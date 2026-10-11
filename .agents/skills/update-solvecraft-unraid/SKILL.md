@@ -16,6 +16,10 @@ filesystem paths or the previous chat's installation state.
   and deliverable artifact. Follow repository rules for committing and publishing the work branch.
 - Updating a running Unraid installation is a distinct scope. Perform it when the user has
   requested it and access is available; preserve existing authorization rather than asking again.
+- After a successfully validated update, the owner authorizes refreshing one local test
+  runtime and removing obsolete project build/check/candidate containers. Preserve runtime
+  data and credentials, useful build images/caches and a rollback image. This local scope
+  does not authorize an Unraid installation or deletion of persistent volumes.
 - This skill is a reusable workflow, not a scheduler. An upstream commit by itself does not
   authorize a production restart, image publication, release or recurring automation.
 
@@ -31,7 +35,7 @@ merge the selected upstream snapshot directly into it. Do not create separate up
 branches or use `origin/main` as the deployment base. Preserve the gateway and packaging.
 
 Use [the update workflow](references/upstream-update.md) for integration, validation
-and delivery. It covers published branches, license conflicts, isolated MCP tests and rollback.
+and delivery. It covers published branches, license conflicts, isolated MCP tests, local cleanup and rollback.
 
 ## Invariants
 
@@ -52,5 +56,6 @@ and delivery. It covers published branches, license conflicts, isolated MCP test
 
 Report the old and selected new upstream revisions, integration branch/commit, conflicts
 resolved, quality gates and real MCP/web checks, image/archive location, and deployment status.
+Report the surviving local test container, checks after replacement and removed obsolete containers.
 Distinguish a prepared artifact from an installed update. If no upstream changes are present,
 report that without creating empty commits or rebuilding unchanged artifacts.

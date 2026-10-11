@@ -47,9 +47,12 @@ Local archive: `target/solvecraft-unraid-upstream-4af2d06.tar` (53,562,880 bytes
 Archive SHA256: `88848d815616b621e1cecbc66a9a34c608455757d85a4ddd9f4b07bc11c540e6`.
 The exported manifest was checked for the expected image tag.
 
-The previous `solvecraft-unraid:prototype` image and running development container
-remain available. No Unraid installation, credential rotation, registry publication
-or release tag was performed. Private deployment configuration remains ignored.
+The local development container was subsequently switched to this validated image,
+retaining its persistent data volume and MCP token. Obsolete project build/check/candidate
+containers were removed; the previous `solvecraft-unraid:prototype` image remains available
+for rollback, alongside reusable build images and caches. No Unraid installation,
+credential rotation, registry publication or release tag was performed. Private deployment
+configuration and the local pre-replacement data backup remain ignored.
 
 To install the prepared update, transfer and load the archive on Unraid, then change
 the container's image field to `solvecraft-unraid:upstream-4af2d06` while retaining

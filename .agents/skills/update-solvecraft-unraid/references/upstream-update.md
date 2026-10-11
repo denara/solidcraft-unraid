@@ -92,7 +92,35 @@ Image registry publication, GitHub release branches/tags and production installa
 not implied by preparing an update. Use `docs/releasing.md` only when a release is requested.
 Do not bump versions from commit prefixes or turn every development push into a release.
 
-## 5. Install only within the requested deployment scope
+## 5. Refresh the local test runtime and clean up
+
+After successful candidate validation and artifact preparation, keep one local development
+runtime on the newest validated image. The owner authorizes this local replacement and
+cleanup; Unraid installation remains a separate scope.
+
+Inspect container ownership, activity, image, ports, mounts and credentials before changing
+anything. Preserve a private pre-replacement data backup and the previous image for rollback.
+For the existing Compose runtime, select the immutable validated tag with `SOLVECRAFT_IMAGE`
+in ignored `.env`, then recreate with `docker compose up -d --no-build`. Retain the same data
+volume, MCP token, port/origin configuration, ownership and security/resource limits. Do not
+use a disposable test credential for the surviving runtime.
+
+Verify health, the actual image, unchanged volume/token, authenticated MCP and browser startup.
+Use a copied or known public-safe fixture for read-only reopen/measurement checks; never run
+smoke scripts that overwrite files on the persistent runtime's data volume. If replacement
+verification fails, restore the previous compatible image and preserve diagnostic evidence;
+stop after one failed replacement/recovery attempt and report the remaining action.
+
+Once the replacement passes, remove obsolete project build/check/candidate containers.
+Identify them by inspected Compose labels, images and workspace mounts, not just a broad name
+pattern. Save useful diagnostics under ignored target paths before removal. Do not remove
+active builds, containers owned by another project, or a container still needed for recovery.
+Remove containers without volume deletion. Retain reusable build/toolchain images, Cargo/build
+cache volumes, persistent design volumes, private backups and a rollback image. Those resources
+can recreate future build containers; exited build/check containers are not themselves a cache.
+Do not use global Docker container/system/volume prune. Report the surviving runtime and cleanup.
+
+## 6. Install only within the requested deployment scope
 
 Read actual deployment values from local ignored configuration or the connected target.
 Nginx Proxy Manager is managed by the user through its UI; provide the changed settings

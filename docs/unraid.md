@@ -21,6 +21,11 @@ addition, validates an isolated candidate and prepares the image for installatio
 It does not schedule monitoring or automatically replace the running Unraid container.
 Manual and scheduled updates both use the single working branch `codex/unraid-mcp-web`.
 Upstream snapshots are merged into it; no separate update branches are created.
+After successful validation, keep one local test container on the latest validated image
+and remove obsolete project build/check containers. Select the local image with
+`SOLVECRAFT_IMAGE` in ignored `.env`; preserve the existing data volume and MCP token.
+Useful build images and caches, saved designs and a rollback image are retained.
+This local cleanup does not update Unraid or remove unrelated Docker resources.
 
 | Address | Purpose |
 | --- | --- |

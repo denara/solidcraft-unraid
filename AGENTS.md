@@ -34,6 +34,12 @@ Build and test on the development computer. Keep web and MCP sessions independen
 preserve persistent designs and the existing MCP token, and leave private deployment values
 in ignored local configuration. Preparing an update does not itself install it on Unraid
 or publish an application release; follow the user's actual requested scope.
+After a successful update, retain one local development/test container on the newest
+validated image and remove obsolete project build/check/candidate containers. Preserve
+the local runtime's data volume and MCP token, useful build images/caches and a rollback
+image. Check ownership and current activity before removal; do not prune unrelated Docker
+resources or delete data volumes. This authorizes refreshing the local test container,
+not installing on Unraid. See the update skill for verification and cleanup details.
 
 ## Start every session here
 1. Read `plan/STATUS.md` (current milestone, next task), then the task in `plan/execution-plan.md`

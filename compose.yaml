@@ -1,7 +1,7 @@
 services:
   solvecraft:
     build: .
-    image: solvecraft-unraid:prototype
+    image: "${SOLVECRAFT_IMAGE:-solvecraft-unraid:prototype}"
     init: true
     user: "${SOLVECRAFT_UID:-99}:${SOLVECRAFT_GID:-100}"
     ports:
