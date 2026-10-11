@@ -79,7 +79,10 @@ The separate public [CA repository](https://github.com/denara/unraid-templates) 
 the MIT-licensed template/metadata, a repository profile and the original attributed icon.
 The CA portal validated it as public, active and MIT-licensed, then found one valid Docker
 app with no hard errors or warnings and confirmed that the image is pullable.
-Catalog finalization and acceptance are separate from those completed checks.
+On 2026-10-12, the owner authorized submission and acceptance of the portal terms.
+The repository was submitted as **denara's Repository** and the portal confirmed
+**received and auto-approved**. It states that the Docker app should appear after the
+next Community Applications build publishes; feed visibility is separate from approval.
 
 The catalog app is **SolidCraft**, explicitly an unofficial Unraid integration.
 The CAD application and browser app are credited to bherbruck and the upstream SolidCraft

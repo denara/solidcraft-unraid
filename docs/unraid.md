@@ -53,6 +53,9 @@ The dedicated public catalog repository is
 `ca_profile.xml`, `templates/solidcraft.xml` and an original, attributed icon. Catalog inclusion
 requires validation, scanning and acceptance through [the CA submission portal](https://ca.unraid.net/submit).
 Creating the repository does not itself list the application in Community Applications.
+This repository's submission was automatically approved on 2026-10-12 as
+**denara's Repository**. The portal says SolidCraft should appear after the next
+Community Applications build publishes; approval alone does not establish feed visibility.
 
 Once the image is anonymously accessible, use the supplied template and retain its registry
 image reference to install directly, without loading a tar archive. Before public catalog
