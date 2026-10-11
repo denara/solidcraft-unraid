@@ -1,7 +1,7 @@
 # SolidCraft — instructions for agents
 
-SolidCraft is a clean-room, open-source, pure-Rust parametric 3D CAD application in the style of
-Autodesk Fusion: sketches with a constraint solver, a parametric timeline of features, a B-rep
+SolidCraft is a clean-room, open-source, pure-Rust parametric 3D CAD application:
+sketches with a constraint solver, a parametric timeline of features, a B-rep
 kernel, and a desktop UI that agents can drive. Siblings with the same conventions live next to
 it in `storytold/`: `cadcraft` (AutoCAD-style, the closest relative), `photocraft`, `vectorcraft`,
 `gridcraft`, `designcraft`, `wordcraft`, `deckcraft`, `soundcraft`. Repos don't share code; when
@@ -16,9 +16,10 @@ use project Pages `/solidcraft/`; do not add permanent old-name Pages aliases. S
 compatibility notes.
 
 ## Container prototype baseline
-The first Unraid prototype deliberately uses the tested upstream commit `af536a7`.
+The first Unraid prototype used upstream commit `af536a7`. The current validated
+container baseline is `4af2d060073b17d3a6dcea2018ac9490740f8f4e`.
 Keep later upstream CAD/UI feature updates separate from this deployment addition;
-advance the baseline only as a separate, validated update.
+advance the baseline only as a separate, validated update. See [update records](docs/unraid-updates.md).
 
 ## Requested upstream updates
 For an explicit upstream update, use

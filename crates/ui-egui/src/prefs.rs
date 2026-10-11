@@ -39,6 +39,10 @@ pub struct Prefs {
     pub zoom_reverse: bool,
     /// Orbit around the point under the cursor (else around the view's centre).
     pub orbit_cursor: bool,
+    /// Whether a connected 3D mouse moves the view.
+    pub space_mouse_enabled: bool,
+    /// Speed multiplier for 3D mouse navigation.
+    pub space_mouse_speed: f32,
     /// Anti-aliasing samples (applies on restart).
     pub msaa: u32,
     /// Decimals shown for lengths and angles.
@@ -68,6 +72,8 @@ impl Default for Prefs {
             nav: "fusion".into(),
             zoom_reverse: false,
             orbit_cursor: false,
+            space_mouse_enabled: true,
+            space_mouse_speed: 1.0,
             msaa: 4,
             length_decimals: 2,
             angle_decimals: 1,
@@ -175,6 +181,8 @@ fn defaults(app: &mut SolveApp, page: usize) {
             p.zoom_reverse = d.zoom_reverse;
             p.zoom_to_cursor = d.zoom_to_cursor;
             p.orbit_cursor = d.orbit_cursor;
+            p.space_mouse_enabled = d.space_mouse_enabled;
+            p.space_mouse_speed = d.space_mouse_speed;
             p.look_at_anim = d.look_at_anim;
             p.look_at_speed = d.look_at_speed;
         }
@@ -577,6 +585,16 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
                 egui::Slider::new(&mut app.preferences.look_at_speed, 0.5..=3.0).step_by(0.25).custom_formatter(|v, _| format!("{v:.2}×")),
             );
             ui.end_row();
+            ui.label("3D mouse (Windows)");
+            ui.checkbox(&mut app.preferences.space_mouse_enabled, "Navigate with SpaceNavigator / SpaceMouse");
+            ui.end_row();
+            ui.label("3D mouse speed");
+            ui.add_enabled(
+                app.preferences.space_mouse_enabled,
+                egui::Slider::new(&mut app.preferences.space_mouse_speed, 0.25..=3.0).step_by(0.05).custom_formatter(|v, _| format!("{v:.2}×")),
+            );
+            ui.end_row();
+            note(ui, "Move and rotate the view together; sketches use pan and zoom only.");
         }
         PAGE_DESIGN => {
             ui.label("Default modelling orientation");

@@ -1,7 +1,6 @@
 # SolidCraft
 
-**Parametric 3D CAD; an open-source, [clean-room](CLAUDE.md) reimplementation of Autodesk
-Fusion 360, built in pure Rust.**
+**An open-source parametric 3D CAD application built in pure Rust.**
 
 Sketch, constrain, and build solids with a parametric feature timeline. Change a dimension
 and watch your model rebuild. Run it on your desktop, in your browser, or let AI agents
@@ -15,9 +14,10 @@ model through the built-in MCP server. Part of the storytold "craft" family.
 developer guide and command reference; sources in [docs/book](docs/book)), and the
 [web app](https://bherbruck.github.io/solidcraft/app/) to try it in the browser.
 
-**Status: early but usable for simple parts.** 76 of 76 reference parts built in Fusion
-rebuild in SolidCraft with the same volume, area and topology ([docs/oracle.md](docs/oracle.md));
-command parity with Fusion's Design workspace is tracked in [docs/parity.md](docs/parity.md).
+**Status: early but usable for simple parts.** The historical benchmark report records
+76 of 76 reference parts matching volume, area and topology ([docs/oracle.md](docs/oracle.md)).
+These checks do not establish complete geometric or workflow equivalence. Feature coverage
+is tracked in [docs/parity.md](docs/parity.md) and [ROADMAP.md](ROADMAP.md).
 Open work and known bugs are in [GitHub issues](https://github.com/bherbruck/solidcraft/issues),
 and help is welcome: see [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -85,7 +85,7 @@ renamed repository; old-name Pages and Flatpak URLs are not maintained as perman
   Feature errors and Help can open an editable **Create Issue** draft with relevant context
   and an optional reviewed screenshot; opening GitHub does not submit the report.
 - **Headless CLI** `solvecraft-cli`: run command scripts, measure (volume, area, centre of mass,
-  face/edge/vertex counts), export, render PNG snapshots, replay Fusion oracle recipes.
+  face/edge/vertex counts), export, render PNG snapshots and replay reference recipes.
 - **MCP server** `solvecraft-cli mcp`: AI agents model, measure and look at parts headless or
   in the running app (see below).
 
@@ -105,6 +105,11 @@ cargo xtask ci                                          # fmt, clippy, tests, as
 ```
 
 Windows builds: `cargo xwin build --release --target x86_64-pc-windows-msvc -p solvecraft`.
+
+On Windows, SolidCraft detects a connected 3Dconnexion SpaceNavigator or SpaceMouse through its
+multi-axis HID interface. Move the cap to pan and zoom, and tilt or twist it to rotate the 3D view.
+While editing a sketch, the cap pans and zooms without changing the sketch view. The Navigation
+page in Preferences has an on/off switch and a speed control for the 3D mouse.
 
 In the browser: `cd apps/solvecraft-web && trunk build --release --public-url ./` (WebGPU, or
 WebGL2 with `?webgl`; `?sample` opens the sample part).
@@ -148,10 +153,19 @@ configuration and an example session: [docs/mcp.md](docs/mcp.md).
 
 ## Contributing
 
+Coming from Autodesk Fusion? SolidCraft uses familiar parametric CAD workflows: constrained
+sketches, solid features, an editable timeline, parameters and assemblies. See the
+[roadmap](ROADMAP.md) for supported operations and current limitations.
+
 See [CONTRIBUTING.md](CONTRIBUTING.md): how to build and test, the code map, the clean-room
 and licence rules, and where help is wanted most.
 
 ## Licence
 
-MIT OR Apache-2.0, at your option. SolidCraft is not affiliated with Autodesk; Fusion is a
-trademark of Autodesk, Inc.
+MIT OR Apache-2.0, at your option. Developed under the
+[clean-room contribution rules](CLAUDE.md); third-party code and assets retain their
+documented licences and attribution.
+
+References to other products describe workflow comparisons and benchmark provenance.
+SolidCraft is not affiliated with, sponsored by or endorsed by Autodesk. Autodesk and
+Fusion are trademarks of Autodesk, Inc.

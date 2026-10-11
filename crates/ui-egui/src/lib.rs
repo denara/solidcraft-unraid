@@ -863,6 +863,15 @@ impl SolveApp {
         self.cam_anim = None;
     }
 
+    /// Hand the view to an external navigation device without a pending mouse orbit or spin
+    /// immediately taking it back on the next frame.
+    pub fn begin_external_navigation(&mut self) {
+        self.cancel_view_animation();
+        self.viewport.orbit_snap = None;
+        self.viewport.orbit_free = None;
+        self.viewport.spin = false;
+    }
+
     fn step_view_animation(&mut self, ctx: &egui::Context) {
         let Some(anim) = self.cam_anim else { return };
         let (cam, done) = anim.sample(self.now);

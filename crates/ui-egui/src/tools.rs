@@ -327,6 +327,8 @@ fn run_shape(app: &mut SolveApp, t: &Tool) -> Result<Vec<String>, String> {
 pub(crate) fn constraint_preselection(command: &str, selection: &[solvecraft_engine::Sel]) -> Option<Value> {
     use solvecraft_engine::Sel::{SketchCurve, SketchPoint};
     match (command, selection) {
+        ("sketch.constraint.horizontal_vertical", [SketchCurve { id }]) => Some(json!({"line":id})),
+        ("sketch.constraint.horizontal_vertical", [SketchPoint { id: a }, SketchPoint { id: b }]) if a != b => Some(json!({"points":[a,b]})),
         ("sketch.constraint.coincident", [a, b]) => {
             let entity = |s: &solvecraft_engine::Sel| match s {
                 SketchPoint { id } | SketchCurve { id } => Some(id.clone()),

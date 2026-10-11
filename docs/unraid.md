@@ -7,8 +7,10 @@ Upstream renamed the displayed product from SolveCraft to SolidCraft. Technical 
 (`solvecraft-cli`, `.solvecraft`, environment variables and this fork's image name) stay
 compatible. Hostnames and deployment paths below are examples: substitute your own
 values locally, outside Git. `.env` and `target/` are ignored by Git and Docker builds.
-The first prototype is pinned to the validated upstream commit `af536a7`; subsequent
-upstream feature updates are intentionally handled separately from deployment work.
+The first prototype used upstream commit `af536a7`. The current validated snapshot is
+`4af2d060073b17d3a6dcea2018ac9490740f8f4e`, packaged as
+`solvecraft-unraid:upstream-4af2d06`. See [update records](unraid-updates.md) for checks,
+the transferable image archive and installation instructions for this update.
 
 For future requested updates, use the repository skill
 [update-solvecraft-unraid](../.agents/skills/update-solvecraft-unraid/SKILL.md).

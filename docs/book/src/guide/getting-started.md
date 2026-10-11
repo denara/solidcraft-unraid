@@ -8,7 +8,7 @@ were released under the SolveCraft name.
 
 Download the latest build from the
 [releases page](https://github.com/bherbruck/solidcraft/releases), or build it yourself with
-stable Rust (1.90 or newer):
+stable Rust (1.95 or newer):
 
 ```sh
 git clone https://github.com/bherbruck/solidcraft && cd solidcraft

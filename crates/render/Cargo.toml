@@ -12,3 +12,6 @@ workspace = true
 solvecraft-geom = { workspace = true }
 serde = { workspace = true }
 image = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

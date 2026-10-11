@@ -13,36 +13,44 @@
 #![forbid(unsafe_code)]
 
 mod control_server;
+#[cfg(target_os = "windows")]
+mod space_mouse;
 
 use solvecraft_engine::Session;
 use solvecraft_ui_egui::{Services, SolveApp};
 
-struct App(SolveApp);
+struct App {
+    solve: SolveApp,
+    #[cfg(target_os = "windows")]
+    space_mouse: space_mouse::SpaceMouse,
+}
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // The OS closing the window (Alt+F4, Cmd+Q, the window manager): ask about unsaved
         // designs first; the window closes once they are answered (`quit_requested`).
-        if ctx.input(|i| i.viewport().close_requested()) && !self.0.quit_requested {
+        if ctx.input(|i| i.viewport().close_requested()) && !self.solve.quit_requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            solvecraft_ui_egui::documents::request_quit(&mut self.0);
+            solvecraft_ui_egui::documents::request_quit(&mut self.solve);
         }
-        self.0.logic(ctx);
-        if self.0.quit_requested {
+        self.solve.logic(ctx);
+        #[cfg(target_os = "windows")]
+        self.space_mouse.tick(&mut self.solve, ctx);
+        if self.solve.quit_requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
-        self.0.raw_input_hook(raw);
+        self.solve.raw_input_hook(raw);
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.0.ui(ui);
+        self.solve.ui(ui);
     }
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        storage.set_string(PREFS_KEY, self.0.prefs());
+        storage.set_string(PREFS_KEY, self.solve.prefs());
     }
     fn on_exit(&mut self) {
-        solvecraft_ui_egui::recovery_ui::close(&mut self.0);
+        solvecraft_ui_egui::recovery_ui::close(&mut self.solve);
     }
 }
 
@@ -205,7 +213,13 @@ fn main() -> eframe::Result {
                 let every = if app.autosave_minutes > 0.0 { app.autosave_minutes * 60.0 } else { f64::MAX / 4.0 };
                 solvecraft_ui_egui::recovery_ui::start(&mut app, &dir, std::time::Duration::from_secs_f64(every.min(1e9)));
             }
-            Ok(Box::new(App(app)))
+            #[cfg(target_os = "windows")]
+            let space_mouse = space_mouse::SpaceMouse::start(&cc.egui_ctx);
+            Ok(Box::new(App {
+                solve: app,
+                #[cfg(target_os = "windows")]
+                space_mouse,
+            }))
         }),
     )
 }

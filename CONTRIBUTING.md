@@ -1,7 +1,7 @@
 # Contributing to SolidCraft
 
-SolidCraft is an open-source parametric 3D CAD app written in pure Rust, in the style of
-Autodesk Fusion. You sketch on a plane, constrain the sketch, turn profiles into solids, and
+SolidCraft is an open-source parametric 3D CAD app written in pure Rust.
+You sketch on a plane, constrain the sketch, turn profiles into solids, and
 change a parameter to watch the timeline rebuild. It runs as a desktop app (Windows, Linux), in
 the browser (wasm + WebGPU/WebGL2), headless from a CLI, and as an MCP server that AI agents can
 model with.
@@ -12,7 +12,7 @@ needed most.
 
 ## Get it running (about 10 minutes on a fast machine)
 
-You need stable Rust 1.90 or newer. For the web
+You need stable Rust 1.95 or newer (required by egui/eframe 0.36). For the web
 build you also need `rustup target add wasm32-unknown-unknown` and [`trunk`](https://trunkrs.dev).
 
 ```sh

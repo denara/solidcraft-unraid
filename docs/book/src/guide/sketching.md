@@ -96,6 +96,9 @@ distinct straight lines. Two lines join their closest pair of endpoints; the fir
 picked line stays in place when the existing constraints allow it. Pick endpoints
 explicitly when you want to connect a different pair.
 
+Horizontal/Vertical also applies immediately to one selected line or two distinct selected
+points. Shift-click to add the second point before choosing the constraint.
+
 For Parallel, Perpendicular, Equal, Tangent, Concentric and Collinear, select exactly two
 sketch curves (Shift-click to add the second) and choose the constraint to apply it immediately.
 You can also start the constraint first and then pick its curves. An incomplete or mixed

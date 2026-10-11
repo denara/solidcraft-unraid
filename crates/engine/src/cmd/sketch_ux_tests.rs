@@ -238,6 +238,21 @@ fn construction_toggle_takes_shapes_out_of_profiles_and_back() {
 }
 
 #[test]
+fn centerline_can_become_construction_directly() {
+    let mut s = new_sketch();
+    let l = curve_ids(&run(&mut s, "sketch.line", json!({"points": [[0, 0], [20, 0]]})));
+    run(&mut s, "sketch.centerline", json!({ "curves": l, "value": true }));
+    let r = run(&mut s, "sketch.construction", json!({ "curves": l, "value": true }));
+    assert_eq!(r["changed"], 1);
+    let sk = sketch(&s);
+    assert!(sk.curves.iter().filter(|c| l.contains(&c.id)).all(|c| c.construction && !c.centerline));
+    // And back to a centerline.
+    run(&mut s, "sketch.centerline", json!({ "curves": l, "value": true }));
+    let sk = sketch(&s);
+    assert!(sk.curves.iter().filter(|c| l.contains(&c.id)).all(|c| c.centerline && !c.construction));
+}
+
+#[test]
 fn projected_geometry_can_become_construction() {
     let mut s = Session::default();
     run(&mut s, "sketch.create", json!({"plane": "XY"}));

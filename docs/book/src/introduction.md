@@ -1,7 +1,7 @@
 # SolidCraft
 
-SolidCraft is an open-source parametric 3D CAD application written in pure Rust. It works the way
-Fusion-style modellers do: sketch on a plane, constrain and dimension the sketch, turn profiles
+SolidCraft is an open-source parametric 3D CAD application written in pure Rust.
+Sketch on a plane, constrain and dimension the sketch, turn profiles
 into solids with features on a timeline, and change a parameter to watch the whole timeline
 rebuild.
 
