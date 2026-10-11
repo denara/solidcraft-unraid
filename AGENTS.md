@@ -26,8 +26,10 @@ For an explicit upstream update, use
 [update-solvecraft-unraid](.agents/skills/update-solvecraft-unraid/SKILL.md).
 Select one target upstream commit at the start and finish validation against that snapshot;
 report later upstream movement separately. A requested and validated update may advance
-the recorded prototype baseline. Start from a revision that already contains the deployment
-addition: this may still be `codex/unraid-mcp-web`, not the fork's `main`.
+the recorded prototype baseline. The sole working branch for this fork is
+`codex/unraid-mcp-web`, for both manual and scheduled updates. Synchronize that branch
+with its origin counterpart and merge the selected upstream snapshot directly into it.
+Do not create separate update branches. The fork's `main` is not the deployment branch.
 Build and test on the development computer. Keep web and MCP sessions independent,
 preserve persistent designs and the existing MCP token, and leave private deployment values
 in ignored local configuration. Preparing an update does not itself install it on Unraid
@@ -94,10 +96,12 @@ People trust SolidCraft with their designs; a crash loses their work. **This out
 - **Quality gates** before every commit: `cargo xtask ci` (fmt, clippy -D warnings, tests,
   assets, layers). Commit after every feature arc that builds.
 - **Publishing in this fork**: `origin` is github.com/denara/solvecraft-unraid;
-  `upstream` is github.com/bherbruck/solidcraft. Publish deployment work on a topic branch.
-  After each commit that
-  passes `cargo xtask ci`: `git pull --rebase origin main` (re-run ci if it brought changes),
-  then `git push`. Never force-push. Never commit `plan/`, build dirs (`target*/`) or anything
+  `upstream` is github.com/bherbruck/solidcraft. Publish deployment work only on
+  `codex/unraid-mcp-web`. Fetch origin before pushing and incorporate changes from
+  `origin/codex/unraid-mcp-web` by fast-forward or merge, preserving published history.
+  Compare origin/main separately and merge genuine new changes when needed; do not
+  run `git pull --rebase origin main` on this integration branch. Revalidate if integration
+  changes the tested result. Never force-push. Never commit `plan/`, build dirs (`target*/`) or anything
   produced by Fusion (oracle STEP/STL/PNG); check `git ls-files` before pushing.
 - **Never break wasm**: everything below the apps must build for `wasm32-unknown-unknown`
   (`cargo xtask wasm`, part of `cargo xtask ci`).
@@ -120,7 +124,7 @@ People trust SolidCraft with their designs; a crash loses their work. **This out
 - Throughout the work and before handoff, check current upstream commits and the relevant
   PR's merge status. Keep your branch current with upstream merges, resolve conflicts without
   discarding others' work, and re-run validation when integration changes the result. Use
-  `git pull --rebase origin main` before pushing as above; never force-push. Report the checked
+  the fork-specific fetch/merge workflow above before pushing; never force-push. Report the checked
   upstream/PR state, any conflicts resolved and the validation performed. If a PR remains open,
   keep monitoring it while the task is active and make its pending status clear at handoff;
   do not claim it merged without checking.

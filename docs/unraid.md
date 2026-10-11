@@ -19,6 +19,8 @@ Keep this repository as the primary local project folder so new chats discover r
 an upstream update in natural language. The skill checks changes, preserves the deployment
 addition, validates an isolated candidate and prepares the image for installation.
 It does not schedule monitoring or automatically replace the running Unraid container.
+Manual and scheduled updates both use the single working branch `codex/unraid-mcp-web`.
+Upstream snapshots are merged into it; no separate update branches are created.
 
 | Address | Purpose |
 | --- | --- |

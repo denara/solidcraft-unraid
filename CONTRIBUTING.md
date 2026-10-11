@@ -184,8 +184,12 @@ accessible recording rather than committing generated review artifacts.
 
 Keep checking upstream commits and the relevant PR's merge status throughout the work and
 before handoff. Integrate upstream merges, resolve conflicts without losing others' changes,
-and validate the integrated result. Before pushing, run `git pull --rebase origin main`, re-run
-CI if it brought changes, and push without force. Report the upstream/PR state you checked,
+and validate the integrated result. In this Unraid fork, publish manual and scheduled updates
+only on `codex/unraid-mcp-web`, following the fetch/merge workflow in AGENTS.md; preserve
+published merge history and do not create separate update branches. The upstream author's
+workflow uses `git pull --rebase origin main`, but that does not apply to this integration
+branch. Revalidate if synchronization brought code changes, and push without force.
+Report the upstream/PR state you checked,
 any conflicts resolved and validation results. While a task remains active, follow an open
 PR through its status changes; at handoff, clearly identify anything still awaiting merge.
 

@@ -21,14 +21,18 @@ For check-only requests, return the comparison and required integration work her
 
 ## 2. Integrate without losing the fork
 
-Identify a base revision that already contains the deployment gateway and packaging.
-Inspect current, local and remote branches; `origin/main` is suitable only if the integration
-has actually landed there. The original integration branch is `codex/unraid-mcp-web`.
-Reuse a suitable work branch or create a `codex/unraid-update-...` branch from that base.
+Use the single working branch `codex/unraid-mcp-web` for every requested or scheduled
+update. Fetch origin and synchronize with `origin/codex/unraid-mcp-web`: fast-forward
+when possible, or merge divergent commits without discarding anyone's work. Verify that
+the deployment gateway and packaging remain present. Do not create an update branch.
 
-Merge the selected upstream SHA into the update branch. Preserve published history:
-do not rebase a published branch into a force-push. An unpublished work branch may be
-rebased if that is clearly the better integration method. Never reset or discard user work.
+Merge the selected upstream SHA directly into `codex/unraid-mcp-web`. Preserve published
+history: no rebases of integration merges, no force-pushes, and no resets of user work.
+Check `origin/main` separately by ancestry comparison; merge genuinely new changes when
+needed. Do not use `git pull --rebase origin main`, which can flatten the validated merge
+history even when main is already an ancestor. Revalidate when integration changes code.
+If user edits or concurrent project work prevent safe integration, leave them intact and
+report or defer the update instead of inventing another branch.
 
 Resolve conflicts by preserving both the upstream behavior and the deployment addition.
 In particular, retain fork-specific privacy, snapshot and publishing rules in `AGENTS.md`.

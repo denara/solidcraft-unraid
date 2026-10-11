@@ -25,10 +25,10 @@ Read root `AGENTS.md`, `docs/unraid.md`, and the applicable local update instruc
 SolidCraft is the upstream display name; `solvecraft` binaries, crate names, environment
 variables and `.solvecraft` designs retain compatibility.
 
-The repository may still contain the deployment only on `codex/unraid-mcp-web`, rather
-than on `origin/main`. Find the revision containing `apps/solvecraft-server`, `Dockerfile`,
-`compose.yaml` and `packaging/unraid/` before choosing an update base.
-Do not start from an upstream-only main branch and accidentally remove the integration.
+Use `codex/unraid-mcp-web` as the single working and publishing branch for this fork,
+including scheduled updates. Synchronize it with `origin/codex/unraid-mcp-web` and
+merge the selected upstream snapshot directly into it. Do not create separate update
+branches or use `origin/main` as the deployment base. Preserve the gateway and packaging.
 
 Use [the update workflow](references/upstream-update.md) for integration, validation
 and delivery. It covers published branches, license conflicts, isolated MCP tests and rollback.

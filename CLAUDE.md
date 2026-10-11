@@ -72,9 +72,11 @@ People trust SolidCraft with their designs; a crash loses their work. **This out
 - **Rust only.** Units are millimetres and radians internally; Z is up.
 - **Quality gates** before every commit: `cargo xtask ci` (fmt, clippy -D warnings, tests,
   assets, layers). Commit after every feature arc that builds.
-- **Publishing**: `origin` is github.com/bherbruck/solidcraft. After each commit that
-  passes `cargo xtask ci`: `git pull --rebase origin main` (re-run ci if it brought changes),
-  then `git push`. Never force-push. Never commit `plan/`, build dirs (`target*/`) or anything
+- **Publishing in this fork**: `origin` is github.com/denara/solvecraft-unraid;
+  `upstream` is github.com/bherbruck/solidcraft. All manual and scheduled deployment work
+  uses `codex/unraid-mcp-web`. Follow AGENTS.md's fetch/merge workflow and preserve
+  published history; do not create update branches or rebase integration merges.
+  Never force-push. Never commit `plan/`, build dirs (`target*/`) or anything
   produced by Fusion (oracle STEP/STL/PNG); check `git ls-files` before pushing.
 - **Never break wasm**: everything below the apps must build for `wasm32-unknown-unknown`
   (`cargo xtask wasm`, part of `cargo xtask ci`).

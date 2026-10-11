@@ -4,9 +4,13 @@
 
 Advanced the deployment fork from `af536a7907dd4961bb8e01a3208863c013392c58` to the
 fixed upstream snapshot `4af2d060073b17d3a6dcea2018ac9490740f8f4e` on
-`codex/unraid-update-4af2d06`. Upstream main still pointed to this snapshot at the
-final pre-publication check. The inherited application version remains `0.2.1`;
+`codex/unraid-mcp-web`, preserving the tested update merge `c8d1f63`. Upstream main still
+pointed to this snapshot at the final pre-publication check. The inherited application version remains `0.2.1`;
 this development update is not a new application release.
+
+All subsequent manual and scheduled updates use the same `codex/unraid-mcp-web`
+working branch. The temporary branch used to prepare this first update was consolidated
+into that branch and removed after publication; the tested code and image are unchanged.
 
 Changes include horizontal/vertical constraints on preselected geometry, direct
 centerline-to-construction conversion, clearer constraint glyph placement, active
