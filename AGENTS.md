@@ -20,6 +20,18 @@ The first Unraid prototype deliberately uses the tested upstream commit `af536a7
 Keep later upstream CAD/UI feature updates separate from this deployment addition;
 advance the baseline only as a separate, validated update.
 
+## Requested upstream updates
+For an explicit upstream update, use
+[update-solvecraft-unraid](.agents/skills/update-solvecraft-unraid/SKILL.md).
+Select one target upstream commit at the start and finish validation against that snapshot;
+report later upstream movement separately. A requested and validated update may advance
+the recorded prototype baseline. Start from a revision that already contains the deployment
+addition: this may still be `codex/unraid-mcp-web`, not the fork's `main`.
+Build and test on the development computer. Keep web and MCP sessions independent,
+preserve persistent designs and the existing MCP token, and leave private deployment values
+in ignored local configuration. Preparing an update does not itself install it on Unraid
+or publish an application release; follow the user's actual requested scope.
+
 ## Start every session here
 1. Read `plan/STATUS.md` (current milestone, next task), then the task in `plan/execution-plan.md`
    and the relevant `plan/architecture.md` section. Behaviour reference: `plan/fusion/`

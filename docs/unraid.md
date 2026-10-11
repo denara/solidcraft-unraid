@@ -10,6 +10,14 @@ values locally, outside Git. `.env` and `target/` are ignored by Git and Docker 
 The first prototype is pinned to the validated upstream commit `af536a7`; subsequent
 upstream feature updates are intentionally handled separately from deployment work.
 
+For future requested updates, use the repository skill
+[update-solvecraft-unraid](../.agents/skills/update-solvecraft-unraid/SKILL.md).
+Keep this repository as the primary local project folder so new chats discover root
+`AGENTS.md` and `.agents/skills/`. Invoke it with `$update-solvecraft-unraid`, or request
+an upstream update in natural language. The skill checks changes, preserves the deployment
+addition, validates an isolated candidate and prepares the image for installation.
+It does not schedule monitoring or automatically replace the running Unraid container.
+
 | Address | Purpose |
 | --- | --- |
 | `/` | Original browser CAD app; calculations and designs stay in the browser |

@@ -8,6 +8,9 @@ features → parametric timeline) as an open, pure-Rust, agent-drivable applicat
 Fork deployment addition: a Linux container packages the independent web app and an
 authenticated Streamable HTTP adapter for the existing headless MCP CLI. Separate CAD
 sessions share explicitly saved files on a persistent volume; see [Unraid setup](docs/unraid.md).
+Requested upstream updates use the repository's
+[update skill](.agents/skills/update-solvecraft-unraid/SKILL.md), with a fixed target snapshot,
+isolated validation and local-only private deployment settings.
 
 | Question | Answer |
 |---|---|

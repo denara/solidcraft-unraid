@@ -1,0 +1,4 @@
+interface:
+  display_name: "SolveCraft Unraid aktualisieren"
+  short_description: "Upstream-Updates mit MCP und Web-App sicher übernehmen"
+  default_prompt: "Nutze $update-solvecraft-unraid, um den Fork auf einen neuen Upstream-Stand zu aktualisieren und ein geprüftes Unraid-Image vorzubereiten."
