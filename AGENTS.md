@@ -40,6 +40,12 @@ the local runtime's data volume and MCP token, useful build images/caches and a 
 image. Check ownership and current activity before removal; do not prune unrelated Docker
 resources or delete data volumes. This authorizes refreshing the local test container,
 not installing on Unraid. See the update skill for verification and cleanup details.
+Public container distribution is authorized through the tested container workflow to
+`ghcr.io/denara/solidcraft-unraid`, with Community Applications metadata in
+`denara/unraid-templates`. Publish only after the image's modelling, authentication,
+file/origin, persistence and web checks pass. Keep `latest` on a passing build and retain
+commit-specific tags. Verify anonymous pulls before claiming public availability.
+This is container packaging, not an upstream application release or an Unraid deployment.
 
 ## Start every session here
 1. Read `plan/STATUS.md` (current milestone, next task), then the task in `plan/execution-plan.md`

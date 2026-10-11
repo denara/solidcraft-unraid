@@ -73,7 +73,9 @@ and export. Test a copied fixture, never an original private design.
 
 After validation, update the recorded tested baseline in `AGENTS.md`, `docs/unraid.md` and
 the fork's roadmap/status note. Record the exact image tag or digest and the checks run.
-Update the Unraid template Repository field to the same validated immutable image tag.
+Keep the public Unraid template Repository field on `ghcr.io/denara/solidcraft-unraid:latest`;
+record the passing source-commit image tag/digest separately for rollback. Do not replace
+the catalog registry reference with a development-only image tag.
 Keep its product display name and fork links current while retaining compatibility identifiers.
 
 ## 4. Publish code or prepare an installation artifact
@@ -90,6 +92,21 @@ before pushing. Keep other contributors' changes; validate again if integration 
 the tested result. Respect the selected upstream snapshot and never force-push.
 
 Export a verified image with `docker save` to an ignored target path for transfer to Unraid.
+For this fork's authorized public container distribution, monitor the exact container workflow
+run created by the validated source push. It builds and smoke-tests a fresh image before pushing
+`sha-<full-source-commit>` and `latest` to `ghcr.io/denara/solidcraft-unraid`. Reuse that pipeline;
+do not push untested images or silently change package visibility. Confirm successful jobs,
+source labels, published digest and anonymous pull access before claiming an update is available.
+If publication fails, preserve the existing working local image and report the workflow failure.
+
+Catalog metadata is maintained in the public `denara/unraid-templates` repository on its main
+branch. When template/icon metadata changes, fetch or clone it under an ignored target path,
+retain others' edits and profile/license files, synchronize the canonical template/icon,
+validate XML/assets/privacy and push without force using the public commit identity. Do not
+create another work branch in the application fork. An unchanged template needs no new commit
+for an image-only update. A repository/image is not a CA listing until the portal accepts it.
+Portal finalization may require owner login and agreement to Unraid's terms; never infer that
+those requirements have been completed from a prepared repository or successful CI job.
 Image registry publication, GitHub release branches/tags and production installation are
 not implied by preparing an update. Use `docs/releasing.md` only when a release is requested.
 Do not bump versions from commit prefixes or turn every development push into a release.

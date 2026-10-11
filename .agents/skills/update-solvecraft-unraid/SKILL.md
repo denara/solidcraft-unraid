@@ -20,6 +20,10 @@ filesystem paths or the previous chat's installation state.
   runtime and removing obsolete project build/check/candidate containers. Preserve runtime
   data and credentials, useful build images/caches and a rollback image. This local scope
   does not authorize an Unraid installation or deletion of persistent volumes.
+- Public distribution is now authorized for this fork: the tested GitHub container workflow
+  publishes `ghcr.io/denara/solidcraft-unraid`, and catalog metadata lives in
+  `denara/unraid-templates`. Follow AGENTS.md's scope and the workflow's validation gates;
+  this does not authorize an upstream app release or production installation.
 - This skill is a reusable workflow, not a scheduler. An upstream commit by itself does not
   authorize a production restart, image publication, release or recurring automation.
 

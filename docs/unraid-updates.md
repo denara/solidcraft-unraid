@@ -60,3 +60,28 @@ its existing persistent data mapping, MCP token, network settings and resource l
 Back up designs and retain the previous image before replacing the container; see
 the [update workflow](../.agents/skills/update-solvecraft-unraid/references/upstream-update.md).
 Nginx Proxy Manager requires no settings changes for this update.
+
+## 2026-10-12: public registry and unofficial Community Applications packaging
+
+The first registry build is based on source commit
+`450eff4ef2fdaa47da6de8b6e9a7549d125a3989`, with the same validated upstream CAD baseline
+`4af2d06`. [Container workflow run](https://github.com/denara/solidcraft-unraid/actions/runs/38180172891)
+passed build, modelling/PNG/STEP, access and path/origin checks, independent sessions,
+restart persistence and web assets before publication.
+
+Image: `ghcr.io/denara/solidcraft-unraid:latest`, Linux amd64. Source-specific tag:
+`ghcr.io/denara/solidcraft-unraid:sha-450eff4ef2fdaa47da6de8b6e9a7549d125a3989`.
+Published digest: `sha256:279dc00e65e0ca18c27de9dce34fc53e84164443c8aced25f66c31939b381483`.
+An anonymous Docker pull and anonymous registry manifest request both succeeded;
+the downloaded image reports the expected source revision and architecture.
+
+The separate public [CA repository](https://github.com/denara/unraid-templates) contains
+the MIT-licensed template/metadata, a repository profile and the original attributed icon.
+The CA portal validated it as public, active and MIT-licensed, then found one valid Docker
+app with no hard errors or warnings and confirmed that the image is pullable.
+Catalog finalization and acceptance are separate from those completed checks.
+
+The catalog app is **SolidCraft-Unraid**, explicitly an unofficial Unraid integration.
+The CAD application and browser app are credited to bherbruck and the upstream SolidCraft
+contributors; denara maintains only the container packaging, HTTP MCP adapter and Unraid
+template. No upstream application release, version bump or release tag was created.

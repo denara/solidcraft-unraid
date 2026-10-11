@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <Container version="2">
-  <Name>solidcraft</Name>
+  <Name>SolidCraft-Unraid</Name>
   <Repository>ghcr.io/denara/solidcraft-unraid:latest</Repository>
   <Registry>https://github.com/denara/solidcraft-unraid/pkgs/container/solidcraft-unraid</Registry>
   <Network>bridge</Network>
@@ -8,7 +8,7 @@
   <Privileged>false</Privileged>
   <Support>https://github.com/denara/solidcraft-unraid/issues</Support>
   <Project>https://github.com/denara/solidcraft-unraid</Project>
-  <Overview>Community-maintained Linux amd64 packaging of SolidCraft: an independent browser CAD app and authenticated Streamable HTTP MCP service for local AI clients. Early experimental CAD software; latest contains the newest container build that passed its modelling, persistence and web checks. Server designs and exports persist under /data/files. Browser designs are stored separately in the browser and do not share MCP sessions. This packaging is a fork, not an official upstream distribution.</Overview>
+  <Overview>Unofficial SolidCraft integration for Unraid, maintained by denara. The CAD application and browser app are developed by bherbruck and the upstream SolidCraft contributors; denara provides the container packaging, HTTP MCP adapter and Unraid template, not the original CAD application. Linux amd64 only. Experimental software: latest contains the newest container build that passed modelling, persistence and web checks. Server designs and exports persist under /data/files; browser designs are stored separately and do not share MCP sessions. Upstream: https://github.com/bherbruck/solidcraft. This is not an official upstream distribution.</Overview>
   <Category>Productivity: Tools:Utilities</Category>
   <Beta>true</Beta>
   <Icon>https://raw.githubusercontent.com/denara/unraid-templates/main/icons/solidcraft.png</Icon>

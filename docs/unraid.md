@@ -8,7 +8,7 @@ Upstream renamed the displayed product from SolveCraft to SolidCraft. Technical 
 compatible. Hostnames and deployment paths below are examples: substitute your own
 values locally, outside Git. `.env` and `target/` are ignored by Git and Docker builds.
 The fork is hosted at [denara/solidcraft-unraid](https://github.com/denara/solidcraft-unraid).
-The Unraid template names a new container `solidcraft`; the existing local Compose service,
+The public Unraid template names a new container `SolidCraft-Unraid`; the existing local Compose service,
 image tags, command names, data format and environment variables retain compatibility.
 The first prototype used upstream commit `af536a7`. The current validated snapshot is
 `4af2d060073b17d3a6dcea2018ac9490740f8f4e`, packaged as
@@ -29,6 +29,41 @@ and remove obsolete project build/check containers. Select the local image with
 `SOLVECRAFT_IMAGE` in ignored `.env`; preserve the existing data volume and MCP token.
 Useful build images and caches, saved designs and a rollback image are retained.
 This local cleanup does not update Unraid or remove unrelated Docker resources.
+
+## Registry installation and Community Applications
+
+The public distribution uses `ghcr.io/denara/solidcraft-unraid:latest`. GitHub's container
+workflow builds Linux amd64 on pushes affecting container code on `codex/unraid-mcp-web`,
+then verifies modelling, PNG/STEP, isolation, access/path/origin checks, restart persistence
+and web assets before pushing. `latest` is the newest passing container build, not untested
+upstream main or a guarantee that every CAD operation is supported. This is experimental
+community packaging, not an official upstream release. The CAD application and browser app
+are developed by bherbruck and the upstream SolidCraft contributors; denara maintains this
+Unraid integration, HTTP MCP adapter and packaging. `sha-<full-source-commit>` tags
+identify earlier builds for controlled rollback.
+
+The package must be set to **Public** in GitHub Packages before anonymous Unraid pulls work;
+new GitHub packages default to private. Test an anonymous pull before announcing availability.
+No GitHub token should be put into a public Unraid template.
+
+The dedicated public catalog repository is
+[denara/unraid-templates](https://github.com/denara/unraid-templates), with root `LICENSE`,
+`ca_profile.xml`, `templates/solidcraft.xml` and an original, attributed icon. Catalog inclusion
+requires validation, scanning and acceptance through [the CA submission portal](https://ca.unraid.net/submit).
+Creating the repository does not itself list the application in Community Applications.
+
+Once the image is anonymously accessible, use the supplied template and retain its registry
+image reference to install directly, without loading a tar archive. Before public catalog
+acceptance, the same XML can be placed under
+`/boot/config/plugins/community.applications/private/denara/` for local CA use, or under
+`/boot/config/plugins/dockerMan/templates-user/` for Docker's Add Container screen.
+CA's private templates are local XML files; modern Unraid does not have the old repository-URL
+subscription field. An additional helper is not needed for container image updates.
+
+Unraid's normal update action pulls a newer `latest` image and recreates the container with
+its saved settings. Keep the existing data mapping, origin settings and MCP token; back up
+designs and retain a prior commit-specific image before updating. This workflow does not
+restart an Unraid installation automatically.
 
 | Address | Purpose |
 | --- | --- |
@@ -138,9 +173,10 @@ fixed IP on an existing custom network, replace `-p 8781:8080` with
 
 Install the supplied `packaging/unraid/solvecraft.xml` as a user template (under
 `/boot/config/plugins/dockerMan/templates-user/`), then select it in **Docker → Add
-Container**. It references the locally loaded `solvecraft-unraid:upstream-4af2d06` image;
-there is no published registry image for this prototype. Do not ask Unraid to update
-it from a registry; load a newly built archive for subsequent prototype updates.
+Container**. For this offline archive path, change the template's Repository field from
+the registry reference to `solvecraft-unraid:upstream-4af2d06`, the locally loaded image.
+Offline installations need a new image archive for subsequent updates. For direct registry
+installation, keep `ghcr.io/denara/solidcraft-unraid:latest` instead.
 
 Keep your chosen appdata folder mapped to `/data`. Default runtime UID/GID is 99:100,
 with a read-only image, writable `/tmp`, no capabilities, a 4 GiB memory limit and four
