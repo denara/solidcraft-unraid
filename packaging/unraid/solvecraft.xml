@@ -1,14 +1,20 @@
 <?xml version="1.0"?>
 <Container version="2">
   <Name>solidcraft</Name>
-  <Repository>solvecraft-unraid:upstream-4af2d06</Repository>
-  <Registry>https://github.com/denara/solidcraft-unraid</Registry>
+  <Repository>ghcr.io/denara/solidcraft-unraid:latest</Repository>
+  <Registry>https://github.com/denara/solidcraft-unraid/pkgs/container/solidcraft-unraid</Registry>
   <Network>bridge</Network>
   <Shell>sh</Shell>
   <Privileged>false</Privileged>
   <Support>https://github.com/denara/solidcraft-unraid/issues</Support>
   <Project>https://github.com/denara/solidcraft-unraid</Project>
-  <Overview>Independent SolidCraft browser CAD app and authenticated Streamable HTTP MCP service. Load the locally built image first; this prototype is not a published registry image. Server models and exports are persisted under /data/files. Browser designs are stored in the browser and do not share MCP sessions.</Overview>
+  <Overview>Community-maintained Linux amd64 packaging of SolidCraft: an independent browser CAD app and authenticated Streamable HTTP MCP service for local AI clients. Early experimental CAD software; latest contains the newest container build that passed its modelling, persistence and web checks. Server designs and exports persist under /data/files. Browser designs are stored separately in the browser and do not share MCP sessions. This packaging is a fork, not an official upstream distribution.</Overview>
+  <Category>Productivity: Tools:Utilities</Category>
+  <Beta>true</Beta>
+  <Icon>https://raw.githubusercontent.com/denara/unraid-templates/main/icons/solidcraft.png</Icon>
+  <TemplateURL>https://raw.githubusercontent.com/denara/unraid-templates/main/templates/solidcraft.xml</TemplateURL>
+  <License>MIT OR Apache-2.0</License>
+  <ExtraSearchTerms>CAD parametric MCP AI SolveCraft</ExtraSearchTerms>
   <WebUI>http://[IP]:[PORT:8080]/</WebUI>
   <ExtraParams>--user=99:100 --init --read-only --tmpfs /tmp:rw,nosuid,nodev,size=256m,mode=1777 --cap-drop=ALL --security-opt=no-new-privileges:true --memory=4g --cpus=4 --pids-limit=128</ExtraParams>
   <Config Name="Web and MCP port" Target="8080" Default="8781" Mode="tcp" Description="Web at / ; MCP at /mcp. Nginx can proxy both through this port." Type="Port" Display="always" Required="true" Mask="false">8781</Config>

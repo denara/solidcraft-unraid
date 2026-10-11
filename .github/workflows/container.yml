@@ -1,6 +1,17 @@
-name: Container prototype
+name: SolidCraft Unraid container
 
 on:
+  push:
+    branches: ['codex/unraid-mcp-web']
+    paths:
+      - 'apps/**'
+      - 'crates/**'
+      - 'vendor/**'
+      - 'Cargo.*'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'packaging/unraid/**'
+      - '.github/workflows/container.yml'
   pull_request:
     paths:
       - 'apps/**'
@@ -17,14 +28,34 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: unraid-container-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   proof:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - name: Build the container
-        run: docker build -t solvecraft-unraid:prototype .
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: solvecraft-unraid:prototype
+          labels: |
+            org.opencontainers.image.source=https://github.com/denara/solidcraft-unraid
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.title=SolidCraft Unraid
+            org.opencontainers.image.licenses=MIT OR Apache-2.0
+          cache-from: type=gha,scope=unraid-amd64
+          cache-to: type=gha,mode=max,scope=unraid-amd64
       - name: Start a private test instance
         # Deliberately disposable test credential; never used for a deployment.
         run: >-
@@ -57,11 +88,35 @@ jobs:
       - name: Reopen the persisted model
         shell: pwsh
         run: ./packaging/unraid/smoke-test.ps1 -Token disposable-container-proof-token-only -Reopen
-      - uses: actions/upload-artifact@v4
+      - name: Verify browser assets
+        run: curl -fsS http://localhost:8781/ | grep -q 'SolidCraft'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: container-mcp-proof
           path: target/unraid-proof/
           retention-days: 30
+      - name: Authenticate to the container registry
+        if: github.event_name == 'push' && github.repository == 'denara/solidcraft-unraid'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish the tested image
+        if: github.event_name == 'push' && github.repository == 'denara/solidcraft-unraid'
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          image=ghcr.io/denara/solidcraft-unraid
+          docker tag solvecraft-unraid:prototype "$image:sha-$SOURCE_REVISION"
+          docker push "$image:sha-$SOURCE_REVISION"
+          docker tag solvecraft-unraid:prototype "$image:latest"
+          docker push "$image:latest"
+          printf 'Published `%s:latest` from `%s` after MCP, persistence and web checks.\n' "$image" "$SOURCE_REVISION" >> "$GITHUB_STEP_SUMMARY"
       - name: Container diagnostics
         if: failure()
         run: docker logs proof
+      - name: Remove the disposable test instance
+        if: always()
+        run: docker rm -f proof 2>/dev/null || true
