@@ -81,7 +81,7 @@ The CA portal validated it as public, active and MIT-licensed, then found one va
 app with no hard errors or warnings and confirmed that the image is pullable.
 Catalog finalization and acceptance are separate from those completed checks.
 
-The catalog app is **SolidCraft-Unraid**, explicitly an unofficial Unraid integration.
+The catalog app is **SolidCraft**, explicitly an unofficial Unraid integration.
 The CAD application and browser app are credited to bherbruck and the upstream SolidCraft
 contributors; denara maintains only the container packaging, HTTP MCP adapter and Unraid
 template. No upstream application release, version bump or release tag was created.

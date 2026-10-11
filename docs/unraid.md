@@ -1,5 +1,7 @@
 # SolidCraft on Unraid: independent web app and MCP CAD service
 
+Unraid® is a registered trademark of Lime Technology, Inc. This application is not affiliated with, endorsed, or sponsored by Lime Technology, Inc.
+
 This fork adds deployment packaging and an HTTP adapter. The modelling engine and the
 existing stdio MCP server retain their behaviour. The first target is Linux x86_64 (AMD/Intel),
 tested locally using Docker Desktop Linux containers, then deployable on Unraid.
@@ -8,7 +10,7 @@ Upstream renamed the displayed product from SolveCraft to SolidCraft. Technical 
 compatible. Hostnames and deployment paths below are examples: substitute your own
 values locally, outside Git. `.env` and `target/` are ignored by Git and Docker builds.
 The fork is hosted at [denara/solidcraft-unraid](https://github.com/denara/solidcraft-unraid).
-The public Unraid template names a new container `SolidCraft-Unraid`; the existing local Compose service,
+The public Unraid template names a new container `SolidCraft`; the existing local Compose service,
 image tags, command names, data format and environment variables retain compatibility.
 The first prototype used upstream commit `af536a7`. The current validated snapshot is
 `4af2d060073b17d3a6dcea2018ac9490740f8f4e`, packaged as
