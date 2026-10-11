@@ -1,0 +1,10 @@
+.git
+plan
+target*
+dist
+.env
+*.tar
+*.tar.gz
+*.log
+.codex
+.agents

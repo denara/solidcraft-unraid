@@ -1,0 +1,30 @@
+services:
+  solvecraft:
+    build: .
+    image: solvecraft-unraid:prototype
+    init: true
+    user: "${SOLVECRAFT_UID:-99}:${SOLVECRAFT_GID:-100}"
+    ports:
+      - "${SOLVECRAFT_BIND_IP:-127.0.0.1}:${SOLVECRAFT_PORT:-8781}:8080"
+    volumes:
+      - solvecraft-data:/data
+    environment:
+      SOLVECRAFT_ALLOWED_ORIGINS: "${SOLVECRAFT_ALLOWED_ORIGINS:-http://localhost:8781,http://127.0.0.1:8781}"
+      SOLVECRAFT_MAX_SESSIONS: "4"
+      SOLVECRAFT_IDLE_SECONDS: "1800"
+      SOLVECRAFT_TOOL_TIMEOUT: "300"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=256m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 4g
+    cpus: 4
+    pids_limit: 128
+    stop_grace_period: 15s
+    restart: unless-stopped
+
+volumes:
+  solvecraft-data:

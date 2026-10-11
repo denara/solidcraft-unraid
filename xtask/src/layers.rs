@@ -49,6 +49,7 @@ pub const TABLE: &[(&str, Class)] = &[
     ("solvecraft", Class::Exempt),
     ("cli", Class::Exempt),
     ("web", Class::Exempt),
+    ("server", Class::Exempt),
     ("xtask", Class::Exempt),
 ];
 

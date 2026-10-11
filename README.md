@@ -91,6 +91,9 @@ renamed repository; old-name Pages and Flatpak URLs are not maintained as perman
 
 ## Build and run
 
+For this fork's local container prototype (independent browser app plus authenticated
+HTTP MCP service), see [Unraid setup](docs/unraid.md).
+
 ```sh
 cargo run --release -p solvecraft -- --sample          # desktop app with a sample part
 cargo run --release -p solvecraft-cli -- commands      # the command registry

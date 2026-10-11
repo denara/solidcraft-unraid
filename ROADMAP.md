@@ -5,6 +5,10 @@ features → parametric timeline) as an open, pure-Rust, agent-drivable applicat
 
 ## At a glance
 
+Fork deployment addition: a Linux container packages the independent web app and an
+authenticated Streamable HTTP adapter for the existing headless MCP CLI. Separate CAD
+sessions share explicitly saved files on a persistent volume; see [Unraid setup](docs/unraid.md).
+
 | Question | Answer |
 |---|---|
 | Where are we? | **M0 and M13 done; M1, M2, M5–M7, M9, M10, M14 in progress.** Sketch with solver and the full SKETCH create/modify set; extrude, revolve (two sides, symmetric, to object), fillet/chamfer (variable radius, chord length, a radius per edge, corner patches), holes, threads (cosmetic and modelled), patterns, mirror, shell (inside/outside/both), draft, loft, sweep, coil, split body and split face, delete face, construction planes, axes and points; persistent naming of faces and edges; parameters and configurations; components, joints, motion studies, exploded views; sheet metal and a plastic enclosure subset; STEP/IGES/3MF/STL/OBJ/DXF; autosave and crash recovery; desktop and browser (wasm) app, CLI, MCP server, oracle harness. |

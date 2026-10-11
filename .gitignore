@@ -7,3 +7,5 @@
 /.claude/worktrees/
 /target-snapshot
 __pycache__/
+.env
+/solvecraft-unraid-prototype.tar

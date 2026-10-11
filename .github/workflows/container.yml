@@ -1,0 +1,67 @@
+name: Container prototype
+
+on:
+  pull_request:
+    paths:
+      - 'apps/**'
+      - 'crates/**'
+      - 'vendor/**'
+      - 'Cargo.*'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'compose.yaml'
+      - 'packaging/unraid/**'
+      - '.github/workflows/container.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build the container
+        run: docker build -t solvecraft-unraid:prototype .
+      - name: Start a private test instance
+        # Deliberately disposable test credential; never used for a deployment.
+        run: >-
+          docker run -d --name proof --init -p 127.0.0.1:8781:8080
+          --read-only --tmpfs /tmp:rw,nosuid,nodev,size=256m,mode=1777
+          --cap-drop ALL --security-opt no-new-privileges:true
+          --memory 4g --cpus 4 --pids-limit 128
+          -v proof-data:/data
+          -e SOLVECRAFT_MCP_TOKEN=disposable-container-proof-token-only
+          solvecraft-unraid:prototype
+      - name: Wait for startup
+        run: |
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://localhost:8781/health; then exit 0; fi
+            sleep 1
+          done
+          docker logs proof
+          exit 1
+      - name: Model, preview and export through HTTP MCP
+        shell: pwsh
+        run: ./packaging/unraid/smoke-test.ps1 -Token disposable-container-proof-token-only
+      - name: Restart the container
+        run: |
+          docker restart proof
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://localhost:8781/health; then exit 0; fi
+            sleep 1
+          done
+          exit 1
+      - name: Reopen the persisted model
+        shell: pwsh
+        run: ./packaging/unraid/smoke-test.ps1 -Token disposable-container-proof-token-only -Reopen
+      - uses: actions/upload-artifact@v4
+        with:
+          name: container-mcp-proof
+          path: target/unraid-proof/
+          retention-days: 30
+      - name: Container diagnostics
+        if: failure()
+        run: docker logs proof

@@ -15,6 +15,11 @@ and attribution records keep their historical names. Public docs/web/Flatpak dep
 use project Pages `/solidcraft/`; do not add permanent old-name Pages aliases. See README's
 compatibility notes.
 
+## Container prototype baseline
+The first Unraid prototype deliberately uses the tested upstream commit `af536a7`.
+Keep later upstream CAD/UI feature updates separate from this deployment addition;
+advance the baseline only as a separate, validated update.
+
 ## Start every session here
 1. Read `plan/STATUS.md` (current milestone, next task), then the task in `plan/execution-plan.md`
    and the relevant `plan/architecture.md` section. Behaviour reference: `plan/fusion/`
@@ -44,6 +49,9 @@ People trust SolidCraft with their designs; a crash loses their work. **This out
   `#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]`.
 
 ## Non-negotiables
+- **Private deployment configuration stays local.** Commit only generic example hostnames,
+  network addresses and filesystem paths. Keep actual deployment values and credentials in
+  ignored `.env` files or `target/`; exclude them from container build contexts as well.
 - **Clean-room.** Fusion may be *observed* black-box (its UI, its toolbar dump, parts built in it
   and their measurements, kept under `plan/fusion/`, never committed). Never copy Autodesk icons,
   artwork, help text, tooltips, templates or materials, and never commit files produced by
@@ -72,7 +80,9 @@ People trust SolidCraft with their designs; a crash loses their work. **This out
 - **Rust only.** Units are millimetres and radians internally; Z is up.
 - **Quality gates** before every commit: `cargo xtask ci` (fmt, clippy -D warnings, tests,
   assets, layers). Commit after every feature arc that builds.
-- **Publishing**: `origin` is github.com/bherbruck/solidcraft. After each commit that
+- **Publishing in this fork**: `origin` is github.com/denara/solvecraft-unraid;
+  `upstream` is github.com/bherbruck/solidcraft. Publish deployment work on a topic branch.
+  After each commit that
   passes `cargo xtask ci`: `git pull --rebase origin main` (re-run ci if it brought changes),
   then `git push`. Never force-push. Never commit `plan/`, build dirs (`target*/`) or anything
   produced by Fusion (oracle STEP/STL/PNG); check `git ls-files` before pushing.

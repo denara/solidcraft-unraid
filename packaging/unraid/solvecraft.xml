@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>solvecraft</Name>
+  <Repository>solvecraft-unraid:prototype</Repository>
+  <Registry>https://github.com/denara/solvecraft-unraid</Registry>
+  <Network>bridge</Network>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/denara/solvecraft-unraid/issues</Support>
+  <Project>https://github.com/denara/solvecraft-unraid</Project>
+  <Overview>Independent SolidCraft browser CAD app and authenticated Streamable HTTP MCP service. Load the locally built image first; this prototype is not a published registry image. Server models and exports are persisted under /data/files. Browser designs are stored in the browser and do not share MCP sessions.</Overview>
+  <WebUI>http://[IP]:[PORT:8080]/</WebUI>
+  <ExtraParams>--user=99:100 --init --read-only --tmpfs /tmp:rw,nosuid,nodev,size=256m,mode=1777 --cap-drop=ALL --security-opt=no-new-privileges:true --memory=4g --cpus=4 --pids-limit=128</ExtraParams>
+  <Config Name="Web and MCP port" Target="8080" Default="8781" Mode="tcp" Description="Web at / ; MCP at /mcp. Nginx can proxy both through this port." Type="Port" Display="always" Required="true" Mask="false">8781</Config>
+  <Config Name="Persistent data" Target="/data" Default="/mnt/user/appdata/your-cad-service" Mode="rw" Description="Choose your appdata folder, writable by UID 99 / GID 100. Contains mcp-token and files/." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/your-cad-service</Config>
+  <Config Name="Allowed origins" Target="SOLVECRAFT_ALLOWED_ORIGINS" Default="https://cad.example.invalid" Mode="" Description="Replace this example with your hostname. Comma-separated exact browser origins; clients without Origin can authenticate normally." Type="Variable" Display="always" Required="true" Mask="false">https://cad.example.invalid</Config>
+  <Config Name="Maximum CAD sessions" Target="SOLVECRAFT_MAX_SESSIONS" Default="4" Mode="" Description="Each session has its own CAD process and model; 1 to 32." Type="Variable" Display="advanced" Required="true" Mask="false">4</Config>
+  <Config Name="Idle session seconds" Target="SOLVECRAFT_IDLE_SECONDS" Default="1800" Mode="" Description="Unsaved models are discarded on expiry. Explicitly save designs you want to keep." Type="Variable" Display="advanced" Required="true" Mask="false">1800</Config>
+  <Config Name="Tool timeout seconds" Target="SOLVECRAFT_TOOL_TIMEOUT" Default="300" Mode="" Description="A timed-out CAD process is ended; operations are never automatically retried." Type="Variable" Display="advanced" Required="true" Mask="false">300</Config>
+</Container>
