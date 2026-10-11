@@ -73,6 +73,8 @@ and export. Test a copied fixture, never an original private design.
 
 After validation, update the recorded tested baseline in `AGENTS.md`, `docs/unraid.md` and
 the fork's roadmap/status note. Record the exact image tag or digest and the checks run.
+Update the Unraid template Repository field to the same validated immutable image tag.
+Keep its product display name and fork links current while retaining compatibility identifiers.
 
 ## 4. Publish code or prepare an installation artifact
 

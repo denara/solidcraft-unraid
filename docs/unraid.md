@@ -7,6 +7,9 @@ Upstream renamed the displayed product from SolveCraft to SolidCraft. Technical 
 (`solvecraft-cli`, `.solvecraft`, environment variables and this fork's image name) stay
 compatible. Hostnames and deployment paths below are examples: substitute your own
 values locally, outside Git. `.env` and `target/` are ignored by Git and Docker builds.
+The fork is hosted at [denara/solidcraft-unraid](https://github.com/denara/solidcraft-unraid).
+The Unraid template names a new container `solidcraft`; the existing local Compose service,
+image tags, command names, data format and environment variables retain compatibility.
 The first prototype used upstream commit `af536a7`. The current validated snapshot is
 `4af2d060073b17d3a6dcea2018ac9490740f8f4e`, packaged as
 `solvecraft-unraid:upstream-4af2d06`. See [update records](unraid-updates.md) for checks,
@@ -105,13 +108,13 @@ after 30 minutes, and container restarts end all sessions. Start a new MCP sessi
 Build on the development computer, not on Unraid:
 
 ```sh
-docker save -o solvecraft-unraid-prototype.tar solvecraft-unraid:prototype
+docker save -o solvecraft-unraid-upstream-4af2d06.tar solvecraft-unraid:upstream-4af2d06
 ```
 
 Transfer that archive to Unraid and load it from the Unraid terminal:
 
 ```sh
-docker load -i /path/to/solvecraft-unraid-prototype.tar
+docker load -i /path/to/solvecraft-unraid-upstream-4af2d06.tar
 mkdir -p /mnt/user/appdata/your-cad-service
 chown 99:100 /mnt/user/appdata/your-cad-service
 ```
@@ -119,14 +122,14 @@ chown 99:100 /mnt/user/appdata/your-cad-service
 For the locally loaded prototype, you can start it directly in the Unraid terminal:
 
 ```sh
-docker run -d --name solvecraft --init --restart unless-stopped \
+docker run -d --name solidcraft --init --restart unless-stopped \
   --user 99:100 -p 8781:8080 \
   -v /mnt/user/appdata/your-cad-service:/data \
   -e SOLVECRAFT_ALLOWED_ORIGINS=https://cad.example.invalid \
   --read-only --tmpfs /tmp:rw,nosuid,nodev,size=256m,mode=1777 \
   --cap-drop ALL --security-opt no-new-privileges:true \
   --memory 4g --cpus 4 --pids-limit 128 \
-  solvecraft-unraid:prototype
+  solvecraft-unraid:upstream-4af2d06
 ```
 
 This installs the already built image; it does not compile anything on Unraid. For a
@@ -135,7 +138,7 @@ fixed IP on an existing custom network, replace `-p 8781:8080` with
 
 Install the supplied `packaging/unraid/solvecraft.xml` as a user template (under
 `/boot/config/plugins/dockerMan/templates-user/`), then select it in **Docker → Add
-Container**. It references the locally loaded `solvecraft-unraid:prototype` image;
+Container**. It references the locally loaded `solvecraft-unraid:upstream-4af2d06` image;
 there is no published registry image for this prototype. Do not ask Unraid to update
 it from a registry; load a newly built archive for subsequent prototype updates.
 

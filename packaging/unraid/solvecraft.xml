@@ -1,13 +1,13 @@
 <?xml version="1.0"?>
 <Container version="2">
-  <Name>solvecraft</Name>
-  <Repository>solvecraft-unraid:prototype</Repository>
-  <Registry>https://github.com/denara/solvecraft-unraid</Registry>
+  <Name>solidcraft</Name>
+  <Repository>solvecraft-unraid:upstream-4af2d06</Repository>
+  <Registry>https://github.com/denara/solidcraft-unraid</Registry>
   <Network>bridge</Network>
   <Shell>sh</Shell>
   <Privileged>false</Privileged>
-  <Support>https://github.com/denara/solvecraft-unraid/issues</Support>
-  <Project>https://github.com/denara/solvecraft-unraid</Project>
+  <Support>https://github.com/denara/solidcraft-unraid/issues</Support>
+  <Project>https://github.com/denara/solidcraft-unraid</Project>
   <Overview>Independent SolidCraft browser CAD app and authenticated Streamable HTTP MCP service. Load the locally built image first; this prototype is not a published registry image. Server models and exports are persisted under /data/files. Browser designs are stored in the browser and do not share MCP sessions.</Overview>
   <WebUI>http://[IP]:[PORT:8080]/</WebUI>
   <ExtraParams>--user=99:100 --init --read-only --tmpfs /tmp:rw,nosuid,nodev,size=256m,mode=1777 --cap-drop=ALL --security-opt=no-new-privileges:true --memory=4g --cpus=4 --pids-limit=128</ExtraParams>

@@ -101,7 +101,7 @@ People trust SolidCraft with their designs; a crash loses their work. **This out
 - **Rust only.** Units are millimetres and radians internally; Z is up.
 - **Quality gates** before every commit: `cargo xtask ci` (fmt, clippy -D warnings, tests,
   assets, layers). Commit after every feature arc that builds.
-- **Publishing in this fork**: `origin` is github.com/denara/solvecraft-unraid;
+- **Publishing in this fork**: `origin` is github.com/denara/solidcraft-unraid;
   `upstream` is github.com/bherbruck/solidcraft. Publish deployment work only on
   `codex/unraid-mcp-web`. Fetch origin before pushing and incorporate changes from
   `origin/codex/unraid-mcp-web` by fast-forward or merge, preserving published history.
