@@ -138,7 +138,7 @@ Archive: `target/solvecraft-unraid-upstream-07e263d.tar` (53,579,776 bytes).
 Archive SHA256: `e89e1954d8d5eaf52ad91d80effee3a4c590c19d1cee703d3c90883af5356e5d`.
 The exported manifest names the expected image tag.
 
-The local development runtime `solvecraft-solvecraft-1` now runs this image.
+The local development runtime `solvecraft-solvecraft-1` first ran this local image; after registry verification it was moved to the immutable public source tag below.
 A private pre-update backup was preserved, along with the same persistent volume,
 MCP token, loopback port/origins and security/resource limits. Health, authenticated
 MCP, PNG, browser assets and read-only reopen of the public saved fixture passed.
@@ -151,3 +151,24 @@ source push. Registry success, exact source revision/digest and anonymous access
 must be verified separately before announcing availability. Unraid and nginx/DNS
 are unchanged; install a verified registry update through Unraid's normal container
 update action while keeping existing settings, data and token.
+
+Publication completed successfully in [container workflow 38217614599](https://github.com/denara/solidcraft-unraid/actions/runs/38217614599)
+from tested integration commit `0dcc905c2ece6ae9eff3120be2f16f98d2aaa793`.
+The workflow passed its fresh build, modelling/authentication/origin/file checks,
+independent MCP sessions, PNG/STEP, restart persistence and browser assets before
+publishing `latest` and `sha-0dcc905c2ece6ae9eff3120be2f16f98d2aaa793`.
+Published image: `ghcr.io/denara/solidcraft-unraid:latest` (Linux amd64).
+Digest: `sha256:7376ae32e4c49696c32129292ac5a8a81451085f235f93a0b8e31e2369a79344`.
+Anonymous pulls of both tags succeeded with an empty Docker client configuration;
+an anonymous registry manifest returned HTTP 200 and the same digest. OCI source
+labels match the tested integration commit. Upstream main still matched the selected
+`07e263d` snapshot at the final check.
+
+The sole local runtime now uses the immutable public source tag, with the same
+volume/token and security/resource settings; authenticated SDK modelling/PNG and
+read-only public-design reopen passed again. Eight obsolete owned check/candidate
+containers were removed without deleting volumes. The old 0.2.1 registry image,
+local 0.3.2 archive image, build caches/toolchain images and private backups remain
+available. Public template/icon blob hashes exactly match denara/unraid-templates;
+no catalog commit or further CA submission was needed. To install on Unraid, use
+its normal Docker container update action; this run did not install it there.
