@@ -51,6 +51,7 @@ mod tests {
                 web: directory.clone(),
                 files: directory.clone(),
                 token: "private-test-bearer-never-log".into(),
+                token_source: crate::config::TokenSource::Environment,
                 origins: vec!["https://private-test-origin.invalid".into()],
                 max_sessions: 1,
                 idle: Duration::from_secs(60),

@@ -36,7 +36,7 @@ async fn run() -> Result<(), String> {
     });
     let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| format!("listen {addr}: {e}"))?;
     eprintln!("SolidCraft web: http://{addr}/ ; MCP: /mcp (Bearer authentication required)");
-    state.audit.emit(audit::Event::Ready, serde_json::json!({"version":env!("CARGO_PKG_VERSION"),"slots_total":state.config.max_sessions}));
+    state.audit.startup(&state.config);
     let audit = Arc::clone(&state.audit);
     axum::serve(listener, http::router(state)).with_graceful_shutdown(shutdown(audit)).await.map_err(|e| e.to_string())
 }

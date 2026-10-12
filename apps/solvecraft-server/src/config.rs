@@ -3,12 +3,27 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
+pub enum TokenSource {
+    File(PathBuf),
+    Environment,
+}
+
+impl TokenSource {
+    pub fn location(&self) -> serde_json::Value {
+        match self {
+            Self::File(path) => serde_json::json!({"source":"file","path":path.to_string_lossy()}),
+            Self::Environment => serde_json::json!({"source":"environment","environment_variable":"SOLVECRAFT_MCP_TOKEN"}),
+        }
+    }
+}
+
 pub struct Config {
     pub listen: String,
     pub cli: String,
     pub web: PathBuf,
     pub files: PathBuf,
     pub token: String,
+    pub token_source: TokenSource,
     pub origins: Vec<String>,
     pub max_sessions: usize,
     pub idle: Duration,
@@ -34,9 +49,12 @@ impl Config {
     pub fn load() -> Result<Self, String> {
         let data = PathBuf::from(env("SOLVECRAFT_DATA_DIR", "/data"));
         fs::create_dir_all(data.join("files")).map_err(|e| format!("data directory: {e}"))?;
-        let token = match std::env::var("SOLVECRAFT_MCP_TOKEN") {
-            Ok(t) if !t.is_empty() => t,
-            _ => token_file(&data.join("mcp-token"))?,
+        let (token, token_source) = match std::env::var("SOLVECRAFT_MCP_TOKEN") {
+            Ok(t) if !t.is_empty() => (t, TokenSource::Environment),
+            _ => {
+                let path = data.join("mcp-token");
+                (token_file(&path)?, TokenSource::File(path))
+            }
         };
         if !(32..=512).contains(&token.len()) || !token.bytes().all(|b| b.is_ascii_graphic()) {
             return Err("MCP token must contain 32..512 visible ASCII characters, without spaces".into());
@@ -56,6 +74,7 @@ impl Config {
             web: PathBuf::from(env("SOLVECRAFT_WEB_DIR", "/opt/solvecraft/web")),
             files: fs::canonicalize(data.join("files")).map_err(|e| e.to_string())?,
             token,
+            token_source,
             origins,
             max_sessions: number("SOLVECRAFT_MAX_SESSIONS", 4, 1, 32)? as usize,
             idle: Duration::from_secs(number("SOLVECRAFT_IDLE_SECONDS", 1800, 60, 86400)?),

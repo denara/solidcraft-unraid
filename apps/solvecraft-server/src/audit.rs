@@ -6,6 +6,7 @@ use serde_json::Value;
 #[derive(Clone, Copy)]
 pub enum Event {
     Ready,
+    TokenLocation,
     Stopping,
     AuthAccepted,
     AuthRejected,
@@ -26,6 +27,7 @@ impl Event {
     fn label(self) -> (&'static str, &'static str, &'static str) {
         match self {
             Self::Ready => ("system", "🚀", "server.ready"),
+            Self::TokenLocation => ("system", "🔑", "token.location"),
             Self::Stopping => ("system", "🛑", "server.stopping"),
             Self::AuthAccepted => ("login", "✅", "auth.accepted"),
             Self::AuthRejected => ("warn", "⛔", "auth.rejected"),
@@ -51,6 +53,11 @@ pub struct Audit {
 }
 
 impl Audit {
+    pub fn startup(&self, config: &crate::config::Config) {
+        self.emit(Event::Ready, serde_json::json!({"version":env!("CARGO_PKG_VERSION"),"slots_total":config.max_sessions}));
+        self.emit(Event::TokenLocation, config.token_source.location());
+    }
+
     pub fn emit(&self, event: Event, fields: Value) {
         let (category, icon, name) = event.label();
         // Plain severity words let log viewers apply their own palette; no ANSI escapes.

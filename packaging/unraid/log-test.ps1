@@ -29,7 +29,7 @@ function Start-Session {
     $taskSession
 }
 $taskBefore = @(Read-Log)
-if (-not (($taskBefore -join "`n") -match 'server.ready' -and ($taskBefore -join "`n") -match 'server.stopping')) { throw 'Startup/shutdown events missing after proof restart' }
+if (-not (($taskBefore -join "`n") -match 'server.ready' -and ($taskBefore -join "`n") -match 'server.stopping' -and ($taskBefore -join "`n") -match 'token.location.*SOLVECRAFT_MCP_TOKEN')) { throw 'Startup/shutdown/token-source events missing after proof restart' }
 try {
     $taskFirst = Start-Session
     $taskActive = $taskHeaders.Clone()

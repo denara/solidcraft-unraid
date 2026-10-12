@@ -262,6 +262,7 @@ mod tests {
             web: std::env::temp_dir(),
             files: std::env::temp_dir(),
             token: "test-token-for-http-authorization".into(),
+            token_source: crate::config::TokenSource::Environment,
             origins: vec!["https://solvecraft.example".into()],
             max_sessions: 2,
             idle: Duration::from_secs(60),
@@ -271,6 +272,23 @@ mod tests {
 
     fn app() -> Router {
         router(state())
+    }
+
+    #[test]
+    fn every_start_reports_file_or_environment_location_without_the_token() {
+        let mut state = state();
+        state.audit.startup(&state.config);
+        let first = state.audit.rows.lock().unwrap().join("\n");
+        assert!(first.contains("token.location") && first.contains("SOLVECRAFT_MCP_TOKEN"));
+        assert!(!first.contains(&state.config.token));
+        let config = &mut Arc::get_mut(&mut state).unwrap().config;
+        config.token_source = crate::config::TokenSource::File("/data/mcp-token".into());
+        for _ in 0..2 {
+            state.audit.startup(&state.config);
+        }
+        let rows = state.audit.rows.lock().unwrap();
+        assert_eq!(rows.iter().filter(|row| row.contains("token.location") && row.contains("/data/mcp-token")).count(), 2);
+        assert!(rows.iter().all(|row| !row.contains(&state.config.token)));
     }
 
     #[tokio::test]

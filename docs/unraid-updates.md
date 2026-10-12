@@ -206,3 +206,18 @@ Registry publication and the final retained local runtime are verified separatel
 below. Unraid is not updated by this development task; installation uses its
 normal Docker container update action, retaining existing settings/data/token.
 The canonical public template and original icon have not changed.
+
+The final logging addition also reports `token.location` on every successful startup,
+not only when a token is generated. File mode names the trusted container path
+(normally `/data/mcp-token`); environment mode names `SOLVECRAFT_MCP_TOKEN`, never
+its value. This intentionally disclosed credential-file location is distinct from
+omitted design/export paths and host volume mappings. Twelve gateway tests pass,
+including repeated startup records for both modes. Fresh-container file-mode tests
+confirmed two location records across restart, unchanged token and no token leakage.
+The final real log proof and persisted-design reopen also passed. The superseded
+initial image workflow was canceled before publication to include this addition.
+
+Final local image: `solvecraft-unraid:logging-token-location` (Linux amd64).
+Image ID: `sha256:932090de0fb756106ba2a7e89dcd766e21dfc2a3467ca092f76ab3afcd288cff`.
+Archive: `target/solidcraft-unraid-logging-token-location.tar` (53,611,008 bytes).
+SHA256: `d37759e8d0086137ff818c709b49b7ba45a6caf25b5041c89ed1098ba45ef4f3`.

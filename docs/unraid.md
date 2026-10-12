@@ -226,6 +226,7 @@ force ANSI colors; the viewer can apply its own palette. Categories match the di
 | Category | Event | Meaning |
 | --- | --- | --- |
 | `system` 🚀 / 🛑 | `server.ready` / `server.stopping` | Started / received a graceful stop signal |
+| `system` 🔑 | `token.location` | Every startup reports the token-file path inside the container, normally `/data/mcp-token`, or the environment variable when explicitly configured; never its value |
 | `login` ✅ | `auth.accepted` | Bearer authentication accepted for a session-admission request |
 | `warn` ⛔ | `auth.rejected` / `origin.rejected` | Missing/invalid Bearer token or disallowed origin |
 | `system` 🔒 | `session.opened slots=1/4` | A separate CAD process occupies one of four slots |
@@ -236,7 +237,9 @@ force ANSI colors; the viewer can apply its own palette. Categories match the di
 
 The `s-...` identifier is generated separately for logs and cannot be used as the HTTP
 session ID. Audit events omit tokens, actual `Mcp-Session-Id` headers, client names,
-origins/IP addresses, file paths, command arguments and model contents. Because all
+origins/IP addresses, design/export paths, command arguments and model contents. The
+trusted token-file location is intentionally reported on every start; no host volume
+mapping or token value is printed. Because all
 clients share a Bearer token, these are session records, not authenticated user identities.
 Normal successful tool requests, initialized notifications, browser requests and health
 checks do not generate audit lines. Bearer authentication is stateless; `auth.accepted`
