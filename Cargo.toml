@@ -5,7 +5,7 @@ members = ["crates/*", "apps/*", "xtask"]
 exclude = ["vendor"]
 
 [workspace.package]
-version = "0.2.1"
+version = "0.3.2"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.95"
@@ -100,3 +100,6 @@ truck-shapeops = { path = "vendor/truck-shapeops" }
 truck-stepio = { path = "vendor/truck-stepio" }
 truck-meshalgo = { path = "vendor/truck-meshalgo" }
 matext4cgmath = { path = "vendor/matext4cgmath" }
+
+# Keep OpenGL pipelines, resolve textures and CAD callbacks at the same safe sample count.
+egui-wgpu = { path = "vendor/egui-wgpu" }

@@ -24,3 +24,6 @@ hidapi = { version = "2.6.7", default-features = false, features = ["windows-nat
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 winit = { version = "0.30", default-features = false, features = ["x11"] }
+
+[build-dependencies]
+embed-resource = "3.0.11"

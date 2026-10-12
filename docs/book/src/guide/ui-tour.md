@@ -14,8 +14,9 @@
   row gives that item's menu. Rows drag into groups and other components.
 - **Viewport.** Click to select, Shift or Ctrl to add, drag for a window or crossing box. The
   wheel zooms at the cursor, the middle button pans and right-drag orbits freely (the mouse
-  preset in Preferences switches to SolidWorks or Inventor style). Hold Shift during an orbit
-  to snap to the nearest standard or diagonal view; the default Shift+middle gesture also snaps.
+  preset in Preferences switches to SolidWorks or Inventor style). Shift+middle orbits freely
+  in the default and Inventor presets. Shift+right-drag snaps to the nearest standard or
+  diagonal view; Shift does not request snapping when the preset already requires it to orbit.
   The axis view shows the world's X/Y/Z directions in SolidCraft's colors. Click a signed
   axis tip to look along that axis; click the aligned tip again to look from the opposite side.
   Drag the axis view to orbit around the view centre, with Shift for snapping. Top and bottom
@@ -37,6 +38,11 @@
 Preferences (File › Preferences) hold the theme, the units of new designs, the mouse preset, the
 visual style and autosave. Help › Keyboard Shortcuts lists every key, and File › Keyboard
 Shortcuts changes them.
+
+Navigation › **Smooth wheel zoom** is on by default. Turn it off to apply each wheel or
+trackpad event immediately, with no smoothing tail. It is independent of **Animate view
+changes**, which controls axis views, Look At, Home and Fit. Re-enabling smoothing during
+a wheel gesture takes effect after that gesture ends, avoiding leftover zoom being replayed.
 
 Shift-orbit snapping includes 45-degree edge views and isometric corner views, with a
 lightly damped spring transition and a small boundary margin to prevent flicker.

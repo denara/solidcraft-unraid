@@ -88,3 +88,66 @@ The catalog app is **SolidCraft**, explicitly an unofficial Unraid integration.
 The CAD application and browser app are credited to bherbruck and the upstream SolidCraft
 contributors; denara maintains only the container packaging, HTTP MCP adapter and Unraid
 template. No upstream application release, version bump or release tag was created.
+
+## 2026-10-12: upstream 07e263d (SolidCraft 0.3.2)
+
+Advanced the deployment fork from `4af2d060073b17d3a6dcea2018ac9490740f8f4e`
+to the fixed upstream snapshot `07e263d7e95cac9a6851e48bffcb79f302aabfb8`, merged
+directly into the sole working branch `codex/unraid-mcp-web`. Origin's integration
+branch was synchronized before integration; origin/main was already an ancestor.
+The inherited upstream application version is 0.3.2; this packaging update does
+not create a new application release, release branch or release tag.
+
+Changes include removal of artificial Shell wall splits on stepped bodies, faster
+cold geometry rebuilds and retained assembly geometry across selection changes,
+direct Parameters access, expression completion and Enter handling, free
+Shift-middle orbit, optional immediate wheel zoom, and desktop renderer/icon fixes.
+The new vendored egui-wgpu is MIT OR Apache-2.0 with original license texts and
+attribution. Desktop Windows hardware and OpenGL launches were not tested for
+this Linux/Unraid update. No design serialization schema change was introduced.
+
+Merge conflicts were limited to Cargo.lock and generated license notices. Both
+the HTTP gateway's dependencies and upstream additions were retained; notices
+were regenerated. A headless-only upstream completion-test harness initially
+failed on unapplied texture deltas; it now explicitly clears them, matching the
+existing UI test harness. All six completion regressions then passed with debug
+checks active. No production CAD or gateway behavior was modified for that fix.
+
+Validation was scoped to these changes, without rerunning the full test suite:
+
+- Formatting, workspace Clippy with warnings denied, assets, license notices and
+  dependency layers passed; all ten library/web targets passed WebAssembly checks.
+- 118 selected tests passed: profile geometry, mesh refinement, wall regularization,
+  stepped Shell/file-reference compatibility, document/engine placement caching,
+  completion, viewport/navigation, preferences, theme/context menus, parameter Enter,
+  CLI behavior, HTTP gateway and stdio MCP. Initial launch/filter diagnostics and
+  the corrected test runs remain under ignored `target/unraid-update-07e263d/`.
+- Linux amd64 release image and independent browser app built successfully.
+- Isolated HTTP MCP checks passed: 14 tools, sketch/extrusion, 24000 mm3 volume,
+  PNG/STEP output, independent sessions, authentication and origin/path confinement.
+  Restarting the fresh candidate test volume preserved its saved public design.
+- A copied 0.2.1 public fixture reopened with 24000 mm3 and exported STEP. Official
+  MCP SDK 1.32.1 also built 4000 mm3, returned PNG and deleted its session.
+- Browser sample and direct Parameters dialog were inspected visually at version
+  0.3.2. Proof images and logs remain ignored. The generated original catalog icon
+  is byte-identical to the existing icon; no template/catalog metadata changes apply.
+
+Prepared image: `solvecraft-unraid:upstream-07e263d` (Linux amd64).
+Image ID: `sha256:7f0f03fc2d399852f30e859c9ee89510119258206d901338c1ee865955f1a040`.
+Archive: `target/solvecraft-unraid-upstream-07e263d.tar` (53,579,776 bytes).
+Archive SHA256: `e89e1954d8d5eaf52ad91d80effee3a4c590c19d1cee703d3c90883af5356e5d`.
+The exported manifest names the expected image tag.
+
+The local development runtime `solvecraft-solvecraft-1` now runs this image.
+A private pre-update backup was preserved, along with the same persistent volume,
+MCP token, loopback port/origins and security/resource limits. Health, authenticated
+MCP, PNG, browser assets and read-only reopen of the public saved fixture passed.
+The previous registry image is pinned as `solvecraft-unraid:rollback-450eff4`.
+Obsolete owned update containers are removed only after successful checks; data
+volumes, build caches/toolchain images and rollback images are retained.
+
+Public publication is handled by the tested container workflow after the validated
+source push. Registry success, exact source revision/digest and anonymous access
+must be verified separately before announcing availability. Unraid and nginx/DNS
+are unchanged; install a verified registry update through Unraid's normal container
+update action while keeping existing settings, data and token.

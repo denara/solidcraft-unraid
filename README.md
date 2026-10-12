@@ -14,6 +14,9 @@ model through the built-in MCP server. Part of the storytold "craft" family.
 developer guide and command reference; sources in [docs/book](docs/book)), and the
 [web app](https://bherbruck.github.io/solidcraft/app/) to try it in the browser.
 
+Linux Flatpak installation needs the Freedesktop runtime from Flathub as well as the
+SolidCraft application feed. See [install and launch commands](https://bherbruck.github.io/solidcraft/guide/getting-started.html#linux-flatpak).
+
 **Status: early but usable for simple parts.** The historical benchmark report records
 76 of 76 reference parts matching volume, area and topology ([docs/oracle.md](docs/oracle.md)).
 These checks do not establish complete geometric or workflow equivalence. Feature coverage

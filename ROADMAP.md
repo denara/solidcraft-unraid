@@ -11,7 +11,7 @@ sessions share explicitly saved files on a persistent volume; see [Unraid setup]
 Requested upstream updates use the repository's
 [update skill](.agents/skills/update-solvecraft-unraid/SKILL.md), with a fixed target snapshot,
 isolated validation and local-only private deployment settings.
-The container's validated upstream baseline is `4af2d06` (previously `af536a7`);
+The container's validated upstream baseline is `07e263d` (previously `4af2d06`);
 the Linux image passes the changed CAD/UI tests and real web/MCP, restart and old-design
 compatibility checks. See [update records](docs/unraid-updates.md).
 
@@ -260,6 +260,21 @@ headline counts in-scope tabs only and lists the deferred ones separately.
   record their coordinate frame; legacy wires migrate from known provenance without changing
   coordinates. Broken legacy links with missing provenance can require explicit refresh or relink.
   See [occurrence workflows](docs/occurrence-workflows.md).
+- Parameters and Configurations have distinct actions in the SOLID toolbar's CONFIGURE panel.
+  Parameters opens the user/model variable editor; Configurations opens the configuration table.
+  Configure remains available in the panel dropdown.
+- Parameter creation supports Enter with validation and continued keyboard entry. Shared
+  expression autocomplete supports Up/Down selection, Enter/Tab acceptance and Escape dismissal;
+  accepting a suggestion does not submit a parameter or trigger viewport shortcuts.
+- Movable window title bars follow the app's dark/light header palette. Radial right-click
+  menus are opt-in in Preferences > Navigation; ordinary context menus remain the default.
+- Desktop distribution: running Windows windows and executable resources use the app icon;
+  packaging validates icon resources. Nix installs launchers, MIME data and generated icons,
+  with explicit launch apps and Vulkan-loader/driver discovery. Flatpak feed instructions
+  register the required runtime source; release checks exercise desktop modelling on X11/Wayland.
+- OpenGL rendering clamps effective anti-aliasing to 1x across UI pipelines, textures and CAD
+  callbacks to prevent black frames. Other backends retain the requested sample count, and
+  stored preferences remain unchanged.
 - Configuration rules: ordered typed conditions can drive parameters and suppressions or
   restrict values. Preview explains effective values without modifying the document; applying
   rules validates rows atomically. Length expressions retain their authoring units across
@@ -284,7 +299,26 @@ headline counts in-scope tabs only and lists the deferred ones separately.
   continuous collision detection; local thin walls and small details remain limitations.
   See [contact-set limits and recovery](docs/contact-sets.md).
 
+## Document-opening performance
+
+- Cold rebuild profiling separates parsing, geometry, placement, display meshing and
+  thumbnails. Straight-line closest-point projection and exact curved-surface evaluation
+  reuse reduce repeated work without relaxing geometry checks. Three alternating optimized
+  benchmark runs reduce median rebuild time by 26% on the public sensor enclosure and 22%
+  on a local case assembly; shape measurements and topology match the original build.
+  See [performance measurements](docs/perf.md). Further cold Boolean and import costs remain.
+- Prepared assembly geometry survives selection and view changes while real geometry and
+  placement changes invalidate it. A Pi assembly edge-selection probe drops from 9.24 s to
+  0.57 s; initial opening is unchanged. Actual Windows desktop profiling measures 15.87 s
+  median opening, with 82% spent rebuilding geometry; halving full opening remains open.
+
 ## Kernel
+
+- Shell of a stepped, joined planar body no longer creates horizontal subdivisions across
+  continuous walls. Fresh axis-aligned Cut walls are stitched using their exact construction
+  support and shared topology, preserving real steps and intentional boundaries. The local
+  reported case returns from 86 to 49 faces with unchanged material and bounds; regressions
+  cover stepped stock, STEP round trips and saved projections from removed pieces.
 
 truck (Apache-2.0) behind our own `kernel` crate, with our own blend operation and boolean
 retry/validation; see `plan/adr/0001-geometry-kernel.md` (local) — summary in README.

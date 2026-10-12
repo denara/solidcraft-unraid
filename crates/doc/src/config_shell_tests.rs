@@ -457,3 +457,124 @@ fn saved_curved_strip_projection_is_lost_after_exact_wall_coalescence() {
         }
     }
 }
+
+#[test]
+fn saved_stepped_tab_cut_piece_projection_is_lost_without_expanding_material() {
+    use solvecraft_kernel::{BoolOp, FacePaint, Paint};
+    use solvecraft_sketch::{LinkKind, LinkSource, Sketch};
+    let mut doc = Document::new("public stepped tab case");
+    doc.set_param("length", "40", Some("mm"), None).unwrap();
+    doc.set_param("wall", "2", Some("mm"), None).unwrap();
+    for (name, kind) in [
+        ("Case", json!({"type":"box","corner":[0,0,0],"length":"length","width":"30","height":"20"})),
+        ("Tab", json!({"type":"box","corner":["length",10,12],"length":"8","width":"10","height":"8"})),
+    ] {
+        let id = doc.add_feature(serde_json::from_value(kind).unwrap(), Some(name)).unwrap();
+        doc.feature_mut(id).unwrap().body_names = vec![name.into()];
+    }
+    doc.add_feature(
+        FeatureKind::Combine { target: "Case".into(), tools: vec!["Tab".into()], operation: crate::Operation::Join, keep_tools: false },
+        None,
+    )
+    .unwrap();
+    let tool = doc
+        .add_feature(
+            serde_json::from_value(
+                json!({"type":"box","corner":["wall","wall","wall"],"length":"length-2*wall","width":"30-2*wall","height":"22-wall"}),
+            )
+            .unwrap(),
+            Some("Pocket tool"),
+        )
+        .unwrap();
+    doc.feature_mut(tool).unwrap().body_names = vec!["Pocket tool".into()];
+    let cut = doc
+        .add_feature(
+            FeatureKind::Combine { target: "Case".into(), tools: vec!["Pocket tool".into()], operation: crate::Operation::Cut, keep_tools: false },
+            Some("Pocket"),
+        )
+        .unwrap();
+    let mut model = Model::new();
+    model.evaluate(&doc);
+    assert!(model.results.iter().all(|r| r.error.is_none()), "{:?}", model.results);
+    let before = model.state_before(cut);
+    // A real per-face paint control preserves the former slab construction;
+    // no historical names or geometry are fabricated.
+    let old_stock = before
+        .body("Case")
+        .unwrap()
+        .body
+        .clone()
+        .with_paint(Some(Paint { opacity: 1., faces: vec![FacePaint { face: 0, color: [1., 0., 0.], opacity: 1. }] }));
+    let old_cut = solvecraft_kernel::boolean(&old_stock, &before.body("Pocket tool").unwrap().body, BoolOp::Cut).unwrap().unwrap();
+    let mut old_body = ModelBody::new("Case".into(), old_cut, cut);
+    old_body.names = crate::naming::NameCell::new(Some(std::sync::Arc::new(crate::naming::NamingOrigin {
+        feature: doc.feature(cut).unwrap().clone(),
+        before,
+        depth: 1,
+        mats: vec![],
+    })));
+    let at = Vec3::new(0., 15., 1.);
+    let former = crate::naming::face_name_at_body(&old_body, at).unwrap();
+    assert_ne!(former, crate::naming::strip_piece(&former), "actual former bounded wall patch has a full piece name");
+    let index = crate::naming::face_on_body(&old_body, &former, at).unwrap().0;
+    let mut old_state = crate::ModelState::default();
+    old_state.bodies.push(old_body);
+    let plane = solvecraft_geom::Plane::YZ;
+    let resolved = crate::project::resolve_face_indices(&old_state, &plane, LinkKind::Project, "Case", &[index]).unwrap();
+    let current_state = model.state();
+    let current = current_state.body("Case").unwrap();
+    let stem = crate::naming::strip_piece(&former);
+    let current_names = crate::naming::face_names(current);
+    let merged = current_names.iter().position(|name| name == stem).unwrap();
+    assert!(current.body.face_was_coalesced(merged), "new exact generated-wall construction supplies the loss-only witness");
+    assert!(!current_names.contains(&former));
+    let mut sketch = Sketch::new();
+    sketch.add_link(LinkKind::Project, LinkSource::Face { body: "Case".into(), at }, &resolved.geom).unwrap();
+    sketch.links[0].face_name = Some(former);
+    let original = sketch.clone();
+    let captured = original.points.iter().filter(|p| p.link.is_some()).map(|p| p.pos).collect::<Vec<_>>();
+    assert_eq!(captured.len(), 4);
+    assert!(captured.iter().all(|p| (p.x == 10. || p.x == 20.) && (p.y == 0. || p.y == 20.)));
+    let sk = doc.add_feature(FeatureKind::Sketch { plane: PlaneRef::Custom { plane }, sketch }, Some("Saved wall patch")).unwrap();
+    let material = doc
+        .add_feature(
+            FeatureKind::Extrude {
+                sketch: sk,
+                profiles: crate::ProfileSel::All,
+                extent: serde_json::from_value(json!({"distance":"1"})).unwrap(),
+                operation: crate::Operation::NewBody,
+                targets: vec![],
+            },
+            Some("Saved band stock"),
+        )
+        .unwrap();
+    for (length, wall) in [(40., 2.), (50., 3.)] {
+        doc.set_param("length", &length.to_string(), Some("mm"), None).unwrap();
+        doc.set_param("wall", &wall.to_string(), Some("mm"), None).unwrap();
+        model.evaluate(&doc);
+        let reopened = crate::format::read(&doc.to_json()).unwrap();
+        let mut cold = Model::new();
+        cold.evaluate(&reopened);
+        for current in [&model, &cold] {
+            let result = current.results.iter().find(|r| r.id == sk).unwrap();
+            assert!(result.error.is_none(), "{result:?}");
+            assert!(result.warning.as_deref().is_some_and(|w| w.contains("no longer exists; last geometry retained")), "{result:?}");
+            let state = current.state();
+            let saved = state.sketch(sk).unwrap();
+            assert!(saved.sketch.links[0].lost);
+            assert_eq!(saved.sketch.points, original.points);
+            assert_eq!(saved.sketch.curves, original.curves);
+            let stock = state.bodies.iter().find(|b| b.feature == material).unwrap();
+            assert!(
+                (solvecraft_kernel::measure(&stock.body).unwrap().volume - 200.).abs() < 1e-7,
+                "saved10x20 patch must not become30x20 wall; actualvolume={}, bounds={:?}, originalpoints={:?}",
+                solvecraft_kernel::measure(&stock.body).unwrap().volume,
+                stock.mesh().bounds(),
+                original.points
+            );
+            let case = state.body("Case").unwrap();
+            let expected = length * 30. * 20. + 8. * 10. * 8. - (length - 2. * wall) * (30. - 2. * wall) * (20. - wall);
+            assert!((solvecraft_kernel::measure(&case.body).unwrap().volume - expected).abs() < 1e-6);
+        }
+    }
+}

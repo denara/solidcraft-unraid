@@ -61,6 +61,7 @@ mod status_tests {
         assert!(app.session.log.last().is_some_and(|l| l.starts_with("Redo: ") && !l.contains("edit.redo")), "{:?}", app.session.log.last());
     }
 }
+mod expression_complete;
 #[cfg(test)]
 mod extrude_edit_tests;
 mod file_load;
@@ -953,6 +954,7 @@ impl SolveApp {
 
     /// Lay out the whole window.
     pub fn ui(&mut self, ui: &mut egui::Ui) {
+        expression_complete::begin_frame(ui.ctx());
         let t0 = now_ms();
         let _language = crate::i18n::scope(&self.preferences.language);
         let mut report_input = None;

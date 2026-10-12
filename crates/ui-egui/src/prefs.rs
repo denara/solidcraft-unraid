@@ -35,6 +35,8 @@ pub struct Prefs {
     pub default_units: String,
     /// Mouse mapping: `fusion`, `solidworks` or `inventor`.
     pub nav: String,
+    /// Show the radial ring and enable hold/flick gestures for viewport context menus.
+    pub radial_context_menu: bool,
     /// The wheel zooms out when turned forward.
     pub zoom_reverse: bool,
     /// Orbit around the point under the cursor (else around the view's centre).
@@ -56,6 +58,8 @@ pub struct Prefs {
     pub ui_scale: f32,
     /// The wheel zooms toward the point under the cursor (else toward the view's centre).
     pub zoom_to_cursor: bool,
+    /// Spread discrete wheel input across frames (off: apply each event immediately).
+    pub smooth_wheel_zoom: bool,
     /// View changes (axis view, Look At, Home) animate; `look_at_speed` scales how fast.
     pub look_at_anim: bool,
     pub look_at_speed: f32,
@@ -70,6 +74,7 @@ impl Default for Prefs {
         Prefs {
             default_units: "mm".into(),
             nav: "fusion".into(),
+            radial_context_menu: false,
             zoom_reverse: false,
             orbit_cursor: false,
             space_mouse_enabled: true,
@@ -81,6 +86,7 @@ impl Default for Prefs {
             language: "en".into(),
             ui_scale: 1.0,
             zoom_to_cursor: true,
+            smooth_wheel_zoom: true,
             look_at_anim: true,
             look_at_speed: 1.0,
             up_axis: "z".into(),
@@ -178,8 +184,10 @@ fn defaults(app: &mut SolveApp, page: usize) {
         }
         1 => {
             p.nav = d.nav;
+            p.radial_context_menu = d.radial_context_menu;
             p.zoom_reverse = d.zoom_reverse;
             p.zoom_to_cursor = d.zoom_to_cursor;
+            p.smooth_wheel_zoom = d.smooth_wheel_zoom;
             p.orbit_cursor = d.orbit_cursor;
             p.space_mouse_enabled = d.space_mouse_enabled;
             p.space_mouse_speed = d.space_mouse_speed;
@@ -563,12 +571,19 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
                 });
             ui.end_row();
             note(ui, &format!("{}; hold Shift during orbit to snap; the wheel zooms", nav_help(&app.preferences.nav)));
+            ui.label("Context menu");
+            ui.checkbox(&mut app.preferences.radial_context_menu, "Radial context menu");
+            ui.end_row();
             ui.label("Reverse zoom direction");
             ui.checkbox(&mut app.preferences.zoom_reverse, "");
             ui.end_row();
             ui.label("Zoom to the cursor");
             ui.checkbox(&mut app.preferences.zoom_to_cursor, "")
                 .on_hover_text("The wheel zooms toward the point under the cursor (off: toward the view's centre)");
+            ui.end_row();
+            ui.label("Smooth wheel zoom");
+            ui.checkbox(&mut app.preferences.smooth_wheel_zoom, "")
+                .on_hover_text("Turn off to apply each wheel event immediately, without a smoothing tail");
             ui.end_row();
             ui.label("Orbit around");
             ui.horizontal(|ui| {
@@ -752,6 +767,48 @@ pub fn set(app: &mut SolveApp, p: &serde_json::Value) -> Result<serde_json::Valu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn radial_context_menu_defaults_off_and_follows_preferences_transactions() {
+        assert!(!Prefs::default().radial_context_menu);
+        let old: Prefs = serde_json::from_value(json!({"nav":"solidworks","zoom_reverse":true})).unwrap();
+        assert!(!old.radial_context_menu && old.zoom_reverse && old.nav == "solidworks");
+        let mut h = crate::scenario::Harness::new();
+        h.call("ui.prefs", json!({"open":"Navigation"}));
+        h.step(&json!({"widget":"Radial context menu"})).unwrap();
+        assert!(h.app.preferences.radial_context_menu, "the actual checkbox enables radial menus");
+        let mut restored = SolveApp::new(solvecraft_engine::Session::default(), Default::default());
+        restored.load_prefs(&h.app.prefs());
+        assert!(restored.preferences.radial_context_menu, "enabled preference survives save/load");
+        h.call("ui.prefs", json!({"button":"cancel"}));
+        assert!(!h.app.preferences.radial_context_menu, "Cancel restores the default-off setting");
+        h.call("ui.prefs", json!({"open":"Navigation","radial_context_menu":true}));
+        h.call("ui.prefs", json!({"button":"apply"}));
+        h.call("ui.prefs", json!({"button":"defaults"}));
+        assert!(!h.app.preferences.radial_context_menu, "Navigation defaults disable the ring");
+        h.call("ui.prefs", json!({"button":"cancel"}));
+        assert!(h.app.preferences.radial_context_menu, "Cancel restores the last Apply");
+    }
+
+    #[test]
+    fn wheel_smoothing_persists_and_follows_dialog_buttons() {
+        assert!(serde_json::from_value::<Prefs>(json!({})).unwrap().smooth_wheel_zoom);
+        let mut app = SolveApp::new(solvecraft_engine::Session::default(), Default::default());
+        control(&mut app, &json!({"open":"Navigation", "smooth_wheel_zoom":false})).unwrap();
+        control(&mut app, &json!({"button":"cancel"})).unwrap();
+        assert!(app.preferences.smooth_wheel_zoom);
+        control(&mut app, &json!({"open":"Navigation", "smooth_wheel_zoom":false})).unwrap();
+        control(&mut app, &json!({"button":"apply"})).unwrap();
+        control(&mut app, &json!({"smooth_wheel_zoom":true, "button":"cancel"})).unwrap();
+        assert!(!app.preferences.smooth_wheel_zoom);
+        let mut other = SolveApp::new(solvecraft_engine::Session::default(), Default::default());
+        other.load_prefs(&app.prefs());
+        assert!(!other.preferences.smooth_wheel_zoom);
+        control(&mut app, &json!({"open":"Navigation", "button":"defaults"})).unwrap();
+        assert!(app.preferences.smooth_wheel_zoom);
+        control(&mut app, &json!({"button":"cancel"})).unwrap();
+        assert!(!app.preferences.smooth_wheel_zoom);
+    }
 
     #[test]
     fn presets_map_the_mouse_and_prefs_round_trip() {

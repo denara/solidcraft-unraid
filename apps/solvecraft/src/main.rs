@@ -12,6 +12,8 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
+#[path = "../../app_icon.rs"]
+mod app_icon;
 mod control_server;
 #[cfg(target_os = "windows")]
 mod space_mouse;
@@ -124,6 +126,24 @@ const DEPTH_BITS: u8 = 24;
 const STENCIL_BITS: u8 = 8;
 const MSAA: u16 = 4;
 
+fn app_viewport() -> Result<egui::ViewportBuilder, eframe::Error> {
+    Ok(egui::ViewportBuilder::default()
+        .with_title("SolidCraft")
+        .with_icon(egui::IconData {
+            rgba: app_icon::rgba(64).map_err(|e| eframe::Error::AppCreation(std::io::Error::other(e).into()))?,
+            width: 64,
+            height: 64,
+        })
+        .with_inner_size([1600.0, 1000.0])
+        .with_min_inner_size([960.0, 600.0])
+        .with_drag_and_drop(true)
+        .with_decorations(!CUSTOM_TITLEBAR)
+        .with_fullsize_content_view(true)
+        .with_titlebar_shown(false)
+        .with_title_shown(false)
+        .with_app_id("ai.storyteller.solvecraft"))
+}
+
 fn main() -> eframe::Result {
     let samples = msaa();
     let mut control_port: Option<u16> = std::env::var("SOLVECRAFT_CONTROL_PORT").ok().and_then(|p| p.parse().ok());
@@ -146,16 +166,7 @@ fn main() -> eframe::Result {
         }
     }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("SolidCraft")
-            .with_inner_size([1600.0, 1000.0])
-            .with_min_inner_size([960.0, 600.0])
-            .with_drag_and_drop(true)
-            .with_decorations(!CUSTOM_TITLEBAR)
-            .with_fullsize_content_view(true)
-            .with_titlebar_shown(false)
-            .with_title_shown(false)
-            .with_app_id("ai.storyteller.solvecraft"),
+        viewport: app_viewport()?,
         depth_buffer: DEPTH_BITS,
         stencil_buffer: STENCIL_BITS,
         multisampling: samples,
@@ -185,7 +196,8 @@ fn main() -> eframe::Result {
                 app.load_prefs(&p);
             }
             if let Some(rs) = &cc.wgpu_render_state {
-                app.set_wgpu(rs, DEPTH_BITS, STENCIL_BITS, u32::from(samples));
+                eprintln!("SolidCraft graphics: {:?}, MSAA {}x (requested {}x)", rs.adapter.get_info().backend, rs.msaa_samples, samples);
+                app.set_wgpu(rs, DEPTH_BITS, STENCIL_BITS, rs.msaa_samples);
             }
             if let Some(port) = control_port {
                 let rx = control_server::start(port, cc.egui_ctx.clone());
@@ -222,4 +234,30 @@ fn main() -> eframe::Result {
             }))
         }),
     )
+}
+
+#[cfg(test)]
+mod icon_tests {
+    #[test]
+    fn desktop_viewport_supplies_the_original_mark_to_the_window() {
+        let viewport = super::app_viewport().expect("viewport");
+        let icon = viewport.icon.expect("running window must have an icon");
+        assert_eq!((icon.width, icon.height), (64, 64));
+        assert_eq!(icon.rgba, super::app_icon::rgba(64).expect("original mark"));
+        assert_eq!(viewport.app_id.as_deref(), Some("ai.storyteller.solvecraft"));
+    }
+}
+
+#[cfg(test)]
+mod msaa_tests {
+    #[test]
+    fn saved_multisampling_uses_the_selected_backend_policy() {
+        use eframe::wgpu::Backend;
+        for requested in [1, 2, 4, 8] {
+            assert_eq!(eframe::egui_wgpu::effective_msaa_samples(Backend::Gl, requested), 1);
+            for backend in [Backend::Vulkan, Backend::Dx12, Backend::Metal] {
+                assert_eq!(eframe::egui_wgpu::effective_msaa_samples(backend, requested), requested);
+            }
+        }
+    }
 }

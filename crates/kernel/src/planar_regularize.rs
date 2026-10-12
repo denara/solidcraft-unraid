@@ -117,6 +117,36 @@ fn merged_face(faces: &[&mt::Face], members: &[usize], plane: Plane, eligible: &
 
 impl Body {
     pub(crate) fn regularize_certified_planar_faces(self) -> Result<Self> {
+        self.regularize_planar_faces(false)
+    }
+
+    /// Only newly produced Cut walls call this path. The temporary planes carry
+    /// construction support, never persistent ancestor/source-role authority.
+    pub(crate) fn regularize_generated_planar_faces(self) -> Result<Self> {
+        let body = self.regularize_planar_faces(true)?;
+        let sources = body.face_sources().map(|sources| {
+            sources
+                .iter()
+                .map(|source| {
+                    let mut source = source.clone();
+                    if let Some(super::FaceSource::ExtrudeSide { plane, coalesced, .. }) = &mut source {
+                        if plane.is_some() && !*coalesced {
+                            source = None;
+                        } else {
+                            *plane = None;
+                        }
+                    }
+                    source
+                })
+                .collect()
+        });
+        Ok(body.with_face_sources(sources.map(Arc::new)))
+    }
+
+    fn regularize_planar_faces(self, generated: bool) -> Result<Self> {
+        if self.regularization_protected {
+            return Ok(self);
+        }
         let Some(sources) = self.face_sources() else { return Ok(self) };
         if sources.len() > 16_384 || self.paint().is_some_and(|p| !p.faces.is_empty()) {
             return Ok(self);
@@ -148,7 +178,16 @@ impl Body {
                 .zip(sources)
                 .map(|(f, s)| {
                     s.as_ref()
-                        .and_then(super::planar_sources::certified_plane)
+                        .and_then(|source| {
+                            if generated {
+                                match source {
+                                    super::FaceSource::ExtrudeSide { segment: solvecraft_geom::Seg2::Line { .. }, plane: Some(p), .. } => Some(*p),
+                                    _ => None,
+                                }
+                            } else {
+                                super::planar_sources::certified_plane(source)
+                            }
+                        })
                         .filter(|p| super::planar_sources::actual_plane(f).is_some_and(|actual| super::planar_sources::same_support(p, &actual)))
                 })
                 .collect();
@@ -179,7 +218,7 @@ impl Body {
                 };
                 let Some(left) = identity.checked_sub(cost) else { return Ok(None) };
                 identity = left;
-                if sa != sb {
+                if !generated && sa != sb {
                     continue;
                 }
                 let Some(cost) = split_points.checked_mul(6).and_then(|n| n.checked_add(1)) else { return Ok(None) };
@@ -235,7 +274,14 @@ impl Body {
                         let Some(left) = metadata.checked_sub(cost) else { return Ok(None) };
                         metadata = left;
                     }
-                    output_sources.push(source.cloned());
+                    let mut source = source.cloned();
+                    if generated
+                        && replacements.contains_key(&leader)
+                        && let Some(super::FaceSource::ExtrudeSide { coalesced, .. }) = &mut source
+                    {
+                        *coalesced = true;
+                    }
+                    output_sources.push(source);
                     offset += 1;
                 }
                 shells.push(mt::Shell::from(output));

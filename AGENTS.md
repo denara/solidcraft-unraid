@@ -17,7 +17,7 @@ compatibility notes.
 
 ## Container prototype baseline
 The first Unraid prototype used upstream commit `af536a7`. The current validated
-container baseline is `4af2d060073b17d3a6dcea2018ac9490740f8f4e`.
+container baseline is `07e263d7e95cac9a6851e48bffcb79f302aabfb8`.
 Keep later upstream CAD/UI feature updates separate from this deployment addition;
 advance the baseline only as a separate, validated update. See [update records](docs/unraid-updates.md).
 

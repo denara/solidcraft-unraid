@@ -16,11 +16,18 @@ You need stable Rust 1.95 or newer (required by egui/eframe 0.36). For the web
 build you also need `rustup target add wasm32-unknown-unknown` and [`trunk`](https://trunkrs.dev).
 
 ```sh
-git clone https://github.com/bherbruck/solidcraft && cd solvecraft
+git clone https://github.com/bherbruck/solidcraft && cd solidcraft
 cargo run --release -p solvecraft -- --sample      # desktop app with a sample part
 cargo xtask test                                   # unit, engine and UI-scenario tests
 cargo xtask ci                                     # everything a PR must pass (see below)
 ```
+
+SolidCraft is the product and repository name. Cargo packages and executables retain
+their `solvecraft` names for compatibility with existing scripts and MCP clients.
+Build the desktop app with `cargo build --release -p solvecraft`, or the CLI with
+`cargo build --release -p solvecraft-cli`. Run the CLI with
+`cargo run --release -p solvecraft-cli -- commands` (or `target/release/solvecraft-cli commands`
+after building). There is no Cargo package named `solidcraft`.
 
 Web: `cd apps/solvecraft-web && trunk serve --release`, then open the printed URL (`?sample`
 opens the sample part, `?webgl` forces WebGL2). Saving and opening files in the browser needs
@@ -41,32 +48,21 @@ ERROR eframe::native::run: Exiting because of error: WGPU error: Failed to creat
 ERROR rfd::backend::xdg_desktop_portal::portal::libdbus: Can't connect to a portal: libdbus-1.so not found
 ```
 
-`nix develop` (the [`flake.nix`](flake.nix) in the repository root) puts the Wayland, X11,
-EGL-loader and D-Bus libraries on `LD_LIBRARY_PATH`, so `cargo run --release -p solvecraft` works
-from that shell as on any other distribution, file dialogs included. `nix run` builds the app and
-wraps the binary the same way. The Mesa drivers stay the system's, from `/run/opengl-driver`
-(`hardware.graphics.enable`): that is the driver stack the compositor runs on, and wgpu reaches the
-integrated GPU through the EGL loader. The shell deliberately brings no Rust toolchain — the one on
-`PATH` keeps its build cache, where a second `rustc` would make every build recompile the workspace
-from scratch; `nix develop .#rust` is there for a machine with no Rust at all.
+`nix develop` (the [`flake.nix`](flake.nix) in the repository root) supplies Wayland,
+X11, EGL, Vulkan-loader and D-Bus runtime libraries. It also exposes the NixOS
+driver manifests in `/run/opengl-driver/share`, so Vulkan can discover the system
+drivers. Enable `hardware.graphics.enable` on NixOS; other Linux distributions
+may need a matching [nixGL wrapper](https://github.com/nix-community/nixGL).
+The default development shell retains the Rust/C toolchain already on `PATH`;
+`nix develop .#rust` supplies the pinned toolchain and builds in `target/nix`.
 
-**Anti-aliasing on the OpenGL backend.** NixOS keeps the Vulkan ICD descriptions
-(`/run/opengl-driver/share/vulkan/icd.d`) off the Vulkan loader's search path, so wgpu picks its
-OpenGL backend on the integrated GPU. On that backend any multisampling above 1× — the default is
-4× — draws a black window: the UI still lays out and the control channel still answers, but every
-frame, `ui.screenshot` included, comes out empty. Set **Preferences ▸ Graphics ▸ Anti-aliasing** to
-1× and restart (the setting applies on the next start), or write it before the first run, since a
-black window is no way to reach the dialog:
-
-```sh
-mkdir -p ~/.local/share/solvecraft
-echo '{"msaa": 1}' > ~/.local/share/solvecraft/graphics.json
-```
-
-`apps/solvecraft/src/main.rs` reads that file (`graphics_path()`, eframe's storage dir) before the
-window opens; 2× and 4× are the same black window. The Vulkan backend is no way out of it either:
-`libvulkan.so.1` is not on `LD_LIBRARY_PATH`, so `WGPU_BACKEND=vulkan` exits with a
-`CreateSurfaceError` instead.
+To launch, use `nix run .#solidcraft -- --sample`. To install the app's terminal
+commands, desktop entry and generated icons, use `nix profile install .#solidcraft`.
+`nix build` alone creates a build result; it does not install a launcher in your
+desktop menu. The installed `solidcraft` command and compatible `solvecraft`
+command run the same wrapped app; `solvecraft-cli` is included as well. See
+[Nix installation and troubleshooting](docs/nix.md) for remote-flake commands,
+desktop integration and how to distinguish an old executable on `PATH`.
 
 ## How the code is laid out
 

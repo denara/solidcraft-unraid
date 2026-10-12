@@ -342,7 +342,15 @@ pub fn round_all_edges(b: &Body, r: f64) -> Result<Body> {
 /// by the thickness (open faces outward, past the body) keeping the body's topology, which
 /// gives the cavity; the shell is the body minus the cavity.
 fn shell_planar(b: &Body, open: &[Vec3], thickness: f64) -> Result<Body> {
-    let healed = Body::new(crate::heal::heal_keep(b.deep_copy(), b.size(), b.split_keep()))?;
+    // Face paint and authored splits are construction boundaries. Retain their
+    // eligibility veto through the temporary body used for the cavity Cut.
+    // Paint indices stay in source order by avoiding healing in that case.
+    let solid = if b.paint().is_some_and(|paint| !paint.faces.is_empty()) {
+        b.deep_copy()
+    } else {
+        crate::heal::heal_keep(b.deep_copy(), b.size(), b.split_keep())
+    };
+    let healed = Body::new(solid)?.with_paint(b.paint().cloned()).with_split_lines(b.split_lines().cloned()).inherit_regularization_protection(b);
     let size = healed.size();
     let mesh = healed.tessellate((size * 1e-3).max(1e-3))?;
     // Faces to open: the face of the triangle nearest each point.

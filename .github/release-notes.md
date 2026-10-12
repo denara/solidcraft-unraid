@@ -21,6 +21,19 @@ SolidCraft project Pages URLs; old-name Pages addresses are not permanent aliase
 - **Web:** `solvecraft-web-{version}.zip` is a static site to host yourself.
 - `SHA256SUMS.txt`: `sha256sum -c SHA256SUMS.txt --ignore-missing`.
 
+For Flatpak feed installation and updates, add Flathub for the required runtime before
+installing SolidCraft; keep both remotes in the same user installation:
+
+```sh
+flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+flatpak remote-add --user --if-not-exists solvecraft https://bherbruck.github.io/solidcraft/flatpak/solvecraft.flatpakrepo
+flatpak install --user solvecraft ai.storyteller.solvecraft
+flatpak run ai.storyteller.solvecraft
+```
+
+Single-file `.flatpak` bundles include the runtime repository address; missing runtimes
+still need an internet connection. [Linux installation details](https://bherbruck.github.io/solidcraft/guide/getting-started.html#linux-flatpak).
+
 The builds aren't signed yet. On macOS, right-click `SolveCraft.app` in Applications and choose
 **Open** the first time (or run `xattr -dr com.apple.quarantine /Applications/SolveCraft.app`).
 On Windows, SmartScreen may say "Windows protected your PC": **More info**, then **Run anyway**.

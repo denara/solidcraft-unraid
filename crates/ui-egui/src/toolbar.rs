@@ -481,9 +481,19 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
                 } else {
                     (t.border, t.panel_header, t.border)
                 };
-                let icon = if c.id == "sketch.finish" { "finish" } else { c.icon };
+                let icon = match c.id {
+                    "sketch.finish" => "finish",
+                    "config.table" => "configuration_table",
+                    _ => c.icon,
+                };
                 icons::paint(&painter, br.shrink(6.0), icon, ink, fill, acc);
-                let tr_label = app.tr_label(c.label);
+                let label = match c.id {
+                    "parameters.change" if *panel == "CONFIGURE" => "Parameters",
+                    "config.table" if *panel == "CONFIGURE" => "Configurations",
+                    _ => c.label,
+                };
+                let tr_label = app.tr_label(label);
+                resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled() && info.enabled, tr_label));
                 let tip = match &info.disabled_reason {
                     Some(why) => format!("{}\n{why}", tr_label),
                     None => format!("{}{}", tr_label, c.shortcut.map(|k| format!("  ({k})")).unwrap_or_default()),

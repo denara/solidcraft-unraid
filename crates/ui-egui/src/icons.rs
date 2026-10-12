@@ -240,6 +240,12 @@ pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, acce
                 pen.arrow((12.0, 12.0), (12.0 + 9.0 * dx, 12.0 + 9.0 * dy), a);
             }
         }
+        "configuration_table" => {
+            pen.poly(&[(3.0, 4.0), (21.0, 4.0), (21.0, 20.0), (3.0, 20.0)], pen.fill, ink);
+            pen.line(&[(3.0, 9.0), (21.0, 9.0)], a);
+            pen.line(&[(3.0, 14.0), (21.0, 14.0)], ink);
+            pen.line(&[(9.0, 4.0), (9.0, 20.0)], ink);
+        }
         "params" => {
             pen.line(&[(8.0, 20.0), (9.0, 8.0), (10.0, 5.0), (13.0, 4.0)], ink);
             pen.line(&[(6.0, 11.0), (12.0, 11.0)], ink);

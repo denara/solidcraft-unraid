@@ -114,13 +114,15 @@ impl Body {
     /// Retain exact shell roles, and construction roles for Cut, only on unchanged
     /// supports without a competing coplanar tool. No imported or fitted role is inferred.
     pub(crate) fn with_preserved_boolean_planar_sources(self, input: &Body, tool: &Body, constructed: bool) -> Result<Self> {
+        let self_ = self.inherit_regularization_protection(input).inherit_regularization_protection(tool);
         if !input.face_sources().is_some_and(|sources| sources.iter().flatten().any(|s| boolean_source(s, constructed))) {
-            return Ok(self);
+            return Ok(self_);
         }
-        self.map_planar_sources(input, None, Some(tool), &[], constructed)
+        self_.map_planar_sources(input, None, Some(tool), &[], constructed)
     }
 
     fn map_planar_sources(mut self, input: &Body, shell: Option<f64>, blocker: Option<&Body>, open: &[Vec3], constructed: bool) -> Result<Self> {
+        self.regularization_protected |= input.regularization_protected;
         let Some(sources) = input.face_sources() else { return Ok(self) };
         if input.solid.face_iter().count() > 16_384
             || self.solid.face_iter().count() > 16_384

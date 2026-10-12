@@ -848,6 +848,16 @@ fn sew_connected_sections(plane: &Plane, d: Vec3, levels: &[f64], slabs: &[Vec<R
     }
     let mut faces: Vec<FaceSpec> = Vec::new();
     let mut sources = Vec::new();
+    let frame_is_orthonormal = plane.origin.is_finite()
+        && plane.x.is_finite()
+        && plane.y.is_finite()
+        && d.is_finite()
+        && (plane.x.len2() - 1.).abs() <= 64. * f64::EPSILON
+        && (plane.y.len2() - 1.).abs() <= 64. * f64::EPSILON
+        && (d.len2() - 1.).abs() <= 64. * f64::EPSILON
+        && plane.x.dot(plane.y).abs() <= 64. * f64::EPSILON
+        && plane.x.dot(d).abs() <= 64. * f64::EPSILON
+        && plane.y.dot(d).abs() <= 64. * f64::EPSILON;
     for (first, end, sg) in runs {
         let (z0, z1) = (levels[first], levels[end]);
         let (a, b) = (sg.start(), sg.end());
@@ -868,7 +878,28 @@ fn sew_connected_sections(plane: &Plane, d: Vec3, levels: &[f64], slabs: &[Vec<R
             _ => SurfSpec::Plane,
         };
         faces.push(FaceSpec { loops: vec![lp3], surface, probe: Some((at(sg.point_at(0.5), (z0 + z1) / 2.0), outward)) });
-        sources.push((end > first + 1).then_some(crate::FaceSource::ExtrudeSide { segment: sg, plane: None, coalesced: true }));
+        // Axis-aligned generated lines have a common oriented support frame
+        // independent of axial stations or along-line endpoint interpolation.
+        let generated_plane = if coalesce
+            && frame_is_orthonormal
+            && let Seg2::Line { a, b } = sg
+        {
+            let (origin, x) = if a.y == b.y && a.x != b.x {
+                (at(Vec2::new(0., a.y), 0.), plane.x * (b.x - a.x).signum())
+            } else if a.x == b.x && a.y != b.y {
+                (at(Vec2::new(a.x, 0.), 0.), plane.y * (b.y - a.y).signum())
+            } else {
+                (Vec3::ZERO, Vec3::ZERO)
+            };
+            (origin.is_finite() && x.len2() > 0.).then_some(Plane { origin, x, y: d })
+        } else {
+            None
+        };
+        sources.push((generated_plane.is_some() || end > first + 1).then_some(crate::FaceSource::ExtrudeSide {
+            segment: sg,
+            plane: generated_plane,
+            coalesced: end > first + 1,
+        }));
     }
     for (z, up, rs) in &caps {
         for r in rs {
@@ -885,7 +916,11 @@ fn sew_connected_sections(plane: &Plane, d: Vec3, levels: &[f64], slabs: &[Vec<R
             sources.push(None);
         }
     }
-    Some(crate::sew::sew_touching_with_sources(&faces, &sources))
+    Some(crate::sew::sew_touching_with_sources(&faces, &sources).and_then(
+        |body| {
+            if coalesce { body.regularize_generated_planar_faces() } else { Ok(body) }
+        },
+    ))
 }
 
 fn simple_prism_boolean(a: &Body, b: &Body, op: BoolOp) -> Option<Result<Option<Body>>> {
@@ -1109,6 +1144,8 @@ fn stack_boolean(a: &Body, b: &Body, op: BoolOp) -> Option<Result<Option<Body>>>
         &slabs,
         tol,
         op == BoolOp::Cut
+            && !a.regularization_protected
+            && !b.regularization_protected
             && a.split_keep().is_empty()
             && b.split_keep().is_empty()
             && a.paint().is_none_or(|p| p.faces.is_empty())
@@ -1216,6 +1253,62 @@ mod planar_tests {
         assert_eq!(crate::step_export(&[&tool], "tool").unwrap(), before_tool);
         assert_eq!(crate::step_export(&[&roof], "roof").unwrap(), before_roof);
     }
+    fn stepped_tab_stock() -> Body {
+        let stock = crate::box_solid(Vec3::new(-20., -15., 0.), Vec3::new(20., 15., 24.)).unwrap();
+        let tab = crate::box_solid(Vec3::new(-12., -25., 8.), Vec3::new(-4., -15., 16.)).unwrap();
+        crate::boolean(&stock, &tab, BoolOp::Union).unwrap().unwrap()
+    }
+
+    fn coplanar_joins(body: &Body) -> usize {
+        let faces: Vec<_> = body.solid.face_iter().collect();
+        let mut adjacency = std::collections::HashMap::<_, Vec<usize>>::new();
+        for (i, face) in faces.iter().enumerate() {
+            for edge in face.edge_iter() {
+                adjacency.entry(edge.id()).or_default().push(i);
+            }
+        }
+        adjacency
+            .values()
+            .filter(|faces| {
+                let [a, b] = faces.as_slice() else { return false };
+                let (Some(pa), Some(pb)) = (body.planar_face(*a), body.planar_face(*b)) else { return false };
+                let (na, nb) = (pa.normal(), pb.normal());
+                na.dot(nb) > 1. - 1e-12 && (pb.origin - pa.origin).dot(na).abs() < 1e-10
+            })
+            .count()
+    }
+
+    #[test]
+    fn shell_of_joined_stepped_tabs_has_no_artificial_planar_stations() {
+        let stock = stepped_tab_stock();
+        let snapshot = crate::step_export(&[&stock], "unchanged stock").unwrap();
+        assert_eq!(coplanar_joins(&stock), 0);
+        let shell = crate::shell(&stock, &[Vec3::new(0., 0., 24.)], 1.).unwrap();
+        assert_eq!(coplanar_joins(&shell), 0, "Shell must not add internal edges across continuous planar walls");
+        assert!(shell.validity().is_empty());
+        let mesh = shell.tessellate(1e-5).unwrap();
+        let expected = 40. * 30. * 24. + 8. * 10. * 8. - (38. * 28. * 23. + 6. * 10. * 6.);
+        assert!((mesh.measure().volume - expected).abs() < 1e-6);
+        for (point, material) in [
+            (Vec3::new(0., 0., 0.5), true),
+            (Vec3::new(0., 0., 10.), false),
+            (Vec3::new(0., -14.5, 10.), true),
+            (Vec3::new(19.5, 0., 10.), true),
+            (Vec3::new(-8., -24.5, 12.), true),
+            (Vec3::new(-8., -20., 12.), false),
+            (Vec3::new(0., -18., 9.), false),
+        ] {
+            assert_eq!(mesh.contains(point), material, "wrong material at {point:?}");
+        }
+        let step = crate::step_export(&[&shell], "stepped tab shell").unwrap();
+        let reopened = crate::step_import(&step).unwrap();
+        let body = &reopened.bodies[0].body;
+        assert_eq!(body.face_count(), shell.face_count());
+        assert_eq!(coplanar_joins(body), 0);
+        assert!((body.tessellate(1e-5).unwrap().measure().volume - expected).abs() < 1e-6);
+        assert_eq!(crate::step_export(&[&stock], "unchanged stock").unwrap(), snapshot);
+    }
+
     #[test]
     fn contiguous_analytic_walls_remove_faces_but_retain_vertical_stations() {
         for curved in [false, true] {
