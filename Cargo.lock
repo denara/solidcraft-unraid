@@ -3595,6 +3595,7 @@ name = "solvecraft-server"
 version = "0.3.2"
 dependencies = [
  "axum",
+ "chrono",
  "serde_json",
  "tokio",
  "tokio-util",

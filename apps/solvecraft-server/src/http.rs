@@ -10,7 +10,9 @@ use axum::{Json, Router};
 use serde_json::{Value, json};
 use tower_http::services::ServeDir;
 
+use crate::audit::Event;
 use crate::paths;
+use crate::sessions::EndReason;
 use crate::sessions::State as AppState;
 
 const VERSIONS: &[&str] = &["2025-06-18", "2025-03-26"];
@@ -51,13 +53,19 @@ async fn authorize(State(state): State<Arc<AppState>>, request: Request, next: N
     let headers = request.headers();
     if headers.contains_key(header::ORIGIN) && !header_str(headers, "origin").is_some_and(|o| state.config.origins.iter().any(|allowed| allowed == o))
     {
+        state.audit.emit(Event::OriginRejected, json!({"reason":"origin_not_allowed"}));
         return failure(StatusCode::FORBIDDEN, Value::Null, "origin is not allowed");
     }
     let token = header_str(headers, "authorization").and_then(|s| s.strip_prefix("Bearer "));
     if !token.is_some_and(|t| token_matches(t.as_bytes(), state.config.token.as_bytes())) {
+        state.audit.emit(Event::AuthRejected, json!({"reason":if token.is_some() { "invalid_token" } else { "missing_bearer" }}));
         let mut response = failure(StatusCode::UNAUTHORIZED, Value::Null, "Bearer token required");
         response.headers_mut().insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
         return response;
+    }
+    // Authentication is stateless. Log session admission, not every tool request.
+    if !headers.contains_key(SESSION) && request.method() == axum::http::Method::POST {
+        state.audit.emit(Event::AuthAccepted, json!({"endpoint":"mcp"}));
     }
     let mut response = next.run(request).await;
     response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -113,7 +121,7 @@ async fn mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, bytes: Byte
     {
         return failure(StatusCode::BAD_REQUEST, id, "unsupported MCP protocol version");
     }
-    let (session_id, worker) = if initialize {
+    let (session_id, worker, log_id) = if initialize {
         let requested = message.pointer("/params/protocolVersion").and_then(Value::as_str).unwrap_or(VERSIONS[0]);
         if requested == "2024-11-05" {
             return failure(StatusCode::BAD_REQUEST, id, "HTTP requires protocol 2025-03-26 or later; stdio supports the legacy revision");
@@ -130,6 +138,7 @@ async fn mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, bytes: Byte
         };
         let mut sessions = state.sessions.lock().await;
         let Some(entry) = sessions.get_mut(session_id) else {
+            state.audit.emit(Event::SessionRejected, json!({"reason":"unknown_or_expired"}));
             return failure(StatusCode::NOT_FOUND, id, "session ended or expired; initialize again and reopen a saved design");
         };
         if let Some(version) = header_str(&headers, VERSION)
@@ -138,21 +147,25 @@ async fn mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, bytes: Byte
             return failure(StatusCode::BAD_REQUEST, id, "protocol version differs from this session's negotiated version");
         }
         entry.touched = std::time::Instant::now();
-        (session_id.to_owned(), Arc::clone(&entry.worker))
+        (session_id.to_owned(), Arc::clone(&entry.worker), entry.log_id.clone())
     };
     let tool = message.pointer("/params/name").and_then(Value::as_str).unwrap_or_default().to_owned();
     if message.get("method").and_then(Value::as_str) == Some("tools/call")
         && let Some(args) = message.get_mut("params").and_then(|p| p.get_mut("arguments"))
         && let Err(e) = paths::prepare_tool(&state.config.files, &tool, args)
     {
+        state.audit.emit(Event::ToolFailed, json!({"session":log_id,"reason":"file_access_rejected"}));
         if message.get("id").is_none() {
             return StatusCode::ACCEPTED.into_response();
         }
         return Json(json!({"jsonrpc":"2.0","id":id,"result":{"isError":true,"content":[{"type":"text","text":e}]}})).into_response();
     }
-    let result = state.exchange(worker, message).await;
+    let result = state.exchange(worker, message, log_id.clone()).await;
     let mut response = match result {
         Ok(Some(mut reply)) => {
+            if reply.get("error").is_some() || reply.pointer("/result/isError").and_then(Value::as_bool) == Some(true) {
+                state.audit.emit(Event::ToolFailed, json!({"session":log_id,"reason":"cad_request_rejected"}));
+            }
             if initialize && let Some(instructions) = reply.pointer_mut("/result/instructions") {
                 let text = instructions.as_str().unwrap_or_default();
                 *instructions = Value::String(format!(
@@ -164,7 +177,7 @@ async fn mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, bytes: Byte
         Ok(None) => StatusCode::ACCEPTED.into_response(),
         Err(e) if e.starts_with("CAD session is busy") => return failure(StatusCode::TOO_MANY_REQUESTS, id, &e),
         Err(e) => {
-            state.sessions.lock().await.remove(&session_id);
+            state.remove(&session_id, EndReason::Failure).await;
             return failure(StatusCode::BAD_GATEWAY, id, &e);
         }
     };
@@ -190,7 +203,13 @@ async fn close(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Respon
     let Some(id) = header_str(&headers, SESSION) else {
         return failure(StatusCode::BAD_REQUEST, Value::Null, "Mcp-Session-Id required");
     };
-    if state.sessions.lock().await.remove(id).is_some() { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }.into_response()
+    if state.remove(id, EndReason::Client).await {
+        StatusCode::NO_CONTENT
+    } else {
+        state.audit.emit(Event::SessionRejected, json!({"reason":"unknown_or_expired"}));
+        StatusCode::NOT_FOUND
+    }
+    .into_response()
 }
 
 async fn download(State(state): State<Arc<AppState>>, Path(name): Path<String>) -> Response {
@@ -236,8 +255,8 @@ mod tests {
     use std::time::Duration;
     use tower::ServiceExt;
 
-    fn app() -> Router {
-        let state = Arc::new(AppState::new(crate::config::Config {
+    fn state() -> Arc<AppState> {
+        Arc::new(AppState::new(crate::config::Config {
             listen: "127.0.0.1:0".into(),
             cli: "not-started-in-authorization-tests".into(),
             web: std::env::temp_dir(),
@@ -247,8 +266,79 @@ mod tests {
             max_sessions: 2,
             idle: Duration::from_secs(60),
             timeout: Duration::from_secs(10),
-        }));
-        router(state)
+        }))
+    }
+
+    fn app() -> Router {
+        router(state())
+    }
+
+    #[tokio::test]
+    async fn audit_logs_auth_results_without_credentials_paths_or_routine_health_noise() {
+        let state = state();
+        let app = router(Arc::clone(&state));
+        for _ in 0..5 {
+            let response = app.clone().oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        assert!(state.audit.rows.lock().unwrap().is_empty());
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("authorization", "Bearer private-invalid-token-marker")
+                    .body(Body::from("private-body-marker"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/files/private-file-marker")
+                    .header("authorization", "Bearer test-token-for-http-authorization")
+                    .header("origin", "https://private-origin-marker.invalid")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("authorization", "Bearer test-token-for-http-authorization")
+                    .header("content-type", "application/json")
+                    .header("accept", "application/json, text/event-stream")
+                    .body(Body::from("[]"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let rows = state.audit.rows.lock().unwrap();
+        assert_eq!(rows.len(), 3);
+        let text = rows.join("\n");
+        assert!(text.contains("auth.accepted") && text.contains("auth.rejected") && text.contains("origin.rejected"));
+        for private in [
+            "test-token-for-http-authorization",
+            "private-invalid-token-marker",
+            "private-body-marker",
+            "private-file-marker",
+            "private-origin-marker",
+            "\u{1b}",
+        ] {
+            assert!(!text.contains(private));
+        }
+        for row in rows.iter() {
+            assert!(row.split_whitespace().next().is_some_and(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).is_ok()));
+        }
     }
 
     #[tokio::test]

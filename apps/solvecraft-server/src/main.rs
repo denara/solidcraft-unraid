@@ -2,6 +2,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
+mod audit;
 mod config;
 mod http;
 mod paths;
@@ -15,7 +16,7 @@ async fn main() -> ExitCode {
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("solvecraft-server: {e}");
+            eprintln!("[error] ❌ solvecraft-server: {e}");
             ExitCode::FAILURE
         }
     }
@@ -35,12 +36,18 @@ async fn run() -> Result<(), String> {
     });
     let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| format!("listen {addr}: {e}"))?;
     eprintln!("SolidCraft web: http://{addr}/ ; MCP: /mcp (Bearer authentication required)");
-    axum::serve(listener, http::router(state))
-        .with_graceful_shutdown(async {
-            if let Err(e) = tokio::signal::ctrl_c().await {
-                eprintln!("shutdown signal: {e}");
-            }
-        })
-        .await
-        .map_err(|e| e.to_string())
+    state.audit.emit(audit::Event::Ready, serde_json::json!({"version":env!("CARGO_PKG_VERSION"),"slots_total":state.config.max_sessions}));
+    let audit = Arc::clone(&state.audit);
+    axum::serve(listener, http::router(state)).with_graceful_shutdown(shutdown(audit)).await.map_err(|e| e.to_string())
+}
+
+async fn shutdown(audit: Arc<audit::Audit>) {
+    #[cfg(unix)]
+    if let Ok(mut terminate) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        tokio::select! { _ = terminate.recv() => {}, _ = tokio::signal::ctrl_c() => {} }
+        audit.emit(audit::Event::Stopping, serde_json::json!({}));
+        return;
+    }
+    let _ = tokio::signal::ctrl_c().await;
+    audit.emit(audit::Event::Stopping, serde_json::json!({}));
 }

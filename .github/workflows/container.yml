@@ -90,10 +90,15 @@ jobs:
         run: ./packaging/unraid/smoke-test.ps1 -Token disposable-container-proof-token-only -Reopen
       - name: Verify browser assets
         run: curl -fsS http://localhost:8781/ | grep -q 'SolidCraft'
+      - name: Verify operational logging and privacy
+        shell: pwsh
+        run: ./packaging/unraid/log-test.ps1 -Token disposable-container-proof-token-only
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: container-mcp-proof
-          path: target/unraid-proof/
+          path: |
+            target/unraid-proof/
+            target/unraid-log-proof/
           retention-days: 30
       - name: Authenticate to the container registry
         if: github.event_name == 'push' && github.repository == 'denara/solidcraft-unraid'

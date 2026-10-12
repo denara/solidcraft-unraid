@@ -9,6 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 serde_json = { workspace = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "process", "io-util", "sync", "time", "signal", "fs"] }

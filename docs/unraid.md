@@ -215,6 +215,39 @@ Keep internet exposure consistent with your intended local use (e.g. local DNS/V
 nginx access controls). The server does not need to be internet-reachable for local clients.
 The token file is a credential and should be excluded from publicly shared backups.
 
+## Container logs
+
+Unraid's **Docker → SolidCraft → Logs** view reads the gateway's standard error output;
+`docker logs solidcraft` is the equivalent terminal view (use your container's name).
+The gateway emits UTC timestamps, plain severity/category words and icons. It does not
+force ANSI colors; the viewer can apply its own palette. Categories match the displayed
+`system`, `login`, `warn` and `error` labels. Other viewers may display plain text.
+
+| Category | Event | Meaning |
+| --- | --- | --- |
+| `system` 🚀 / 🛑 | `server.ready` / `server.stopping` | Started / received a graceful stop signal |
+| `login` ✅ | `auth.accepted` | Bearer authentication accepted for a session-admission request |
+| `warn` ⛔ | `auth.rejected` / `origin.rejected` | Missing/invalid Bearer token or disallowed origin |
+| `system` 🔒 | `session.opened slots=1/4` | A separate CAD process occupies one of four slots |
+| `system` ⏳ | `session.closing` | Session closed, but an in-flight request still holds its process slot |
+| `system` 🔓 | `session.released slots=0/4` | The process slot is actually free; reason includes explicit DELETE, idle expiry, timeout, failure or shutdown |
+| `warn` ⚠️ / ⏳ / ⌛ | `session.capacity_reached`, `session.busy`, `cad.timed_out`, `tool.failed` | Capacity exhausted, concurrent request, timeout or rejected CAD/file operation |
+| `error` ❌ | `cad.start_failed` / `cad.exchange_failed` | CAD subprocess or its protocol failed |
+
+The `s-...` identifier is generated separately for logs and cannot be used as the HTTP
+session ID. Audit events omit tokens, actual `Mcp-Session-Id` headers, client names,
+origins/IP addresses, file paths, command arguments and model contents. Because all
+clients share a Bearer token, these are session records, not authenticated user identities.
+Normal successful tool requests, initialized notifications, browser requests and health
+checks do not generate audit lines. Bearer authentication is stateless; `auth.accepted`
+is not repeated for each call in an existing session, and does not guarantee that a
+session can be allocated when capacity is full.
+
+`packaging/unraid/log-test.ps1` verifies real container log output after a disposable
+candidate's restart: login rejection/success, allocation/release/capacity, silence during
+normal requests and absence of credentials, raw session IDs, arbitrary client metadata
+and ANSI escapes. It assumes four test slots and must not be run on a real deployment.
+
 ## Verification
 
 `packaging/unraid/smoke-test.ps1` runs a complete HTTP MCP session: initialize, command

@@ -172,3 +172,37 @@ local 0.3.2 archive image, build caches/toolchain images and private backups rem
 available. Public template/icon blob hashes exactly match denara/unraid-templates;
 no catalog commit or further CA submission was needed. To install on Unraid, use
 its normal Docker container update action; this run did not install it there.
+
+## 2026-10-12: gateway authentication and session logs
+
+Added operational stderr events to the HTTP gateway on the validated `07e263d`
+CAD baseline. This is a packaging/gateway addition, not a further upstream CAD
+update or application release; application version remains 0.3.2.
+
+Events include startup/graceful stop, accepted/rejected Bearer authentication,
+origin rejection, CAD session allocation, real process-slot release, pending close,
+idle expiry, full capacity, busy sessions, timeouts, subprocess/protocol failures
+and rejected CAD/file requests. UTC timestamps, icons and plain `system`, `login`,
+`warn`, `error` categories allow viewers to use their own palette without ANSI
+escapes. The separately generated log ID is not the HTTP session credential.
+Routine successful tool/browser/health requests stay quiet; operational fields
+exclude raw tokens/session headers, client metadata, addresses, file paths and
+model/request contents. Authentication acceptance and slot allocation are separate.
+
+Validation: 11 gateway tests, warning-free gateway Clippy, formatting, assets,
+licenses, dependency layers and ten-target WebAssembly compatibility passed.
+Real isolated container checks passed for modelling/PNG/STEP, auth/origin/path
+confinement, separate sessions, restart persistence and browser sample rendering.
+The new `log-test.ps1` passed its four-slot allocation/release, severity/timestamp,
+startup/stop, secret/header exclusion and normal-request silence checks; the
+container publication workflow now runs this proof before publishing images.
+Tests and evidence remain under ignored `target/unraid-logging/`.
+
+Local image: `solvecraft-unraid:logging`, Linux amd64.
+Image ID: `sha256:5db74c8c496c587e56f67113ee1a8c12244409ecef1467d3adb6c62eebde9ab2`.
+Archive: `target/solidcraft-unraid-logging.tar` (53,609,472 bytes).
+SHA256: `aaf2792d13e96d55c7a962aafa456d8fa36b904b8fdb93ca306c5e54587d888c`.
+Registry publication and the final retained local runtime are verified separately
+below. Unraid is not updated by this development task; installation uses its
+normal Docker container update action, retaining existing settings/data/token.
+The canonical public template and original icon have not changed.
