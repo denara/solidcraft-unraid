@@ -221,3 +221,27 @@ Final local image: `solvecraft-unraid:logging-token-location` (Linux amd64).
 Image ID: `sha256:932090de0fb756106ba2a7e89dcd766e21dfc2a3467ca092f76ab3afcd288cff`.
 Archive: `target/solidcraft-unraid-logging-token-location.tar` (53,611,008 bytes).
 SHA256: `d37759e8d0086137ff818c709b49b7ba45a6caf25b5041c89ed1098ba45ef4f3`.
+
+Final publication passed [container workflow 38251162829](https://github.com/denara/solidcraft-unraid/actions/runs/38251162829)
+from source commit `a3efe6fabedd3d4d6ffe032a4ac94eb43815e299`, including the new
+real logging/privacy proof before publication. Public image:
+`ghcr.io/denara/solidcraft-unraid:latest`, with immutable rollback/source tag
+`sha-a3efe6fabedd3d4d6ffe032a4ac94eb43815e299` (Linux amd64).
+Digest: `sha256:893c1260d3feb0f9ab487feb4280ee2e8c790535fc2e949651aec815a5f76723`.
+Both tags pulled anonymously with an empty Docker profile; the anonymous registry
+manifest returned HTTP 200 with the same digest and OCI source labels matched.
+
+The sole local runtime `solvecraft-solvecraft-1` uses that immutable public tag.
+A private pre-update backup and `solvecraft-unraid:rollback-before-logging` were
+preserved. Volume, token, loopback/origin and security/resource settings are unchanged.
+Health, authenticated SDK modelling/PNG, read-only public-design reopen, web assets
+and actual runtime token-location/open/release logs passed without token leakage.
+Seven owned obsolete check/proof/candidate containers were removed in total,
+including the superseded candidate; no volumes were deleted. Build/toolchain images,
+caches, prior images, archives and private backups remain. The public CA template/icon
+match the canonical blobs and required no metadata push or new submission.
+
+Later upstream movement was observed at `db0a2a0`; it was deliberately not mixed
+into this gateway-only addition. The validated CAD baseline remains `07e263d`.
+Unraid/nginx/DNS were not modified. Install the logging addition through Unraid's
+normal container update action with the existing settings, data and token.
