@@ -303,3 +303,28 @@ Unraid template/icon have not changed. Existing files remain readable, but desig
 with the new SolidCraft format/container are not readable by old application builds.
 Retain a data backup for rollback; browser storage is separate from the server volume.
 No Unraid/nginx/DNS installation or application release/version bump/tag is performed.
+
+Publication completed in [container workflow 38363021056](https://github.com/denara/solidcraft-unraid/actions/runs/38363021056)
+from validated merge commit `54213307c09db2352865118952a2cdad79be9a08`. Its fresh image
+passed modelling/PNG/STEP, authentication/origin/file and extended font/diagnostic confinement,
+independent sessions, restart persistence, browser assets and actual logging/privacy before
+publication. Public image: `ghcr.io/denara/solidcraft-unraid:latest`; immutable source tag:
+`sha-54213307c09db2352865118952a2cdad79be9a08` (Linux amd64).
+Digest: `sha256:b8df1550b94b547373bd6b983a7f23816da506057abd0260340a88c3a6fa8732`.
+Both tags pulled anonymously with a fresh empty Docker configuration. An anonymous manifest
+returned HTTP 200 and the same digest; OCI source/architecture matched the validated commit.
+
+The sole remaining local runtime `solvecraft-solvecraft-1` now uses that immutable public
+source tag and is healthy at 0.7.0. Private data/configuration backup and the previous image
+`solvecraft-unraid:rollback-before-913583b` were retained. Persistent volume, MCP token,
+ports/origins and security/resource limits are unchanged. Authenticated SDK modelling/PNG,
+read-only public saved-design reopen, actual browser rendering and file-token-location plus
+session open/release logs passed after replacement. Seven obsolete owned build/check/candidate
+containers were removed after inspecting labels, workspace mounts, images and inactivity;
+no volumes were deleted. Reusable toolchain/build caches, prior images, archives and private
+backups remain. CA template and original icon blobs match their public repository exactly;
+no catalog commit or new submission was needed. Install through Unraid's normal SolidCraft
+container update action, preserving settings/data/token and a pre-update design backup.
+This run did not modify Unraid or nginx/DNS.
+
+Upstream main still matched the selected 913583b snapshot at the final verification.
