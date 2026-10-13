@@ -278,4 +278,3 @@ stored in uploaded documents. The gateway supplies a per-subprocess link root; r
 paths and parent folders are checked again by the engine, with symlinks refused. Desktop
 linked components retain their normal behavior when no network link root is supplied.
 This snapshot writes format 17, newer than the initial upstream 0.8.0 tag's format 16.
-

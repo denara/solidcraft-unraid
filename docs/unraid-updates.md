@@ -359,10 +359,10 @@ Validation was scoped to the changes; the entire suite was not rerun:
 
 - Formatting, warning-free workspace Clippy/all targets, 43 attributed assets, license
   notices, dependency layers and ten-target WebAssembly compatibility passed.
-- 121 selected tests passed: gateway 13, MCP 23, design storage/thumbnail 20, format
+- 128 selected tests passed: gateway 13, MCP 23, design storage/thumbnail 20, format
   migrations 24, linked components/confinement 4, rendering backend/request safety 9,
   named views 2, Sketch Scale UI 6, CLI/alias/catalog/connectivity 11, variable/taper/spline
-  fillets 6, Sketch Offset UI 2, and one Boolean determinism test (six rebuilds). Two
+  fillets 6, Sketch Offset UI 2, SVG/3MF parser checks 7, and one Boolean determinism test (six rebuilds). Two
   existing storage benchmarks remain ignored. Initial lock-version and filter diagnostics
   remain under ignored target/unraid-update-be55a49 alongside final passing results.
 - Linux amd64 native/server and independent WASM browser release builds passed.
@@ -389,3 +389,33 @@ CA template and original icon are unchanged. Unraid/nginx/DNS are not modified. 
 daily automation remains scheduled for 09:00 Europe/Berlin. Later upstream movement at
 `a8b3b21fd0ec09f5c5353df16cfbd441158720d6` (left-side feature history) was observed before
 publication; it is intentionally left for the next fixed-snapshot update.
+
+Publication passed [container workflow 38437831894](https://github.com/denara/solidcraft-unraid/actions/runs/38437831894)
+from validated merge commit `054e751c6a09d9ba571bddcbe0dabbe930069e6e`. The fresh build
+passed modelling/PNG/STEP, authentication/origin/file/font/diagnostic and stored-link
+confinement, independent sessions, restart persistence, browser assets and operational
+logging/privacy checks before publishing the immutable source tag and latest.
+Public image: `ghcr.io/denara/solidcraft-unraid:latest` (Linux amd64), immutable tag
+`sha-054e751c6a09d9ba571bddcbe0dabbe930069e6e`.
+Digest: `sha256:8ae80566da970fcaeed941e0a24ff72c6f721ce7d5c5f14f72fda7f6ee0a87cd`.
+Both tags pulled anonymously with a fresh empty Docker configuration; the anonymous
+manifest returned HTTP 200 with the same digest and matching OCI source/architecture.
+
+The sole local runtime `solvecraft-solvecraft-1` now runs that public immutable image,
+healthy at 0.8.0. A private pre-update data/config backup and rollback image
+`solvecraft-unraid:rollback-before-be55a49` (previous public 0.7.0) were preserved.
+Volume, token, ports/origins and security/resource limits are unchanged. Authenticated
+SDK modelling/PNG and read-only known public saved-design reopen passed after replacement;
+the actual browser canvas rendered at 0.8.0 and startup/token-location/session logs passed.
+Six owned obsolete check/supplement/candidate containers were removed only after verifying
+labels, images, workspace mounts and inactivity. No volumes were deleted. Toolchain images,
+Cargo/build caches, archives, earlier images and private backups remain. Public template
+and icon blob hashes match exactly, so no CA metadata commit or new submission was needed.
+
+On Unraid, back up server designs and separately export browser designs before updating
+SolidCraft through its normal Docker update action; retain existing settings/data/token.
+Reload the browser afterward. Format 17 requires this main snapshot or a newer one, including
+for rollback between builds that display the same 0.8.0 version. Unraid/nginx/DNS remain
+unchanged by this development task; the daily 09:00 Europe/Berlin automation remains active.
+
+The final upstream check observed 16766bdbc79a4b9ec46bb8b9879587f38ce2994d; later movement is deferred to the next fixed-snapshot update.
