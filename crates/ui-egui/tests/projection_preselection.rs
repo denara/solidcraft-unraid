@@ -120,3 +120,35 @@ fn oversized_preselection_does_not_silently_project_a_subset() {
     assert_eq!(h.app.session.undo.len(), undo);
     assert_eq!(h.app.session.selection.len(), 1001);
 }
+
+/// #635: a rectangle whose corner is made coincident with a projected edge of the solid, so
+/// that its bottom side lies on the edge, is still a closed profile: a click in its middle
+/// selects it, bounded by the rectangle's other three sides and the projected edge under the
+/// fourth.
+#[test]
+fn a_rectangle_put_onto_a_projected_edge_is_still_a_profile_to_click() {
+    let mut h = Harness::new();
+    h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+    h.app.run("sketch.rectangle.two_point", json!({"p0":[0,0],"p1":[40,30]})).unwrap();
+    h.app.run("sketch.finish", json!({})).unwrap();
+    h.app.run("solid.extrude", json!({"distance":20})).unwrap();
+    let sketch = h.app.run("sketch.create", json!({"plane":"XY"})).unwrap()["sketch"].as_u64().unwrap();
+    let projected = h.app.run("sketch.project", json!({"refs":[{"edge":[20,0,0]}]})).unwrap()["links"][0]["curves"][0].as_str().unwrap().to_string();
+    let rectangle = h.app.run("sketch.rectangle.two_point", json!({"p0":[5,10],"p1":[25,25]})).unwrap();
+    let mut sides: Vec<String> = rectangle["curves"].as_array().unwrap().iter().map(|c| c.as_str().unwrap().to_string()).collect();
+    h.app.run("sketch.constraint.coincident", json!({"a":format!("{}.start", sides[0]),"b":projected})).unwrap();
+    // The bottom side lies under the projected edge.
+    sides[0] = projected.clone();
+    // From below, the sketch plane is in front of the solid standing on it.
+    h.call("ui.view", json!({"view":"bottom"}));
+    h.step(&json!({"click":{"sketch":[15,12]}})).unwrap();
+    assert_eq!(h.app.session.selection, vec![Sel::Profile { sketch, index: 0 }]);
+    let state = h.app.session.world_state();
+    let ss = state.sketch(sketch).unwrap();
+    assert_eq!(ss.profiles.len(), 1);
+    let mut bounded_by = ss.profiles[0].outer_curves.clone();
+    bounded_by.sort();
+    sides.sort();
+    assert_eq!(bounded_by, sides);
+    assert!(ss.sketch.curves.iter().any(|curve| curve.id == projected && curve.link.is_some()), "the projected edge stays");
+}

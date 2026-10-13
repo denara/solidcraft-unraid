@@ -603,6 +603,59 @@ fn cylinder_auto_inference_refuses_ambiguity_curves_and_seam_crossing_atomically
     }
 }
 
+/// The design from #396: a loft from a Ø12 circle on a 40 × 30 × 20 box's top to a hexagon 15 up.
+fn loft_on_box(op: &str) -> Session {
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY"}));
+    run(&mut s, "sketch.rectangle.center", json!({"center": [0, 0], "corner": [20, 15]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"distance": 20, "body_name": "Box"}));
+    run(&mut s, "construct.plane.offset", json!({"base": "XY", "offset": 20, "name": "A"}));
+    run(&mut s, "construct.plane.offset", json!({"base": "XY", "offset": 35, "name": "B"}));
+    run(&mut s, "sketch.create", json!({"plane": "A", "name": "L0"}));
+    run(&mut s, "sketch.circle.center", json!({"center": [0, 0], "diameter": 12}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "sketch.create", json!({"plane": "B", "name": "L1"}));
+    run(&mut s, "sketch.polygon.inscribed", json!({"center": [0, 0], "radius": 4, "sides": 6}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.loft", json!({"sections": [{"sketch": "L0"}, {"sketch": "L1"}], "operation": op}));
+    s
+}
+
+#[test]
+fn loft_joined_onto_a_box_exports_one_connected_mesh() {
+    // #396: one body, but its two shells only touched, and the STL came out in two pieces.
+    let mut apart = loft_on_box("new_body");
+    let m = measure(&mut apart);
+    assert_eq!(m["body_count"], 2);
+    let loft = m["bodies"][1]["volume_mm3"].as_f64().unwrap();
+    let mut s = loft_on_box("join");
+    let m = measure(&mut s);
+    assert_eq!(m["body_count"], 1);
+    assert_eq!(m["bodies"][0]["kernel"]["shells"], 1);
+    let v = volume(&mut s);
+    assert!(rel(v, 24000.0 + loft) < 1e-5, "{v} vs {}", 24000.0 + loft);
+    // The exported mesh, its vertices merged, is one connected piece.
+    let mesh = s.model.state().body("Box").unwrap().body.tessellate(0.01).unwrap();
+    let (positions, triangles) = solidcraft_io::weld(&mesh.positions, &mesh.triangles, 1e-4);
+    let mut piece: Vec<usize> = (0..positions.len()).collect();
+    let root = |piece: &mut Vec<usize>, mut i: usize| {
+        while piece[i] != i {
+            i = piece[i];
+        }
+        i
+    };
+    for t in &triangles {
+        let r0 = root(&mut piece, t[0] as usize);
+        for k in [1, 2] {
+            let rk = root(&mut piece, t[k] as usize);
+            piece[rk] = r0;
+        }
+    }
+    let pieces: std::collections::BTreeSet<usize> = triangles.iter().map(|t| root(&mut piece, t[0] as usize)).collect();
+    assert_eq!(pieces.len(), 1);
+}
+
 /// A cone that takes only a 1 mm chamfer off a cylinder's top edge leaves nearly all of the
 /// cylinder inside it; the intersection is still the chamfered cylinder (#443).
 #[test]
@@ -624,4 +677,20 @@ fn loft_intersect_that_trims_one_edge_changes_the_body() {
     assert!((got - want).abs() < want * 2e-4, "{got} vs {want}");
     let m = measure(&mut s);
     assert_eq!(m["bodies"][0]["face_types"]["cone"], 1, "{m}");
+}
+
+/// #623: a moulded front frame (rounded block, recess, through opening, four pockets from the back, two joined ribs,
+/// one joined Ø7 boss) and a Ø3.2 x 8 blind bore into the boss. Reduced from the issue's script; on 0.7.0 the bore
+/// fails on every run with "lumps: cannot mesh a complete shell boundary" (the original failed on about half).
+const RECIPE_623: &str = r#"{"commands":[{"command":"component.activate","params":{"component":"root"}},{"command":"sketch.create","params":{"plane":{"origin":[466.0,0,0],"x_dir":[0,1,0],"y_dir":[0,0,1]},"name":"PL01 Outline Sketch"}},{"command":"sketch.line","params":{"points":[[9.0,17.35],[231.0,17.35]],"closed":false}},{"command":"sketch.arc.center_point","params":{"center":[231.0,25.5],"start":[231.0,17.35],"end":[239.15,25.5]}},{"command":"sketch.line","params":{"points":[[239.15,25.5],[239.15,500.0]],"closed":false}},{"command":"sketch.arc.center_point","params":{"center":[231.0,500.0],"start":[239.15,500.0],"end":[231.0,508.15]}},{"command":"sketch.line","params":{"points":[[231.0,508.15],[9.0,508.15]],"closed":false}},{"command":"sketch.arc.center_point","params":{"center":[9.0,500.0],"start":[9.0,508.15],"end":[0.8500000000000001,500.0]}},{"command":"sketch.line","params":{"points":[[0.8500000000000001,500.0],[0.8500000000000001,25.5]],"closed":false}},{"command":"sketch.arc.center_point","params":{"center":[9.0,25.5],"start":[0.8500000000000001,25.5],"end":[9.0,17.35]}},{"command":"sketch.finish","params":{}},{"command":"solid.extrude","params":{"sketch":"PL01 Outline Sketch","distance":30.0,"operation":"new","direction":"positive","name":"PL01 Outline","body_name":"PL01 Front Frame"}},{"command":"sketch.create","params":{"plane":{"origin":[496.0,0,0],"x_dir":[0,1,0],"y_dir":[0,0,1]},"name":"PL01 Recess Sketch"}},{"command":"sketch.line","params":{"points":[[10.0,22.5],[230.0,22.5]],"closed":false}},{"command":"sketch.arc.center_point","params":{"center":[230.0,26.5],"start":[230.0,22.5],"end":[234.0,26.5]}},{"command":"sketch.line","params":{"points":[[234.0,26.5],[234.0,499.0]],"closed":false}},{"command":"sketch.arc.center_point","params":{"center":[230.0,499.0],"start":[234.0,499.0],"end":[230.0,503.0]}},{"command":"sketch.line","params":{"points":[[230.0,503.0],[10.0,503.0]],"closed":false}},{"command":"sketch.arc.center_point","params":{"center":[10.0,499.0],"start":[10.0,503.0],"end":[6.0,499.0]}},{"command":"sketch.line","params":{"points":[[6.0,499.0],[6.0,26.5]],"closed":false}},{"command":"sketch.arc.center_point","params":{"center":[10.0,26.5],"start":[6.0,26.5],"end":[10.0,22.5]}},{"command":"sketch.finish","params":{}},{"command":"solid.extrude","params":{"sketch":"PL01 Recess Sketch","distance":12.0,"operation":"cut","direction":"negative","name":"PL01 Recess","targets":["PL01 Front Frame"]}},{"command":"sketch.create","params":{"plane":{"origin":[484.0,0,0],"x_dir":[0,1,0],"y_dir":[0,0,1]},"name":"PL01 Opening Sketch"}},{"command":"sketch.line","params":{"points":[[20.5,36.0],[219.5,36.0]],"closed":false}},{"command":"sketch.arc.center_point","params":{"center":[219.5,38.0],"start":[219.5,36.0],"end":[221.5,38.0]}},{"command":"sketch.line","params":{"points":[[221.5,38.0],[221.5,488.5]],"closed":false}},{"command":"sketch.arc.center_point","params":{"center":[219.5,488.5],"start":[221.5,488.5],"end":[219.5,490.5]}},{"command":"sketch.line","params":{"points":[[219.5,490.5],[20.5,490.5]],"closed":false}},{"command":"sketch.arc.center_point","params":{"center":[20.5,488.5],"start":[20.5,490.5],"end":[18.5,488.5]}},{"command":"sketch.line","params":{"points":[[18.5,488.5],[18.5,38.0]],"closed":false}},{"command":"sketch.arc.center_point","params":{"center":[20.5,38.0],"start":[18.5,38.0],"end":[20.5,36.0]}},{"command":"sketch.finish","params":{}},{"command":"solid.extrude","params":{"sketch":"PL01 Opening Sketch","distance":18.0,"operation":"cut","direction":"negative","name":"PL01 Opening","targets":["PL01 Front Frame"]}},{"command":"sketch.create","params":{"plane":{"origin":[466.0,0,0],"x_dir":[0,1,0],"y_dir":[0,0,1]},"name":"PL01 Hollow 1 Sketch"}},{"command":"sketch.rectangle.two_point","params":{"p0":[3.35,28.85],"p1":[16.0,496.65]}},{"command":"sketch.finish","params":{}},{"command":"solid.extrude","params":{"sketch":"PL01 Hollow 1 Sketch","distance":15.5,"operation":"cut","direction":"positive","name":"PL01 Hollow 1","targets":["PL01 Front Frame"]}},{"command":"sketch.create","params":{"plane":{"origin":[466.0,0,0],"x_dir":[0,1,0],"y_dir":[0,0,1]},"name":"PL01 Hollow 2 Sketch"}},{"command":"sketch.rectangle.two_point","params":{"p0":[224.0,28.85],"p1":[236.65,496.65]}},{"command":"sketch.finish","params":{}},{"command":"solid.extrude","params":{"sketch":"PL01 Hollow 2 Sketch","distance":15.5,"operation":"cut","direction":"positive","name":"PL01 Hollow 2","targets":["PL01 Front Frame"]}},{"command":"sketch.create","params":{"plane":{"origin":[466.0,0,0],"x_dir":[0,1,0],"y_dir":[0,0,1]},"name":"PL01 Hollow 3 Sketch"}},{"command":"sketch.rectangle.two_point","params":{"p0":[12.35,19.85],"p1":[227.65,33.5]}},{"command":"sketch.finish","params":{}},{"command":"solid.extrude","params":{"sketch":"PL01 Hollow 3 Sketch","distance":15.5,"operation":"cut","direction":"positive","name":"PL01 Hollow 3","targets":["PL01 Front Frame"]}},{"command":"sketch.create","params":{"plane":{"origin":[466.0,0,0],"x_dir":[0,1,0],"y_dir":[0,0,1]},"name":"PL01 Hollow 4 Sketch"}},{"command":"sketch.rectangle.two_point","params":{"p0":[12.35,493.0],"p1":[227.65,505.65]}},{"command":"sketch.finish","params":{}},{"command":"solid.extrude","params":{"sketch":"PL01 Hollow 4 Sketch","distance":15.5,"operation":"cut","direction":"positive","name":"PL01 Hollow 4","targets":["PL01 Front Frame"]}},{"command":"sketch.create","params":{"plane":{"origin":[471.0,0,0],"x_dir":[0,1,0],"y_dir":[0,0,1]},"name":"PL01 Rib 1 Sketch"}},{"command":"sketch.rectangle.two_point","params":{"p0":[16.0,69.0],"p1":[224.0,73.0]}},{"command":"sketch.finish","params":{}},{"command":"solid.extrude","params":{"sketch":"PL01 Rib 1 Sketch","distance":12.0,"operation":"join","direction":"positive","name":"PL01 Rib 1","targets":["PL01 Front Frame"]}},{"command":"sketch.create","params":{"plane":{"origin":[471.0,0,0],"x_dir":[0,1,0],"y_dir":[0,0,1]},"name":"PL01 Rib 6 Sketch"}},{"command":"sketch.rectangle.two_point","params":{"p0":[16.0,470.0],"p1":[224.0,474.0]}},{"command":"sketch.finish","params":{}},{"command":"solid.extrude","params":{"sketch":"PL01 Rib 6 Sketch","distance":12.0,"operation":"join","direction":"positive","name":"PL01 Rib 6","targets":["PL01 Front Frame"]}},{"command":"sketch.create","params":{"plane":{"origin":[481.5,0,0],"x_dir":[0,1,0],"y_dir":[0,0,1]},"name":"PL01 Boss 4 Sketch"}},{"command":"sketch.circle.center","params":{"center":[227.5,492.0],"radius":3.5}},{"command":"sketch.finish","params":{}},{"command":"solid.extrude","params":{"sketch":"PL01 Boss 4 Sketch","distance":24.5,"operation":"join","direction":"negative","name":"PL01 Boss 4","targets":["PL01 Front Frame"]}},{"command":"sketch.create","params":{"plane":{"origin":[457.0,0,0],"x_dir":[0,1,0],"y_dir":[0,0,1]},"name":"B"}},{"command":"sketch.circle.center","params":{"center":[227.5,492.0],"radius":1.6}},{"command":"sketch.finish","params":{}},{"command":"solid.extrude","params":{"sketch":"B","distance":8.0,"operation":"cut","direction":"positive","name":"B","targets":["PL01 Front Frame"]}}]}"#;
+
+#[test]
+fn blind_bore_into_a_joined_boss_meshes() {
+    let recipe: Value = serde_json::from_str(RECIPE_623).unwrap();
+    let mut s = Session::default();
+    for c in recipe["commands"].as_array().unwrap() {
+        run(&mut s, c["command"].as_str().unwrap(), c["params"].clone());
+    }
+    let m = measure(&mut s);
+    assert_eq!(m["bodies"].as_array().map(Vec::len), Some(1), "{m}");
 }

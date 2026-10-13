@@ -95,7 +95,9 @@ pub(super) fn draw(s: &mut Session, p: &Value) -> Result<Value> {
             }
             _ => return Err(bad(cmd, "unsupported dimension role")),
         };
-        let mut dimension = json!({"entities": entities, "type": ty, "value": value});
+        // A typed size the sketch already has (a rectangle drawn onto another's side, the same
+        // height) is placed as a driven (reference) dimension rather than refused.
+        let mut dimension = json!({"entities": entities, "type": ty, "value": value, "if_redundant": "driven"});
         if let Some(sketch) = params.get("sketch") {
             dimension["sketch"] = sketch.clone();
         }

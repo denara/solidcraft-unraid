@@ -343,6 +343,8 @@ fn joints_moving(app: &SolveApp) -> Vec<(usize, String, JointKind)> {
 /// The dialog's rows; true when Enter was pressed in a value.
 pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Mo, inputs: &mut [SelInput]) -> bool {
     let t = Tokens::get();
+    // Physical materials for the configuration table's Library: the library's, then the design's own.
+    let material_names = app.session.doc.material_names();
     let mut enter = false;
     match k {
         Mo::ContactSet { name, check } => {
@@ -702,8 +704,8 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Mo, inputs: &mut [Sel
                                                 ui.close();
                                             }
                                             if kind == "material" {
-                                                for (name, _) in solidcraft_engine::doc::MATERIALS.iter().filter(|(n, _)| *n != "Default") {
-                                                    if ui.button(*name).clicked() {
+                                                for name in material_names.iter().filter(|n| *n != "Default") {
+                                                    if ui.button(name).clicked() {
                                                         choice = Some(name.to_string());
                                                         ui.close();
                                                     }

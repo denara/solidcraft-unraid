@@ -357,7 +357,6 @@ fn mode(id: &str) -> Option<Mode> {
         "sketch.text" => Mode::Points(1),
         "sketch.edit_text" => Mode::Entities(1),
         "sketch.blend_curve" => Mode::Points(2),
-        "sketch.offset" => Mode::Entities(1),
         "sketch.fillet" | "sketch.chamfer.equal_distance" | "sketch.chamfer.distance_angle" | "sketch.chamfer.two_distance" => Mode::Entities(1),
         "sketch.constraint.curvature" | "sketch.circle.two_tangent" => Mode::Entities(2),
         "sketch.circle.three_tangent" => Mode::Entities(3),
@@ -406,16 +405,15 @@ pub fn hint(id: &str) -> Option<String> {
             "sketch.line.midpoint" => "Midpoint line: click the middle, then an end",
             "sketch.arc.tangent" => "Tangent arc: click the end of a line or arc, then the arc's end",
             "sketch.ellipse" => "Ellipse: click the centre, the end of the major axis, then a point on it",
-            "sketch.conic" => "Conic: click the start, the end, then the apex",
+            "sketch.conic" => "Conic: click the start, the end, then the apex; type Rho to shape it (0.5 is a parabola)",
             "sketch.slot.center_point" => "Slot: click the centre, an arc centre, then the width",
             "sketch.slot.arc_three_point" => "Arc slot: click start, a point on the arc, the end, then the width",
             "sketch.slot.arc_center" => "Arc slot: click the centre, the start, the end, then the width",
             "sketch.spline.fit_point" => "Spline: click fit points; click the start to close smoothly, or right-click to finish",
             "sketch.spline.control_point" | "sketch.spline.control_point_5" => "Control point spline: click control points; right-click to finish",
             "sketch.text" => "Text: click where the text starts",
-            "sketch.edit_text" => "Edit Text: click an outline of the text to edit",
+            "sketch.edit_text" => "Edit Text: click a letter interior or outline",
             "sketch.blend_curve" => "Blend curve: click the ends of two curves",
-            "sketch.offset" => "Offset: click a curve (its chain is offset), then the side and distance",
             "sketch.fillet" => "Fillet: click the corner of two lines",
             "sketch.chamfer.equal_distance" | "sketch.chamfer.distance_angle" | "sketch.chamfer.two_distance" => {
                 "Chamfer: click the corner of two lines"
@@ -688,7 +686,7 @@ pub fn on_click(app: &mut SolveApp, tool: &mut Tool, proj: &Proj, pos: Pos2) {
                 let _ = app.run(cmd, json!({"curve": id, "at": xy(p)}));
             }
         }
-        Mode::Points(n) => {
+        Mode::Points(_) => {
             if periodic_start_snap(app, tool, proj, pos).is_some() {
                 // Only this deliberate click selects periodic interpolation. A
                 // right-click finish and all previously saved splines stay natural.
@@ -700,11 +698,7 @@ pub fn on_click(app: &mut SolveApp, tool: &mut Tool, proj: &Proj, pos: Pos2) {
                 return;
             }
             let Some(p) = at else { return };
-            tool.pts.push(p);
-            if n > 0 && tool.pts.len() >= n {
-                run_points(app, tool);
-                tool.pts.clear();
-            }
+            place_point(app, tool, p);
         }
         Mode::Entities(n) => {
             if cmd == "sketch.fillet" || cmd.starts_with("sketch.chamfer.") {
@@ -713,35 +707,20 @@ pub fn on_click(app: &mut SolveApp, tool: &mut Tool, proj: &Proj, pos: Pos2) {
                 }
                 return;
             }
-            if cmd == "sketch.offset" && !tool.picks.is_empty() {
-                // Dense derived fit nodes must not snap a nearby side click back
-                // onto the source, reducing a deliberate offset to zero.
-                let state = app.session.world_state();
-                let side = active_sketch(app).and_then(|sid| state.sketch(sid)).and_then(|ss| {
-                    let (o, d) = proj.ray(pos);
-                    ss.plane.intersect_ray(o, d).map(|p| ss.plane.to_local(p))
+            if cmd == "sketch.edit_text" {
+                let selection = hits.first().and_then(|hit| match hit {
+                    Hit::SketchCurve { sketch, id, .. } if Some(*sketch) == active_sketch(app) => {
+                        Some(solidcraft_engine::Sel::SketchCurve { id: id.clone() })
+                    }
+                    Hit::Profile { sketch, index } => Some(solidcraft_engine::Sel::Profile { sketch: *sketch, index: *index }),
+                    _ => None,
                 });
-                if let Some(p) = side {
-                    offset_side(app, tool, p);
-                }
-                return;
-            }
-            if cmd == "sketch.offset" {
-                if let Some(sid) = active_sketch(app)
-                    && let Some(id) = hits.iter().find_map(|hit| match hit {
-                        Hit::SketchCurve { sketch, id, .. } if *sketch == sid => Some(id.clone()),
-                        _ => None,
-                    })
-                {
-                    tool.picks.push(id);
+                if let Some(id) = selection.as_ref().and_then(|sel| crate::sketch_text::entity_for_selection(app, sel)) {
+                    crate::sketch_text::open(app, &id);
                 }
                 return;
             }
             let Some((id, _)) = sketch_entity(app, &hits) else { return };
-            if cmd == "sketch.edit_text" {
-                crate::sketch_text::open(app, &id);
-                return;
-            }
             if cmd == "sketch.centerline" {
                 let _ = app.run(cmd, json!({"curves": [id]}));
                 return;
@@ -838,6 +817,22 @@ pub fn on_click(app: &mut SolveApp, tool: &mut Tool, proj: &Proj, pos: Pos2) {
     }
 }
 
+/// Put down the next point of a point tool: a click, or Enter in one of its value boxes. The
+/// last point runs the command. Typed values are checked first, so a rejected one stays in its
+/// box to be corrected rather than reaching the command.
+pub(crate) fn place_point(app: &mut SolveApp, tool: &mut Tool, p: (Vec2, Option<String>)) {
+    let Some(Mode::Points(n)) = mode(tool.cmd) else { return };
+    if let Err(error) = crate::sketch_dims::validate(app, tool) {
+        app.set_status(error, true);
+        return;
+    }
+    tool.pts.push(p);
+    if n > 0 && tool.pts.len() >= n {
+        run_points(app, tool);
+        tool.pts.clear();
+    }
+}
+
 fn run_points(app: &mut SolveApp, t: &Tool) {
     let p = &t.pts;
     let width = |a: Vec2, b: Vec2, c: Vec2| -> f64 { 2.0 * (b - a).normalized().map(|d| d.cross(c - a).abs()).unwrap_or(1.0) };
@@ -845,7 +840,11 @@ fn run_points(app: &mut SolveApp, t: &Tool) {
         ("sketch.line.midpoint", [m, e]) => json!({"mid": arg(m), "end": xy(e.0)}),
         ("sketch.arc.tangent", [s, e]) => json!({"start": arg(s), "end": xy(e.0)}),
         ("sketch.ellipse", [c, m, q]) => json!({"center": xy(c.0), "major": xy(m.0), "minor": xy(q.0)}),
-        ("sketch.conic", [a, b, x]) => json!({"start": arg(a), "end": arg(b), "apex": arg(x)}),
+        ("sketch.conic", [a, b, x]) => {
+            // The typed Rho box, or the parabola the command defaults to.
+            let rho = crate::sketch_dims::locked_value(app, t, "Rho").unwrap_or(0.5);
+            json!({"start": arg(a), "end": arg(b), "apex": arg(x), "rho": rho})
+        }
         ("sketch.slot.center_point", [c, e, w]) => json!({"center": xy(c.0), "end": xy(e.0), "width": width(c.0, e.0, w.0).max(1e-3)}),
         ("sketch.slot.arc_three_point", [a, th, b, w]) => {
             json!({"start": xy(a.0), "through": xy(th.0), "end": xy(b.0), "width": (2.0 * w.0.dist(b.0)).max(1e-3)})
@@ -936,30 +935,6 @@ pub fn finish(app: &mut SolveApp, tool: &mut Tool) -> bool {
     }
 }
 
-/// Offset: the second click sets the side and distance.
-fn offset_side(app: &mut SolveApp, tool: &mut Tool, p: Vec2) -> bool {
-    if tool.cmd != "sketch.offset" || tool.picks.is_empty() {
-        return false;
-    }
-    let st = app.session.world_state();
-    let d = active_sketch(app)
-        .and_then(|s| st.sketch(s))
-        .and_then(|ss| {
-            let curve = ss.sketch.curve_index(&tool.picks[0])?;
-            if let Some(shape) = ss.sketch.shape(curve) {
-                Some(shape.dist(p))
-            } else {
-                ss.sketch.exact_segs(curve)?.iter().map(|s| s.point_at(s.closest_param(p)).dist(p)).min_by(f64::total_cmp)
-            }
-        })
-        .unwrap_or(0.0);
-    if d > 1e-6 {
-        let _ = app.run("sketch.offset", json!({"curves": [tool.picks[0]], "distance": d, "side": xy(p)}));
-    }
-    tool.picks.clear();
-    true
-}
-
 /// Rubber band for point tools and pick markers.
 pub fn preview(app: &SolveApp, t: &Tool, painter: &egui::Painter, proj: &Proj) {
     let Some(sid) = active_sketch(app) else { return };
@@ -973,19 +948,30 @@ pub fn preview(app: &SolveApp, t: &Tool, painter: &egui::Painter, proj: &Proj) {
     {
         painter.circle_stroke(sp, if snap.is_some() { 6.0 } else { 3.0 }, stroke);
     }
-    let pts: Vec<Pos2> = t.pts.iter().filter_map(|p| to(p.0)).collect();
-    for w in pts.windows(2) {
-        painter.line_segment([w[0], w[1]], Stroke::new(1.0, tk.rubber_band.gamma_multiply(0.6)));
+    let faint = Stroke::new(1.0, tk.rubber_band.gamma_multiply(0.6));
+    let mode = crate::sketch_palette::mode(app);
+    for w in t.pts.windows(2) {
+        crate::tools::paint_sketch_path(&[ss.plane.to_world(w[0].0), ss.plane.to_world(w[1].0)], mode, painter, proj, faint);
     }
-    if let (Some(last), Some((h, _))) = (pts.last(), t.hover.as_ref())
-        && let Some(hs) = to(*h)
-    {
-        painter.line_segment([*last, hs], stroke);
+    // Placing a conic's apex: the curve is the preview, and the two tangent legs it is built
+    // from are a faint guide. A full-strength cursor rubber band here read as a straight line
+    // being drawn rather than as a curve being shaped.
+    let legs = t.cmd == "sketch.conic" && t.pts.len() == 2;
+    if let (Some(last), Some((h, _))) = (t.pts.last(), t.hover.as_ref()) {
+        let hw = ss.plane.to_world(*h);
+        if legs {
+            if let Some(first) = t.pts.first() {
+                crate::tools::paint_sketch_path(&[ss.plane.to_world(first.0), hw], mode, painter, proj, faint);
+            }
+            crate::tools::paint_sketch_path(&[ss.plane.to_world(last.0), hw], mode, painter, proj, faint);
+        } else {
+            crate::tools::paint_sketch_path(&[ss.plane.to_world(last.0), hw], mode, painter, proj, stroke);
+        }
     }
     if let Some((h, _)) = t.hover.as_ref()
-        && let Some(curve) = crate::tools::preview_curve(t, *h, None)
+        && let Some(curve) = crate::tools::preview_curve(t, *h, None, crate::sketch_dims::locked_value(app, t, "Rho"))
     {
-        crate::tools::paint_preview_curve(&curve, &ss.plane, painter, proj, stroke);
+        crate::tools::paint_preview_curve(curve, &ss.plane, painter, proj, stroke, crate::sketch_palette::mode(app));
     }
     // Picked curves highlighted.
     let mut display_budget = solidcraft_engine::render::SamplingBudget::new(32_768, 65_536);
@@ -1074,6 +1060,8 @@ fn glyphs(app: &SolveApp, painter: &egui::Painter, proj: &Proj, hover: Option<Po
     for (id, sp, base) in &placed {
         let Some(c) = ss.sketch.constraints.iter().find(|c| &c.id == id) else { continue };
         let failing = ss.report.failing.contains(id);
+        // Redundant (already implied by the others, but holding): dimmed, not an error.
+        let redundant = !failing && ss.report.redundant.contains(id);
         let selected = picked.as_deref() == Some(id.as_str())
             || app.session.selection.iter().any(|s| matches!(s, solidcraft_engine::Sel::SketchConstraint { id: x } if x == id));
         let lit = selected || hovered.as_deref() == Some(id.as_str());
@@ -1081,6 +1069,8 @@ fn glyphs(app: &SolveApp, painter: &egui::Painter, proj: &Proj, hover: Option<Po
             tk.error
         } else if lit {
             tk.accent
+        } else if redundant {
+            tk.glyph_text.gamma_multiply(0.45)
         } else {
             tk.glyph_text
         };
@@ -1102,7 +1092,11 @@ fn glyphs(app: &SolveApp, painter: &egui::Painter, proj: &Proj, hover: Option<Po
     if let (Some(id), Some(h)) = (hovered, hover)
         && let Some(c) = ss.sketch.constraints.iter().find(|c| c.id == id)
     {
-        let label = format!("{} ({id})", c.kind.name());
+        let label = if ss.report.redundant.contains(&id) {
+            format!("{} ({id}), redundant: already implied by other constraints", c.kind.name())
+        } else {
+            format!("{} ({id})", c.kind.name())
+        };
         let at = h + egui::vec2(12.0, 12.0);
         let g = painter.layout_no_wrap(label, egui::FontId::proportional(11.0), tk.text);
         painter.rect_filled(egui::Rect::from_min_size(at, g.size()).expand(3.0), 3.0, tk.panel);

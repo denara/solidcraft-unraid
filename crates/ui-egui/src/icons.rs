@@ -62,6 +62,20 @@ impl Pen<'_> {
     }
 }
 
+/// The stroke width for the Normal/Construction/Centerline line-type icons. It is heavier than
+/// the generic icon weight (`Pen::w`). It is sized from whichever side of `r` is smaller. A
+/// short, wide button and a square toolbar slot both get a stroke their gaps can survive next
+/// to.
+fn line_type_stroke(r: Rect) -> f32 {
+    (r.width().min(r.height()) / 24.0 * 2.0).max(1.6)
+}
+
+/// The Centerline icon's dot radius. It is sized from `r`. The stroke width plays no part in it.
+/// It stays a round mark even next to a heavy stroke.
+fn line_type_dot_radius(r: Rect) -> f32 {
+    (r.width().min(r.height()) * 0.16).max(2.4)
+}
+
 /// Paint the icon `name` into `r`. `accent` highlights the "action" part.
 pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, accent: Color32) {
     let pen = Pen { p, r, ink, fill, accent, w: (r.width() / 24.0 * 1.4).max(1.0) };
@@ -345,27 +359,48 @@ pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, acce
             pen.arrow((12.0, 11.0), (19.5, 11.0), a);
             pen.line(&[(9.0, 15.0), (15.0, 15.0)], ink);
         }
-        // Construction geometry has one fixed meaning everywhere in the app (the theme's
-        // construction orange), independent of the tab accent the caller passes in: a plain
-        // construction curve is an even dashed line, a centerline the ISO long-short rhythm.
-        "construction" | "centerline" => {
-            let orange = crate::theme::Tokens::get().construction_geom;
-            if name == "construction" {
-                for i in 0..4 {
-                    let t = i as f32 * 4.5;
-                    pen.line(&[(3.0 + t, 19.0 - t), (5.5 + t, 16.5 - t)], orange);
-                }
-            } else {
-                let (fx, fy) = (2.5, 20.5);
-                let (dx, dy) = (19.0, -18.0);
-                let seg = |t0: f32, t1: f32| {
-                    pen.line(&[(fx + dx * t0, fy + dy * t0), (fx + dx * t1, fy + dy * t1)], orange);
-                };
-                seg(0.03, 0.32);
-                seg(0.40, 0.48);
-                seg(0.56, 0.85);
-                seg(0.93, 1.0);
+        // The Sketch Palette's line type selector (normal, construction, centerline) paints all
+        // three on the same diagonal, from (3, 19) to (19, 3). Only the dash pattern changes
+        // between them. Normal draws in `ink` and ignores `accent`. It is a plain line. It is
+        // never construction geometry. Its colour must stay fixed even if a caller passes the
+        // construction orange for it. Construction and centerline draw only in `accent` and
+        // ignore `ink`. The caller decides the colour. The palette and the toolbar both pass
+        // the theme's construction orange.
+        //
+        // These three are drawn small. The Sketch Palette draws them down to about 18 px
+        // square. At that size a repeating dash pattern loses its gaps. It reads as a solid
+        // line. Two patterns that only differ in dash phase read as the same texture too.
+        // Normal, Construction and Centerline instead get three different silhouettes. One is
+        // an unbroken line. One is a line broken by a single gap. One is a line broken by a
+        // single gap with a bold dot sitting in it. A viewer can name the shape on sight. No
+        // rhythm needs measuring. The stroke width and the dot radius both come from the rect
+        // actually passed in. That keeps the shapes legible in the palette, the toolbar and the
+        // command palette, at every size any of them uses.
+        "normal" => {
+            let w = line_type_stroke(r);
+            p.add(Shape::line(vec![pen.at(3.0, 19.0), pen.at(19.0, 3.0)], Stroke::new(w, ink)));
+        }
+        "construction" => {
+            // One gap, no dot. It is an unmistakably broken line. Nothing sits in the break.
+            let w = line_type_stroke(r);
+            let at = |t: f32| pen.at(3.0 + 16.0 * t, 19.0 - 16.0 * t);
+            for (t0, t1) in [(0.0, 0.35), (0.65, 1.0)] {
+                p.add(Shape::line(vec![at(t0), at(t1)], Stroke::new(w, a)));
             }
+        }
+        "centerline" => {
+            // The same gap as Construction, with a bold dot centred in it. The silhouette is
+            // line, dot, line. The dot's radius comes from the rect. It reads as a distinct
+            // round mark on its own, never as a thicker stretch of the stroke. The dashes stop
+            // well short of it on both sides. The dot never touches either stroke. It always
+            // reads as a separate shape.
+            let w = line_type_stroke(r);
+            let dot_r = line_type_dot_radius(r);
+            let at = |t: f32| pen.at(3.0 + 16.0 * t, 19.0 - 16.0 * t);
+            for (t0, t1) in [(0.0, 0.26), (0.74, 1.0)] {
+                p.add(Shape::line(vec![at(t0), at(t1)], Stroke::new(w, a)));
+            }
+            p.circle_filled(at(0.5), dot_r, a);
         }
         "c_hv" => {
             pen.line(&[(4.0, 18.0), (20.0, 18.0)], a);
@@ -1027,6 +1062,113 @@ pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, acce
         }
         _ => {
             pen.poly(&[(5.0, 5.0), (19.0, 5.0), (19.0, 19.0), (5.0, 19.0)], pen.fill, ink);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A debug dump of everything `paint` draws for `name`, for comparing two colour choices
+    /// without depending on epaint's internal shape fields.
+    fn drawn(name: &str, ink: Color32, fill: Color32, accent: Color32) -> String {
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(100.0, 100.0));
+        let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+        let out = ctx.run_ui(input, |ui| {
+            let r = Rect::from_min_size(Pos2::ZERO, vec2(24.0, 24.0));
+            paint(ui.painter(), r, name, ink, fill, accent);
+        });
+        format!("{:?}", out.shapes)
+    }
+
+    /// The Sketch Palette and the toolbar both rely on this contract. Construction and
+    /// centerline must track whatever accent colour the caller passes (both callers pass the
+    /// theme's construction orange) and must not change with `ink`.
+    #[test]
+    fn construction_and_centerline_icons_follow_the_callers_accent_only() {
+        for name in ["construction", "centerline"] {
+            let base = drawn(name, Color32::BLACK, Color32::WHITE, Color32::from_rgb(1, 2, 3));
+            let other_accent = drawn(name, Color32::BLACK, Color32::WHITE, Color32::from_rgb(4, 5, 6));
+            assert_ne!(base, other_accent, "{name} icon must change with the caller's accent colour");
+            let other_ink = drawn(name, Color32::from_rgb(9, 9, 9), Color32::WHITE, Color32::from_rgb(1, 2, 3));
+            assert_eq!(base, other_ink, "{name} icon has no ink-coloured parts: ink alone must not change it");
+        }
+    }
+
+    /// Normal is a plain line type. It is never construction geometry. Its icon must never pick
+    /// up the accent colour. It can never render construction orange even if a caller passes it
+    /// by mistake.
+    #[test]
+    fn normal_icon_never_uses_the_accent_colour() {
+        let one_accent = drawn("normal", Color32::BLACK, Color32::WHITE, Color32::from_rgb(1, 2, 3));
+        let other_accent = drawn("normal", Color32::BLACK, Color32::WHITE, Color32::from_rgb(4, 5, 6));
+        assert_eq!(one_accent, other_accent, "the Normal icon must not change with the accent colour");
+        let other_ink = drawn("normal", Color32::from_rgb(9, 9, 9), Color32::WHITE, Color32::from_rgb(1, 2, 3));
+        assert_ne!(one_accent, other_ink, "the Normal icon must change with ink");
+    }
+
+    /// The dashes (as their first and last point) and the dots (as centre and radius) `paint`
+    /// actually drew for `name`, at `side` pixels square: the Sketch Palette draws these three
+    /// icons down to about 18 px.
+    fn dashes_and_dots(name: &str, side: f32) -> (Vec<(Pos2, Pos2)>, Vec<(Pos2, f32)>) {
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(100.0, 100.0));
+        let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+        let r = Rect::from_min_size(Pos2::ZERO, vec2(side, side));
+        let out = ctx.run_ui(input, |ui| {
+            paint(ui.painter(), r, name, Color32::BLACK, Color32::WHITE, Color32::from_rgb(232, 140, 48));
+        });
+        let dashes = out
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                Shape::Path(p) => Some((*p.points.first()?, *p.points.last()?)),
+                _ => None,
+            })
+            .collect();
+        let dots = out.shapes.iter().filter_map(|s| if let Shape::Circle(c) = &s.shape { Some((c.center, c.radius)) } else { None }).collect();
+        (dashes, dots)
+    }
+
+    /// Pins the dash count and the gap. A future tidy-up might add dashes back in. It might
+    /// narrow the gap to look more faithful to the ISO convention. Either change would flatten
+    /// the icon back into a near-solid line at the size the Sketch Palette actually draws it,
+    /// about 18 px square. That is the exact defect this fix addressed.
+    #[test]
+    fn construction_and_centerline_read_as_two_dashes_with_a_gap_wider_than_the_stroke() {
+        for (name, want_dots) in [("construction", 0), ("centerline", 1)] {
+            for side in [18.0, 26.0] {
+                let (dashes, dots) = dashes_and_dots(name, side);
+                assert_eq!(dashes.len(), 2, "{name} at {side}px must be exactly two dashes");
+                assert_eq!(dots.len(), want_dots, "{name} at {side}px has the wrong number of dots");
+                let (_, gap_start) = dashes[0];
+                let (gap_end, _) = dashes[1];
+                let gap = gap_start.distance(gap_end);
+                let stroke = line_type_stroke(Rect::from_min_size(Pos2::ZERO, vec2(side, side)));
+                assert!(
+                    gap > stroke * 2.0,
+                    "{name} at {side}px: the gap of {gap:.1}px must exceed the {stroke:.1}px stroke by a wide margin, or the dashes read as one solid line"
+                );
+            }
+        }
+    }
+
+    /// Pins the shape of the Centerline dot. It must be large enough to read as a round mark
+    /// beside the stroke. It must sit clear of both dashes. The silhouette must stay line, dot,
+    /// line.
+    #[test]
+    fn centerline_dot_is_a_bold_mark_clear_of_both_dashes() {
+        for side in [18.0, 26.0] {
+            let (dashes, dots) = dashes_and_dots("centerline", side);
+            let (center, radius) = dots[0];
+            let stroke = line_type_stroke(Rect::from_min_size(Pos2::ZERO, vec2(side, side)));
+            assert!(radius > stroke * 1.2, "centerline dot at {side}px: radius {radius:.1}px must exceed the {stroke:.1}px stroke by a wide margin");
+            for (a, b) in &dashes {
+                assert!(center.distance(*a) > radius, "centerline dot at {side}px must not touch a dash end");
+                assert!(center.distance(*b) > radius, "centerline dot at {side}px must not touch a dash end");
+            }
         }
     }
 }

@@ -35,6 +35,8 @@ pub mod frame;
 pub mod gizmo;
 pub mod gpu;
 pub mod help;
+#[cfg(test)]
+mod hole_placement_ui_tests;
 pub mod home;
 pub mod i18n;
 #[cfg(test)]
@@ -66,12 +68,18 @@ mod expression_complete;
 #[cfg(test)]
 mod extrude_edit_tests;
 mod file_load;
+#[cfg(test)]
+mod file_load_ui_tests;
+#[cfg(test)]
+mod fillet_spline_handle_tests;
 pub mod palette;
 pub mod params_dialog;
 pub mod prefs;
 #[cfg(test)]
 mod preselect_tests;
 pub mod preview;
+#[cfg(test)]
+mod primitive_units_tests;
 pub mod recovery_ui;
 pub mod ref_images;
 #[cfg(test)]
@@ -98,8 +106,13 @@ mod sketch_display_ui_tests;
 mod sketch_drag_ui_tests;
 #[cfg(test)]
 mod sketch_edit_tests;
+mod sketch_families;
+pub mod sketch_modify_ui;
+#[cfg(test)]
+mod sketch_modify_ui_tests;
 pub mod sketch_palette;
 pub(crate) mod sketch_text;
+mod sketch_text_move;
 pub mod sketch_tools;
 pub mod stand_up;
 pub mod theme;
@@ -227,6 +240,7 @@ pub struct SolveApp {
     pub crashes: crash_ui::CrashUi,
     /// Toolbar buttons the user pinned, removed or reordered.
     pub toolbar_custom: toolbar_custom::ToolbarCustom,
+    pub sketch_choices: sketch_families::Choices,
     /// Preferences kept between runs, and their window.
     pub preferences: prefs::Prefs,
     pub prefs_window: prefs::PrefsWindow,
@@ -261,6 +275,8 @@ pub struct SolveApp {
     /// The modifiers of the synthetic press in progress (a Ctrl-drag keeps Ctrl while it moves).
     pub synthetic_mods: egui::Modifiers,
     control_rx: Option<Receiver<ControlRequest>>,
+    /// Control requests that change the design, held while a file loads.
+    control_held: std::collections::VecDeque<ControlRequest>,
     /// The agent cursor acting out control requests.
     pub agent: agent_cursor::AgentCursor,
     pending_shots: Vec<(u64, Option<String>, std::sync::mpsc::Sender<Value>, f64)>,
@@ -300,6 +316,7 @@ impl SolveApp {
             issue_report: issue_report::ReportState::default(),
             crashes: crash_ui::CrashUi::default(),
             toolbar_custom: toolbar_custom::ToolbarCustom::default(),
+            sketch_choices: sketch_families::Choices::default(),
             preferences: prefs::Prefs::default(),
             prefs_window: prefs::PrefsWindow::default(),
             preview: preview::PreviewState::default(),
@@ -320,6 +337,7 @@ impl SolveApp {
             synthetic: Vec::new(),
             synthetic_mods: egui::Modifiers::default(),
             control_rx: None,
+            control_held: Default::default(),
             agent: Default::default(),
             pending_shots: Vec::new(),
             queued_shots: Vec::new(),
@@ -457,6 +475,16 @@ impl SolveApp {
         let r = self.session.execute(id, &params).map_err(|e| e.to_string());
         self.big_operation |= now_ms() - t0 >= recovery_ui::BIG_OPERATION_MS;
         if let Ok(v) = &r {
+            if id == "view.navigate" {
+                let to: Camera = serde_json::from_value(v.get("camera").cloned().unwrap_or_default()).map_err(|e| e.to_string())?;
+                if v.get("fit").and_then(Value::as_bool).unwrap_or(false) {
+                    let bounds = solidcraft_engine::view::bounds(&self.session);
+                    self.animate_to(self.fitted(to));
+                    self.pending_fit = Some((to, bounds, true));
+                } else {
+                    self.animate_to(to);
+                }
+            }
             // Curves drawn in construction (or centerline) mode take that line type.
             sketch_palette::apply_mode(self, id, v);
         }
@@ -464,6 +492,7 @@ impl SolveApp {
             Ok(_) => {
                 self.session.echo(format!("{} done", command_label(id)));
                 if matches!(id, "file.new" | "doc.open" | "doc.recover") {
+                    self.sketch_choices = sketch_families::Choices::default();
                     dim_view::cancel();
                     self.menu.props = None;
                     sketch_attachment_ui::clear(self);
@@ -502,13 +531,34 @@ impl SolveApp {
     /// Start a command the way a toolbar click does: interactive tools and dialogs for commands
     /// that have them, otherwise run it with defaults.
     pub fn start(&mut self, id: &str) {
+        // A file is loading: the design waits for it.
+        if self.file_load.busy() {
+            return;
+        }
+        // A disabled command starts nothing, however it was reached. The toolbar greys its
+        // button, but a shortcut, the command palette and the control channel all land here.
+        // Its reason goes to the status line, so the refusal is never silent.
+        if let Some(info) = solidcraft_engine::find_command(id).map(|c| c.info(&self.session))
+            && let Some(why) = info.disabled_reason
+        {
+            let label = self.tr_label(info.label).to_string();
+            self.set_status(format!("{label}: {why}"), true);
+            return;
+        }
         // Another command ends Edit Text (its dialog is not a feature edit to keep).
-        if sketch_text::editing(self) {
+        sketch_text_move::cancel_drag(self);
+        if sketch_text::editing(self) || self.dialog.as_ref().is_some_and(|d| matches!(d.kind, dialogs::Kind::TextMove(_))) {
             dialogs::cancel(self);
         }
         // A component moved without Capture Position: ask first (Capture, Revert or Cancel).
         if browser::needs_capture(self, id) && !(id == "sketch.dimension" && self.session.active_sketch.is_some()) {
             self.tree.capture_prompt = Some(id.to_string());
+            return;
+        }
+        // A line-type toggle changes the current drawing, including a partly picked shape.
+        // Handle it before cancelling tools or inline dimensions.
+        if id == "sketch.construction" {
+            sketch_palette::toggle_construction(self);
             return;
         }
         dim_view::cancel();
@@ -529,6 +579,9 @@ impl SolveApp {
         if !sketch_tools::start_hook(self, id) {
             return;
         }
+        if solidcraft_engine::find_command(id).is_some_and(|c| c.info(&self.session).enabled) {
+            self.sketch_choices.remember(id);
+        }
         if id == "parameters.change" {
             params_dialog::open(self);
             return;
@@ -541,12 +594,6 @@ impl SolveApp {
         if id == "solid.press_pull" {
             let edges = self.session.selection.iter().any(|s| matches!(s, solidcraft_engine::Sel::Edge { .. }));
             return self.start(if edges { "solid.fillet" } else { "solid.extrude" });
-        }
-        // Construction toggle: selected sketch curves switch at once, otherwise pick them.
-        // Construction (X): convert the selection, or switch construction mode; no pick tool.
-        if id == "sketch.construction" {
-            sketch_palette::toggle_construction(self);
-            return;
         }
         if let Some(spec) = solidcraft_engine::find_command(id)
             && (tools::Tool::for_command(id).is_some() || dialogs::Dialog::for_command(self, id).is_some())
@@ -686,7 +733,8 @@ impl SolveApp {
     /// Finish the active sketch: stop editing, restore the history marker Edit Sketch moved and
     /// return to the view from before the sketch.
     pub fn finish_sketch(&mut self) {
-        if sketch_text::editing(self) {
+        sketch_text_move::cancel_drag(self);
+        if sketch_text::editing(self) || self.dialog.as_ref().is_some_and(|d| matches!(d.kind, dialogs::Kind::TextMove(_))) {
             dialogs::cancel(self);
         }
         dim_view::cancel();
@@ -710,6 +758,8 @@ impl SolveApp {
         if let Some(d) = &self.dialog {
             v.extend(d.items());
         }
+        v.extend(sketch_text::highlighted(self));
+        v.extend(sketch_text_move::highlighted(self));
         v
     }
 
@@ -782,14 +832,14 @@ impl SolveApp {
         self.cam_anim = None;
         self.viewport.orbit_snap = None;
         self.viewport.orbit_free = None;
-        let bounds = solidcraft_engine::view::bounds(&self.session);
+        let bounds = viewport::view_bounds(self);
         self.pending_fit = Some((self.cam, bounds, false));
         self.cam = self.fitted(self.cam);
     }
 
     /// `cam` moved to frame the whole model.
     pub fn fitted(&self, mut cam: Camera) -> Camera {
-        let b = solidcraft_engine::view::bounds(&self.session);
+        let b = viewport::view_bounds(self);
         if b.is_empty() {
             cam.target = solidcraft_engine::geom::Vec3::ZERO;
             cam.distance = 150.0;
@@ -846,6 +896,15 @@ impl SolveApp {
         self.cam_anim = Some(anim);
     }
 
+    /// Frame everything shown, keeping the orientation (animated; the selection is ignored).
+    pub fn animate_fit_all(&mut self) {
+        self.pending_fit = None;
+        let request = Some((self.cam, viewport::view_bounds(self), true));
+        let to = self.fitted(self.cam);
+        self.animate_to(to);
+        self.pending_fit = request;
+    }
+
     /// Animated view changes for the axis view and navigation bar.
     pub fn animate_view(&mut self, v: &str) {
         self.pending_fit = None;
@@ -858,13 +917,13 @@ impl SolveApp {
                     to = self.fitted_bounds(to, &b);
                 }
                 None => {
-                    self.pending_fit = Some((to, solidcraft_engine::view::bounds(&self.session), true));
+                    self.pending_fit = Some((to, viewport::view_bounds(self), true));
                     to = self.fitted(to);
                 }
             },
             "home" => {
                 to.set_view(StandardView::Iso);
-                self.pending_fit = Some((to, solidcraft_engine::view::bounds(&self.session), true));
+                self.pending_fit = Some((to, viewport::view_bounds(self), true));
                 to = self.fitted(to);
             }
             v => match StandardView::parse(v) {
@@ -875,6 +934,21 @@ impl SolveApp {
         let request = self.pending_fit.take();
         self.animate_to(to);
         self.pending_fit = request;
+    }
+
+    /// Move the viewport to the camera a command asked for (`view.apply`): animated like a view
+    /// change, or at once (control requests, so a screenshot right after shows it).
+    pub fn follow_view_request(&mut self, animate: bool) {
+        let Some(mut to) = self.session.camera.take() else { return };
+        to.up = self.cam.up;
+        if animate {
+            self.animate_to(to);
+        } else if to.is_valid() {
+            self.cancel_view_animation();
+            self.viewport.orbit_snap = None;
+            self.viewport.orbit_free = None;
+            self.cam = to;
+        }
     }
 
     /// Stop any view animation where it is (the user took over the camera).
@@ -923,6 +997,7 @@ impl SolveApp {
         }
         self.step_view_animation(ctx);
         self.drain_control(ctx);
+        self.follow_view_request(true);
         agent_cursor::step(self, ctx);
         if !self.synthetic.is_empty() {
             ctx.request_repaint();
@@ -1036,13 +1111,33 @@ impl SolveApp {
         /// queued for the next frame.
         const PER_FRAME: usize = 64;
 
+        /// Held requests beyond this are refused rather than kept.
+        const MAX_HELD: usize = 256;
+
         let Some(rx) = self.control_rx.take() else { return };
         // While the agent cursor acts out a request, later ones wait their turn.
         for _ in 0..PER_FRAME {
             if self.agent.busy() {
                 break;
             }
-            let Ok(req) = rx.try_recv() else { break };
+            // Held requests go first, in order, once the file is in.
+            let held = if self.file_load.busy() { None } else { self.control_held.pop_front() };
+            let Some(req) = held.or_else(|| rx.try_recv().ok()) else { break };
+            // A file is loading: commands that change the design wait for it (the window,
+            // inspection and screenshots still answer).
+            if self.file_load.busy() && matches!(req.method.as_str(), "engine.execute" | "command" | "engine.script") {
+                if self.control_held.len() < MAX_HELD {
+                    self.control_held.push_back(req);
+                } else {
+                    let _ = req.reply.send(json!({"ok": false, "error": "a file operation is in progress"}));
+                }
+                continue;
+            }
+            // Opening or importing a file: answered when the file is in, without freezing the window.
+            let Some(req) = file_load::control(self, req) else {
+                ctx.request_repaint();
+                continue;
+            };
             let reply = req.reply.clone();
             if agent_cursor::intercept(self, &req.method, &req.params, &reply) {
                 ctx.request_repaint();

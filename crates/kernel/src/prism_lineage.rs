@@ -59,8 +59,11 @@ pub(super) struct Context<'a> {
 
 /// How one piece of the result was built.
 pub(super) enum Built {
-    /// One body of `crate::extrude` of the section's one region between levels `lo` and `hi`.
-    Extruded { section: Section, lo: f64, hi: f64 },
+    /// One body of `crate::extrude` of a section's one region through `layers`: successive
+    /// slabs (the section as read in each, between its two levels), bottom first, all of one
+    /// outline. Several where operands stacked end to end share an outline (one wall then lies
+    /// over each operand's wall in turn, and is made from all of them).
+    Extruded { layers: Vec<(Section, f64, f64)> },
     /// Sewn (`sew_connected_sections`) from these faces, the sewing saying which each face of
     /// the piece was built from (`None`: it could not).
     Sewn { specs: Vec<Spec>, faces: Option<Vec<usize>> },
@@ -111,10 +114,11 @@ impl Spec {
     }
 }
 
-/// A face of a piece: the wall over a segment with this tag between two levels, or a cap.
+/// A face of an extruded piece: a wall or a cap.
 #[derive(Clone, Copy)]
 enum Kind {
-    Wall(Tag, f64, f64),
+    /// The wall over this segment of the section.
+    Wall(usize),
     Cap(usize),
 }
 
@@ -139,7 +143,7 @@ impl<'a> Context<'a> {
         let mut edges = HashMap::new();
         for (body, built) in pieces {
             let (f, e) = match built {
-                Built::Extruded { section, lo, hi } => self.extruded(caps, body, section, *lo, *hi)?,
+                Built::Extruded { layers } => self.extruded(caps, body, layers)?,
                 Built::Sewn { specs, faces } => self.sewn(caps, body, specs, faces.as_deref()?)?,
                 Built::Traced => {
                     let h = body.history()?;
@@ -231,9 +235,10 @@ impl<'a> Context<'a> {
 
     /// The origins of the edge between the wall over a segment tagged `t` and a cap lying on the
     /// operand faces `cap`: the operand's edge between the wall and its own cap there (the very
-    /// edge the segment was read off, or the one it runs along where its slab ends, when that is
-    /// one), else where the wall meets the cap (all of the faces it lies on).
-    fn cap_edge(&self, t: Tag, cap: &BTreeSet<FaceOrigin>) -> Option<Vec<EdgeOrigin>> {
+    /// edge the segment was read off, or the one it runs along where its slab ends: the one
+    /// running through `at`, a point of the edge, where the wall meets its caps along several),
+    /// else where the wall meets the cap (all of the faces it lies on).
+    fn cap_edge(&self, t: Tag, cap: &BTreeSet<FaceOrigin>, at: Vec3) -> Option<Vec<EdgeOrigin>> {
         let (x, w) = (t.operand, t.wall?);
         let own: Vec<usize> =
             cap.iter().filter_map(|o| if let Face { operand, face } = *o { (operand == x).then_some(face) } else { None }).collect();
@@ -246,6 +251,40 @@ impl<'a> Context<'a> {
         match along.as_slice() {
             [e] => Some(vec![EdgeOrigin::Edge { operand: x, edge: *e }]),
             [] => Some(vec![EdgeOrigin::meet(Self::wall(t)?, Side::new(cap.iter().copied())?)]),
+            // One wall with openings meets its caps along several edges (a side wall with ports
+            // cut through it meets the ports' floors at each port): the one this edge lies on,
+            // else (a new opening beside them) where the wall meets the cap.
+            many => match self.edge_through(x, many, at)? {
+                Some(edge) => Some(vec![EdgeOrigin::Edge { operand: x, edge }]),
+                None => Some(vec![EdgeOrigin::meet(Self::wall(t)?, Side::new(cap.iter().copied())?)]),
+            },
+        }
+    }
+
+    /// Of the operand's edges `edges`, the one the point `at` lies on (`Some(None)` when none
+    /// does; `None` when several do).
+    fn edge_through(&self, operand: usize, edges: &[usize], at: Vec3) -> Option<Option<usize>> {
+        if edges.len() > 4096 {
+            return None;
+        }
+        let body = self.operands.get(operand)?;
+        let order = crate::body::edge_order(body.solid.face_iter()).0;
+        let mut on = edges.iter().filter(|e| {
+            order.get(**e).is_some_and(|edge| {
+                use mt::{BoundedCurve, ParametricCurve};
+                let c = edge.curve();
+                let (t0, t1) = c.range_tuple();
+                // The edge as a fine polyline: a line exactly, an arc within its chords' sag.
+                let n = if matches!(c, mt::Curve::Line(_)) { 1 } else { 64 };
+                let pts: Vec<Vec3> = (0..=n).map(|k| from_p3(c.subs(t0 + (t1 - t0) * k as f64 / n as f64))).collect();
+                let length: f64 = pts.windows(2).map(|w| w[0].dist(w[1])).sum();
+                let near = self.tol * 10.0 + if n == 1 { 0.0 } else { length * 2e-3 };
+                pts.windows(2).any(|w| at.dist_to_segment(w[0], w[1]) <= near)
+            })
+        });
+        match (on.next(), on.next()) {
+            (Some(e), None) => Some(Some(*e)),
+            (None, _) => Some(None),
             _ => None,
         }
     }
@@ -331,28 +370,35 @@ impl<'a> Context<'a> {
         }
     }
 
-    /// Faces and edges of a piece `crate::extrude` built from a section of one region. Its
-    /// history says which faces are walls over which segment (numbered over the region's
-    /// loops in order) and which are its caps; the start cap's wires run over the segments in
-    /// loop order (as the extrude builds them), so the vertex after each wire edge is where one
-    /// segment runs into the next, or splits.
+    /// Faces and edges of a piece `crate::extrude` built from a section of one region through
+    /// `layers` (see [`Built::Extruded`]). Its history says which faces are walls over which
+    /// segment (numbered over the region's loops in order) and which are its caps; the start
+    /// cap's wires run over the segments in loop order (as the extrude builds them), so the
+    /// vertex after each wire edge is where one segment runs into the next, or splits. A wall
+    /// through several layers is made from the wall each layer's segment was read beside, and
+    /// an edge between two walls from the operand edges there in each layer.
     #[allow(clippy::type_complexity)]
     fn extruded(
         &self,
         caps: &[Cap],
         body: &Body,
-        section: &Section,
-        lo: f64,
-        hi: f64,
+        layers: &[(Section, f64, f64)],
     ) -> Option<(Vec<(BTreeSet<FaceOrigin>, bool)>, HashMap<mt::EdgeID, Vec<EdgeOrigin>>)> {
         let h = body.history()?;
-        let tags = section.segments().1;
-        let tops = [self.cap_origins(caps, section, lo, false), self.cap_origins(caps, section, hi, true)];
+        let ((first, lo, _), (last, _, hi)) = (layers.first()?, layers.last()?);
+        let (lo, hi) = (*lo, *hi);
+        let tags: Vec<Vec<Tag>> = layers.iter().map(|(section, ..)| section.segments().1).collect();
+        let count = tags.first()?.len();
+        if tags.iter().any(|t| t.len() != count) {
+            return None;
+        }
+        let tag = |layer: usize, segment: usize| tags.get(layer).and_then(|t| t.get(segment)).copied();
+        let tops = [self.cap_origins(caps, first, lo, false), self.cap_origins(caps, last, hi, true)];
         let kinds: Vec<Kind> = h
             .faces
             .iter()
             .map(|f| match f.origins.as_slice() {
-                [FaceOrigin::Profile { segment }] => Some(Kind::Wall(*tags.get(*segment)?, lo, hi)),
+                [FaceOrigin::Profile { segment }] => (*segment < count).then_some(Kind::Wall(*segment)),
                 [FaceOrigin::Cap { end }] => Some(Kind::Cap(usize::from(*end))),
                 _ => None,
             })
@@ -360,7 +406,14 @@ impl<'a> Context<'a> {
         let faces = kinds
             .iter()
             .map(|k| match *k {
-                Kind::Wall(t, lo, hi) => Some((std::iter::once(Self::wall(t)?).collect(), self.whole(caps, t, lo, hi))),
+                Kind::Wall(segment) => {
+                    let walls = (0..layers.len()).map(|layer| Self::wall(tag(layer, segment)?)).collect::<Option<BTreeSet<_>>>()?;
+                    let whole = match layers {
+                        [(_, lo, hi)] => self.whole(caps, tag(0, segment)?, *lo, *hi),
+                        _ => false,
+                    };
+                    Some((walls, whole))
+                }
                 Kind::Cap(end) => Some(tops.get(end).filter(|o| !o.is_empty())?.clone()).map(|o| (o, false)),
             })
             .collect::<Option<Vec<_>>>()?;
@@ -374,7 +427,9 @@ impl<'a> Context<'a> {
             })
         };
         let start = kinds.iter().position(|k| matches!(k, Kind::Cap(0)))?;
-        let mut junctions: HashMap<mt::VertexID, (Tag, Tag)> = HashMap::new();
+        // At each vertex of the start cap: the segment running into it, the one running out,
+        // and whether that is one segment the extrude split there.
+        let mut junctions: HashMap<mt::VertexID, (usize, usize, bool)> = HashMap::new();
         for w in body.solid.face_iter().nth(start)?.absolute_boundaries() {
             let es: Vec<mt::Edge> = w.edge_iter().cloned().collect();
             let segs: Vec<usize> = es.iter().map(segment_of).collect::<Option<_>>()?;
@@ -383,20 +438,27 @@ impl<'a> Context<'a> {
             }
             for (k, e) in es.iter().enumerate() {
                 let (s, next) = (*segs.get(k)?, *segs.get((k + 1) % segs.len())?);
-                let (t, u) = (*tags.get(s)?, *tags.get(next)?);
-                // A segment the extrude split in two runs on through the vertex between.
-                let pair = if s != next || k + 1 == segs.len() { (t, u) } else { (Tag { end: None, ..t }, Tag { start: None, ..t }) };
-                junctions.insert(e.back().id(), pair);
+                junctions.insert(e.back().id(), (s, next, s == next && k + 1 != segs.len()));
             }
         }
         let mut origins = HashMap::new();
         for (e, fs) in edges.iter().zip(&bounds) {
             let [f, g] = fs.as_slice() else { return None };
             let o = match (kinds.get(*f)?, kinds.get(*g)?) {
-                (Kind::Wall(t, ..), Kind::Cap(end)) | (Kind::Cap(end), Kind::Wall(t, ..)) => self.cap_edge(*t, tops.get(*end)?)?,
+                (Kind::Wall(segment), Kind::Cap(end)) | (Kind::Cap(end), Kind::Wall(segment)) => {
+                    let layer = if *end == 0 { 0 } else { layers.len() - 1 };
+                    self.cap_edge(tag(layer, *segment)?, tops.get(*end)?, crate::heal::edge_points(e).get(2).copied()?)?
+                }
                 (Kind::Wall(..), Kind::Wall(..)) => {
-                    let (t1, t2) = [e.absolute_front().id(), e.absolute_back().id()].iter().find_map(|v| junctions.get(v))?;
-                    self.junction(*t1, *t2, lo, hi)?
+                    let (s, next, split) = *[e.absolute_front().id(), e.absolute_back().id()].iter().find_map(|v| junctions.get(v))?;
+                    let mut o = BTreeSet::new();
+                    for (layer, (_, lo, hi)) in layers.iter().enumerate() {
+                        let (t, u) = (tag(layer, s)?, tag(layer, next)?);
+                        // A segment the extrude split in two runs on through the vertex between.
+                        let (t, u) = if split { (Tag { end: None, ..t }, Tag { start: None, ..t }) } else { (t, u) };
+                        o.extend(self.junction(t, u, *lo, *hi)?);
+                    }
+                    o.into_iter().collect()
                 }
                 _ => return None,
             };
@@ -441,9 +503,10 @@ impl<'a> Context<'a> {
             let (front, back) = (from_p3(e.absolute_front().point()), from_p3(e.absolute_back().point()));
             let (h1, h2) = (self.plane.height(front), self.plane.height(back));
             let (lo, hi) = (h1.min(h2), h1.max(h2));
+            let middle = || crate::heal::edge_points(e).get(2).copied();
             let o = match (x, y) {
-                (Spec::Wall { .. }, Spec::Cap { .. }) => self.cap_edge(x.end(lo, self.tol)?.tag, cap_of.get(j)?.as_ref()?)?,
-                (Spec::Cap { .. }, Spec::Wall { .. }) => self.cap_edge(y.end(lo, self.tol)?.tag, cap_of.get(i)?.as_ref()?)?,
+                (Spec::Wall { .. }, Spec::Cap { .. }) => self.cap_edge(x.end(lo, self.tol)?.tag, cap_of.get(j)?.as_ref()?, middle()?)?,
+                (Spec::Cap { .. }, Spec::Wall { .. }) => self.cap_edge(y.end(lo, self.tol)?.tag, cap_of.get(i)?.as_ref()?, middle()?)?,
                 (Spec::Wall { .. }, Spec::Wall { .. }) if hi - lo <= self.tol => {
                     // One over the other at a level: the lower first.
                     let (below, above) = match (x.top(lo, self.tol), y.bottom(lo, self.tol)) {

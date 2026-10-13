@@ -461,8 +461,9 @@ fn hand_written_part_in_inches_with_colour() {
     assert_eq!(imp.tree[0].name, "Widget");
 }
 
-#[test]
-fn hand_written_assembly() {
+/// A cube part (in cm) placed twice in a millimetre assembly: the file asks one brep item for
+/// two bodies.
+fn two_instance_assembly() -> String {
     let mut t = String::from(HEAD);
     t += "#8=PRODUCT_DEFINITION_CONTEXT('part definition',#9,'design');\n#9=APPLICATION_CONTEXT('');\n";
     t += &cube_entities();
@@ -489,6 +490,12 @@ fn hand_written_assembly() {
         t += &format!("#{}=CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#{},#{});\n", n + 4, n + 3, n + 1);
     }
     t += TAIL;
+    t
+}
+
+#[test]
+fn hand_written_assembly() {
+    let t = two_instance_assembly();
     let imp = step_import(&t).unwrap();
     assert_same_import(&step_import_with_workers(&t, 1).unwrap(), &step_import_with_workers(&t, 8).unwrap());
     let expanded = t.replace("(#101,#65)", "(#101,#2000,#2001,#2002,#2003,#65)");
@@ -514,6 +521,43 @@ fn hand_written_assembly() {
     assert!(root.children.iter().all(|c| c.name == "Block" && c.bodies.len() == 1));
     assert_eq!(imp.bodies[1].path, vec!["Assembly".to_string(), "Block".to_string()]);
     assert!((root.children[1].transform[3][0] - 100.0).abs() < 1e-9);
+}
+
+/// The import keeps a conversion only where the file can ask for the item again. A flat file of
+/// separate solids converts each item exactly once (no second copy of the whole import is held);
+/// an assembly that instances one item keeps it, and each instance still gets geometry of its
+/// own. Both files import to the same bodies either way.
+#[test]
+fn repeated_items_are_shared_and_one_use_items_are_not() {
+    let a = box_solid(Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0)).unwrap();
+    let b = box_solid(Vec3::new(20.0, 0.0, 0.0), Vec3::new(30.0, 10.0, 10.0)).unwrap();
+    let flat = step_export(&[&a, &b], "test").unwrap();
+    let ex = p21::parse(&flat).unwrap();
+    let mut rd = Reader::new(&ex, 1);
+    rd.index();
+    assert_eq!(rd.once.len(), 2, "each solid of a flat file is converted once");
+    let imp = step_import(&flat).unwrap();
+    assert_eq!(imp.bodies.len(), 2);
+    assert!(imp.bodies.iter().all(|b| b.closed));
+    let vol: f64 = imp.bodies.iter().map(|b| measure(&b.body).unwrap().volume).sum();
+    assert!(rel(vol, 2000.0) < 1e-6, "{vol}");
+
+    let assembly = two_instance_assembly();
+    let ex = p21::parse(&assembly).unwrap();
+    let mut rd = Reader::new(&ex, 1);
+    rd.index();
+    assert!(rd.once.is_empty(), "an assembly may convert an item again for the second instance");
+    let imp = step_import(&assembly).unwrap();
+    assert_eq!(imp.bodies.len(), 2);
+    assert!(imp.bodies.iter().all(|b| b.name == "Cube" && b.closed));
+    let boxes: Vec<_> = imp.bodies.iter().map(|b| measure(&b.body).unwrap()).collect();
+    for m in &boxes {
+        assert!(rel(m.volume, 1000.0) < 1e-9, "{}", m.volume);
+    }
+    // Each instance owns its placed geometry: the two bodies are not one shared solid.
+    assert!(!imp.bodies[0].body.same(&imp.bodies[1].body));
+    // The two instances sit at their own placements, so the second conversion was not skipped.
+    assert!(boxes[1].bbox.min.dist(Vec3::new(90.0, 0.0, 0.0)) < 1e-6, "{:?}", boxes[1].bbox);
 }
 
 #[test]

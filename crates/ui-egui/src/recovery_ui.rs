@@ -94,14 +94,10 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                 app.recoverable.insert(0, e);
                 return;
             }
-            if app.run("doc.recover", json!({"id": e.id, "dir": dir_s})).is_ok() {
-                // Ours now: autosave it under this app's entry before the old entry goes.
-                let kept = app.autosave.as_mut().map(|a| a.save(&app.session));
-                if let Some(Ok(_)) = kept {
-                    let _ = app.run("doc.recovery_discard", json!({"id": e.id, "dir": dir_s}));
-                }
-                app.set_status(format!("recovered {}: save it to keep it", e.name), false);
-            }
+            // Rebuilt off the window thread like any other file; once it is in, it is
+            // autosaved under this app's entry before the old entry goes.
+            let kind = crate::file_load::Kind::Recover { id: e.id.clone(), dir: dir_s };
+            let _ = crate::file_load::begin_request(app, crate::file_load::Request::new(&e.name, kind));
         } else {
             let _ = app.run("doc.recovery_discard", json!({"id": e.id, "dir": dir_s}));
         }

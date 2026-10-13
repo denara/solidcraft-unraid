@@ -1,6 +1,6 @@
 use std::f64::consts::PI;
 
-use solidcraft_geom::{Loop2, Plane, Region2, Vec2, Vec3};
+use solidcraft_geom::{Loop2, Plane, Region2, Seg2, Vec2, Vec3};
 
 use crate::*;
 
@@ -382,6 +382,36 @@ fn fillet_max_finds_the_largest_radius_that_works() {
     assert!(fillet_max(&b, &[Vec3::new(500.0, 0.0, 5.0)], 1.0).is_none());
 }
 
+/// Edges that share no face get their own largest radius: a 2 mm fin's top edge takes at most
+/// its thickness, while a corner of the block it stands on, far from it, keeps the 4 asked for.
+/// Edges that limit each other (the post's four, sharing faces) still share one.
+#[test]
+fn fillet_max_each_reduces_only_where_the_radius_does_not_fit() {
+    let (block, fin) = (40.0 * 30.0 * 20.0, 2.0 * 30.0 * 10.0);
+    let body = boolean(
+        &box_solid(Vec3::ZERO, Vec3::new(40.0, 30.0, 20.0)).unwrap(),
+        &box_solid(Vec3::new(19.0, 0.0, 20.0), Vec3::new(21.0, 30.0, 30.0)).unwrap(),
+        BoolOp::Union,
+    )
+    .unwrap()
+    .unwrap();
+    let edges = [Vec3::new(21.0, 15.0, 30.0), Vec3::new(40.0, 0.0, 10.0)];
+    assert!(matches!(fillet(&body, &edges, 4.0), Err(KernelError::TooLarge(_))));
+    let (one, _) = fillet_max(&body, &edges, 4.0).unwrap();
+    let (radii, b) = fillet_max_each(&body, &edges, 4.0).unwrap();
+    assert_eq!(radii.get(1), Some(&4.0), "{radii:?}");
+    let fin_r = radii.first().copied().unwrap();
+    assert!(fin_r < 4.0 && (fin_r - one).abs() < 1e-9, "{radii:?}, one radius {one}");
+    assert!(b.validity().is_empty(), "{:?}", b.validity());
+    // Each round takes (1 − π/4)·r² along its edge: the fin's 30 long, the corner's 20.
+    let removed = (1.0 - PI / 4.0) * (fin_r * fin_r * 30.0 + 16.0 * 20.0);
+    assert!(rel(measure(&b).unwrap().volume, block + fin - removed) < 2e-4);
+    // The post's four edges limit each other: one radius, as `fillet_max`.
+    let post = box_solid(Vec3::new(14.0, 0.0, 0.0), Vec3::new(28.0, 6.0, 10.0)).unwrap();
+    let mids = [Vec3::new(14.0, 0.0, 5.0), Vec3::new(28.0, 0.0, 5.0), Vec3::new(14.0, 6.0, 5.0), Vec3::new(28.0, 6.0, 5.0)];
+    assert_eq!(fillet_max_each(&post, &mids, 3.5).map(|x| x.0), Some(vec![3.0; 4]));
+}
+
 /// A corner's rounds too large for its faces are refused as too large, so a fit can reduce
 /// them, also where only the corner build finds it (the edge-by-edge blend failing otherwise).
 #[test]
@@ -427,6 +457,37 @@ fn tapered_extrudes() {
     assert!(rel(m.volume, v) < 5e-4, "{} vs {v}", m.volume);
     assert!(m.bbox.max.z < 1e-6 && m.bbox.min.z > -10.0 - 1e-6, "{:?}", m.bbox);
     assert!(extrude_tapered(&Plane::XY, &c, 10.0, 1.0, -60f64.to_radians()).is_err(), "closes the profile");
+}
+
+/// A slot (two lines and two half-circles, tangent) tapered inward: every edge moves in by
+/// d = z · tan 8°, so A(d) = A₀ − P·d + π·d² (#546). An arc meeting a line at a corner is refused.
+#[test]
+fn tapered_extrude_of_lines_and_arcs() {
+    let (r, l, h, a) = (5.0, 20.0, 12.0, 8f64.to_radians());
+    let slot = Loop2 {
+        segs: vec![
+            Seg2::Line { a: Vec2::new(0.0, -r), b: Vec2::new(l, -r) },
+            Seg2::Arc { center: Vec2::new(l, 0.0), radius: r, start: -PI / 2.0, sweep: PI },
+            Seg2::Line { a: Vec2::new(l, r), b: Vec2::new(0.0, r) },
+            Seg2::Arc { center: Vec2::ZERO, radius: r, start: PI / 2.0, sweep: PI },
+        ],
+    };
+    let b = extrude_tapered(&Plane::XY, &Region2 { outer: slot, holes: vec![] }, h, 1.0, -a).unwrap();
+    let (a0, p, t) = (2.0 * r * l + PI * r * r, 2.0 * l + 2.0 * PI * r, a.tan());
+    let v = a0 * h - p * t * h * h / 2.0 + PI * t * t * h.powi(3) / 3.0;
+    let m = measure(&b).unwrap();
+    assert!(rel(m.volume, v) < 5e-4, "{} vs {v}", m.volume);
+    assert_eq!(m.merged.faces, 6);
+    // A quarter disc: the arc meets both lines at right angles.
+    let quarter = Loop2 {
+        segs: vec![
+            Seg2::Line { a: Vec2::ZERO, b: Vec2::new(r, 0.0) },
+            Seg2::Arc { center: Vec2::ZERO, radius: r, start: 0.0, sweep: PI / 2.0 },
+            Seg2::Line { a: Vec2::new(0.0, r), b: Vec2::ZERO },
+        ],
+    };
+    let e = extrude_tapered(&Plane::XY, &Region2 { outer: quarter, holes: vec![] }, h, 1.0, a).unwrap_err();
+    assert!(e.to_string().contains("arc meets another edge at a corner"), "{e}");
 }
 
 #[test]
@@ -1536,6 +1597,21 @@ fn draft_of_a_round_ended_pocket() {
     assert!(rel(v, 80.0 * 60.0 * 25.0 - pocket) < 1e-4, "{v} vs {}", 80.0 * 60.0 * 25.0 - pocket);
 }
 
+/// A round wall is stored in pieces (a cylinder's two halves); one pick drafts all of it (#547).
+/// A hole drafted from the top narrows going down: a frustum from R 10 to 10 − 25 · tan 5°.
+#[test]
+fn draft_of_a_round_hole_from_one_pick() {
+    let block = box_solid(Vec3::ZERO, Vec3::new(60.0, 60.0, 25.0)).unwrap();
+    let hole = cylinder(Vec3::new(30.0, 30.0, -1.0), Vec3::Z, 10.0, 27.0).unwrap();
+    let b = boolean(&block, &hole, BoolOp::Cut).unwrap().unwrap();
+    let a = 5f64.to_radians();
+    let d = draft(&b, &[Vec3::new(40.0, 30.0, 12.5)], &Plane::XY.offset(25.0), Vec3::Z, a).unwrap();
+    let (big, small) = (10.0, 10.0 - 25.0 * a.tan());
+    let want = 60.0 * 60.0 * 25.0 - PI * 25.0 / 3.0 * (big * big + big * small + small * small);
+    let m = measure(&d).unwrap();
+    assert!(rel(m.volume, want) < 1e-4, "{} vs {want}", m.volume);
+}
+
 #[test]
 fn rounded_corners_rounded_again_make_spheres() {
     // Vertical edges first, then the top and bottom loops with the same radius: the corners
@@ -2171,6 +2247,33 @@ fn shell_open_beside_a_round_as_large_as_the_wall_is_refused() {
     }
     let f = fillet(&b, &loop_, 1.5).unwrap();
     assert!(shell(&f, &bottom, 2.0).unwrap().validity().is_empty());
+}
+
+#[test]
+fn loft_joined_onto_a_box_top_is_one_shell() {
+    // #396: a loft from a Ø12 circle on the box top (z = 20) to a hexagon at z = 35. The union
+    // returned both shells side by side, touching on the disc, which an STL shows as two parts.
+    let bx = box_solid(Vec3::new(-20.0, -15.0, 0.0), Vec3::new(20.0, 15.0, 20.0)).unwrap();
+    let hex: Vec<Vec2> = (0..6).map(|k| Vec2::new(4.0 * (PI / 3.0 * k as f64).cos(), 4.0 * (PI / 3.0 * k as f64).sin())).collect();
+    let loft_at = |x: f64| {
+        let hex: Vec<Vec2> = hex.iter().map(|p| *p + Vec2::new(x, 0.0)).collect();
+        loft(&[(Plane::XY.offset(20.0), Loop2::circle(Vec2::new(x, 0.0), 6.0)), (Plane::XY.offset(35.0), Loop2::polygon(&hex))]).unwrap()
+    };
+    let l = loft_at(0.0);
+    let u = boolean(&bx, &l, BoolOp::Union).unwrap().unwrap();
+    assert_eq!((u.shell_count(), u.face_count()), (1, 6 + 8 - 1), "the loft's bottom disc goes");
+    assert!(u.validity().is_empty(), "{:?}", u.validity());
+    let (v, vl) = (measure(&u).unwrap().volume, measure(&l).unwrap().volume);
+    assert!(rel(v, 24000.0 + vl) < 1e-5, "{v} vs {}", 24000.0 + vl);
+    // Either order of the operands.
+    let w = boolean(&l, &bx, BoolOp::Union).unwrap().unwrap();
+    assert_eq!(w.shell_count(), 1);
+    assert!(rel(measure(&w).unwrap().volume, 24000.0 + vl) < 1e-5);
+    // Overhanging the box edge (x = 20) the disc is not inside the top face: whatever the join
+    // does, it never returns touching shells as one body.
+    if let Ok(Some(r)) = boolean(&bx, &loft_at(17.0), BoolOp::Union) {
+        assert!(r.shell_count() == 1 || r.union_lumps().is_ok(), "{} touching shells", r.shell_count());
+    }
 }
 
 /// A disc whose circular edge is rounded smaller than the wall (#319): moved in by the

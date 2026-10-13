@@ -69,7 +69,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .params("entities: [curve/point ids], base: [x,y] or point ref, factor: number"),
     CommandSpec::new("sketch.move", "Move/Copy Sketch Entities", move_copy)
         .enabled(in_sketch)
-        .params(concat!("entities: [ids], translate?: [dx,dy], angle?: deg, center?: [x,y], copy?: bool", created_doc!())),
+        .params(concat!("entities: [ids], translate?: [dx,dy], angle?: deg, center?: [x,y], copy?: bool; picking a text outline or linked point transforms its whole text source once, and copies remain editable text", created_doc!())),
     CommandSpec::new("sketch.mirror", "Mirror", mirror)
         .at("SKETCH", "CREATE")
         .icon("sketch_mirror")
@@ -1458,19 +1458,35 @@ fn transform_in_place(sk: &mut Sketch, cs: &[usize], ps: &[usize], f: &dyn Fn(Ve
 
 fn move_copy(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "sketch.move";
-    let t = p.get("translate").and_then(vec2).unwrap_or(Vec2::ZERO);
-    let ang = num(p, "angle").unwrap_or(0.0).to_radians();
+    let t = if p.get("translate").is_some() { req_vec2(cmd, p, "translate")? } else { Vec2::ZERO };
+    let ang = if p.get("angle").is_some() { num(p, "angle").ok_or_else(|| bad(cmd, "`angle` must be finite"))? } else { 0.0 }.to_radians();
     let copy = bool_(p, "copy").unwrap_or(false);
     let (out, info) = edit(s, p, cmd, false, |sk, _| {
-        let (cs, ps) = entities(sk, p, cmd)?;
+        let (mut cs, mut ps) = entities(sk, p, cmd)?;
         let c = if p.get("center").is_some() { point_or_ref(sk, p, "center", cmd)? } else { Vec2::ZERO };
         let rot = rotate(c, ang);
         let f = move |q: Vec2| rot(q) + t;
+        let mut links = Vec::new();
+        for entity in string_list(p, "entities") {
+            if let Some(link) = super::sketch_create::text_link(sk, &entity)
+                && !links.iter().any(|old| old == link)
+            {
+                links.push(link.to_owned());
+            }
+        }
+        cs.retain(|&i| !sk.curves.get(i).and_then(|c| c.link.as_ref()).is_some_and(|link| links.contains(link)));
+        ps.retain(|&i| !sk.points.get(i).and_then(|p| p.link.as_ref()).is_some_and(|link| links.contains(link)));
+        let mut text_curves = Vec::new();
+        for link in links {
+            text_curves.extend(super::sketch_create::move_text(sk, &link, t, ang, c, copy)?);
+        }
         if copy {
-            let (m, _) = copy_through(sk, &cs, &ps, &f, false, &|_| false, 1.0)?;
+            let (mut m, _) = copy_through(sk, &cs, &ps, &f, false, &|_| false, 1.0)?;
+            m.extend(text_curves);
             return Ok(ids_of(sk, &m));
         }
         transform_in_place(sk, &cs, &ps, &f, 1.0, cmd)?;
+        cs.extend(text_curves);
         Ok(ids_of(sk, &cs))
     })?;
     Ok(json!({"curves": out, "sketch": info}))

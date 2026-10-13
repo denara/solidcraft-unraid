@@ -1,0 +1,10 @@
+[
+ {"call": "engine.execute", "params": {"command": "solid.box", "params": {"length": 40, "width": 20, "height": 10}}},
+ {"call": "engine.execute", "params": {"command": "solid.cylinder", "params": {"radius": 4, "height": 12, "base": [10, 10, 10]}}},
+ {"call": "engine.execute", "params": {"command": "view.save", "params": {"name": "Photo", "camera": {"target": [20, 10, 8], "yaw": 2.3, "pitch": 0.35, "distance": 120}}}},
+ {"call": "ui.view", "params": {"view": "top"}},
+ {"shot": "view_apply_before_top"},
+ {"call": "engine.execute", "params": {"command": "view.apply", "params": {"view": "Photo"}}},
+ {"expect": {"camera_matches": "Photo"}},
+ {"shot": "view_apply_after_photo"}
+]

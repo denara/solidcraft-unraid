@@ -1,0 +1,8 @@
+{
+  "description": "Issue #674: a patterned cylinder cap touches only part of a block face; fuse the shared region without adding material beyond the edge.",
+  "commands": [
+    {"command": "solid.box", "params": {"height": 37.5, "length": 25.0, "width": 47.5}},
+    {"command": "solid.cylinder", "params": {"axis": [1.0, 0.0, 0.0], "base": [0.0, 7.5, 0.0], "height": 2.5, "operation": "join", "radius": 5.0}},
+    {"command": "solid.pattern.circular", "params": {"axis": "Z", "count": 4, "features": ["Cylinder1"]}}
+  ]
+}

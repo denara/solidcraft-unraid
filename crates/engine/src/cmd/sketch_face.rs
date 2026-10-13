@@ -105,10 +105,10 @@ fn capture_impl(s: &Session, value: &Value, cmd: &str, internal: bool) -> Result
             let inverse = mat_inverse(&frame).ok_or_else(|| bad(cmd, "invalid selected face frame"))?;
             let local_point = apply_point(&inverse, point);
             let tolerance = (body.body.size() * 1e-4).max(1e-5);
-            // A flat face of a sheet metal body attaches to its panel: the exact plane comes from
-            // the panel's flat region and fold, and the sketch keeps the face's name to follow it.
+            // A flat face of a sheet metal body attaches to its panel (or a panel's rim): the
+            // exact plane comes from the panel's flat region and fold, and the sketch keeps the
+            // face's name to follow it.
             if !fixed
-                && !internal
                 && let Some(sheet) = state.sheets.iter().find(|sheet| sheet.body == body.name)
                 && let Some((face, plane)) = sheet.panel_face_at(local_point, tolerance * 10.0)
             {

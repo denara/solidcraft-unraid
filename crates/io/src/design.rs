@@ -5,7 +5,9 @@ use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
 mod native_cache;
+mod thumbnail;
 pub use native_cache::{DesignGeometry, read_design_geometry};
+pub use thumbnail::{THUMBNAIL_SIZE, read_design_thumbnail, read_design_thumbnail_file};
 
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -111,6 +113,18 @@ pub fn write_design_container_with_cache(
     preview: Option<&DesignPreview>,
     geometry: Option<&[DesignGeometry]>,
 ) -> Result<Vec<u8>> {
+    write_design_container_with_thumbnail(doc, compression, preview, geometry, None)
+}
+
+/// Include a bounded portable PNG picture when one is already available.
+/// Unsupported headers or oversized pictures are omitted without changing the design.
+pub fn write_design_container_with_thumbnail(
+    doc: &Document,
+    compression: DesignCompression,
+    preview: Option<&DesignPreview>,
+    geometry: Option<&[DesignGeometry]>,
+    thumbnail: Option<&[u8]>,
+) -> Result<Vec<u8>> {
     let mut writer = PackageWriter { zip: zip::ZipWriter::new(Cursor::new(Vec::new())), names: BTreeSet::new(), expanded: 0, resolved: 0 };
     let mut features = Vec::with_capacity(doc.features.len());
     for feature in &doc.features {
@@ -183,6 +197,9 @@ pub fn write_design_container_with_cache(
     {
         writer.part("cache/preview.json", &manifest, false)?;
         writer.part("cache/preview.bin", &data, false)?;
+    }
+    if let Some(png) = thumbnail {
+        thumbnail::write(&mut writer, png, &metadata)?;
     }
     let bytes = writer.zip.finish().map_err(invalid)?.into_inner();
     if bytes.len() > MAX_DESIGN_BYTES {
@@ -463,6 +480,11 @@ impl<R: Read + Seek> DesignContainerReader<R> {
         // An explicitly saved mesh avoids tessellation. Native cache is the default
         // fallback, generating a bounded provisional mesh without source imports.
         read_preview(&mut self.reader).ok().or_else(|| native_cache::geometry_preview(self.geometry()?).ok())
+    }
+
+    /// Portable PNG picture only; no source blobs or geometry are evaluated.
+    pub fn thumbnail(&mut self) -> Option<Vec<u8>> {
+        thumbnail::read(&mut self.reader).ok()
     }
 
     /// Native geometry is provisional, never a substitute for rebuilding the document.
@@ -835,6 +857,53 @@ mod tests {
             zip.write_all(bytes).unwrap();
         }
         zip.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn portable_thumbnail_is_keyed_bounded_and_does_not_read_sources() {
+        // IO validates an opaque PNG header/hash; UI tests exercise real PNG decoding.
+        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        png.extend(240u32.to_be_bytes());
+        png.extend(150u32.to_be_bytes());
+        let mut doc = Document::from_json(&document().to_json()).unwrap();
+        if let FeatureKind::Import { step, .. } = &mut doc.features[0].kind {
+            *step = "source data".repeat(250_000);
+        }
+        let bytes = write_design_container_with_thumbnail(&doc, DesignCompression::Fast, None, None, Some(&png)).unwrap();
+        let count = std::rc::Rc::new(std::cell::Cell::new(0));
+        let mut reader = DesignContainerReader::new(CountingReader { source: Cursor::new(bytes.clone()), count: count.clone() }).unwrap();
+        assert_eq!(reader.thumbnail(), Some(png.clone()));
+        assert!(count.get() < 256 * 1024);
+        assert_eq!(reader.read_document().unwrap(), doc);
+        let original = parts(&bytes);
+        for field in ["format", "app", "document", "payload"] {
+            let mut entries = original.clone();
+            let mut key: Value = serde_json::from_slice(&entries["cache/thumbnail.json"]).unwrap();
+            key[field] = json!("mismatch");
+            entries.insert("cache/thumbnail.json".into(), serde_json::to_vec(&key).unwrap());
+            let changed = package(&entries);
+            assert!(read_design_thumbnail(&changed).is_none());
+            assert_eq!(crate::read_design(&changed).unwrap(), doc);
+        }
+        let mut entries = original.clone();
+        let source = entries.keys().find(|k| k.ends_with(".step")).unwrap().clone();
+        entries.insert(source, b"corrupt source".to_vec());
+        let changed = package(&entries);
+        assert_eq!(read_design_thumbnail(&changed), Some(png));
+        assert!(crate::read_design(&changed).is_err());
+        for n in [0, 1, 8, bytes.len() / 2, bytes.len() - 1] {
+            assert!(read_design_thumbnail(&bytes[..n]).is_none());
+        }
+        for i in (0..bytes.len()).step_by((bytes.len() / 128).max(1)) {
+            let mut changed = bytes.clone();
+            changed[i] ^= 0xff;
+            assert!(std::panic::catch_unwind(|| read_design_thumbnail(&changed)).is_ok());
+        }
+        for invalid in [vec![], vec![0; 300_000]] {
+            let bytes = write_design_container_with_thumbnail(&doc, DesignCompression::Fast, None, None, Some(&invalid)).unwrap();
+            assert!(read_design_thumbnail(&bytes).is_none());
+            assert_eq!(crate::read_design(&bytes).unwrap(), doc);
+        }
     }
 
     #[test]

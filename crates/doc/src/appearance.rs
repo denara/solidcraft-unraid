@@ -147,7 +147,7 @@ impl Document {
             .get(name)
             .cloned()
             .or_else(|| self.appearances.components.get(&self.model_body_component(body)).cloned())
-            .or_else(|| self.materials.get(name).and_then(|material| material_look(material)))
+            .or_else(|| self.materials.get(name).and_then(|material| self.material_look(material)))
     }
     /// Effective body opacity, including paint carried from an imported body.
     pub fn model_body_opacity(&self, body: &crate::ModelBody) -> f64 {
@@ -168,7 +168,7 @@ impl Document {
                 let c = self.body_component(name, feature);
                 (c != 0).then(|| self.appearances.components.get(&c).cloned()).flatten()
             })
-            .or_else(|| self.materials.get(name).and_then(|m| material_look(m)))
+            .or_else(|| self.materials.get(name).and_then(|m| self.material_look(m)))
     }
 
     /// Face appearances on a body: (point on the face, look).

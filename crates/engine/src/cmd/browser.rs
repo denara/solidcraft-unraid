@@ -33,10 +33,13 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("view.rename", "Rename Named View", view_rename).params("view: name, name"),
     CommandSpec::new("view.delete", "Delete Named View", view_delete).params("view: name"),
     CommandSpec::new("view.list", "List Named Views", view_list).noundo().doc_only(),
+    CommandSpec::new("view.apply", "Restore Named View", view_apply).icon("camera").noundo().params(
+        "view?: front|back|top|bottom|left|right|iso|home (frames the model) | a named view's name; or camera?: {target: [x,y,z], yaw, pitch, distance, fov?} (radians, mm) → camera. The viewport (and the MCP screenshot) moves there. View state: not saved, not an undo step",
+    ),
     CommandSpec::new("browser.order", "Order Browser Items", order).params("folder, component?, order: [keys] (the folder's items in display order)"),
     CommandSpec::new("browser.visibility", "Show/Hide", visibility).icon("eye").noundo().params(
         "visible: bool; items?: [sketch id or name | body name | construction name | O|X|Y|Z|XY|XZ|YZ]; \
-         or folder?: bodies|sketches|construction|origin (all of it); or paths?: [[occurrence ids]] (exact placements and descendants), isolate?: bool (requires paths and visible:true). View state: not saved, not an undo step",
+         or folder?: bodies|sketches|construction|origin (all of it); or paths?: [[occurrence ids]] (exact placements and descendants), isolate?: bool (requires paths and visible:true). Saved with the design; not an undo step",
     ),
 ];
 
@@ -373,6 +376,38 @@ fn view_save(s: &mut Session, p: &Value) -> Result<Value> {
     d.named_views.retain(|x| x.name != name);
     d.named_views.push(v);
     Ok(json!({ "view": name }))
+}
+
+fn view_apply(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "view.apply";
+    let cam = match (str_(p, "view"), p.get("camera")) {
+        (Some(_), Some(_)) => return Err(bad(cmd, "give `view` or `camera`, not both")),
+        (None, None) => return Err(bad(cmd, "`view` (a name) or `camera` is required")),
+        (None, Some(c)) => {
+            let v: solidcraft_doc::NamedView = serde_json::from_value(c.clone()).map_err(|e| bad(cmd, format!("bad camera: {e}")))?;
+            camera_of(&v)
+        }
+        // Standard view names come first, as in the browser's Named Views folder.
+        (Some(name), None) => match crate::render::StandardView::parse(name) {
+            Some(sv) => {
+                let mut c = crate::view::home_camera(s);
+                c.set_view(sv);
+                c.fit(&crate::view::bounds(s));
+                c
+            }
+            None => s.doc.named_views.iter().find(|v| v.name == name).map(camera_of).ok_or_else(|| bad(cmd, format!("no named view `{name}`")))?,
+        },
+    };
+    if !cam.is_valid() || !cam.fov.is_finite() || cam.fov < 0.0 {
+        return Err(bad(cmd, "the camera must be finite with a positive distance"));
+    }
+    s.camera = Some(cam);
+    Ok(json!({ "camera": cam }))
+}
+
+/// The orbit camera of a named view (Z up, no roll).
+fn camera_of(v: &solidcraft_doc::NamedView) -> crate::render::Camera {
+    crate::render::Camera { target: v.target, yaw: v.yaw, pitch: v.pitch, distance: v.distance, fov: v.fov, ..Default::default() }
 }
 
 fn view_index(s: &Session, p: &Value, cmd: &str) -> Result<usize> {
@@ -722,6 +757,35 @@ mod tests {
         assert!((width(&mut s) - 50.8).abs() < 1e-6, "still 50.8 mm: {r}");
         assert_eq!(r["kept"], json!(["w"]));
         assert_eq!(s.doc.param("w").map(|p| p.expr.as_str()), Some("2 in"));
+    }
+
+    #[test]
+    fn applying_a_named_view_or_camera_moves_the_view() {
+        let mut s = Session::default();
+        run(&mut s, "solid.box", json!({"length": 40, "width": 20, "height": 10}));
+        run(&mut s, "view.save", json!({"name": "Photo", "camera": {"target": [1, 2, 3], "yaw": 0.5, "pitch": -0.6, "distance": 150}}));
+        let undo = s.undo.len();
+        assert!(s.camera.is_none());
+        let r = run(&mut s, "view.apply", json!({"view": "Photo"}));
+        let c = s.camera.expect("a camera for the view");
+        assert_eq!((c.target, c.yaw, c.pitch, c.distance), (solidcraft_geom::Vec3::new(1.0, 2.0, 3.0), 0.5, -0.6, 150.0));
+        assert_eq!(r["camera"]["yaw"], 0.5);
+        // A standard view looks from its direction and frames the model.
+        run(&mut s, "view.apply", json!({"view": "top"}));
+        let c = s.camera.expect("a camera for the top view");
+        assert!((c.pitch - std::f64::consts::FRAC_PI_2).abs() < 1e-3 && (c.target.x - 20.0).abs() < 1e-6, "{c:?}");
+        run(&mut s, "view.apply", json!({"camera": {"target": [0, 0, 0], "yaw": 1, "pitch": 0.2, "distance": 80, "fov": 0.5}}));
+        assert_eq!(s.camera.map(|c| (c.yaw, c.distance, c.fov)), Some((1.0, 80.0, 0.5)));
+        assert_eq!(s.undo.len(), undo, "view state, not an undo step");
+        for p in [
+            json!({}),
+            json!({"view": "Nope"}),
+            json!({"view": "Photo", "camera": {"target": [0, 0, 0], "yaw": 0, "pitch": 0, "distance": 1}}),
+            json!({"camera": {"target": [0, 0, 0], "yaw": 0, "pitch": 0, "distance": 0}}),
+            json!({"camera": "x"}),
+        ] {
+            assert!(s.execute("view.apply", &p).is_err(), "{p}");
+        }
     }
 
     #[test]

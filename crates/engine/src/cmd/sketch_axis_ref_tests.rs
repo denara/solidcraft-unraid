@@ -232,7 +232,8 @@ fn bad_line_references_are_errors_and_change_nothing() {
     // A constraint the sketch refuses rolls the axis line back with it.
     run(&mut s, "sketch.constraint.horizontal_vertical", json!({"line": "b", "mode": "horizontal"}));
     let before_redundant = s.doc.to_json();
-    assert!(s.execute("sketch.constraint.parallel", &json!({"a": "b", "b": "x"})).is_err(), "already horizontal");
+    // (A redundant one is kept unless refused: refused here.)
+    assert!(s.execute("sketch.constraint.parallel", &json!({"a": "b", "b": "x", "if_redundant": "refuse"})).is_err(), "already horizontal");
     assert_eq!(s.doc.to_json(), before_redundant);
     assert!(axis_lines(&sketch(&s)).is_empty());
 }

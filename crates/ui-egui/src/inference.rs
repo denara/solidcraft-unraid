@@ -156,13 +156,15 @@ pub fn lines(sk: &Sketch, prev: Vec2, lp: Vec2, tol: f64) -> Option<Inference> {
 pub fn commit(app: &mut SolveApp, line: &str, end: Vec2) {
     let Some(i) = current().filter(|i| i.at.dist(end) < 1e-9) else { return };
     clear();
-    let (cmd, params) = match i.kind {
+    let (cmd, mut params) = match i.kind {
         Kind::Parallel => ("sketch.constraint.parallel", json!({"a": i.curve, "b": line})),
         Kind::Perpendicular => ("sketch.constraint.perpendicular", json!({"a": i.curve, "b": line})),
         Kind::Tangent => ("sketch.constraint.tangent", json!({"a": i.curve, "b": line})),
         Kind::Extension => ("sketch.constraint.coincident", json!({"a": format!("{line}.end"), "b": i.curve})),
     };
-    // An inference that would over-constrain the sketch is simply not kept.
+    // An inference only adds what the sketch does not already have: one that is already implied
+    // (redundant) or would conflict is simply not kept.
+    params["if_redundant"] = json!("refuse");
     let _ = app.session.execute(cmd, &params);
 }
 

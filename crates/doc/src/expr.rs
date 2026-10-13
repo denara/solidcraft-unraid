@@ -350,6 +350,17 @@ pub fn is_literal(s: &str) -> bool {
     }
 }
 
+/// Is the expression a bare number without a unit, like `20` or `-1.5`?
+pub fn is_bare_number(s: &str) -> bool {
+    is_literal(s) && s.trim().trim_start_matches(['-', '+']).trim().parse::<f64>().is_ok()
+}
+
+/// The length unit of a design with these units: `mm` unless they name another length unit.
+pub fn length_unit_or_mm(units: &str) -> &str {
+    let u = units.trim();
+    if unit_info(u).is_some_and(|(k, _)| k == Kind::Length) { u } else { "mm" }
+}
+
 struct Parser<'a> {
     toks: Vec<Tok>,
     pos: usize,
@@ -942,5 +953,7 @@ mod tests {
         assert_eq!(rename_reference("10 mm", "mm", "x"), "10 mm");
         assert!(is_literal("20") && is_literal("-1.5 in") && is_literal("3 deg"));
         assert!(!is_literal("d1") && !is_literal("2 * 3") && !is_literal("2 width"));
+        assert!(is_bare_number(" -1.5 ") && is_bare_number("+2") && !is_bare_number("20 mm") && !is_bare_number("(2)"));
+        assert_eq!((length_unit_or_mm(" in "), length_unit_or_mm("deg"), length_unit_or_mm("")), ("in", "mm", "mm"));
     }
 }

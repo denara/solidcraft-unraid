@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use solidcraft_doc::{AxisRef, Direction, Extent, FeatureKind, Operation, PointExpr, ProfileSel, expr::Kind, point_expr};
 use solidcraft_geom::Vec3;
 
-use super::CommandSpec;
+use super::{CommandSpec, not_in_sketch};
 use crate::params::{bad, bool_, expr, req_expr, str_, string_list, vec2, vec3};
 use crate::{EngineError, Result, Session};
 
@@ -13,11 +13,11 @@ pub static COMMANDS: &[CommandSpec] = &[
         .at("SOLID", "CREATE")
         .icon("extrude")
         .key("E")
-        .params("distance: expr (or through_all: true); taper?: angle expr; sketch?: id|name (default: active or last sketch); profiles?: all | [index] | [{curves: [ids]}] (the profile whose outer loop is made of exactly these curves, or pieces of them; found again on every recompute, so it follows parameter changes; islands inside are its holes; an error when no profile or several match) | [{point:[x,y]}] (index and point picks are stored by their curves when that finds the same profile); face?: [x,y,z] (extrude a planar body face instead of a sketch profile); direction?: positive|negative|symmetric; distance2?; start_offset?: expr (along the sketch normal, also with direction: negative); to?: [x,y,z] (To Object: a face, vertex or point; to_offset?: expr past it); from?: [x,y,z] (From Object: start at that face or point); operation?: new|join|cut|intersect|auto (cut into a body, otherwise join existing solids; new in an empty component); targets?: [body]; name?; body_name?"),
+        .params("distance: expr (or through_all: true); taper?: angle expr; sketch?: id|name (default: active or last sketch); profiles?: all | [index] | [{curves: [ids]}] (the profile whose outer loop is made of exactly these curves, or pieces of them; found again on every recompute, so it follows parameter changes; islands inside are its holes; an error when no profile or several match) | [{point:[x,y]}] (index and point picks are stored by their curves when that finds the same profile); face?: [x,y,z] (extrude a planar body face instead of a sketch profile); face_body?: name (whose face, where faces of several bodies meet at the point); direction?: positive|negative|symmetric; distance2?; start_offset?: expr (along the sketch normal, also with direction: negative); to?: [x,y,z] (To Object: a face, vertex or point; to_offset?: expr past it); from?: [x,y,z] (From Object: start at that face or point); operation?: new|join|cut|intersect|auto (cut into a body, otherwise join existing solids; new in an empty component); targets?: [body]; name?; body_name?"),
     CommandSpec::new("solid.revolve", "Revolve", revolve)
         .at("SOLID", "CREATE")
         .icon("revolve")
-        .params("axis: sketch line id | x | y (sketch axes) | X|Y|Z (world); angle?: expr (default 360 deg); angle2?: expr (Two Sides: the other side's angle); direction?: symmetric (angle split either side, independent of axis direction); convention?: sketch_normal|legacy_axis_start (default sketch_normal; legacy retains older angular starts); to?: [x,y,z] (To Object: turn until that face, vertex or point); sketch?, profiles? | face: [x,y,z] (a planar body face as the profile), operation?, targets?, name?, body_name?"),
+        .params("axis: sketch line id | x | y (sketch axes) | X|Y|Z (world); angle?: expr (default 360 deg); angle2?: expr (Two Sides: the other side's angle); direction?: symmetric (angle split either side, independent of axis direction); convention?: sketch_normal|legacy_axis_start (default sketch_normal; legacy retains older angular starts); to?: [x,y,z] (To Object: turn until that face, vertex or point); sketch?, profiles? | face: [x,y,z] (a planar body face as the profile) and face_body?: name (whose face, where faces of several bodies meet), operation?, targets?, name?, body_name?"),
     CommandSpec::new("solid.sweep", "Sweep", sweep)
         .at("SOLID", "CREATE")
         .icon("sweep")
@@ -31,7 +31,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .at("SOLID", "MODIFY")
         .icon("fillet")
         .key("F")
-        .params("edges: [[x,y,z] point on edge | {body, index}]; radius: expr; body?; type?: constant|chord (radius is the width across)|variable (radius at the end nearest start, radius2 at the other); radius2?; start?: [x,y,z]; mid?: [[position 0…1 from start, radius expr], …] (variable radii between the ends); smooth?: bool (smooth instead of straight between the radii); fit?: exact|reduce (exact, the default: a radius too large for the geometry around the edges is refused; reduce: it is reduced to the largest that fits all of them, returned as `radius_applied` and noted in the feature's warning)"),
+        .params("edges: [[x,y,z] point on edge | {body, index}]; radius: expr; body?; type?: constant|chord (radius is the width across)|variable (radius at the end nearest start, radius2 at the other; one end may be 0, where the round closes to the corner)|spline (the radius along the edge is a clamped B-spline from the end nearest start: radius is its first control radius, radii the rest, knots its knot vector from 0 to 1; one end may be 0); radius2?; start?: [x,y,z]; radii?: [expr, …]; knots?: [number, …]; mid?: [[position 0…1 from start, radius expr], …] (variable radii between the ends); smooth?: bool (smooth instead of straight between the radii); fit?: exact|reduce|taper (exact, the default: a radius too large for the geometry around the edges is refused; reduce: where it doesn't fit it is reduced to the largest that does, one radius for edges sharing a face; the smallest used is returned as `radius_applied`, each edge's as `radii_applied: [{edge: [x,y,z], radius}]`, and noted in the feature's warning; taper: along each straight edge between planar faces where it doesn't fit, the radius follows the room there as a smooth spline, down to 0 where a face closes to a point, noted in the feature's warning)"),
     CommandSpec::new("solid.chamfer", "Chamfer", chamfer).at("SOLID", "MODIFY").icon("chamfer").params("edges: [[x,y,z] | {body, index}]; distance: expr; distance2?: expr (along the second face) | angle?: expr (from the first face); flip?: bool (which face is first: by default the one facing up most); body?"),
     CommandSpec::new("solid.combine", "Combine", combine).at("SOLID", "MODIFY").icon("combine").params("target: body; tools: [body]; operation?: join|cut|intersect; keep_tools?: bool; new_component?: bool (the result goes into a new component; component_name?)"),
     CommandSpec::new("solid.pattern.rectangular", "Rectangular Pattern", pattern_rect)
@@ -107,14 +107,14 @@ pub static COMMANDS: &[CommandSpec] = &[
         .icon("presspull")
         .key("Q")
         .params("face: [x,y,z] and distance: expr (positive adds material, negative cuts), or edges: [[x,y,z]…] and distance (a fillet)"),
-    CommandSpec::new("solid.move", "Move/Copy", move_bodies).at("SOLID", "MODIFY").icon("move").key("M").params("bodies: [names]; translate?: [x,y,z] (exprs or numbers); axis?: [x,y,z]; angle?: expr; copy?: bool (default false: keeps the original bodies and transforms a new copy instead of moving them in place)"),
+    CommandSpec::new("solid.move", "Move/Copy", move_bodies).at("SOLID", "MODIFY").icon("move").key("M").enabled(not_in_sketch).params("bodies: [names]; translate?: [x,y,z] (exprs or numbers); axis?: [x,y,z]; angle?: expr; copy?: bool (default false: keeps the original bodies and transforms a new copy instead of moving them in place)"),
 ];
 
 /// Where an extrude starts and which way is positive: a point inside the (first) profile or
 /// face, and the unit normal.
 fn extrude_base(s: &Session, p: &Value) -> Option<(Vec3, Vec3)> {
     if let Some(fp) = p.get("face").and_then(vec3) {
-        return Some((fp, super::face::face_normal(s, fp)?));
+        return Some((fp, super::face::face_normal_in(s, fp, str_(p, "face_body"))?));
     }
     let sid = feature_sketch(s, p, "Extrude").ok()?;
     let st = s.model.state();
@@ -365,6 +365,8 @@ pub(super) fn add_feature(s: &mut Session, p: &Value, kind: FeatureKind) -> Resu
 /// `add_feature`; `world` is false when `kind` is already in the active component's frame.
 fn add_feature_in(s: &mut Session, p: &Value, kind: FeatureKind, world: bool) -> Result<Value> {
     let name = str_(p, "name");
+    // The bodies before the feature, to say which ones it changed or removed.
+    let before = s.model.state();
     // Commands speak world coordinates; the feature is authored in the active component.
     let mut kind = kind;
     if world {
@@ -392,6 +394,10 @@ fn add_feature_in(s: &mut Session, p: &Value, kind: FeatureKind, world: bool) ->
             (Vec::new(), solidcraft_doc::sheet::sheet_edge_names(&s.model.state(), &points))
         }
         FeatureKind::SheetHem { edges, .. } => (Vec::new(), solidcraft_doc::sheet::sheet_edge_names(&s.model.state(), edges)),
+        // A conversion's bend edges are edges of the body it converts.
+        FeatureKind::SheetConvert { body, bends, .. } if !bends.is_empty() => {
+            (Vec::new(), solidcraft_doc::sheet::bend_edge_names(&s.model.state(), body, bends))
+        }
         _ => (Vec::new(), Vec::new()),
     };
     let face_names = {
@@ -474,8 +480,18 @@ fn add_feature_in(s: &mut Session, p: &Value, kind: FeatureKind, world: bool) ->
     let bodies: Vec<&str> = st.bodies.iter().map(|b| b.name.as_str()).collect();
     // The bodies this feature made, apart from the ones it changed or that were there (#374).
     let created: Vec<&str> = st.bodies.iter().filter(|b| b.feature == id).map(|b| b.name.as_str()).collect();
+    // Bodies that were there before and now have other geometry, and bodies that are gone.
+    let old: std::collections::HashMap<&str, &solidcraft_doc::kernel::Body> = before.bodies.iter().map(|b| (b.name.as_str(), &b.body)).collect();
+    let now: std::collections::HashSet<&str> = st.bodies.iter().map(|b| b.name.as_str()).collect();
+    let changed: Vec<&str> =
+        st.bodies.iter().filter(|b| b.feature != id && old.get(b.name.as_str()).is_some_and(|o| !o.same(&b.body))).map(|b| b.name.as_str()).collect();
+    let removed: Vec<&str> = before.bodies.iter().map(|b| b.name.as_str()).filter(|n| !now.contains(n)).collect();
     let fname = s.doc.feature(id).map(|f| f.name.clone()).unwrap_or_default();
-    Ok(json!({"feature": id, "name": fname, "bodies": bodies, "created_bodies": created, "ms": r.map(|r| r.ms)}))
+    // A warning (a Boolean that needed a retry, a reference found again elsewhere) is part of
+    // the reply: a script or an agent sees it without asking the timeline (#616).
+    let warning = r.as_ref().and_then(|r| r.warning.clone());
+    Ok(json!({"feature": id, "name": fname, "bodies": bodies, "created_bodies": created, "changed_bodies": changed,
+        "removed_bodies": removed, "warning": warning, "ms": r.map(|r| r.ms)}))
 }
 
 fn extrude(s: &mut Session, p: &Value) -> Result<Value> {
@@ -483,7 +499,7 @@ fn extrude(s: &mut Session, p: &Value) -> Result<Value> {
     // A planar body face extrudes like a profile: its boundary is copied into a sketch on it.
     let (sketch, face_profile) = match p.get("face").and_then(vec3) {
         Some(fp) => {
-            let (id, inside) = super::face::sketch_of_face(s, fp, cmd)?;
+            let (id, inside) = super::face::sketch_of_face(s, fp, cmd, str_(p, "face_body"))?;
             (id, Some(ProfileSel::Points { points: vec![inside] }))
         }
         None => (feature_sketch(s, p, cmd)?, None),
@@ -547,7 +563,7 @@ fn revolve(s: &mut Session, p: &Value) -> Result<Value> {
     // A planar body face revolves like a profile (its edges projected into a sketch on it).
     let (sketch, face_profile) = match p.get("face").and_then(vec3) {
         Some(fp) => {
-            let (id, inside) = super::face::sketch_of_face(s, fp, cmd)?;
+            let (id, inside) = super::face::sketch_of_face(s, fp, cmd, str_(p, "face_body"))?;
             s.active_sketch = None;
             (id, Some(ProfileSel::Points { points: vec![inside] }))
         }
@@ -600,12 +616,34 @@ fn revolve(s: &mut Session, p: &Value) -> Result<Value> {
     add_feature(s, p, kind)
 }
 
-fn radius_expr(p: &Value, cmd: &str) -> Result<String> {
+fn radius_expr(s: &Session, p: &Value, cmd: &str) -> Result<String> {
     match (expr(p, "radius"), expr(p, "diameter")) {
         (Some(r), _) => Ok(r),
-        (None, Some(d)) => Ok(format!("({d}) / 2")),
+        (None, Some(d)) => {
+            let [d] = length_operands(s, [(&d, &typed_length_unit(s))]);
+            Ok(format!("({d}) / 2"))
+        }
         _ => Err(bad(cmd, "needs `radius` or `diameter`")),
     }
+}
+
+/// The unit a bare length typed into a command means: the design's units. (A point's bare
+/// coordinates, and a bare number already stored in a feature, are millimetres.)
+pub(super) fn typed_length_unit(s: &Session) -> String {
+    solidcraft_doc::expr::length_unit_or_mm(&s.doc.units).to_string()
+}
+
+/// The lengths a command works one expression out from (a radius from a diameter, a pitch from
+/// a height), each with the unit a bare number means where it came from. Bare numbers get that
+/// unit written in, so the expression keeps the meaning they had: inside a larger expression a
+/// bare number is read in the design's units of the moment, and changing them would resize the
+/// part (#716). Next to a unit-less expression that is not a bare number (`2 * 5`, a unit-less
+/// parameter), which is read in the design's units itself, they stay bare and are read with it,
+/// as before.
+pub(super) fn length_operands<const N: usize>(s: &Session, operands: [(&str, &str); N]) -> [String; N] {
+    use solidcraft_doc::expr::is_bare_number;
+    let follows = operands.iter().any(|(e, _)| !is_bare_number(e) && s.doc.eval(e, Kind::Unitless).is_ok());
+    operands.map(|(e, unit)| if !follows && is_bare_number(e) { format!("{} {unit}", e.trim()) } else { e.to_string() })
 }
 
 /// A placement point: `[x, y, z]` (or `{x, y, z}`) of numbers (mm) or length expressions;
@@ -652,11 +690,17 @@ fn prim_box(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let corner = match (point_param(s, p, "corner", cmd)?, point_param(s, p, "center", cmd)?) {
         (Some(c), _) => c,
-        // The corner half a size back from the centre (numbers stay numbers).
+        // The corner half a size back from the centre (numbers stay numbers, in mm). The centre's
+        // bare numbers are millimetres, the sizes' the design's units.
         (None, Some([cx, cy, cz])) => {
+            let unit = typed_length_unit(s);
+            let mm_per_unit = solidcraft_doc::expr::unit_info(&unit).map_or(1.0, |(_, k)| k);
             let back = |c: String, size: &String| match (c.parse::<f64>(), size.parse::<f64>()) {
-                (Ok(a), Ok(b)) => format!("{}", a - b / 2.0),
-                _ => format!("({c}) - ({size}) / 2"),
+                (Ok(a), Ok(b)) => format!("{}", a - b * mm_per_unit / 2.0),
+                _ => {
+                    let [c, size] = length_operands(s, [(&c, "mm"), (size, &unit)]);
+                    format!("({c}) - ({size}) / 2")
+                }
             };
             [back(cx, &l), back(cy, &w), back(cz, &h)]
         }
@@ -667,7 +711,7 @@ fn prim_box(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn prim_cylinder(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "solid.cylinder";
-    let radius = radius_expr(p, cmd)?;
+    let radius = radius_expr(s, p, cmd)?;
     let height = req_expr(cmd, p, "height")?;
     check_expr(s, &radius, Kind::Length, cmd, "radius")?;
     check_expr(s, &height, Kind::Length, cmd, "height")?;
@@ -678,7 +722,7 @@ fn prim_cylinder(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn prim_sphere(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "solid.sphere";
-    let radius = radius_expr(p, cmd)?;
+    let radius = radius_expr(s, p, cmd)?;
     check_expr(s, &radius, Kind::Length, cmd, "radius")?;
     let center = point_param(s, p, "center", cmd)?.unwrap_or_else(|| point_expr(Vec3::ZERO));
     add_feature(s, p, FeatureKind::Sphere { center, radius, operation: operation(p, cmd)? })
@@ -742,7 +786,9 @@ fn press_pull(s: &mut Session, p: &Value) -> Result<Value> {
                 FeatureKind::Chamfer { distance, .. } => ("distance", distance.clone()),
                 _ => return Err(bad(cmd, "that face is not a fillet's or a chamfer's")),
             };
-            let new = format!("({old}) + ({distance})");
+            // A bare number stored in the feature is millimetres; the distance's, the design's units.
+            let [old, more] = length_operands(s, [(&old, "mm"), (&distance, &typed_length_unit(s))]);
+            let new = format!("({old}) + ({more})");
             let r = super::find_command("timeline.edit").ok_or_else(|| bad(cmd, "timeline.edit"))?;
             let out = (r.run)(s, &json!({"feature": f.id, "set": {key: new}}))?;
             return Ok(json!({"feature": f.id, "edited": f.name, key: new, "recomputed": out.get("recomputed"), "restored": out.get("restored")}));
@@ -751,7 +797,13 @@ fn press_pull(s: &mut Session, p: &Value) -> Result<Value> {
         let r = super::find_command("solid.offset_face").ok_or_else(|| bad(cmd, "solid.offset_face"))?;
         return (r.run)(s, &json!({"faces": [face], "distance": distance}));
     }
-    let (dist, dir, op) = if d > 0.0 { (distance, "positive", "join") } else { (format!("-({distance})"), "negative", "cut") };
+    // Pushed in: the extrude cuts the other way by as much (a bare number stays one, so it keeps
+    // being read as a bare number typed into the extrude).
+    let flipped = match distance.trim().parse::<f64>() {
+        Ok(v) if solidcraft_doc::expr::is_bare_number(&distance) => format!("{}", -v),
+        _ => format!("-({distance})"),
+    };
+    let (dist, dir, op) = if d > 0.0 { (distance, "positive", "join") } else { (flipped, "negative", "cut") };
     extrude(s, &json!({"face": face, "distance": dist, "direction": dir, "operation": op}))
 }
 
@@ -787,22 +839,52 @@ fn fillet(s: &mut Session, p: &Value) -> Result<Value> {
             let smooth = p.get("smooth").and_then(Value::as_bool).unwrap_or(false);
             solidcraft_doc::FilletStyle::Variable { radius2, start, mid, smooth }
         }
-        Some(o) => return Err(bad(cmd, format!("unknown fillet type `{o}` (constant, chord or variable)"))),
+        Some("spline") => {
+            let start = p
+                .get("start")
+                .and_then(vec3)
+                .ok_or_else(|| bad(cmd, "a spline fillet needs `start`: [x,y,z] near the end its positions start from"))?;
+            let knots: Vec<f64> = p.get("knots").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_f64).collect();
+            let mut radii = Vec::new();
+            for r in p.get("radii").and_then(Value::as_array).into_iter().flatten().take(100) {
+                let r = match r {
+                    Value::String(x) => x.clone(),
+                    Value::Number(n) => n.to_string(),
+                    _ => return Err(bad(cmd, "a control radius is a number or an expression")),
+                };
+                check_expr(s, &r, Kind::Length, cmd, "control radius")?;
+                radii.push(r);
+            }
+            // All control radii (`radius` and `radii`) plus the degree (1…3) plus one.
+            if radii.is_empty() || !(radii.len() + 3..=radii.len() + 5).contains(&knots.len()) {
+                return Err(bad(
+                    cmd,
+                    "a spline fillet needs `radii` (the control radii after `radius`) and `knots` (as many as all control radii, the degree 1…3 and one more)",
+                ));
+            }
+            solidcraft_doc::FilletStyle::Spline { start, knots, radii }
+        }
+        Some(o) => return Err(bad(cmd, format!("unknown fillet type `{o}` (constant, chord, variable or spline)"))),
     };
     let fit = match str_(p, "fit").map(str::to_ascii_lowercase).as_deref() {
         None | Some("exact") => solidcraft_doc::FilletFit::Exact,
         Some("reduce") => solidcraft_doc::FilletFit::Reduce,
-        Some(o) => return Err(bad(cmd, format!("unknown fit `{o}` (exact or reduce)"))),
+        Some("taper") => solidcraft_doc::FilletFit::Taper,
+        Some(o) => return Err(bad(cmd, format!("unknown fit `{o}` (exact, reduce or taper)"))),
     };
-    if fit == solidcraft_doc::FilletFit::Reduce && !style.is_constant() {
-        return Err(bad(cmd, "`fit: reduce` takes a constant radius"));
+    if !fit.is_exact() && !style.is_constant() {
+        return Err(bad(cmd, "`fit: reduce` and `fit: taper` take a constant radius"));
     }
     let mut out = add_feature(s, p, FeatureKind::Fillet { edges, radius, body: str_(p, "body").map(str::to_string), style, fit })?;
-    // The radius the fillet used, when `fit: reduce` reduced it.
+    // The radii the fillet used, when `fit: reduce` reduced it.
     if let Some(id) = out.get("feature").and_then(Value::as_u64)
-        && let Some(r) = s.model.result(id).and_then(|res| res.state.fitted_radius(id))
+        && let Some(state) = s.model.result(id).map(|res| &res.state)
+        && let Some(r) = state.fitted_radius(id)
     {
         out["radius_applied"] = serde_json::json!(r);
+        let each: Vec<Value> =
+            state.fitted_edges(id).unwrap_or_default().into_iter().map(|(p, r)| serde_json::json!({"edge": [p.x, p.y, p.z], "radius": r})).collect();
+        out["radii_applied"] = Value::Array(each);
     }
     Ok(out)
 }
@@ -1310,7 +1392,33 @@ fn hole(s: &mut Session, p: &Value) -> Result<Value> {
         Some(v) => Some(vec3(v).ok_or_else(|| bad(cmd, "`to` must be a point [x, y, z] on the face to drill to"))?),
         None => None,
     };
-    add_feature(s, p, FeatureKind::Hole { position, direction, diameter, depth, hole: kind, points: points.map(|x| x.0), thread, to })
+    // A hole picked on a body of another component (a moved one, shown where it is placed) cuts
+    // that body: the pick is already in that body's frame, and the component's own bodies alone
+    // would leave nothing to cut.
+    let mut p = p.clone();
+    if points.is_none()
+        && p.get("participants").is_none()
+        && let Some(body) = body_of_other_component_at(s, position)
+    {
+        p["participants"] = json!([body]);
+    }
+    add_feature(s, &p, FeatureKind::Hole { position, direction, diameter, depth, hole: kind, points: points.map(|x| x.0), thread, to })
+}
+
+/// The body whose face is nearest `p` (within its pick tolerance), when it belongs to another
+/// component than the active one.
+fn body_of_other_component_at(s: &Session, p: Vec3) -> Option<String> {
+    let st = s.model.state();
+    let (_, body) = st
+        .bodies
+        .iter()
+        .filter(|b| !b.body.is_mesh())
+        .filter_map(|b| {
+            let (d, _) = solidcraft_doc::appearance::nearest_face(b, p)?;
+            (d <= solidcraft_doc::appearance::pick_tolerance(b)).then_some((d, b))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))?;
+    (s.doc.model_body_component(body) != s.active_component).then(|| body.name.clone())
 }
 
 /// The points of a sketch a hole drills at when only the sketch is given.
@@ -1540,9 +1648,16 @@ mod offset_edit_guard_tests;
 mod offset_plane_face_tests;
 
 #[cfg(test)]
+#[path = "lineage_face_tests.rs"]
+mod lineage_face_tests;
+#[cfg(test)]
 #[path = "stacked_face_tests.rs"]
 mod stacked_face_tests;
 
 #[cfg(test)]
 #[path = "solid_move_copy_tests.rs"]
 mod solid_move_copy_tests;
+
+#[cfg(test)]
+#[path = "move_in_sketch_tests.rs"]
+mod move_in_sketch_tests;

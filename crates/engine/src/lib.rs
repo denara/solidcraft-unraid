@@ -27,6 +27,7 @@ use solidcraft_geom::Vec3;
 
 pub use cmd::{CommandInfo, CommandSpec, auto_operation, command_specs, find_command};
 pub use solidcraft_doc as doc;
+pub use solidcraft_doc::Visibility;
 pub use solidcraft_geom as geom;
 pub use solidcraft_io as io;
 pub use solidcraft_kernel as kernel;
@@ -217,8 +218,15 @@ pub struct Session {
     pub section: Option<(Vec3, Vec3)>,
     /// Surface analysis shading the model (zebra, draft, curvature map).
     pub analysis: Option<SurfaceAnalysis>,
-    /// What is hidden or shown in the view (`browser.visibility`).
+    /// What is hidden or shown in the view (`browser.visibility`): saved with the design, not an
+    /// undo step. A design brings its saved visibility when it opens (`Session::new`).
     pub visibility: Visibility,
+    /// The camera `view.apply` asked the view to use (view state, not saved). The desktop app
+    /// moves its viewport there and takes it; headless renders keep using it until a standard
+    /// view is chosen.
+    pub camera: Option<render::Camera>,
+    /// The visibility the design file holds (what `is_dirty` compares with).
+    saved_visibility: Visibility,
     /// States to go back to (`edit.checkpoint`, `edit.restore_checkpoint`): how batches of
     /// commands are undone however long the undo history is.
     pub(crate) checkpoints: Vec<Checkpoint>,
@@ -252,22 +260,6 @@ pub(crate) struct Checkpoint {
     pub redo: Vec<Snapshot>,
 }
 
-/// Items hidden or shown one by one (view state, not part of the design and not an undo step).
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
-pub struct Visibility {
-    /// Bodies by name.
-    pub hidden_bodies: Vec<String>,
-    /// Exact occurrence placements hidden with all descendants.
-    pub hidden_occurrences: Vec<Vec<u64>>,
-    /// Origin items (O, X, Y, Z, XY, XZ, YZ) and construction geometry, by name.
-    pub hidden_origin: Vec<String>,
-    /// Sketches by feature id.
-    pub hidden_sketches: Vec<u64>,
-    /// Finished sketches shown although a feature uses them.
-    pub shown_sketches: Vec<u64>,
-}
-
 /// A way of shading the model's faces to judge their shape (view state, not part of the design).
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -297,7 +289,9 @@ impl Default for Session {
 }
 
 impl Session {
-    pub fn new(doc: Document) -> Self {
+    pub fn new(mut doc: Document) -> Self {
+        // The session keeps what is hidden (not an undo step); the design file carries it.
+        let visibility = std::mem::take(&mut doc.visibility);
         let doc = Arc::new(doc);
         let mut model = Model::new();
         model.evaluate(&doc);
@@ -324,18 +318,32 @@ impl Session {
             analysis: None,
             checkpoints: Vec::new(),
             next_checkpoint: 1,
-            visibility: Visibility::default(),
+            saved_visibility: visibility.clone(),
+            visibility,
+            camera: None,
             #[cfg(test)]
             evaluations: 0,
             crash_journal: false,
         }
     }
 
+    /// The design has changes not in its file: in the document, or in what is hidden.
     pub fn is_dirty(&self) -> bool {
-        !Arc::ptr_eq(&self.doc, &self.saved) && *self.doc != *self.saved
+        (!Arc::ptr_eq(&self.doc, &self.saved) && *self.doc != *self.saved) || self.visibility != self.saved_visibility
     }
     pub fn mark_saved(&mut self) {
         self.saved = self.doc.clone();
+        self.saved_visibility = self.visibility.clone();
+    }
+
+    /// The design as a file holds it: the document with what is hidden in it.
+    pub fn design(&self) -> std::borrow::Cow<'_, Document> {
+        if self.visibility.is_empty() {
+            return std::borrow::Cow::Borrowed(&*self.doc);
+        }
+        let mut doc = (*self.doc).clone();
+        doc.visibility = self.visibility.clone();
+        std::borrow::Cow::Owned(doc)
     }
     /// The design has changes not in its file (a recovered design).
     pub fn mark_unsaved(&mut self) {
@@ -667,6 +675,8 @@ impl Session {
             checkpoints: Vec::new(),
             next_checkpoint: 1,
             visibility: self.visibility.clone(),
+            camera: self.camera,
+            saved_visibility: self.saved_visibility.clone(),
             #[cfg(test)]
             evaluations: 0,
             crash_journal: false,
@@ -793,6 +803,8 @@ mod construct_tests;
 #[cfg(test)]
 mod delete_face_tests;
 #[cfg(test)]
+mod derived_units_tests;
+#[cfg(test)]
 mod display_mesh_tests;
 #[cfg(test)]
 mod extent_tests;
@@ -812,6 +824,8 @@ mod split_face_tests;
 mod tests;
 #[cfg(test)]
 mod thread_tests;
+#[cfg(test)]
+mod view_bounds_tests;
 #[cfg(test)]
 mod world_placement_cache_tests;
 

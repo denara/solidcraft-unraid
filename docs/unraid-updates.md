@@ -328,3 +328,64 @@ container update action, preserving settings/data/token and a pre-update design 
 This run did not modify Unraid or nginx/DNS.
 
 Upstream main still matched the selected 913583b snapshot at the final verification.
+
+## 2026-10-13: upstream be55a49 (SolidCraft 0.8.0, format 17)
+
+Advanced the validated snapshot from `913583bfeebb67eea406b40c9bc282bbf27726c7`
+to the fixed upstream commit `be55a49b047eb516c88a1f8add5723818cd2b57d` (PR #728,
+confirmed merged). The 94 new commits include linked design components, compact MCP
+execute/batch replies, named-view/camera screenshots, portable thumbnails, materials and
+visibility, exact geometry and fillet improvements, new sketch windows, and format 17.
+The inherited application version is 0.8.0; the selected main snapshot includes later
+changes beyond the initial 0.8.0 release, which only knows format 16. No fork application
+release, version bump or tag is created.
+
+Merged directly into `codex/unraid-mcp-web` after synchronization; origin/main was an
+ancestor. Only the generated third-party notices conflicted and were regenerated with
+the gateway license roots retained. The upstream quick-xml 0.41.0 security update and
+original/attributed assets were retained. Gateway dependency versions remain unchanged.
+Toolchain, CLI compatibility alias, web/HTTP endpoints and container settings are retained.
+
+New linked components require confinement on both insert and refresh: the HTTP adapter
+resolves component.insert_design file parameters, and each CAD subprocess receives a link
+root. Engine reads revalidate resolved stored links against that root, rejecting parent
+escape and symlinks even for uploaded documents and later component.update_links calls.
+Desktop link behavior is unchanged when no network root is supplied. Regression tests
+cover allowed normalized paths and outside/symlink rejection. The public workflow's smoke
+proof now inserts/refreshes an allowed link and rejects a tampered stored link before it
+can read outside the files directory. Existing font/recovery/diagnostic protections remain.
+
+Validation was scoped to the changes; the entire suite was not rerun:
+
+- Formatting, warning-free workspace Clippy/all targets, 43 attributed assets, license
+  notices, dependency layers and ten-target WebAssembly compatibility passed.
+- 121 selected tests passed: gateway 13, MCP 23, design storage/thumbnail 20, format
+  migrations 24, linked components/confinement 4, rendering backend/request safety 9,
+  named views 2, Sketch Scale UI 6, CLI/alias/catalog/connectivity 11, variable/taper/spline
+  fillets 6, Sketch Offset UI 2, and one Boolean determinism test (six rebuilds). Two
+  existing storage benchmarks remain ignored. Initial lock-version and filter diagnostics
+  remain under ignored target/unraid-update-be55a49 alongside final passing results.
+- Linux amd64 native/server and independent WASM browser release builds passed.
+- A fresh isolated candidate passed modelling (24000 mm3), PNG/STEP, auth/origin/file
+  confinement, independent sessions, persisted-design reopen after restart and real log
+  capacity/release/privacy/noise checks. Tampered stored links were rejected, while allowed
+  links inserted and refreshed with unchanged volume. File/font/diagnostic probes passed.
+- Official MCP SDK 1.32.1 reopened copied public 0.2.1, 0.3.2 and 0.7.0/format-16 fixtures,
+  measured 24000 mm3, exported STEP and saved/reopened the new format. It built/rendered
+  4000 mm3, used an uploaded confined font, verified compact execute output and a named
+  camera PNG, then refreshed a saved linked part from 6000 to 9000 mm3 and deleted its
+  session. The actual independent browser sample visibly rendered at 0.8.0.
+
+Image: `solvecraft-unraid:upstream-be55a49` (Linux amd64).
+Image ID: `sha256:ab32131fda537570cf78e8b9f0b05812eaf537063b894a88c86669af7cc61d74`.
+Archive: `target/solidcraft-unraid-upstream-be55a49.tar` (87,734,272 bytes).
+SHA256: `5509887173d9877a12843001827eb84a83a3276b111618e55f9cc416dae635db`.
+The export manifest was checked for the expected tag. Existing saved designs remain
+readable; newly saved format-17 designs require this snapshot or a newer one, so retain
+pre-update server and separate browser-design backups for rollback.
+
+Publication and final local runtime/cleanup are verified separately below. The canonical
+CA template and original icon are unchanged. Unraid/nginx/DNS are not modified. The active
+daily automation remains scheduled for 09:00 Europe/Berlin. Later upstream movement at
+`a8b3b21fd0ec09f5c5353df16cfbd441158720d6` (left-side feature history) was observed before
+publication; it is intentionally left for the next fixed-snapshot update.

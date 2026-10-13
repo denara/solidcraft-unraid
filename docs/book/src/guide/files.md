@@ -52,9 +52,13 @@ cache with `cache: true` on warm saves; saving never rebuilds cold geometry just
 create one. Ordinary saves and browser downloads default to `cache: false`. An additional display-mesh cache remains opt-in
 with `preview: true`. Unsupported or mismatched caches are ignored. Browser opening
 still rebuilds synchronously.
+Warm saves with explicit `cache: true` can also include a small PNG thumbnail. It travels with the file, so
+Home can show the recent design without reconstructing it when no local picture
+is available. Missing or incompatible pictures use the usual thumbnail generation.
+The default `cache: false` omits the portable thumbnail too.
 The repository's `docs/design-container.md` describes limits and encoding details.
 
-Current designs use format 16, including the font of sketch text, sheet metal corner relief shapes, sketch face anchors on cylinder caps, sketch axis
+Current designs use format 17, including face anchors on a piece of a face by its own name, sheet metal rims and bend ends, bend edges for Convert to Sheet Metal, the names of projected edges, physical materials defined in the design, the font of sketch text, sheet metal corner relief shapes, sketch face anchors on cylinder caps, sketch axis
 links, persistent
 names from exact face history, exact planar shell-face anchors, persistent analytic offset boundary roles and
 association profile references, durable sketch face anchors, periodic fit splines and versioned

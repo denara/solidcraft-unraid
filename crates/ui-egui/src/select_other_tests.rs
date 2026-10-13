@@ -170,3 +170,27 @@ fn rows_name_points_by_their_curves() {
     let rows = labels(&h);
     assert!(rows.iter().any(|r| r.starts_with("Point (") && r.contains("centre")), "{rows:?}");
 }
+
+#[test]
+fn a_dense_spot_is_capped_per_kind_and_reports_the_total() {
+    let mut h = Harness::new();
+    h.app.ui.show_origin = false;
+    h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+    // Thirty lines drawn on top of each other: one kind of thing, far beyond the per-kind cap.
+    for _ in 0..30 {
+        h.app.run("sketch.line", json!({"points":[[0,10],[20,10]],"infer":false,"connect":false})).unwrap();
+    }
+    h.app.cam.distance = 60.0;
+    h.settle();
+    let at = h.call("ui.at", json!({"sketch":[10,10]}))["result"].clone();
+    h.step(&json!({"hold": at})).unwrap();
+    assert!(crate::select_other::is_open(&h.app));
+    let d = crate::select_other::describe(&h.app);
+    let rows = d["rows"].as_array().expect("rows");
+    let lines = rows.iter().filter(|r| r["label"].as_str().is_some_and(|l| l.starts_with("Line "))).count();
+    assert_eq!(lines, 20, "at most 20 rows of one kind, nearest first: {rows:?}");
+    assert_eq!(rows[0]["label"], json!("Line 1"), "the nearest still leads");
+    let total = d["total"].as_u64().expect("total");
+    assert!(total >= 30, "the total counts every candidate, not just the rows: {total}");
+    assert!((total as usize) < rows.len() + 30, "the list is truncated: {total} total, {} rows", rows.len());
+}

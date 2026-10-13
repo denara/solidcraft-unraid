@@ -144,15 +144,30 @@ impl Document {
         author: u64,
         author_path: &[u64],
     ) -> Result<FaceAnchor> {
-        let source = body
+        // A construction certificate that names this face alone, else its exact history name.
+        let certified = body
             .body
             .face_plane(index)
+            .ok_or_else(|| DocError::Invalid("this face has no exact planar source; choose a fixed plane instead".into()))
+            .and_then(|source| {
+                let target = self.strong_face_target(body, index, source.origin)?;
+                if target.certificate.is_none() {
+                    return Err(DocError::Invalid("this face has no supported construction certificate; choose a fixed plane instead".into()));
+                }
+                let indices = self.configuration_face_indices(body, &target)?;
+                self.coplanar_pieces(body, &indices, |_| true)?;
+                Ok(target)
+            });
+        let target = match certified {
+            Ok(target) => target,
+            Err(error) => match body.body.planar_face(index).and_then(|plane| self.lineage_face_target(body, index, plane.origin)) {
+                Some(target) => target,
+                None => return Err(error),
+            },
+        };
+        let source = self
+            .anchor_face_plane(body, index, target.certificate.as_ref())
             .ok_or_else(|| DocError::Invalid("this face has no exact planar source; choose a fixed plane instead".into()))?;
-        let target = self.strong_face_target(body, index, source.origin)?;
-        if target.certificate.is_none() {
-            return Err(DocError::Invalid("this face has no supported construction certificate; choose a fixed plane instead".into()));
-        }
-        self.configuration_face_indices(body, &target)?;
         let mut anchor = FaceAnchor {
             target,
             component: self.model_body_component(body),
@@ -178,9 +193,14 @@ impl Document {
             state.body(&anchor.target.body).ok_or_else(|| DocError::Unknown(format!("attached body `{}` no longer exists", anchor.target.body)))?;
         let indices = self.configuration_face_indices(body, &anchor.target)?;
         let first = indices.first().copied().ok_or_else(|| DocError::Unknown("attached face no longer exists".into()))?;
-        let plane = body.body.face_plane(first).ok_or_else(|| DocError::Invalid("attached face no longer has an exact planar source".into()))?;
+        let certificate = anchor.target.certificate.as_ref();
+        let plane = self
+            .anchor_face_plane(body, first, certificate)
+            .ok_or_else(|| DocError::Invalid("attached face no longer has an exact planar source".into()))?;
         for index in indices.iter().skip(1) {
-            let other = body.body.face_plane(*index).ok_or_else(|| DocError::Invalid("attached face pieces are not exactly planar".into()))?;
+            let other = self
+                .anchor_face_plane(body, *index, certificate)
+                .ok_or_else(|| DocError::Invalid("attached face pieces are not exactly planar".into()))?;
             if plane.normal().dot(other.normal()) < 1. - 1e-8 || (other.origin - plane.origin).dot(plane.normal()).abs() > 1e-7 {
                 return Err(DocError::Invalid("attached face pieces no longer share one oriented plane".into()));
             }

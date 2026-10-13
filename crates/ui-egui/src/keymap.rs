@@ -77,6 +77,31 @@ pub fn command_for(app: &SolveApp, key: &str) -> Option<&'static str> {
     commands_for(app, key).into_iter().find(|id| solidcraft_engine::find_command(id).is_some_and(|c| c.info(&app.session).enabled))
 }
 
+/// Run a shortcut key: its enabled command; outside a sketch, a sketch tool's key opens Create
+/// Sketch (on the selected plane or planar face, else on the plane picked next) and the tool
+/// starts in the new sketch.
+pub fn press(app: &mut SolveApp, key: &str) {
+    if let Some(id) = command_for(app, key) {
+        app.start(id);
+    } else if let Some(id) = sketch_tool_for(app, key) {
+        app.start("sketch.create");
+        if let Some(d) = app.dialog.as_mut().filter(|d| matches!(d.kind, crate::dialogs::Kind::Sketch)) {
+            d.then_start = Some(id);
+        }
+    }
+}
+
+/// Outside a sketch: the SKETCH-tab command bound to `key` that a new sketch would start. Not
+/// Normal/Construction (a mode of the drawing in progress) nor the Finish Sketch panel.
+fn sketch_tool_for(app: &SolveApp, key: &str) -> Option<&'static str> {
+    if app.session.active_sketch.is_some() {
+        return None;
+    }
+    commands_for(app, key).into_iter().find(|id| {
+        solidcraft_engine::find_command(id).is_some_and(|c| c.tab == "SKETCH" && c.panel != "FINISH SKETCH" && c.id != "sketch.construction")
+    })
+}
+
 /// Bind `key` to a command (`""` clears it). Refused for reserved keys, and when other commands
 /// use the key unless `replace` (they lose it).
 pub fn bind(app: &mut SolveApp, id: &str, key: &str, replace: bool) -> Result<(), String> {
@@ -167,7 +192,7 @@ pub fn page(app: &mut SolveApp, ui: &mut egui::Ui) {
             }
             ui.label(
                 RichText::new(
-                    "Select Other: hold the left button still on the model (or right-click › Select Other…) to list everything under the cursor; click again on the same spot to select the next thing there.",
+                    "Select Other: hold the left button still on the model (or right-click › Select Other…) to list everything under the cursor; click again on the same spot to select the next thing there. Double-click the middle button to go Home (Preferences › Navigation).",
                 )
                 .size(11.0)
                 .color(t.text_dim),
@@ -298,3 +323,7 @@ mod tests {
         assert_eq!(key_name(egui::Key::K, egui::Modifiers { ctrl: true, shift: true, ..Default::default() }), "Ctrl+Shift+K");
     }
 }
+
+#[cfg(test)]
+#[path = "sketch_shortcut_tests.rs"]
+mod sketch_shortcut_tests;

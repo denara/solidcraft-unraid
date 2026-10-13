@@ -19,9 +19,10 @@ hostile variants of it never panic.
 | `move-bodies` | 00baf1d | `solid.move` before it could copy: two bodies, one translated in place, one translated and turned 90 deg about Z (no `copy` key anywhere in the file) |
 | `split-body-pieces` | v0.3.2 (07e263d) | a slot along X cuts a block into two bodies; a fillet, a chamfer and an appearance refer to the pieces by body name (`Body1`, `Body1 (1)`) |
 | `issue-489-stacked-join` | v0.6.0 (809ecf7), desktop | a 70 × 84 extrude, then a 70 × 62 strip joined on its top face, sketched partly over the face's projected edges (issue #489; expected values from main at 2880525) |
+| `issue-616-lid-ribs` | v0.7.0 (a9879fa), CLI | a rounded lid with a skirt ring, a window and a slot cut through, then four ribs joined on the plate over the skirt, flush with the window's sides; v0.7.0 displaced the ribs and left a slit through the skirt and plate (issue #616; script `examples/regressions/lid_ribs_flush_with_window.json`, expected values from the fix) |
 
 The scripts that made them are in `scripts/` (`issue-489-stacked-join` was drawn in the desktop
-app and has none). Every flat face of every final body must also take an attached sketch and an
+app and has none; `issue-616-lid-ribs` is made by its regression script). Every flat face of every final body must also take an attached sketch and an
 offset plane; the faces that can't yet are listed with their issues in `design_corpus.rs`.
 
 Never regenerate a file with a newer build: the point is that it was written by the old one. Add new files for new eras instead.

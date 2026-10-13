@@ -72,6 +72,8 @@ fn paste(s: &mut Session, p: &Value) -> Result<Value> {
     for f in feats {
         let mut kind = f.kind.clone();
         kind.remap_refs(&sketches, &names);
+        // A body made by an earlier copy is the one this copy acts on (#613).
+        kind.remap_bodies(&bodies);
         if let FeatureKind::Sketch { plane, .. } = &mut kind
             && let Some(anchor) = super::sketch::face::anchor_mut(plane)
         {
@@ -207,5 +209,26 @@ mod tests {
         assert!(s.execute("timeline.paste", &json!({"translate": "x"})).is_err());
         let mut t = Session::default();
         assert!(t.execute("timeline.paste", &json!({})).is_err());
+    }
+
+    #[test]
+    fn pasted_fillet_rounds_the_copied_body_it_names() {
+        let mut s = Session::default();
+        run(&mut s, "sketch.create", json!({"plane": "XY", "name": "S"}));
+        run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [40, 20]}));
+        run(&mut s, "sketch.finish", json!({}));
+        run(&mut s, "solid.extrude", json!({"sketch": "S", "distance": 10, "operation": "new", "body_name": "Block", "name": "Block"}));
+        run(&mut s, "solid.fillet", json!({"body": "Block", "radius": 2, "edges": [[20, 0, 10], [20, 20, 10]], "name": "Round"}));
+        let one = volume(&mut s);
+        assert!(one < 8000.0 - 1.0, "the fillet removes material: {one}");
+        run(&mut s, "timeline.copy", json!({"features": ["S", "Block", "Round"]}));
+        let r = run(&mut s, "timeline.paste", json!({"translate": [0, 40, 0]}));
+        assert_eq!(r["errors"].as_array().map(Vec::len), Some(0), "{r}");
+        let round = r["pasted"][2]["name"].as_str().unwrap_or_default().to_string();
+        let def = run(&mut s, "timeline.inspect", json!({"feature": round}));
+        assert_eq!(def["definition"]["body"], "Block (copy)", "{def}");
+        let m = run(&mut s, "inspect.measure", json!({}));
+        assert_eq!(m["body_count"], 2, "{m}");
+        assert!((volume(&mut s) - 2.0 * one).abs() < 1e-6, "both blocks are rounded: {m}");
     }
 }

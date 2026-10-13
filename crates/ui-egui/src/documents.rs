@@ -27,6 +27,7 @@ pub struct DocSlot {
 /// The per-design part of the UI state (what is hidden, shown or locked).
 #[derive(Clone, Debug, Default)]
 struct DocView {
+    sketch_choices: crate::sketch_families::Choices,
     hidden_profiles: Vec<u64>,
     shown_dims: Vec<u64>,
     locked_bodies: Vec<String>,
@@ -47,6 +48,8 @@ pub struct Documents {
     pub closing: Option<usize>,
     /// Quitting: the tabs answered so far with Don't Save (`None`: not quitting).
     pub quitting: Option<Vec<usize>>,
+    /// The "save changes?" button the arrow keys have picked; Enter gives it.
+    pub choice: Answer,
 }
 
 impl Documents {
@@ -59,6 +62,7 @@ impl Documents {
 fn take_view(app: &mut SolveApp) -> DocView {
     let u = &mut app.ui;
     DocView {
+        sketch_choices: std::mem::take(&mut app.sketch_choices),
         hidden_profiles: std::mem::take(&mut u.hidden_profiles),
         shown_dims: std::mem::take(&mut u.shown_dims),
         locked_bodies: std::mem::take(&mut u.locked_bodies),
@@ -66,6 +70,7 @@ fn take_view(app: &mut SolveApp) -> DocView {
 }
 
 fn put_view(app: &mut SolveApp, v: DocView) {
+    app.sketch_choices = v.sketch_choices;
     let u = &mut app.ui;
     u.hidden_profiles = v.hidden_profiles;
     u.shown_dims = v.shown_dims;
@@ -75,6 +80,7 @@ fn put_view(app: &mut SolveApp, v: DocView) {
 /// Put `slot` into the app and return what was there.
 fn swap_in(app: &mut SolveApp, slot: DocSlot) -> DocSlot {
     // Whatever was going on in the design leaves with it.
+    crate::sketch_text_move::cancel_drag(app);
     crate::dialogs::cancel(app);
     crate::dim_view::cancel();
     app.tool = None;
@@ -148,6 +154,7 @@ pub fn adopt(app: &mut SolveApp, session: Session) {
         app.menu.props = None;
         crate::sketch_attachment_ui::clear(app);
         app.session = session;
+        app.sketch_choices = crate::sketch_families::Choices::default();
         app.session.invalidate_view(rev);
         app.cam = Camera::default();
         app.fit_view();
@@ -190,6 +197,7 @@ pub fn close(app: &mut SolveApp, i: usize, force: bool) {
     app.docs.closing = None;
     if n <= 1 {
         // The last design: a blank one takes its place.
+        crate::sketch_text_move::cancel_drag(app);
         let rev = app.session.revision;
         crate::dialogs::cancel(app);
         app.tool = None;
@@ -323,7 +331,7 @@ pub fn tabs(app: &mut SolveApp, ui: &mut egui::Ui, r: Rect, x0: f32, x1: f32) {
         if app.home.open { t.text } else { t.app_bar_text },
     );
     crate::scenario::publish_handle("tab:home", home.center());
-    if response.clicked() {
+    if response.clicked() && !app.file_load.busy() {
         app.home.show(app.session.revision);
     }
     let x0 = x0 + 70.0;
@@ -424,13 +432,16 @@ pub fn tabs(app: &mut SolveApp, ui: &mut egui::Ui, r: Rect, x0: f32, x1: f32) {
     let s = Stroke::new(1.6, t.app_bar_text);
     ui.painter().line_segment([c - vec2(6.0, 0.0), c + vec2(6.0, 0.0)], s);
     ui.painter().line_segment([c - vec2(0.0, 6.0), c + vec2(0.0, 6.0)], s);
-    if presp.on_hover_text("New Design (Ctrl+N)").clicked() {
+    // A file loading into the window keeps the tabs as they are (dragging still moves it).
+    let idle = !app.file_load.busy();
+    if presp.on_hover_text("New Design (Ctrl+N)").clicked() && idle {
         new_design(app);
     }
-    if let Some(i) = shut {
-        close(app, i, false);
-    } else if let Some(i) = pick {
-        switch(app, i);
+    match (shut, pick) {
+        _ if !idle => {}
+        (Some(i), _) => close(app, i, false),
+        (None, Some(i)) => switch(app, i),
+        (None, None) => {}
     }
 }
 
@@ -451,8 +462,9 @@ pub fn layout(n: usize, active: usize, room: f32) -> (usize, usize, f32) {
 }
 
 /// What "save changes?" was answered.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Answer {
+    #[default]
     Save,
     DontSave,
     Cancel,
@@ -466,6 +478,28 @@ pub fn prompt(app: &mut SolveApp, ctx: &egui::Context) {
     let name = tabs_info(app).get(i).map(|x| x.0.clone()).unwrap_or_default();
     let name_display = if name == "Untitled" { crate::i18n::tr("ui.untitled") } else { &name };
     let mut answer: Option<Answer> = None;
+    // Left and Right move between the buttons (Save is picked first); Enter gives the picked one.
+    let order = [Answer::Save, Answer::DontSave, Answer::Cancel];
+    let (left, right, enter) = ctx.input_mut(|x| {
+        (
+            x.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft),
+            x.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight),
+            x.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+        )
+    });
+    let at = order.iter().position(|a| *a == app.docs.choice).unwrap_or(0);
+    let at = if left {
+        at.saturating_sub(1)
+    } else if right {
+        (at + 1).min(order.len() - 1)
+    } else {
+        at
+    };
+    let choice = order.get(at).copied().unwrap_or_default();
+    app.docs.choice = choice;
+    if enter {
+        answer = Some(choice);
+    }
     let title = crate::i18n::format("document.save_changes", &[("name", name_display)]);
     crate::frame::window(ctx, title, crate::frame::Width::Normal)
         .id(egui::Id::new("sc_close_prompt"))
@@ -476,13 +510,13 @@ pub fn prompt(app: &mut SolveApp, ctx: &egui::Context) {
             ui.label(crate::i18n::format("document.unsaved_changes", &[("name", name_display)]));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button(crate::i18n::tr("ui.save")).clicked() {
+                if ui.add(egui::Button::new(crate::i18n::tr("ui.save")).selected(choice == Answer::Save)).clicked() {
                     answer = Some(Answer::Save);
                 }
-                if ui.button(crate::i18n::tr("ui.don_t_save")).clicked() {
+                if ui.add(egui::Button::new(crate::i18n::tr("ui.don_t_save")).selected(choice == Answer::DontSave)).clicked() {
                     answer = Some(Answer::DontSave);
                 }
-                if ui.button(crate::i18n::tr("ui.cancel")).clicked() {
+                if ui.add(egui::Button::new(crate::i18n::tr("ui.cancel")).selected(choice == Answer::Cancel)).clicked() {
                     answer = Some(Answer::Cancel);
                 }
             });
@@ -499,6 +533,7 @@ pub fn prompt(app: &mut SolveApp, ctx: &egui::Context) {
 /// Act on the "save changes?" answer (also the control channel's `ui.documents {answer}`).
 pub fn answer_prompt(app: &mut SolveApp, answer: Answer) {
     let Some(i) = app.docs.closing else { return };
+    app.docs.choice = Answer::Save;
     match answer {
         Answer::Save => {
             switch(app, i);

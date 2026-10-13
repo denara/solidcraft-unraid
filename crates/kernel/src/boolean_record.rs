@@ -146,6 +146,35 @@ pub(crate) fn heal_body(body: &Body, solid: Solid, size: f64, keep: &[Vec<Vec3>]
     heal_build(solid, size, keep, faces, edges, counts)
 }
 
+/// A prism boolean's result `body` with the coplanar pieces its slabs leave merged (nothing
+/// else healed: its edges are exact as they are), its history carried through, and what else it carries kept: each face's
+/// construction source where every piece merged into it had that same one, its Split Face
+/// lines and its regularization protection.
+pub(crate) fn heal_prism_result(body: &Body, size: f64, keep: &[Vec<Vec3>], counts: &[(usize, usize)]) -> Result<Body> {
+    let (faces, edges): (Option<Vec<FaceProv>>, Option<Vec<Vec<EdgeOrigin>>>) =
+        body.history().map(|h| (h.faces.clone(), h.edges.iter().map(|e| e.origins.clone()).collect())).unzip();
+    let (healed, map) = crate::heal::merge_faces_traced((*body.solid).clone(), size, keep);
+    let sources = match (body.face_sources(), &map) {
+        (Some(sources), Some(m)) => Some(
+            m.faces
+                .iter()
+                .map(|under| {
+                    let mut each = under.iter().map(|i| sources.get(*i).cloned().flatten());
+                    let first = each.next().flatten()?;
+                    each.all(|s| s.as_ref() == Some(&first)).then_some(first)
+                })
+                .collect::<Vec<_>>(),
+        ),
+        _ => None,
+    };
+    let carried = faces.zip(edges).zip(map).and_then(|((f, e), m)| m.carry(&f, &e));
+    let (faces, edges) = carried.unzip();
+    let mut out = record::build(healed, counts, faces, edges.as_ref())?;
+    out = out.with_face_sources(sources.map(std::sync::Arc::new)).inherit_regularization_protection(body);
+    out.splits = body.splits.clone();
+    Ok(out)
+}
+
 /// `body` healed as the local modifiers take it (coplanar neighbours as one face, as after a
 /// join; faces split on purpose kept apart), with its history over `[body]`.
 pub(crate) fn healed(body: &Body) -> Result<Body> {

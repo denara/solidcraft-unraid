@@ -306,6 +306,8 @@ fn draft_walls(b: &Body, at: &[Vec3], neutral: &Plane, pull: Vec3, angle: f64) -
             _ => return Err(KernelError::Invalid(format!("no face at {:?}", [p.x, p.y, p.z]))),
         }
     }
+    // A round wall is stored in pieces (a cylinder's two halves): picking one drafts the whole wall.
+    let chosen = crate::offset::with_same_surface(&healed, &chosen);
     Ok(record::after(crate::offset::draft_walls(&healed, &chosen, neutral, pull, angle)?, &healed, &record::counts(&[b])))
 }
 

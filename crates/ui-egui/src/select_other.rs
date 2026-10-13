@@ -5,7 +5,10 @@
 //! - Holding the left button still (or a finger, on touch screens) for [`HOLD_SECS`], or the
 //!   viewport menu's "Select Other…", opens a list at the cursor of every pickable thing there,
 //!   in the selection filter's and the open dialog's terms: sketch points and curves first, then
-//!   vertices, edges, faces, bodies, profiles, planes and axes, each kind nearest first.
+//!   vertices, edges, faces, bodies, profiles, planes and axes, each kind nearest first. On a
+//!   dense mesh (a modelled thread, an imported mesh) thousands of facets can share one cursor,
+//!   so at most [`MAX_PER_KIND`] rows are kept per kind, nearest first, and the list reports how
+//!   many things there were in all.
 //! - Hovering a row lights its entity up in the viewport; clicking it selects it (Shift/Ctrl add,
 //!   as clicks do) or, with a dialog open, gives it to the dialog's active selection input.
 //!   Esc or a click elsewhere closes the list.
@@ -28,6 +31,10 @@ use crate::viewport::{Hit, Proj};
 pub const HOLD_SECS: f64 = 0.5;
 /// How far (screen points) a repeat click may be from the last one and still cycle.
 const CYCLE_SLOP: f32 = 4.0;
+/// The most rows kept per kind of thing (vertices, edges, faces, …). The list exists to tell a
+/// handful of overlapping things apart; nearest first, farther ones of the same kind are dropped
+/// so it stays readable and bounded.
+pub(crate) const MAX_PER_KIND: usize = 20;
 
 /// One row of the list.
 #[derive(Clone, Debug)]
@@ -43,6 +50,8 @@ pub struct Row {
 pub struct Popup {
     pub at: Pos2,
     pub rows: Vec<Row>,
+    /// How many things were under the cursor in all (the rows are capped per kind).
+    pub total: usize,
     /// The row under the pointer (lit in the viewport).
     pub hovered: Option<usize>,
     /// The model and dialog it was made for: it closes when they change.
@@ -78,6 +87,11 @@ pub struct State {
 
 /// Every pickable thing under `pos`, ordered by kind (the sketch being edited first), then depth.
 pub fn rows(app: &SolveApp, proj: &Proj, pos: Pos2) -> Vec<Row> {
+    rows_capped(app, proj, pos).0
+}
+
+/// [`rows`], with how many things were under the cursor in all.
+fn rows_capped(app: &SolveApp, proj: &Proj, pos: Pos2) -> (Vec<Row>, usize) {
     let hits = crate::viewport::pick_all(app, proj, pos);
     let mut found = crate::viewport::candidates(app, &hits);
     let dialog = app.dialog.as_ref().is_some_and(|d| d.wants_picks());
@@ -89,20 +103,46 @@ pub fn rows(app: &SolveApp, proj: &Proj, pos: Pos2) -> Vec<Row> {
             }
         }
     }
+    // A face place a sketch point snapped (a Single hole's) is its own row: beside the face as
+    // picked, and beside other points on that face.
+    let snapped = |h: &Hit| matches!(h, Hit::SketchPoint { .. });
     let mut out: Vec<(Hit, Sel)> = Vec::new();
     for (h, s) in found {
-        if !out.iter().any(|(_, x)| crate::selection::same_item(x, &s)) {
+        if !out.iter().any(|(hx, x)| if snapped(hx) || snapped(&h) { *x == s } else { crate::selection::same_item(x, &s) }) {
             out.push((h, s));
         }
     }
     let sketching = app.session.active_sketch.is_some();
-    out.sort_by_key(|(_, s)| rank(s, sketching));
-    out.into_iter()
-        .map(|(hit, sel)| {
-            let label = label(app, &sel);
-            Row { icon: icon(app, &sel), hit, sel, label }
+    out.sort_by_key(|(h, s)| rank(&shown_as(h, s), sketching));
+    let total = out.len();
+    // Nearest first within a kind, so capping drops the farther ones.
+    let mut per_kind: std::collections::HashMap<u8, usize> = std::collections::HashMap::new();
+    let rows: Vec<Row> = out
+        .into_iter()
+        .filter(|(h, s)| {
+            let n = per_kind.entry(rank(&shown_as(h, s), sketching).1).or_default();
+            if *n >= MAX_PER_KIND {
+                return false;
+            }
+            *n += 1;
+            true
         })
-        .collect()
+        .map(|(hit, sel)| {
+            let shown = shown_as(&hit, &sel);
+            let label = label(app, &shown);
+            Row { icon: icon(app, &shown), hit, sel, label }
+        })
+        .collect();
+    (rows, total)
+}
+
+/// What a row shows itself as: a face place a sketch point snapped is that point (ranked, capped
+/// and named with the points).
+fn shown_as(hit: &Hit, sel: &Sel) -> Sel {
+    match (hit, sel) {
+        (Hit::SketchPoint { sketch, id, .. }, Sel::Face { .. }) => Sel::ExternalSketchPoint { sketch: *sketch, id: id.clone() },
+        _ => sel.clone(),
+    }
 }
 
 /// Sort key: in a sketch its own points and curves come first; then by kind.
@@ -255,14 +295,14 @@ pub fn open(app: &mut SolveApp, at: Pos2) -> bool {
 }
 
 fn open_with(app: &mut SolveApp, proj: &Proj, at: Pos2) -> bool {
-    let rows = rows(app, proj, at);
+    let (rows, total) = rows_capped(app, proj, at);
     if rows.is_empty() {
         app.status = Some(("Nothing to select here".into(), crate::now_ms(), false));
         return false;
     }
     close(app);
     app.viewport.select_other.popup =
-        Some(Popup { at, rows, hovered: None, revision: app.session.revision, dialog: app.dialog.is_some(), lit_body: false });
+        Some(Popup { at, rows, total, hovered: None, revision: app.session.revision, dialog: app.dialog.is_some(), lit_body: false });
     true
 }
 
@@ -306,6 +346,7 @@ pub fn describe(app: &SolveApp) -> Value {
             "open": true,
             "at": [p.at.x, p.at.y],
             "hovered": p.hovered,
+            "total": p.total,
             "rows": p.rows.iter().map(|r| json!({ "label": r.label, "icon": r.icon, "sel": r.sel })).collect::<Vec<_>>(),
         }),
     }
@@ -474,13 +515,9 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
         .show(ctx, |ui| {
             crate::context_menu::menu_frame(ui, |ui| {
                 let (r, _) = ui.allocate_exact_size(vec2(w, 20.0), Sense::hover());
-                ui.painter().text(
-                    pos2(r.left() + 8.0, r.center().y),
-                    Align2::LEFT_CENTER,
-                    crate::i18n::tr_label("Select Other").to_uppercase(),
-                    FontId::proportional(10.5),
-                    t.text_dim,
-                );
+                let title = crate::i18n::tr_label("Select Other").to_uppercase();
+                let title = if p.total > p.rows.len() { format!("{title} · {} / {}", p.rows.len(), p.total) } else { title };
+                ui.painter().text(pos2(r.left() + 8.0, r.center().y), Align2::LEFT_CENTER, title, FontId::proportional(10.5), t.text_dim);
                 egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
                     for (i, row) in p.rows.iter().enumerate() {
                         let (r, resp) = ui.allocate_exact_size(vec2(w, 24.0), Sense::click());

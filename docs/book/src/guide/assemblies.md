@@ -26,6 +26,16 @@ couples two joints. Contact sets stop motion where bodies would pass through eac
 **Motion Study** keys joint values along a timeline, and **Interference** shows overlapping
 volumes in red.
 
+**Insert Design** (`component.insert_design {path, translate?}`) adds a component linked to
+another saved design, so each part can live in its own document. The part's solid bodies come
+in as they sit in that design, and they are kept in the assembly, so it opens even without the
+part file. The link is stored relative to the assembly's folder once the assembly is saved.
+After the part file changes, **Update Links** (`component.update_links`) reads it again.
+**Break Link** (`component.break_link`) keeps the bodies and forgets the file, and
+`component.links` lists the links and whether their files are found. A linked component holds
+the part's bodies only: its timeline, parameters and sheet-metal data (flat pattern, bend
+table) stay in the part's own design.
+
 STEP export writes the component tree as an assembly.
 
 Right-click a component in the Browser and choose **Properties** to inspect

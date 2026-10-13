@@ -227,7 +227,7 @@ impl FeatureKind {
             }
             FeatureKind::Fillet { edges, style, .. } => {
                 edges.iter_mut().for_each(pt);
-                if let crate::FilletStyle::Variable { start, .. } = style {
+                if let crate::FilletStyle::Variable { start, .. } | crate::FilletStyle::Spline { start, .. } = style {
                     pt(start);
                 }
             }
@@ -265,7 +265,10 @@ impl FeatureKind {
             FeatureKind::Thread { face, .. } => pt(face),
             FeatureKind::SheetFlange { edges, .. } => edges.iter_mut().for_each(|e| pt(&mut e.point)),
             FeatureKind::SheetHem { edges, .. } => edges.iter_mut().for_each(pt),
-            FeatureKind::SheetConvert { face, .. } => pt(face),
+            FeatureKind::SheetConvert { face, bends, .. } => {
+                pt(face);
+                bends.iter_mut().for_each(pt);
+            }
             FeatureKind::SheetFold { a, b, fixed, .. } => {
                 pt(a);
                 pt(b);

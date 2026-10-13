@@ -20,7 +20,12 @@ fn point_triangle_dist(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> f64 {
 
 /// The outward normal of the planar body face at `p`.
 pub(super) fn face_normal(s: &Session, p: Vec3) -> Option<Vec3> {
-    let (m, f, d, _) = face_at(s, p)?;
+    face_normal_in(s, p, None)
+}
+
+/// The outward normal of the planar face at `p` of `body` (any body when `None`).
+pub(super) fn face_normal_in(s: &Session, p: Vec3, body: Option<&str>) -> Option<Vec3> {
+    let (m, f, d, _) = face_at_in(s, p, body).ok().flatten()?;
     let tol = (m.bounds().diagonal() * 1e-3).max(1e-3);
     if d > tol * 10.0 {
         return None;
@@ -52,12 +57,20 @@ pub(super) fn face_is_planar(s: &Session, p: Vec3) -> Option<bool> {
     Some(ns.iter().all(|n| n.dot(n0) > 1.0 - 1e-6))
 }
 
-/// The body face under a point: (mesh, face index, distance).
+/// The body face under a point: (mesh, face index, distance, body).
 fn face_at(s: &Session, p: Vec3) -> Option<(std::sync::Arc<Mesh>, u32, f64, String)> {
+    face_at_in(s, p, None).ok().flatten()
+}
+
+type FacePick = (std::sync::Arc<Mesh>, u32, f64, String);
+
+/// The face under a point of `only` (any body when `None`). Where faces of several bodies are
+/// equally near (bodies touching flush), the pick is ambiguous: `Err` names those bodies.
+fn face_at_in(s: &Session, p: Vec3, only: Option<&str>) -> std::result::Result<Option<FacePick>, Vec<String>> {
     let st = s.model.state();
-    let mut best: Option<(std::sync::Arc<Mesh>, u32, f64, String)> = None;
-    let mut ambiguous = false;
-    for b in &st.bodies {
+    let mut best: Option<FacePick> = None;
+    let mut tied: Vec<String> = Vec::new();
+    for b in st.bodies.iter().filter(|b| only.is_none_or(|n| b.name == n)) {
         let m = b.mesh();
         let mut near: Option<(u32, f64)> = None;
         for (t, f) in m.triangles.iter().zip(&m.tri_face) {
@@ -70,13 +83,16 @@ fn face_at(s: &Session, p: Vec3) -> Option<(std::sync::Arc<Mesh>, u32, f64, Stri
         if let Some((f, d)) = near {
             if best.as_ref().is_none_or(|x| d < x.2 - 1e-8) {
                 best = Some((m.clone(), f, d, b.name.clone()));
-                ambiguous = false;
+                tied.clear();
             } else if best.as_ref().is_some_and(|x| (d - x.2).abs() <= 1e-8) {
-                ambiguous = true;
+                tied.push(b.name.clone());
             }
         }
     }
-    if ambiguous { None } else { best }
+    match best {
+        Some(b) if !tied.is_empty() => Err(std::iter::once(b.3).chain(tied).collect()),
+        b => Ok(b),
+    }
 }
 
 /// Circle through three points.
@@ -97,11 +113,17 @@ fn xy(v: Vec2) -> Value {
 
 /// Start a sketch on the planar face at `point` holding a copy of the face boundary. Returns
 /// the sketch id and a point inside the face (sketch coordinates). The sketch is left active.
-pub(super) fn sketch_of_face(s: &mut Session, point: Vec3, cmd: &str) -> Result<(u64, Vec2)> {
-    let (m, f, d, body) = face_at(s, point).ok_or_else(|| bad(cmd, "no body face at `face`"))?;
+pub(super) fn sketch_of_face(s: &mut Session, point: Vec3, cmd: &str, face_body: Option<&str>) -> Result<(u64, Vec2)> {
+    let none = || match face_body {
+        Some(b) => bad(cmd, format!("no face of `{b}` at `face`")),
+        None => bad(cmd, "no body face at `face`"),
+    };
+    let (m, f, d, body) = face_at_in(s, point, face_body)
+        .map_err(|names| bad(cmd, format!("faces of several bodies meet at `face` ({}): name one with `face_body`", names.join(", "))))?
+        .ok_or_else(none)?;
     let tol = (m.bounds().diagonal() * 1e-3).max(1e-3);
     if d > tol * 10.0 {
-        return Err(bad(cmd, "no body face at `face`"));
+        return Err(none());
     }
     let tris: Vec<[Vec3; 3]> = m.triangles.iter().zip(&m.tri_face).filter(|(_, tf)| **tf == f).filter_map(|(t, _)| m.tri(t)).collect();
     let normal = tris.iter().find_map(|[a, b, c]| (*b - *a).cross(*c - *a).normalized()).ok_or_else(|| bad(cmd, "degenerate face"))?;

@@ -130,6 +130,10 @@ pub struct Link {
     /// Persistent model face identity, resolved by the document before geometry refresh.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub face_name: Option<String>,
+    /// Persistent model edge identity of an `Edge` source, resolved by the document before
+    /// geometry refresh. None: the edge is the one nearest the source's point.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_name: Option<String>,
     /// Automatically projected borders owned by a durable sketch face attachment.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub auto_face: bool,
@@ -476,7 +480,7 @@ impl Sketch {
             return Err(SketchError::TooLarge);
         }
         let id = self.fresh("j")?;
-        self.links.push(Link { id: id.clone(), kind, source, face_name: None, auto_face: false, lost: false });
+        self.links.push(Link { id: id.clone(), kind, source, face_name: None, edge_name: None, auto_face: false, lost: false });
         self.build_link(&id, &lay)?;
         Ok(id)
     }
@@ -852,6 +856,21 @@ impl Sketch {
         Ok(true)
     }
 
+    /// Where this sketch's points were in `stored`, the same sketch before its links were
+    /// moved to where their sources are now ([`Sketch::update_link`]): point by point, as
+    /// [`crate::solve_after_edit`] takes them. Points are matched by id (a rebuilt link has
+    /// new ones); a point `stored` does not have is where it is now. `None` when none moved.
+    pub fn positions_in(&self, stored: &Sketch) -> Option<Vec<Vec2>> {
+        let aligned = self.points.len() == stored.points.len() && self.points.iter().zip(&stored.points).all(|(p, q)| p.id == q.id);
+        let was: Vec<Vec2> = if aligned {
+            stored.points.iter().map(|p| p.pos).collect()
+        } else {
+            let by_id: std::collections::BTreeMap<&str, Vec2> = stored.points.iter().map(|p| (p.id.as_str(), p.pos)).collect();
+            self.points.iter().map(|p| by_id.get(p.id.as_str()).copied().unwrap_or(p.pos)).collect()
+        };
+        self.points.iter().zip(&was).any(|(p, w)| p.pos != *w).then_some(was)
+    }
+
     fn drop_link_entities(&mut self, id: &str) {
         let curves = self.link_curves(id);
         let keep = self.links.clone();
@@ -921,3 +940,7 @@ impl Sketch {
 #[cfg(test)]
 #[path = "link_identity_tests.rs"]
 mod identity_tests;
+
+#[cfg(test)]
+#[path = "link_side_tests.rs"]
+mod side_tests;

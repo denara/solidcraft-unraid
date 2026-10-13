@@ -5,7 +5,7 @@ members = ["crates/*", "apps/*", "xtask"]
 exclude = ["vendor"]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.95"
@@ -40,7 +40,7 @@ truck-topology = "0.6"
 
 # packages (3MF)
 zip = { version = "3", default-features = false, features = ["deflate"] }
-quick-xml = "0.38"
+quick-xml = "0.41"
 
 # fonts (sketch text outlines; MIT OR Apache-2.0, pure Rust)
 ttf-parser = { version = "0.25", default-features = false, features = ["std"] }

@@ -39,13 +39,14 @@ fn free_rect(view: Rect, obstacles: &[Rect]) -> Rect {
 }
 
 impl Layout {
-    pub fn new(viewport: Rect, docks: &[Rect], scale: f32) -> Self {
+    pub fn new(viewport: Rect, docks: &[Rect], scale: f32, style: crate::prefs::NavigatorStyle) -> Self {
         let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
         let mut obstacles: Vec<_> = docks.iter().take(6).copied().filter(|r| r.is_finite()).map(|r| r.expand(4.0)).collect();
         // Navigation is anchored to the viewport, never to transient dialog space.
         let available = viewport;
-        let mut axis_view = if available.width() >= 116.0 && available.height() >= 116.0 {
-            Rect::from_min_size(pos2(available.right() - 116.0, available.top()), vec2(116.0, 116.0))
+        let cube_size = super::viewport::axis_view_size(style);
+        let mut axis_view = if available.width() >= cube_size && available.height() >= cube_size {
+            Rect::from_min_size(pos2(available.right() - cube_size, available.top()), vec2(cube_size, cube_size))
         } else {
             Rect::NOTHING
         };
@@ -60,7 +61,12 @@ impl Layout {
         // On tiny viewports keep the bottom controls usable rather than overlapping them.
         // This decision depends only on viewport size, never on an overlay.
         if axis_view.intersect(navigation).is_positive() {
-            axis_view = Rect::NOTHING;
+            let compact = (navigation.top() - viewport.top() - 4.0).min(cube_size);
+            axis_view = if style == crate::prefs::NavigatorStyle::Cube && compact >= 96.0 {
+                Rect::from_min_size(pos2(viewport.right() - compact, viewport.top()), vec2(compact, compact))
+            } else {
+                Rect::NOTHING
+            };
         }
         if axis_view.is_positive() {
             obstacles.push(axis_view);

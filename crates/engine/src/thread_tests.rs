@@ -67,3 +67,38 @@ fn modelled_internal_threads_m3_to_m20() {
         assert!((got - want).abs() < want * 0.03, "M{d}: removed {got}, ISO profile {want}");
     }
 }
+
+/// Issue 602: rounding the edges of a hex boss on a threaded shaft froze the app. The thread's
+/// thousands of facets were healed pair by pair, once per feature after it, and the fillet's
+/// preview then compared each of them with the whole old body.
+#[test]
+fn fillet_beside_a_modelled_thread_finishes() {
+    let mut s = Session::default();
+    for (id, p) in [
+        ("sketch.create", json!({"plane": "XY"})),
+        ("sketch.circle.center", json!({"center": [0, 0], "diameter": 5})),
+        ("sketch.finish", json!({})),
+        ("solid.extrude", json!({"distance": 10, "body_name": "Screw"})),
+        ("sketch.create", json!({"plane": {"face": [0, 0, 10]}})),
+        ("sketch.polygon.circumscribed", json!({"center": [0, 0], "radius": 2, "sides": 6})),
+        ("sketch.finish", json!({})),
+        ("solid.extrude", json!({"distance": 3, "profiles": [{"point": [0, 0]}], "operation": "join", "targets": ["Screw"]})),
+        ("solid.thread", json!({"face": [2.5, 0, 5], "designation": "M5", "length": 4, "modeled": true})),
+    ] {
+        run(&mut s, id, p);
+    }
+    let faces_before = s.model.state().body("Screw").map(|b| b.body.face_count()).unwrap_or(0);
+    assert!(faces_before > 1000, "the thread is faceted: {faces_before} faces");
+    let volume_before = volume(&mut s, "Screw");
+    let top: Vec<Value> = (0..6)
+        .map(|i| {
+            let a = (30.0 + 60.0 * i as f64).to_radians();
+            json!([2.0 * a.cos(), 2.0 * a.sin(), 13])
+        })
+        .collect();
+    let started = std::time::Instant::now();
+    run(&mut s, "solid.fillet", json!({"edges": top, "radius": 0.3}));
+    assert!(started.elapsed().as_secs() < 30, "the fillet took {:?}", started.elapsed());
+    let volume_after = volume(&mut s, "Screw");
+    assert!(volume_after < volume_before && volume_after > volume_before * 0.99, "{volume_before} -> {volume_after}");
+}

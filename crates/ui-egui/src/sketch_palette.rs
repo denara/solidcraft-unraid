@@ -1,12 +1,13 @@
 //! The Sketch Palette: a panel docked at the right while a sketch is being edited, like a
-//! command dialog. Options: the line type of the selected curves (normal, construction,
-//! centerline), Look At, and the display toggles kept with the sketch (grid, snap, slice,
-//! profiles, points, dimensions, constraints, projected geometry, 3D sketch); the sketch's
-//! degrees of freedom; Finish Sketch. Toggles run `sketch.options`, line types
-//! `sketch.construction` / `sketch.centerline`.
+//! command dialog. Feature Options: the modes of the creation tool that is running, as icon
+//! buttons. Options: the line type of the selected curves (normal, construction, centerline),
+//! Look At, and the display toggles kept with the sketch (grid, snap, slice, profiles, points,
+//! dimensions, constraints, projected geometry, 3D sketch); the sketch's degrees of freedom;
+//! Finish Sketch. Toggles run `sketch.options`, line types `sketch.construction` /
+//! `sketch.centerline`.
 //!
-//! The line type is also a drawing mode, as in Fusion: with nothing selected, Construction (or
-//! X) makes what is drawn next construction geometry until it is switched back.
+//! The line type is also a drawing mode: with nothing selected, Construction (or X) makes what
+//! is drawn next construction geometry until it is switched back.
 
 use std::cell::Cell;
 
@@ -23,6 +24,7 @@ thread_local! {
     static MODE: Cell<(u8, Option<u64>)> = const { Cell::new((0, None)) };
     static FOLDED: Cell<bool> = const { Cell::new(false) };
     static OPTIONS_FOLDED: Cell<bool> = const { Cell::new(false) };
+    static FEATURE_FOLDED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Palette width (logical px).
@@ -227,6 +229,68 @@ fn disclosure_triangle(p: &egui::Painter, c: egui::Pos2, open: bool, col: Color3
     p.add(egui::Shape::convex_polygon(pts, col, Stroke::NONE));
 }
 
+/// The creation family of the tool that is running, and the exact variant it is running, when
+/// that family has more than one mode to switch between.
+///
+/// Family membership comes from the declared table in `sketch_families`, never from the shape of
+/// the id. `sketch.line` and `sketch.line.midpoint` are one family although only one of them
+/// carries a variant suffix, and `sketch.ellipse`, `sketch.conic` and `sketch.text` carry no
+/// family at all. The table also fixes the order the modes are shown in, which a derived rule
+/// cannot express.
+///
+/// A tool outside a family has nothing to switch to, so the section stays hidden rather than
+/// showing a single button that does nothing. The palette's vertical space is already budgeted
+/// down to the footer, so an inert row would cost the Options list real height.
+fn active_feature(app: &SolveApp) -> Option<(&'static crate::sketch_families::Family, &'static str)> {
+    let id = app.tool.as_ref()?.cmd;
+    let family = crate::sketch_families::family(id)?;
+    (family.commands.len() > 1).then_some((family, id))
+}
+
+/// One row of the Feature Options section: the family's name, then its modes as icon buttons
+/// right-aligned in the same column every other palette row ends at. Five buttons do not fit one
+/// palette-wide row, so the group wraps onto as many rows as it needs.
+fn feature_row(app: &SolveApp, ui: &mut egui::Ui, width: f32, family: &crate::sketch_families::Family, current: &str) -> Option<&'static str> {
+    let t = Tokens::get();
+    let mut start = None;
+    ui.horizontal(|ui| {
+        ui.label(app.tr_label(family.label));
+        let btn_w = 28.0;
+        let btn_h = 22.0;
+        let sp = ui.spacing().item_spacing.x;
+        let room = (width - ui.min_rect().width() - sp).max(btn_w);
+        let fits = ((room + sp) / (btn_w + sp)).floor().clamp(1.0, family.commands.len() as f32) as usize;
+        let per_row = fits.max(1);
+        let group_w = per_row as f32 * btn_w + per_row.saturating_sub(1) as f32 * sp;
+        crate::frame::right_aligned(ui, width, group_w, |ui| {
+            ui.vertical(|ui| {
+                for chunk in family.commands.chunks(per_row) {
+                    ui.horizontal(|ui| {
+                        for spec in chunk.iter().filter_map(|id| solidcraft_engine::find_command(id)) {
+                            let on = spec.id == current;
+                            let enabled = spec.info(&app.session).enabled;
+                            let resp = ui.add_enabled(enabled, egui::Button::new("").selected(on).min_size(vec2(btn_w, btn_h)));
+                            let side = (resp.rect.width().min(resp.rect.height()) - 4.0).max(12.0);
+                            let icon_rect = egui::Rect::from_center_size(resp.rect.center(), vec2(side, side));
+                            let (ink, fill, acc) = if enabled { (t.icon, t.icon_fill, t.accent) } else { (t.border, t.panel_header, t.border) };
+                            crate::icons::paint(ui.painter(), icon_rect, spec.icon, ink, fill, acc);
+                            crate::scenario::publish_handle(&format!("sketch_palette:feature:{}", spec.id), resp.rect.center());
+                            // The button draws an icon and no text of its own, so give a screen
+                            // reader the command's own name and whether it is the mode in use.
+                            let label = app.tr_label(spec.label).to_string();
+                            resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, on, &label));
+                            if resp.on_hover_text(app.tr_label(spec.label)).clicked() && enabled {
+                                start = Some(spec.id);
+                            }
+                        }
+                    });
+                }
+            });
+        });
+    });
+    start
+}
+
 /// Draw the palette (while sketching and no command dialog is open).
 pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     app.viewport.palette_rect = None;
@@ -266,6 +330,8 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     let mut linetype: Option<u8> = None;
     let mut look = false;
     let mut finish = false;
+    let mut start: Option<&'static str> = None;
+    let feature = active_feature(app);
     let has_curves = !selected_curves(app).is_empty();
     let selected_types = selected_linetypes(app);
     let margin_bottom = f32::from(frame.inner_margin.bottom);
@@ -293,6 +359,25 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
         if FOLDED.with(Cell::get) {
             return;
         }
+        // Feature Options sits above Options: the modes of the creation tool that is running.
+        if let Some((family, current)) = feature {
+            let ffold = FEATURE_FOLDED.with(Cell::get);
+            crate::frame::heading(ui, Level::Section, width, |ui| {
+                let (tri_rect, tri_resp) = ui.allocate_exact_size(vec2(14.0, 14.0), egui::Sense::click());
+                disclosure_triangle(ui.painter(), tri_rect.center(), !ffold, t.text);
+                crate::scenario::publish_handle("sketch_palette:feature_fold", tri_rect.center());
+                let label_resp = ui.add(egui::Label::new(RichText::new(app.tr("ui.feature_options")).size(12.0)).sense(egui::Sense::click()));
+                if tri_resp.clicked() || label_resp.clicked() {
+                    FEATURE_FOLDED.with(|f| f.set(!ffold));
+                }
+            });
+            if !ffold {
+                let section = ui.vertical(|ui| feature_row(app, ui, width, family, current));
+                start = section.inner;
+                crate::scenario::publish_rect("sketch_palette:feature_options", section.response.rect);
+            }
+            ui.add_space(2.0);
+        }
         let ofold = OPTIONS_FOLDED.with(Cell::get);
         crate::frame::heading(ui, Level::Section, width, |ui| {
             let (tri_rect, tri_resp) = ui.allocate_exact_size(vec2(14.0, 14.0), egui::Sense::click());
@@ -315,22 +400,46 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                     ui.vertical(|ui| {
                         ui.horizontal(|ui| {
                             ui.label(app.tr("ui.linetype"));
-                            let btn_w = 30.0;
+                            // Taller and wider than the old text-only buttons. Construction and
+                            // Centerline need a round dot and a clear gap to read apart. 30 by
+                            // 20 px left too little square room for either.
+                            let btn_w = 36.0;
                             let group_w = 3.0 * btn_w + 2.0 * ui.spacing().item_spacing.x;
                             crate::frame::right_aligned(ui, width, group_w, |ui| {
                                 ui.horizontal(|ui| {
                                     // With a selection: its line type, and a click converts it;
-                                    // without: the mode new curves are drawn in.
+                                    // without: the mode new curves are drawn in. Each button
+                                    // still carries its old glyph as hidden (transparent) text.
+                                    // That keeps its hit target, size and accessible name
+                                    // exactly as before. A drawn icon (icons.rs) paints over it.
+                                    // Construction and Centerline always draw in the theme's
+                                    // construction orange. Normal's icon never changes with the
+                                    // accent colour. It stays neutral in every case.
                                     let current = mode(app);
-                                    for (i, (label, tip)) in [("—", "Normal"), ("- -", "Construction"), ("-·-", "Centerline")].iter().enumerate() {
+                                    for (i, (label, icon, tip)) in
+                                        [("—", "normal", "Normal"), ("- -", "construction", "Construction"), ("-·-", "centerline", "Centerline")]
+                                            .iter()
+                                            .enumerate()
+                                    {
                                         let on = if has_curves { selected_types.get(i).copied().unwrap_or(false) } else { current == i as u8 };
                                         let tr_tip = app.tr_label(tip);
-                                        let tip = if has_curves {
+                                        let hover = if has_curves {
                                             crate::i18n::format("sketch.make_selection", &[("linetype", tr_tip)])
                                         } else {
                                             crate::i18n::format("sketch.draw_curves", &[("linetype", tr_tip)])
                                         };
-                                        if ui.add(egui::Button::new(*label).selected(on).min_size(vec2(btn_w, 20.0))).on_hover_text(tip).clicked() {
+                                        let btn = egui::Button::new(RichText::new(*label).color(Color32::TRANSPARENT))
+                                            .selected(on)
+                                            .min_size(vec2(btn_w, 28.0));
+                                        let resp = ui.add(btn).on_hover_text(hover);
+                                        let accent = if *icon == "normal" { t.icon } else { t.construction_geom };
+                                        // A square icon area. The button's own rect is
+                                        // text-shaped, wider than tall. A flattened diagonal
+                                        // leaves less room for a dash pattern's gaps to read.
+                                        let side = (resp.rect.width().min(resp.rect.height()) - 3.0).max(12.0);
+                                        let icon_rect = egui::Rect::from_center_size(resp.rect.center(), vec2(side, side));
+                                        crate::icons::paint(ui.painter(), icon_rect, icon, t.icon, t.icon_fill, accent);
+                                        if resp.clicked() {
                                             linetype = Some(i as u8);
                                         }
                                     }
@@ -416,6 +525,12 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
             set_mode(app, k);
         }
     }
+    if let Some(id) = start {
+        // The same path a toolbar click takes. It drops the half-drawn shape and starts the
+        // chosen mode from its first point, so a partly placed 3-point rectangle does not
+        // carry its stale points into a 2-point one.
+        app.start(id);
+    }
     if look {
         crate::dialogs::look_at_sketch(app);
     }
@@ -427,6 +542,40 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn construction_shortcut_keeps_the_drawing_tool_and_commits_its_line_type() {
+        for command in ["sketch.line", "sketch.rectangle.two_point", "sketch.circle.center"] {
+            let mut h = crate::scenario::Harness::new();
+            h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+            set_mode(&mut h.app, 0);
+            h.step(&json!({"start":command})).unwrap();
+            h.step(&json!({"key":"X"})).unwrap();
+            assert_eq!(h.app.tool.as_ref().map(|t| t.cmd), Some(command));
+            assert_eq!(mode(&h.app), 1);
+            h.step(&json!({"click":{"sketch":[0,0]}})).unwrap();
+            h.step(&json!({"move":{"sketch":[20,10]}})).unwrap();
+            let before = h.app.tool.clone().unwrap();
+            let history = h.app.session.undo.len();
+            // The toolbar takes the same start path, even while a dimension box has focus.
+            h.app.start("sketch.construction");
+            h.app.start("sketch.construction");
+            let after = h.app.tool.as_ref().unwrap();
+            assert_eq!(after.cmd, before.cmd);
+            assert_eq!(after.pts, before.pts);
+            assert_eq!(after.dims_stage, before.dims_stage);
+            assert_eq!(after.dims.iter().map(|d| &d.value).collect::<Vec<_>>(), before.dims.iter().map(|d| &d.value).collect::<Vec<_>>());
+            assert_eq!(h.app.session.undo.len(), history);
+            h.step(&json!({"click":{"sketch":[20,10]}})).unwrap();
+            let state = h.app.session.world_state();
+            let sketch = &state.sketch(h.app.session.active_sketch.unwrap()).unwrap().sketch;
+            assert!(!sketch.curves.is_empty(), "{command}");
+            assert!(sketch.curves.iter().all(|c| c.construction), "{command}");
+            h.app.run("edit.undo", json!({})).unwrap();
+            assert!(h.app.session.world_state().sketch(h.app.session.active_sketch.unwrap()).unwrap().sketch.curves.is_empty());
+            set_mode(&mut h.app, 0);
+        }
+    }
 
     #[test]
     fn palette_footer_and_scrolled_lower_option_remain_reachable_at_scale_and_resize() {
@@ -554,6 +703,116 @@ mod tests {
         h.call("ui.click", json!({"x": x, "y": y}));
         h.settle();
         assert!(slice_on(&mut h), "clicking the \"Slice\" label must toggle it on");
+    }
+
+    /// The modes the Feature Options row draws pressed, in family order.
+    fn pressed_modes(h: &crate::scenario::Harness, family: &crate::sketch_families::Family) -> Vec<&'static str> {
+        let tree = h.output.accesskit_update.as_ref().unwrap();
+        family
+            .commands
+            .iter()
+            .copied()
+            .filter(|id| {
+                let label = solidcraft_engine::find_command(id).unwrap().label;
+                tree.nodes.iter().any(|(_, n)| n.label() == Some(label) && n.toggled() == Some(egui::accesskit::Toggled::True))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn feature_options_show_every_mode_of_the_running_tool_and_switch_between_them() {
+        FOLDED.with(|v| v.set(false));
+        FEATURE_FOLDED.with(|v| v.set(false));
+        let mut h = crate::scenario::Harness::new();
+        h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+        h.app.start("sketch.circle.center");
+        h.settle();
+        let circle = crate::sketch_families::family("sketch.circle.center").unwrap();
+        assert_eq!(circle.commands.len(), 5, "the Circle family is the five circle modes");
+        for id in circle.commands {
+            assert!(crate::scenario::handle_at(&format!("sketch_palette:feature:{id}")).is_some(), "{id} needs a mode button");
+        }
+        assert!(h.widget("Circle").is_some(), "the row names the family");
+        assert_eq!(pressed_modes(&h, circle), ["sketch.circle.center"]);
+        let at = crate::scenario::handle_at("sketch_palette:feature:sketch.circle.three_tangent").unwrap();
+        h.call("ui.click", json!({"x": at.x, "y": at.y}));
+        h.settle();
+        assert_eq!(h.app.tool.as_ref().map(|t| t.cmd), Some("sketch.circle.three_tangent"));
+        assert_eq!(pressed_modes(&h, circle), ["sketch.circle.three_tangent"]);
+        // Another family replaces the row with its own modes.
+        h.app.start("sketch.rectangle.two_point");
+        h.settle();
+        let rect = crate::sketch_families::family("sketch.rectangle.two_point").unwrap();
+        assert_eq!(rect.commands.len(), 3);
+        assert_eq!(pressed_modes(&h, rect), ["sketch.rectangle.two_point"]);
+        assert!(crate::scenario::handle_at("sketch_palette:feature:sketch.circle.center").is_none(), "only the running family is shown");
+    }
+
+    #[test]
+    fn switching_mode_mid_draw_restarts_the_tool_and_leaves_the_design_alone() {
+        FOLDED.with(|v| v.set(false));
+        FEATURE_FOLDED.with(|v| v.set(false));
+        let mut h = crate::scenario::Harness::new();
+        h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+        h.app.start("sketch.rectangle.three_point");
+        h.step(&json!({"click":{"sketch":[0,0]}})).unwrap();
+        h.settle();
+        assert_eq!(h.app.tool.as_ref().map(|t| t.pts.len()), Some(1), "one corner is placed");
+        let baseline = h.app.session.doc.to_json();
+        let undo = h.app.session.undo.len();
+        let at = crate::scenario::handle_at("sketch_palette:feature:sketch.rectangle.two_point").unwrap();
+        h.call("ui.click", json!({"x": at.x, "y": at.y}));
+        h.settle();
+        let tool = h.app.tool.as_ref().unwrap();
+        assert_eq!(tool.cmd, "sketch.rectangle.two_point");
+        assert!(tool.pts.is_empty(), "the half-drawn rectangle is dropped, not carried into the new mode");
+        assert_eq!(h.app.session.doc.to_json(), baseline, "switching modes never changes the design");
+        assert_eq!(h.app.session.undo.len(), undo, "switching modes adds no undo step");
+    }
+
+    #[test]
+    fn feature_options_stay_hidden_without_a_tool_that_has_other_modes() {
+        FOLDED.with(|v| v.set(false));
+        FEATURE_FOLDED.with(|v| v.set(false));
+        let mut h = crate::scenario::Harness::new();
+        h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+        h.settle();
+        assert!(crate::scenario::rect_of("sketch_palette:feature_options").is_none(), "no creation tool, no section");
+        // Ellipse has no siblings to switch to, so a section would hold one inert button.
+        h.app.start("sketch.ellipse");
+        h.settle();
+        assert!(crate::sketch_families::family("sketch.ellipse").is_none());
+        assert!(crate::scenario::rect_of("sketch_palette:feature_options").is_none(), "a tool outside a family shows no section");
+        h.app.start("sketch.arc.three_point");
+        h.settle();
+        assert!(crate::scenario::rect_of("sketch_palette:feature_options").is_some(), "a family with siblings shows the section");
+        // Finishing the tool takes the section away again.
+        h.step(&json!({"key":"Escape"})).unwrap();
+        h.settle();
+        assert!(h.app.tool.is_none());
+        assert!(crate::scenario::rect_of("sketch_palette:feature_options").is_none());
+    }
+
+    #[test]
+    fn feature_options_disclosure_triangle_folds_and_unfolds_the_section() {
+        FOLDED.with(|v| v.set(false));
+        FEATURE_FOLDED.with(|v| v.set(false));
+        let mut h = crate::scenario::Harness::new();
+        h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+        h.app.start("sketch.slot.center_to_center");
+        h.settle();
+        let button = "sketch_palette:feature:sketch.slot.arc_center";
+        assert!(crate::scenario::handle_at(button).is_some());
+        let at = crate::scenario::handle_at("sketch_palette:feature_fold").unwrap();
+        h.call("ui.click", json!({"x": at.x, "y": at.y}));
+        h.settle();
+        assert!(crate::scenario::handle_at(button).is_none(), "the triangle must fold the section");
+        assert!(h.widget("Sketch Grid").is_some(), "folding Feature Options leaves Options open");
+        let at = crate::scenario::handle_at("sketch_palette:feature_fold").unwrap();
+        h.call("ui.click", json!({"x": at.x, "y": at.y}));
+        h.settle();
+        assert!(crate::scenario::handle_at(button).is_some(), "the triangle must unfold it again");
+        FEATURE_FOLDED.with(|v| v.set(false));
     }
 
     #[test]

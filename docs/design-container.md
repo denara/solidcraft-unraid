@@ -7,7 +7,7 @@ self-contained input/output format. `io::write_design` keeps its JSON contract;
 `io::write_design_container` is the fallible container writer.
 
 Packages have `container.json` with `{"format":"solidcraft-container/1"}` and
-`document.json` with the versioned parametric document (currently `solidcraft/16`).
+`document.json` with the versioned parametric document (currently `solidcraft/17`).
 The independent versions let document migrations evolve without changing blob encodings.
 Existing serialized document fields are retained automatically, without a second copy
 of the document schema or a deep clone of embedded payloads.
@@ -185,3 +185,34 @@ existing preview remains opt-in. GPU tessellation is independent work. Continue
 using format/application constants rather than source-tree hashing build scripts,
 retain JSON Save As/MCP/script compatibility and the documented legacy shims, and
 run standalone wasm validation on each published code revision.
+
+## Portable thumbnail
+
+A warm save with `cache: true` may add `cache/thumbnail.png` and its small
+`cache/thumbnail.json` key. The picture is a 240 x 150 PNG, bounded to 256 KiB,
+keyed by `solidcraft-thumbnail/1`, application version, exact document SHA-256 and
+PNG SHA-256. It contains an isometric view of visible solid bodies with their
+appearances. It is display-only and independent of the producing geometry kernel.
+
+Saving uses only already placed bodies and cached meshes, at most 1,024 bodies,
+100,000 triangles and 100,000 vertices. A preflight also caps projected pixel-box
+work at four million supersampled pixels and face-color lookups at one million,
+so overlapping triangles cannot make a small picture arbitrarily expensive.
+It never evaluates or tessellates a cold
+model for a picture. Active edits, pending moves, model errors, absent warm
+geometry or exceeded limits omit the picture. Ordinary saves and browser downloads
+default to `cache: false` and omit the PNG; `cache: true` explicitly opts in. Plain JSON
+never contains the PNG. The same writer is used by desktop and browser saves.
+
+The seekable thumbnail reader checks the small key, retained document metadata,
+PNG size/header and hashes without resolving source blobs. The Home/Recent Files
+reader tries its local picture cache, then this portable picture, then its existing
+background reconstruction. PNG decoding also has dimension and allocation limits.
+Missing, mismatched, truncated or malformed pictures are misses and never prevent
+authoritative document opening. Embedding a PNG does not install an operating-system
+file-browser thumbnail provider.
+
+Desktop thumbnail reads seek within the file. The browser VFS supplies a bounded
+in-memory buffer instead; it avoids geometry reconstruction but does not provide
+range-based OPFS reads. IO checks the PNG header and hashes, while the consuming
+UI performs the full bounded PNG decode.

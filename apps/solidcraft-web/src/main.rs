@@ -110,7 +110,7 @@ mod web {
                 let changed = s.is_dirty() && self.autosaved != Some(s.revision);
                 let wait = AUTOSAVE_S - (now - self.autosaved_at);
                 if changed && wait <= 0.0 {
-                    files::autosave(&self.files, Some((&s.doc, s.path.as_deref())));
+                    files::autosave(&self.files, Some((&s.design(), s.path.as_deref())));
                     self.autosaved = Some(s.revision);
                     self.autosaved_at = now;
                 } else if changed {

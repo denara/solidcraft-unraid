@@ -4,7 +4,7 @@
 <mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
   <mime-type type="application/x-solidcraft">
     <comment>SolidCraft design</comment>
-    <icon name="ai.storyteller.solvecraft"/>
+    <icon name="ai.storyteller.solidcraft"/>
     <sub-class-of type="application/json"/>
     <glob pattern="*.solidcraft"/>
     <!-- Compatibility shim (docs/compatibility.md): designs saved before the rename. -->

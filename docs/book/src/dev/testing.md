@@ -15,6 +15,28 @@ profile and the wasm build check.
 | Kill mid-save | `apps/solidcraft-cli/tests/kill_mid_save.rs` | a save killed at any moment leaves a readable file |
 | Reference tests | `cargo xtask oracle` → [docs/oracle.md](oracle.md) | parts rebuilt from `tests/oracle/*/recipe.json`, compared with analytic or FreeCAD expected values |
 
+## Dependency advisories
+
+Scheduled and manually dispatched CI runs have a separate **Dependency advisories** job;
+new advisories do not fail unrelated pull requests. To run the same scan locally:
+
+```sh
+cargo install cargo-deny --version 0.20.2 --locked
+cargo deny --locked check --warn unmaintained advisories bans sources
+```
+
+The checked-in `deny.toml` rejects vulnerabilities and unknown registries/git sources.
+Unmaintained crates, yanked versions and duplicate versions warn; licences remain covered
+by `cargo xtask licences --check`. Review advisory failures and update dependencies rather
+than adding broad ignores. The first scan prompted an update to quick-xml 0.41.0 for
+[RUSTSEC-2026-0194](https://rustsec.org/advisories/RUSTSEC-2026-0194) and
+[RUSTSEC-2026-0195](https://rustsec.org/advisories/RUSTSEC-2026-0195).
+
+Coverage excludes the version matching of local path patches: `truck-shapeops`,
+`truck-stepio`, `truck-meshalgo`, `matext4cgmath` and `egui-wgpu` in `vendor/`. Their checked-in
+code and patches still need comparison with their permissively licensed upstreams; a green
+scan does not establish their security or incorporate an upstream fix automatically.
+
 ## UI scenarios
 
 A scenario is a JSON list of steps run against the real app with a headless egui context:

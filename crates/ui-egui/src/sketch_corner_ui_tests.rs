@@ -30,8 +30,26 @@ fn clicked_periodic_fit_closes_at_start_and_right_click_keeps_natural() {
     assert!(matches!(sk.curves[1].kind, CurveKind::Spline { periodic: false, .. }));
 }
 
+/// Curve ids in the open dialog's first selection input.
+fn dialog_curves(h: &crate::scenario::Harness) -> Vec<String> {
+    h.app
+        .dialog
+        .as_ref()
+        .and_then(|d| d.inputs.first())
+        .map(|i| i.items.iter().filter_map(|x| if let solidcraft_engine::Sel::SketchCurve { id } = x { Some(id.clone()) } else { None }).collect())
+        .unwrap_or_default()
+}
+
+/// Type `value` into the open Offset window's Distance row, then apply with OK.
+fn offset_distance(h: &mut crate::scenario::Harness, value: &str) {
+    h.step(&json!({"click":{"handle":"dialog:Distance"}})).unwrap();
+    h.step(&json!({"key":"A","cmd":true})).unwrap();
+    h.step(&json!({"text":value})).unwrap();
+    h.step(&json!({"widget":"OK"})).unwrap();
+}
+
 #[test]
-fn clicked_ellipse_offset_then_closed_offset_preserves_exact_distance_and_undo() {
+fn offset_window_distance_and_flip_offset_an_ellipse_exactly_and_undo_restores() {
     let mut h = crate::scenario::Harness::new();
     h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
     h.app.run("sketch.ellipse", json!({"center":[0,0],"major":[10,0],"minor_radius":5})).unwrap();
@@ -40,25 +58,45 @@ fn clicked_ellipse_offset_then_closed_offset_preserves_exact_distance_and_undo()
     h.step(&json!({"start":"sketch.offset"})).unwrap();
     // Major tip is also a source handle: Offset must choose the actual curve.
     h.step(&json!({"click":{"world":[10,0,0]}})).unwrap();
-    assert_eq!(h.app.tool.as_ref().unwrap().picks, vec!["e1"]);
-    h.step(&json!({"click":{"world":[11,0,0]}})).unwrap();
+    assert_eq!(dialog_curves(&h), vec!["e1".to_string()], "{:?}", h.app.status);
+    // Nothing is committed until the window is applied.
+    assert!(h.app.session.model.state().sketch(sid).unwrap().sketch.freeform_offsets.is_empty());
+    h.step(&json!({"click":{"handle":"dialog:Flip"}})).unwrap();
+    offset_distance(&mut h, "1 mm");
+    assert!(h.app.dialog.is_none(), "{:?}", h.app.status);
     let sk = h.app.session.model.state().sketch(sid).unwrap().sketch.clone();
     assert_eq!(sk.freeform_offsets.len(), 1, "{:?}", h.app.status);
-    assert!((sk.freeform_offsets[0].distance + 1.0).abs() < 1e-4);
+    assert!((sk.freeform_offsets[0].distance + 1.0).abs() < 1e-4, "{:?}", sk.freeform_offsets[0].distance);
     let first = sk.freeform_offsets[0].output.clone();
     let saved = h.app.session.doc.to_json();
+    h.step(&json!({"start":"sketch.offset"})).unwrap();
     h.step(&json!({"click":{"world":[11,0,0]}})).unwrap();
-    assert_eq!(h.app.tool.as_ref().unwrap().picks, vec![first]);
-    h.step(&json!({"click":{"world":[11.5,0,0]}})).unwrap();
+    assert_eq!(dialog_curves(&h), vec![first], "{:?}", h.app.status);
+    h.step(&json!({"click":{"handle":"dialog:Flip"}})).unwrap();
+    offset_distance(&mut h, "0.5 mm");
     let sk = h.app.session.model.state().sketch(sid).unwrap().sketch.clone();
     assert_eq!(sk.freeform_offsets.len(), 2, "{:?}", h.app.status);
-    assert!((sk.freeform_offsets[1].distance + 0.5).abs() < 1e-4);
+    assert!((sk.freeform_offsets[1].distance + 0.5).abs() < 1e-4, "{:?}", sk.freeform_offsets[1].distance);
     assert!(sk.freeform_offsets.iter().all(|r| r.certificate == 2));
     assert_eq!(solidcraft_engine::sketch::find_profiles(&sk).len(), 3);
     let last = sk.curve_index(&sk.freeform_offsets[1].output).unwrap();
     assert!(sk.exact_segs(last).unwrap()[0].point_at(0.0).dist(Vec2::new(11.5, 0.0)) < 1e-4);
     h.app.run("edit.undo", json!({})).unwrap();
     assert_eq!(h.app.session.doc.to_json(), saved);
+}
+
+#[test]
+fn offset_window_without_a_curve_reports_it_and_keeps_the_window_open() {
+    let mut h = crate::scenario::Harness::new();
+    h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+    h.app.run("sketch.ellipse", json!({"center":[0,0],"major":[10,0],"minor_radius":5})).unwrap();
+    h.settle();
+    let sid = h.app.session.active_sketch.unwrap();
+    h.step(&json!({"start":"sketch.offset"})).unwrap();
+    h.step(&json!({"widget":"OK"})).unwrap();
+    let error = h.app.dialog.as_ref().and_then(|d| d.error.clone());
+    assert_eq!(error.as_deref(), Some("Select the curves to offset first"));
+    assert!(h.app.session.model.state().sketch(sid).unwrap().sketch.freeform_offsets.is_empty());
 }
 
 #[test]

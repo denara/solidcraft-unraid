@@ -3,7 +3,7 @@
 
 use serde_json::{Value, json};
 use solidcraft_doc::expr::Kind;
-use solidcraft_doc::sheet::{SheetBody, SheetRule};
+use solidcraft_doc::sheet::{self, SheetBody, SheetRule};
 use solidcraft_doc::{FeatureKind, FlangeEdge};
 use solidcraft_geom::{Vec2, Vec3};
 
@@ -17,7 +17,8 @@ pub static COMMANDS: &[CommandSpec] = &[
         "base: sketch + profiles? (rule?, flip?) | contour: sketch + curves (open chain of lines) + distance (rule?, flip?, reverse?) | \
          edge: edges: [[x,y,z] on top/bottom edges, or {point: [x,y,z], angle?, height?} for an edge with its own angle and height] + \
          height (to the outer face), angle? (default 90 deg), radius? (default: rule), \
-         position?: inside|outside|middle, flip?, body?; type?: base|edge|contour (default from the inputs); name?, body_name? (the new body)",
+         position?: inside|outside|middle, flip?, body?; type?: base|edge|contour (default from the inputs); name?, body_name? (the new body). \
+         Thickness, K-factor and bend radius come from the rule (sheet.manage_rules); passing them here is refused",
     ),
     CommandSpec::new("sheet.hem", "Hem", hem)
         .at("SHEET METAL", "CREATE")
@@ -33,7 +34,12 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("sheet.convert", "Convert to Sheet Metal", convert)
         .at("SHEET METAL", "CREATE")
         .icon("convert_sheet")
-        .params("body; face: [x,y,z] on its large flat face (a plate of even thickness); rule?"),
+        .params(
+            "body; face: [x,y,z] on its large flat face (a plate of even thickness); rule?; \
+             bends?: [[x,y,z] on sharp edges] (a solid or a shelled body: `face` is the fixed face and the flat faces reached from it \
+             across these edges become the sheet; a shell keeps its thickness, a solid takes the rule's inward; \
+             edges between two of those faces that are no bends are cut open with the rule's gap)",
+        ),
     CommandSpec::new("sheet.manage_rules", "Sheet Metal Rules", rules).at("SHEET METAL", "MODIFY").icon("sheet_rules").params(
         "name (new or existing); thickness?, k_factor?, bend_radius?, relief_width?, relief_depth?, corner_relief?, hem_gap?, gap? (expressions; `Thickness` is the rule's; \
          gap: between flanges that meet at a corner, whose ends are closed toward each other at any angle); \
@@ -45,13 +51,15 @@ pub static COMMANDS: &[CommandSpec] = &[
         .at("SHEET METAL", "CREATE")
         .icon("flat")
         .noundo()
-        .params("body? → flat size, outline loops and cut-outs (flat coordinates), bend lines and the bend table"),
+        .params(
+            "body? → flat size, outline loops and cut-outs (flat coordinates, as point lists), cutout_shapes (the same cut-outs exactly, in the same order: {circle: {center, radius}} for a round hole, else {segments: [{line: [a, b]} | {arc: {center, radius, start_deg, sweep_deg}} | {polyline: [...]}]}), pockets (with their own cutout_shapes), bend lines and the bend table",
+        ),
     CommandSpec::new("sheet.export_dxf", "Export Flat Pattern as DXF", export_dxf)
         .noundo()
         .params("body?, path? → DXF (mm): OUTLINE, BEND_UP and BEND_DOWN (centre lines) layers"),
     CommandSpec::new("sheet.export_bend_table", "Export Bend Table", export_bend_table)
         .noundo()
-        .params("body?, format?: csv|json (default csv), path? → bend table in mm and degrees, including rule and flat centre-line coordinates"),
+        .params("body?, format?: csv|json (default csv), path? → bend table in mm and degrees, including rule and flat centre-line coordinates; a bend that cut-outs split has a row for each piece"),
 ];
 
 fn points(p: &Value, k: &str, cmd: &str) -> Result<Vec<Vec3>> {
@@ -105,8 +113,23 @@ fn rule_param(s: &Session, p: &Value, cmd: &str) -> Result<Option<String>> {
     }
 }
 
+/// Sheet values a flange takes from its rule. Passing one to `sheet.flange` is refused rather
+/// than ignored, so a script never gets a part of another thickness than it asked for.
+const RULE_ONLY: [&str; 8] =
+    ["thickness", "k_factor", "bend_radius", "relief_width", "relief_depth", "corner_relief", "corner_relief_shape", "hem_gap"];
+
 fn flange(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "sheet.flange";
+    let nested = p.get("base").filter(|b| b.is_object());
+    if let Some(key) = RULE_ONLY.iter().find(|k| p.get(**k).is_some() || nested.is_some_and(|b| b.get(**k).is_some())) {
+        return Err(bad(
+            cmd,
+            format!(
+                "`{key}` is not a sheet.flange parameter: the sheet metal rule sets it. Make a rule with \
+                 sheet.manage_rules {{name, {key}, …}} and pass its name as `rule`"
+            ),
+        ));
+    }
     let ty = match str_(p, "type") {
         Some(t) => t.to_ascii_lowercase(),
         None if p.get("edges").is_some() => "edge".into(),
@@ -218,7 +241,25 @@ fn fold(s: &mut Session, p: &Value) -> Result<Value> {
         None => None,
     };
     let body = str_(p, "body").map(str::to_string);
-    add_feature(s, p, FeatureKind::SheetFold { sketch, curve, a, b, angle, radius, position, flip: bool_(p, "flip").unwrap_or(false), fixed, body })
+    let r = add_feature(
+        s,
+        p,
+        FeatureKind::SheetFold { sketch, curve, a, b, angle, radius, position, flip: bool_(p, "flip").unwrap_or(false), fixed, body },
+    )?;
+    // A recompute keeps a stored fold whose fixed point no longer touches the sheet (with a
+    // warning); a new fold refuses one, since it picks no side (#263).
+    if let Some(f) = fixed {
+        let id = r.get("feature").and_then(Value::as_u64);
+        let off =
+            id.and_then(|id| s.model.result(id)).and_then(|res| res.warning.as_deref()).is_some_and(|w| w.contains(sheet::FOLD_FIXED_OFF_SHEET));
+        if off {
+            return Err(bad(
+                cmd,
+                format!("the fixed point ({:.3}, {:.3}, {:.3}) is not on the sheet: pick a point on the face of the side that stays", f.x, f.y, f.z),
+            ));
+        }
+    }
+    Ok(r)
 }
 
 fn unfold(s: &mut Session, p: &Value) -> Result<Value> {
@@ -236,8 +277,17 @@ fn convert(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad(cmd, format!("no body `{body}`")));
     }
     let face = p.get("face").and_then(vec3).ok_or_else(|| bad(cmd, "`face` must be a point [x, y, z] on the plate's face"))?;
+    // With bend edges, a solid or shelled body; without, a plate.
+    let bends = match p.get("bends") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(_) => points(p, "bends", cmd)?,
+    };
+    // Such a sheet's values are its rule's (a plate's thickness is the plate's own).
+    if let Some(key) = RULE_ONLY.iter().find(|k| !bends.is_empty() && p.get(**k).is_some()) {
+        return Err(bad(cmd, format!("`{key}` is not a sheet.convert parameter: the sheet metal rule sets it. Pass a rule's name as `rule`")));
+    }
     let rule = rule_param(s, p, cmd)?;
-    add_feature(s, p, FeatureKind::SheetConvert { body, face, rule })
+    add_feature(s, p, FeatureKind::SheetConvert { body, face, rule, bends })
 }
 
 fn rules(s: &mut Session, p: &Value) -> Result<Value> {
@@ -314,6 +364,39 @@ fn sheet_of(s: &Session, p: &Value, cmd: &str) -> Result<SheetBody> {
     }
 }
 
+/// The centre and radius of a loop that is one whole circle (often two semicircles).
+fn loop_circle(lp: &solidcraft_geom::Loop2) -> Option<(Vec2, f64)> {
+    use solidcraft_geom::Seg2;
+    let Some(Seg2::Arc { center, radius, sweep, .. }) = lp.segs.first() else { return None };
+    let total: f64 = lp.segs.iter().filter_map(|s| if let Seg2::Arc { sweep, .. } = s { Some(*sweep) } else { None }).sum();
+    let circular = lp.segs.iter().all(
+        |s| matches!(s, Seg2::Arc { center: c, radius: r, sweep: a, .. } if c.dist(*center) < 1e-9 && (*r - *radius).abs() < 1e-9 && a.signum() == sweep.signum()),
+    );
+    (circular && (total.abs() - std::f64::consts::TAU).abs() < 1e-9).then_some((*center, *radius))
+}
+
+/// A loop's exact shape for the flat pattern JSON: a circle, or its lines and arcs (other
+/// curves as point lists at the flat pattern's 0.001 mm tolerance).
+fn loop_shape(lp: &solidcraft_geom::Loop2) -> Value {
+    use solidcraft_geom::Seg2;
+    let pt = |v: Vec2| json!([v.x, v.y]);
+    if let Some((center, radius)) = loop_circle(lp) {
+        return json!({"circle": {"center": pt(center), "radius": radius}});
+    }
+    let segments: Vec<Value> = lp
+        .segs
+        .iter()
+        .map(|seg| match *seg {
+            Seg2::Line { a, b } => json!({"line": [pt(a), pt(b)]}),
+            Seg2::Arc { center, radius, start, sweep } => {
+                json!({"arc": {"center": pt(center), "radius": radius, "start_deg": start.to_degrees(), "sweep_deg": sweep.to_degrees()}})
+            }
+            ref other => json!({"polyline": other.polyline(1e-3).into_iter().map(pt).collect::<Vec<_>>()}),
+        })
+        .collect();
+    json!({"segments": segments})
+}
+
 fn flat_json(sh: &SheetBody) -> Result<Value> {
     let regions = sh.flat_regions()?;
     let loops: Vec<Vec<Vec2>> = regions.iter().map(|r| r.outer.polyline(1e-3)).collect();
@@ -326,6 +409,7 @@ fn flat_json(sh: &SheetBody) -> Result<Value> {
     let pt = |v: &Vec2| json!([v.x, v.y]);
     let outline: Vec<Value> = loops.iter().map(|l| Value::Array(l.iter().map(pt).collect())).collect();
     let holes: Vec<Value> = regions.iter().flat_map(|r| &r.holes).map(|h| Value::Array(h.polyline(1e-3).iter().map(pt).collect())).collect();
+    let hole_shapes: Vec<Value> = regions.iter().flat_map(|r| &r.holes).map(loop_shape).collect();
     let bends: Vec<Value> = sh
         .bends()
         .iter()
@@ -347,11 +431,12 @@ fn flat_json(sh: &SheetBody) -> Result<Value> {
             };
             json!({"outline": p.region.outer.polyline(1e-3).iter().map(pt).collect::<Vec<_>>(),
             "cutouts": p.region.holes.iter().map(|h| h.polyline(1e-3).iter().map(pt).collect::<Vec<_>>()).collect::<Vec<_>>(),
+            "cutout_shapes": p.region.holes.iter().map(loop_shape).collect::<Vec<_>>(),
             "side": side, "depth_mm": p.z1-p.z0, "z0_mm": p.z0, "z1_mm": p.z1})
         })
         .collect();
     Ok(
-        json!({"body": sh.body, "rule": sh.rule, "thickness": sh.t, "k_factor": sh.k, "flat_size_mm": [w, h, sh.t], "outline": outline, "cutouts": holes, "pockets": pockets, "bends": bends, "unfolded": sh.flat}),
+        json!({"body": sh.body, "rule": sh.rule, "thickness": sh.t, "k_factor": sh.k, "flat_size_mm": [w, h, sh.t], "outline": outline, "cutouts": holes, "cutout_shapes": hole_shapes, "pockets": pockets, "bends": bends, "unfolded": sh.flat}),
     )
 }
 
@@ -425,17 +510,13 @@ pub fn flat_dxf(sh: &SheetBody) -> Result<String> {
     for (h, layer) in loops {
         // A circle is often represented by two semicircles. Keep the whole analytic
         // boundary as one CIRCLE rather than approximating outer boundaries with chords.
-        if let Some(solidcraft_geom::Seg2::Arc { center, radius, sweep, .. }) = h.segs.first() {
-            let total: f64 = h.segs.iter().filter_map(|s| if let solidcraft_geom::Seg2::Arc { sweep, .. } = s { Some(*sweep) } else { None }).sum();
-            let circular = h.segs.iter().all(|s| matches!(s, solidcraft_geom::Seg2::Arc { center: c, radius: r, sweep: a, .. } if c.dist(*center) < 1e-9 && (*r-*radius).abs() < 1e-9 && a.signum() == sweep.signum()));
-            if circular && (total.abs() - std::f64::consts::TAU).abs() < 1e-9 {
-                w(0, "CIRCLE");
-                w(8, &layer);
-                w(10, &f(center.x));
-                w(20, &f(center.y));
-                w(40, &f(*radius));
-                continue;
-            }
+        if let Some((center, radius)) = loop_circle(h) {
+            w(0, "CIRCLE");
+            w(8, &layer);
+            w(10, &f(center.x));
+            w(20, &f(center.y));
+            w(40, &f(radius));
+            continue;
         }
         for seg in &h.segs {
             match *seg {
@@ -532,3 +613,7 @@ fn export_bend_table(s: &mut Session, p: &Value) -> Result<Value> {
 #[cfg(test)]
 #[path = "sheet_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "sheet_convert_tests.rs"]
+mod convert_tests;

@@ -31,6 +31,8 @@ pub struct NamingOrigin {
     pub depth: usize,
     /// Instance transforms of a pattern or mirror (its copies are named after their sources).
     pub mats: Vec<crate::Mat>,
+    /// The sheet metal bodies after a sheet feature (their folds place moved faces).
+    pub sheets: Vec<crate::sheet::SheetBody>,
 }
 
 /// The lazily computed names of a body, shared by its clones.
@@ -112,6 +114,8 @@ fn samples(m: &Mesh, nf: usize) -> Vec<Vec<Vec3>> {
         .collect()
 }
 
+/// The point of triangle `abc` nearest `p`. A zero-length edge (a cone's tip repeats its apex
+/// vertex) has no interior to project onto, so its branch is skipped rather than dividing 0 by 0.
 pub(crate) fn closest(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
     let (ab, ac, ap) = (b - a, c - a, p - a);
     let (d1, d2) = (ab.dot(ap), ac.dot(ap));
@@ -124,7 +128,7 @@ pub(crate) fn closest(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
         return b;
     }
     let vc = d1 * d4 - d3 * d2;
-    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 && d1 - d3 > 0.0 {
         return a + ab * (d1 / (d1 - d3));
     }
     let cp = p - c;
@@ -133,11 +137,11 @@ pub(crate) fn closest(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
         return c;
     }
     let vb = d5 * d2 - d1 * d6;
-    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 && d2 - d6 > 0.0 {
         return a + ac * (d2 / (d2 - d6));
     }
     let va = d3 * d6 - d5 * d4;
-    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 && (d4 - d3) + (d5 - d6) > 0.0 {
         return b + (c - b) * ((d4 - d3) / ((d4 - d3) + (d5 - d6)));
     }
     let den = va + vb + vc;
@@ -334,6 +338,24 @@ fn geometric_from(b: &ModelBody, o: &NamingOrigin, nf: usize, names_of: fn(&Mode
             names = got.into_iter().map(|n| n.map(|n| format!("{n}@F{fid}.{}", k + 1))).collect();
         }
     }
+    // A sheet feature that moved panels (a fold, an unfold): faces it carried along lie on the
+    // faces they were, taken back through the panel they are on.
+    if let (Some(after), Some(before), Some(input)) = (
+        o.sheets.iter().find(|s| s.body == b.name),
+        o.before.sheets.iter().find(|s| s.body == b.name),
+        inputs.iter().find(|(x, _, _)| x.name == b.name),
+    ) {
+        let input = std::slice::from_ref(input);
+        for (name, ps) in names.iter_mut().zip(&pts) {
+            if name.is_some() {
+                continue;
+            }
+            let back: Option<Vec<Vec3>> = ps.iter().map(|p| after.point_before(before, *p)).collect();
+            if let Some(back) = back.filter(|b| !b.is_empty()) {
+                *name = vote(&back, input, tol, None);
+            }
+        }
+    }
     let empty = Vec::new();
     let names: Vec<String> = names
         .into_iter()
@@ -454,14 +476,12 @@ pub fn strip_edge_piece(n: &str) -> String {
 
 /// Edges sharing a name: number them along the longest axis of their spread.
 fn number_pieces(names: &mut [String], pts: &[Vec<Vec3>], mark: char) {
-    let mut seen: Vec<String> = Vec::new();
-    for i in 0..names.len() {
-        let n = names[i].clone();
-        if seen.contains(&n) {
-            continue;
-        }
-        seen.push(n.clone());
-        let same: Vec<usize> = (0..names.len()).filter(|j| names[*j] == n).collect();
+    // The pieces of each name, gathered in one pass (a faceted body has thousands of names).
+    let mut groups: std::collections::BTreeMap<String, Vec<usize>> = std::collections::BTreeMap::new();
+    for (i, n) in names.iter().enumerate() {
+        groups.entry(n.clone()).or_default().push(i);
+    }
+    for (n, same) in groups {
         if same.len() < 2 {
             continue;
         }
@@ -734,6 +754,20 @@ pub fn face_on_body(body: &ModelBody, name: &str, p: Vec3) -> Option<(usize, Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cone's tip repeats its apex vertex, so a triangle can have a zero-length edge. The nearest
+    /// point on it must still be a real point (it used to be NaN, which broke picking the tip).
+    #[test]
+    fn closest_point_on_a_degenerate_triangle_is_finite() {
+        let (a, c) = (Vec3::new(0., 0., 0.), Vec3::new(2., 0., 0.));
+        for (b, c) in [(a, c), (c, c), (a, a)] {
+            for p in [Vec3::new(1., 1., 0.), Vec3::new(-1., 0.5, 0.), Vec3::new(3., -2., 1.), a] {
+                let q = closest(p, a, b, c);
+                assert!(q.x.is_finite() && q.y.is_finite() && q.z.is_finite(), "{a:?} {b:?} {c:?} {p:?} -> {q:?}");
+            }
+        }
+        assert_eq!(closest(Vec3::new(1., 1., 0.), a, a, c), Vec3::new(1., 0., 0.));
+    }
 
     #[test]
     fn merged_face_votes_collectively_for_pieces_of_one_source() {

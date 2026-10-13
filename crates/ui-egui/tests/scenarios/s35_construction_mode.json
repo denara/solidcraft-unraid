@@ -1,5 +1,5 @@
 [
-  {"note": "Construction mode like Fusion: with nothing selected, X (or the palette's Construction linetype) makes new curves construction until switched back; with a selection X converts it."},
+  {"note": "Construction mode like Fusion: with nothing selected, X (or the palette's Construction linetype) makes new curves construction until switched back; with a selection X converts it. The palette's linetype buttons still carry their old glyphs ('--', '- -', '-.-') as an invisible accessible label and hit target. A drawn icon (icons.rs) now paints over each, in the construction orange for construction and centerline. The widgets below are still reached by the glyph."},
   {"start": "sketch.create"},
   {"click": {"plane": "XY"}},
   {"expect": {"dialog": null}},

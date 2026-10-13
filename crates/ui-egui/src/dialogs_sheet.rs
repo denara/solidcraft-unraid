@@ -148,7 +148,9 @@ pub fn start(app: &SolveApp, id: &str) -> Option<(Kind, Vec<SelInput>)> {
         ),
         "sheet.unfold" => (Sm::Unfold { refold: false }, vec![SelInput::new("Body (last if none)", BODIES, false)]),
         "sheet.refold" => (Sm::Unfold { refold: true }, vec![SelInput::new("Body (last if none)", BODIES, false)]),
-        "sheet.convert" => (Sm::Convert { rule: 0 }, vec![SelInput::new("Face", PLANAR_FACES, false)]),
+        "sheet.convert" => {
+            (Sm::Convert { rule: 0 }, vec![SelInput::new("Fixed Face", PLANAR_FACES, false), SelInput::new("Bend Edges", EDGES, true)])
+        }
         "sheet.manage_rules" => {
             let active = app.session.doc.sheet.active.clone();
             let rules = rule_list(app);
@@ -586,8 +588,16 @@ pub fn commands(app: &SolveApp, k: &Sm, inputs: &[SelInput], extra: &Map<String,
             (if *refold { "sheet.refold" } else { "sheet.unfold" }, p)
         }
         Sm::Convert { rule } => {
-            let Some(Sel::Face { body, point, .. }) = items(inputs, 0).first() else { return Err("select the plate's large face first".into()) };
+            let Some(Sel::Face { body, point, .. }) = items(inputs, 0).first() else {
+                return Err("select the fixed face first (a plate's large face)".into());
+            };
             let mut p = json!({"body": body, "face": pt(*point)});
+            // The sharp edges of a solid or shelled body that become bends (a plate has none).
+            let bends: Vec<Value> =
+                items(inputs, 1).iter().filter_map(|x| if let Sel::Edge { point, .. } = x { Some(pt(*point)) } else { None }).collect();
+            if !bends.is_empty() {
+                p["bends"] = json!(bends);
+            }
             if let Some(r) = rule_value(app, *rule) {
                 p["rule"] = json!(r);
             }
@@ -711,7 +721,16 @@ pub fn for_feature(app: &SolveApp, kind: &FeatureKind) -> Option<(Kind, Vec<SelI
             return Some((Kind::Sheet(k), ins, extra));
         }
         FeatureKind::SheetUnfold { body, refold } => (Sm::Unfold { refold: *refold }, body.iter().map(|n| Sel::Body { name: n.clone() }).collect()),
-        FeatureKind::SheetConvert { face, rule, .. } => (Sm::Convert { rule: rule_index(rule) }, face_sel(s, *face).into_iter().collect()),
+        FeatureKind::SheetConvert { face, rule, bends, .. } => {
+            let (_, mut ins) = start(app, "sheet.convert")?;
+            if let Some(i) = ins.first_mut() {
+                i.items = face_sel(s, *face).into_iter().collect();
+            }
+            if let Some(i) = ins.get_mut(1) {
+                i.items = bends.iter().filter_map(|p| edge_sel(s, *p)).collect();
+            }
+            return Some((Kind::Sheet(Sm::Convert { rule: rule_index(rule) }), ins, extra));
+        }
         _ => return None,
     };
     let id = match &k {

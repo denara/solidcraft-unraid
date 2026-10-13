@@ -253,6 +253,7 @@ fn saved_former_strip_projection_reports_lost_without_expanding_healthy_material
         before,
         depth: 1,
         mats: vec![],
+        sheets: vec![],
     })));
     let captured = crate::naming::face_name_at_body(&old_body, Vec3::new(20., 6., 1.)).unwrap();
     assert_eq!(crate::naming::parent_piece(&captured), Some(stem.as_str()), "actual strip capture records a piece name");
@@ -376,6 +377,7 @@ fn saved_curved_strip_projection_is_lost_after_exact_wall_coalescence() {
         before,
         depth: 1,
         mats: vec![],
+        sheets: vec![],
     })));
     let t = std::f64::consts::FRAC_1_SQRT_2;
     let at = Vec3::new(34. + 6. * t, 24. + 6. * t, 1.);
@@ -515,6 +517,7 @@ fn saved_stepped_tab_cut_piece_projection_is_lost_without_expanding_material() {
         before,
         depth: 1,
         mats: vec![],
+        sheets: vec![],
     })));
     let at = Vec3::new(0., 15., 1.);
     let former = crate::naming::face_name_at_body(&old_body, at).unwrap();

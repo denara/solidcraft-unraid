@@ -514,7 +514,21 @@ pub fn to_script(recipe: &Value) -> Result<Value, String> {
                 out.push(json!({"command": "solid.mirror", "params": p}));
             }
             Some("fillet") => {
-                out.push(json!({"command": "solid.fillet", "params": {"edges": edge_points(f), "radius": f.get("radius"), "name": name}}))
+                let mut p = json!({"edges": edge_points(f), "radius": f.get("radius"), "name": name});
+                // Constant radius (the default), chord length, or a radius varying along each edge
+                // (`radius` at the end nearest `start`, `radius2` at the other, `mid` between,
+                // `smooth`); `fit` for a radius too large for the geometry.
+                match f.get("type").and_then(Value::as_str) {
+                    Some("chord_length") => p["type"] = json!("chord"),
+                    Some("variable_radius") => p["type"] = json!("variable"),
+                    _ => {}
+                }
+                for key in ["radius2", "start", "mid", "smooth", "fit"] {
+                    if let Some(v) = f.get(key) {
+                        p[key] = v.clone();
+                    }
+                }
+                out.push(json!({"command": "solid.fillet", "params": p}))
             }
             Some("chamfer") => {
                 out.push(json!({"command": "solid.chamfer", "params": {"edges": edge_points(f), "distance": f.get("distance"), "name": name}}))

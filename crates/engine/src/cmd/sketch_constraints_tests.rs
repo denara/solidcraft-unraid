@@ -25,17 +25,17 @@ fn sketch(s: &Session) -> solidcraft_sketch::Sketch {
 }
 
 #[test]
-fn redundant_constraints_and_dimensions_are_refused_driven_ones_measure() {
+fn redundant_dimensions_are_refused_driven_ones_measure() {
     let mut s = new_sketch();
     let l = ids(&run(&mut s, "sketch.line", json!({"points": [[0, 0], [10, 0]], "infer": true}))["curves"])[0].clone();
-    // Already horizontal (inferred).
-    let e = s.execute("sketch.constraint.horizontal_vertical", &json!({"line": l})).unwrap_err().to_string();
-    assert!(e.contains("over-constrain"), "{e}");
+    // Already horizontal (inferred): kept as redundant, unless asked to refuse it.
+    let e = s.execute("sketch.constraint.horizontal_vertical", &json!({"line": l, "if_redundant": "refuse"})).unwrap_err().to_string();
+    assert!(e.contains("over-constrain") && e.contains("already determined by"), "{e}");
     run(&mut s, "sketch.constraint.coincident", json!({"a": format!("{l}.start"), "b": "origin"}));
     run(&mut s, "sketch.dimension", json!({"entities": [l], "value": 10}));
     let si = run(&mut s, "sketch.inspect", json!({}));
     assert_eq!(si["dof"], 0, "{si}");
-    // A second length on it over-constrains: refused, unless driven.
+    // A second length on it is already determined: refused, unless driven.
     assert!(s.execute("sketch.dimension", &json!({"entities": [format!("{l}.start"), format!("{l}.end")]})).is_err());
     let d = run(&mut s, "sketch.dimension", json!({"entities": [format!("{l}.start"), format!("{l}.end")], "driven": true}));
     assert_eq!(d["driven"], true);

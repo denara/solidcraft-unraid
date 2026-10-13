@@ -43,6 +43,7 @@ pub fn boxes_for(cmd: &str, n: usize) -> Vec<DimBox> {
         ("sketch.arc.center_point", 2) => vec![b("Sweep", Angle)],
         ("sketch.polygon.inscribed" | "sketch.polygon.circumscribed", 1) => vec![b("Radius", Length), b("Sides", Unitless)],
         ("sketch.slot.center_to_center" | "sketch.slot.overall", 1) => vec![b("Length", Length)],
+        ("sketch.conic", 2) => vec![b("Rho", Unitless)],
         ("sketch.slot.center_to_center" | "sketch.slot.overall", 2) => vec![b("Width", Length)],
         _ => Vec::new(),
     }
@@ -131,7 +132,7 @@ pub fn axis_aligned(a: Vec2, b: Vec2) -> Option<bool> {
 /// The value each box shows while it follows the cursor, and where it sits (sketch coordinates).
 /// `px` is the size of a screen pixel in sketch units: boxes sit a little off the segment they
 /// measure so they don't cover it.
-fn live(t: &Tool, e: Vec2, px: f64) -> Vec<(f64, Vec2)> {
+fn live(app: &SolveApp, t: &Tool, e: Vec2, px: f64) -> Vec<(f64, Vec2)> {
     let Some(a) = t.pts.last().map(|p| p.0) else { return Vec::new() };
     let first = t.pts.first().map(|p| p.0).unwrap_or(a);
     let off = 20.0 * px;
@@ -162,6 +163,16 @@ fn live(t: &Tool, e: Vec2, px: f64) -> Vec<(f64, Vec2)> {
             let a0 = (a - first).angle();
             vec![(((e - first).angle() - a0).rem_euclid(std::f64::consts::TAU), e)]
         }
+        ("sketch.conic", 2) => {
+            // `rho` is the curve's fullness, not a distance: the conic passes through
+            // `chord midpoint + rho * (apex - chord midpoint)`, so the box sits on that point
+            // (the part of the curve the value moves) with the default parabola's 0.5 shown
+            // until a value is typed.
+            let rho = locked(app, t, "Rho").unwrap_or(0.5);
+            let mid = (first + a) * 0.5;
+            let d = e - mid;
+            vec![(rho, mid + d * rho + dir_or_x(d).perp() * off)]
+        }
         ("sketch.slot.center_to_center" | "sketch.slot.overall", 2) => {
             let dir = dir_or_x(a - first);
             vec![(2.0 * dir.cross(e - first).abs(), e)]
@@ -170,9 +181,15 @@ fn live(t: &Tool, e: Vec2, px: f64) -> Vec<(f64, Vec2)> {
     }
 }
 
-fn fmt(app: &SolveApp, kind: ValueKind, v: f64) -> String {
+fn fmt(app: &SolveApp, label: &str, kind: ValueKind, v: f64) -> String {
     match kind {
         ValueKind::Angle => format!("{:.1} deg", v.to_degrees()),
+        // A count rounds to a whole number; a ratio keeps its decimals (0.5, not 1).
+        ValueKind::Unitless if label == "Rho" => {
+            let text = format!("{v:.3}");
+            let text = text.trim_end_matches('0').trim_end_matches('.');
+            if text.is_empty() { "0".to_string() } else { text.to_string() }
+        }
         ValueKind::Unitless => format!("{}", v.round()),
         ValueKind::Length => crate::prefs::show_mm_bare(app, v),
     }
@@ -213,7 +230,7 @@ pub fn dimensions(t: &Tool) -> Value {
         .dim_history
         .iter()
         .chain(&t.dims)
-        .filter(|dimension| dimension.locked && dimension.label != "Sides")
+        .filter(|dimension| dimension.locked && !matches!(dimension.label, "Sides" | "Rho"))
         .map(|dimension| (dimension.label.to_ascii_lowercase(), json!(dimension.value)))
         .collect::<serde_json::Map<_, _>>();
     Value::Object(values)
@@ -235,6 +252,8 @@ pub fn validate(app: &SolveApp, t: &Tool) -> Result<(), String> {
             "Sweep" => return Err("Sweep must lie strictly between -360 and 360 degrees, and cannot be zero".into()),
             "Sides" if (3.0..=200.0).contains(&value) && value.fract() == 0.0 => {}
             "Sides" => return Err("Sides must be an integer from 3 to 200".into()),
+            "Rho" if value > 1e-6 && value < 1.0 - 1e-6 => {}
+            "Rho" => return Err("Rho must lie strictly between 0 and 1 (below 0.5 an ellipse, 0.5 a parabola, above 0.5 a hyperbola)".into()),
             _ if value > 1e-9 => {}
             _ => return Err(format!("{} must be positive", dimension.label)),
         }
@@ -280,7 +299,7 @@ fn boxes(app: &SolveApp, ui: &mut egui::Ui, proj: &Proj, t: &mut Tool) -> Option
     let h = t.hover.as_ref().map(|x| x.0)?;
     let e = effective(app, t, h);
     let px = 2.0 * app.cam.half_height() / f64::from(proj.rect.height().max(1.0));
-    let lv = live(t, e, px);
+    let lv = live(app, t, e, px);
     let focus = std::mem::take(&mut t.dims_focus);
     // Egui processes ordinary Tab navigation before these floating text edits are drawn.
     // Remember the box that owned the keyboard and restore a focus within this tool after
@@ -310,7 +329,7 @@ fn boxes(app: &SolveApp, ui: &mut egui::Ui, proj: &Proj, t: &mut Tool) -> Option
     for (i, b) in t.dims.iter_mut().enumerate() {
         let Some((v, at)) = lv.get(i).copied() else { continue };
         if !b.locked {
-            b.value = fmt(app, b.kind, v);
+            b.value = fmt(app, b.label, b.kind, v);
         }
         let Some(sp) = proj.to_screen(plane.to_world(at)) else { continue };
         let id = egui::Id::new(("sc_dim", i));
@@ -377,3 +396,7 @@ mod tests;
 #[cfg(test)]
 #[path = "sketch_typed_intent_tests.rs"]
 mod typed_intent_tests;
+
+#[cfg(test)]
+#[path = "sketch_clover_ui_tests.rs"]
+mod clover_ui_tests;

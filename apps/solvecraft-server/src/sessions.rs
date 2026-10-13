@@ -209,6 +209,7 @@ impl Worker {
             .arg("mcp")
             .current_dir(&config.files)
             .env_remove("SOLVECRAFT_MCP_TOKEN")
+            .env("SOLIDCRAFT_LINK_ROOT", &config.files)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

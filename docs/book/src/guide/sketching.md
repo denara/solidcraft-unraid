@@ -31,14 +31,36 @@ fit-point and control-point splines, conics, points and text. **Construction** (
 into reference geometry that doesn't form profiles. Modify tools include trim (T), extend, break,
 fillet, chamfer, offset (O), mirror, patterns, move/copy and scale.
 
+Polygon tools show their edge outline while positioning the second point, so the orientation
+can be checked before placement. Inscribed and circumscribed polygons retain their support
+circle and update the outline when the inline **Sides** value changes.
+
 **Text** is set in the built-in font (Liberation Sans) unless it is given another: `sketch.text` and
 `sketch.edit_text` take a `font`, the family or full name of an installed font ("DejaVu Sans") or the path
 of a `.ttf` / `.otf` file, and the **Edit Text** dialog has a **Font** field for it. An unknown font is an
 error, and the font is kept with the text in the design, so the text stays editable in it. `SOLIDCRAFT_FONT_DIRS`
 adds folders to the ones searched for installed fonts.
 
+Right-click a letter's filled interior or outline and choose **Edit Text**. You can also
+start **Edit Text** first and click the letter. All outlines belonging to that text are
+highlighted while the dialog is open. A profile bounded by multiple text sources or other
+geometry cannot identify one text: use **Select Other** to choose its outline instead.
+Change the text, font, baseline X/Y, height or angle, then confirm with **OK**; **Cancel**
+keeps the original text. Position and height use the document's units.
+
+Drag a text outline to move all its letters together. Let go to finish in one undo step,
+or press **Esc** during the drag to restore the original text. The text stays editable.
+For an exact displacement, select an outline and choose **Move/Copy** from its context menu.
+Enter **Distance X**, **Distance Y** and an optional **Angle** about the text's baseline;
+lengths accept document units or explicit units such as `1 in`. Enable **Create Copy** to
+leave the original in place and create a separately editable text. **Cancel** leaves the
+design unchanged. Projected geometry remains protected from ordinary dragging.
+
+
 **Project** (P) and **Intersect** bring model edges into the sketch as linked geometry that
 follows later changes. Sketching on a face projects its edges automatically.
+A projected edge stays the edge that was picked, wherever a later change moves it; when that
+edge no longer exists, the projection keeps its last shape and the sketch says it was lost.
 For Project, select visible source curves or points from another sketch, model edges,
 faces, vertices or bodies, or axes and planes, then press P. The entire supported selection
 is projected in one undo step. A rejected projection keeps the selection for correction;
@@ -94,6 +116,11 @@ While drawing a fit spline, click its starting point after three distinct sample
 it smoothly. Right-click finishes an ordinary natural fit. Offset accepts both ellipse
 handles and dense fitted curves; the second click sets the side and distance from the curve.
 
+While drawing in a planar sketch, **Construction** (X) changes the line type without
+ending the tool or losing picked points and inline values. The preview and hover feedback
+keep construction dashes and centerline dash-dot patterns visible. With curves selected,
+Construction changes those curves as before.
+
 Enable **3D Sketch** in the Sketch Palette to draw lines, fit splines and points off the plane.
 While placing these points, you can snap to points on other visible sketches. For a bridge
 line, start Line and click an endpoint on each source sketch; each endpoint uses its source
@@ -121,6 +148,19 @@ coincident, horizontal/vertical, parallel, perpendicular, tangent, equal, concen
 midpoint, symmetry, fix, curvature (G2) and polygon. **Sketch Dimension** (D) adds linear,
 aligned, horizontal, vertical, radius, diameter and angle dimensions. Each is a parameter
 (`d1`, `d2`, …), so it can hold an expression.
+
+Press D, click what you want to measure and type the value: as soon as the click settles the
+dimension (one line, circle or arc, or the second point or line of a distance or angle), its
+value box takes the keyboard with the measured value selected, so typing replaces it. Numbers,
+units (`1 in`), expressions (`2*width`) and parameter names all work; letters go into the box,
+not to tool shortcuts. While you type, the dimension text follows the cursor, and Enter places
+it there (or in its default place if you haven't moved the cursor) as one undo step. Esc
+cancels the dimension.
+
+You can still place the text first. Before you type, a click on empty sketch space puts the
+text there and keeps the value box focused; a click on another point or line makes the
+dimension a distance or angle instead; Tab leaves the picks waiting for a click to place the
+text.
 
 Between two points, or on a line, that don't line up with an axis, where you place the
 dimension picks what it measures: across from them, the distance between them; above or below

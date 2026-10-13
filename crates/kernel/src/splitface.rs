@@ -385,7 +385,14 @@ fn cut_edge(e: &mt::Edge, t: f64, p: mt::Point3, tol: f64) -> Result<(mt::Vertex
         return Ok((abs.back().clone(), None));
     }
     let v = mt::Vertex::new(p);
-    let (a, b) = abs.cut_with_parameter(&v, t).ok_or_else(|| KernelError::Failed("cannot cut an edge at the split line".into()))?;
+    // `t` is on the edge as it was: when an earlier crossing already cut it (a split line
+    // crossing it twice), the parameter is found again on the piece.
+    let cut = abs.cut_with_parameter(&v, t).or_else(|| {
+        use mt::SearchNearestParameter;
+        let t = abs.curve().search_nearest_parameter(p, None, 100)?;
+        abs.cut_with_parameter(&v, t)
+    });
+    let (a, b) = cut.ok_or_else(|| KernelError::Failed("cannot cut an edge at the split line".into()))?;
     Ok((v, Some((a, b))))
 }
 
@@ -401,11 +408,7 @@ fn recut(face: &mt::Face, cuts: &[(mt::Edge, (mt::Edge, mt::Edge))]) -> mt::Face
         .map(|w| {
             let mut out: Vec<mt::Edge> = Vec::new();
             for e in w.edge_iter() {
-                match cuts.iter().find(|(c, _)| c.id() == e.id()) {
-                    Some((c, (a, b))) if c.orientation() == e.orientation() => out.extend([a.clone(), b.clone()]),
-                    Some((_, (a, b))) => out.extend([b.inverse(), a.inverse()]),
-                    None => out.push(e.clone()),
-                }
+                expand(e, cuts, &mut out, 0);
             }
             out.into()
         })
@@ -415,6 +418,101 @@ fn recut(face: &mt::Face, cuts: &[(mt::Edge, (mt::Edge, mt::Edge))]) -> mt::Face
         f.invert();
     }
     f
+}
+
+/// `e` as the pieces it was cut into, in its direction; a piece cut again (a line crossing an
+/// edge twice) as its own pieces.
+fn expand(e: &mt::Edge, cuts: &[(mt::Edge, (mt::Edge, mt::Edge))], out: &mut Vec<mt::Edge>, depth: usize) {
+    match cuts.iter().find(|(c, _)| c.id() == e.id()).filter(|_| depth < 64) {
+        Some((c, (a, b))) if c.orientation() == e.orientation() => {
+            expand(a, cuts, out, depth + 1);
+            expand(b, cuts, out, depth + 1);
+        }
+        Some((_, (a, b))) => {
+            expand(&b.inverse(), cuts, out, depth + 1);
+            expand(&a.inverse(), cuts, out, depth + 1);
+        }
+        None => out.push(e.clone()),
+    }
+}
+
+/// `body` with its edges cut at the given points where they pass through them (not at their
+/// ends): the faces either side keep the same region, bounded by the pieces. Used to give two
+/// faces that cover the same region the same vertices before they are glued (#674).
+pub(crate) fn split_edges_at(body: &Body, points: &[Vec3]) -> Result<Body> {
+    use mt::SearchNearestParameter;
+    let size = body.size();
+    let tol = size * 1e-7 + 1e-9;
+    guard("split edges", || {
+        let mut cuts: Vec<(mt::Edge, (mt::Edge, mt::Edge))> = Vec::new();
+        let mut rec = Rebuild::default();
+        // Each current piece and the body edge it is a piece of.
+        let mut current: Vec<(mt::Edge, mt::Edge)> = body
+            .solid
+            .edge_iter()
+            .map(|e| {
+                let abs = if e.orientation() { e.clone() } else { e.inverse() };
+                (abs.clone(), abs)
+            })
+            .collect();
+        for p in points {
+            let q = p3(*p);
+            let hit = current.iter().position(|(e, _)| {
+                if e.front().point().distance(q) <= tol * 10.0 || e.back().point().distance(q) <= tol * 10.0 {
+                    return false;
+                }
+                let c = e.curve();
+                let (t0, t1) = c.range_tuple();
+                c.search_nearest_parameter(q, None, 100).is_some_and(|t| t > t0.min(t1) && t < t0.max(t1) && c.subs(t).distance(q) <= tol * 10.0)
+            });
+            let Some(k) = hit else { continue };
+            let (e, root) = current.swap_remove(k);
+            let Some(t) = e.curve().search_nearest_parameter(q, None, 100) else { continue };
+            let (_, cut) = cut_edge(&e, t, q, tol)?;
+            if let Some((a, b)) = cut {
+                rec.piece(&a, &root);
+                rec.piece(&b, &root);
+                current.push((a.clone(), root.clone()));
+                current.push((b.clone(), root.clone()));
+                cuts.push((e, (a, b)));
+            } else {
+                current.push((e, root));
+            }
+        }
+        if cuts.is_empty() {
+            return Ok(body.clone());
+        }
+        let shells: Vec<mt::Shell> = body
+            .solid
+            .boundaries()
+            .iter()
+            .map(|sh| {
+                sh.face_iter()
+                    .map(|f| {
+                        let nf = recut(f, &cuts);
+                        rec.whole(&nf, f);
+                        nf
+                    })
+                    .collect::<Vec<_>>()
+                    .into()
+            })
+            .collect();
+        let solid = mt::Solid::new_unchecked(shells);
+        let split = Body {
+            solid: std::sync::Arc::new(solid),
+            size: 0.0,
+            volume: Some(std::sync::Arc::new(std::sync::Mutex::new(None))),
+            coarse_missing: None,
+            mesh: None,
+            color: body.color,
+            paint: None,
+            splits: body.splits.clone(),
+            face_sources: None,
+            history: None,
+            regularization_protected: true,
+        };
+        Ok(crate::record::rebuilt_body(split, &[&body.solid], &rec))
+    })
 }
 
 /// A face rebuilt from loops (absolute) on the same surface and orientation as `like`.
@@ -532,12 +630,16 @@ fn split_one(faces: &mut Vec<mt::Face>, fi: usize, g: &Field, size: f64, new_edg
             let mut e = h.edge.clone();
             for (c, (x, y)) in cuts.iter() {
                 if c.id() == e.id() || c.id() == e.inverse().id() {
-                    let on = |pc: &mt::Edge| {
+                    // The piece the hit lies on (a cut line's pieces are parametrised afresh,
+                    // so by where the point is, not by the original parameter).
+                    let off = |pc: &mt::Edge| {
+                        use mt::SearchNearestParameter;
                         let cc = pc.curve();
                         let (t0, t1) = cc.range_tuple();
-                        (t0.min(t1) - 1e-12..=t0.max(t1) + 1e-12).contains(&h.t)
+                        let t = cc.search_nearest_parameter(h.p, None, 100).unwrap_or(h.t).clamp(t0.min(t1), t0.max(t1));
+                        cc.subs(t).distance(h.p)
                     };
-                    e = if on(x) { x.clone() } else { y.clone() };
+                    e = if off(x) <= off(y) { x.clone() } else { y.clone() };
                 }
             }
             let (v, cut) = cut_edge(&e, h.t, h.p, tol)?;
@@ -896,6 +998,8 @@ pub(crate) fn split_any(body: &Body, faces: &[usize], tool: &SplitTool) -> Resul
         let solid = mt::Solid::new_unchecked(shells.into_iter().map(mt::Shell::from).collect());
         let split = Body {
             solid: std::sync::Arc::new(solid),
+            size: 0.0,
+            volume: Some(std::sync::Arc::new(std::sync::Mutex::new(None))),
             coarse_missing: None,
             mesh: None,
             color: body.color,

@@ -166,8 +166,14 @@ fn owner_frame(s: &Session, doc: &Document, comp: u64) -> solidcraft_doc::Mat {
     if comp == s.active_component { s.active_component_frame() } else { doc.component_transform(comp) }
 }
 
-/// Re-resolve the links of a sketch being edited against the model before it, so edits see
-/// current reference geometry. Returns warnings.
+/// Re-resolve the links of a sketch being edited (`sk`, a copy of the stored sketch `id`)
+/// against the model before it, so edits see current reference geometry. Returns warnings.
+///
+/// When a link moved, the rest of the sketch follows it as the evaluation solves it, keeping
+/// the stored sides and turns, so the edit goes on from the sketch the model shows. Left where
+/// it was stored beside a line that has moved past it, a dimensioned point would give the
+/// edit's solve the other side to keep. A sketch that does not solve that way keeps its stored
+/// geometry, with the links moved.
 pub(super) fn refresh(s: &Session, doc: &Document, id: u64, sk: &mut Sketch) -> Vec<String> {
     if sk.links.is_empty() {
         return Vec::new();
@@ -183,10 +189,21 @@ pub(super) fn refresh(s: &Session, doc: &Document, id: u64, sk: &mut Sketch) -> 
         return vec!["lost face attachment; reattach explicitly".into()];
     };
     let Ok(plane) = sketch_plane(&doc, id, &st) else { return Vec::new() };
-    match attachment {
+    let warnings = match attachment {
         Some(anchor) => solidcraft_doc::project::refresh_face_anchor_links(&doc, &vals, &st, &plane, sk, anchor),
         None => solidcraft_doc::project::refresh_links(&doc, &vals, &st, &plane, sk),
+    };
+    if let Ok(stored) = doc.sketch(id)
+        && sk.positions_in(stored).is_some()
+    {
+        let mut solved = sk.clone();
+        let follows = solved.refresh_offsets().is_ok()
+            && doc.solve_sketch(&vals, &mut solved, &stored.driving_values(), Some(stored)).is_ok_and(|report| report.keeps_orientation());
+        if follows {
+            *sk = solved;
+        }
     }
+    warnings
 }
 
 /// Add a link for `src` to sketch `id` in `doc` (not stored in the session). Returns the link id.
@@ -209,9 +226,12 @@ pub(super) fn add_link(s: &Session, doc: &Document, id: u64, sk: &mut Sketch, ki
     } else {
         None
     };
+    // The link is the edge that was picked, not whichever is nearest the picked point later.
+    let edge_name = solidcraft_doc::project::resolved_edge_name(&st, &r);
     let link = sk.add_link_with_wires(kind, r.source, &r.geom, &r.wires)?;
     if let Some(l) = sk.links.iter_mut().find(|l| l.id == link) {
         l.face_name = name;
+        l.edge_name = edge_name;
     }
     Ok(link)
 }
@@ -546,6 +566,14 @@ pub(super) fn auto_project_face(s: &mut Session, id: u64, _at: Vec3) -> Result<O
 #[cfg(test)]
 #[path = "sketch_project_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "sketch_project_side_tests.rs"]
+mod side_tests;
+
+#[cfg(test)]
+#[path = "sketch_project_edge_tests.rs"]
+mod edge_tests;
 
 #[cfg(test)]
 #[path = "sketch_model_plane_tests.rs"]

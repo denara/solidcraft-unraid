@@ -528,7 +528,7 @@ fn hostile_input_neither_panics_nor_changes_the_report() {
         case(&mut sk, a, b, l);
         let mut mask = given(&sk);
         mask.push(true);
-        let s = seed(&sk, &mask, Some(&[v(f64::NAN, 0.0)]), &points_on_curves(&sk), &mut Budget::full());
+        let s = seed(&sk, &mask, Some(&[v(f64::NAN, 0.0)]), false, &points_on_curves(&sk), &mut Budget::full());
         assert!(s.pos.iter().flatten().all(|p| p.is_finite()), "case {i}: {s:?}");
         let n = sk.points.len();
         for reference in [None, Some(vec![Vec2::ZERO; 1]), Some(vec![v(f64::NAN, f64::INFINITY); n]), Some(vec![Vec2::ZERO; n + 3])] {
@@ -902,7 +902,7 @@ fn given_points_are_never_placed() {
     push(&mut sk, ConstraintKind::Distance { p: a, q: d, value: 36.0 });
     let mask = given(&sk);
     assert!(mask[g]);
-    let out = seed(&sk, &mask, None, &points_on_curves(&sk), &mut Budget::full());
+    let out = seed(&sk, &mask, None, true, &points_on_curves(&sk), &mut Budget::full());
     assert_eq!((out.pos[g], out.placed_by[g]), (None, None), "{out:?}");
     assert_eq!(out.placed_by[d], None, "nothing is built on it: {out:?}");
 }

@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use solidcraft_geom::Vec2;
 use solidcraft_sketch::{ConstraintKind, CurveKind, Sketch};
 
-use super::sketch::{add_c, dof_now, edit, reject_redundant};
+use super::sketch::{add_c, constraint_result, dof_now, edit, listed, redundancy, residual_of};
 use super::{CommandSpec, in_sketch};
 use crate::params::{bad, num, req_vec2, str_, string_list, vec2};
 use crate::{EngineError, Result, Session};
@@ -56,15 +56,17 @@ pub static COMMANDS: &[CommandSpec] = &[
 
 fn c_smooth(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "sketch.constraint.curvature";
-    let mut before = None;
+    let (mut before, mut residual) = (None, None);
     let (id, info) = edit(s, p, cmd, true, |sk, _| {
         let a = curve(sk, p.get("a"), cmd)?;
         let b = curve(sk, p.get("b"), cmd)?;
         before = Some(dof_now(sk));
-        add_c(sk, ConstraintKind::Smooth { a, b })
+        let id = add_c(sk, ConstraintKind::Smooth { a, b })?;
+        residual = residual_of(sk, &id);
+        Ok(id)
     })?;
-    reject_redundant(before, &info, cmd)?;
-    Ok(json!({"constraint": id, "sketch": info}))
+    let by = redundancy(s, p, cmd, before, &info, residual, &id)?;
+    constraint_result(p, cmd, id, info, by, Value::Null)
 }
 
 fn curve(sk: &Sketch, v: Option<&Value>, cmd: &str) -> Result<usize> {
@@ -349,16 +351,18 @@ fn guess(sk: &Sketch, ents: &[String], cmd: &str) -> Result<ConstraintKind> {
 fn smart_constrain(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "sketch.constrainer";
     let ents = string_list(p, "entities");
-    let mut before = None;
+    let (mut before, mut residual) = (None, None);
     let mut name = "";
     let (id, info) = edit(s, p, cmd, true, |sk, _| {
         let k = guess(sk, &ents, cmd)?;
         name = k.name();
         before = Some(dof_now(sk));
-        add_c(sk, k)
+        let id = add_c(sk, k)?;
+        residual = residual_of(sk, &id);
+        Ok(id)
     })?;
-    reject_redundant(before, &info, cmd)?;
-    Ok(json!({"constraint": id, "type": name, "sketch": info}))
+    let by = redundancy(s, p, cmd, before, &info, residual, &id)?;
+    constraint_result(p, cmd, id, info, by, json!({"type": name}))
 }
 
 fn toggle_driven(s: &mut Session, p: &Value) -> Result<Value> {
@@ -397,7 +401,10 @@ fn toggle_driven(s: &mut Session, p: &Value) -> Result<Value> {
             c.driven = true;
         }
         before = Some(dof_now(&sk));
-        reject_redundant(before, &info, cmd)?;
+        // It holds (its parameter takes the value it measures), so it can only be redundant.
+        if let Some(by) = redundancy(s, p, cmd, before, &info, Some(0.0), &cid)? {
+            return Err(bad(cmd, format!("that dimension is already determined by {}; it stays driven", listed(&by))));
+        }
     }
     s.doc_mut().prune_model_params();
     Ok(json!({"constraint": cid, "driven": driven, "sketch": info}))
@@ -468,6 +475,8 @@ fn glyphs(s: &mut Session, p: &Value) -> Result<Value> {
                 "param": c.param,
                 "at": anchor(&ss.sketch, &c.kind),
                 "failing": failing.contains(&c.id),
+                // Implied by the others (it removes no freedom) but holding: shown dimmed.
+                "redundant": ss.report.redundant.contains(&c.id),
             })
         })
         .collect();

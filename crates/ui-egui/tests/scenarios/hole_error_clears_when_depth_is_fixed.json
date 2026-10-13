@@ -1,0 +1,18 @@
+[
+  {"note": "#641: a refused OK's error must not outlive the inputs it was about. A negative depth is refused; once the depth is positive again the dialog shows no error and OK makes the hole (Ø5, 5 deep to the shoulder, 118° drill point: 30000 − 98.17 − 9.83 mm³)."},
+  {"call": "engine.execute", "params": {"command": "solid.box", "params": {"length": 50, "width": 30, "height": 20}}},
+  {"call": "ui.view", "params": {"view": "iso"}},
+  {"start": "solid.hole"},
+  {"click": {"world": [25, 15, 20]}},
+  {"click": {"handle": "dialog:Depth"}},
+  {"key": "A", "cmd": true},
+  {"text": "-5"},
+  {"key": "Enter"},
+  {"expect": {"dialog": "error: Some(\"hole depth must be positive\")"}},
+  {"click": {"handle": "dialog:Depth"}},
+  {"key": "A", "cmd": true},
+  {"text": "5"},
+  {"expect": {"dialog": "error: None"}},
+  {"key": "Enter"},
+  {"expect": {"bodies": 1, "errors": 0, "dialog": null, "volume": [29891.99, 1e-4]}}
+]

@@ -342,6 +342,12 @@ fn edit_feature(s: &mut Session, p: &Value) -> Result<Value> {
             nf.edge_names = solidcraft_doc::sheet::sheet_edge_names(&s.model.state_before(id), &points(a));
         }
     }
+    // New bend edges for a conversion: the names of the body's edges there now.
+    if let (FeatureKind::SheetConvert { bends: a, body, .. }, FeatureKind::SheetConvert { bends: b, body: was, .. }) = (&nf.kind, &f.kind)
+        && (a != b || body != was)
+    {
+        nf.edge_names = solidcraft_doc::sheet::bend_edge_names(&s.model.state_before(id), body, a);
+    }
     // Profiles picked by index or point are kept by their curves, as when the feature was made.
     if nf.kind.clone().profile_sels_mut() != f.kind.clone().profile_sels_mut() {
         super::features::stable_profiles(s, &mut nf.kind)?;
@@ -435,10 +441,18 @@ fn input_keys(kind: &FeatureKind) -> Vec<(String, solidcraft_doc::expr::Kind)> {
         if let Some((key, _)) = keys.first_mut() {
             *key = "fillet.radius".into();
         }
-        if let solidcraft_doc::FilletStyle::Variable { mid, .. } = style {
-            for ((key, _), (position, _)) in keys.iter_mut().skip(2).zip(mid) {
-                *key = format!("fillet.mid.{}", position.to_bits());
+        match style {
+            solidcraft_doc::FilletStyle::Variable { mid, .. } => {
+                for ((key, _), (position, _)) in keys.iter_mut().skip(2).zip(mid) {
+                    *key = format!("fillet.mid.{}", position.to_bits());
+                }
             }
+            solidcraft_doc::FilletStyle::Spline { .. } => {
+                for (i, (key, _)) in keys.iter_mut().enumerate().skip(1) {
+                    *key = format!("fillet.control.{i}");
+                }
+            }
+            solidcraft_doc::FilletStyle::Constant | solidcraft_doc::FilletStyle::Chord => {}
         }
     }
     keys

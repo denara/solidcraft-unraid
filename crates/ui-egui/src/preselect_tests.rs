@@ -333,6 +333,97 @@ fn profiles_then_extrude_takes_them_all() {
     assert!(apply_commands(&app, &d).is_ok());
 }
 
+/// #684: with nothing selected, Extrude and Revolve take the last sketch's single profile only
+/// while no feature uses it yet. A cube's sketch lies on its bottom face: taking that profile
+/// again made the dialog default to Cut, so OK cut into the part nobody had picked.
+#[test]
+fn used_profile_of_the_last_sketch_is_not_pre_picked() {
+    let mut h = crate::scenario::Harness::new();
+    let base = h.app.run("sketch.create", json!({"plane":"XY"})).unwrap()["sketch"].as_u64().unwrap();
+    h.app.run("sketch.rectangle.two_point", json!({"p0":[0,0],"p1":[20,20]})).unwrap();
+    h.app.run("sketch.finish", json!({})).unwrap();
+    h.app.run("solid.extrude", json!({"distance":20})).unwrap();
+    h.app.run("select.clear", json!({})).unwrap();
+    let features = h.app.session.doc.features.len();
+    h.call("ui.start", json!({"command":"solid.extrude"}));
+    h.frames(2);
+    let ui = h.call("ui.selection", json!({}))["result"].clone();
+    assert_eq!(ui["selection"], json!([]));
+    assert_eq!(ui["dialog"], json!([{"label":"Profiles","items":[]}]), "the extruded sketch's profile is taken again");
+    let d = h.app.dialog.as_ref().unwrap();
+    assert!(matches!(d.kind, Kind::Extrude { operation: 1, auto_op: true, .. }), "Join, not Cut: {:?}", d.kind);
+    assert_eq!(d.active, 0, "picks go to Profiles");
+    // OK with nothing picked builds nothing: the cube stays whole.
+    h.step(&json!({"key":"Enter"})).unwrap();
+    assert!(h.app.dialog.is_some(), "OK waits for a pick");
+    assert_eq!(h.app.session.doc.features.len(), features);
+    h.step(&json!({"expect":{"bodies":1,"volume":8000}})).unwrap();
+    h.step(&json!({"key":"Escape"})).unwrap();
+    assert!(h.app.dialog.is_none());
+    // Revolve takes the same default.
+    h.app.start("solid.revolve");
+    h.frames(2);
+    assert!(h.app.dialog.as_ref().unwrap().inputs[0].items.is_empty(), "Revolve takes the used profile");
+    h.step(&json!({"key":"Escape"})).unwrap();
+    // A sketch being edited still offers its profile, used or not.
+    h.app.edit_sketch(base);
+    h.frames(2);
+    h.app.start("solid.extrude");
+    h.frames(2);
+    assert_eq!(h.app.dialog.as_ref().unwrap().inputs[0].items, vec![Sel::Profile { sketch: base, index: 0 }]);
+    h.step(&json!({"key":"Escape"})).unwrap();
+    h.app.finish_sketch();
+    // A new sketch on the top face, not used yet, is taken right after Finish Sketch.
+    let top = h.app.run("sketch.create", json!({"plane":{"origin":[0,0,20],"x_dir":[1,0,0],"y_dir":[0,1,0]}})).unwrap()["sketch"].as_u64().unwrap();
+    h.app.run("sketch.rectangle.two_point", json!({"p0":[5,5],"p1":[15,15]})).unwrap();
+    h.app.run("sketch.finish", json!({})).unwrap();
+    h.app.run("select.clear", json!({})).unwrap();
+    h.app.start("solid.extrude");
+    h.frames(2);
+    let d = h.app.dialog.as_ref().unwrap();
+    assert_eq!(d.inputs[0].items, vec![Sel::Profile { sketch: top, index: 0 }]);
+    assert!(matches!(d.kind, Kind::Extrude { operation: 1, .. }), "a boss on the top face joins: {:?}", d.kind);
+    h.step(&json!({"key":"Enter"})).unwrap();
+    assert!(h.app.dialog.is_none(), "{:?}", h.app.dialog);
+    h.step(&json!({"expect":{"bodies":1,"volume":9000}})).unwrap();
+}
+
+/// #684: what stops the pre-pick is a feature building from the sketch's profile (not just an
+/// extrude), anywhere in the timeline; a feature that only follows its curves does not.
+#[test]
+fn profile_use_not_curve_use_stops_the_pre_pick() {
+    // A surface patch fills the sketch's region.
+    let mut app = app_with(json!([
+        {"command": "sketch.create", "params": {"plane": "XY", "name": "Region"}},
+        {"command": "sketch.rectangle.two_point", "params": {"p0": [0, 0], "p1": [20, 10]}},
+        {"command": "sketch.finish", "params": {}},
+        {"command": "surface.patch", "params": {"sketch": "Region"}},
+    ]));
+    assert_eq!(app.session.doc.features.len(), 2);
+    assert!(start(&mut app, vec![], "solid.extrude").inputs[0].items.is_empty(), "the patched region is taken again");
+    // Rolled back to just after the sketch: the extrude after the marker still builds from it.
+    let mut app = app_with(json!([
+        {"command": "sketch.create", "params": {"plane": "XY", "name": "Base"}},
+        {"command": "sketch.rectangle.two_point", "params": {"p0": [0, 0], "p1": [20, 20]}},
+        {"command": "sketch.finish", "params": {}},
+        {"command": "solid.extrude", "params": {"distance": 20}},
+        {"command": "timeline.roll_to", "params": {"position": 1}},
+    ]));
+    let base = app.session.doc.features.first().unwrap().id;
+    assert_eq!(app.session.world_state().sketch(base).map(|s| s.profiles.len()), Some(1));
+    assert!(start(&mut app, vec![], "solid.extrude").inputs[0].items.is_empty(), "the rolled-back extrude's profile is taken");
+    // A pipe follows the circle; the disc inside it is used by nothing.
+    let mut app = app_with(json!([
+        {"command": "sketch.create", "params": {"plane": "XY", "name": "Path"}},
+        {"command": "sketch.circle.center", "params": {"center": [0, 0], "radius": 20, "id": "c"}},
+        {"command": "sketch.finish", "params": {}},
+        {"command": "solid.pipe", "params": {"path_sketch": "Path", "path": ["c"], "diameter": 4}},
+    ]));
+    let path = app.session.doc.features.first().unwrap().id;
+    assert_eq!(app.session.doc.features.len(), 2);
+    assert_eq!(start(&mut app, vec![], "solid.extrude").inputs[0].items, vec![Sel::Profile { sketch: path, index: 0 }]);
+}
+
 #[test]
 fn edges_then_fillet_takes_them_with_chains() {
     let mut app = boxed();
@@ -537,7 +628,7 @@ fn fillet_radius_fit_reduces_and_shows_the_applied_radius() {
     assert_eq!(p["fit"], json!("reduce"));
     let job = crate::preview::compute(&app.session, &[(id.clone(), p.clone())], crate::preview::Colors::from_tokens(&crate::theme::Tokens::dark()))
         .unwrap();
-    assert_eq!(job.applied, Some(3.0));
+    assert_eq!(job.applied, Some((3.0, 3.0)));
     // Applied and edited again, the fillet keeps its fit.
     app.session.execute(&id, &p).unwrap();
     let fillet = app.session.doc.features.last().unwrap().id;
@@ -546,7 +637,7 @@ fn fillet_radius_fit_reduces_and_shows_the_applied_radius() {
     // Its edit preview shows the radius it uses too.
     let cmds = apply_commands(&app, &e).unwrap();
     let job = crate::preview::compute(&app.session, &cmds, crate::preview::Colors::from_tokens(&crate::theme::Tokens::dark())).unwrap();
-    assert_eq!(job.applied, Some(3.0));
+    assert_eq!(job.applied, Some((3.0, 3.0)));
 }
 
 /// Apply a dialog's commands to the session; the new feature's id.
@@ -753,4 +844,89 @@ fn split_body_by_a_curved_face_sends_it_as_a_tool() {
     d.inputs[1].items = vec![side];
     let p = apply_commands(&app, &d).unwrap().remove(0).1;
     assert!(p["tool"]["point"].is_array() && p.get("plane").is_none(), "{p}");
+}
+
+/// Runs a primitive's dialog with `sels` pre-selected and returns the new body's centroid.
+fn primitive_on(app: &mut SolveApp, sels: Vec<Sel>, id: &str, edit: impl FnOnce(&mut Dialog)) -> (serde_json::Value, Vec3) {
+    let mut d = start(app, sels, id);
+    edit(&mut d);
+    let (cmd, p) = apply_commands(app, &d).unwrap().remove(0);
+    let name = app.session.execute(&cmd, &p).unwrap()["created_bodies"][0].as_str().unwrap().to_string();
+    let st = app.session.model.state();
+    (p, st.body(&name).unwrap().mesh().measure().centroid)
+}
+
+/// The face of Body1 whose centre is at `c`, picked at `p`.
+fn picked(app: &SolveApp, c: Vec3, p: Vec3) -> Sel {
+    let Sel::Face { body, index, .. } = face(app, c) else { panic!("a face") };
+    Sel::Face { body, index, point: p }
+}
+
+fn near(a: Vec3, b: Vec3) -> bool {
+    a.dist(b) < 0.05
+}
+
+#[test]
+fn primitives_go_on_the_picked_face() {
+    // #580: a sphere (or any primitive) made with a face selected went to the origin.
+    let mut app = boxed();
+    let top = picked(&app, Vec3::new(20.0, 15.0, 20.0), Vec3::new(8.0, 10.0, 20.0));
+    let (p, c) = primitive_on(&mut app, vec![top.clone()], "solid.sphere", |_| {});
+    assert_eq!(p["center"], json!([8.0, 10.0, 20.0]), "{p}");
+    assert!(near(c, Vec3::new(8.0, 10.0, 20.0)), "{c:?}");
+
+    let (p, c) = primitive_on(&mut app, vec![top.clone()], "solid.cylinder", |_| {});
+    assert_eq!(p["axis"], json!([0.0, 0.0, 1.0]), "standing on the top face: {p}");
+    assert!(near(c, Vec3::new(8.0, 10.0, 30.0)), "{c:?}");
+
+    // A box stands on the face, centred on the picked point across it. Sizes that are plain
+    // lengths ("20 mm") give a plain corner.
+    let (p, c) = primitive_on(&mut app, vec![top.clone()], "solid.box", |_| {});
+    assert_eq!(p["corner"], json!([-2.0, 0.0, 20.0]), "{p}");
+    assert!(near(c, Vec3::new(8.0, 10.0, 30.0)), "{c:?}");
+
+    let (p, c) = primitive_on(&mut app, vec![top], "solid.torus", |_| {});
+    assert_eq!(p["center"], json!([8.0, 10.0, 20.0]), "{p}");
+    assert!(near(c, Vec3::new(8.0, 10.0, 20.0)), "{c:?}");
+}
+
+#[test]
+fn a_box_stands_out_of_a_face_that_faces_down_an_axis() {
+    let mut app = boxed();
+    // The x = 0 side faces -X: the box goes the other way, away from the body.
+    let side = picked(&app, Vec3::new(0.0, 15.0, 10.0), Vec3::new(0.0, 12.0, 8.0));
+    let (_, c) = primitive_on(&mut app, vec![side.clone()], "solid.box", |_| {});
+    assert!(near(c, Vec3::new(-10.0, 12.0, 8.0)), "{c:?}");
+    // Sizes that are expressions stay expressions in the corner.
+    app.session.execute("parameters.add", &json!({"name": "s", "expression": "6 mm"})).unwrap();
+    let (p, c) = primitive_on(&mut app, vec![side.clone()], "solid.box", |d| {
+        if let Kind::Primitive { fields, .. } = &mut d.kind {
+            fields.iter_mut().for_each(|f| f.1 = "s".into());
+        }
+    });
+    assert_eq!(p["corner"][0], json!("0 mm - (s)"), "{p}");
+    assert!(near(c, Vec3::new(-3.0, 12.0, 8.0)), "{c:?}");
+    // The cylinder's axis points out of the face.
+    let (p, c) = primitive_on(&mut app, vec![side], "solid.cylinder", |_| {});
+    assert_eq!(p["axis"], json!([-1.0, 0.0, 0.0]), "{p}");
+    assert!(near(c, Vec3::new(-10.0, 12.0, 8.0)), "{c:?}");
+}
+
+#[test]
+fn a_primitive_without_a_pick_or_with_its_position_cleared_stays_at_the_origin() {
+    let mut app = boxed();
+    let (p, c) = primitive_on(&mut app, vec![], "solid.sphere", |_| {});
+    assert!(p.get("center").is_none(), "{p}");
+    assert!(near(c, Vec3::ZERO), "{c:?}");
+    let top = face(&app, Vec3::new(20.0, 15.0, 20.0));
+    let (p, _) = primitive_on(&mut app, vec![top], "solid.sphere", |d| {
+        if let Kind::Primitive { at, .. } = &mut d.kind {
+            *at = None;
+        }
+    });
+    assert!(p.get("center").is_none(), "{p}");
+    // A vertex places it too.
+    let v = Sel::Vertex { body: "Body1".into(), point: Vec3::new(40.0, 30.0, 20.0) };
+    let (p, _) = primitive_on(&mut app, vec![v], "solid.sphere", |_| {});
+    assert_eq!(p["center"], json!([40.0, 30.0, 20.0]), "{p}");
 }

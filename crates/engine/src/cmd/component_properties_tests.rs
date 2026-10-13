@@ -132,7 +132,6 @@ fn excessively_nested_assembly_refuses_partial_totals() {
 /// rubber, leather). A user-defined material with its density is assigned like a built-in one
 /// and sets the body's mass: a 10 mm walnut cube at 0.65 g/cm³ weighs 0.65 g.
 #[test]
-#[ignore = "fails until #532 is fixed"]
 fn user_defined_material_sets_the_body_mass() {
     let mut s = Session::default();
     run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10, "body_name": "Slat"}));
@@ -142,4 +141,161 @@ fn user_defined_material_sets_the_body_mass() {
     assert_eq!(props["bodies"][0]["material"], "Walnut", "{props}");
     close(&props["bodies"][0]["density_g_cm3"], 0.65);
     close(&props["total"]["mass_g"], 0.65);
+}
+
+/// A design file path in a fresh temporary folder (removed by the caller).
+fn temp_design(tag: &str) -> (std::path::PathBuf, String) {
+    let dir = std::env::temp_dir().join(format!("solidcraft-user-material-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("design.solidcraft").to_string_lossy().to_string();
+    (dir, path)
+}
+
+fn mass(s: &mut Session) -> Value {
+    run(s, "component.properties", json!({"component": "root"}))["total"]["mass_g"].clone()
+}
+
+/// #532: a design's own material is listed after the library, gives its bodies its look, and
+/// can be edited (density and name: the bodies follow) and deleted; each step is undoable.
+#[test]
+fn user_defined_material_is_edited_renamed_and_deleted() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10, "body_name": "Pad"}));
+    assert!(s.execute("material.edit", &json!({"material": "Rubber", "density_g_cm3": 1.2})).is_err(), "nothing to edit yet");
+    let created = run(&mut s, "material.create", json!({"name": "Rubber", "density_g_cm3": 1.5, "color": "#1c1c1c"}));
+    assert_eq!(created["appearance"]["color"], "#1c1c1c", "{created}");
+    let list = run(&mut s, "material.list", json!({}));
+    let materials = list["materials"].as_array().unwrap();
+    assert_eq!(materials.len(), solidcraft_doc::MATERIALS.len() + 1);
+    let rubber = materials.last().unwrap();
+    assert_eq!((rubber["name"].as_str(), rubber["user"].as_bool()), (Some("Rubber"), Some(true)));
+
+    // Assigned (in any case), it sets the mass and the body's colour.
+    run(&mut s, "material.assign", json!({"bodies": ["Pad"], "material": "rubber"}));
+    close(&mass(&mut s), 1.5);
+    let pad = s.model.state().body("Pad").unwrap().clone();
+    let grey = 28.0 / 255.0;
+    assert_eq!(s.doc.body_color(&pad), Some([grey, grey, grey]));
+
+    // A new density changes the mass; a new name carries the body with it.
+    run(&mut s, "material.edit", json!({"material": "Rubber", "density_g_cm3": 1.2, "name": "Foot Rubber"}));
+    close(&mass(&mut s), 1.2);
+    let props = run(&mut s, "component.properties", json!({"component": "root"}));
+    assert_eq!(props["bodies"][0]["material"], "Foot Rubber");
+    run(&mut s, "edit.undo", json!({}));
+    close(&mass(&mut s), 1.5);
+    assert_eq!(s.doc.materials.get("Pad").map(String::as_str), Some("Rubber"));
+    run(&mut s, "edit.redo", json!({}));
+
+    // A material in use is not deleted unless its bodies get another one.
+    let refused = s.execute("material.delete", &json!({"material": "Foot Rubber"})).unwrap_err().to_string();
+    assert!(refused.contains("body `Pad`"), "{refused}");
+    run(&mut s, "material.delete", json!({"material": "Foot Rubber", "replace": "Oak"}));
+    close(&mass(&mut s), 0.75);
+    assert!(s.doc.user_materials.is_empty());
+    assert!(s.execute("material.assign", &json!({"bodies": ["Pad"], "material": "Foot Rubber"})).is_err());
+    run(&mut s, "edit.undo", json!({}));
+    close(&mass(&mut s), 1.2);
+}
+
+/// #532: names and densities are checked before anything changes.
+#[test]
+fn user_defined_material_refuses_bad_names_and_densities() {
+    let mut s = Session::default();
+    run(&mut s, "material.create", json!({"name": "Walnut", "density_g_cm3": 0.65}));
+    let doc = s.doc.clone();
+    for p in [
+        json!({"name": "Steel", "density_g_cm3": 1.0}),
+        json!({"name": "walnut", "density_g_cm3": 1.0}),
+        json!({"name": "  ", "density_g_cm3": 1.0}),
+        json!({"name": "x".repeat(129), "density_g_cm3": 1.0}),
+        json!({"name": "Leather", "density_g_cm3": 0}),
+        json!({"name": "Leather", "density_g_cm3": -1}),
+        json!({"name": "Leather", "density_g_cm3": 1e9}),
+        json!({"name": "Leather", "density_g_cm3": "heavy"}),
+        json!({"name": "Leather"}),
+        json!({"name": "Leather", "density_g_cm3": 0.9, "color": "#zzzzzz"}),
+        json!({"name": "Leather", "density_g_cm3": 0.9, "appearance": "No Such Look"}),
+        json!({"name": "Leather", "density_g_cm3": 0.9, "opacity": 0.5}),
+    ] {
+        assert!(s.execute("material.create", &p).is_err(), "{p}");
+    }
+    for p in [
+        json!({"material": "Steel", "density_g_cm3": 1.0}),
+        json!({"material": "Walnut", "name": "Oak"}),
+        json!({"material": "Walnut", "density_g_cm3": 0}),
+    ] {
+        assert!(s.execute("material.edit", &p).is_err(), "{p}");
+    }
+    assert_eq!(*s.doc, *doc);
+}
+
+/// #532: a design's materials are saved with it: after reopening, the bodies keep their
+/// material, its density and its look.
+#[test]
+fn user_defined_material_survives_save_and_reopen() {
+    let (dir, path) = temp_design("saved");
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10, "body_name": "Tab"}));
+    run(&mut s, "material.create", json!({"name": "Leather", "density_g_cm3": 0.86, "appearance": "Rubber - Black"}));
+    run(&mut s, "material.assign", json!({"bodies": ["Tab"], "material": "Leather"}));
+    run(&mut s, "file.save", json!({"path": path}));
+    assert!(s.doc.to_json().contains("\"solidcraft/17\""));
+
+    run(&mut s, "file.new", json!({}));
+    run(&mut s, "doc.open", json!({"path": path}));
+    let props = run(&mut s, "component.properties", json!({"component": "root"}));
+    assert_eq!(props["bodies"][0]["material"], "Leather", "{props}");
+    close(&props["total"]["mass_g"], 0.86);
+    assert_eq!(s.doc.material_look("Leather").map(|l| l.name), Some("Rubber - Black".to_string()));
+    run(&mut s, "material.edit", json!({"material": "Leather", "density_g_cm3": 0.9}));
+    close(&mass(&mut s), 0.9);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #532: designs from before user materials open unchanged: built-in assignments keep their
+/// densities and a design without its own materials saves no `user_materials`. A damaged
+/// file's unusable density falls back to the default instead of producing nonsense masses.
+#[test]
+fn designs_without_user_materials_open_unchanged() {
+    let (dir, path) = temp_design("legacy");
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10, "body_name": "Plate"}));
+    run(&mut s, "material.assign", json!({"bodies": ["Plate"], "material": "Steel"}));
+    let mut legacy: Value = serde_json::from_str(&s.doc.to_json()).unwrap();
+    assert!(legacy.get("user_materials").is_none());
+    legacy["format"] = json!("solidcraft/16");
+    std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    run(&mut s, "file.new", json!({}));
+    run(&mut s, "doc.open", json!({"path": path}));
+    close(&mass(&mut s), 7.85);
+    assert!(s.doc.user_materials.is_empty());
+    assert!(s.execute("material.delete", &json!({"material": "Steel"})).is_err(), "no design materials: nothing to delete");
+
+    legacy["user_materials"] = json!([{"name": "Broken", "density": -3.0, "appearance": {"name": "Broken", "color": [1, 2, 3], "opacity": 9.0}}]);
+    legacy["materials"] = json!({"Plate": "Broken"});
+    std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    run(&mut s, "doc.open", json!({"path": path}));
+    close(&mass(&mut s), solidcraft_doc::DEFAULT_DENSITY);
+    assert_eq!(s.doc.material_look("Broken").map(|l| l.opacity), Some(1.0));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #532: configuration material cells take a design's own material and follow its rename.
+#[test]
+fn configurations_switch_to_a_user_defined_material() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10, "body_name": "Slat"}));
+    run(&mut s, "material.create", json!({"name": "Walnut", "density_g_cm3": 0.65}));
+    run(&mut s, "config.configure", json!({"materials": ["Slat"]}));
+    run(&mut s, "config.row", json!({"name": "Walnut", "values": {"material:Slat": "walnut"}}));
+    run(&mut s, "config.activate", json!({"row": "Walnut"}));
+    close(&mass(&mut s), 0.65);
+    run(&mut s, "material.edit", json!({"material": "Walnut", "name": "Black Walnut"}));
+    run(&mut s, "config.activate", json!({"row": "Default"}));
+    run(&mut s, "config.activate", json!({"row": "Walnut"}));
+    assert_eq!(s.doc.materials.get("Slat").map(String::as_str), Some("Black Walnut"));
+    run(&mut s, "material.delete", json!({"material": "Black Walnut", "replace": "Default"}));
+    assert!(!s.doc.materials.contains_key("Slat"));
 }

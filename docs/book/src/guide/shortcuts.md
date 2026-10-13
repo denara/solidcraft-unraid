@@ -26,6 +26,11 @@ Keys handled by the window itself:
 | F6 | fit the view to the model |
 | Esc | cancel the running command, or clear the selection |
 
+While a value box has the keyboard (a dimension being added, a dialog field), keys type into
+it and single-letter shortcuts don't fire. With Sketch Dimension (D), the box opens as soon as
+you click a line, circle or arc (or the second point or line), so D, click, type the value,
+Enter.
+
 Mouse and touch:
 
 | Action | Result |
@@ -34,5 +39,6 @@ Mouse and touch:
 | Click again on the same spot | select the next thing under the cursor (click cycling) |
 | Hold the left button still (long-press on touch), or right-click › Select Other… | list everything under the cursor to pick from |
 | Double-click a sketch curve or edge | select its chain or tangent loop |
+| Double-click the middle button | go Home: the home view, framing everything shown (Preferences › Navigation › Middle double-click: Home, Fit or Off) |
 
 Help › Keyboard Shortcuts in the app lists the current bindings, including any you changed.

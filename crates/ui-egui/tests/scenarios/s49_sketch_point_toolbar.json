@@ -1,7 +1,7 @@
 [
- {"note":"#191: Point is a default Sketch CREATE button; the existing six drawing buttons remain available."},
+ {"note":"#191: Point remains a default Sketch CREATE button alongside the drawing families."},
  {"call":"engine.execute","params":{"command":"sketch.create","params":{"plane":"XY"}}},
- {"expect":{"shown_handles":["button:sketch.line","button:sketch.rectangle.two_point","button:sketch.rectangle.three_point","button:sketch.rectangle.center","button:sketch.circle.center","button:sketch.circle.two_point","button:sketch.point"]}},
+ {"expect":{"shown_handles":["button:sketch.line","family:Rectangle","family:Circle","family:Arc","family:Slot","family:Polygon","family:Spline","button:sketch.point"]}},
  {"click":{"handle":"button:sketch.point"}},
  {"expect":{"tool":"sketch.point","dialog":null}},
  {"click":{"sketch":[20,15]}},

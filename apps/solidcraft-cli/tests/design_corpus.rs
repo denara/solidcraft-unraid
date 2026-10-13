@@ -137,18 +137,7 @@ fn body_names_saved_before_exact_history_keep_their_pieces() {
 /// ignored test below that checks its faces; a listed plane whose face attaches fails the main
 /// check until it is removed from here.
 type Planes = &'static [([f64; 3], f64)];
-const NO_ATTACHMENT_YET: [(&str, &str, Option<Planes>, u32); 9] = [
-    ("issue-489-stacked-join", "Body1", Some(&[([1., 0., 0.], 35.), ([-1., 0., 0.], 35.)]), 491),
-    ("issue-489-stacked-join", "Body1", Some(&[([0., 0., 1.], 30.)]), 492),
-    ("m0-revolve-primitives", "Body2", Some(&[([-FRAC_1_SQRT_2, 0., FRAC_1_SQRT_2], -21. * FRAC_1_SQRT_2)]), 493),
-    ("split-body-pieces", "Body1", Some(&[([0., FRAC_1_SQRT_2, FRAC_1_SQRT_2], 38.5 * FRAC_1_SQRT_2), ([0., -1., 0.], -18.)]), 493),
-    ("split-body-pieces", "Body1 (1)", Some(&[([0., 1., 0.], 12.)]), 493),
-    ("m0-revolve-primitives", "Body1", None, 494),
-    ("naming-split-pieces", "Body1", None, 494),
-    ("modern-plastic", "Body1", None, 494),
-    ("modern-sheet-metal", "Body1", None, 495),
-];
-use std::f64::consts::FRAC_1_SQRT_2;
+const NO_ATTACHMENT_YET: [(&str, &str, Option<Planes>, u32); 1] = [("issue-616-lid-ribs", "Lid", None, 628)];
 
 /// The issue a face is listed under, and whether it is listed by its plane (not as every face).
 fn known_without_attachment(design: &str, body: &str, normal: [f64; 3], distance: f64) -> Option<(u32, bool)> {
@@ -268,33 +257,9 @@ fn known_faces_attach(issue: u32) {
 }
 
 #[test]
-#[ignore = "fails until #491 is fixed"]
-fn a_side_face_join_merged_from_two_extrudes_takes_an_attached_sketch() {
-    known_faces_attach(491);
-}
-
-#[test]
-#[ignore = "fails until #492 is fixed"]
-fn a_face_split_into_pieces_by_a_later_feature_takes_an_attached_sketch() {
-    known_faces_attach(492);
-}
-
-#[test]
-#[ignore = "fails until #493 is fixed"]
-fn cut_walls_and_chamfer_faces_take_an_attached_sketch() {
-    known_faces_attach(493);
-}
-
-#[test]
-#[ignore = "fails until #494 is fixed"]
-fn faces_after_revolve_offset_face_and_boss_take_an_attached_sketch() {
-    known_faces_attach(494);
-}
-
-#[test]
-#[ignore = "fails until #495 is fixed"]
-fn sheet_metal_thickness_faces_take_an_attached_sketch() {
-    known_faces_attach(495);
+#[ignore = "fails until #628 is fixed"]
+fn faces_of_a_lid_with_joined_ribs_take_an_attached_sketch() {
+    known_faces_attach(628);
 }
 
 /// A small deterministic generator (xorshift).

@@ -150,7 +150,10 @@ fn wire_frame_include_other_component_refresh_break_lost_and_reopen() {
     assert_eq!(s.doc.to_json(), before);
     // Lost references retain the last coordinates and explicit marker, with no guessing.
     let sk = s.doc_mut().sketch_mut(sketch).unwrap();
-    sk.links.iter_mut().find(|l| l.id == link).unwrap().source = solidcraft_sketch::LinkSource::Edge { body: "Missing".into(), at: Vec3::ZERO };
+    let entry = sk.links.iter_mut().find(|l| l.id == link).unwrap();
+    entry.source = solidcraft_sketch::LinkSource::Edge { body: "Missing".into(), at: Vec3::ZERO };
+    // The link is the edge it names; without the name it is the edge nearest its point.
+    entry.edge_name = None;
     run(&mut s, "sketch.line", json!({"points":[[2,0],[3,0]]}));
     let sk = s.doc.sketch(sketch).unwrap();
     assert!(sk.link(&link).unwrap().lost);

@@ -862,10 +862,8 @@ pub fn restore_view(app: &mut SolveApp, name: &str) {
         app.animate_view(v);
         return;
     }
-    let Some(v) = app.session.doc.named_views.iter().find(|v| v.name == name) else { return };
-    let j = json!({ "target": v.target, "yaw": v.yaw, "pitch": v.pitch, "distance": v.distance, "fov": v.fov });
-    if let Ok(cam) = serde_json::from_value::<solidcraft_engine::render::Camera>(j) {
-        app.animate_to(cam);
+    if app.run("view.apply", json!({ "view": name })).is_ok() {
+        app.follow_view_request(true);
     }
 }
 

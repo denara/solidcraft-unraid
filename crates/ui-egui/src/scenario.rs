@@ -34,6 +34,7 @@
 //! - `{"note": "…"}`: a comment; `{"pending": "why"}`: the scenario waits for a fix (its test
 //!   is ignored)
 //! - `{"expect": {…}}`: checks, see [`check`]; `{"until": {…}}` waits (frames) until they pass
+//!   (`"status"` takes a substring of the status line, or null for none)
 //!
 //! The same files drive the live app over the control channel for screenshots.
 
@@ -224,6 +225,12 @@ impl Harness {
                 break;
             }
             self.frame();
+        }
+        // A file opening or recovering in the background: wait for it (as a person would).
+        let began = std::time::Instant::now();
+        while !self.app.file_load.idle() && began.elapsed() < std::time::Duration::from_secs(120) {
+            self.frame();
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
         self.frames(4);
     }
@@ -556,7 +563,8 @@ fn approx(got: f64, want: &Value, what: &str) -> Result<(), String> {
 
 /// Checks: `bodies` (count), `volume` / `area` (total, number or [value, rel tol]), `faces`,
 /// `features` (count), `errors` (timeline features in error, default 0), `dialog` (null: none
-/// open, or a word its kind must contain), `tool` (null or command id), `sketching` (bool),
+/// open, or a word its kind must contain), `tool` (null or command id), `status` (null, or a
+/// substring of the status line), `sketching` (bool),
 /// `selection` (count), `glyphs` ({constraint id: count}, none overlapping one another or a dimension value), `param` ({name: value}), `sketch_status` (solved|…), `dof`, `query`
 /// ({command, params?, path, value}: a command's result).
 pub fn check(h: &mut Harness, e: &Value) -> Result<(), String> {
@@ -752,6 +760,18 @@ pub fn check(h: &mut Harness, e: &Value) -> Result<(), String> {
             "tool" => {
                 if ui["tool"] != *v {
                     return Err(format!("tool: got {}, want {v}", ui["tool"]));
+                }
+            }
+            "status" => {
+                // A substring of the status line's text, or null for no status at all.
+                let got = &ui["status"]["text"];
+                let ok = match v {
+                    Value::Null => ui["status"].is_null(),
+                    Value::String(w) => got.as_str().is_some_and(|g| g.contains(w.as_str())),
+                    _ => false,
+                };
+                if !ok {
+                    return Err(format!("status: got {}, want {v}", ui["status"]));
                 }
             }
             "glyphs" => {

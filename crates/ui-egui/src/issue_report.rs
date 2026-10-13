@@ -601,6 +601,10 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
         cancel_capture(app);
         // Pointer release may have happened during review; never finalize it against
         // the report's last cursor position when CAD interaction resumes.
+        if app.viewport.text_drag.is_some() {
+            let _ = app.session.execute("sketch.drag_end", &serde_json::json!({}));
+            crate::sketch_text_move::end_drag(app);
+        }
         app.viewport.point_drag = None;
         app.viewport.boxsel = None;
         app.viewport.axis_drag = None;

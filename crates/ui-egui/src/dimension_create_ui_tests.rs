@@ -378,3 +378,217 @@ fn an_over_constraining_dimension_is_placed_as_a_driven_one() {
     h.app.run("edit.undo", json!({})).unwrap();
     assert_eq!(h.app.session.doc.to_json(), original);
 }
+
+// ---- Type-first: D, click, type, Enter ----
+
+/// A sketch with `setup` drawn, the Top view centred on `centre`, and the Dimension tool on.
+fn sketch_with(setup: &[(&str, serde_json::Value)], centre: [f64; 2]) -> Harness {
+    crate::dim_view::cancel();
+    let mut h = Harness::new();
+    h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+    for (cmd, params) in setup {
+        h.app.run(cmd, params.clone()).unwrap();
+    }
+    h.call("ui.view", json!({"view":"top"}));
+    h.app.cam.distance = 80.0;
+    h.app.cam.target = solidcraft_engine::geom::Vec3::new(centre[0], centre[1], 0.0);
+    h.settle();
+    h.step(&json!({"start":"sketch.dimension"})).unwrap();
+    h
+}
+
+/// Type as a keyboard does: each character is a key press with its text in the same frame,
+/// so a letter that is also a tool shortcut reaches the shortcuts too.
+fn keys(h: &mut Harness, text: &str) {
+    for ch in text.chars() {
+        let key = egui::Key::from_name(&ch.to_ascii_uppercase().to_string());
+        let modifiers = egui::Modifiers::default();
+        if let Some(key) = key {
+            h.app.synthetic.push(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers });
+        }
+        h.app.synthetic.push(egui::Event::Text(ch.to_string()));
+        if let Some(key) = key {
+            h.app.synthetic.push(egui::Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers });
+        }
+        h.frames(1);
+    }
+    h.settle();
+}
+
+fn solved(h: &Harness) -> solidcraft_engine::sketch::Sketch {
+    let state = h.app.session.world_state();
+    state.sketch(h.app.session.active_sketch.unwrap()).unwrap().sketch.clone()
+}
+
+/// The dimensions added since `before` (constraints with a parameter or a value).
+fn added(h: &Harness, before: usize) -> Vec<solidcraft_engine::sketch::Constraint> {
+    solved(h).constraints.into_iter().filter(|c| c.kind.is_dimension()).skip(before).collect()
+}
+
+fn dimension_count(h: &Harness) -> usize {
+    solved(h).constraints.iter().filter(|c| c.kind.is_dimension()).count()
+}
+
+/// The value took the keyboard straight after the pick that determined the dimension.
+fn assert_live(h: &Harness) {
+    assert!(crate::dim_view::editing(), "the pick opens the value at once");
+    assert_eq!(crate::dim_view::live(), Some(false));
+    assert_eq!(h.ctx.memory(|m| m.focused()), Some(egui::Id::new("sc_dim_edit")));
+}
+
+#[test]
+fn type_first_line_circle_arc_distance_and_angle_commit_one_undo_step_each() {
+    use solidcraft_engine::sketch::ConstraintKind as K;
+    let line = [("sketch.line", json!({"points":[[0,0],[20,0]],"infer":false}))];
+    let circle = [("sketch.circle.center", json!({"center":[10,0],"radius":5}))];
+    let arc = [("sketch.arc.center_point", json!({"center":[10,0],"start":[18,0],"sweep":90}))];
+    // Two lines joined at a fixed corner: the angle turns one about it.
+    let corner = [
+        ("sketch.line", json!({"points":[[0,20],[0,0],[20,0]],"infer":false})),
+        ("sketch.constraint.fix", json!({"entity":"l1.end"})),
+        ("sketch.constraint.horizontal_vertical", json!({"line":"l2","mode":"horizontal"})),
+    ];
+    let half = std::f64::consts::FRAC_1_SQRT_2 * 8.0;
+    type Check = fn(&K) -> bool;
+    let cases: [(&[(&str, serde_json::Value)], [f64; 2], Vec<[f64; 2]>, &str, Check); 5] = [
+        (&line, [10., 0.], vec![[10., 0.]], "25", |k| matches!(k, K::Length { value, .. } if (value - 25.).abs() < 1e-6)),
+        (&circle, [10., 0.], vec![[15., 0.]], "12", |k| matches!(k, K::Diameter { value, .. } if (value - 12.).abs() < 1e-6)),
+        (&arc, [10., 0.], vec![[10. + half, half]], "6", |k| matches!(k, K::Radius { value, .. } if (value - 6.).abs() < 1e-6)),
+        (&line, [10., 0.], vec![[0., 0.], [20., 0.]], "25", |k| k.value().is_some_and(|v| (v - 25.).abs() < 1e-6)),
+        (&corner, [8., 8.], vec![[12., 0.], [0., 12.]], "60", |k| k.is_angle() && k.value().is_some_and(|v| (v.to_degrees() - 60.).abs() < 1e-6)),
+    ];
+    for (setup, centre, picks, typed, check) in cases {
+        let mut h = sketch_with(setup, centre);
+        let original = h.app.session.doc.to_json();
+        let undo = h.app.session.undo.len();
+        let dims = dimension_count(&h);
+        for p in &picks {
+            h.step(&json!({"click":{"world":[p[0],p[1],0]}})).unwrap();
+        }
+        assert_live(&h);
+        assert_eq!(h.app.session.doc.to_json(), original, "nothing changes until Enter");
+        // The text follows the pointer while typing: Enter places it there.
+        // (For the angle, inside the wedge both before and after it changes.)
+        let cursor = if check(&solidcraft_engine::sketch::ConstraintKind::Angle { a: 0, b: 1, value: 60f64.to_radians(), flip: false }) {
+            [10.4, 6.0]
+        } else {
+            [centre[0] + 3.0, centre[1] + 9.0]
+        };
+        h.step(&json!({"move":{"world":[cursor[0],cursor[1],0]}})).unwrap();
+        keys(&mut h, typed);
+        h.step(&json!({"key":"Enter"})).unwrap();
+        assert!(!crate::dim_view::editing(), "{picks:?}");
+        assert_eq!(h.app.session.undo.len(), undo + 1, "{picks:?}");
+        let new = added(&h, dims);
+        assert_eq!(new.len(), 1, "{picks:?}: {new:?}");
+        assert!(check(&new[0].kind), "{picks:?}: {:?}", new[0].kind);
+        h.settle();
+        let shown = crate::dim_view::text_at(&new[0].id).expect("the new dimension is drawn");
+        let [x, y] = h.at(&json!({"world":[cursor[0],cursor[1],0]})).unwrap();
+        assert!(shown.distance(egui::pos2(x as f32, y as f32)) < 40.0, "{picks:?}: text at {shown:?}, cursor at {x},{y}");
+        assert_eq!(h.app.tool.as_ref().map(|t| (t.cmd, t.picks.len())), Some(("sketch.dimension", 0)), "ready for the next dimension");
+        h.app.run("edit.undo", json!({})).unwrap();
+        assert_eq!(h.app.session.doc.to_json(), original);
+    }
+    crate::dim_view::cancel();
+}
+
+#[test]
+fn type_first_without_moving_uses_the_default_place_and_expressions_work() {
+    let mut h = sketch_with(&[("sketch.line", json!({"points":[[0,0],[20,0]],"infer":false}))], [10., 0.]);
+    h.app.run("parameters.add", json!({"name":"width","expression":"15 mm"})).unwrap();
+    h.settle();
+    let dims = dimension_count(&h);
+    h.step(&json!({"click":{"world":[10,0,0]}})).unwrap();
+    assert_live(&h);
+    keys(&mut h, "2*width");
+    h.step(&json!({"key":"Enter"})).unwrap();
+    let new = added(&h, dims);
+    assert_eq!(new.len(), 1);
+    assert!(new[0].text.is_none(), "an unmoved pointer leaves the text in its default place: {:?}", new[0].text);
+    assert!((new[0].kind.value().unwrap() - 30.).abs() < 1e-6);
+    assert_eq!(h.app.session.doc.param(new[0].param.as_deref().unwrap()).unwrap().expr, "2*width");
+    crate::dim_view::cancel();
+}
+
+/// Letters typed into the value are not tool shortcuts (L Line, D Dimension, C Circle…).
+#[test]
+fn type_first_parameter_names_are_not_taken_by_shortcuts() {
+    for name in ["length", "depth", "clearance", "rim"] {
+        let mut h = sketch_with(&[("sketch.line", json!({"points":[[0,0],[20,0]],"infer":false}))], [10., 0.]);
+        h.app.run("parameters.add", json!({"name":name,"expression":"22 mm"})).unwrap();
+        h.settle();
+        let dims = dimension_count(&h);
+        h.step(&json!({"click":{"world":[10,0,0]}})).unwrap();
+        assert_live(&h);
+        keys(&mut h, name);
+        assert_eq!(h.app.tool.as_ref().map(|t| t.cmd), Some("sketch.dimension"), "{name}: a letter started another tool");
+        assert!(h.app.dialog.is_none(), "{name}");
+        h.step(&json!({"key":"Enter"})).unwrap();
+        let new = added(&h, dims);
+        assert_eq!(new.len(), 1, "{name}");
+        assert!((new[0].kind.value().unwrap() - 22.).abs() < 1e-6, "{name}");
+        assert_eq!(h.app.session.doc.param(new[0].param.as_deref().unwrap()).unwrap().expr, name);
+        crate::dim_view::cancel();
+    }
+}
+
+#[test]
+fn type_first_escape_cancels_with_no_change() {
+    let mut h = sketch_with(&[("sketch.line", json!({"points":[[0,0],[20,0]],"infer":false}))], [10., 0.]);
+    let original = h.app.session.doc.to_json();
+    let undo = h.app.session.undo.len();
+    for typed in ["", "25"] {
+        h.step(&json!({"click":{"world":[10,0,0]}})).unwrap();
+        assert_live(&h);
+        keys(&mut h, typed);
+        h.step(&json!({"key":"Escape"})).unwrap();
+        assert!(!crate::dim_view::editing());
+        assert_eq!(h.app.session.doc.to_json(), original);
+        assert_eq!(h.app.session.undo.len(), undo);
+        assert_eq!(h.app.tool.as_ref().map(|t| (t.cmd, t.picks.len())), Some(("sketch.dimension", 0)), "Esc drops the picks too");
+    }
+    crate::dim_view::cancel();
+}
+
+/// Place first still works: a click before typing puts the text there and keeps the value
+/// (selected, so typing replaces it); Tab leaves the picks for a click to place, as before.
+#[test]
+fn type_first_keeps_the_place_first_flow() {
+    let mut h = sketch_with(&[("sketch.line", json!({"points":[[0,0],[20,0]],"infer":false}))], [10., 0.]);
+    let dims = dimension_count(&h);
+    h.step(&json!({"click":{"world":[10,0,0]}})).unwrap();
+    assert_live(&h);
+    h.step(&json!({"click":{"world":[10,-7,0]}})).unwrap();
+    assert!(crate::dim_view::editing());
+    assert_eq!(crate::dim_view::live(), None, "the text is pinned");
+    assert_eq!(h.ctx.memory(|m| m.focused()), Some(egui::Id::new("sc_dim_edit")));
+    h.step(&json!({"move":{"world":[0,12,0]}})).unwrap();
+    keys(&mut h, "18");
+    h.step(&json!({"key":"Enter"})).unwrap();
+    let new = added(&h, dims);
+    assert_eq!(new.len(), 1);
+    assert!((new[0].kind.value().unwrap() - 18.).abs() < 1e-6);
+    h.settle();
+    let shown = crate::dim_view::text_at(&new[0].id).unwrap();
+    let [x, y] = h.at(&json!({"world":[10,-7,0]})).unwrap();
+    assert!(shown.distance(egui::pos2(x as f32, y as f32)) < 40.0, "the pinned place wins over the pointer: {shown:?} vs {x},{y}");
+    // Tab before typing hands the picks back to the place-first flow.
+    h.app.run("edit.undo", json!({})).unwrap();
+    h.settle();
+    h.step(&json!({"click":{"world":[10,0,0]}})).unwrap();
+    assert_live(&h);
+    h.frames(4);
+    h.step(&json!({"key":"Tab"})).unwrap();
+    h.settle();
+    assert!(!crate::dim_view::editing());
+    assert_eq!(h.app.tool.as_ref().map(|t| t.picks.len()), Some(1));
+    h.step(&json!({"click":{"world":[10,6,0]}})).unwrap();
+    assert!(crate::dim_view::editing());
+    assert_eq!(h.ctx.memory(|m| m.focused()), Some(egui::Id::new("sc_dim_edit")));
+    keys(&mut h, "21");
+    h.step(&json!({"key":"Enter"})).unwrap();
+    let new = added(&h, dims);
+    assert!((new[0].kind.value().unwrap() - 21.).abs() < 1e-6);
+    crate::dim_view::cancel();
+}

@@ -68,7 +68,7 @@ struct State {
 
 const DIRS: [Vec3; 3] = [Vec3::X, Vec3::Y, Vec3::Z];
 /// Arrow length on screen (px).
-const LEN_PX: f64 = 110.0;
+pub const LEN_PX: f64 = 110.0;
 
 thread_local! {
     /// The last triad drawn: centre and arrow length in mm (for scenarios and tests).

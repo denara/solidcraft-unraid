@@ -243,69 +243,19 @@ fn remap_link(
     }
 }
 
-impl crate::Feature {
-    /// Clone identities through typed reference fields. Sketch-local entity IDs stay local.
-    pub fn remap_clone(
-        &mut self,
-        ids: &BTreeMap<u64, u64>,
-        names: &BTreeMap<String, String>,
-        bodies: &BTreeMap<String, String>,
-        parameters: &BTreeMap<String, String>,
-    ) -> crate::Result<()> {
+impl FeatureKind {
+    /// Point the body names a feature acts on (targets, tools, the body it rounds…) at the
+    /// copies in `bodies`; names not in the map stay as they are.
+    pub fn remap_bodies(&mut self, bodies: &BTreeMap<String, String>) {
         use FeatureKind as K;
-        match &self.kind {
-            K::Sketch { plane, sketch } => {
-                checked_plane(plane, 0)?;
-                for link in &sketch.links {
-                    checked_link(&link.source, 0)?;
-                }
-            }
-            K::ConstructionPlane { plane }
-            | K::Split { plane, .. }
-            | K::SplitFace { plane, .. }
-            | K::Mirror { plane, .. }
-            | K::SurfaceTrim { plane, .. } => checked_plane(plane, 0)?,
-            K::Draft { neutral, .. } => checked_plane(neutral, 0)?,
-            K::ReplaceFace { target, .. } => checked_plane(target, 0)?,
-            K::ConstructionAxis { def } => {
-                for r in def.refs() {
-                    checked_geo(r, 0)?;
-                }
-            }
-            K::ConstructionPoint { def } => {
-                for r in def.refs() {
-                    checked_geo(r, 0)?;
-                }
-            }
-            _ => {}
-        }
-        self.kind.remap_refs(ids, names);
-        for n in &mut self.body_names {
-            mapped_name(n, bodies);
-        }
-        for n in &mut self.participants {
-            mapped_name(n, bodies);
-        }
-        for n in &mut self.param_names {
-            mapped_name(n, parameters);
-        }
-        for n in self.face_names.iter_mut().chain(&mut self.edge_names) {
-            *n = remap_topology(n, ids, bodies);
-        }
-        for (_, e, _) in self.kind.inputs_mut() {
-            *e = clone_expression(e, parameters);
-        }
-        for e in self.kind.point_expr_mut().into_iter().flatten() {
-            *e = clone_expression(e, parameters);
-        }
-        match &mut self.kind {
+        match self {
             K::Emboss { face: Some(face), .. } => mapped_name(&mut face.body, bodies),
             K::Split { tool: Some(tool), .. } | K::SplitFace { tool: Some(tool), .. } | K::SurfaceTrim { tool: Some(tool), .. } => {
                 mapped_name(&mut tool.body, bodies)
             }
             _ => {}
         }
-        match &mut self.kind {
+        match self {
             K::Extrude { targets, .. }
             | K::Revolve { targets, .. }
             | K::Loft { targets, .. }
@@ -373,6 +323,65 @@ impl crate::Feature {
             | K::MeshConvert { body, .. } => mapped_name(body, bodies),
             _ => {}
         }
+    }
+}
+
+impl crate::Feature {
+    /// Clone identities through typed reference fields. Sketch-local entity IDs stay local.
+    pub fn remap_clone(
+        &mut self,
+        ids: &BTreeMap<u64, u64>,
+        names: &BTreeMap<String, String>,
+        bodies: &BTreeMap<String, String>,
+        parameters: &BTreeMap<String, String>,
+    ) -> crate::Result<()> {
+        use FeatureKind as K;
+        match &self.kind {
+            K::Sketch { plane, sketch } => {
+                checked_plane(plane, 0)?;
+                for link in &sketch.links {
+                    checked_link(&link.source, 0)?;
+                }
+            }
+            K::ConstructionPlane { plane }
+            | K::Split { plane, .. }
+            | K::SplitFace { plane, .. }
+            | K::Mirror { plane, .. }
+            | K::SurfaceTrim { plane, .. } => checked_plane(plane, 0)?,
+            K::Draft { neutral, .. } => checked_plane(neutral, 0)?,
+            K::ReplaceFace { target, .. } => checked_plane(target, 0)?,
+            K::ConstructionAxis { def } => {
+                for r in def.refs() {
+                    checked_geo(r, 0)?;
+                }
+            }
+            K::ConstructionPoint { def } => {
+                for r in def.refs() {
+                    checked_geo(r, 0)?;
+                }
+            }
+            _ => {}
+        }
+        self.kind.remap_refs(ids, names);
+        for n in &mut self.body_names {
+            mapped_name(n, bodies);
+        }
+        for n in &mut self.participants {
+            mapped_name(n, bodies);
+        }
+        for n in &mut self.param_names {
+            mapped_name(n, parameters);
+        }
+        for n in self.face_names.iter_mut().chain(&mut self.edge_names) {
+            *n = remap_topology(n, ids, bodies);
+        }
+        for (_, e, _) in self.kind.inputs_mut() {
+            *e = clone_expression(e, parameters);
+        }
+        for e in self.kind.point_expr_mut().into_iter().flatten() {
+            *e = clone_expression(e, parameters);
+        }
+        self.kind.remap_bodies(bodies);
         match &mut self.kind {
             K::Sketch { plane, sketch } => {
                 remap_plane(plane, ids, names, bodies, 0)?;
@@ -383,7 +392,7 @@ impl crate::Feature {
                 }
                 for link in &mut sketch.links {
                     remap_link(&mut link.source, ids, names, bodies, 0);
-                    if let Some(n) = &mut link.face_name {
+                    for n in link.face_name.iter_mut().chain(&mut link.edge_name) {
                         *n = remap_topology(n, ids, bodies);
                     }
                 }

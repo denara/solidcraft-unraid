@@ -91,17 +91,14 @@ pub fn appearance_cell(value: &str) -> Result<Option<crate::appearance::Look>> {
     Ok(Some(look))
 }
 
-/// Parse a physical material cell, returning None for the default material.
-pub fn material_cell(value: &str) -> Result<Option<String>> {
-    let name = crate::MATERIALS
-        .iter()
-        .find(|(n, _)| n.eq_ignore_ascii_case(value.trim()))
-        .map(|(n, _)| *n)
-        .ok_or_else(|| DocError::Invalid(format!("unknown configuration material `{value}`")))?;
-    Ok((name != "Default").then(|| name.to_string()))
-}
-
 impl Document {
+    /// Parse a physical material cell (a built-in material or one defined in this design),
+    /// returning None for the default material.
+    pub fn material_cell(&self, value: &str) -> Result<Option<String>> {
+        let name = self.material_name(value).ok_or_else(|| DocError::Invalid(format!("unknown configuration material `{value}`")))?;
+        Ok((name != "Default").then_some(name))
+    }
+
     /// Freeze design-unit-sensitive configuration literals when changing display units.
     /// Explicit units and nonliteral expressions retain their source text.
     pub fn preserve_configuration_units(&mut self, previous_unit: &str, kept_parameters: &[String]) {
@@ -199,7 +196,7 @@ impl Document {
                     let f = next.feature_mut(*id).ok_or_else(|| DocError::Unknown(format!("configuration `{row}`: feature {id} is gone")))?;
                     f.suppressed = on;
                 }
-                Column::Material(body) => match material_cell(v)? {
+                Column::Material(body) => match self.material_cell(v)? {
                     Some(material) => {
                         next.materials.insert(body.clone(), material);
                     }
@@ -274,7 +271,7 @@ impl Document {
                 self.config_current(c)
                     .is_some_and(|current| current.chars().filter(|c| !c.is_whitespace()).eq(expected.chars().filter(|c| !c.is_whitespace())))
             }
-            Column::Material(body) => material_cell(v).is_ok_and(|m| self.materials.get(body) == m.as_ref()),
+            Column::Material(body) => self.material_cell(v).is_ok_and(|m| self.materials.get(body) == m.as_ref()),
             Column::Appearance(body) => appearance_cell(v).is_ok_and(|look| self.appearances.bodies.get(body) == look.as_ref()),
             Column::ComponentAppearance(id) => appearance_cell(v).is_ok_and(|look| self.appearances.components.get(id) == look.as_ref()),
             Column::FaceAppearance(target) => appearance_cell(v).is_ok_and(|look| self.config_face_look(target) == look),

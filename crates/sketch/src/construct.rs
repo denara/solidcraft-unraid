@@ -94,11 +94,13 @@ impl Placement {
 
 /// Place the points the constraints pin down; `given[i]` marks the points that are constants
 /// for this solve. Branches are chosen to match the orientation of `reference` (positions
-/// before an interactive move) where it covers a point, of the sketch's current positions
-/// otherwise; a reference longer than the point list is ignored. `on_curve` holds the sketch's
-/// point-on-curve pairs ([`crate::solver::points_on_curves`]); the decomposition works within
-/// what is left of `budget`, and charges it.
-pub(crate) fn seed(sk: &Sketch, given: &[bool], reference: Option<&[Vec2]>, on_curve: &[(usize, usize)], budget: &mut Budget) -> Seed {
+/// before an interactive move, or the stored ones after linked geometry moved) where it covers
+/// a point, of the sketch's current positions otherwise; a reference longer than the point list
+/// is ignored. `edits`: the solve applies edits; a drag step solves against its reference and
+/// moves only held points. `on_curve` holds the sketch's point-on-curve pairs
+/// ([`crate::solver::points_on_curves`]); the decomposition works within what is left of
+/// `budget`, and charges it.
+pub(crate) fn seed(sk: &Sketch, given: &[bool], reference: Option<&[Vec2]>, edits: bool, on_curve: &[(usize, usize)], budget: &mut Budget) -> Seed {
     let n = sk.points.len();
     let reference = reference.filter(|r| r.len() <= n);
     let before = |i: usize| match reference.and_then(|r| r.get(i)) {
@@ -139,9 +141,6 @@ pub(crate) fn seed(sk: &Sketch, given: &[bool], reference: Option<&[Vec2]>, on_c
     if !switch::decompose_on() {
         return out;
     }
-    // A drag step solves against its reference and moves only held points; any other solve
-    // applies edits.
-    let edits = reference.is_none();
     let mut clusters = Decomposition::new(&reading, &prop.anchors, edits, budget.left());
     if !clusters.built() {
         return out;

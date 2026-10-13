@@ -13,8 +13,7 @@ set -euo pipefail
 # shellcheck source=../env.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../env.sh"
 HERE="$ROOT/packaging/macos"
-# macOS has no Flatpak-style update channel keyed by this id, so it follows the new name
-# (the Linux reverse-DNS APP_ID stays as a compatibility shim; docs/compatibility.md).
+# The same reverse-DNS id as the Linux APP_ID.
 MACOS_BUNDLE_ID=ai.storyteller.solidcraft
 
 ARCH=universal

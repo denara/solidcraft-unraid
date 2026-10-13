@@ -63,7 +63,8 @@ fn table(id: &str) -> &'static [(&'static str, K)] {
         "plastic.boss" | "plastic.snap_fit" | "plastic.rest" => {
             &[("position", Pick), ("direction", Dir), ("hook", Dir), ("along", Dir), ("body", Body)]
         }
-        "plastic.lip" | "sheet.convert" => &[("face", Pick), ("body", Body)],
+        "plastic.lip" => &[("face", Pick), ("body", Body)],
+        "sheet.convert" => &[("face", Pick), ("bends", Picks), ("body", Body)],
         "sheet.flange" | "sheet.hem" => &[("edges", Picks), ("body", Body)],
         "sheet.fold" => &[("points", Picks), ("fixed", Pick), ("body", Body)],
         "sketch.create" | "sketch.redefine" => &[("plane", HerePlane)],

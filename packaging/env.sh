@@ -37,10 +37,10 @@ export DIST
 
 export SOLIDCRAFT_BUILD_DATE="${SOLIDCRAFT_BUILD_DATE:-${SOLVECRAFT_BUILD_DATE:-$(date -u +%Y-%m-%d)}}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
-# Compatibility shim, see docs/compatibility.md: the reverse-DNS id (Flatpak app id, desktop,
-# metainfo and MIME file names, icon name, Wayland app_id) keeps its pre-rename value so Flatpak
-# installs keep updating and desktop integration keeps working.
-APP_ID=ai.storyteller.solvecraft
+# The reverse-DNS id: Flatpak app id, desktop, metainfo and MIME file names, icon name and the
+# window's Wayland app_id / X11 class. Releases before 0.8 used ai.storyteller.solvecraft; the
+# Flatpak repository rebases that id to this one (packaging/flatpak-site.sh, docs/compatibility.md).
+APP_ID=ai.storyteller.solidcraft
 export APP_ID
 
 # Emit a GitHub Actions warning (plain stderr outside Actions).

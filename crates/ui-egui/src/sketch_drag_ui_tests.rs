@@ -6,6 +6,52 @@ use solidcraft_engine::geom::Vec2;
 
 use crate::scenario::Harness;
 
+#[test]
+fn text_move_drag_is_one_editable_unit_and_escape_restores_the_gesture() {
+    for cancel in [false, true] {
+        let mut h = Harness::new();
+        h.app.home.open = false;
+        run(&mut h, "sketch.create", json!({"plane":"XY"}));
+        run(&mut h, "sketch.text", json!({"text":"II","at":[0,0],"height":10}));
+        run(&mut h, "sketch.line", json!({"points":[[15,0],[15,10]],"connect":false}));
+        h.call("ui.view", json!({"view":"top"}));
+        h.app.cam.distance = 35.0;
+        h.frames(3);
+        let before = h.app.session.doc.to_json();
+        let undo = h.app.session.undo.len();
+        let sk = h.app.session.doc.sketch(1).unwrap();
+        let line = sk.curves.last().unwrap().id.clone();
+        let neighbor = point(&h, &format!("{line}.start"));
+        let polyline = sk.polyline(0);
+        let at = (polyline[0] + polyline[1]) * 0.5;
+        let a = screen(&mut h, at.x, at.y);
+        let b = screen(&mut h, at.x + 3.0, at.y + 2.0);
+        let mut path = vec![a];
+        path.extend(steps(a, b, 6));
+        press_and_move(&mut h, &path);
+        assert!(h.app.viewport.text_drag.is_some());
+        assert_ne!(h.app.session.doc.to_json(), before);
+        if cancel {
+            h.step(&json!({"key":"Escape"})).unwrap();
+        }
+        release(&mut h, b);
+        assert!(h.app.viewport.text_drag.is_none());
+        assert_eq!(h.app.session.active_sketch, Some(1));
+        assert!(point(&h, &format!("{line}.start")).dist(neighbor) < 1e-9);
+        if cancel {
+            assert_eq!(h.app.session.doc.to_json(), before);
+            assert_eq!(h.app.session.undo.len(), undo);
+        } else {
+            assert_eq!(h.app.session.undo.len(), undo + 1);
+            let sk = h.app.session.doc.sketch(1).unwrap();
+            let solidcraft_engine::sketch::LinkSource::Text { at, .. } = &sk.links[0].source else { panic!() };
+            assert!(at.dist(Vec2::new(3.0, 2.0)) < 0.02, "{at:?}");
+            run(&mut h, "edit.undo", json!({}));
+            assert_eq!(h.app.session.doc.to_json(), before);
+        }
+    }
+}
+
 fn run(h: &mut Harness, id: &str, p: Value) {
     if let Err(e) = h.app.run(id, p.clone()) {
         panic!("{id} {p}: {e}");

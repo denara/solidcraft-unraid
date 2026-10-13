@@ -2,10 +2,12 @@
 """Demo v2/v3: build an electronics enclosure in a running SolidCraft the way a person would,
 with the parametric steps sent over MCP.
 
---story pi (default, the 0.6 README demo): a case for a Raspberry Pi 4, from a sketch dimensioned
-with the board's parameters to standoffs patterned on its mounting holes, port cut-outs, vent
-slots, a colour and a height change in the Parameters dialog. Camera moves orbit about the
+--story pi (default, the 0.8 README demo): a case for a Raspberry Pi 4, from a sketch dimensioned
+with the board's parameters to standoffs patterned on its mounting holes, the rim rounded in one
+pick, port cut-outs, vent slots, "Pi 4" engraved in DejaVu Sans Bold, a PETG material with its
+mass in Properties and a height change in the Parameters dialog. Camera moves orbit about the
 model under the pointer.
+--story pi-0.6: the 0.6 README demo, with a colour instead of the rim, text and material.
 --story v3: one standoff placed from the parameters and patterned 2 x 2 in the
 Rectangular Pattern dialog, then width and wall changed in the Parameters dialog.
 --story v2: four standoffs from one sketch, then the width changed over MCP.
@@ -225,7 +227,7 @@ def build_box(d, params):
     d.settle_camera()
 
     d.caption("Center rectangle from the origin", "UI click")
-    d.tool("sketch.rectangle.center")
+    d.tool("sketch.rectangle.center", panel="family:Rectangle")
     d.click(d.at(sketch=[0, 0]), settle=0.15)
     d.click(d.at(sketch=[40, 30]), dur=0.45, settle=0.2)
     d.key("Escape")
@@ -276,7 +278,7 @@ def build_box(d, params):
     d.tool("sketch.create")
     d.click(d.at(world=[40, 10, 20]), settle=0.9)
     d.settle_camera()
-    d.tool("sketch.rectangle.center")
+    d.tool("sketch.rectangle.center", panel="family:Rectangle")
     d.click(d.at(world=[40, 0, 12]), settle=0.15)
     d.click(d.at(world=[40, 6, 15.5]), dur=0.4, settle=0.2)
     d.key("Escape")
@@ -429,7 +431,7 @@ def rectangle(d, centre, half):
     """A centre rectangle drawn on the active sketch's face with world-space picks (`half` is
     the corner's offset from `centre`); returns its four sides' ids."""
     before = {c["id"] for c in sketch_curves(d)}
-    d.tool("sketch.rectangle.center")
+    d.tool("sketch.rectangle.center", panel="family:Rectangle")
     d.click(d.at(world=centre), settle=0.15)
     d.click(d.at(world=[c + h for c, h in zip(centre, half)]), dur=0.35, settle=0.2)
     d.key("Escape")
@@ -472,11 +474,95 @@ def last_feature(d):
 HOLE = (-(85 / 2 - 3.5), -(56 / 2 - 3.5))
 
 
-def run_pi(d):
-    """pi (the 0.6 README demo): a case for a Raspberry Pi 4. A sketch dimensioned from the
+def colour(d):
+    """0.6: drag ABS red from the Appearance dialog onto the case."""
+    d.caption("Give it a colour")
+    D = 33.0
+    d.key("A")
+    d.wait(0.3)
+    d.drag(swatch(d, 1, 5), d.at(world=[0, -D, 18]), steps=30)
+    # The dialog adds a note under the swatches: let it lay out before finding OK.
+    d.glide((1500, 700), 0.3)
+    d.settle_camera()
+    d.click(d.at(handle="dialog:OK"), settle=0.4)
+    if "Appearance" in (d.ui("ui.inspect").get("dialog") or ""):
+        raise RuntimeError("the Appearance dialog did not close")
+
+
+def engrave(d):
+    """0.8: "Pi 4" in DejaVu Sans Bold, engraved 0.6 mm into the floor behind the vents."""
+    d.caption("Engrave “Pi 4” in the floor")
+    d.tool("sketch.create")
+    d.click(d.at(world=[-5, 18, 2]), settle=0.9)
+    d.settle_camera()
+    d.tool("sketch.text", panel="panel:SKETCH:CREATE")
+    d.click(d.at(world=[-9, 20, 2]), settle=0.4)
+    d.ui("ui.text", {"text": "Pi 4"})
+    d.wait(0.6)
+    d.ui("ui.key", {"key": "Enter"})
+    d.wait(0.4)
+    d.settle_camera()
+    d.caption("Font: DejaVu Sans Bold, 6 mm")
+    link = next(l["id"] for l in inspect_sketch(d)["links"] if l["kind"] == "text")
+    d.execute("sketch.edit_text", {"link": link, "font": "DejaVu Sans Bold", "height": 6})
+    # Centre it on the free floor between the vents and the back wall.
+    sk = inspect_sketch(d)
+    pts = [c[k] for c in sk["curves"] if c.get("link") == link for k in ("start_at", "end_at") if k in c]
+    x0, x1 = min(p[0] for p in pts), max(p[0] for p in pts)
+    y0, y1 = min(p[1] for p in pts), max(p[1] for p in pts)
+    at = next(l["source"]["at"] for l in sk["links"] if l["id"] == link)
+    d.execute("sketch.edit_text", {"link": link, "at": [round(at[0] - (x0 + x1) / 2, 2), round(at[1] + 22.5 - (y0 + y1) / 2, 2)]})
+    d.wait(0.6)
+    sk = inspect_sketch(d)
+    letters = {c["id"] for c in sk["curves"] if c.get("link") == link}
+    profiles = [p for p in sk["profiles"] if set(p["curves"]) <= letters]
+    counters = {frozenset(h) for p in profiles for h in p["holes"]}
+    loops = [p["curves"] for p in profiles if frozenset(p["curves"]) not in counters]
+    d.tool("sketch.finish")
+    d.view("home", 0.4)
+    extrude(d, loops, "-0.6 mm")
+
+
+def material(d):
+    """0.8: a PETG physical material defined in the design and assigned to the case over MCP,
+    then the mass it gives in Properties (the body's browser menu)."""
+    d.caption("PETG: a material of its own, 1.27 g/cm³")
+    d.execute("material.create", {"name": "PETG", "density_g_cm3": 1.27, "color": "#2a8696"})
+    d.execute("material.assign", {"bodies": ["Body1"], "material": "PETG"})
+    d.wait(0.6)
+    d.caption("Properties: material and mass")
+    body = d.at(handle="row:Body1")
+    d.glide(body, 0.3)
+    d.ui("ui.click", {"x": body[0], "y": body[1], "button": "right"})
+    d.mark(cursor=list(body), click=True)
+    d.wait(0.4)
+    d.settle_camera()
+    d.click(d.at(handle="menu:ui.properties"), settle=0.5)
+    # Real seconds, not scaled by --speed: long enough to read at playback speed.
+    time.sleep(PROPERTIES_HOLD)
+    d.click(PROPERTIES_CLOSE, settle=0.3)
+    d.key("Escape")
+
+
+# Seconds the Properties window stays up (about 1.5 s at 8-9x playback).
+PROPERTIES_HOLD = 13.0
+# The Properties window's close button (it opens centred on the 1920 x 1080 window).
+PROPERTIES_CLOSE = (1112.0, 387.0)
+
+
+def inspect_sketch(d):
+    sk = json.loads(d.mcp.tool("execute", {"command": "sketch.inspect", "params": {}}))
+    return sk.get("result", sk)
+
+
+def run_pi(d, release="0.8"):
+    """pi (the 0.8 README demo): a case for a Raspberry Pi 4. A sketch dimensioned from the
     board's parameters, extrude, fillets and shell, one standoff with its M2.5 hole patterned on
     the board's 58 x 49 mm hole rectangle, port cut-outs on a side and an end, a row of vent
-    slots, a colour, then the height changed in the Parameters dialog."""
+    slots, then the height changed in the Parameters dialog. 0.8 also rounds the top rim,
+    engraves "Pi 4" in a font into the floor and makes the case PETG (a material defined
+    in the design) with its mass in Properties; 0.6 (`--story pi-0.6`) gave it a colour instead."""
+    v08 = release == "0.8"
     d.caption("A case for a Raspberry Pi 4")
     for name, expr in [("board_w", "85 mm"), ("board_d", "56 mm"), ("wall", "2 mm"), ("height", "24 mm")]:
         d.execute("parameters.change", {"name": name, "expression": expr})
@@ -487,7 +573,7 @@ def run_pi(d):
     d.tool("sketch.create")
     d.click(d.at(plane="XY"), settle=0.8)
     d.settle_camera()
-    d.tool("sketch.rectangle.center")
+    d.tool("sketch.rectangle.center", panel="family:Rectangle")
     d.click(d.at(sketch=[0, 0]), settle=0.15)
     d.click(d.at(sketch=[W, D]), dur=0.45, settle=0.2)
     d.key("Escape")
@@ -522,6 +608,13 @@ def run_pi(d):
     d.tool("solid.shell", panel="panel:SOLID:MODIFY")
     d.click(d.at(world=[0, 0, H]), settle=0.3)
     d.type("wall")
+
+    if v08:
+        # Before the port cuts, so the rim's edges are whole when it is picked.
+        d.caption("Round the rim in one pick")
+        d.tool("solid.fillet")
+        d.click(d.at(world=[0, D, H]), settle=0.3)
+        d.type("1")
 
     d.caption("A standoff with an M2.5 hole")
     hx, hy = HOLE
@@ -595,16 +688,11 @@ def run_pi(d):
     extrude(d, [loop], "-wall")
     pattern(d, last_feature(d), [([W, 0, 0], 5, "7 mm")])
 
-    d.caption("Give it a colour")
-    d.key("A")
-    d.wait(0.3)
-    d.drag(swatch(d, 1, 5), d.at(world=[0, -D, 18]), steps=30)
-    # The dialog adds a note under the swatches: let it lay out before finding OK.
-    d.glide((1500, 700), 0.3)
-    d.settle_camera()
-    d.click(d.at(handle="dialog:OK"), settle=0.4)
-    if "Appearance" in (d.ui("ui.inspect").get("dialog") or ""):
-        raise RuntimeError("the Appearance dialog did not close")
+    if v08:
+        engrave(d)
+        material(d)
+    else:
+        colour(d)
 
     d.caption("Change a parameter: height 24 → 32 mm")
     d.tool("parameters.change", panel="panel:SOLID:CONFIGURE")
@@ -637,7 +725,7 @@ def main():
     ap.add_argument("--port", type=int, default=7878, help="the app's --control port")
     ap.add_argument("--cli", default="solidcraft-cli", help="path to solidcraft-cli")
     ap.add_argument("--log", help="write a JSON line per caption and pointer event")
-    ap.add_argument("--story", choices=["v2", "v3", "pi"], default="pi", help="v2: standoffs from one sketch, width over MCP; v3: one standoff patterned, Parameters dialog; pi: the 0.6 README demo, a Raspberry Pi 4 case")
+    ap.add_argument("--story", choices=["v2", "v3", "pi", "pi-0.6"], default="pi", help="v2: standoffs from one sketch, width over MCP; v3: one standoff patterned, Parameters dialog; pi: the 0.8 README demo, a Raspberry Pi 4 case; pi-0.6: the 0.6 one")
     ap.add_argument("--until", type=int, default=10**6, help="stop before step N (trying the script out)")
     ap.add_argument("--speed", type=float, default=0.55, help="scale the pauses (2 = twice as long)")
     ap.add_argument("--save", help="save the completed healthy enclosure and measured proof")
@@ -650,7 +738,7 @@ def main():
     mcp.send("notifications/initialized", notify=True)
     d = Demo(a.port, mcp, open(a.log, "w") if a.log else None, a.speed, a.minimum_caption)
     # The pi story's camera moves orbit about the point under the pointer (Preferences > Navigation).
-    d.ui("ui.prefs", {"language": "en", "theme": "dark", "ui_scale": 1, "nav": "fusion", "orbit_cursor": a.story == "pi", "button": "apply"})
+    d.ui("ui.prefs", {"language": "en", "theme": "dark", "ui_scale": 1, "nav": "fusion", "orbit_cursor": a.story.startswith("pi"), "button": "apply"})
     d.ui("ui.resize", {"width": 1920, "height": 1080})
     d.ui("ui.home", {"open": False})
     d.ui("ui.documents", {"action": "new"})
@@ -660,10 +748,10 @@ def main():
     d.stop = a.until - 1
     t0 = time.time()
     try:
-        {"v2": run_v2, "v3": run_v3, "pi": run_pi}[a.story](d)
+        {"v2": run_v2, "v3": run_v3, "pi": run_pi, "pi-0.6": lambda d: run_pi(d, "0.6")}[a.story](d)
     except StopIteration:
         pass
-    if a.story == "pi" and a.until == 10**6:
+    if a.story.startswith("pi") and a.until == 10**6:
         # Check the finished case without changing what is on screen.
         d.settle_camera()
         design = d.ui("document.inspect", {"measure": True})

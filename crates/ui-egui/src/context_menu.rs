@@ -646,6 +646,9 @@ fn sketch_entity_items(app: &SolveApp) -> Vec<Item> {
     }
     let mut v = Vec::new();
     if curves.is_empty() && points.is_empty() {
+        if crate::sketch_text::selected_entity(app).is_some() {
+            v.push(cmd(app, "sketch.edit_text", "Edit Text"));
+        }
         v.push(cmd(app, "sketch.line", "Line"));
         v.push(cmd(app, "sketch.rectangle.two_point", "Rectangle"));
         v.push(cmd(app, "sketch.circle.center", "Circle"));
@@ -1183,7 +1186,7 @@ pub fn open(app: &mut SolveApp, at: Pos2) {
     } else if app.session.active_sketch.is_some()
         && let Some(h) = app.viewport.hover.clone()
         && let Some((_, sel)) = crate::viewport::candidate(app, &[h])
-        && matches!(sel, Sel::SketchCurve { .. } | Sel::SketchPoint { .. })
+        && (matches!(sel, Sel::SketchCurve { .. } | Sel::SketchPoint { .. }) || crate::sketch_text::entity_for_selection(app, &sel).is_some())
         && !app.session.selection.contains(&sel)
     {
         let _ = app.run("select.set", json!({ "items": [sel] }));

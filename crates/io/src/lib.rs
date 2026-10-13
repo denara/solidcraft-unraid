@@ -10,9 +10,10 @@ mod design;
 mod design_metadata;
 mod dxf;
 pub use design::{
-    DesignCompression, DesignContainerReader, DesignGeometry, DesignPreview, is_design_container, read_design_file, read_design_geometry,
-    read_design_preview, write_design_container, write_design_container_with_cache, write_design_container_with_compression,
-    write_design_container_with_preview,
+    DesignCompression, DesignContainerReader, DesignGeometry, DesignPreview, THUMBNAIL_SIZE, is_design_container, read_design_file,
+    read_design_geometry, read_design_preview, read_design_thumbnail, read_design_thumbnail_file, write_design_container,
+    write_design_container_with_cache, write_design_container_with_compression, write_design_container_with_preview,
+    write_design_container_with_thumbnail,
 };
 mod legacy_dir;
 pub mod safe_write;
@@ -22,7 +23,7 @@ mod threemf;
 pub mod vfs;
 
 pub use dxf::{read_dxf, write_dxf};
-pub use legacy_dir::adopt_legacy_dir;
+pub use legacy_dir::{APP_ID, LEGACY_APP_ID, adopt_legacy_dir, legacy_flatpak_path};
 pub use safe_write::{backup_path, write_atomic};
 pub use sketch2d::{Geom2, MAX_DRAWING_BYTES};
 pub use svg::read_svg;

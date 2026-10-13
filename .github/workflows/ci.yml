@@ -29,6 +29,19 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  dependency-advisories:
+    name: Dependency advisories
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install advisory scanner
+        run: cargo install cargo-deny --version 0.20.2 --locked
+      - name: Check locked dependencies
+        run: cargo deny --locked check --warn unmaintained advisories bans sources
+
   changes:
     name: Select checks
     runs-on: ubuntu-24.04

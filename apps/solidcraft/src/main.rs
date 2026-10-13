@@ -141,17 +141,28 @@ fn graphics_path() -> Option<std::path::PathBuf> {
 /// Compatibility shim (docs/compatibility.md): on the first launch after the rename, copy the
 /// settings of earlier releases into the new folder. They kept `graphics.json` (and, on Linux
 /// and macOS, the recovery folder) under the old product name, and eframe's `app.ron` under the
-/// window's app id. The old folders are never changed.
+/// window's old app id. In the Flatpak sandbox, releases before 0.8 kept everything under the
+/// old app id's `~/.var/app` folder; that copy comes first, as it is the newest. The old folders
+/// are never changed.
 fn adopt_legacy_settings() {
     let (Some(current), Some(legacy)) = (settings_dir(), eframe::storage_dir("SolveCraft")) else { return };
-    let legacy_eframe = eframe::storage_dir(APP_ID);
-    if let Err(e) = adopt_settings(&current, &legacy, legacy_eframe.as_deref()) {
+    let legacy_eframe = eframe::storage_dir(solidcraft_engine::io::LEGACY_APP_ID);
+    let old_flatpak = solidcraft_engine::io::legacy_flatpak_path(&current);
+    if let Err(e) = adopt_settings(&current, old_flatpak.as_deref(), &legacy, legacy_eframe.as_deref()) {
         log::warn!("settings: could not copy the previous release's settings into {}: {e}", current.display());
     }
 }
 
-fn adopt_settings(current: &std::path::Path, legacy: &std::path::Path, legacy_eframe: Option<&std::path::Path>) -> std::io::Result<()> {
+fn adopt_settings(
+    current: &std::path::Path,
+    old_flatpak: Option<&std::path::Path>,
+    legacy: &std::path::Path,
+    legacy_eframe: Option<&std::path::Path>,
+) -> std::io::Result<()> {
     let fresh = !current.exists();
+    if let Some(old) = old_flatpak {
+        solidcraft_engine::io::adopt_legacy_dir(current, old)?;
+    }
     solidcraft_engine::io::adopt_legacy_dir(current, legacy)?;
     if let Some(old) = legacy_eframe.map(|d| d.join("app.ron")).filter(|p| fresh && p.is_file()) {
         std::fs::create_dir_all(current)?;
@@ -203,9 +214,8 @@ fn app_viewport() -> Result<egui::ViewportBuilder, eframe::Error> {
         .with_app_id(APP_ID))
 }
 
-/// The window's app id: it names the desktop entry, so it stays the packages' reverse-DNS id,
-/// which is kept from before the rename (compatibility shim, docs/compatibility.md).
-const APP_ID: &str = "ai.storyteller.solvecraft";
+/// The window's app id: it names the desktop entry, so it is the packages' reverse-DNS id.
+const APP_ID: &str = solidcraft_engine::io::APP_ID;
 
 fn main() -> eframe::Result {
     adopt_legacy_settings();
@@ -408,14 +418,14 @@ mod msaa_tests {
         std::fs::create_dir_all(&legacy_eframe).unwrap();
         std::fs::write(legacy.join("graphics.json"), r#"{"msaa":8}"#).unwrap();
         std::fs::write(legacy_eframe.join("app.ron"), "(prefs)").unwrap();
-        super::adopt_settings(&current, &legacy, Some(&legacy_eframe)).unwrap();
+        super::adopt_settings(&current, None, &legacy, Some(&legacy_eframe)).unwrap();
         assert_eq!(std::fs::read_to_string(current.join("graphics.json")).unwrap(), r#"{"msaa":8}"#);
         assert_eq!(std::fs::read_to_string(current.join("app.ron")).unwrap(), "(prefs)");
         assert!(legacy.join("graphics.json").is_file() && legacy_eframe.join("app.ron").is_file());
         // Later launches leave the current settings alone.
         std::fs::write(current.join("app.ron"), "(mine)").unwrap();
         std::fs::remove_file(current.join("graphics.json")).unwrap();
-        super::adopt_settings(&current, &legacy, Some(&legacy_eframe)).unwrap();
+        super::adopt_settings(&current, None, &legacy, Some(&legacy_eframe)).unwrap();
         assert_eq!(std::fs::read_to_string(current.join("app.ron")).unwrap(), "(mine)");
         assert!(!current.join("graphics.json").exists());
         let _ = std::fs::remove_dir_all(&d);

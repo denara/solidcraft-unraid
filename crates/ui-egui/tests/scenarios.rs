@@ -66,6 +66,78 @@ fn angle_dimension_both_interactive_workflows() {
     }
 }
 
+/// The conic tool still places a curve in three clicks (start, end, apex), the way it always
+/// has, defaulting to a parabola (`rho` 0.5). A further drag on the curve itself (not on one of
+/// its three points) reads `rho` off where the drag lands between the chord's midpoint and the
+/// apex, so an ellipse or a hyperbola is a drag away rather than a fourth click away. The apex
+/// stays an ordinary, separately draggable point: dragging it slides the curve's tangent point
+/// and leaves `rho` alone. Both drags are tried after leaving the tool with Escape, the way a
+/// person reshapes anything else they have just drawn (the tool is sticky, placing more conics
+/// on further clicks, the way the ellipse and slot tools already are too).
+#[test]
+fn dragging_a_conic_after_the_tool_sets_rho_and_its_apex_stays_separately_draggable() {
+    use serde_json::json;
+    let mut h = Harness::new();
+    h.run(&json!([
+        {"call": "engine.execute", "params": {"command": "sketch.create", "params": {"plane": "XY"}}},
+        {"call": "ui.view", "params": {"view": "top"}},
+        {"start": "sketch.conic"},
+        {"click": {"sketch": [0, 0]}},
+        {"click": {"sketch": [40, 0]}},
+        {"click": {"sketch": [20, 20]}},
+        {"key": "Escape"},
+        {"expect": {"errors": 0}}
+    ]))
+    .unwrap();
+
+    let sk = h.app.session.model.state().sketches[0].sketch.clone();
+    let (ci, apex_idx, rho) = sk
+        .curves
+        .iter()
+        .enumerate()
+        .find_map(|(i, c)| match c.kind {
+            solidcraft_engine::sketch::CurveKind::Conic { apex, rho, .. } => Some((i, apex, rho)),
+            _ => None,
+        })
+        .expect("the three clicks created a conic");
+    assert!((rho - 0.5).abs() < 1e-6, "default rho {rho}");
+    let apex_before = sk.point(apex_idx).expect("apex point resolves");
+    assert!(apex_before.dist(solidcraft_engine::geom::Vec2::new(20.0, 20.0)) < 1e-6);
+
+    // Grabbed on the curve itself, at its default-rho midpoint (20, 10): the chord's midpoint
+    // is (20, 0), the apex (20, 20), so (20, 14) is 0.7 of the way from one to the other.
+    h.run(&json!([
+        {"drag": [{"sketch": [20, 10]}, {"sketch": [20, 14]}], "steps": 4},
+        {"expect": {"errors": 0}}
+    ]))
+    .unwrap();
+    let sk_after_rho_drag = h.app.session.model.state().sketches[0].sketch.clone();
+    let rho_after = match sk_after_rho_drag.curves[ci].kind {
+        solidcraft_engine::sketch::CurveKind::Conic { rho, .. } => rho,
+        ref k => panic!("not a conic: {k:?}"),
+    };
+    assert!((rho_after - 0.7).abs() < 0.02, "rho after drag {rho_after}");
+    let apex_after_rho_drag = sk_after_rho_drag.point(apex_idx).expect("apex point resolves");
+    assert!(apex_before.dist(apex_after_rho_drag) < 1e-6, "the apex moved on a curve-body drag");
+
+    // Grabbed on the apex point itself: it slides, and rho is left as the previous drag set it.
+    h.run(&json!([
+        {"drag": [{"sketch": [20, 20]}, {"sketch": [10, 30]}], "steps": 4},
+        {"expect": {"errors": 0}}
+    ]))
+    .unwrap();
+    let sk_after_apex_drag = h.app.session.model.state().sketches[0].sketch.clone();
+    let apex_after = sk_after_apex_drag.point(apex_idx).expect("apex point still resolves");
+    assert!(apex_before.dist(apex_after) > 1.0, "apex did not move: still at {apex_after:?}");
+    let rho_final = match sk_after_apex_drag.curves[ci].kind {
+        solidcraft_engine::sketch::CurveKind::Conic { rho, .. } => rho,
+        ref k => panic!("not a conic: {k:?}"),
+    };
+    assert!((rho_final - 0.7).abs() < 0.02, "rho changed on an apex drag: {rho_final}");
+    // The same curve, reshaped in place (not replaced): the id survives both drags.
+    assert_eq!(sk_after_apex_drag.curves.get(ci).map(|c| &c.id), sk.curves.get(ci).map(|c| &c.id));
+}
+
 #[test]
 fn home_tab_and_file_recent_open_designs() {
     use serde_json::json;

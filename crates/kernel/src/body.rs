@@ -20,6 +20,13 @@ pub(crate) type Solid = mt::Solid;
 #[derive(Clone, Debug)]
 pub struct Body {
     pub(crate) solid: std::sync::Arc<Solid>,
+    /// Bounding-box diagonal, measured by [`Body::new`] while it read the vertices anyway; 0
+    /// means "not measured, walk the geometry". Every kernel tolerance is a fraction of it.
+    pub(crate) size: f64,
+    /// The last volume measured for this solid and the tolerance it was measured at, shared by
+    /// clones because they share the solid. A boolean measures its operands, and a later boolean
+    /// takes the result as an operand again, so the same body is measured twice otherwise.
+    pub(crate) volume: Option<std::sync::Arc<std::sync::Mutex<Option<(u64, f64)>>>>,
     /// Missing-face check from the orientation mesh, reusable at exactly its tolerance.
     pub(crate) coarse_missing: Option<(f64, usize)>,
     /// Set for mesh bodies (`solid` is then empty).
@@ -441,6 +448,25 @@ fn polyline_mid(pts: &[Vec3]) -> (Vec3, f64) {
     (pts.first().copied().unwrap_or_default(), len)
 }
 
+/// Deflection the orientation mesh uses: coarse enough for a large solid, fine enough that a
+/// small one still tessellates. `unmeshed_faces` counts at the same value, so the count the
+/// orientation mesh produced is reused instead of meshing the body again.
+fn orientation_tolerance(span: f64) -> f64 {
+    (span * 0.01).clamp(1e-3, 1.0)
+}
+
+/// Bounding-box diagonal of a solid's vertices (1 when it has no finite extent).
+fn span_of(solid: &Solid) -> f64 {
+    let mut lo = Vec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
+    let mut hi = -lo;
+    for v in solid.vertex_iter() {
+        let p = from_p3(v.point());
+        lo = Vec3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z));
+        hi = Vec3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z));
+    }
+    if lo.x.is_finite() { (hi - lo).len() } else { 1.0 }
+}
+
 impl Body {
     /// The very same body (shared data), not just an equal-looking one. Its history (how an
     /// operation made it) is not part of it: an operation that leaves a body as it is (a cut by
@@ -466,30 +492,65 @@ impl Body {
         let mut solid = rephase_revolved(solid);
         // Orient outward: a closed solid must have positive volume (meshed finely enough that
         // every face comes out: a face missing from a coarse mesh can flip the sign).
-        let span = {
-            let mut lo = Vec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
-            let mut hi = -lo;
-            for v in solid.vertex_iter() {
-                let p = from_p3(v.point());
-                lo = Vec3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z));
-                hi = Vec3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z));
-            }
-            if lo.x.is_finite() { (hi - lo).len() } else { 1.0 }
+        let span = span_of(&solid);
+        let tol = orientation_tolerance(span);
+        let orient = |tol: f64| {
+            guard("orient", || {
+                let shells = mesh_shells(&solid, tol);
+                let volume = shells.iter().map(|s| s.to_polygon().volume()).sum::<f64>();
+                let missing = shells
+                    .iter()
+                    .flat_map(|s| s.face_iter())
+                    .filter(|f| f.surface().is_none_or(|m| m.faces().triangle_iter().next().is_none()))
+                    .count();
+                Ok((volume, missing))
+            })
         };
-        let tol = (span * 0.01).clamp(1e-3, 1.0);
-        let (v, missing) = guard("orient", || {
-            let shells = mesh_shells(&solid, tol);
-            let volume = shells.iter().map(|s| s.to_polygon().volume()).sum::<f64>();
-            let missing =
-                shells.iter().flat_map(|s| s.face_iter()).filter(|f| f.surface().is_none_or(|m| m.faces().triangle_iter().next().is_none())).count();
-            Ok((volume, missing))
-        })?;
+        let (mut v, mut missing) = orient(tol)?;
+        // A long thin round part (a through hole's tool: a cylinder whose vertices all lie on
+        // its seam, so they span its length only) meshed that coarsely can come out with a
+        // negative volume when it is outward already: check finely before turning it inside out.
+        let fine = (tol * 0.02).max(1e-4);
+        if v < 0.0 && fine < tol {
+            (v, missing) = orient(fine)?;
+        }
         if v < 0.0 {
             solid.not();
         }
         Ok(Body {
             solid: std::sync::Arc::new(solid),
+            size: if span.is_finite() && span > 0.0 { span } else { 0.0 },
+            volume: Some(std::sync::Arc::new(std::sync::Mutex::new(None))),
             coarse_missing: (v >= 0.0).then_some((tol, missing)),
+            mesh: None,
+            color: None,
+            paint: None,
+            splits: None,
+            face_sources: None,
+            regularization_protected: false,
+            history: None,
+        })
+    }
+
+    /// Like [`Body::new`], for a solid made by placing an already-oriented body (see
+    /// [`crate::ops::transform_matrix`]): a placement keeps the faces pointing the way they did
+    /// unless it mirrors them, so its orientation is read from the matrix rather than meshed
+    /// again. Only for closed solids; `coarse` is the input's cached missing-face count, which a
+    /// rigid placement preserves exactly.
+    pub(crate) fn new_placed(solid: Solid, flip: bool, coarse: Option<(f64, usize)>) -> Result<Body> {
+        if solid.boundaries().is_empty() {
+            return Err(KernelError::Failed("empty result".into()));
+        }
+        let mut solid = rephase_revolved(solid);
+        let span = span_of(&solid);
+        if flip {
+            solid.not();
+        }
+        Ok(Body {
+            solid: std::sync::Arc::new(solid),
+            size: if span.is_finite() && span > 0.0 { span } else { 0.0 },
+            volume: Some(std::sync::Arc::new(std::sync::Mutex::new(None))),
+            coarse_missing: coarse,
             mesh: None,
             color: None,
             paint: None,
@@ -830,8 +891,13 @@ impl Body {
         self
     }
 
-    /// Characteristic size (bounding box diagonal) for tolerances.
+    /// Characteristic size (bounding box diagonal) for tolerances. [`Body::new`] measured it
+    /// while it read the vertices anyway, so the answer is cached; a body built by hand carries
+    /// 0 and is walked here once, and mesh bodies always measure their triangles.
     pub fn size(&self) -> f64 {
+        if self.mesh.is_none() && self.size > 0.0 {
+            return self.size;
+        }
         let mut b = solidcraft_geom::Aabb3::EMPTY;
         if let Some(m) = &self.mesh {
             for p in &m.positions {
@@ -843,6 +909,37 @@ impl Body {
         }
         let d = b.diagonal();
         if d.is_finite() && d > 0.0 { d } else { 1.0 }
+    }
+
+    /// The body's volume from a mesh at `tol`, measured once per (solid, tolerance): clones of
+    /// a body share the measurement, so an operand a later boolean takes again is not meshed
+    /// twice for the same number. `None` when the body cannot be meshed.
+    pub fn volume_at(&self, tol: f64) -> Option<f64> {
+        let key = if tol.is_finite() && tol > 0.0 { tol } else { 0.05 };
+        let key = key.to_bits();
+        if let Some(cell) = &self.volume
+            && let Ok(cached) = cell.lock()
+            && let Some((cached_tol, volume)) = *cached
+            && cached_tol == key
+        {
+            return Some(volume);
+        }
+        let volume = self.tessellate(f64::from_bits(key)).ok()?.measure().volume;
+        if let Some(cell) = &self.volume
+            && let Ok(mut slot) = cell.lock()
+        {
+            *slot = Some((key, volume));
+        }
+        Some(volume)
+    }
+
+    /// Rough heap footprint, for the evaluation cache's byte budget: the B-rep topology is what
+    /// makes a kept timeline snapshot expensive, so it dominates the estimate.
+    pub fn retained_bytes(&self) -> usize {
+        if let Some(m) = &self.mesh {
+            return m.positions.len() * 24 + m.triangles.len() * 12;
+        }
+        self.solid.face_iter().count() * 2048 + self.solid.edge_iter().count() * 512 + self.solid.vertex_iter().count() * 96
     }
 
     /// Distinct edges in a stable order (the order of `edges()` and `tessellate().edges`).
@@ -1144,6 +1241,12 @@ impl Body {
     /// A boolean shortcut needs clearance larger than both shell mesh deflections.
     pub(crate) fn separated_lumps(&self) -> Result<Vec<Body>> {
         self.lumps_with_clearance(4.0 * (self.size() * 1e-3).max(1e-3))
+    }
+
+    /// A union's pieces must be clear of each other by the contact distance of [`Body::meets`];
+    /// closer shells are touching material that was never fused (#396).
+    pub(crate) fn union_lumps(&self) -> Result<Vec<Body>> {
+        self.lumps_with_clearance(2.0 * (self.size() * 1e-4).max(1e-6))
     }
 
     fn lumps_with_clearance(&self, clearance: f64) -> Result<Vec<Body>> {

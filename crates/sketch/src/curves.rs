@@ -33,6 +33,24 @@ pub fn conic_point(a: Vec2, apex: Vec2, b: Vec2, rho: f64, t: f64) -> Vec2 {
     (a * b0 + apex * b1 + b * b2) / den.max(1e-12)
 }
 
+/// The `rho` that puts the conic's midpoint (`conic_point` at `t = 0.5`) at `p`, projected onto
+/// the segment from the chord's midpoint to `apex`: at `t = 0.5`, `conic_point` is exactly
+/// `mid + rho * (apex - mid)` (its two chord weights are equal there), so `rho` is `p`'s fraction
+/// along that segment. Lets a UI turn a dragged or hovered point into a shape (drag the apex and
+/// `rho` stays; drag the curve's midpoint handle and `rho` follows the drag instead). Clamped
+/// well inside (0, 1) so the result is always a usable conic; `apex` on the chord's midpoint (no
+/// segment to project onto) falls back to a parabola.
+pub fn conic_rho_from_point(a: Vec2, apex: Vec2, b: Vec2, p: Vec2) -> f64 {
+    let mid = (a + b) * 0.5;
+    let d = apex - mid;
+    let len2 = d.len2();
+    if !len2.is_finite() || len2 < 1e-12 {
+        return 0.5;
+    }
+    let t = (p - mid).dot(d) / len2;
+    if t.is_finite() { t.clamp(1e-3, 1.0 - 1e-3) } else { 0.5 }
+}
+
 pub fn conic_polyline(a: Vec2, apex: Vec2, b: Vec2, rho: f64) -> Vec<Vec2> {
     // Samples by how far the curve bows from its chord (small text curves need few).
     let chord = b - a;
@@ -376,6 +394,30 @@ mod tests {
             let g = (i as f64 + 0.4) / 4.0;
             assert!(bez(c, 0.4).dist(spline_point(&p, false, 3, g)) < 1e-9);
         }
+    }
+
+    #[test]
+    fn conic_rho_from_point_round_trips_through_the_midpoint() {
+        let (a, apex, b) = (Vec2::new(0.0, 0.0), Vec2::new(20.0, 40.0), Vec2::new(40.0, 0.0));
+        for rho in [0.1, 0.3, 0.5, 0.7, 0.9] {
+            let mid_point = conic_point(a, apex, b, rho, 0.5);
+            let back = conic_rho_from_point(a, apex, b, mid_point);
+            assert!((back - rho).abs() < 1e-9, "rho {rho} back {back}");
+        }
+        // A point off the apex-chord-midpoint segment is projected onto it, not just measured
+        // as a raw distance: well off to the side at the same height as a known rho still
+        // recovers that rho.
+        let on_axis = conic_point(a, apex, b, 0.6, 0.5);
+        let off_axis = on_axis + Vec2::new(15.0, 0.0);
+        assert!((conic_rho_from_point(a, apex, b, off_axis) - 0.6).abs() < 1e-9);
+        // Degenerate apex (on the chord's midpoint): no segment to project onto, so the
+        // fallback is a parabola rather than a division by zero.
+        let mid = (a + b) * 0.5;
+        assert_eq!(conic_rho_from_point(a, mid, b, Vec2::new(100.0, 100.0)), 0.5);
+        // Always stays a valid, usable conic even for points far past either end.
+        let far = mid + (apex - mid) * 50.0;
+        let r = conic_rho_from_point(a, apex, b, far);
+        assert!(r > 0.0 && r < 1.0);
     }
 
     #[test]

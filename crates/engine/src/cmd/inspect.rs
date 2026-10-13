@@ -22,7 +22,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("material.assign", "Physical Material", physical_material)
         .at("SOLID", "MODIFY")
         .icon("material")
-        .params("bodies: [names]; material: name (Steel, Aluminum, ABS Plastic, …; `material.list`)"),
+        .params("bodies: [names]; material: name (Steel, Aluminum, ABS Plastic, …, or one made with material.create; `material.list`)"),
     CommandSpec::new("appearance.assign", "Appearance", appearance).at("SOLID", "MODIFY").icon("appearance").key("A").params(
         "bodies?: [names]; faces?: [[x,y,z] on faces] (body?: which body, default the nearest); components?: [names or ids, or occurrence names]; \
              appearance?: library name (appearance.library) | color: \"#rrggbb\" or [r, g, b] (0–255), opacity? (0–1, default 1); \
@@ -34,7 +34,10 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("appearance.list", "List Appearances", appearance_list)
         .noundo()
         .params("body?: name → assigned appearances; with body, its resolved look and its faces' (face index, look)"),
-    CommandSpec::new("material.list", "List Materials", material_list).noundo().doc_only(),
+    CommandSpec::new("material.list", "List Materials", material_list)
+        .noundo()
+        .doc_only()
+        .params("→ the built-in materials, then the design's own (user: true, with their look)"),
     CommandSpec::new("engine.commands", "List Commands", commands).noundo(),
 ];
 
@@ -283,11 +286,7 @@ fn physical_material(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "material.assign";
     let bodies = string_list(p, "bodies");
     let material = str_(p, "material").ok_or_else(|| bad(cmd, "`material` must be a material name"))?;
-    let canonical = solidcraft_doc::MATERIALS
-        .iter()
-        .find(|(n, _)| n.eq_ignore_ascii_case(material.trim()))
-        .map(|(n, _)| n.to_string())
-        .ok_or_else(|| bad(cmd, format!("unknown material `{material}` (see material.list)")))?;
+    let canonical = s.doc.material_name(material).ok_or_else(|| bad(cmd, format!("unknown material `{material}` (see material.list)")))?;
     let st = s.model.state();
     if bodies.is_empty() || bodies.iter().any(|b| st.body(b).is_none()) {
         return Err(bad(cmd, "`bodies` must list existing bodies"));
@@ -303,7 +302,7 @@ fn physical_material(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 /// A colour parameter: `"#rrggbb"` or `[r, g, b]` (0–255).
-fn color_param(v: &Value) -> Option<[u8; 3]> {
+pub(super) fn color_param(v: &Value) -> Option<[u8; 3]> {
     if let Some(t) = v.as_str() {
         let h = t.trim().trim_start_matches('#');
         if h.len() != 6 || !h.is_ascii() {
@@ -455,7 +454,7 @@ fn dist_to(b: &solidcraft_doc::ModelBody, p: solidcraft_geom::Vec3) -> f64 {
     c.dist(p)
 }
 
-fn look_json(l: &solidcraft_doc::appearance::Look) -> Value {
+pub(super) fn look_json(l: &solidcraft_doc::appearance::Look) -> Value {
     json!({"name": l.name, "color": l.hex(), "opacity": l.opacity})
 }
 
@@ -524,6 +523,10 @@ fn appearance_list(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(out)
 }
 
-fn material_list(_s: &mut Session, _p: &Value) -> Result<Value> {
-    Ok(json!({"materials": solidcraft_doc::MATERIALS.iter().map(|(n, d)| json!({"name": n, "density_g_cm3": d})).collect::<Vec<_>>()}))
+fn material_list(s: &mut Session, _p: &Value) -> Result<Value> {
+    let built_in = solidcraft_doc::MATERIALS.iter().map(|(n, d)| json!({"name": n, "density_g_cm3": d}));
+    let user = s.doc.user_materials.iter().map(
+        |m| json!({"name": m.name, "density_g_cm3": m.density, "appearance": s.doc.material_look(&m.name).as_ref().map(look_json), "user": true}),
+    );
+    Ok(json!({"materials": built_in.chain(user).collect::<Vec<_>>()}))
 }

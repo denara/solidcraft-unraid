@@ -75,9 +75,10 @@ fn explicit_rebind_preserves_geometry_dimensions_context_and_one_undo() {
 #[test]
 fn unsupported_face_has_explicit_fixed_alternative_and_no_live_projection() {
     let mut s = Session::default();
-    run(&mut s, "solid.box", json!({"length":10,"width":10,"height":10,"body_name":"Base"}));
-    // The tops of two joined boxes merge into one face that no single construction owns.
-    run(&mut s, "solid.box", json!({"length":10,"width":10,"height":10,"corner":[10,0,0],"operation":"join"}));
+    // A top half Offset Face raised: no construction certificate and no exact history name yet.
+    run(&mut s, "solid.box", json!({"length":40,"width":30,"height":20,"body_name":"Base"}));
+    run(&mut s, "solid.split_face", json!({"faces":[[10,15,20]],"plane":{"origin":[20,0,0],"normal":[1,0,0]}}));
+    run(&mut s, "solid.offset_face", json!({"faces":[[10,15,20]],"distance":5}));
     let mut pick = top_pick(&s, "Base");
     let before = s.doc.to_json();
     let error = s.execute("sketch.create", &json!({"plane":pick})).unwrap_err();

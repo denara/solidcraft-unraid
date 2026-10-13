@@ -693,7 +693,7 @@ fn hostile_lines_and_rounds_neither_panic_nor_change_the_report() {
         let mut c = base();
         case(&mut c.sk);
         let sk = edited(&c);
-        let s = seed(&sk, &given(&sk), Some(&[v(f64::NAN, 0.0)]), &points_on_curves(&sk), &mut Budget::full());
+        let s = seed(&sk, &given(&sk), Some(&[v(f64::NAN, 0.0)]), false, &points_on_curves(&sk), &mut Budget::full());
         assert!(s.pos.iter().flatten().all(|p| p.is_finite()), "case {i}: {s:?}");
         assert!(s.radius.iter().flatten().all(|r| r.is_finite() && *r > 0.0), "case {i}: {s:?}");
         let mut t = c.sk.clone();
@@ -751,7 +751,7 @@ fn a_dimensioned_radius_is_seeded_with_nothing_given() {
     let mut sk = Sketch::new();
     let circle = sk.add_circle(v(10.0, 5.0), 10.0, None, None).unwrap();
     push(&mut sk, ConstraintKind::Diameter { c: circle, value: 30.0 });
-    let s = seed(&sk, &vec![false; sk.points.len()], None, &[], &mut Budget::full());
+    let s = seed(&sk, &vec![false; sk.points.len()], None, true, &[], &mut Budget::full());
     assert_eq!(s.radius[circle], Some(15.0));
 }
 
@@ -773,10 +773,10 @@ fn the_touch_point_comes_from_the_point_on_curve_index() {
     push(&mut sk, ConstraintKind::Tangent { a: l, b: circle });
     push(&mut sk, ConstraintKind::PointOnCurve { p: b, c: circle });
     let on_curve = crate::solver::points_on_curves(&sk);
-    let with = seed(&sk, &given(&sk), None, &on_curve, &mut Budget::full());
+    let with = seed(&sk, &given(&sk), None, true, &on_curve, &mut Budget::full());
     assert!(with.placed_by[c].is_some_and(Placement::anchors), "{with:?}");
     assert!(with.pos[c].unwrap().dist(v(40.0, 12.0) + d.perp() * 8.0) < 1e-9, "{with:?}");
-    let without = seed(&sk, &given(&sk), None, &[], &mut Budget::full());
+    let without = seed(&sk, &given(&sk), None, true, &[], &mut Budget::full());
     assert!(!without.placed_by[c].is_some_and(Placement::anchors), "{without:?}");
 }
 

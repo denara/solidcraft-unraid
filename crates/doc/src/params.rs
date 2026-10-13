@@ -83,6 +83,11 @@ impl FeatureKind {
                     v.push(("End radius", radius2, L));
                     v.extend(mid.iter_mut().map(|(_, r)| ("Mid radius", r, L)));
                 }
+                crate::FilletStyle::Spline { radii, .. } => {
+                    v.push(("Start radius", radius, L));
+                    let n = radii.len();
+                    v.extend(radii.iter_mut().enumerate().map(|(i, r)| (if i + 1 == n { "End radius" } else { "Control radius" }, r, L)));
+                }
             },
             FeatureKind::Chamfer { distance, distance2, angle, .. } => {
                 v.push(("Distance", distance, L));
@@ -466,7 +471,7 @@ impl Document {
     /// in (feature inputs are stored in mm otherwise). Anything else is returned unchanged.
     pub fn with_design_unit(&self, e: &str, kind: Kind) -> String {
         let u = self.units.trim();
-        let bare = expr::is_literal(e) && e.trim().trim_start_matches(['-', '+']).trim().parse::<f64>().is_ok();
+        let bare = expr::is_bare_number(e);
         if kind == Kind::Length && bare && !u.is_empty() && u != "mm" && expr::unit_info(u).is_some_and(|(k, _)| k == Kind::Length) {
             format!("{} {u}", e.trim())
         } else {

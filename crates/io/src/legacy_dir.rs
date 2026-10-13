@@ -3,7 +3,12 @@
 //! the legacy folder is copied over. The legacy folder is never changed or deleted, so an older
 //! release installed side by side keeps working.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// The Linux app id (Flatpak, desktop entry, AppStream, Wayland `app_id`).
+pub const APP_ID: &str = "ai.storyteller.solidcraft";
+/// The app id of releases before 0.8 (compatibility shim, docs/compatibility.md).
+pub const LEGACY_APP_ID: &str = "ai.storyteller.solvecraft";
 
 /// Most files and nesting copied from a legacy folder (it holds preferences, autosaves and
 /// small caches; anything bigger is not ours).
@@ -20,6 +25,25 @@ pub fn adopt_legacy_dir(current: &Path, legacy: &Path) -> std::io::Result<bool> 
     let mut budget = MAX_ENTRIES;
     copy_tree(legacy, current, 0, &mut budget)?;
     Ok(true)
+}
+
+/// In the Flatpak sandbox, the same `path` under the pre-rename app's data folder: Flatpak keeps
+/// each app's XDG folders under `~/.var/app/<app id>`, so after the app id changed, settings and
+/// autosaves of earlier Flatpak releases sit under the old id. `None` outside the sandbox or for
+/// paths outside our own `~/.var/app` folder. Flatpak moves that folder itself when an install
+/// follows the end-of-life rebase; this covers installs made next to the old app, which reach it
+/// read-only through the manifest's `--filesystem` grant.
+pub fn legacy_flatpak_path(path: &Path) -> Option<PathBuf> {
+    flatpak_twin(path, &std::env::var_os("FLATPAK_ID")?, Path::new(&std::env::var_os("HOME")?))
+}
+
+fn flatpak_twin(path: &Path, flatpak_id: &std::ffi::OsStr, home: &Path) -> Option<PathBuf> {
+    if flatpak_id != APP_ID {
+        return None;
+    }
+    let apps = home.join(".var").join("app");
+    let rel = path.strip_prefix(apps.join(APP_ID)).ok()?;
+    Some(apps.join(LEGACY_APP_ID).join(rel))
 }
 
 fn copy_tree(from: &Path, to: &Path, depth: usize, budget: &mut usize) -> std::io::Result<()> {
@@ -73,6 +97,17 @@ mod tests {
         assert!(!adopt_legacy_dir(&new, &old).unwrap());
         assert!(!new.join("later.json").exists());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn flatpak_twin_maps_our_sandbox_data_to_the_old_app_id() {
+        let home = Path::new("/home/u");
+        let ours = home.join(".var/app/ai.storyteller.solidcraft/data/solidcraft");
+        let id = std::ffi::OsStr::new(APP_ID);
+        assert_eq!(flatpak_twin(&ours, id, home), Some(home.join(".var/app/ai.storyteller.solvecraft/data/solidcraft")));
+        // Outside our sandbox folder, or in another app's sandbox, there is nothing to map.
+        assert_eq!(flatpak_twin(&home.join(".local/share/solidcraft"), id, home), None);
+        assert_eq!(flatpak_twin(&ours, std::ffi::OsStr::new("org.example.Other"), home), None);
     }
 
     #[test]

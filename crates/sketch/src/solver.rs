@@ -21,6 +21,10 @@ use crate::linalg::{Mat, determined_vars, solve as lin_solve};
 use crate::model::{ConstraintKind, CurveKind, Sketch};
 use crate::union_find::{find, union};
 
+#[path = "redundancy.rs"]
+mod redundancy;
+pub use redundancy::{CONSISTENT, constraint_residual, determined_by};
+
 const MAX_ITERS: usize = 500;
 /// Variables in one connected component. Each component is solved as a dense system: an n by n
 /// matrix for the Levenberg-Marquardt step, rows by n for the Jacobian. 4,000 variables is a
@@ -65,6 +69,12 @@ pub struct SolveReport {
     pub point_determined: Vec<bool>,
     /// Per curve: all of its defining values determined.
     pub curve_determined: Vec<bool>,
+    /// Constraints that remove no degree of freedom: everything they ask for is already implied
+    /// by the constraints before them (a second "vertical" on a side two rectangles share).
+    /// They hold, so they are not a conflict; they are shown as redundant. Only from a full
+    /// analysis, and only for components of at most a few hundred variables.
+    #[serde(default)]
+    pub redundant: Vec<String>,
 }
 
 impl SolveReport {
@@ -1275,8 +1285,19 @@ pub type DrivingValues = std::collections::BTreeMap<String, f64>;
 /// again by stepping its changed values from old to new (see `continue_values`). Where no
 /// value changed a solve behaves as [`solve`].
 pub fn solve_after_value_edit(sk: &mut Sketch, old: &DrivingValues) -> SolveReport {
+    solve_after_edit(sk, old, None)
+}
+
+/// [`solve_after_value_edit`] of a sketch whose linked geometry may have moved as well: once
+/// its links are refreshed ([`Sketch::update_link`]), the linked points are where their sources
+/// are now and everything else is still the stored solved state. `stored` has every point's
+/// position in that state ([`Sketch::positions_in`]; `None` when no link moved), and the sides
+/// and turns the solve keeps are read there, as [`solve_with`] reads them from the positions
+/// before an interactive move. Read where the links are now, a point dimensioned from a
+/// projected line is on the far side of it as soon as the source moves the line past the point.
+pub fn solve_after_edit(sk: &mut Sketch, old: &DrivingValues, stored: Option<&[Vec2]>) -> SolveReport {
     let old_values: Vec<Option<f64>> = sk.constraints.iter().map(|c| old.get(&c.id).copied()).collect();
-    solve_from(sk, &Hold::default(), None, Analysis::Full, Some(&old_values), &mut Budget::full())
+    solve_from(sk, &Hold::default(), stored, Analysis::Full, Some(&old_values), &mut Budget::full())
 }
 
 impl Sketch {
@@ -1285,6 +1306,60 @@ impl Sketch {
     pub fn driving_values(&self) -> DrivingValues {
         self.constraints.iter().filter_map(|c| Some((c.id.clone(), c.kind.value()?))).collect()
     }
+}
+
+/// The variables' values where the sketch is now.
+fn initial_x(sk: &Sketch, lay: &Layout) -> Vec<f64> {
+    let mut x = vec![0.0; lay.n];
+    for (i, p) in sk.points.iter().enumerate() {
+        if let Some(v) = lay.pvar.get(i).copied().flatten() {
+            set_point(&mut x, v, p.pos);
+        }
+    }
+    for (i, c) in sk.curves.iter().enumerate() {
+        if let (CurveKind::Circle { r, .. } | CurveKind::Ellipse { r, .. }, Some(v)) = (&c.kind, lay.rvar.get(i).copied().flatten())
+            && let Some(s) = x.get_mut(v)
+        {
+            *s = *r;
+        }
+    }
+    x
+}
+
+/// The solve's blocks in order (the curves' own relations, then the driving constraints in
+/// constraint order) with the variables each reads, and per block whether it reads a constant
+/// point.
+fn build_blocks<'a>(sk: &'a Sketch, lay: &Layout, on_curve: &[(usize, usize)]) -> (Vec<(Block<'a>, Vec<usize>)>, Vec<bool>) {
+    let mut raw = Vec::new();
+    for c in &sk.curves {
+        if let CurveKind::Spline { pts, periodic: true, .. } = &c.kind
+            && let (Some(a), Some(b)) = (pts.first(), pts.last())
+            && a != b
+        {
+            raw.push(Block::Closure { a: *a, b: *b });
+        }
+        if let CurveKind::Arc { c, a, b } = c.kind {
+            raw.push(Block::Arc { c, a, b });
+        }
+    }
+    for (i, c) in sk.constraints.iter().enumerate() {
+        if c.driven {
+            continue;
+        }
+        raw.push(match touch_point(sk, &c.kind, on_curve) {
+            Some(p) => Block::TangentAt(i, &c.kind, p),
+            None => Block::User(i, &c.kind),
+        });
+    }
+    let mut blocks: Vec<(Block, Vec<usize>)> = Vec::with_capacity(raw.len());
+    let mut reads_constant = Vec::with_capacity(raw.len());
+    for bl in raw {
+        let (vars, constant) = block_vars(sk, lay, &bl);
+        blocks.push((bl, vars));
+        reads_constant.push(constant);
+    }
+
+    (blocks, reads_constant)
 }
 
 #[cfg(not(test))]
@@ -1710,19 +1785,7 @@ fn solve_inner(
         }
     }
     let lay = layout(sk, hold);
-    let mut x = vec![0.0; lay.n];
-    for (i, p) in sk.points.iter().enumerate() {
-        if let Some(v) = lay.pvar.get(i).copied().flatten() {
-            set_point(&mut x, v, p.pos);
-        }
-    }
-    for (i, c) in sk.curves.iter().enumerate() {
-        if let (CurveKind::Circle { r, .. } | CurveKind::Ellipse { r, .. }, Some(v)) = (&c.kind, lay.rvar.get(i).copied().flatten())
-            && let Some(s) = x.get_mut(v)
-        {
-            *s = *r;
-        }
-    }
+    let mut x = initial_x(sk, &lay);
     let x0 = x.clone();
     let on_curve = points_on_curves(sk);
     // Start from the constructed positions of the points the constraints pin down (see
@@ -1736,7 +1799,11 @@ fn solve_inner(
     let mut constructed = vec![false; lay.n];
     if crate::construct::switch::seed_on() {
         let given: Vec<bool> = lay.pvar.iter().map(Option::is_none).collect();
-        let seeded = crate::construct::seed(sk, &given, reference, &on_curve, budget);
+        // A drag step solves against its reference and moves only held points. Any other solve
+        // applies edits: also the one after linked geometry moved, whose reference is the
+        // stored state.
+        let edits = reference.is_none() || old_values.is_some();
+        let seeded = crate::construct::seed(sk, &given, reference, edits, &on_curve, budget);
         for (i, (at, how)) in seeded.pos.iter().zip(&seeded.placed_by).enumerate() {
             if let (Some(at), Some(how), Some(v)) = (at, how, lay.pvar.get(i).copied().flatten())
                 && how.anchors()
@@ -1770,34 +1837,7 @@ fn solve_inner(
     nudge_line_angles(sk, &lay, &mut x);
 
     // The blocks, and per block whether it reads a constant point.
-    let mut raw = Vec::new();
-    for c in &sk.curves {
-        if let CurveKind::Spline { pts, periodic: true, .. } = &c.kind
-            && let (Some(a), Some(b)) = (pts.first(), pts.last())
-            && a != b
-        {
-            raw.push(Block::Closure { a: *a, b: *b });
-        }
-        if let CurveKind::Arc { c, a, b } = c.kind {
-            raw.push(Block::Arc { c, a, b });
-        }
-    }
-    for (i, c) in sk.constraints.iter().enumerate() {
-        if c.driven {
-            continue;
-        }
-        raw.push(match touch_point(sk, &c.kind, &on_curve) {
-            Some(p) => Block::TangentAt(i, &c.kind, p),
-            None => Block::User(i, &c.kind),
-        });
-    }
-    let mut blocks: Vec<(Block, Vec<usize>)> = Vec::with_capacity(raw.len());
-    let mut reads_constant = Vec::with_capacity(raw.len());
-    for bl in raw {
-        let (vars, constant) = block_vars(sk, &lay, &bl);
-        blocks.push((bl, vars));
-        reads_constant.push(constant);
-    }
+    let (blocks, reads_constant) = build_blocks(sk, &lay, &on_curve);
 
     carry_with_seeded(&mut x, &x0, &constructed, &blocks, &lay);
     // The plain start, for the variables whose start the seed (or carrying along it) moved.
@@ -1966,6 +2006,7 @@ fn solve_inner(
     let mut failing: Vec<String> = Vec::new();
     let mut det = vec![false; lay.n];
     let mut rank = 0;
+    let mut redundant: Vec<String> = Vec::new();
     // A component too large to solve is a failure, not an allocation.
     if comps.iter().any(|(_, vars, bis)| !bis.is_empty() && oversized(vars)) {
         max_residual = f64::MAX;
@@ -2008,6 +2049,17 @@ fn solve_inner(
         let (rest_det, rest_rank) = if j.rows > 0 { determined_vars(&j, 1e-7) } else { (vec![false; rest.len()], 0) };
         let comp_rank = pin_flags.iter().filter(|p| **p).count() + rest_rank;
         rank += comp_rank;
+        // More rows than rank: some constraint may be implied by the others.
+        if r.len() > comp_rank && vars.len() <= redundancy::MAX_REDUNDANCY_VARS {
+            let (dependent, _) = redundancy::dependent_blocks(sk, &lay, &sub, vars, &mut x, None);
+            for ((b, _), d) in sub.iter().zip(dependent) {
+                if d && let Some(c) = redundancy::block_constraint(b).and_then(|ci| sk.constraints.get(ci))
+                    && !redundant.contains(&c.id)
+                {
+                    redundant.push(c.id.clone());
+                }
+            }
+        }
         for (&v, pinned) in vars.iter().zip(&pin_flags) {
             let flag = match rest.binary_search(&v) {
                 Ok(k) => rest_det.get(k).copied().unwrap_or(false),
@@ -2156,6 +2208,7 @@ fn solve_inner(
         continuations,
         point_determined,
         curve_determined,
+        redundant,
     }
 }
 

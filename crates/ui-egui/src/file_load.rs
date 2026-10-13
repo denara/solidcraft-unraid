@@ -1,24 +1,69 @@
 //! Interactive file operations run off the window thread. The old design stays intact until
 //! the command and display meshes are ready; failures and cancelled jobs never replace it.
+//!
+//! While one runs, the window keeps drawing frames: the title bar still moves, resizes,
+//! minimizes and maximizes the window, and a light overlay over the design shows the file's
+//! progress with Cancel. The overlay takes the pointer, shortcuts and commands wait, and
+//! control-channel commands that change the design are held until the file is in. A control
+//! (MCP) `doc.open` or import is answered when its file finishes loading.
 
 use std::collections::VecDeque;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicU8, Ordering},
-    mpsc::{Receiver, TryRecvError},
+    atomic::{AtomicU8, Ordering},
+    mpsc::{Receiver, Sender, TryRecvError},
 };
 
-use serde_json::Value;
-#[cfg(not(target_arch = "wasm32"))]
-use serde_json::json;
-use solidcraft_engine::{Session, doc::Document};
+use serde_json::{Value, json};
+use solidcraft_engine::{Session, doc::Document, doc::progress::Progress};
 
 use crate::SolveApp;
+use crate::control::ControlResponse;
 
-struct Request {
-    path: String,
-    insert: bool,
+/// What a file operation does with its file.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Kind {
+    /// Open the design (or a STEP/mesh file as a new design) in a tab of its own.
+    Open,
+    /// Insert a STEP or mesh file's bodies into the active design.
+    Insert,
+    /// Open a design an earlier run autosaved before it closed.
+    Recover { id: String, dir: Option<String> },
 }
+
+pub struct Request {
+    /// The file, or for a recovery the design's name.
+    pub path: String,
+    pub kind: Kind,
+    /// A control-channel caller waiting for the command's reply.
+    pub reply: Option<Sender<ControlResponse>>,
+}
+
+impl Request {
+    pub fn new(path: &str, kind: Kind) -> Self {
+        Request { path: path.into(), kind, reply: None }
+    }
+    fn insert(&self) -> bool {
+        self.kind == Kind::Insert
+    }
+    fn command(&self) -> (&'static str, Value) {
+        match &self.kind {
+            Kind::Open => ("doc.open", json!({"path": self.path})),
+            Kind::Insert if solidcraft_engine::io::is_mesh_path(&self.path) => ("file.insert_mesh", json!({"path": self.path})),
+            Kind::Insert => ("file.insert_step", json!({"path": self.path})),
+            Kind::Recover { id, dir } => ("doc.recover", json!({"id": id, "dir": dir})),
+        }
+    }
+    fn answer(&self, r: Result<Value, String>) {
+        if let Some(reply) = &self.reply {
+            let _ = reply.send(match r {
+                Ok(v) => json!({"ok": true, "result": v}),
+                Err(e) => json!({"ok": false, "error": e}),
+            });
+        }
+    }
+}
+
 struct Made {
     session: Session,
     result: Value,
@@ -32,7 +77,7 @@ struct Running {
     before: Vec<String>,
     rx: Receiver<Job>,
     phase: Arc<AtomicU8>,
-    cancelled: Arc<AtomicBool>,
+    progress: Arc<Progress>,
     preview_rx: Option<Receiver<egui::ColorImage>>,
     preview: Option<egui::TextureHandle>,
 }
@@ -41,38 +86,112 @@ impl Running {
     fn matches(&self, session: &Session) -> bool {
         Arc::ptr_eq(&session.doc, &self.base) && session.revision == self.base_revision
     }
+    fn cancelled(&self) -> bool {
+        self.progress.is_cancelled()
+    }
 }
 
 #[derive(Default)]
 pub struct FileLoad {
     queued: VecDeque<Request>,
     running: Option<Running>,
+    /// Tests: the next load waits before this feature until cancelled.
+    #[cfg(test)]
+    pub hold_at: Option<usize>,
 }
 
 impl FileLoad {
+    /// A file operation is under way: the design waits for it.
     pub fn busy(&self) -> bool {
-        self.running.as_ref().is_some_and(|r| !r.cancelled.load(Ordering::Relaxed)) || !self.queued.is_empty()
+        self.running.as_ref().is_some_and(|r| !r.cancelled()) || !self.queued.is_empty()
+    }
+    /// The running load's progress: (features rebuilt, timeline length).
+    pub fn features(&self) -> Option<(usize, usize)> {
+        self.running.as_ref().map(|r| r.progress.features())
+    }
+    /// Nothing running or queued (a cancelled job may still be finishing in [`Self::busy`]'s eyes).
+    pub fn idle(&self) -> bool {
+        self.running.is_none() && self.queued.is_empty()
+    }
+    /// Stop the running operation at its next feature and drop the queued ones.
+    pub fn cancel(&mut self) {
+        if let Some(r) = &self.running {
+            r.progress.cancel();
+        }
+        for q in self.queued.drain(..) {
+            q.answer(Err("file operation cancelled".into()));
+        }
     }
 }
 
 pub fn begin(app: &mut SolveApp, path: &str, insert: bool) {
+    let _ = begin_request(app, Request::new(path, if insert { Kind::Insert } else { Kind::Open }));
+}
+
+/// Queue a file operation; on the web (no threads) it runs now.
+pub fn begin_request(app: &mut SolveApp, request: Request) -> Result<(), String> {
     #[cfg(target_arch = "wasm32")]
     {
-        if insert {
-            app.insert_path(path);
-        } else {
-            app.open_path(path);
-        }
+        let r = match &request.kind {
+            Kind::Insert => {
+                app.insert_path(&request.path);
+                Ok(Value::Null)
+            }
+            Kind::Open => {
+                app.open_path(&request.path);
+                Ok(Value::Null)
+            }
+            Kind::Recover { .. } => {
+                let (command, params) = request.command();
+                let r = app.run(command, params);
+                if r.is_ok() {
+                    recovered(app, &request);
+                }
+                r
+            }
+        };
+        request.answer(r);
+        Ok(())
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
         if app.file_load.queued.len() >= crate::documents::MAX_OPEN {
-            app.set_status("too many queued files", true);
-            return;
+            let e = "too many queued files".to_string();
+            app.set_status(e.clone(), true);
+            request.answer(Err(e.clone()));
+            return Err(e);
         }
-        app.file_load.queued.push_back(Request { path: path.into(), insert });
+        app.file_load.queued.push_back(request);
         start(app);
+        Ok(())
     }
+}
+
+/// A control-channel (MCP) `doc.open` or STEP/mesh import runs like File > Open: off the window
+/// thread, answered when the file is in. Other requests come back to be handled now.
+pub fn control(app: &mut SolveApp, req: crate::control::ControlRequest) -> Option<crate::control::ControlRequest> {
+    if cfg!(target_arch = "wasm32") || !matches!(req.method.as_str(), "engine.execute" | "command") {
+        return Some(req);
+    }
+    let command = req.params.get("command").or(req.params.get("id")).and_then(Value::as_str);
+    let kind = match command {
+        Some("doc.open") => Kind::Open,
+        Some("file.insert_step" | "file.insert_mesh") => Kind::Insert,
+        _ => return Some(req),
+    };
+    let Some(path) = req.params.get("params").and_then(|p| p.get("path")).and_then(Value::as_str) else { return Some(req) };
+    let _ = begin_request(app, Request { path: path.into(), kind, reply: Some(req.reply.clone()) });
+    None
+}
+
+/// A recovered design is ours now: autosave it under this app's entry before the old one goes.
+fn recovered(app: &mut SolveApp, request: &Request) {
+    let Kind::Recover { id, dir } = &request.kind else { return };
+    let kept = app.autosave.as_mut().map(|a| a.save(&app.session));
+    if let Some(Ok(_)) = kept {
+        let _ = app.session.execute("doc.recovery_discard", &json!({"id": id, "dir": dir}));
+    }
+    app.set_status(format!("recovered {}: save it to keep it", request.path), false);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -81,34 +200,41 @@ fn start(app: &mut SolveApp) {
         return;
     }
     let Some(request) = app.file_load.queued.pop_front() else { return };
-    if !request.insert && app.docs.count() >= crate::documents::MAX_OPEN && !crate::documents::active_is_blank(app) {
-        app.set_status("too many open designs; close a tab before opening another", true);
+    if !request.insert() && app.docs.count() >= crate::documents::MAX_OPEN && !crate::documents::active_is_blank(app) {
+        let e = "too many open designs; close a tab before opening another";
+        app.set_status(e, true);
+        request.answer(Err(e.into()));
         return;
     }
-    let before = if request.insert { app.session.world_state().bodies.iter().map(|b| b.name.clone()).collect() } else { Vec::new() };
-    let mut scratch = if request.insert { app.session.scratch() } else { Session::default() };
-    if request.insert {
+    let insert = request.insert();
+    let before = if insert { app.session.world_state().bodies.iter().map(|b| b.name.clone()).collect() } else { Vec::new() };
+    let mut scratch = if insert { app.session.scratch() } else { Session::default() };
+    if insert {
         scratch.selection = app.session.selection.clone();
     }
     let base = app.session.doc.clone();
     let base_revision = app.session.revision;
     let phase = Arc::new(AtomicU8::new(0));
     let worker_phase = phase.clone();
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let worker_cancelled = cancelled.clone();
+    let progress = Arc::new(Progress::default());
+    #[cfg(test)]
+    if let Some(i) = app.file_load.hold_at.take() {
+        progress.hold_at(i);
+    }
+    let worker_progress = progress.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     let (preview_tx, preview_rx) = std::sync::mpsc::channel();
-    let path = request.path.clone();
-    let insert = request.insert;
+    let (command, params) = request.command();
+    let thumbnail = request.kind == Kind::Open;
     let spawned = std::thread::Builder::new().name("file-load".into()).spawn(move || {
         let preview_began = std::time::Instant::now();
-        if !insert {
-            let cancelled = worker_cancelled.clone();
+        if command == "doc.open" {
+            let progress = worker_progress.clone();
             scratch.open_preview = Some(Box::new(move |preview| {
-                if !cancelled.load(Ordering::Relaxed) {
+                if !progress.is_cancelled() {
                     // Render on the file worker, never the window thread.
                     let picture = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| saved_picture(preview))).ok().flatten();
-                    if let Some(picture) = picture.filter(|_| !cancelled.load(Ordering::Relaxed)) {
+                    if let Some(picture) = picture.filter(|_| !progress.is_cancelled()) {
                         let _ = preview_tx.send(picture);
                         if solidcraft_engine::geom::env::var_os("PROFILE_OPEN").is_some() {
                             eprintln!("SolidCraft saved preview: ready_ms={:.3}", preview_began.elapsed().as_secs_f64() * 1000.0);
@@ -117,16 +243,21 @@ fn start(app: &mut SolveApp) {
                 }
             }));
         }
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compute(scratch, &path, insert, &worker_phase, &worker_cancelled)))
-            .unwrap_or_else(|_| Err("the file operation failed; the current design is unchanged".into()));
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compute(scratch, command, &params, thumbnail, &worker_phase, &worker_progress)))
+                .unwrap_or_else(|_| Err("the file operation failed; the current design is unchanged".into()));
         let _ = tx.send(result);
     });
     match spawned {
         Ok(_) => {
             app.file_load.running =
-                Some(Running { request, base, base_revision, before, rx, phase, cancelled, preview_rx: Some(preview_rx), preview: None })
+                Some(Running { request, base, base_revision, before, rx, phase, progress, preview_rx: Some(preview_rx), preview: None })
         }
-        Err(e) => app.set_status(format!("could not start file operation: {e}"), true),
+        Err(e) => {
+            let e = format!("could not start file operation: {e}");
+            request.answer(Err(e.clone()));
+            app.set_status(e, true);
+        }
     }
 }
 
@@ -220,20 +351,18 @@ fn preview_work_fits(scene: &solidcraft_engine::render::Scene, camera: &solidcra
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn compute(mut session: Session, path: &str, insert: bool, phase: &AtomicU8, cancelled: &AtomicBool) -> Job {
+fn compute(mut session: Session, command: &str, params: &Value, thumbnail: bool, phase: &AtomicU8, progress: &Arc<Progress>) -> Job {
     let profile = solidcraft_engine::geom::env::var_os("PROFILE_OPEN").is_some();
     let began = std::time::Instant::now();
-    if cancelled.load(Ordering::Relaxed) {
-        return Err("file operation cancelled".into());
+    let cancelled = || Err("file operation cancelled".to_string());
+    if progress.is_cancelled() {
+        return cancelled();
     }
-    let command = if !insert {
-        "doc.open"
-    } else if solidcraft_engine::io::is_mesh_path(path) {
-        "file.insert_mesh"
-    } else {
-        "file.insert_step"
-    };
-    let result = session.execute(command, &json!({"path": path})).map_err(|e| e.to_string())?;
+    // The timeline's rebuild reports each feature and stops at the next one after Cancel.
+    let result = solidcraft_engine::doc::progress::watch(progress.clone(), || session.execute(command, params)).map_err(|e| e.to_string())?;
+    if progress.is_cancelled() {
+        return cancelled();
+    }
     let geometry_ms = began.elapsed().as_secs_f64() * 1000.0;
     let view_began = std::time::Instant::now();
     phase.store(1, Ordering::Relaxed);
@@ -242,8 +371,8 @@ fn compute(mut session: Session, path: &str, insert: bool, phase: &AtomicU8, can
     let mesh_began = std::time::Instant::now();
     // Fit, picking and the first viewport frame must not trigger cold tessellation on the UI.
     for b in &world.bodies {
-        if cancelled.load(Ordering::Relaxed) {
-            return Err("file operation cancelled".into());
+        if progress.is_cancelled() {
+            return cancelled();
         }
         let _ = b.mesh();
     }
@@ -251,7 +380,7 @@ fn compute(mut session: Session, path: &str, insert: bool, phase: &AtomicU8, can
     phase.store(2, Ordering::Relaxed);
     let view_ms = view_began.elapsed().as_secs_f64() * 1000.0;
     let thumbnail_began = std::time::Instant::now();
-    let image = if insert { None } else { crate::home::remember(&session) };
+    let image = if thumbnail { crate::home::remember(&session) } else { None };
     if profile {
         eprintln!(
             "SolidCraft open phases: geometry_ms={geometry_ms:.3} placement_ms={placement_ms:.3} tessellation_ms={tessellation_ms:.3} display_warmup_ms={view_ms:.3} thumbnail_ms={:.3} total_ms={:.3}",
@@ -264,7 +393,7 @@ fn compute(mut session: Session, path: &str, insert: bool, phase: &AtomicU8, can
 
 pub fn tick(app: &mut SolveApp, ctx: &egui::Context) {
     if let Some(running) = &mut app.file_load.running {
-        if !running.cancelled.load(Ordering::Relaxed) && running.matches(&app.session) {
+        if !running.cancelled() && running.matches(&app.session) {
             if let Some(image) = running.preview_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
                 running.preview = Some(ctx.load_texture("opening-preview", image, egui::TextureOptions::LINEAR));
             }
@@ -280,32 +409,49 @@ pub fn tick(app: &mut SolveApp, ctx: &egui::Context) {
     if let Some(job) = result
         && let Some(running) = app.file_load.running.take()
     {
+        let request = &running.request;
         match job {
-            _ if running.cancelled.load(Ordering::Relaxed) => {}
+            _ if running.cancelled() => request.answer(Err("file operation cancelled".into())),
             Ok(made) if running.matches(&app.session) => {
-                if running.request.insert {
+                if request.insert() {
                     app.session.accept_computed(made.session);
                     app.big_operation = true;
                 } else {
                     crate::documents::adopt(app, made.session);
-                    app.home.add_recent(&running.request.path);
-                    crate::home::install(&mut app.home, ctx, &running.request.path, made.image);
+                    if request.kind == Kind::Open {
+                        app.home.add_recent(&request.path);
+                        crate::home::install(&mut app.home, ctx, &request.path, made.image);
+                    }
                 }
                 app.home.open = false;
                 app.fit_view();
-                crate::stand_up::offer(app, &running.request.path, &running.before);
+                if request.kind == Kind::Open || request.insert() {
+                    crate::stand_up::offer(app, &request.path, &running.before);
+                }
                 let warnings = made.result.get("warnings").and_then(Value::as_array);
-                app.set_status(
-                    if let Some(w) = warnings.filter(|w| !w.is_empty()) {
-                        format!("imported with {} warning(s): {}", w.len(), w.first().and_then(Value::as_str).unwrap_or(""))
-                    } else {
-                        format!("{} done", if running.request.insert { "Insert" } else { "Open" })
-                    },
-                    false,
-                );
+                if let Kind::Recover { .. } = request.kind {
+                    recovered(app, request);
+                } else {
+                    app.set_status(
+                        if let Some(w) = warnings.filter(|w| !w.is_empty()) {
+                            format!("imported with {} warning(s): {}", w.len(), w.first().and_then(Value::as_str).unwrap_or(""))
+                        } else {
+                            format!("{} done", if request.insert() { "Insert" } else { "Open" })
+                        },
+                        false,
+                    );
+                }
+                request.answer(Ok(made.result));
             }
-            Ok(_) => app.set_status("the active design changed while loading; the file operation was discarded", true),
-            Err(e) => app.set_status(e, true),
+            Ok(_) => {
+                let e = "the active design changed while loading; the file operation was discarded";
+                request.answer(Err(e.into()));
+                app.set_status(e, true);
+            }
+            Err(e) => {
+                request.answer(Err(e.clone()));
+                app.set_status(e, true);
+            }
         }
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -315,49 +461,109 @@ pub fn tick(app: &mut SolveApp, ctx: &egui::Context) {
     }
 }
 
+/// The light overlay over everything under the title bar while a file loads. The title bar,
+/// its window buttons and the window's resize edges stay live; the design underneath takes no
+/// pointer input until the file is in.
 pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     let Some(r) = &app.file_load.running else { return };
-    let cancelled = r.cancelled.load(Ordering::Relaxed);
+    let cancelled = r.cancelled();
     if cancelled && app.file_load.queued.is_empty() {
         return;
     }
-    let name = std::path::Path::new(&r.request.path).file_name().map(|p| p.to_string_lossy()).unwrap_or_default();
+    let name = match &r.request.kind {
+        Kind::Recover { .. } => r.request.path.clone(),
+        _ => std::path::Path::new(&r.request.path).file_name().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+    };
     let phase = r.phase.load(Ordering::Relaxed);
-    let mut cancel = false;
-    egui::Modal::new(egui::Id::new("file_loading")).show(ctx, |ui| {
-        ui.heading(if cancelled {
-            "Waiting for file operation"
-        } else if r.request.insert {
-            "Inserting geometry"
-        } else {
-            "Opening design"
-        });
-        ui.label(name.as_ref());
-        if let Some(preview) = r.preview.as_ref().filter(|_| !cancelled) {
-            ui.image((preview.id(), egui::vec2(320.0, 200.0)));
-            ui.label("Saved preview. Geometry is being checked before editing.");
+    let (done, total) = r.progress.features();
+    let screen = ctx.content_rect();
+    // Leave the title bar to the window. The resize edges are a foreground layer above this.
+    let cover = egui::Rect::from_min_max(egui::pos2(screen.left(), screen.top() + crate::toolbar::APP_BAR_HEIGHT), screen.max);
+    if cover.width() <= 0.0 || cover.height() <= 0.0 {
+        return;
+    }
+    let centre = app.viewport.rect.filter(|v| cover.contains_rect(*v)).unwrap_or(cover).center();
+    // Typing goes nowhere until the design is in.
+    ctx.memory_mut(|m| {
+        if let Some(id) = m.focused() {
+            m.surrender_focus(id);
         }
-        ui.horizontal(|ui| {
-            ui.spinner();
-            ui.label(if cancelled {
-                "Waiting for the previous operation to stop..."
-            } else {
-                match phase {
-                    1 => "Preparing the view...",
-                    2 => "Preparing the thumbnail...",
-                    _ => "Reading and building geometry...",
-                }
-            });
-        });
-        cancel = ui.button("Cancel").clicked();
     });
-    if cancel {
+    let t = crate::theme::Tokens::get();
+    let mut cancel = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+    let id = egui::Id::new("file_loading");
+    let card_id = id.with("card");
+    // Above the dialogs over the design; menus, tooltips and the resize edges stay above it.
+    ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, id));
+    ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, card_id));
+    egui::Area::new(id).order(egui::Order::Middle).fixed_pos(cover.min).interactable(true).show(ctx, |ui| {
+        ui.set_min_size(cover.size());
+        ui.interact(cover, egui::Id::new("file_loading_block"), egui::Sense::click_and_drag());
+        ui.painter().rect_filled(cover, 0.0, egui::Color32::from_black_alpha(70));
+    });
+    let width = 340.0f32.min(cover.width() - 16.0).max(120.0);
+    // Anchored at its top with Cancel in the heading row: the card grows downwards (the saved
+    // preview, the progress bar) and Cancel never moves under the pointer.
+    let top = egui::pos2(centre.x, (centre.y - 120.0).max(cover.top() + 8.0));
+    egui::Area::new(card_id).order(egui::Order::Middle).pivot(egui::Align2::CENTER_TOP).fixed_pos(top).show(ctx, |child| {
+        egui::Frame::popup(child.style()).fill(t.panel).show(child, |ui| {
+            ui.set_width(width - 16.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(if cancelled {
+                        "Waiting for file operation"
+                    } else {
+                        match r.request.kind {
+                            Kind::Insert => "Inserting geometry",
+                            Kind::Open => "Opening design",
+                            Kind::Recover { .. } => "Recovering design",
+                        }
+                    })
+                    .strong()
+                    .size(14.0),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let b = ui.button("Cancel");
+                    crate::scenario::publish_handle("file_loading:cancel", b.rect.center());
+                    cancel |= b.clicked();
+                });
+            });
+            ui.label(egui::RichText::new(format!("{name}…")).weak());
+            if let Some(preview) = r.preview.as_ref().filter(|_| !cancelled) {
+                let w = ui.available_width().min(320.0);
+                ui.image((preview.id(), egui::vec2(w, w * 200.0 / 320.0)));
+                ui.label(egui::RichText::new("Saved preview. Geometry is being checked before editing.").small().weak());
+            }
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(if cancelled {
+                    "Waiting for the previous operation to stop...".to_string()
+                } else {
+                    match phase {
+                        1 => "Preparing the view...".into(),
+                        2 => "Preparing the thumbnail...".into(),
+                        _ if total > 0 => format!("Rebuilding feature {} of {total}", (done + 1).min(total)),
+                        _ => "Reading the file...".into(),
+                    }
+                });
+            });
+            // Always there, so the card keeps its height as the phases change.
+            let fraction = if cancelled || total == 0 {
+                0.0
+            } else if phase == 0 {
+                done as f32 / total as f32
+            } else {
+                1.0
+            };
+            ui.add(egui::ProgressBar::new(fraction).desired_height(6.0));
+        });
+    });
+    if cancel && !cancelled {
         // Keep the running job until it exits: cancelling must not allow another large
-        // import to overlap it in memory. The user can continue editing the current design.
-        if let Some(r) = &app.file_load.running {
-            r.cancelled.store(true, Ordering::Relaxed);
-        }
-        app.file_load.queued.clear();
+        // import to overlap it in memory. The rebuild stops at its next feature and the
+        // current design stays as it was.
+        app.file_load.cancel();
         app.set_status("file operation cancelled", false);
     }
 }
@@ -375,13 +581,13 @@ mod tests {
             let (preview_tx, preview_rx) = std::sync::mpsc::channel();
             preview_tx.send(egui::ColorImage::new([2, 2], vec![egui::Color32::RED; 4])).unwrap();
             app.file_load.running = Some(Running {
-                request: Request { path: "old.solidcraft".into(), insert },
+                request: Request::new("old.solidcraft", if insert { Kind::Insert } else { Kind::Open }),
                 base,
                 base_revision: app.session.revision,
                 before: Vec::new(),
                 rx,
                 phase: Arc::new(AtomicU8::new(0)),
-                cancelled: Arc::new(AtomicBool::new(false)),
+                progress: Arc::new(Progress::default()),
                 preview_rx: Some(preview_rx),
                 preview: None,
             });
@@ -437,13 +643,13 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(Err("bad STEP".into())).unwrap();
         app.file_load.running = Some(Running {
-            request: Request { path: "bad.step".into(), insert: true },
+            request: Request::new("bad.step", Kind::Insert),
             base: old.clone(),
             base_revision: app.session.revision,
             before: Vec::new(),
             rx,
             phase: Arc::new(AtomicU8::new(0)),
-            cancelled: Arc::new(AtomicBool::new(false)),
+            progress: Arc::new(Progress::default()),
             preview_rx: None,
             preview: None,
         });
@@ -457,15 +663,16 @@ mod tests {
         let mut app = SolveApp::new(Session::default(), Default::default());
         let old = app.session.doc.clone();
         let (tx, rx) = std::sync::mpsc::channel();
-        let cancelled = Arc::new(AtomicBool::new(true));
+        let progress = Arc::new(Progress::default());
+        progress.cancel();
         app.file_load.running = Some(Running {
-            request: Request { path: "cancelled.step".into(), insert: true },
+            request: Request::new("cancelled.step", Kind::Insert),
             base: old.clone(),
             base_revision: app.session.revision,
             before: Vec::new(),
             rx,
             phase: Arc::new(AtomicU8::new(0)),
-            cancelled,
+            progress,
             preview_rx: None,
             preview: None,
         });

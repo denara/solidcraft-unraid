@@ -70,6 +70,12 @@ pub struct Tokens {
     pub preview_add: Color32,
     /// Removed material in a feature preview (translucent).
     pub preview_cut: Color32,
+    /// Navigation cube faces, outline and labels.
+    pub cube_face: Color32,
+    pub cube_border: Color32,
+    pub cube_text: Color32,
+    /// Light blue hover fill, readable on the pale cube in either theme.
+    pub cube_hover: Color32,
     // ---- viewport ----
     /// Viewport background (top and bottom of the gradient; equal for a flat fill).
     pub viewport_top: Color32,
@@ -128,6 +134,21 @@ impl Tokens {
         if is_dark() { Tokens::dark() } else { Tokens::light() }
     }
 
+    /// Fade idle cube colours into the viewport while retaining opaque facets.
+    pub fn navigation_cube(self, active: bool) -> Tokens {
+        if active {
+            return self;
+        }
+        let mut t = self;
+        t.cube_face = t.cube_face.lerp_to_gamma(t.viewport_top, 0.55);
+        t.cube_border = t.cube_border.lerp_to_gamma(t.viewport_top, 0.55);
+        t.cube_text = t.cube_text.lerp_to_gamma(t.viewport_top, 0.55);
+        t.axis_x = t.axis_x.lerp_to_gamma(t.viewport_top, 0.55);
+        t.axis_y = t.axis_y.lerp_to_gamma(t.viewport_top, 0.55);
+        t.axis_z = t.axis_z.lerp_to_gamma(t.viewport_top, 0.55);
+        t
+    }
+
     pub const fn light() -> Tokens {
         Tokens {
             app_bar: Color32::from_rgb(52, 56, 64),
@@ -171,6 +192,10 @@ impl Tokens {
             manipulator: Color32::from_rgb(40, 110, 220),
             preview_add: Color32::from_rgb(112, 160, 226),
             preview_cut: Color32::from_rgba_unmultiplied_const(232, 84, 44, 110),
+            cube_face: Color32::from_rgb(236, 239, 244),
+            cube_border: Color32::from_rgb(85, 94, 110),
+            cube_text: Color32::from_rgb(38, 42, 50),
+            cube_hover: Color32::from_rgb(190, 220, 252),
             viewport_top: Color32::from_rgb(240, 243, 247),
             viewport_bottom: Color32::from_rgb(203, 210, 221),
             grid: Color32::from_rgb(196, 202, 212),

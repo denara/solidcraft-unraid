@@ -41,8 +41,11 @@ pub struct Built {
     pub error: Option<String>,
     /// Extent of what the preview shows (the view's depth range must cover it).
     pub bounds: Aabb3,
-    /// The radius a fillet used when it reduced one too large for its edges (`fit: reduce`).
-    pub applied: Option<f64>,
+    /// The smallest and largest radius a fillet used when it reduced one too large for its edges
+    /// (`fit: reduce`).
+    pub applied: Option<(f64, f64)>,
+    /// The radius spline of each edge a fillet tapered (`fit: taper`), with a point on the edge.
+    pub tapered: Vec<(Vec3, solidcraft_engine::kernel::Taper)>,
 }
 
 type Job = Result<Built, String>;
@@ -68,8 +71,10 @@ pub struct PreviewState {
     /// Time the last preview took (ms), for `ui.inspect`.
     pub ms: f64,
     started: f64,
-    /// The radius the previewed fillet used when it reduced the one asked for.
-    pub applied: Option<f64>,
+    /// The smallest and largest radius the previewed fillet used when it reduced the one asked for.
+    pub applied: Option<(f64, f64)>,
+    /// The radius splines the previewed fillet tapered its edges with.
+    pub tapered: Vec<(Vec3, solidcraft_engine::kernel::Taper)>,
 }
 
 impl PreviewState {
@@ -78,6 +83,7 @@ impl PreviewState {
         self.shown_key = None;
         self.error = None;
         self.applied = None;
+        self.tapered.clear();
         self.busy = false;
         if self.active || !self.replaced.is_empty() {
             self.active = false;
@@ -104,11 +110,13 @@ impl PreviewState {
                 self.active = true;
                 self.error = b.error;
                 self.applied = b.applied;
+                self.tapered = b.tapered;
                 self.set_scene(b.scene);
             }
             Err(e) => {
                 self.error = Some(e);
                 self.applied = None;
+                self.tapered.clear();
             }
         }
     }
@@ -231,7 +239,9 @@ pub fn compute(s: &Session, cmds: &[(String, Value)], colors: Colors) -> Job {
             b.bounds = state_bounds(&p.after);
             // The radius a previewed fillet used when it reduced the one asked for (a new
             // fillet or an edited one: the feature the replies name).
-            b.applied = p.replies.iter().filter_map(|r| r.get("feature").and_then(Value::as_u64)).find_map(|id| p.after.fitted_radius(id));
+            let features = || p.replies.iter().filter_map(|r| r.get("feature").and_then(Value::as_u64));
+            b.applied = features().find_map(|id| p.after.fitted_range(id));
+            b.tapered = features().find_map(|id| p.after.tapered(id)).map(<[_]>::to_vec).unwrap_or_default();
             Ok(b)
         }
     }
@@ -268,7 +278,7 @@ fn build_tool(before: &ModelState, after: &ModelState, c: Colors, op: &str) -> B
             }
         }
     }
-    Built { scene: sc, replaced: Vec::new(), error: None, bounds: Aabb3::EMPTY, applied: None }
+    Built { scene: sc, replaced: Vec::new(), error: None, bounds: Aabb3::EMPTY, applied: None, tapered: Vec::new() }
 }
 
 /// The same commands making a new body instead of joining, cutting or intersecting, and the
@@ -328,7 +338,10 @@ pub fn build(before: &ModelState, after: &ModelState, c: Colors) -> Built {
             continue;
         }
         let nf = am.tri_face.iter().max().map_or(0, |m| *m as usize + 1);
-        let added: Vec<bool> = (0..nf).map(|f| old.as_ref().is_none_or(|bm| face_is_new(&am, f, bm))).collect();
+        let added: Vec<bool> = match &old {
+            Some(bm) => new_faces(&am, nf, bm),
+            None => vec![true; nf],
+        };
         // Material removed from a body (a hole, a pocket): its new faces also show through the
         // body in the cut colour, so the cut is seen from any side.
         let cut = old.as_ref().is_some_and(|bm| am.measure().volume < bm.measure().volume - 1e-6);
@@ -375,37 +388,114 @@ pub fn build(before: &ModelState, after: &ModelState, c: Colors) -> Built {
             replaced.push(b.name.clone());
         }
     }
-    Built { scene: sc, replaced, error: None, bounds: Aabb3::EMPTY, applied: None }
+    Built { scene: sc, replaced, error: None, bounds: Aabb3::EMPTY, applied: None, tapered: Vec::new() }
 }
 
-/// Is face `f` of `m` new surface, i.e. not on the old mesh? Decided by a vote of points on it
-/// (triangle centroids spread over the face).
-fn face_is_new(m: &Mesh, f: usize, old: &Mesh) -> bool {
-    let cents: Vec<Vec3> = m
-        .triangles
+/// Which of the `nf` faces of `m` are new surface, i.e. not on the old mesh? Each is decided by
+/// a vote of points on it (triangle centroids spread over the face). One pass over `m`'s
+/// triangles gathers the centroids, and the old mesh is indexed once, so the cost stays
+/// near-linear however many faces there are (a modeled thread has thousands).
+fn new_faces(m: &Mesh, nf: usize, old: &Mesh) -> Vec<bool> {
+    let mut cents: Vec<Vec<Vec3>> = vec![Vec::new(); nf];
+    for (t, f) in m.triangles.iter().zip(&m.tri_face) {
+        if let (Some(face), Some([a, b, c])) = (cents.get_mut(*f as usize), m.tri(t)) {
+            face.push((a + b + c) / 3.0);
+        }
+    }
+    let index = SurfaceIndex::new(old);
+    cents
         .iter()
-        .zip(&m.tri_face)
-        .filter(|(_, tf)| **tf as usize == f)
-        .filter_map(|(t, _)| m.tri(t))
-        .map(|[a, b, c]| (a + b + c) / 3.0)
-        .collect();
-    if cents.is_empty() {
-        return true;
-    }
-    let step = cents.len().div_ceil(9);
-    let samples: Vec<&Vec3> = cents.iter().step_by(step.max(1)).collect();
-    let off = samples.iter().filter(|p| !on_surface(old, ***p)).count();
-    off * 3 > samples.len()
+        .map(|cents| {
+            let Some(index) = &index else { return true };
+            if cents.is_empty() {
+                return true;
+            }
+            let step = cents.len().div_ceil(9);
+            let samples: Vec<&Vec3> = cents.iter().step_by(step.max(1)).collect();
+            let off = samples.iter().filter(|p| !index.contains(***p)).count();
+            off * 3 > samples.len()
+        })
+        .collect()
 }
 
-/// Does `p` lie on the surface of mesh `m` (within its tessellation tolerance)?
-fn on_surface(m: &Mesh, p: Vec3) -> bool {
-    let bb = m.bounds();
-    let tol = (bb.diagonal() * 2e-3).max(1e-4);
-    if bb.is_empty() {
-        return false;
+/// The triangles of a mesh in a uniform grid, to ask whether a point lies on the surface (within
+/// its tessellation tolerance) by looking only at the triangles near it.
+struct SurfaceIndex {
+    tris: Vec<[Vec3; 3]>,
+    tol: f64,
+    lo: [f64; 3],
+    cell: [f64; 3],
+    res: usize,
+    cells: Vec<Vec<u32>>,
+}
+
+impl SurfaceIndex {
+    /// Most triangle-in-cell entries the grid may hold; a coarser grid is used beyond it.
+    const BUDGET: usize = 4_000_000;
+
+    /// None for a mesh with no surface.
+    fn new(m: &Mesh) -> Option<SurfaceIndex> {
+        let bb = m.bounds();
+        if bb.is_empty() {
+            return None;
+        }
+        let tol = (bb.diagonal() * 2e-3).max(1e-4);
+        let tris: Vec<[Vec3; 3]> = m.triangles.iter().filter_map(|t| m.tri(t)).collect();
+        let lo = [bb.min.x - tol, bb.min.y - tol, bb.min.z - tol];
+        let ext = [bb.max.x - bb.min.x + 2.0 * tol, bb.max.y - bb.min.y + 2.0 * tol, bb.max.z - bb.min.z + 2.0 * tol];
+        let mut res = ((tris.len() as f64).cbrt().round() as usize).clamp(1, 48);
+        loop {
+            let cell = [ext[0] / res as f64, ext[1] / res as f64, ext[2] / res as f64];
+            let mut index = SurfaceIndex { tris: Vec::new(), tol, lo, cell, res, cells: vec![Vec::new(); res * res * res] };
+            let mut entries = 0usize;
+            'fill: for (i, t) in tris.iter().enumerate() {
+                let (a, b) = index.range(t);
+                for x in a[0]..=b[0] {
+                    for y in a[1]..=b[1] {
+                        for z in a[2]..=b[2] {
+                            entries += 1;
+                            if entries > Self::BUDGET && res > 1 {
+                                break 'fill;
+                            }
+                            if let Some(c) = index.cells.get_mut((x * res + y) * res + z) {
+                                c.push(i as u32);
+                            }
+                        }
+                    }
+                }
+            }
+            if entries <= Self::BUDGET || res == 1 {
+                index.tris = tris;
+                return Some(index);
+            }
+            res /= 2;
+        }
     }
-    m.triangles.iter().filter_map(|t| m.tri(t)).any(|[a, b, c]| point_triangle_dist(p, a, b, c) < tol)
+
+    fn cell_of(&self, v: f64, axis: usize) -> usize {
+        let (lo, cell) = (self.lo.get(axis).copied().unwrap_or(0.0), self.cell.get(axis).copied().unwrap_or(1.0));
+        let k = ((v - lo) / cell).floor();
+        if k.is_finite() { (k.max(0.0) as usize).min(self.res - 1) } else { 0 }
+    }
+
+    /// The cells (inclusive corners) a triangle, grown by the tolerance, touches.
+    fn range(&self, t: &[Vec3; 3]) -> ([usize; 3], [usize; 3]) {
+        let (mut a, mut b) = ([0; 3], [0; 3]);
+        for axis in 0..3 {
+            let c = t.map(|p| [p.x, p.y, p.z][axis]);
+            let (lo, hi) = (c[0].min(c[1]).min(c[2]) - self.tol, c[0].max(c[1]).max(c[2]) + self.tol);
+            a[axis] = self.cell_of(lo, axis);
+            b[axis] = self.cell_of(hi, axis);
+        }
+        (a, b)
+    }
+
+    /// Does `p` lie on the surface?
+    fn contains(&self, p: Vec3) -> bool {
+        let (x, y, z) = (self.cell_of(p.x, 0), self.cell_of(p.y, 1), self.cell_of(p.z, 2));
+        let Some(cell) = self.cells.get((x * self.res + y) * self.res + z) else { return false };
+        cell.iter().filter_map(|i| self.tris.get(*i as usize)).any(|[a, b, c]| point_triangle_dist(p, *a, *b, *c) < self.tol)
+    }
 }
 
 pub fn point_triangle_dist(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> f64 {
@@ -505,6 +595,59 @@ mod tests {
             s.execute(id, &p).unwrap();
         }
         s
+    }
+
+    /// The surface test the preview used to run per face against every triangle.
+    fn brute_force_on_surface(m: &Mesh, p: Vec3) -> bool {
+        let bb = m.bounds();
+        let tol = (bb.diagonal() * 2e-3).max(1e-4);
+        m.triangles.iter().filter_map(|t| m.tri(t)).any(|[a, b, c]| point_triangle_dist(p, a, b, c) < tol)
+    }
+
+    /// A flat sheet of `n × n` squares, two triangles and one face each, lifted by `z`.
+    fn sheet(n: usize, z: f64) -> Mesh {
+        let mut m = Mesh::default();
+        for i in 0..=n {
+            for j in 0..=n {
+                m.positions.push(Vec3::new(i as f64, j as f64, z));
+                m.normals.push(Vec3::Z);
+            }
+        }
+        for i in 0..n {
+            for j in 0..n {
+                let a = (i * (n + 1) + j) as u32;
+                let (b, c, d) = (a + 1, a + n as u32 + 1, a + n as u32 + 2);
+                m.triangles.extend([[a, c, d], [a, d, b]]);
+                m.tri_face.extend([(i * n + j) as u32; 2]);
+            }
+        }
+        m
+    }
+
+    /// The grid answers as a scan of every triangle does, inside, beside and far from the mesh.
+    #[test]
+    fn surface_index_matches_a_scan() {
+        let m = sheet(12, 0.0);
+        let index = SurfaceIndex::new(&m).unwrap();
+        for k in 0..2000 {
+            let f = k as f64;
+            let p = Vec3::new((f * 0.37).rem_euclid(15.0) - 1.5, (f * 0.61).rem_euclid(15.0) - 1.5, ((f * 0.13).rem_euclid(1.0) - 0.5) * 0.05);
+            assert_eq!(index.contains(p), brute_force_on_surface(&m, p), "{p:?}");
+        }
+        assert!(SurfaceIndex::new(&Mesh::default()).is_none());
+    }
+
+    /// Thousands of faces (a modeled thread's) are classified at once, not face by face against
+    /// every triangle: filleting beside a thread froze the app for minutes.
+    #[test]
+    fn many_faces_are_classified_quickly() {
+        let started = std::time::Instant::now();
+        let n = 120;
+        let (old, same, lifted) = (sheet(n, 0.0), sheet(n, 0.0), sheet(n, 5.0));
+        let nf = n * n;
+        assert!(new_faces(&same, nf, &old).iter().all(|new| !new), "faces on the old surface are not new");
+        assert!(new_faces(&lifted, nf, &old).iter().all(|new| *new), "faces off the old surface are new");
+        assert!(started.elapsed().as_secs() < 10, "took {:?}", started.elapsed());
     }
 
     /// A fillet preview stands in for the body: the round face is new, the rest is kept, and the

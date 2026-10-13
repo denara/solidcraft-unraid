@@ -1,5 +1,45 @@
 # Design loading
 
+## STEP import: shells and item solids without copies (2026-10-13)
+
+A file that lists one product definition many times (a bolt used 70 times, a panel in several
+assemblies) is imported item by item, and every item's B-rep was deep copied twice before it was
+handed on: once by the caller of `Solid::try_new`, which clones the shells so that the failure
+path still has them, and once by the reader's own cache, which kept the solid for a later item
+that might list the same definition.
+
+`read_item` now runs those four checks (non-empty, connected, closed, no singular vertices) on
+borrowed shells, so a shell that passes is moved into the solid instead of cloned. The reader
+keeps each prepared solid in an `Arc`, and an item counts as *once* when one representation
+lists it and exactly one product-definition walk reaches it: that item's solid is moved out of
+the cache with `Arc::try_unwrap` instead of copied, because no later item can ask for it. The
+walk follows `MAPPED_ITEM` targets too, so an item reached through a mapping in another product's
+node is still converted once - a second conversion would repeat that item's warnings. A file
+whose walk exceeds the work budget (`MAX_CLOSURE_WORK`, 65 536 nodes) falls back wholesale to
+the copying path, as does any file with component occurrences, which walks a definition again per
+instance.
+
+Nothing observable changed. Fifteen fixtures (primitives, a void, a fillet, a revolve, colours,
+centimetre units, 70 duplicates of one definition, a broken file with mappings, a two-instance
+assembly and an expanded one; 99 bodies) give the same import dump - name, path, closed flag,
+file faces, face origin, topology and merged counts, bounding box, volume, area, centroid, paint,
+warnings and tree - apart from the per-feature milliseconds, and all fifteen STEP in/out round
+trips are byte-identical.
+
+Two generated flat STEP files, timed like the table above (same binary pair, no other work
+running); four alternating runs each, two for the 31 MB file:
+
+| File | Baseline peak RSS | Patched peak RSS | Import |
+|---|---:|---:|---:|
+| 2500 boxes, 9.5 MB | 150.1 MB | 145.9 MB | 1.81 s → 1.74 s |
+| 2500 filleted boxes, 31 MB | 428 MB | 433 MB | 70.3 s → 71.0 s |
+
+The first row's ranges do not overlap (150.0-150.6 MB against 145.0-146.0 MB), and the saving is
+the shell copy that is no longer made for every item. The second file's runs land between 422 MB
+and 444 MB either way, so two runs each do not resolve it: there the conversion of the geometry
+dominates the per-item copy. An item that keeps every conversion - an assembly, or a file over the
+work budget - is unchanged.
+
 ## Parallel STEP body preparation (2026-10-12)
 
 Profiling an original 48-cylinder STEP fixture before changing the importer measured
@@ -438,7 +478,7 @@ each body is identified by the evaluation that produced it (bodies a feature pas
 unchanged keep their identity). The same feature on the same inputs is never evaluated twice:
 setting a value back, undo, redo, a preview followed by the same command, and the repeated
 evaluations while a script builds the design all reuse earlier results. The cache is shared by a
-model and its copies (previews, scratch sessions) and keeps the last 4096 results.
+model and its copies (previews, scratch sessions), and keeps the last 4096 results within 64 MiB.
 
 An edit still recomputes the edited feature and every later feature whose starting model
 changed; in these parts every later feature works on the edited body, so early edits recompute
@@ -449,6 +489,87 @@ can still recompute (oracle 61, 62): solving the sketch moves its points by roun
 its inputs are not exactly the old ones. Oracle 59's first parameter edit fails (a recipe
 expression the bench's `* 1.02` can't scale) and is left out.
 
+
+## Prism pairs, body measurements and the evaluation cache budget (2026-10-13)
+
+A design whose features repeat one shape (a hole pattern, a plate cut by many tools, a part built
+by one growing body) pays several per-feature costs that a rebuild was paying again and again.
+
+**A body's size is measured once, not once per call.** Every kernel tolerance is a fraction of
+the body's bounding-box diagonal, and `Body::size()` walked every vertex of the solid to work it
+out. `Body::new` already reads those vertices to orient the body, so it keeps the diagonal it
+measured there; a body built by hand, or a mesh body, still measures once.
+
+**The same volume is not measured twice.** A boolean measures both operands' volumes to bound its
+result, and the body it returns becomes the next feature's operand, so a timeline of *n* cuts
+meshed every intermediate body twice. `Body::volume_at(tol)` keeps the last measurement for the
+solid, shared by its clones (they share the solid), and the bounds ask at the same tolerance every
+time.
+
+**A prism pair is decided in 2D before either operand is meshed.** The general boolean builds a
+refined mesh of both operands before it can decide anything, and that mesh is most of its cost: a
+pattern, or a sketch with several profiles, rebuilds the whole target's mesh once per tool. A
+plate and a tool through it are prisms along one direction, which `prism::prism_boolean` decides
+exactly from their 2D sections - and that route ran *after* the meshes. A cut or an intersection
+now asks it first and returns without building them. A pair the route cannot answer takes the old
+path unchanged, meshes and all; a union still asks after the sampled shortcut. One answer is sent
+back to that shortcut on purpose: when the 2D route returns one of its operands (a tool that
+misses its target, or covers it whole), the sampled path returns that very body, so an untouched
+body keeps its identity in the timeline (`ops::prism_fast_path_tests`).
+
+**A placement reads its orientation from its matrix.** Placing a body (a pattern instance, an
+aligned copy) used to mesh the whole copy to decide which way its faces point and to count the
+faces its coarse mesh misses. A rigid placement leaves both as they were; a mirrored one (a
+negative determinant) turns the solid inside out. Both are now read from the matrix, so only the
+geometry is transformed.
+
+**The evaluation cache is bounded by the bytes it keeps.** It held the last 4096 results, and a
+result is as big as the model it holds, so a long editing session kept every superseded state:
+nothing dropped the entries nothing referred to any more. It now also holds at most 64 MiB, oldest
+first, and always keeps the newest result, so a single evaluation is never thrown away in the same
+breath.
+
+Release `solidcraft-cli`, `eval <design> --quiet`, wall time of the whole process and peak RSS
+from `/usr/bin/time -v`, alternating the baseline and patched binaries, median of 12 runs each
+(8 for the 400-hole plate and the vent plate), no other build or test running (Fedora Linux, AMD
+Ryzen 7 5700X, 8 cores / 16 threads, 32 GB):
+
+| Design | Baseline | Patched | Change | Baseline peak RSS | Patched peak RSS |
+|---|---:|---:|---:|---:|---:|
+| 400 × 400 × 6 mm box, one sketch with 100 circles cut through it | 1.24 s | 0.83 s | -33% | 151 MB | 119 MB |
+| The same plate with 400 circles in the sketch | 5.67 s | 4.04 s | -29% | 556 MB | 481 MB |
+| Vent plate, a 10 × 8 pattern of one cut | 0.10 s | 0.08 s | -20% | 22 MB | 22 MB |
+| 14 × 14 pattern of a filleted box (196 copies) | 6.70 s | 6.52 s | -2.6% | 67 MB | 67 MB |
+| 60 sketches, 60 extrudes into one growing body | 8.80 s | 8.88 s | +0.9% | 225 MB | 225 MB |
+| `examples/acceptance/sensor_enclosure.json` | 3.81 s | 3.30 s | -13% | 198 MB | 196 MB |
+
+The hole plates are what the prism route is for: one boolean whose tool is a prism with 100 or 400
+sections, in a sketch with that many circles, so the tool's mesh alone is what the route saves.
+A variant of the patched tree with the route asked in the old order - after the operands' meshes -
+timed the 100-hole plate at 1.27 s and 157 MB (range 1.22-1.30 s), the baseline's own numbers
+(1.25 s and 156 MB over the same runs, range 1.21-1.33 s). The two plate rows, and the peak they
+lose, are the prism route.
+
+The last three designs are the other side: their booleans are not that case. The 196-copy design
+and the 60-sketch design are within 2.6% and 0.9% with overlapping ranges. The sensor enclosure's
+medians differ by 13%, but its runs land anywhere between 3.0 s and 5.0 s and the two ranges
+overlap (3.01-4.97 s against 3.00-4.89 s), so its row is not a result either way and is left as
+measured. The body measurements, the placement and the cache budget are not what these rows
+measure: they stop work the corpus repeats too rarely to see (a hidden vertex walk, an operand
+meshed twice for one number, an orientation mesh per placement, a cache with no byte bound).
+
+No model changed. The evaluation dump of 21 designs (10 to 400 circles in a plate, 16 × 16 to
+31 × 31 box grids with and without fillets, 2500-body grids, assemblies of 40 to 500 bodies, 30 and
+60 sketches, a 196-instance pattern, the bundled sample and the sensor enclosure) is the same model
+before and after - bodies, volumes, areas, centres, bounding boxes, topology counts and warnings -
+apart from the per-feature milliseconds. The
+kernel's test suite passes, including four new tests for the prism route and its identity rule.
+
+Reproduce after compiling a release build, without other builds running: time
+`target/release/solidcraft-cli eval <design> --quiet` with `/usr/bin/time -v`, alternating the
+baseline and patched binaries, and compare the middle of the runs. The corpus (20 generated designs:
+hole plates, box grids, assemblies, many-sketch parts) and the measuring scripts are in
+https://github.com/sahenjp/solidcraft-perf under `perf/`.
 
 ## Desktop loading and recent thumbnails (2026-10-10)
 
@@ -536,3 +657,50 @@ eliminated. A live frame's held solve was already cheap: the seed places the str
 returns at once. Of a live strip frame, the seed reads the constraints in about 0.15 ms, so a
 per-gesture cache of that reading is not worth its invalidation (its signs depend on the
 reference positions, which change every step).
+
+## Portable thumbnail save cost (#303)
+
+Portable thumbnail generation requires explicit `cache: true`. Ordinary saves and
+browser downloads default to `cache: false`, so they incur none of the thumbnail
+work or added bytes measured below.
+
+Measured 2026-10-13 on the same Windows machine and `ci` profile as above, but
+with **SolidCraft 0.7.0** on both sides: `d3d215b` before the thumbnail change and
+thumbnail revision `e180cdc` after it. These measurements precede the integration
+of upstream `9f88537`; later geometry changes are not included in these timings.
+A preserved executable of the baseline
+and the new executable ran the existing `benchmark_native_cache_save` on the same
+STEP and sensor documents. Three paired batches alternated before/after order;
+each batch performed nine alternating atomic saves per encoding. The values below
+are medians of the three batch medians, not a percentile of all individual saves.
+No compilation, test suite or desktop model was running during these measurements.
+
+| 512-cube STEP encoding | Before PNG (ms) | After PNG (ms) | Container bytes before → after |
+|---|---:|---:|---:|
+| Plain JSON | 10.334 | 9.676 | 1,998,826 → 1,998,826 |
+| Container, `cache: false` | 8.850 | 9.013 | 1,950,084 → 1,950,084 |
+| Native cache, fast | 45.323 | 53.473 | 4,694,035 → 4,720,385 |
+| Native cache, compact | 42.739 | 48.643 | 837,067 → 863,417 |
+
+The PNG itself is 25,916 bytes; its key and ZIP records bring the increase to
+26,350 bytes. Fast-cache batch medians ranged from 41.585–47.779 ms before and
+53.212–56.556 ms after. Compact ranged from 36.672–43.040 ms before and
+47.688–51.724 ms after. The approximately 8 ms fast-save increase is a measured
+cost on this example, not a general latency bound. JSON bytes and document/source
+blob bytes were compared across both implementations and remained identical.
+
+The sensor enclosure deliberately receives **no portable PNG**: its projected
+triangle boxes total 4,293,457 supersampled pixels, above the four-million work
+budget. The native fast container remains 379,099 bytes. Its save batch medians
+are 14.714 ms before (12.187–14.956) and 13.728 ms after (13.439–14.648); these
+vary within the observed run ranges and do not establish a speedup. Home retains
+its existing thumbnail-generation fallback for this case. A small triangle count
+alone does not guarantee eligibility, because large overlapping faces cost more.
+
+Actual desktop check: copy the STEP container to a new public temporary path,
+start SolidCraft 0.7.0 with that path in Recent and an empty local thumbnail cache,
+and show Home without opening the design. The portable picture was ready in one
+observed 47.6 ms check; no local PNG was created and the active document remained
+empty. The screenshot shows the transferred file's picture while built-in sample
+pictures are still loading. This is one functional visual check, not a first-frame
+benchmark. The separate counting-reader regression proves source-blob deferral.

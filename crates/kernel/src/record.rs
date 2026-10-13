@@ -136,6 +136,20 @@ pub(crate) fn build(
     Ok(traced(Body::new(solid)?, counts, faces, edges))
 }
 
+/// [`build`] for a solid made by placing an already-oriented copy: the orientation comes from
+/// the placement matrix instead of meshing the whole solid again (see
+/// [`crate::body::Body::new_placed`]).
+pub(crate) fn build_placed(
+    solid: crate::body::Solid,
+    counts: &[(usize, usize)],
+    faces: Option<Vec<FaceProv>>,
+    edges: Option<&HashMap<mt::EdgeID, Vec<EdgeOrigin>>>,
+    flip: bool,
+    coarse: Option<(f64, usize)>,
+) -> Result<Body> {
+    Ok(traced(Body::new_placed(solid, flip, coarse)?, counts, faces, edges))
+}
+
 /// The origins of `body`'s edges by identity, from its history `h` (edges in its edge order).
 pub(crate) fn edges_by_identity<'a>(body: &'a Body, h: &'a History) -> impl Iterator<Item = (mt::EdgeID, Vec<EdgeOrigin>)> + 'a {
     edge_order(body.solid.face_iter()).0.into_iter().zip(&h.edges).map(|(e, p)| (e.id(), p.origins.clone()))

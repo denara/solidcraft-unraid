@@ -160,6 +160,27 @@ impl Traced {
         let lineage = lineages.and_then(|l| Lineage::step(&result, &l));
         Traced { body: result, lineage }
     }
+
+    /// `result`, made by one kernel operation from this body alone. Where that operation's
+    /// history can't be composed with this body's (it blends an edge the same feature made: a
+    /// boss's root fillet), this body is a stage of the feature, its faces and edges named as a
+    /// whole first.
+    pub fn then(&self, result: Body) -> Traced {
+        let step = Traced::step(result.clone(), &[self]);
+        if step.lineage.is_some() {
+            return step;
+        }
+        let lineage = self.lineage.as_ref().and_then(|l| {
+            let history = result.history()?.clone();
+            if history.operands != 1 {
+                return None;
+            }
+            let body = crate::ModelBody::new(String::new(), self.body.clone(), 0);
+            let stage = Arc::new(Operand::Stage(Box::new(Stage { body, lineage: l.clone(), names: OnceLock::new() })));
+            Some(Lineage { history, operands: vec![stage] })
+        });
+        Traced { body: result, lineage }
+    }
 }
 
 /// How the bodies a feature builds from a profile name their faces: what each profile segment's
@@ -186,7 +207,7 @@ impl<'a> ProfileRoles<'a> {
         let segments: Vec<&solidcraft_geom::Seg2> =
             self.region.map(|r| std::iter::once(&r.outer).chain(&r.holes).flat_map(|l| &l.segs).collect()).unwrap_or_default();
         let curves = self.sketch.map(crate::config::ExactSketchCurves::new);
-        let curve = |segment: usize| -> Option<String> { curves.as_ref()?.find(segments.get(segment)?).map(|id| format!("side:{id}")) };
+        let curve = |segment: usize| -> Option<String> { curves.as_ref()?.find_along(segments.get(segment)?).map(|id| format!("side:{id}")) };
         let roles = history
             .faces
             .iter()
@@ -228,6 +249,64 @@ impl<'a> ProfileRoles<'a> {
     }
 }
 
+/// How a loft names its faces: each side by the sketch curves of the sections it runs between
+/// (`side:<curve>` for the first section's, `side:s<k>.<curve>` for section `k`'s), named after
+/// the section with the most segments (the one each side spans exactly one segment of) and
+/// answering to the others; its caps `start` and `end`.
+pub(crate) struct SectionRoles<'a> {
+    /// Each section's sketch and the loop lofted through it, in the order given.
+    pub sections: Vec<(&'a SolvedSketch, &'a solidcraft_geom::Loop2)>,
+}
+
+impl SectionRoles<'_> {
+    /// The loft `body`, its faces named by their roles where its history gives them.
+    pub fn tool(&self, body: Body) -> Traced {
+        let roles = body.history().filter(|h| h.operands == 0).map(|h| self.of(h));
+        Traced::made(body, roles)
+    }
+
+    fn of(&self, history: &History) -> Vec<Vec<String>> {
+        // Each profile segment (numbered through the sections in order): its section and role.
+        let mut segments: Vec<(usize, Option<String>)> = Vec::new();
+        for (k, (sketch, lp)) in self.sections.iter().enumerate() {
+            let curves = crate::config::ExactSketchCurves::new(sketch);
+            for seg in &lp.segs {
+                let role = curves.find_along(seg).map(|id| if k == 0 { format!("side:{id}") } else { format!("side:s{k}.{id}") });
+                segments.push((k, role));
+            }
+        }
+        let lead = self.sections.iter().enumerate().max_by_key(|(k, (_, lp))| (lp.segs.len(), std::cmp::Reverse(*k))).map_or(0, |(k, _)| k);
+        history
+            .faces
+            .iter()
+            .map(|face| {
+                let mut roles: Vec<(bool, usize, String)> = Vec::new();
+                for origin in &face.origins {
+                    let (k, role) = match *origin {
+                        FaceOrigin::Cap { end } => (0, Some(if end { "end" } else { "start" }.to_string())),
+                        FaceOrigin::Profile { segment } => match segments.get(segment) {
+                            Some((k, role)) => (*k, role.clone()),
+                            None => (0, None),
+                        },
+                        _ => (0, None),
+                    };
+                    // One unknown origin leaves the face unknown: never a partial guess.
+                    let Some(role) = role else { return Vec::new() };
+                    roles.push((k != lead, k, role));
+                }
+                roles.sort();
+                let mut out: Vec<String> = Vec::new();
+                for (.., role) in roles {
+                    if !out.contains(&role) {
+                        out.push(role);
+                    }
+                }
+                out
+            })
+            .collect()
+    }
+}
+
 /// A box primitive, its faces named by the side they face (`+x`, `-z`, …), as its construction
 /// records them.
 pub(crate) fn box_tool(body: Body) -> Traced {
@@ -253,6 +332,23 @@ pub(crate) fn cylinder_tool(body: Body) -> Traced {
             .map(|f| match f.origins.as_slice() {
                 [FaceOrigin::Cap { end }] => vec![if *end { "top" } else { "bottom" }.to_string()],
                 origins if !origins.is_empty() && origins.iter().all(|o| matches!(o, FaceOrigin::Profile { .. })) => vec!["side".to_string()],
+                _ => Vec::new(),
+            })
+            .collect()
+    });
+    Traced::made(body, roles)
+}
+
+/// A tool a feature builds without a sketch (a boss's post, a rib, a lip's band), its faces named
+/// by the part it makes: `<part>:top` (its end cap), `<part>:base` (its start cap) and
+/// `<part>:side:<k>` (swept from segment `k` of its profile), as its construction records them.
+pub(crate) fn part_tool(body: Body, part: &str) -> Traced {
+    let roles = body.history().filter(|h| h.operands == 0).map(|h| {
+        h.faces
+            .iter()
+            .map(|f| match f.origins.as_slice() {
+                [FaceOrigin::Cap { end }] => vec![format!("{part}:{}", if *end { "top" } else { "base" })],
+                [FaceOrigin::Profile { segment }] => vec![format!("{part}:side:{segment}")],
                 _ => Vec::new(),
             })
             .collect()

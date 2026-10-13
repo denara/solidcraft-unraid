@@ -252,3 +252,37 @@ fn root_sketch_on_a_moved_components_face() {
     let pts = sketch_world_points(&mut s, "Top");
     assert!(pts.iter().any(|p| near(*p, Vec3::new(-30.0, 40.0, 25.0))), "{pts:?}");
 }
+
+/// (#558) With the root active, construction geometry, a hole and Press Pull picked on a moved
+/// component land on it where it is shown, and so do picks on a pasted instance.
+#[test]
+fn root_picks_on_a_moved_component_build_where_it_is_shown() {
+    let mut s = moved_part();
+    run(&mut s, "component.activate", json!({"component": "root"}));
+    // The block spans world x 50…80, y 0…20, z 0…10.
+    run(&mut s, "construct.axis.edge", json!({"edge": {"edge": [65, 0, 0]}, "name": "FrontEdge"}));
+    run(
+        &mut s,
+        "construct.plane.three_points",
+        json!({"a": {"vertex": [50, 0, 10]}, "b": {"vertex": [80, 0, 10]}, "c": {"vertex": [50, 20, 10]}, "name": "Lid"}),
+    );
+    let lid = crate::view::construction_planes(&s).into_iter().find(|(_, n, _)| n == "Lid").unwrap().2;
+    assert!((lid.origin.z - 10.0).abs() < 1e-6 && lid.normal().z.abs() > 1.0 - 1e-9, "{lid:?}");
+    let st = s.model.state();
+    let axis = st.construct.iter().find(|c| c.name == "FrontEdge").map(|c| c.geom.clone()).unwrap();
+    let solidcraft_doc::construct::ConstructGeom::Axis { origin, dir } = axis else { panic!("{axis:?}") };
+    assert!(origin.y.abs() < 1e-6 && origin.z.abs() < 1e-6 && dir.x.abs() > 1.0 - 1e-9, "{origin:?} {dir:?}");
+    let v0 = volume(&mut s);
+    run(&mut s, "solid.hole", json!({"position": [60, 10, 10], "diameter": 4, "depth": 5}));
+    let v1 = volume(&mut s);
+    assert!(v1 < v0 - 1.0, "the hole cut the moved block: {v0} {v1}");
+    run(&mut s, "solid.press_pull", json!({"face": [80, 10, 5], "distance": 2}));
+    assert!(volume(&mut s) > v1 + 1.0, "press pull grew the moved block");
+    assert!(s.model.results.iter().all(|r| r.error.is_none()), "{:?}", s.model.results);
+
+    // A pasted instance 40 mm further along y.
+    run(&mut s, "occurrence.copy", json!({"component": "Part", "translate": [0, 40, 0]}));
+    run(&mut s, "construct.plane.along_path", json!({"path": {"edge": [65, 40, 0]}, "t": 0.5, "name": "Across"}));
+    let across = crate::view::construction_planes(&s).into_iter().find(|(_, n, _)| n == "Across").unwrap().2;
+    assert!((across.origin.y - 40.0).abs() < 1e-6, "{across:?}");
+}

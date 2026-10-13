@@ -144,16 +144,29 @@ impl Backend for Headless {
             "document.inspect" => s.execute("document.inspect", &p).map_err(|e| e.to_string()),
             "ui.view" => {
                 let v = str_p("view").unwrap_or("home");
-                self.view = match v {
-                    "fit" => self.view,
-                    _ => StandardView::parse(v).ok_or_else(|| format!("unknown view `{v}`"))?,
-                };
+                match v {
+                    // Fit keeps the orientation, also of a camera `view.apply` chose.
+                    "fit" => {
+                        let b = solidcraft_engine::view::bounds(s);
+                        if let Some(c) = s.camera.as_mut() {
+                            c.fit(&b);
+                        }
+                    }
+                    _ => {
+                        self.view = StandardView::parse(v).ok_or_else(|| format!("unknown view `{v}`"))?;
+                        s.camera = None;
+                    }
+                }
                 Ok(json!({"view": self.view}))
             }
             "ui.render" => {
                 let (w, h) = (dim(&p, "width", 1280.0), dim(&p, "height", 800.0));
-                let mut cam = solidcraft_engine::view::home_camera(s);
-                cam.set_view(self.view);
+                // The camera `view.apply` chose, else the standard view framing the model.
+                let cam = s.camera.unwrap_or_else(|| {
+                    let mut cam = solidcraft_engine::view::home_camera(s);
+                    cam.set_view(self.view);
+                    cam
+                });
                 let scene = solidcraft_engine::view::scene(s, &cam);
                 let png = render_png(&scene, &cam, w, h).ok_or("render failed")?;
                 let path = str_p("path").ok_or("missing `path`")?;

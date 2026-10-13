@@ -100,6 +100,8 @@ The [README](README.md#architecture) has the layer table. The short version:
    not.) Permissive
    dependencies are fine. Note which one you're adding and why in the PR, and run
    `cargo xtask licences` so THIRD-PARTY-LICENSES.txt lists it (CI checks that it is current).
+   Nightly/manual CI also scans advisories, bans and sources with cargo-deny; see
+   [the local command and coverage limits](docs/book/src/dev/testing.md#dependency-advisories).
 3. **Every asset is original or openly licensed and has a row in
    [ATTRIBUTION.md](ATTRIBUTION.md).** Icons are drawn in code (`crates/ui-egui/src/icons.rs`).
    `cargo xtask assets` enforces this.

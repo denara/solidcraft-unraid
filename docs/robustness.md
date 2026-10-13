@@ -50,6 +50,18 @@ placement and reports both its translation magnitude and rotation angle.
 Exact planar and piecewise fallbacks report zero displacement. The existing
 volume and spatial acceptance checks still apply to all results.
 
+The command that adds a feature carries the same `warning` in its reply, so a
+script or an agent sees a retry without asking the timeline.
+
+A join or a cut that needed any retry is then held to what it can do at all
+(`crates/kernel/src/boolean_guard.rs`, #616): the result is closed, a join
+never loses volume and a cut never gains any, and outside the tool's box the
+result's surface is the target's and the target's is the result's (a join or
+a cut can only change the target where the tool is). A cut may come out empty
+only when the tool covers the target. A result that fails is refused with an
+error naming what was wrong and where, rather than returned: a wrong result
+that looks right is worse than an error.
+
 Reports belong to the evaluated feature and survive cached rebuilds and
 undo/redo. Cold reopening regenerates them from the embedded design. Failed or
 discarded retry branches do not contribute successful-retry events. Reports
@@ -84,6 +96,14 @@ fixes below (sound face pushes, no panics in the boolean's final assembly).
 | not run (the design ran out of time) | 13.0 % | 18.0 % |
 
 ### Fixed
+
+- Back-to-back contact joins preserve intentional Split Face boundaries, including on
+  faces away from the contact. The glue pass retains their lines during healing and in
+  the resulting body for subsequent operations. Partial circular-contact regressions
+  cover offsets, rotation, operand order, volume, area and history; the seed-16 pattern
+  also runs in the ordinary engine suite with analytic volume and area checks.
+  Imprinting visits a shared analytic support only once: the two side faces of a
+  cylinder must not recut the same outline into redundant arcs.
 
 - **Shell corners where a curved face meets another at an angle** (the biggest cause, 215 of
   the 363 failed designs before). Moving a vertex took one linear step, exact only for planes;

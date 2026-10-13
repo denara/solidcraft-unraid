@@ -6,6 +6,8 @@
 //! Stepped extrusions (case floors and walls) use sections between every cap level, so a
 //! circular boss can meet the rim without shifting either operand off its exact plane.
 
+use std::borrow::Cow;
+
 use solidcraft_geom::{Loop2, Plane, Region2, Seg2, Vec2, Vec3};
 use truck_modeling as mt;
 
@@ -19,13 +21,23 @@ const MAX_PLANAR_SEGMENTS: usize = 8192;
 const MAX_PLANAR_EVENTS: usize = 131_072;
 const MAX_PLANAR_PAIRS: usize = 16_000_000;
 
-/// Boolean of planar regions bounded by straight lines and circular arcs. Boundaries stay
-/// analytic; disjoint results and retained islands are returned as separate regions.
+/// Free-form boundary segments (conics, Béziers) take part in planar booleans as lines and
+/// arcs within this distance (mm); loops that come out whole get their exact segments back.
+pub const PLANAR_FIT_TOL: f64 = 1e-3;
+
+/// Boolean of planar regions bounded by straight lines, circular arcs and free-form segments.
+/// Lines and arcs stay analytic. Free-form loops are arranged as tangent arcs within
+/// [`PLANAR_FIT_TOL`]: a loop the operation leaves whole comes back exact, one it cuts keeps
+/// the arcs. Disjoint results and retained islands are returned as separate regions.
 pub fn planar_regions_boolean(a: &[Region2], b: &[Region2], op: BoolOp, tolerance: f64) -> Result<Vec<Region2>> {
     crate::guard("planar region boolean", || {
         if !tolerance.is_finite() || !(1e-9..=1.0).contains(&tolerance) {
             return Err(KernelError::Invalid("planar boolean tolerance must be finite and between 1e-9 and 1 mm".into()));
         }
+        let mut exact: Vec<(Loop2, Loop2)> = Vec::new();
+        let mut pieces = 0usize;
+        let (a, b) = (fit_free_form(a, &mut exact, &mut pieces)?, fit_free_form(b, &mut exact, &mut pieces)?);
+        let (a, b): (&[Region2], &[Region2]) = (&a, &b);
         let loops = || a.iter().chain(b).flat_map(|r| std::iter::once(&r.outer).chain(&r.holes));
         let mut edges = 0usize;
         let mut samples = 0usize;
@@ -59,9 +71,70 @@ pub fn planar_regions_boolean(a: &[Region2], b: &[Region2], op: BoolOp, toleranc
                 }
             }
         }
-        boolean2d(a, b, op, tolerance)
-            .ok_or_else(|| KernelError::Failed("planar region arrangement failed or exceeded its bounded processing budget".into()))
+        let out = boolean2d(a, b, op, tolerance)
+            .ok_or_else(|| KernelError::Failed("planar region arrangement failed or exceeded its bounded processing budget".into()))?;
+        Ok(restore_exact_loops(out, &exact, tolerance))
     })
+}
+
+/// Regions with their free-form loops fitted by lines and arcs; `exact` records each fitted
+/// loop with the loop it stands for, `pieces` counts the fitted segments. Regions of lines and
+/// arcs alone are passed on as they are.
+fn fit_free_form<'a>(regions: &'a [Region2], exact: &mut Vec<(Loop2, Loop2)>, pieces: &mut usize) -> Result<Cow<'a, [Region2]>> {
+    if regions.iter().all(Region2::is_line_arc) {
+        return Ok(Cow::Borrowed(regions));
+    }
+    let mut fit = |lp: &Loop2| -> Result<Loop2> {
+        if lp.is_line_arc() {
+            return Ok(lp.clone());
+        }
+        let fitted = lp.fit_arcs(PLANAR_FIT_TOL).filter(|f| {
+            *pieces = pieces.saturating_add(f.segs.len());
+            *pieces <= MAX_PLANAR_SEGMENTS
+        });
+        let fitted = fitted.ok_or_else(|| {
+            KernelError::Invalid("planar boolean: a free-form boundary is not finite or takes more arcs than the geometry budget".into())
+        })?;
+        exact.push((fitted.clone(), lp.clone()));
+        Ok(fitted)
+    };
+    let fitted: Result<Vec<Region2>> =
+        regions.iter().map(|r| Ok(Region2 { outer: fit(&r.outer)?, holes: r.holes.iter().map(&mut fit).collect::<Result<_>>()? })).collect();
+    fitted.map(Cow::Owned)
+}
+
+/// Output loops that are a fitted free-form loop, whole (from any start, either way round), get
+/// the exact loop back, running the same way.
+fn restore_exact_loops(regions: Vec<Region2>, exact: &[(Loop2, Loop2)], tol: f64) -> Vec<Region2> {
+    if exact.is_empty() {
+        return regions;
+    }
+    let near = |p: Vec2, q: Vec2| p.dist(q) <= tol * 10.0;
+    let same_run = |l: &Loop2, f: &Loop2| -> bool {
+        let n = f.segs.len();
+        let Some(first) = l.segs.first() else { return false };
+        (0..n).any(|k| {
+            f.segs.get(k).is_some_and(|s| near(s.start(), first.start()))
+                && l.segs.iter().enumerate().all(|(i, s)| {
+                    f.segs.get((k + i) % n).is_some_and(|g| near(g.start(), s.start()) && near(g.end(), s.end()) && near(g.mid(), s.mid()))
+                })
+        })
+    };
+    let restore = |l: Loop2| -> Loop2 {
+        for (fitted, original) in exact {
+            if fitted.segs.len() != l.segs.len() {
+                continue;
+            }
+            if same_run(&l, fitted) {
+                return original.clone();
+            }
+            if same_run(&l, &fitted.reversed()) {
+                return original.reversed();
+            }
+        }
+        l
+    };
+    regions.into_iter().map(|r| Region2 { outer: restore(r.outer), holes: r.holes.into_iter().map(&restore).collect() }).collect()
 }
 
 /// Extrude normalized planar material as one logical compound, retaining every disjoint
@@ -95,8 +168,10 @@ pub fn extrude_planar_regions(plane: &Plane, regions: &[Region2], start: f64, en
         if normalized.is_empty() {
             return Err(KernelError::Invalid("empty planar material extrusion".into()));
         }
-        for (i, a) in normalized.iter().enumerate() {
-            for b in normalized.iter().skip(i + 1) {
+        // The separation test knows lines and arcs: free-form loops take part as their arcs.
+        let fitted = fit_free_form(&normalized, &mut Vec::new(), &mut 0)?;
+        for (i, a) in fitted.iter().enumerate() {
+            for b in fitted.iter().skip(i + 1) {
                 for s in std::iter::once(&a.outer).chain(&a.holes).flat_map(|l| &l.segs) {
                     for t in std::iter::once(&b.outer).chain(&b.holes).flat_map(|l| &l.segs) {
                         remaining_pairs = remaining_pairs
@@ -887,19 +962,61 @@ fn dist_to(regions: &[Region2], p: Vec2) -> f64 {
         .fold(f64::INFINITY, f64::min)
 }
 
-/// Direction of the boundary of `regions` through `p` (on it), as the boundary runs.
-fn dir_at(regions: &[Region2], p: Vec2, tol: f64) -> Option<Vec2> {
-    for r in regions {
-        for l in std::iter::once(&r.outer).chain(&r.holes) {
-            for s in &l.segs {
-                let t = s.closest_param(p);
-                if s.point_at(t).dist(p) < tol {
-                    return s.derivative(t).normalized();
+/// The bounding box of a line or an arc, grown by twice the tolerance (and by the rounding of
+/// its own corners): (min, max). Whatever lies within the tolerance of the segment lies in the
+/// box. `None` for other segments and for values that are not finite: no box, and nothing is
+/// skipped for it.
+type SegBox = (Vec2, Vec2);
+
+fn seg_box(s: &Seg2, tol: f64) -> Option<SegBox> {
+    let mut pts = vec![s.start(), s.end()];
+    match *s {
+        Seg2::Line { .. } => {}
+        Seg2::Arc { center, radius, start, sweep } => {
+            // The axis extremes the arc passes.
+            for k in 0..4 {
+                let ang = k as f64 * std::f64::consts::FRAC_PI_2;
+                let delta =
+                    if sweep >= 0.0 { (ang - start).rem_euclid(std::f64::consts::TAU) } else { (start - ang).rem_euclid(std::f64::consts::TAU) };
+                if delta <= sweep.abs() {
+                    pts.push(center + Vec2::from_angle(ang) * radius);
                 }
             }
         }
+        _ => return None,
     }
-    None
+    let lo = pts.iter().fold(Vec2::new(f64::INFINITY, f64::INFINITY), |m, p| Vec2::new(m.x.min(p.x), m.y.min(p.y)));
+    let hi = pts.iter().fold(Vec2::new(f64::NEG_INFINITY, f64::NEG_INFINITY), |m, p| Vec2::new(m.x.max(p.x), m.y.max(p.y)));
+    let g = tol * 2.0 + 1e-12 * pts.iter().fold(0.0, |m: f64, p| m.max(p.x.abs()).max(p.y.abs()));
+    (pts.iter().all(|p| p.is_finite()) && g.is_finite()).then_some((Vec2::new(lo.x - g, lo.y - g), Vec2::new(hi.x + g, hi.y + g)))
+}
+
+fn boxes_meet(a: Option<SegBox>, b: Option<SegBox>) -> bool {
+    match (a, b) {
+        (Some((a0, a1)), Some((b0, b1))) => a0.x <= b1.x && b0.x <= a1.x && a0.y <= b1.y && b0.y <= a1.y,
+        _ => true,
+    }
+}
+
+fn box_holds(b: Option<SegBox>, p: Vec2) -> bool {
+    b.is_none_or(|(lo, hi)| p.x >= lo.x && p.x <= hi.x && p.y >= lo.y && p.y <= hi.y)
+}
+
+/// Distance from `p` to the nearest of `segs` whose box holds it: infinite when none does (no
+/// segment is within the tolerance of `p` then).
+fn near_dist(segs: &[Seg2], boxes: &[Option<SegBox>], p: Vec2) -> f64 {
+    segs.iter().zip(boxes).filter(|(_, b)| box_holds(**b, p)).map(|(s, _)| s.point_at(s.closest_param(p)).dist(p)).fold(f64::INFINITY, f64::min)
+}
+
+/// Direction of the first of `segs` through `p` (within `tol`), as it runs.
+fn near_dir(segs: &[Seg2], boxes: &[Option<SegBox>], p: Vec2, tol: f64) -> Option<Vec2> {
+    let (s, t) = segs
+        .iter()
+        .zip(boxes)
+        .filter(|(_, b)| box_holds(**b, p))
+        .map(|(s, _)| (s, s.closest_param(p)))
+        .find(|(s, t)| s.point_at(*t).dist(p) < tol)?;
+    s.derivative(t).normalized()
 }
 
 /// 2D boolean of regions bounded by lines and arcs.
@@ -922,12 +1039,19 @@ fn boolean2d_tagged(a: &Section, b: &Section, op: BoolOp, tol: f64) -> Option<Se
     if sa.iter().chain(&sb).any(|s| !matches!(s, Seg2::Line { .. } | Seg2::Arc { .. })) {
         return None;
     }
+    // Only segments whose bounding boxes meet can cross, touch or lie on each other: the other
+    // pairs skip the exact tests (a closest-point search each).
+    let (box_a, box_b): (Vec<_>, Vec<_>) = (sa.iter().map(|s| seg_box(s, tol)).collect(), sb.iter().map(|s| seg_box(s, tol)).collect());
+    let apart = |i: usize, j: usize| !boxes_meet(box_a.get(i).copied().flatten(), box_b.get(j).copied().flatten());
     // Split every segment where it crosses the other side's boundary.
     let mut cut_a: Vec<Vec<f64>> = vec![Vec::new(); sa.len()];
     let mut cut_b: Vec<Vec<f64>> = vec![Vec::new(); sb.len()];
     let mut events = 0usize;
     for (i, s) in sa.iter().enumerate() {
         for (j, t) in sb.iter().enumerate() {
+            if apart(i, j) {
+                continue;
+            }
             for (u, v) in crossings(s, t, tol) {
                 events += 2;
                 if events > MAX_PLANAR_EVENTS {
@@ -940,7 +1064,10 @@ fn boolean2d_tagged(a: &Section, b: &Section, op: BoolOp, tol: f64) -> Option<Se
     }
     // Ends of the other side's segments lying on a segment split it too (touching corners).
     for (i, s) in sa.iter().enumerate() {
-        for t in &sb {
+        for (j, t) in sb.iter().enumerate() {
+            if apart(i, j) {
+                continue;
+            }
             for p in [t.start(), t.end()] {
                 let u = s.closest_param(p);
                 if s.point_at(u).dist(p) < tol {
@@ -954,7 +1081,10 @@ fn boolean2d_tagged(a: &Section, b: &Section, op: BoolOp, tol: f64) -> Option<Se
         }
     }
     for (j, t) in sb.iter().enumerate() {
-        for s in &sa {
+        for (i, s) in sa.iter().enumerate() {
+            if apart(i, j) {
+                continue;
+            }
             for p in [s.start(), s.end()] {
                 let v = t.closest_param(p);
                 if t.point_at(v).dist(p) < tol {
@@ -997,9 +1127,9 @@ fn boolean2d_tagged(a: &Section, b: &Section, op: BoolOp, tol: f64) -> Option<Se
         let (n, tag) = (split.len(), ta.get(i).copied().unwrap_or(BLANK));
         for (k, p) in split.into_iter().enumerate() {
             let m = p.point_at(0.5);
-            let on = dist_to(&b, m) < tol;
+            let on = near_dist(&sb, &box_b, m) < tol;
             let keep = if on {
-                let same = dir_at(&b, m, tol).is_some_and(|d| d.dot(p.derivative(0.5)) > 0.0);
+                let same = near_dir(&sb, &box_b, m, tol).is_some_and(|d| d.dot(p.derivative(0.5)) > 0.0);
                 match op {
                     BoolOp::Union | BoolOp::Intersect => same,
                     BoolOp::Cut => !same,
@@ -1028,7 +1158,7 @@ fn boolean2d_tagged(a: &Section, b: &Section, op: BoolOp, tol: f64) -> Option<Se
         let (n, tag) = (split.len(), tb.get(j).copied().unwrap_or(BLANK));
         for (k, p) in split.into_iter().enumerate() {
             let m = p.point_at(0.5);
-            if dist_to(&a, m) < tol {
+            if near_dist(&sa, &box_a, m) < tol {
                 continue;
             }
             let ins = inside(&a, m);
@@ -1225,7 +1355,12 @@ fn sew_sections(
                 for (r, piece) in crate::extrude(plane, section, levels[first], levels[end])?.into_iter().enumerate() {
                     remaining_faces =
                         remaining_faces.checked_sub(piece.face_count()).ok_or_else(|| KernelError::Failed("prism output face budget".into()))?;
-                    pieces.push((piece, lineage::Built::Extruded { section: tagged.region(r), lo: levels[first], hi: levels[end] }));
+                    // Each slab's section, as read there: the same outline, but its walls
+                    // read beside whichever operand is there.
+                    let layers =
+                        (first..end).map(|k| Some((slabs.get(k)?.region(r), *levels.get(k)?, *levels.get(k + 1)?))).collect::<Option<Vec<_>>>();
+                    let layers = layers.ok_or_else(|| KernelError::Failed("missing prism section".into()))?;
+                    pieces.push((piece, lineage::Built::Extruded { layers }));
                 }
             } else {
                 let (piece, built) = sew_connected_sections(plane, d, &levels[first..=end], &slabs[first..end], tol, coalesce, history)
@@ -1507,6 +1642,13 @@ fn simple_prism_indexed(a: &Body, b: &Body, op: BoolOp, [ia, ib]: [&LazyIndex; 2
         if (u - x).abs() > tol * (1.0 + u) || (u - y).abs() > tol * (1.0 + u) {
             return sew_stack(&plane, d, &pa, &pb, tol, &history).map(|r| r.map(Some));
         }
+        // One outline end to end: also slab by slab, so the history follows each operand's
+        // walls (one longer prism, whose walls are made from both).
+        if let Some(Ok(body)) = sew_stack(&plane, d, &pa, &pb, tol, &history)
+            && body.history().is_some()
+        {
+            return Some(Ok(Some(body)));
+        }
         (pa.lo.min(pb.lo), pa.hi.max(pb.hi))
     } else {
         (pa.lo, pa.hi)
@@ -1518,7 +1660,7 @@ fn simple_prism_indexed(a: &Body, b: &Body, op: BoolOp, [ia, ib]: [&LazyIndex; 2
     };
     // Each body over its region.
     let mut pieces: Vec<(Body, lineage::Built)> =
-        bodies.into_iter().enumerate().map(|(r, b)| (b, lineage::Built::Extruded { section: section.region(r), lo, hi })).collect();
+        bodies.into_iter().enumerate().map(|(r, b)| (b, lineage::Built::Extruded { layers: vec![(section.region(r), lo, hi)] })).collect();
     let last = pieces.pop()?;
     if !pieces.is_empty() {
         // Several pieces: one body of several lumps (the last first).
@@ -2191,6 +2333,101 @@ mod planar_tests {
         assert!(extrude_planar_regions(&plane, &[a, b], 0.0, 2.0).is_err());
         let circles = [Vec2::ZERO, Vec2::new(10.0, 0.0)].map(|center| Region2 { outer: Loop2::circle(center, 5.0), holes: vec![] });
         assert!(extrude_planar_regions(&plane, &circles, 0.0, 2.0).is_err());
+    }
+
+    /// An ellipse about `c` with semi-axes `a` (along x) and `b`, as four exact conics.
+    fn ellipse(c: Vec2, a: f64, b: f64) -> Loop2 {
+        let corners = [c + Vec2::new(a, 0.0), c + Vec2::new(0.0, b), c - Vec2::new(a, 0.0), c - Vec2::new(0.0, b)];
+        let w = std::f64::consts::FRAC_1_SQRT_2;
+        Loop2 {
+            segs: (0..4).map(|i| Seg2::Conic { a: corners[i], apex: corners[i] + corners[(i + 1) % 4] - c, b: corners[(i + 1) % 4], w }).collect(),
+        }
+    }
+
+    #[test]
+    fn free_form_cut_outs_stay_exact_when_whole_and_follow_arcs_when_cut() {
+        let plate = rectangle(Vec2::ZERO, Vec2::new(100.0, 60.0));
+        let hole = Region2 { outer: ellipse(Vec2::new(40.0, 30.0), 15.0, 8.0), holes: vec![] };
+        let out = planar_regions_boolean(std::slice::from_ref(&plate), std::slice::from_ref(&hole), BoolOp::Cut, 1e-7).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].holes.len(), 1);
+        // The whole ellipse comes back as its four exact conics, running as a hole (clockwise):
+        // the plate less π·15·8.
+        let h = &out[0].holes[0];
+        assert_eq!(h.segs.len(), 4);
+        assert!(h.segs.iter().all(|s| hole.outer.segs.contains(&s.reversed())), "{h:?}");
+        assert!(h.signed_area() < 0.0);
+        let exact = 6000.0 - std::f64::consts::PI * 15.0 * 8.0;
+        assert!((out[0].area() - exact).abs() < 1e-9, "{} vs {exact}", out[0].area());
+        // What the cut takes is the ellipse, whole and exact, counter-clockwise.
+        let taken = planar_regions_boolean(std::slice::from_ref(&plate), std::slice::from_ref(&hole), BoolOp::Intersect, 1e-7).unwrap();
+        assert!(taken.len() == 1 && taken[0].outer.segs.iter().all(|s| hole.outer.segs.contains(s)), "{taken:?}");
+        // An ellipse centred on the plate's edge makes a notch of half the ellipse: its part
+        // inside follows arcs within the fit tolerance (times half the perimeter, 37 mm).
+        let over = Region2 { outer: ellipse(Vec2::new(100.0, 30.0), 15.0, 8.0), holes: vec![] };
+        let out = planar_regions_boolean(std::slice::from_ref(&plate), std::slice::from_ref(&over), BoolOp::Cut, 1e-7).unwrap();
+        assert_eq!(out.len(), 1);
+        assert!(out[0].holes.is_empty() && out[0].outer.is_line_arc());
+        let notched = 6000.0 - std::f64::consts::PI * 15.0 * 8.0 / 2.0;
+        assert!((out[0].area() - notched).abs() < PLANAR_FIT_TOL * 37.0, "{} vs {notched}", out[0].area());
+        // Two ellipses that overlap join into one outline of arcs; apart, both stay exact.
+        let beside = |dx: f64| Region2 { outer: ellipse(Vec2::new(40.0 + dx, 30.0), 15.0, 8.0), holes: vec![] };
+        let joined = planar_regions_boolean(std::slice::from_ref(&hole), &[beside(20.0)], BoolOp::Union, 1e-7).unwrap();
+        assert!(joined.len() == 1 && joined[0].outer.is_line_arc(), "{joined:?}");
+        let apart = planar_regions_boolean(std::slice::from_ref(&hole), &[beside(40.0)], BoolOp::Union, 1e-7).unwrap();
+        assert!(apart.len() == 2 && apart.iter().all(|r| r.outer.segs.len() == 4 && !r.outer.is_line_arc()), "{apart:?}");
+        // The flat material extrudes with the exact elliptic wall: four conic faces, two caps.
+        let body = extrude_planar_regions(&Plane::XY, &planar_regions_boolean(&[plate], &[hole], BoolOp::Cut, 1e-7).unwrap(), 0.0, 2.0).unwrap();
+        assert_eq!(body.face_count(), 4 + 4 + 2);
+        let v = crate::measure(&body).unwrap().volume;
+        assert!((v - exact * 2.0).abs() < 1e-3 * exact, "{v}");
+    }
+
+    #[test]
+    fn free_form_loops_that_cannot_be_followed_are_refused() {
+        let plate = rectangle(Vec2::ZERO, Vec2::new(100.0, 60.0));
+        let mut bad = ellipse(Vec2::new(40.0, 30.0), 15.0, 8.0);
+        bad.segs[1] = Seg2::Conic { a: bad.segs[1].start(), apex: Vec2::new(f64::NAN, 0.0), b: bad.segs[1].end(), w: 1.0 };
+        let e = planar_regions_boolean(std::slice::from_ref(&plate), &[Region2 { outer: bad, holes: vec![] }], BoolOp::Cut, 1e-7).unwrap_err();
+        assert!(e.to_string().contains("free-form"), "{e}");
+        // More fitted arcs than the arrangement's segment budget.
+        let many: Vec<Region2> = (0..400).map(|i| Region2 { outer: ellipse(Vec2::new(40.0 * i as f64, 0.0), 15.0, 8.0), holes: vec![] }).collect();
+        assert!(planar_regions_boolean(&[plate], &many, BoolOp::Cut, 1e-7).is_err());
+    }
+
+    #[test]
+    fn segment_boxes_hold_what_lies_within_the_tolerance() {
+        // An arc of radius 10 about the origin from 45° to 135° passes the top of its circle:
+        // x within ±10/√2, y from 10/√2 to 10, grown by twice the tolerance.
+        let r = 10.0 * std::f64::consts::FRAC_1_SQRT_2;
+        let arc = Seg2::Arc { center: Vec2::ZERO, radius: 10.0, start: std::f64::consts::FRAC_PI_4, sweep: std::f64::consts::FRAC_PI_2 };
+        for s in [arc, arc.reversed()] {
+            let (lo, hi) = seg_box(&s, 1e-3).unwrap();
+            assert!(lo.dist(Vec2::new(-r - 2e-3, r - 2e-3)) < 1e-9 && hi.dist(Vec2::new(r + 2e-3, 10.0 + 2e-3)) < 1e-9, "{lo:?} {hi:?}");
+        }
+        let (lo, hi) = seg_box(&Seg2::Line { a: Vec2::new(3.0, -1.0), b: Vec2::new(-2.0, 4.0) }, 0.5).unwrap();
+        assert!(lo.dist(Vec2::new(-3.0, -2.0)) < 1e-9 && hi.dist(Vec2::new(4.0, 5.0)) < 1e-9, "{lo:?} {hi:?}");
+        // A line 3 tolerances above the arc's top meets its box (each is grown by two); one
+        // 5 tolerances above does not. No box (a free-form segment, a value that is not
+        // finite) hides nothing.
+        let level = |y: f64| seg_box(&Seg2::Line { a: Vec2::new(-1.0, y), b: Vec2::new(1.0, y) }, 1e-3);
+        assert!(boxes_meet(seg_box(&arc, 1e-3), level(10.003)) && !boxes_meet(seg_box(&arc, 1e-3), level(10.005)));
+        let free = ellipse(Vec2::ZERO, 2.0, 1.0).segs[0];
+        assert!(seg_box(&free, 1e-3).is_none() && seg_box(&Seg2::Line { a: Vec2::new(f64::NAN, 0.0), b: Vec2::X }, 1e-3).is_none());
+        assert!(boxes_meet(None, level(500.0)) && box_holds(None, Vec2::new(500.0, 500.0)));
+    }
+
+    #[test]
+    fn many_small_cut_outs_far_apart_cut_as_before() {
+        // 400 round holes in a strip: almost every pair of segments is far apart.
+        let plate = rectangle(Vec2::ZERO, Vec2::new(2000.0, 20.0));
+        let holes: Vec<Region2> =
+            (0..400).map(|i| Region2 { outer: Loop2::circle(Vec2::new(2.5 + 5.0 * i as f64, 10.0), 1.8), holes: vec![] }).collect();
+        let out = planar_regions_boolean(&[plate], &holes, BoolOp::Cut, 1e-7).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].holes.len(), 400);
+        let exact = 40_000.0 - 400.0 * std::f64::consts::PI * 1.8 * 1.8;
+        assert!((out[0].area() - exact).abs() < 1e-6, "{}", out[0].area());
     }
 
     #[test]

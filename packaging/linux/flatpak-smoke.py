@@ -19,7 +19,7 @@ import tempfile
 import time
 import zlib
 
-APP_ID = "ai.storyteller.solvecraft"
+APP_ID = "ai.storyteller.solidcraft"
 MAX_PIXELS = 16_000_000
 MAX_PNG_BYTES = 70_000_000
 SANDBOX_PROBE = r'''

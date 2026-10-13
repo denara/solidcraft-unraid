@@ -63,11 +63,12 @@ pub fn tool_definitions() -> Vec<Value> {
              created: {points, curves, constraints, dimensions}: the ids of what they added, stable and not reused \
              after a delete (undo rewinds the counters with the design), usable right away \
              in sketch.dimension, sketch.constraint.* and sketch.delete. Feature commands return the feature's id \
-             and name, every body (bodies) and the bodies the feature created (created_bodies).",
+             and name, every body (bodies) and the bodies the feature created, changed and removed (created_bodies, changed_bodies, removed_bodies).",
             obj(
                 json!({
                     "command": string("Command id (see list_commands)"),
                     "params": {"type": "object", "description": "The command's parameters"},
+                    "verbose": {"type": "boolean", "description": "false: omit the full feature body list and sketch ids repeated outside `created`; keep created_bodies, changed_bodies and removed_bodies (default true)"},
                 }),
                 &["command"],
             ),
@@ -89,6 +90,7 @@ pub fn tool_definitions() -> Vec<Value> {
                         "items": {"type": "object", "properties": {"command": {"type": "string"}, "params": {"type": "object"}}, "required": ["command"]},
                     },
                     "rollback": {"type": "boolean", "description": "Undo completed steps when one fails (default true)"},
+                    "verbose": {"type": "boolean", "description": "false: a compact reply. Feature steps leave out the full body list (created_bodies, changed_bodies and removed_bodies stay), sketch steps the ids they repeat outside `created` (default true)"},
                 }),
                 &["commands"],
             ),
@@ -154,10 +156,13 @@ pub fn tool_definitions() -> Vec<Value> {
             "Render the design and return it as a PNG image. Headless: a CPU render of the model, fitted to the view. \
              Connected to the app: a screenshot of the window (source \"window\", the default) or a render of the model \
              with the app's camera (source \"model\"). Both show an active section (inspect.section) with its cut face \
-             capped. `view` first turns the camera to a standard view.",
+             capped. `view` first turns the camera to a standard view or a saved named view (view.save), `camera` to              any camera (as view.apply).",
             obj(
                 json!({
-                    "view": {"type": "string", "enum": VIEWS, "description": "Standard view (default: keep the current one; headless starts at iso)"},
+                    "view": string(
+                        "Standard view (iso, home, front, back, top, bottom, left, right, fit) or the name of a saved named view                          (default: keep the current one; headless starts at iso)"
+                    ),
+                    "camera": {"type": "object", "description": "Look from this camera instead: {target: [x,y,z], yaw, pitch, distance, fov?}                         (radians, mm; as view.save and view.apply)"},
                     "path": string("Also keep the PNG at this path"),
                     "width": {"type": "integer", "description": "Render width in pixels (model renders; default 960)"},
                     "height": {"type": "integer", "description": "Render height in pixels (model renders; default 600)"},
@@ -340,7 +345,8 @@ fn dispatch(b: &mut dyn Backend, name: &str, a: &Map<String, Value>) -> Result<V
         }
         "execute" => {
             let id = str_arg(a, "command").ok_or("`command` is required")?;
-            exec(b, id, a.get("params").cloned().filter(Value::is_object).unwrap_or(json!({})))
+            let v = exec(b, id, a.get("params").cloned().filter(Value::is_object).unwrap_or(json!({})))?;
+            Ok(if a.get("verbose").and_then(Value::as_bool).unwrap_or(true) { v } else { compact(v) })
         }
         "inspect_design" => {
             let measure = a.get("measure").and_then(Value::as_bool).unwrap_or(true);
@@ -449,6 +455,7 @@ fn batch(b: &mut dyn Backend, a: &Map<String, Value>) -> Value {
         return text_result(&json!(format!("batch too long ({} steps, at most {MAX_BATCH})", steps.len())), true);
     }
     let rollback = a.get("rollback").and_then(Value::as_bool).unwrap_or(true);
+    let verbose = a.get("verbose").and_then(Value::as_bool).unwrap_or(true);
     let start = if rollback { Undo::begin(b) } else { Undo::None };
     let mut results = Vec::with_capacity(steps.len());
     for (i, step) in steps.iter().enumerate() {
@@ -458,7 +465,7 @@ fn batch(b: &mut dyn Backend, a: &Map<String, Value>) -> Value {
             None => Err("missing `command`".to_string()),
         };
         match r {
-            Ok(v) => results.push(v),
+            Ok(v) => results.push(if verbose { v } else { compact(v) }),
             Err(e) => {
                 let undone = start.rollback(b, i);
                 return text_result(
@@ -479,6 +486,24 @@ fn batch(b: &mut dyn Backend, a: &Map<String, Value>) -> Value {
     text_result(&json!({"ok": true, "completed": results.len(), "results": results}), false)
 }
 
+/// A command's result without what the design already had (`execute` or `batch` with `verbose: false`): a
+/// feature's full body list (its created, changed and removed bodies stay), and the sketch ids
+/// a sketch command repeats outside `created`.
+fn compact(mut v: Value) -> Value {
+    let Some(o) = v.as_object_mut() else { return v };
+    if o.contains_key("created_bodies") {
+        o.remove("bodies");
+    }
+    if let Some(created) = o.get("created").cloned() {
+        for k in ["points", "curves", "constraints", "dimensions"] {
+            if o.get(k).is_some_and(|x| created.get(k) == Some(x)) {
+                o.remove(k);
+            }
+        }
+    }
+    v
+}
+
 static SHOT: AtomicU64 = AtomicU64::new(0);
 
 /// `screenshot`: render or capture to a file, return it as an MCP image content block.
@@ -493,12 +518,24 @@ fn screenshot(b: &mut dyn Backend, a: &Map<String, Value>) -> Value {
 }
 
 fn capture(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<(Vec<u8>, Value), String> {
-    if let Some(v) = str_arg(a, "view") {
-        b.call("ui.view", json!({"view": v}))?;
-        // Turning to a standard view also frames the model (like a axis view click).
-        if v != "fit" && v != "home" {
-            b.call("ui.view", json!({"view": "fit"}))?;
+    let apply = |b: &mut dyn Backend, params: Value| b.call("engine.execute", json!({"command": "view.apply", "params": params}));
+    match (str_arg(a, "view"), a.get("camera").filter(|c| !c.is_null())) {
+        (Some(_), Some(_)) => return Err("screenshot: give `view` or `camera`, not both".into()),
+        (None, Some(c)) => {
+            apply(b, json!({"camera": c}))?;
         }
+        (Some(v), None) if VIEWS.contains(&v) => {
+            b.call("ui.view", json!({"view": v}))?;
+            // Turning to a standard view also frames the model (like a axis view click).
+            if v != "fit" && v != "home" {
+                b.call("ui.view", json!({"view": "fit"}))?;
+            }
+        }
+        // A saved named view.
+        (Some(v), None) => {
+            apply(b, json!({"view": v}))?;
+        }
+        (None, None) => {}
     }
     let keep = str_arg(a, "path").filter(|p| !p.trim().is_empty()).map(str::to_string);
     let path = keep.clone().unwrap_or_else(|| {

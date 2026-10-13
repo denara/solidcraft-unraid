@@ -265,7 +265,7 @@ fn row(s: &mut Session, p: &Value) -> Result<Value> {
                 .ok_or_else(|| bad(cmd, format!("`{k}` is not a column (config.column adds one)")))?;
             match s.doc.configs.columns.get(col) {
                 Some(Column::Material(_)) => {
-                    text = solidcraft_doc::config::material_cell(&text).map_err(|e| bad(cmd, e.to_string()))?.unwrap_or_else(|| "Default".into());
+                    text = s.doc.material_cell(&text).map_err(|e| bad(cmd, e.to_string()))?.unwrap_or_else(|| "Default".into());
                 }
                 Some(Column::Appearance(_) | Column::ComponentAppearance(_) | Column::FaceAppearance(_)) => {
                     text = match solidcraft_doc::config::appearance_cell(&text).map_err(|e| bad(cmd, e.to_string()))? {

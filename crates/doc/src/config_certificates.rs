@@ -179,6 +179,13 @@ pub enum FaceCertificate {
         source: Box<FaceCertificate>,
         inner: bool,
     },
+    /// A flat face known by its exact history name (the target's `name`, without piece
+    /// numbers): what the kernel's face history says it came from, followed through every
+    /// feature since (a cut wall `F5:side:l1`, a chamfer `F7:blend:…`, a pattern copy
+    /// `F4:top@F6.2`, a face a join merged from two features). Used where no construction
+    /// certificate above names the face uniquely. Its plane is the face's exact current plane in
+    /// the frame [`lineage_frame`] gives it. See docs/face-attachments.md.
+    Lineage,
 }
 
 impl FaceCertificate {
@@ -210,8 +217,9 @@ impl FaceCertificate {
                     && payload_sha256.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
             }
             Self::ShellPlanar { source_producer, source, .. } => {
-                *source_producer != 0 && !matches!(source.as_ref(), Self::ShellPlanar { .. }) && source.validate().is_ok()
+                *source_producer != 0 && !matches!(source.as_ref(), Self::ShellPlanar { .. } | Self::Lineage) && source.validate().is_ok()
             }
+            Self::Lineage => true,
         };
         if valid { Ok(()) } else { Err(DocError::Invalid("invalid face source certificate".into())) }
     }
@@ -258,13 +266,16 @@ pub(crate) fn validate_certificate_json(value: &serde_json::Value) -> Result<()>
                     .and_then(serde_json::Value::as_str)
                     .is_some_and(|digest| digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
         }
+        Some("lineage") => fields.len() == 1,
         Some("shell_planar") => {
             fields.len() == 4
                 && fields.keys().all(|key| ["kind", "source_producer", "source", "inner"].contains(&key.as_str()))
                 && nonzero("source_producer")
                 && fields.get("inner").and_then(serde_json::Value::as_bool).is_some()
                 && fields.get("source").is_some_and(|source| {
-                    source.as_object().is_some_and(|source| source.get("kind").and_then(serde_json::Value::as_str) != Some("shell_planar"))
+                    source
+                        .as_object()
+                        .is_some_and(|source| !matches!(source.get("kind").and_then(serde_json::Value::as_str), Some("shell_planar" | "lineage")))
                         && validate_certificate_json(source).is_ok()
                 })
         }
@@ -286,6 +297,7 @@ pub(crate) fn shell_certificate_role(source: &FaceCertificate, inner: bool) -> R
         FaceCertificate::ExtrudeCap { high, outer, holes, .. } => format!("cap:{}:{}", if *high { "high" } else { "low" }, cap_key(outer, holes)),
         FaceCertificate::Imported { payload_sha256, item, face } => format!("import:{payload_sha256}:{item}:{face}"),
         FaceCertificate::ShellPlanar { .. } => return Err(DocError::Invalid("nested shell source certificates are unsupported".into())),
+        FaceCertificate::Lineage => return Err(DocError::Invalid("a shell's source needs a construction certificate".into())),
     };
     Ok(format!("shell:{}:{role}", if inner { "inner" } else { "outer" }))
 }
@@ -408,6 +420,40 @@ impl<'a> ExactSketchCurves<'a> {
             (None, Some(id)) => id.map(str::to_owned),
             (None, None) => None,
         }
+    }
+
+    /// [`find`](Self::find), else the one sketch line a generated straight segment runs along
+    /// and overlaps: a profile a feature grew to overlap a flush face (its neighbours lengthened
+    /// past the sketch's corners) still names its sides by the lines they were drawn on. Two
+    /// candidates stay ambiguous.
+    pub(crate) fn find_along(&self, generated: &Seg2) -> Option<String> {
+        if let Some(id) = self.find(generated) {
+            return Some(id);
+        }
+        let Seg2::Line { a: c, b: d } = *generated else { return None };
+        let mut found: Option<Option<&str>> = None;
+        for (id, linked, originals) in &self.segments {
+            if *linked {
+                continue;
+            }
+            let along = originals.iter().any(|original| {
+                let Seg2::Line { a, b } = *original else { return false };
+                let direction = b - a;
+                let scale = direction.len().max((d - c).len()).max(1.);
+                if direction.len() <= 1e-12
+                    || direction.cross(c - a).abs() > 1e-10 * scale * scale
+                    || direction.cross(d - a).abs() > 1e-10 * scale * scale
+                {
+                    return false;
+                }
+                let (tc, td) = ((c - a).dot(direction) / direction.len2(), (d - a).dot(direction) / direction.len2());
+                tc.min(td).max(0.) < tc.max(td).min(1.) - 1e-9
+            });
+            if along {
+                found = Some(if found.is_some() { None } else { Some(*id) });
+            }
+        }
+        found.flatten().map(str::to_owned)
     }
 }
 
@@ -548,6 +594,188 @@ impl Document {
         }
         self.certify_config_face(&target)?;
         Ok(target)
+    }
+}
+
+/// The frame a [`FaceCertificate::Lineage`] face's plane is given, from the plane alone (never
+/// from how a kernel parametrizes the surface, so it survives rebuilds and kernel changes): its
+/// origin where the body's definition origin projects onto the plane, its x axis the first of
+/// the definition's X, Y and Z axes that is not steep to the plane (`|cos| < 0.6`; one always
+/// is), projected onto it. A face that moves along its normal keeps the frame where it was;
+/// one that moves within its plane (a Move feature) keeps it too, as a sketch on a face does
+/// in the definition's coordinates.
+pub fn lineage_frame(body: &ModelBody, plane: &solidcraft_geom::Plane) -> Option<solidcraft_geom::Plane> {
+    use solidcraft_geom::Vec3;
+    let n = plane.normal();
+    let m = &body.source_transform;
+    let origin = crate::apply_point(m, Vec3::ZERO);
+    let axis = [Vec3::X, Vec3::Y, Vec3::Z].into_iter().filter_map(|a| crate::apply_vector(m, a).normalized()).find(|a| a.dot(n).abs() < 0.6)?;
+    let x = axis - n * axis.dot(n);
+    let origin = origin - n * (origin - plane.origin).dot(n);
+    solidcraft_geom::Plane::new(origin, x, n.cross(x))
+}
+
+/// Whether Split Face split `body`'s faces on `plane` (a split line lies on it).
+fn split_on_purpose(body: &ModelBody, plane: &solidcraft_geom::Plane) -> bool {
+    let tolerance = 1e-6 * (1. + body.body.size());
+    let on_plane =
+        |line: &Vec<solidcraft_geom::Vec3>| !line.is_empty() && line.iter().all(|p| (*p - plane.origin).dot(plane.normal()).abs() <= tolerance);
+    body.body.split_lines().is_some_and(|lines| lines.iter().any(on_plane))
+}
+
+/// Whether two exact planes are one oriented plane (pieces of one face).
+fn same_oriented_plane(a: &solidcraft_geom::Plane, b: &solidcraft_geom::Plane, scale: f64) -> bool {
+    a.normal().dot(b.normal()) >= 1. - 1e-8 && (b.origin - a.origin).dot(a.normal()).abs() <= 1e-7 * (1. + scale)
+}
+
+impl Document {
+    /// The exact plane an anchor on face `index` of `body` is measured in: the construction
+    /// certificate's plane, or for a [`FaceCertificate::Lineage`] face its current exact plane in
+    /// the [`lineage_frame`].
+    pub fn anchor_face_plane(&self, body: &ModelBody, index: usize, certificate: Option<&FaceCertificate>) -> Option<solidcraft_geom::Plane> {
+        match certificate {
+            Some(FaceCertificate::Lineage) => body.body.planar_face(index).and_then(|plane| lineage_frame(body, &plane)),
+            _ => body.body.face_plane(index),
+        }
+    }
+
+    /// A target for flat face `index` of `body` by its exact history name
+    /// ([`FaceCertificate::Lineage`]), when that name follows exact history, names a feature of
+    /// the design and finds this face (with its other pieces, all on one oriented plane). Where
+    /// the face's pieces no longer share a plane (Offset Face moved one of them), the piece by
+    /// its own name: the face's name qualified by the faces around it (`F2:top#[F2:side:l4,…]`).
+    pub(crate) fn lineage_face_target(
+        &self,
+        body: &ModelBody,
+        index: usize,
+        point: solidcraft_geom::Vec3,
+    ) -> Option<crate::config::ConfigFaceTarget> {
+        let names = crate::naming::names(body);
+        if !names.verified(index) {
+            return None;
+        }
+        let full = names.faces.get(index)?;
+        let stem = crate::naming::strip_piece(full);
+        let origin = stem.strip_prefix('F')?.split_once(':')?.0.parse::<u64>().ok()?;
+        let inverse = crate::mat_inverse(&body.source_transform)?;
+        let mut candidates = vec![stem];
+        if full != stem {
+            candidates.push(full);
+        }
+        candidates.into_iter().find_map(|name| {
+            let target = crate::config::ConfigFaceTarget {
+                body: body.definition_name().into(),
+                origin_feature: origin,
+                name: name.to_string(),
+                point: crate::apply_point(&inverse, point),
+                certificate: Some(FaceCertificate::Lineage),
+            };
+            self.configuration_face_indices(body, &target).ok()?.contains(&index).then_some(target)
+        })
+    }
+
+    /// The faces of `body` an exact history name finds: those named `name` or a piece of it, else
+    /// (a later join merged it into another face) the face that answers to it. Every one must
+    /// follow exact history and lie on one oriented plane.
+    pub(crate) fn lineage_face_indices(&self, body: &ModelBody, name: &str) -> Result<Vec<usize>> {
+        let names = crate::naming::names(body);
+        // `face` is `name` itself or a piece of it (a piece of a piece, …).
+        let piece_of = |face: &str| {
+            let mut n = face;
+            loop {
+                if n == name {
+                    return true;
+                }
+                match crate::piece_names::parent_piece(n) {
+                    Some(parent) => n = parent,
+                    None => return false,
+                }
+            }
+        };
+        let mut indices: Vec<usize> = names.faces.iter().enumerate().filter(|(_, face)| piece_of(face)).map(|(index, _)| index).collect();
+        if indices.is_empty() {
+            indices =
+                names.info.iter().enumerate().filter(|(_, info)| info.aliases.iter().any(|alias| alias == name)).map(|(index, _)| index).collect();
+        }
+        if indices.is_empty() {
+            return Err(DocError::Unknown(format!("face `{name}` on `{}` no longer exists", body.name)));
+        }
+        self.coplanar_pieces(body, &indices, |index| names.verified(index))?;
+        // A piece by its own name stands for itself, which a piece of a face split on purpose
+        // (Split Face) never does: that needs a fixed plane.
+        if crate::naming::strip_piece(name) != name
+            && let Some(plane) = indices.first().and_then(|index| body.body.planar_face(*index))
+            && split_on_purpose(body, &plane)
+        {
+            return Err(DocError::Invalid(
+                "this face was split on purpose (Split Face): pick an exact face piece's own plane with fixed:true".into(),
+            ));
+        }
+        Ok(indices)
+    }
+
+    /// Check that `indices` are pieces of one flat face: each `exact` and planar, all on one
+    /// oriented plane, and not split on purpose (Split Face: its pieces are separate faces, so
+    /// a pick on one never stands for the whole; docs/face-attachments.md).
+    pub(crate) fn coplanar_pieces(&self, body: &ModelBody, indices: &[usize], exact: impl Fn(usize) -> bool) -> Result<()> {
+        let scale = body.body.size();
+        let mut first = None;
+        for index in indices {
+            if !exact(*index) {
+                return Err(DocError::Invalid("this face's history is not exact".into()));
+            }
+            let plane = body.body.planar_face(*index).ok_or_else(|| DocError::Invalid("attached face is not flat".into()))?;
+            match &first {
+                None => first = Some(plane),
+                Some(first) if same_oriented_plane(first, &plane, scale) => {}
+                Some(_) => return Err(DocError::Invalid("attached face pieces no longer share one oriented plane".into())),
+            }
+        }
+        if let (Some(plane), true) = (first, indices.len() > 1)
+            && split_on_purpose(body, &plane)
+        {
+            return Err(DocError::Invalid(
+                "this face was split on purpose (Split Face): pick an exact face piece's own plane with fixed:true".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Of several faces carrying one construction certificate of feature `origin`, the pieces of
+    /// that feature's own face: copies a pattern or mirror made carry their seed's certificate
+    /// but are named as copies (`…@F<pattern>.<instance>`, docs/face-attachments.md), and pieces
+    /// a later feature split the face into share its exact name and plane.
+    pub(crate) fn certified_pieces(&self, body: &ModelBody, indices: Vec<usize>, origin: u64) -> Result<Vec<usize>> {
+        if indices.len() < 2 {
+            return Ok(indices);
+        }
+        let names = crate::naming::names(body);
+        let own = format!("F{origin}:");
+        let stem = |index: usize| names.faces.get(index).map(|name| crate::naming::strip_piece(name));
+        let seed: Vec<usize> =
+            indices.into_iter().filter(|index| stem(*index).is_some_and(|name| name.starts_with(&own) && !name.contains('@'))).collect();
+        let ambiguous = || DocError::Unknown("attached planar face certificate is missing or ambiguous".into());
+        let first = seed.first().and_then(|index| stem(*index)).ok_or_else(ambiguous)?;
+        if seed.iter().any(|index| stem(*index) != Some(first)) {
+            return Err(ambiguous());
+        }
+        // The certificate is exact; the names only tell the seed from its copies here.
+        self.coplanar_pieces(body, &seed, |_| true).map_err(|_| ambiguous())?;
+        Ok(seed)
+    }
+
+    /// Of several faces carrying one certificate of feature `origin`, those that are not a
+    /// pattern's or mirror's copies (named `…@F<pattern>.<instance>`), when any is not.
+    pub(crate) fn without_copies(&self, body: &ModelBody, indices: Vec<usize>) -> Vec<usize> {
+        if indices.len() < 2 {
+            return indices;
+        }
+        let names = crate::naming::names(body);
+        let copy = |index: &usize| names.faces.get(*index).is_some_and(|name| crate::naming::strip_piece(name).contains('@'));
+        if indices.iter().all(copy) {
+            return indices;
+        }
+        indices.into_iter().filter(|index| !copy(index)).collect()
     }
 }
 

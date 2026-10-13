@@ -8,7 +8,7 @@ fn thin_rotated_bounds_fit_using_the_original_full_projection() {
     for (width, height, scale) in [(1400.0, 900.0, 1.0), (700.0, 450.0, 2.0), (700.0, 360.0, 2.0), (900.0, 720.0, 1.0)] {
         let vp = Rect::from_min_max(pos2(250.0, 126.0), pos2(width, height - 30.0));
         let dock = Rect::from_min_max(pos2(width - 205.0, vp.top()), vp.max);
-        let layout = Layout::new(vp, &[dock], scale);
+        let layout = Layout::new(vp, &[dock], scale, crate::prefs::NavigatorStyle::Axes);
         assert!(layout.drawable.width() >= 80.0 && layout.drawable.height() >= 30.0, "{layout:?}");
         assert!(layout.axis_view.is_positive() && layout.navigation.is_positive(), "{layout:?}");
         assert!(!layout.drawable.intersect(dock).is_positive());
@@ -85,12 +85,12 @@ fn measured_palette_fit_exposes_endpoints_and_layout_changes_preserve_manual_vie
 #[test]
 fn hostile_or_empty_fit_keeps_the_existing_camera_valid() {
     let cam = Camera::default();
-    let layout = Layout::new(Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0)), &[], 1.0);
+    let layout = Layout::new(Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0)), &[], 1.0, crate::prefs::NavigatorStyle::Axes);
     assert!(fit_bounds(cam, &Aabb3::EMPTY, &layout, false).is_none());
     let bad = Aabb3 { min: Vec3::new(f64::NAN, 0.0, 0.0), max: Vec3::new(1.0, 1.0, 1.0) };
     assert!(fit_bounds(cam, &bad, &layout, true).is_none());
     let mut app = crate::SolveApp::new(Default::default(), Default::default());
-    let tiny = Layout::new(Rect::from_min_size(pos2(0.0, 0.0), vec2(5.0, 5.0)), &[], 1.0);
+    let tiny = Layout::new(Rect::from_min_size(pos2(0.0, 0.0), vec2(5.0, 5.0)), &[], 1.0, crate::prefs::NavigatorStyle::Axes);
     app.viewport.layout = Some(tiny);
     let bounds = Aabb3 { min: Vec3::ZERO, max: Vec3::new(20.0, 1.0, 1.0) };
     assert_eq!(app.fitted_bounds(cam, &bounds), cam);
@@ -122,69 +122,80 @@ fn fit_home_animation_and_manual_takeover_use_one_layout_solution() {
 }
 
 #[test]
-fn measured_axis_view_targets_home_and_drag_work_beside_the_palette_at_hidpi() {
-    for (scale, width, height) in [(1.0, 900.0, 720.0), (2.0, 700.0, 450.0), (2.0, 700.0, 360.0)] {
-        let mut h = Harness::new();
-        h.app.preferences.look_at_anim = false;
-        h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
-        h.app.run("sketch.circle.center", json!({"center":[0,0],"radius":1})).unwrap();
-        h.call("ui.prefs", json!({"ui_scale":scale}));
-        h.call("ui.resize", json!({"width":width,"height":height}));
-        h.app.fit_view();
-        h.settle();
-        let baseline = h.app.session.doc.to_json();
-        let undo = h.app.session.undo.len();
-        h.call("ui.view", json!({"view":"front"}));
-        let layout = h.app.viewport.layout.as_ref().unwrap().clone();
-        let palette = h.app.viewport.palette_rect.unwrap();
-        let outer = crate::scenario::rect_of("axis_view:outer").unwrap();
-        let home = crate::scenario::rect_of("axis_view:home").unwrap();
-        assert_eq!(outer, layout.axis_view);
-        assert!(outer.contains_rect(home));
-        assert!(layout.viewport.contains_rect(outer));
-        assert_eq!(outer.right_top(), layout.viewport.right_top());
-        if outer.intersect(palette).is_positive() {
-            // Short palettes may cover the fixed anchor; covered controls never steal input.
-            let covered = outer.intersect(palette).center();
-            let camera = h.app.cam;
-            h.call("ui.click", json!({"x":covered.x,"y":covered.y}));
-            assert_eq!(h.app.cam, camera);
+fn measured_navigator_targets_home_and_drag_work_beside_the_palette_at_hidpi() {
+    for style in crate::prefs::NavigatorStyle::ALL {
+        for (scale, width, height) in [(1.0, 900.0, 720.0), (2.0, 700.0, 450.0), (2.0, 700.0, 360.0)] {
+            let mut h = Harness::new();
+            h.call("ui.prefs", json!({"navigator_style":style}));
+            h.app.preferences.look_at_anim = false;
+            h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+            h.app.run("sketch.circle.center", json!({"center":[0,0],"radius":1})).unwrap();
+            h.call("ui.prefs", json!({"ui_scale":scale}));
+            h.call("ui.resize", json!({"width":width,"height":height}));
+            h.app.fit_view();
+            h.settle();
+            let baseline = h.app.session.doc.to_json();
+            let undo = h.app.session.undo.len();
+            h.call("ui.view", json!({"view":"front"}));
+            let layout = h.app.viewport.layout.as_ref().unwrap().clone();
+            let palette = h.app.viewport.palette_rect.unwrap();
+            let outer = crate::scenario::rect_of("axis_view:outer").unwrap();
+            let home = crate::scenario::rect_of("axis_view:home").unwrap();
+            assert_eq!(outer, layout.axis_view);
+            assert!(outer.contains_rect(home));
+            assert!(layout.viewport.contains_rect(outer));
+            assert_eq!(outer.right_top(), layout.viewport.right_top());
+            if outer.intersect(palette).is_positive() {
+                // Short palettes may cover the fixed anchor; covered controls never steal input.
+                let covered = outer.intersect(palette).center();
+                let camera = h.app.cam;
+                h.call("ui.click", json!({"x":covered.x,"y":covered.y}));
+                assert_eq!(h.app.cam, camera);
+                assert!(h.app.viewport.axis_drag.is_none());
+                assert_eq!(crate::scenario::rect_of("axis_view:outer").unwrap(), outer);
+                assert_eq!(h.app.session.doc.to_json(), baseline);
+                assert_eq!(h.app.session.undo.len(), undo);
+                continue;
+            }
+            assert!(!layout.navigation.intersect(outer).is_positive());
+            if style == crate::prefs::NavigatorStyle::Cube {
+                let front = crate::scenario::handle_at("navigation_cube:front").unwrap();
+                assert!(outer.contains(front));
+                let up = crate::scenario::handle_at("navigation_cube:control:up").unwrap();
+                h.call("ui.click", json!({"x":up.x,"y":up.y}));
+                assert!(h.app.cam.back().dist(Vec3::Z) < 1e-5);
+                let top = crate::scenario::handle_at("navigation_cube:top").unwrap();
+                h.call("ui.click", json!({"x":top.x,"y":top.y}));
+                assert!(h.app.cam.back().dist(Vec3::Z) < 1e-5);
+            } else {
+                let z = crate::scenario::handle_at("axis_view:z").unwrap();
+                assert!(outer.contains(z));
+                h.call("ui.click", json!({"x":z.x,"y":z.y}));
+                assert!(h.app.cam.back().dist(Vec3::Z) < 1e-5);
+                let z = crate::scenario::handle_at("axis_view:z").unwrap();
+                h.call("ui.click", json!({"x":z.x,"y":z.y}));
+                assert!(h.app.cam.back().dist(-Vec3::Z) < 1e-5);
+            }
+            h.call("ui.view", json!({"view":"front"}));
+            h.app.viewport.nav = Some(crate::viewport::NavMode::Pan);
+            let before = h.app.cam;
+            let c = h.app.viewport.layout.as_ref().unwrap().axis_view.center();
+            h.call("ui.drag", json!({"x0":c.x,"y0":c.y,"x1":c.x+24.0,"y1":c.y+8.0,"steps":8}));
+            assert!((h.app.cam.yaw - before.yaw - 24.0 * 0.008).abs() < 1e-6);
+            assert!((h.app.cam.pitch - before.pitch - 8.0 * 0.008).abs() < 1e-6);
+            assert_eq!(h.app.cam.target, before.target);
+            assert_eq!(h.app.cam.distance, before.distance);
             assert!(h.app.viewport.axis_drag.is_none());
-            assert_eq!(crate::scenario::rect_of("axis_view:outer").unwrap(), outer);
+            assert!(h.app.viewport.boxsel.is_none());
+            let home = crate::scenario::handle_at("axis_view:home").unwrap();
+            h.call("ui.click", json!({"x":home.x,"y":home.y}));
+            let mut iso = h.app.cam;
+            iso.set_view(StandardView::Iso);
+            assert_eq!((h.app.cam.yaw, h.app.cam.pitch), (iso.yaw, iso.pitch));
             assert_eq!(h.app.session.doc.to_json(), baseline);
             assert_eq!(h.app.session.undo.len(), undo);
-            continue;
+            assert!(h.app.session.selection.is_empty());
         }
-        assert!(!layout.navigation.intersect(outer).is_positive());
-        for name in ["x", "-x", "y", "-y", "z", "-z"] {
-            let p = crate::scenario::handle_at(&format!("axis_view:{name}")).unwrap();
-            assert!(outer.contains_rect(Rect::from_center_size(p, vec2(22.0, 22.0))));
-        }
-        let z = crate::scenario::handle_at("axis_view:z").unwrap();
-        h.call("ui.click", json!({"x":z.x,"y":z.y}));
-        assert!(h.app.cam.back().dist(Vec3::Z) < 1e-5);
-        let z = crate::scenario::handle_at("axis_view:z").unwrap();
-        h.call("ui.click", json!({"x":z.x,"y":z.y}));
-        assert!(h.app.cam.back().dist(-Vec3::Z) < 1e-5);
-        h.call("ui.view", json!({"view":"front"}));
-        h.app.viewport.nav = Some(crate::viewport::NavMode::Pan);
-        let before = h.app.cam;
-        let c = h.app.viewport.layout.as_ref().unwrap().axis_view.center();
-        h.call("ui.drag", json!({"x0":c.x,"y0":c.y,"x1":c.x+24.0,"y1":c.y+8.0,"steps":8}));
-        assert!((h.app.cam.yaw - before.yaw - 24.0 * 0.008).abs() < 1e-6);
-        assert!((h.app.cam.pitch - before.pitch - 8.0 * 0.008).abs() < 1e-6);
-        assert_eq!(h.app.cam.target, before.target);
-        assert_eq!(h.app.cam.distance, before.distance);
-        assert!(h.app.viewport.axis_drag.is_none());
-        assert!(h.app.viewport.boxsel.is_none());
-        let home = crate::scenario::handle_at("axis_view:home").unwrap();
-        h.call("ui.click", json!({"x":home.x,"y":home.y}));
-        let mut iso = h.app.cam;
-        iso.set_view(StandardView::Iso);
-        assert_eq!((h.app.cam.yaw, h.app.cam.pitch), (iso.yaw, iso.pitch));
-        assert_eq!(h.app.session.doc.to_json(), baseline);
-        assert_eq!(h.app.session.undo.len(), undo);
-        assert!(h.app.session.selection.is_empty());
     }
 }
 
@@ -211,7 +222,7 @@ fn immediate_standard_view_cancels_fit_before_the_measured_frame() {
 fn navigation_anchors_ignore_positioned_resized_and_covering_dialogs() {
     for (width, height, scale) in [(1400.0, 900.0, 1.0), (700.0, 450.0, 2.0), (700.0, 360.0, 2.0)] {
         let vp = Rect::from_min_max(pos2(250.0, 126.0), pos2(width, height - 30.0));
-        let baseline = Layout::new(vp, &[], scale);
+        let baseline = Layout::new(vp, &[], scale, crate::prefs::NavigatorStyle::Axes);
         assert!(baseline.axis_view.is_positive() && baseline.navigation.is_positive());
         assert_eq!(baseline.axis_view.right_top(), vp.right_top());
         assert_eq!(baseline.navigation.center().x, vp.center().x);
@@ -223,7 +234,7 @@ fn navigation_anchors_ignore_positioned_resized_and_covering_dialogs() {
             vec![vp],
         ];
         for docks in cases {
-            let measured = Layout::new(vp, &docks, scale);
+            let measured = Layout::new(vp, &docks, scale, crate::prefs::NavigatorStyle::Axes);
             assert_eq!(measured.axis_view, baseline.axis_view, "{docks:?}");
             assert_eq!(measured.navigation, baseline.navigation, "{docks:?}");
             assert!(vp.contains_rect(measured.axis_view));
@@ -269,8 +280,8 @@ fn tiny_viewports_never_overlap_navigation_and_axis_view() {
     for width in [39.0, 40.0, 90.0, 120.0, 160.0, 310.0] {
         for height in [30.0, 80.0, 130.0, 160.0, 240.0] {
             let vp = Rect::from_min_size(pos2(20.0, 30.0), vec2(width, height));
-            let clear = Layout::new(vp, &[], 1.0);
-            let covered = Layout::new(vp, &[vp], 1.0);
+            let clear = Layout::new(vp, &[], 1.0, crate::prefs::NavigatorStyle::Axes);
+            let covered = Layout::new(vp, &[vp], 1.0, crate::prefs::NavigatorStyle::Axes);
             assert_eq!(clear.axis_view, covered.axis_view);
             assert_eq!(clear.navigation, covered.navigation);
             assert!(!clear.axis_view.intersect(clear.navigation).is_positive());

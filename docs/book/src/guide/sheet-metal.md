@@ -7,12 +7,30 @@ The SHEET METAL tab builds parts from a sheet of constant thickness under a **sh
   sketch, or an edge flange from a part edge.
 - **Hem** (`sheet.hem`) and **Fold** (`sheet.fold`) along a sketch line.
 - **Unfold / Refold** (`sheet.unfold`, `sheet.refold`) for working on the flat part.
-- **Convert** (`sheet.convert`) turns a solid of constant thickness into sheet metal.
+- **Convert** (`sheet.convert`) turns a plate of constant thickness into sheet metal, or, with
+  bend edges, a solid or a shelled body.
 - **Create Flat Pattern** (`sheet.flat_pattern`) shows the flat part with its bend lines and a
   bend table, and exports it as DXF or a bend-table CSV through the save picker.
 
 Bends follow the rule's K-factor, so flat lengths match what a press brake will make. Tests
 check flat lengths against hand-computed bend allowances.
+
+An edge flange takes its setback off its own edge only. Where that edge ends at an inside
+corner of the base (the base runs on past it, like the leg of an L), the rest of the base
+stays, and the rule's **bend relief** (`relief_width` and `relief_depth`; Relief Width and
+Relief Depth in Sheet Metal Rules) is cut into it beside the bend's end: a slot the relief
+width wide, from the relief depth before the bend line to the relief width past the flange's
+far edge in the flat pattern. The bend and the flange are then free of the base, folded and
+flat. A relief that can't be cut (a width under 0.01 mm, one as wide as the base beside the
+bend, or a slot that would cut the base apart) is left out, and the flange feature reports a
+warning saying where.
+
+Where a cut-out has taken part of an edge away (a corner cut off the plate, a notch in the
+middle of an edge), an edge flange picked on that edge runs along the stretch the cut-outs
+leave nearest the pick, and takes its setback off that stretch only. The base on the other
+side of a notch keeps its edge, and a pick there, in the same feature or a later one, makes
+a flange of its own. Where base is still left beside the bend's end at such a cut-out, it
+gets the bend relief as above. An edge that cut-outs have taken whole is refused.
 
 Where two bends of one edge flange feature meet at a corner of the base, the rule's **corner
 relief shape** (`corner_relief_shape`; Corner Relief Shape in Sheet Metal Rules) says what is
@@ -61,10 +79,62 @@ per edge with an angle and a height box; an empty box takes the value above.
  "height":38.6,"angle":"75 deg"}}
 ```
 
+A flange can also stand on the far edge of another flange: a return, such as a lip turned in
+along the top of a tray's walls. It runs along that edge from end to end, so it follows the
+closed end of the flange it stands on, slanted or not. Two returns of one feature whose flanges
+meet at a corner of the base are closed toward each other as well, with the rule's gap. They
+are mitred either side of a plane that runs along the mean of the two panels' normals, bisects
+their bend lines and passes where the lines their panels start on cross. Returns that lie in
+one plane (level returns on a tray's walls, whatever the walls' angle) then meet on the corner's
+bisector, like the sides of a picture frame. Each panel ends on a slanted line in the flat.
+Each bend stops square where all of it keeps half the gap from that plane, at the latest at
+the end of the flange it stands on, which can leave a short stretch of that flange's edge bare.
+Returns turned opposite ways pass each other. A return that meets no other at a corner ends
+with the flange it stands on; where the flange beside that one leans in over it, the return is
+cut back until it keeps as clear of that flange as the end of the flange it stands on does.
+Returns that can't be closed stay open with a warning, as on the base. Returns of separate
+features don't close toward each other either: make the returns round a corner in one feature.
+A corner relief changes none of this: it leaves the flanges' closed ends as they are, so the
+returns on them close over a relieved corner as over a whole one.
+
+```json
+{"command":"sheet.flange","params":{"edges":[[60,2,20],[118,45,20],[60,88,20],[2,45,20]],
+ "height":12,"angle":"90 deg"}}
+```
+
+(The four returns of a 120 x 90 tray in 2 mm sheet with 90° walls 20 high: each point is the
+middle of a wall's far edge on its inner face, so the returns turn in over the base.)
+
+**Convert** also takes a solid or a shelled body: pick the face that stays fixed and the sharp
+edges that become bends (`bends`; Bend Edges in the dialog). The flat faces reached from the
+fixed face across those edges become the sheet. A shelled body keeps its walls and their
+thickness; any other solid's faces become the outside of the sheet, with the rule's thickness
+taken into the body. Each sharp edge stays where the faces of its bend would meet, so the part
+keeps its envelope and the flat pattern is the outside lengths less a bend deduction per bend,
+2·(R + T)·tan(θ/2) − θ·(R + K·T). A bend can be picked on either skin of a shell; bends turn
+either way, follow one another and take any angle (the walls of a tapered tray at 72°). An
+edge between two faces of the sheet that is no bend is cut open, each side half the rule's
+**gap** from the plane halfway between the two, like the corners of a tray. The result is an
+ordinary sheet body: edge flanges, cuts, Unfold, the flat pattern and its exports work on it,
+and it follows the solid when a parameter changes (the edges and the fixed face are found by
+their names). Without bend edges Convert expects a plate, as before. Not converted yet: curved
+faces (rolled sheet, a filleted edge as a bend), faces with holes or curved edges (cut them
+after converting) and bends that close a ring.
+
+```json
+{"command":"solid.box","params":{"length":100,"width":60,"height":30,"body_name":"Tray"}}
+{"command":"solid.shell","params":{"faces":[[50,30,30]],"thickness":2}}
+{"command":"sheet.convert","params":{"body":"Tray","face":[50,30,0],
+ "bends":[[50,0,0],[100,30,0],[50,60,0],[0,30,0]]}}
+```
+
 For a shop drawing or spreadsheet, `sheet.export_bend_table` returns CSV by default; choose
 `format: "json"` for structured data. It includes the sheet rule, thickness, bend angles,
 radii, allowances and flat centre-line coordinates. Lengths use millimetres and angles use
-degrees. Supply `path` to save it, or omit `path` to receive the content through the command
+degrees. A bend is listed where its centre line has material: one that a cut-out has shortened
+gives the length and ends it has left, and one that cut-outs split gives a row for every piece,
+all with the bend's number (the flat pattern and the DXF draw the same pieces as bend lines).
+Supply `path` to save it, or omit `path` to receive the content through the command
 response. `body` defaults to the last sheet body. Exporting does not add a timeline entry or
 consume an undo step.
 
@@ -79,12 +149,22 @@ adaptively. The `OUTLINE`, `BEND_UP` and `BEND_DOWN` layers separate cuts from b
 Base-flange profiles keep their interior holes. Through cuts that cross a sheet edge become
 notches in the flat outline; overlapping and repeated cuts remove their combined area once.
 The flat preview, DXF and unfolded solid use the same material boundaries. Lines and circular
-arcs remain exact; other profile curves use a 0.001 mm chord tolerance.
+arcs remain exact. An ellipse, a spline or text stays the curve it was drawn as in the flat
+pattern and the unfolded solid; the folded solid follows it with tangent arcs within 0.001 mm,
+and the DXF and the point lists write it as chords within 0.001 mm.
+Flat-pattern JSON lists each cut-out twice, in the same order: as points (`cutouts`), and
+exactly (`cutout_shapes`): a round hole as `{"circle": {"center", "radius"}}`, any other as its
+`line`, `arc` (centre, radius, start and sweep in degrees) and `polyline` segments (one
+`polyline` for each ellipse quarter, spline or glyph curve).
 
 Cuts can leave separate material pieces, including the centre of a ring cut. These pieces
 remain one logical sheet group through Unfold / Refold and export as separate flat outlines.
 Large profiles that exceed the geometry processing budget report an error instead of
 exporting a partial outline.
+
+A Box cut, or a Cylinder cut whose axis is the sheet's normal, machines the sheet like the
+extrude of its footprint: through the sheet it is a cut-out (a cylinder a round one), and
+part way it is a pocket. A primitive cut at any other angle, or across a folded bend, is refused.
 
 Parallel, untapered extrude cuts also preserve shallow pockets through Unfold / Refold.
 The pocket floor and side walls remain solid geometry; overlapping cuts from opposite sides

@@ -66,6 +66,24 @@ if (-not $Reopen) {
     Initialize-Session
     $taskEmpty = Read-ToolJson (Invoke-Tool 'measure')
     if ($taskEmpty.total.volume_mm3 -ne 0) { throw 'MCP sessions share an in-memory model' }
+    $null = Invoke-Tool 'execute' @{command = 'component.insert_design'; params = @{path = 'unraid-proof.solvecraft'}}
+    $taskLinked = Read-ToolJson (Invoke-Tool 'measure')
+    if ([Math]::Abs($taskLinked.total.volume_mm3 - 24000) -gt 0.01) { throw 'Confined linked design was not inserted' }
+    $null = Invoke-Tool 'save' @{path = 'linked-proof.json'; format = 'json'}
+    $taskLinkedFile = Join-Path $OutputDirectory 'linked-proof.json'
+    Invoke-WebRequest "$BaseUrl/files/linked-proof.json" -Headers @{Authorization = "Bearer $Token"} -OutFile $taskLinkedFile
+    $taskLinkedJson = Get-Content $taskLinkedFile -Raw | ConvertFrom-Json -Depth 100
+    foreach ($taskLink in $taskLinkedJson.links.PSObject.Properties) { $taskLink.Value.path = '/data/mcp-token' }
+    $taskHostileJson = $taskLinkedJson | ConvertTo-Json -Depth 100 -Compress
+    $null = Invoke-WebRequest "$BaseUrl/files/hostile-linked-proof.json" -Method Put -Headers @{Authorization = "Bearer $Token"} -Body ([Text.Encoding]::UTF8.GetBytes($taskHostileJson))
+    $null = Invoke-Tool 'open' @{path = 'hostile-linked-proof.json'}
+    $taskLinkProbeBody = @{jsonrpc = '2.0'; id = 998; method = 'tools/call'; params = @{name = 'execute'; arguments = @{command = 'component.update_links'}}} | ConvertTo-Json -Depth 10 -Compress
+    $taskLinkRejected = Invoke-RestMethod "$BaseUrl/mcp" -Method Post -ContentType 'application/json' -Headers $taskHeaders -Body $taskLinkProbeBody
+    if (-not $taskLinkRejected.result.isError -or $taskLinkRejected.result.content.text -notmatch 'linked designs must stay inside') { throw 'Stored links can escape the files directory on refresh' }
+    $null = Invoke-Tool 'open' @{path = 'linked-proof.json'}
+    $null = Invoke-Tool 'execute' @{command = 'component.update_links'}
+    $taskRefreshed = Read-ToolJson (Invoke-Tool 'measure')
+    if ([Math]::Abs($taskRefreshed.total.volume_mm3 - 24000) -gt 0.01) { throw 'Confined linked design refresh changed its volume' }
     $null = Invoke-WebRequest "$BaseUrl/mcp" -Method Delete -Headers $taskHeaders
     $taskHeaders['Mcp-Session-Id'] = $taskFirstSession
     $taskBadPath = @{jsonrpc = '2.0'; id = 999; method = 'tools/call'; params = @{name = 'save'; arguments = @{path = '../escape.solvecraft'}}} | ConvertTo-Json -Depth 10 -Compress
@@ -75,6 +93,7 @@ if (-not $Reopen) {
         @{name = 'crash_reports'},
         @{name = 'execute'; arguments = @{command = 'diagnostics.crash_reports.clear'}},
         @{name = 'execute'; arguments = @{command = 'doc.recover'}},
+        @{name = 'execute'; arguments = @{command = 'component.insert_design'; params = @{path = '/data/mcp-token'}}},
         @{name = 'batch'; arguments = @{commands = @(@{command = 'sketch.text'; params = @{font = '../outside.ttf'}})}},
         @{name = 'execute'; arguments = @{command = 'sketch.text'; params = @{font = '%HOME%/outside.ttf'}}}
     )) {

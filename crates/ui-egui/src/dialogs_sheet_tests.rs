@@ -421,3 +421,41 @@ fn edge_flanges_can_have_an_angle_and_a_height_of_their_own() {
         json!([{"point": pt(point(1)), "angle": "100 deg"}, {"point": pt(point(3)), "angle": "90 deg", "height": "15 mm"}])
     );
 }
+
+/// Convert takes a fixed face and, for a solid or shelled body, its bend edges; Edit Feature
+/// brings both back.
+#[test]
+fn convert_takes_the_fixed_face_and_the_bend_edges() {
+    let mut s = Session::default();
+    s.execute("solid.box", &json!({"length": 100, "width": 60, "height": 30, "body_name": "Tray"})).unwrap();
+    s.execute("solid.shell", &json!({"faces": [[50, 30, 30]], "thickness": 2})).unwrap();
+    let mut app = SolveApp::new(s, Services::default());
+    app.start("sheet.convert");
+    let mut d = app.dialog.clone().unwrap();
+    assert_eq!(d.inputs.iter().map(|i| i.label).collect::<Vec<_>>(), ["Fixed Face", "Bend Edges"]);
+    assert!(apply_commands(&app, &d).is_err(), "nothing to convert without a face");
+    // The face alone is the plate conversion: no `bends`.
+    d.inputs[0].items = face_sel(&app.session, Vec3::new(50.0, 30.0, 0.0)).into_iter().collect();
+    assert!(apply_commands(&app, &d).unwrap()[0].1.get("bends").is_none());
+    let edges: Vec<Sel> = [[50.0, 0.0, 0.0], [100.0, 30.0, 0.0], [50.0, 60.0, 0.0], [0.0, 30.0, 0.0]]
+        .iter()
+        .filter_map(|p| edge_sel(&app.session, Vec3::new(p[0], p[1], p[2])))
+        .collect();
+    d.inputs[1].items = edges;
+    let c = apply_commands(&app, &d).unwrap();
+    assert_eq!(c[0].0, "sheet.convert");
+    assert_eq!(c[0].1["bends"], json!([[50.0, 0.0, 0.0], [100.0, 30.0, 0.0], [50.0, 60.0, 0.0], [0.0, 30.0, 0.0]]));
+    run_all(&mut app, c);
+    let bends = |app: &mut SolveApp| app.session.execute("sheet.flat_pattern", &json!({})).unwrap()["bends"].as_array().map(Vec::len);
+    assert_eq!(bends(&mut app), Some(4));
+    // Edit Feature: the face and the four edges are back in their rows, and OK rebuilds the sheet.
+    let f = app.session.doc.features.last().unwrap().clone();
+    let e = edit_dialog(&app, f.id, None).unwrap();
+    assert_eq!((e.inputs[0].items.len(), e.inputs[1].items.len()), (1, 4));
+    let c = apply_commands(&app, &e).unwrap();
+    assert_eq!(c[0].0, "timeline.redefine");
+    assert_eq!(c[0].1["params"]["bends"].as_array().map(Vec::len), Some(4));
+    run_all(&mut app, c);
+    assert_eq!(bends(&mut app), Some(4));
+    assert!(app.session.model.results.iter().all(|r| r.error.is_none()), "{:?}", app.session.model.results);
+}

@@ -173,6 +173,26 @@ pub const PAGE_GRAPHICS: usize = 4;
 pub const THEMES: [(&str, &str); 3] = [("dark", "Dark"), ("light", "Light"), ("system", "System")];
 pub const MSAA: [u32; 4] = [1, 2, 4, 8];
 
+/// Original view navigators, independent of the mouse navigation preset.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NavigatorStyle {
+    #[default]
+    Axes,
+    Cube,
+}
+
+impl NavigatorStyle {
+    pub const ALL: [Self; 2] = [Self::Axes, Self::Cube];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Axes => "Signed axes",
+            Self::Cube => "Cube",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Prefs {
@@ -180,6 +200,8 @@ pub struct Prefs {
     pub default_units: String,
     /// Mouse mapping: `fusion`, `solidworks` or `inventor`.
     pub nav: String,
+    /// View orientation widget: original signed axes (default) or compact cube.
+    pub navigator_style: NavigatorStyle,
     /// Show the radial ring and enable hold/flick gestures for viewport context menus.
     pub radial_context_menu: bool,
     /// The wheel zooms out when turned forward.
@@ -214,6 +236,36 @@ pub struct Prefs {
     pub up_axis: String,
     /// After a STEP or IGES file opens, offer to stand a Y-up part up (`stand_up`).
     pub offer_stand_up: bool,
+    /// What a middle-button double-click in the view does: `home`, `fit` or `off`.
+    pub middle_double_click: String,
+}
+
+/// What a middle-button double-click in the view does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MiddleDoubleClick {
+    /// Go Home (the iso view, framing what is shown).
+    Home,
+    /// Frame what is shown, keeping the orientation.
+    Fit,
+    Off,
+}
+
+impl MiddleDoubleClick {
+    pub const ALL: [(MiddleDoubleClick, &'static str, &'static str); 3] =
+        [(MiddleDoubleClick::Home, "home", "Home"), (MiddleDoubleClick::Fit, "fit", "Fit"), (MiddleDoubleClick::Off, "off", "Off")];
+
+    /// The preference's setting (Home for an unknown one).
+    pub fn of(app: &SolveApp) -> MiddleDoubleClick {
+        Self::parse(&app.preferences.middle_double_click).unwrap_or(MiddleDoubleClick::Home)
+    }
+
+    pub fn parse(id: &str) -> Option<MiddleDoubleClick> {
+        Self::ALL.iter().find(|(_, i, _)| *i == id).map(|(m, _, _)| *m)
+    }
+
+    pub fn label(self) -> &'static str {
+        Self::ALL.iter().find(|(m, _, _)| *m == self).map_or("Home", |(_, _, l)| l)
+    }
 }
 
 impl Default for Prefs {
@@ -221,6 +273,7 @@ impl Default for Prefs {
         Prefs {
             default_units: "mm".into(),
             nav: "fusion".into(),
+            navigator_style: NavigatorStyle::default(),
             radial_context_menu: false,
             zoom_reverse: false,
             orbit_cursor: false,
@@ -239,6 +292,7 @@ impl Default for Prefs {
             look_at_speed: 1.0,
             up_axis: "z".into(),
             offer_stand_up: true,
+            middle_double_click: "home".into(),
         }
     }
 }
@@ -332,6 +386,7 @@ fn defaults(app: &mut SolveApp, page: usize) {
         }
         1 => {
             p.nav = d.nav;
+            p.navigator_style = d.navigator_style;
             p.radial_context_menu = d.radial_context_menu;
             p.zoom_reverse = d.zoom_reverse;
             p.zoom_to_cursor = d.zoom_to_cursor;
@@ -342,6 +397,7 @@ fn defaults(app: &mut SolveApp, page: usize) {
             p.space_mouse_speed = d.space_mouse_speed;
             p.look_at_anim = d.look_at_anim;
             p.look_at_speed = d.look_at_speed;
+            p.middle_double_click = d.middle_double_click;
         }
         PAGE_SHORTCUTS => crate::keymap::reset(app, None),
         PAGE_DESIGN => {
@@ -467,7 +523,7 @@ fn pivot_under(app: &SolveApp, proj: &crate::viewport::Proj, at: Pos2) -> Vec3 {
             _ => {}
         }
     }
-    let b = solidcraft_engine::view::bounds(&app.session);
+    let b = crate::viewport::view_bounds(app);
     if b.is_empty() { app.cam.target } else { b.center() }
 }
 
@@ -839,6 +895,18 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
             ui.label("Context menu");
             ui.checkbox(&mut app.preferences.radial_context_menu, "Radial context menu");
             ui.end_row();
+            ui.label("View navigator");
+            let picker =
+                egui::ComboBox::from_id_salt("pref_navigator_style").selected_text(app.preferences.navigator_style.label()).show_ui(ui, |ui| {
+                    for style in NavigatorStyle::ALL {
+                        let response = ui.selectable_value(&mut app.preferences.navigator_style, style, style.label());
+                        crate::scenario::publish_rect(&format!("prefs:navigator:{}", style.label()), response.rect);
+                        crate::scenario::publish_handle(&format!("prefs:navigator:{}", style.label()), response.rect.center());
+                    }
+                });
+            crate::scenario::publish_rect("prefs:navigator", picker.response.rect);
+            crate::scenario::publish_handle("prefs:navigator", picker.response.rect.center());
+            ui.end_row();
             ui.label("Reverse zoom direction");
             ui.checkbox(&mut app.preferences.zoom_reverse, "");
             ui.end_row();
@@ -860,6 +928,18 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
                 ui.radio_value(&mut app.preferences.orbit_cursor, false, "View centre");
                 ui.radio_value(&mut app.preferences.orbit_cursor, true, "Point under the cursor");
             });
+            ui.end_row();
+            ui.label("Middle double-click");
+            let current = MiddleDoubleClick::of(app);
+            egui::ComboBox::from_id_salt("pref_middle_double_click").selected_text(current.label()).show_ui(ui, |ui| {
+                for (m, id, label) in MiddleDoubleClick::ALL {
+                    if ui.selectable_label(current == m, label).clicked() {
+                        app.preferences.middle_double_click = id.into();
+                    }
+                }
+            })
+            .response
+            .on_hover_text("Double-clicking the middle button in the view: Home (the home view, framing what is shown), Fit (frame what is shown, keeping the orientation) or nothing");
             ui.end_row();
             ui.label("Animate view changes");
             ui.checkbox(&mut app.preferences.look_at_anim, "Axis view, Look At, Home and Fit");
@@ -1015,6 +1095,9 @@ pub fn set(app: &mut SolveApp, p: &serde_json::Value) -> Result<serde_json::Valu
     if !(0.5..=2.5).contains(&new.ui_scale) || !(0.25..=4.0).contains(&new.look_at_speed) {
         return Err("`ui_scale` must be 0.5…2.5 and `look_at_speed` 0.25…4".into());
     }
+    if MiddleDoubleClick::parse(&new.middle_double_click).is_none() {
+        return Err("`middle_double_click` must be home, fit or off".into());
+    }
     if new.theme != app.preferences.theme && new.theme != "system" {
         app.ui.dark = new.theme == "dark";
     }
@@ -1110,6 +1193,50 @@ mod tests {
         assert_eq!(parse_length_mm("abc", inch), None);
         assert_eq!(parse_length_mm("", inch), None);
         assert_eq!(parse_length_mm("1e400", 1.0), None);
+    }
+
+    #[test]
+    fn navigator_picker_preserves_axes_and_follows_preferences_transactions() {
+        let old: Prefs = serde_json::from_value(json!({"nav":"solidworks"})).unwrap();
+        assert_eq!(old.navigator_style, NavigatorStyle::Axes);
+        let mut h = crate::scenario::Harness::new();
+        assert!(crate::scenario::handle_at("axis_view:z").is_some());
+        assert!(crate::scenario::handle_at("navigation_cube:front").is_none());
+        let camera = h.app.cam;
+        let design = h.app.session.doc.to_json();
+        let nav = h.app.preferences.nav.clone();
+        h.call("ui.prefs", json!({"open":"Navigation"}));
+        let picker = crate::scenario::rect_of("prefs:navigator").unwrap().center();
+        h.call("ui.click", json!({"x":picker.x,"y":picker.y}));
+        let cube = crate::scenario::rect_of("prefs:navigator:Cube").unwrap().center();
+        assert!(crate::scenario::rect_of("prefs:navigator:Signed axes").is_some());
+        h.call("ui.click", json!({"x":cube.x,"y":cube.y}));
+        assert_eq!(h.app.preferences.navigator_style, NavigatorStyle::Cube);
+        assert!(crate::scenario::handle_at("navigation_cube:front").is_some());
+        assert_eq!(h.app.preferences.nav, nav);
+        assert_eq!(h.app.cam, camera);
+        assert_eq!(h.app.session.doc.to_json(), design);
+        let mut restored = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
+        restored.load_prefs(&h.app.prefs());
+        assert_eq!(restored.preferences.navigator_style, NavigatorStyle::Cube);
+        let before = h.app.preferences.clone();
+        assert!(control(&mut h.app, &json!({"navigator_style":"unknown", "nav":"solidworks"})).is_err());
+        assert_eq!(h.app.preferences, before, "invalid settings must fail atomically");
+        h.call("ui.prefs", json!({"button":"cancel"}));
+        assert_eq!(h.app.preferences.navigator_style, NavigatorStyle::Axes);
+        assert!(crate::scenario::handle_at("navigation_cube:front").is_none());
+        h.call("ui.prefs", json!({"open":"Navigation","navigator_style":"cube"}));
+        h.call("ui.prefs", json!({"button":"apply"}));
+        h.call("ui.prefs", json!({"button":"defaults"}));
+        assert_eq!(h.app.preferences.navigator_style, NavigatorStyle::Axes);
+        h.call("ui.prefs", json!({"button":"cancel"}));
+        assert_eq!(h.app.preferences.navigator_style, NavigatorStyle::Cube);
+        h.call("ui.prefs", json!({"navigator_style":"axes", "look_at_anim":false}));
+        h.call("ui.view", json!({"view":"front"}));
+        let axis = crate::scenario::handle_at("axis_view:-y").unwrap();
+        h.call("ui.click", json!({"x":axis.x,"y":axis.y}));
+        assert!(h.app.cam.back().dist(Vec3::Y) < 1e-6, "original axes retain click-again reversal");
+        assert_eq!(h.app.session.doc.to_json(), design);
     }
 
     #[test]
@@ -1353,7 +1480,7 @@ mod tests {
         let hits = crate::viewport::pick(&app, &proj, corner);
         use crate::viewport::Hit;
         assert!(!hits.iter().any(|h| matches!(h, Hit::Face { .. } | Hit::Edge { .. } | Hit::Vertex { .. })), "the corner is empty space");
-        let centre = solidcraft_engine::view::bounds(&app.session).center();
+        let centre = crate::viewport::view_bounds(&app).center();
         orbit(&mut app, rect, 40.0, 25.0, Some(corner));
         assert_eq!(app.viewport.orbit_pivot, Some(centre));
 

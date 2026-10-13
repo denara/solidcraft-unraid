@@ -13,7 +13,7 @@ use crate::theme::Tokens;
 
 /// Recent designs kept.
 pub const MAX_RECENT: usize = 12;
-const THUMB: [usize; 2] = [240, 150];
+const THUMB: [usize; 2] = solidcraft_engine::io::THUMBNAIL_SIZE;
 
 /// What a background job makes: a key ("sample:N" or a path), the picture, and for samples the
 /// built design (opened at once when picked).
@@ -96,6 +96,13 @@ fn cached(key: &str) -> Option<egui::ColorImage> {
         return None;
     }
     let bytes = std::fs::read(path).ok()?;
+    decode_thumbnail(bytes)
+}
+
+fn decode_thumbnail(bytes: Vec<u8>) -> Option<egui::ColorImage> {
+    if bytes.len() > 512 * 1024 {
+        return None;
+    }
     let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), image::ImageFormat::Png);
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(THUMB[0] as u32);
@@ -169,6 +176,11 @@ pub(crate) fn install(h: &mut HomeState, ctx: &egui::Context, key: &str, img: Op
 fn make(key: &str) -> Made {
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(img) = cached(key) {
+        return (key.to_string(), Some(img), None);
+    }
+    if !key.starts_with("sample:")
+        && let Some(img) = solidcraft_engine::io::read_design_thumbnail_file(key).and_then(decode_thumbnail)
+    {
         return (key.to_string(), Some(img), None);
     }
     let mut s = Session::default();
@@ -573,6 +585,32 @@ mod tests {
         assert!(cached(&key).is_none());
         std::fs::remove_file(path).unwrap();
         std::fs::remove_file(png).unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn portable_thumbnail_loads_without_a_local_picture_or_model_rebuild() {
+        let mut session = Session::default();
+        session.execute("solid.box", &serde_json::json!({"length":10,"width":20,"height":30})).unwrap();
+        for body in &session.world_state().bodies {
+            body.mesh();
+        }
+        let bytes = session.design_container(solidcraft_engine::io::DesignCompression::Fast, false, true).unwrap();
+        let png = solidcraft_engine::io::read_design_thumbnail(&bytes).unwrap();
+        let image = decode_thumbnail(png).unwrap();
+        assert_eq!(image.size, THUMB);
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("solidcraft-portable-thumb-{}-{nonce}.solidcraft", std::process::id()));
+        std::fs::write(&path, bytes).unwrap();
+        let key = path.to_string_lossy().to_string();
+        assert!(cached(&key).is_none());
+        let (_, picture, rebuilt) = make(&key);
+        assert!(rebuilt.is_none());
+        assert_eq!(picture.unwrap().pixels, image.pixels);
+        assert!(!cache_path(&key).unwrap().exists(), "fallback rebuilding would create a local picture");
+        std::fs::remove_file(path).unwrap();
+        assert!(decode_thumbnail(vec![0; 600_000]).is_none());
+        assert!(decode_thumbnail(vec![0; 24]).is_none());
     }
 
     #[test]

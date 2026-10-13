@@ -327,3 +327,27 @@ fn rolling_ball_past_the_end_seam_is_too_large_and_reduces() {
     }
     assert!(worst < 1e-3, "blend surface is {worst} mm off the analytic round at r {r}");
 }
+
+#[test]
+fn a_refused_edge_is_not_rolled_again_after_blends_far_from_it() {
+    // The crossing cylinders' seam refuses a round of 3 (too large). A bar joined to them has
+    // two straight edges at its far end that round on their own. Each blend there leaves the
+    // seam's surroundings as they were, so the seam is tried once, not once per blend, and the
+    // refusal is the same.
+    let (r1, r2, d, h) = (17.0, 9.5, 12.0, 10.0);
+    let body = boolean(&cylinder(Vec3::ZERO, Vec3::Z, r1, h).unwrap(), &cylinder(Vec3::new(d, 0.0, 0.0), Vec3::Z, r2, h).unwrap(), BoolOp::Union)
+        .unwrap()
+        .unwrap();
+    let bar = crate::box_solid(Vec3::new(-80.0, -5.0, 0.0), Vec3::new(-10.0, 5.0, h)).unwrap();
+    let body = boolean(&body, &bar, BoolOp::Union).unwrap().unwrap();
+    let along = (r1 * r1 - r2 * r2 + d * d) / (2.0 * d);
+    let seam = Vec3::new(along, (r1 * r1 - along * along).sqrt(), h / 2.0);
+    let ends = [Vec3::new(-80.0, -5.0, h / 2.0), Vec3::new(-80.0, 5.0, h / 2.0)];
+    crate::blend::ROLLS.with(|n| n.set(0));
+    let e = fillet(&body, &[seam, ends[0], ends[1]], 3.0).unwrap_err();
+    assert!(matches!(e, KernelError::TooLarge(_)), "{e}");
+    let rolls = crate::blend::ROLLS.with(|n| n.get());
+    assert_eq!(rolls, 1, "the seam was rolled {rolls} times");
+    // The far edges alone still round.
+    assert!(fillet(&body, &ends, 3.0).is_ok());
+}

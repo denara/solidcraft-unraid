@@ -36,18 +36,21 @@ to the same user installation:
 ```sh
 flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 flatpak remote-add --user --if-not-exists solidcraft https://bherbruck.github.io/solidcraft/flatpak/solidcraft.flatpakrepo
-flatpak install --user solidcraft ai.storyteller.solvecraft
-flatpak run ai.storyteller.solvecraft
+flatpak install --user solidcraft ai.storyteller.solidcraft
+flatpak run ai.storyteller.solidcraft
 ```
 
-The application ID is unchanged, so existing installations keep
-receiving updates under whatever remote name they were added with (see the
-[compatibility notes](https://github.com/bherbruck/solidcraft/blob/main/docs/compatibility.md#package-ids)).
+Releases up to 0.7 used the application ID `ai.storyteller.solvecraft`. If you installed one
+of those from the SolidCraft remote, `flatpak update --user` reports it as end-of-life and offers
+to replace it with `ai.storyteller.solidcraft`; accept, and your settings and autosaves move with
+it. If you installed a `.flatpak` bundle, install the new bundle, launch it once (it copies your
+settings), then run `flatpak uninstall --user ai.storyteller.solvecraft` (see the
+[compatibility notes](https://github.com/bherbruck/solidcraft/blob/main/docs/compatibility.md#linux-app-id)).
 
 Alternatively, download the release's `.flatpak` file for your architecture and run
 `flatpak install --user ./solidcraft-VERSION-linux-ARCH.flatpak`. The bundle supplies the
 Flathub runtime repository address; installation still needs internet access to fetch any
-missing runtime. Launch with `flatpak run ai.storyteller.solvecraft`, rather than looking for
+missing runtime. Launch with `flatpak run ai.storyteller.solidcraft`, rather than looking for
 a host `solidcraft` binary. Files chosen through Open/Save use the desktop file-chooser portal;
 command-line paths outside Documents may need a specific additional filesystem permission.
 

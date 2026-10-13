@@ -34,14 +34,36 @@ pub struct Tx {
     focus: bool,
 }
 
+/// Resolve an outline or filled letter only when all its boundaries belong to one text.
+pub(crate) fn entity_for_selection(app: &SolveApp, selection: &Sel) -> Option<String> {
+    let sid = app.session.active_sketch?;
+    let state = app.session.world_state();
+    let ss = state.sketch(sid)?;
+    let ids = match selection {
+        Sel::SketchCurve { id } => vec![id.clone()],
+        Sel::Profile { sketch, index } if *sketch == sid => ss.profiles.get(*index)?.curve_ids(),
+        _ => return None,
+    };
+    let mut link = None;
+    for id in &ids {
+        let curve = ss.sketch.curves.iter().find(|curve| &curve.id == id)?;
+        let source = ss.sketch.link(curve.link.as_deref()?)?;
+        if source.kind != LinkKind::Text || link.is_some_and(|old| old != source.id.as_str()) {
+            return None;
+        }
+        link = Some(source.id.as_str());
+    }
+    ids.into_iter().next()
+}
+
 /// Only a complete selection belonging to one text source can seed the editor.
 pub(crate) fn selected_entity(app: &SolveApp) -> Option<String> {
     let sk = app.session.doc.sketch(app.session.active_sketch?).ok()?;
     let mut selected = None;
     let mut link = None;
     for selection in &app.session.selection {
-        let Sel::SketchCurve { id } = selection else { return None };
-        let curve = sk.curves.iter().find(|curve| &curve.id == id)?;
+        let id = entity_for_selection(app, selection)?;
+        let curve = sk.curves.iter().find(|curve| curve.id == id)?;
         let source = sk.link(curve.link.as_deref()?)?;
         if source.kind != LinkKind::Text || link.is_some_and(|old| old != source.id.as_str()) {
             return None;
@@ -50,6 +72,13 @@ pub(crate) fn selected_entity(app: &SolveApp) -> Option<String> {
         selected = Some(id.clone());
     }
     selected
+}
+
+/// Show every outline affected by the open editor without changing feature selections.
+pub(crate) fn highlighted(app: &SolveApp) -> Vec<Sel> {
+    let Some(Kind::Text(tx)) = app.dialog.as_ref().map(|dialog| &dialog.kind) else { return Vec::new() };
+    let Ok(sk) = app.session.doc.sketch(tx.sketch) else { return Vec::new() };
+    sk.curves.iter().filter(|curve| curve.link.as_deref() == Some(tx.link.as_str())).map(|curve| Sel::SketchCurve { id: curve.id.clone() }).collect()
 }
 
 /// A value shown in a field: rounded so binary noise does not show, with its unit.
@@ -239,6 +268,77 @@ mod tests {
         match app.dialog.as_ref().map(|d| &d.kind) {
             Some(Kind::Text(k)) => k,
             _ => panic!("Edit Text is not open"),
+        }
+    }
+
+    #[test]
+    fn letter_interior_context_menu_opens_and_highlights_the_whole_text() {
+        let (mut h, link, _) = setup();
+        h.app.run("sketch.edit_text", json!({"link":link,"text":"II"})).unwrap();
+        h.app.session.selection.clear();
+        h.call("ui.view", json!({"view":"top"}));
+        h.app.cam.distance = 25.0;
+        h.frames(3);
+        let sid = h.app.session.active_sketch.unwrap();
+        let at = h.app.session.world_state().sketch(sid).unwrap().profiles[0].centroid;
+        let [x, y] = h.at(&json!({"sketch":[at.x,at.y]})).unwrap();
+        h.call("ui.menu", json!({"x":x,"y":y}));
+        h.frames(3);
+        assert!(matches!(h.app.session.selection.as_slice(), [Sel::Profile { .. }]));
+        let item = crate::context_menu::items(&h.app, &crate::context_menu::Target::Viewport)
+            .into_iter()
+            .find(|item| item.id == "sketch.edit_text")
+            .unwrap();
+        crate::context_menu::run_item(&mut h.app, &item, egui::Pos2::ZERO);
+        h.frames(3);
+        assert_eq!(tx(&h.app).link, link);
+        let sk = h.app.session.doc.sketch(sid).unwrap();
+        for curve in sk.curves.iter().filter(|curve| curve.link.as_deref() == Some(&link)) {
+            assert!(h.app.highlighted().contains(&Sel::SketchCurve { id: curve.id.clone() }));
+        }
+        h.step(&json!({"widget":"Cancel"})).unwrap();
+        assert!(highlighted(&h.app).is_empty());
+    }
+
+    #[test]
+    fn edit_text_tool_accepts_a_letter_interior_without_preselection() {
+        let (mut h, link, _) = setup();
+        h.app.session.selection.clear();
+        h.call("ui.view", json!({"view":"top"}));
+        h.app.cam.distance = 25.0;
+        h.frames(3);
+        let sid = h.app.session.active_sketch.unwrap();
+        let at = h.app.session.world_state().sketch(sid).unwrap().profiles[0].centroid;
+        h.step(&json!({"start":"sketch.edit_text"})).unwrap();
+        h.step(&json!({"click":{"sketch":[at.x,at.y]}})).unwrap();
+        assert_eq!(tx(&h.app).link, link);
+    }
+
+    #[test]
+    fn text_profile_resolution_checks_holes_and_rejects_mixed_sources() {
+        let (mut h, link, _) = setup();
+        h.app.run("sketch.edit_text", json!({"link":link,"text":"O"})).unwrap();
+        let sid = h.app.session.active_sketch.unwrap();
+        let state = h.app.session.world_state();
+        let profile = state.sketch(sid).unwrap().profiles.iter().position(|p| !p.hole_curves.is_empty()).unwrap();
+        let selection = Sel::Profile { sketch: sid, index: profile };
+        assert!(entity_for_selection(&h.app, &selection).is_some());
+        h.app.run("sketch.text", json!({"text":"I","at":[20,0],"height":10})).unwrap();
+        let profiles = h.app.session.world_state().sketch(sid).unwrap().profiles.len();
+        h.app.session.selection = (0..profiles).map(|index| Sel::Profile { sketch: sid, index }).collect();
+        assert!(selected_entity(&h.app).is_none());
+        assert!(entity_for_selection(&h.app, &Sel::Profile { sketch: sid + 1, index: 0 }).is_none());
+    }
+
+    #[test]
+    fn profile_cut_by_ordinary_geometry_does_not_identify_text() {
+        let (mut h, _, _) = setup();
+        h.app.run("sketch.line", json!({"points":[[-10,3],[10,3]]})).unwrap();
+        let sid = h.app.session.active_sketch.unwrap();
+        let count = h.app.session.world_state().sketch(sid).unwrap().profiles.len();
+        assert!(count >= 2);
+        for index in 0..count {
+            assert!(entity_for_selection(&h.app, &Sel::Profile { sketch: sid, index }).is_none());
         }
     }
 

@@ -47,7 +47,7 @@ unit regardless of the design, pass an expression with one: `"value": "50 mm"` o
 
 | Method | Params | Notes |
 |---|---|---|
-| `ui.inspect` | — | UI state, what is hidden (`visibility`: bodies, origin and construction items, sketches; set it with the `browser.visibility` command), viewport rect, camera, active tool/dialog, hover, renderer, timings, live preview (`active`, `busy`, `error`, `ms`, bodies it stands in for) |
+| `ui.inspect` | — | UI state, what is hidden (`visibility`: bodies, origin and construction items, sketches; set it with the `browser.visibility` command), viewport rect, camera, active tool/dialog, the status line (`status`: text and whether it is an error), hover, renderer, timings, live preview (`active`, `busy`, `error`, `ms`, bodies it stands in for) |
 | `ui.set` | any `UiState` field (`tab`, `perspective`, `showGrid`, `dark`, …), and `hiddenBodies`, `hiddenOrigin`, `hiddenSketches`, `shownSketches` (whole lists; `browser.visibility` changes single items) | `dark: false` switches to the light theme |
 | `ui.view` | `view`: `front`, `back`, `top`, `bottom`, `left`, `right`, `iso`, `home`, `fit`; `animate` (bool, default false: snap) | |
 | `ui.start` | `command` | like a toolbar click: starts the sketch tool or dialog for the command |
@@ -56,7 +56,7 @@ unit regardless of the design, pass an expression with one: `"value": "50 mm"` o
 | `ui.drag` | `x0`, `y0`, `x1`, `y1`, `button?`, `shift?`, `ctrl?`, `steps?`, `hold?`, `hold_end?` | press, move, release; a left drag on the model is a box selection (left to right: window, right to left: crossing); with OpenSCAD navigation, plain left-drag on empty space orbits, Shift+left-drag box-selects, and drags starting on sketch geometry edit it; `hold` keeps the button down that many frames first (a right press-and-hold opens the marking menu, releasing over a direction picks it), `hold_end` that many frames at the end (a sketch drag shows its snap) |
 | `ui.menu` | `x?`, `y?`, `target?`, `close?` | with a point: open a context menu there as a right-click would (the viewport's marking menu, or a browser menu with `target: {"type": "body", "name"} \| {"type": "sketch", "id"} \| {"type": "component", "id"}`); without: the open menu (`radial` and `items`: id, label, shortcut, enabled) |
 | `ui.menuPick` | `item`: id or label | runs an item of the open menu, as clicking it does |
-| `ui.selectOther` | `x?`, `y?`, `pick?`, `add?`, `hover?`, `close?` | Select Other: with a point, list everything pickable there (as holding the left button does); `pick`: select row `pick` (`add`: as Shift-click; with a dialog open, into its active input); `hover`: light a row up; without: the open list (`open`, `at`, `rows`: label, icon, sel) |
+| `ui.selectOther` | `x?`, `y?`, `pick?`, `add?`, `hover?`, `close?` | Select Other: with a point, list everything pickable there (as holding the left button does); `pick`: select row `pick` (`add`: as Shift-click; with a dialog open, into its active input); `hover`: light a row up; without: the open list (`open`, `at`, `total`: everything under the cursor, `rows`: label, icon, sel, at most 20 per kind, nearest first) |
 | `ui.rename` | `text?`, `commit?` (default true) | finishes the rename box a Rename item opened |
 | `ui.selection` | | the selection, the open dialog's inputs, the hovered item, and the active sketch's drawn dimensions (`dimensions`: id and text centre, `dimension_selected`, `dimension_editing`) |
 | `ui.worldToScreen` | `points`: `[[x, y, z]…]` world points | their screen points |
@@ -64,7 +64,7 @@ unit regardless of the design, pass an expression with one: `"value": "50 mm"` o
 | `ui.sketchToScreen` | `points`: `[[x, y]…]` in active-sketch coordinates | their screen points (null when behind the camera) |
 | `ui.dialogInput` | `index` | what clicking an input's Select chip does: picks go to that input |
 | `ui.at` | `world: [x,y,z]` \| `sketch: [x,y]` \| `plane: "XY"` \| `axis: "Z"` \| `dimension: "d1"` (its value text) \| `handle: "arrow"` (a manipulator handle, see `scenario::publish_handle`) | the screen point (a scenario step's target; see `crates/ui-egui/src/scenario.rs`) |
-| `ui.handles` | `prefix?` | the handles drawn last frame, `[{name, x, y}]`: toolbar buttons and drop-down items `toolbar:<command id>` (the button alone: `button:<command id>`; a drop-down row: `dropdown:<command id>`, highlighted `dropdown_hot:<command id>`, its pin `dropdown_pin:<command id>`; Customize Toolbar's check boxes `customize:<command id>`), panel labels `panel:<tab>:<panel>`, browser rows `row:<label>` and fold arrows `fold:<label>`, manipulator handles; orientation tips `axis_view:x`, `axis_view:-x` (and y/z) |
+| `ui.handles` | `prefix?` | the handles drawn last frame, `[{name, x, y}]`: toolbar buttons and drop-down items `toolbar:<command id>` (the button alone: `button:<command id>`; a drop-down row: `dropdown:<command id>`, highlighted `dropdown_hot:<command id>`, its pin `dropdown_pin:<command id>`; Customize Toolbar's check boxes `customize:<command id>`), panel labels `panel:<tab>:<panel>`, browser rows `row:<label>` and fold arrows `fold:<label>`, manipulator handles; signed-axis tips `axis_view:z`, `axis_view:-y`; optional cube facets `navigation_cube:top`, `navigation_cube:top_front_right`, controls `navigation_cube:control:home` (and other actions), plus signed-axis aliases for visible cube faces; Preferences navigator picker `prefs:navigator`, options `prefs:navigator:Signed axes` and `prefs:navigator:Cube` |
 | `ui.editFeature` | `feature` (id or name) | what double-clicking a timeline item does: rolls back to it and opens its dialog filled in (sketches open in sketch mode) |
 | `ui.scroll` | `x`, `y`, `delta?` | wheel zoom at the cursor |
 | `ui.key` | `key` (egui key name, `Enter`, `Escape`…), `cmd?`, `shift?` | |
@@ -77,7 +77,7 @@ unit regardless of the design, pass an expression with one: `"value": "50 mm"` o
 | `ui.home` | `open?`: bool; `sample?`: index | the start page: show or hide it, open a built-in sample (once built); returns `open` and the recent designs |
 | `ui.shortcut` | `command`, `key?`, `replace?` | a command's key, or rebinds it (`""` clears; a key another command uses is refused unless `replace`) |
 | `ui.help` | `item?`: `about`, `shortcuts` (read only), `report` (copies diagnostics), `crashes` (the Crash Reports window) | the version, commit, build date and diagnostic text |
-| `ui.prefs` | any of `default_units`, `nav` (`fusion`, `solidworks`, `inventor`, `alias`, `tinkercad`, `openscad`), `zoom_reverse`, `zoom_to_cursor`, `smooth_wheel_zoom` (default true), `trackpad_pan` (default true: two-finger scroll pans, pinch zooms), `orbit_cursor`, `look_at_anim`, `look_at_speed`, `msaa`, `length_decimals`, `angle_decimals`, `theme` (`dark`, `light`, `system`), `language` (`en`, `ja`; see [localization](localization.md)), `ui_scale`, `up_axis` (`z`, `y`), `offer_stand_up`; `open` (a page: General, Navigation, Keyboard Shortcuts, Design, Graphics, Sketch, Selection) opens the Preferences dialog there; `button`: `ok`, `cancel`, `apply`, `defaults`; `stand_up: true` stands up a just-opened Y-up file | sets preferences (kept between runs), returns them all plus `dialog` (the open page or null), `dark` and `stand_up_offer` |
+| `ui.prefs` | any of `default_units`, `nav` (`fusion`, `solidworks`, `inventor`, `alias`, `tinkercad`, `openscad`), `zoom_reverse`, `zoom_to_cursor`, `smooth_wheel_zoom` (default true), `trackpad_pan` (default true: two-finger scroll pans, pinch zooms), `orbit_cursor`, `look_at_anim`, `look_at_speed`, `middle_double_click` (`home` (default), `fit`, `off`), `msaa`, `length_decimals`, `angle_decimals`, `theme` (`dark`, `light`, `system`), `language` (`en`, `ja`; see [localization](localization.md)), `ui_scale`, `up_axis` (`z`, `y`), `offer_stand_up`; `open` (a page: General, Navigation, Keyboard Shortcuts, Design, Graphics, Sketch, Selection) opens the Preferences dialog there; `button`: `ok`, `cancel`, `apply`, `defaults`; `stand_up: true` stands up a just-opened Y-up file | sets preferences (kept between runs), returns them all plus `dialog` (the open page or null), `dark` and `stand_up_offer` |
 | `ui.capture` | `action?`: `capture`, `revert`, `cancel` | answers the Capture Position question (asked when a command starts or the design is saved while components were moved without capturing); without `action`, what waits |
 | `ui.window` | `action`: minimize, maximize, restore, toggle, close | what the title bar's caption buttons do (on Windows and Linux the application bar is the title bar); close asks about unsaved designs first |
 | `ui.agent_cursor` | `show` (bool), `speed`: a number from 1 to 5 (times the normal speed) or `"instant"` (no animation: the command runs at once and the pointer jumps to where it acted), `follow_camera` (bool); all optional | the settings. While the cursor is shown, `engine.execute` first glides to the command's toolbar button and to each pick, then runs and replies; later requests wait their turn. `"animate": false` on a call skips it |
@@ -99,10 +99,39 @@ channel; see [mcp.md](mcp.md).
 {"id":5,"method":"ui.screenshot","params":{"path":"/tmp/part.png"}}
 ```
 
+Preferences → Navigation → View navigator offers **Signed axes** (the original default) and
+**Cube**. This choice is saved independently of the mouse preset. The control channel selects it
+with `ui.prefs {"navigator_style":"axes"}` or `ui.prefs {"navigator_style":"cube"}`.
+Existing settings without this field keep signed axes. Signed-axis tips choose principal views;
+clicking an aligned tip again reverses the view.
+
 Hold Shift during an orbit gesture to snap to the nearest standard or diagonal view. This applies to
-right-drag, the Orbit navigation tool, and dragging the axis view. Under the default preset,
-Shift+middle also orbits with snapping; middle alone pans. Axis-view tips use world coordinates,
-regardless of the up-axis preference. Clicking an aligned tip again flips to its opposite.
+right-drag, the Orbit navigation tool, and dragging either view navigator. Under the default preset,
+Shift+middle also orbits with snapping; middle alone pans. Cube faces choose principal views,
+and corners choose isometric views. The middle of each cube edge belongs to its face. Face names
+follow the up-axis preference; the small X/Y/Z triad shows world axes. Clicking the same face keeps that view.
+The inward-pointing arrows orbit by 90 degrees; the curved arrows at the upper right roll the
+view by 90 degrees. The Home button at the upper left returns to isometric and the lower-right circle
+fits the model.
+
+The cube is subdued while idle. Hovering its area brightens the cube and navigation bar and
+reveals the surrounding controls; the picked face or corner gets a pale blue fill and
+blue outline. Moving away restores the subdued state. Navigation-bar controls also brighten
+when hovered or when a navigation tool is active.
+
+The cube has six face targets and eight corner targets, with no edge targets. Corner picking
+regions lie on the six flat faces, preserving sharp corners with no permanent subdivision
+lines. Hovering a corner highlights its parts on the adjacent visible faces together.
+
+The cube widget occupies a compact 112-point square in the viewport corner. A straight-on
+cube face is approximately 55 points wide; painting and picking scale together. Face labels
+are stretched vertically. View clicks ease through intermediate orientations when Navigation
+animated view changes is enabled (the default), at the configured animation speed.
+
+The cube runs `view.navigate` through the command engine. Programmatic callers pass `camera`
+and either `direction: [x,y,z]` in the camera's up-axis frame or `action` (`left`, `right`, `up`,
+`down`, `clockwise`, `counterclockwise`, `home`, `fit`). The result contains `camera` and `fit`;
+UI callers apply the camera with their animation preference, without editing the design.
 
 Shift-orbit snapping includes 45-degree edge views and isometric corner views, with a
 lightly damped spring transition and a small boundary margin to prevent flicker.

@@ -45,18 +45,26 @@ Claude Desktop (`claude_desktop_config.json`), bridged to a running app:
 }
 ```
 
+### Agent skills
+
+[`skills/`](https://github.com/bherbruck/solidcraft/tree/main/skills) holds two [Agent Skills](https://agentskills.io) for agents that model through this server:
+- `solidcraft-modeling` covers building a new part.
+- `solidcraft-editing` covers changing an existing design.
+
+They cover the workflow, the command shapes, how to verify with `measure`, and the known traps. With them an agent builds a part in a few `batch` calls and reads far less output. To install them for Claude Code, copy both folders into `~/.claude/skills/`; [skills/README.md](https://github.com/bherbruck/solidcraft/blob/main/skills/README.md) has the details.
+
 ## Tools
 
 | Tool | Arguments | What it does |
 |---|---|---|
 | `list_commands` | `filter?` | The command catalog: id, label, tab/panel, shortcut, parameter docs, enabled now. `filter` matches id, label, tab and panel. |
-| `execute` | `command`, `params?` | Run any command with JSON parameters (`list_commands` shows them). Failures leave the design unchanged. A feature command replies with the feature (`feature`, `name`), every body (`bodies`) and the bodies it created (`created_bodies`). |
-| `batch` | `commands: [{command, params}]`, `rollback?` (default true) | Run steps in order, stop at the first error and undo the completed steps. The reply names the failing step (`failed.index`, `failed.command`, `failed.error`) and every result before it. |
+| `execute` | `command`, `params?`, `verbose?` (default true) | Run any command with JSON parameters (`list_commands` shows them). Failures leave the design unchanged. A feature command replies with the feature (`feature`, `name`), every body (`bodies`) and the bodies it created, changed and removed (`created_bodies`, `changed_bodies`, `removed_bodies`). `verbose: false` uses the same compact reply as `batch`. |
+| `batch` | `commands: [{command, params}]`, `rollback?` (default true), `verbose?` (default true) | Run steps in order, stop at the first error and undo the completed steps. The reply names the failing step (`failed.index`, `failed.command`, `failed.error`) and every result before it. `verbose: false` keeps the reply small in large designs: feature steps leave out the full body list (`created_bodies`, `changed_bodies`, `removed_bodies` stay) and sketch steps the ids they repeat outside `created`. |
 | `inspect_design` | `measure?` (default true), `sketches?` (default true) | Parameters, timeline (type, suppressed, rolled back, error, warning, timing), bodies (volume, area, centre of mass, bbox, face/edge/vertex counts, visible), sketches (curves, points, constraints, profiles, DOF, solve status, visible), selection, undo depth. Hide helper sketches, bodies or construction planes with `execute` `browser.visibility` (`{items, visible}` or `{folder, visible}`). |
 | `measure` | `body?` | Volume (mm³), area (mm²), centre of mass, bbox and topology counts per body, with totals. |
 | `body_topology` | `body` | Edges (index, midpoint, length, ends) and faces (index, area, centroid, normal). An edge midpoint is the `[x,y,z]` that picks that edge for fillet and chamfer. |
 | `set_parameter` | `name`, `value` (number or expression), `unit?`, `comment?` | Create or change a user parameter and recompute; reports `recomputed` (features rebuilt), `restored` (features whose earlier result for the same inputs was reused, e.g. a value set back) and features that now fail. |
-| `screenshot` | `view?` (iso, top, front, back, bottom, left, right, home, fit), `path?`, `width?`, `height?`, `source?` (window, model) | A PNG image content block. Headless: CPU render fitted to the model. Bridged: the app window (default) or a model render with the app's camera. |
+| `screenshot` | `view?` (iso, top, front, back, bottom, left, right, home, fit, or a named view saved with `view.save`), `camera?` (`{target, yaw, pitch, distance, fov?}`, as `view.apply`), `path?`, `width?`, `height?`, `source?` (window, model) | A PNG image content block. Headless: CPU render fitted to the model, or from the named view or camera. Bridged: the app window (default) or a model render with the app's camera; a named view or camera moves the app's viewport there first (`execute` `view.apply` does the same without a screenshot). |
 | `export` | `path`, `format?` (step, 3mf, stl, stla, obj), `bodies?` | STEP, 3MF or mesh export. |
 | `undo`, `redo` | — | Undo / redo one change. |
 | `crash_reports` | `id?`, `limit?` | The crash reports on this computer, newest first; with `id`, the whole report (backtrace, command, recent commands, `design_path`/`replay_path`). See [crash-reports.md](crash-reports.md). |
@@ -81,6 +89,23 @@ step: the design, the active sketch and the undo history are restored exactly as
 however long the history is. Batches that call `file.new` or `doc.open` get the design back,
 not its file path. (An older app without checkpoints falls back to undoing as many steps as
 the batch added to the undo history.)
+
+## Compact replies
+
+`execute` and `batch` default to `verbose: true`, preserving the full command results.
+For long modelling sessions, set `verbose: false` at the tool-argument level:
+
+```json
+{"name": "execute", "arguments": {"command": "solid.box", "params": {"length": 10, "width": 10, "height": 10}, "verbose": false}}
+```
+
+Feature replies omit the full `bodies` list while keeping `feature`, `name`,
+`created_bodies`, `changed_bodies` and `removed_bodies`. A cut can therefore report a
+changed body even when no body name was added or removed. Sketch replies keep new
+IDs under `created` and omit only identical top-level `points`, `curves`,
+`constraints` and `dimensions` lists. Other fields and errors are unchanged;
+inspection commands still return their complete results. Compaction uses the
+engine's reply directly, without an additional design-inspection request.
 
 ## Demo: an enclosure built over MCP
 

@@ -35,10 +35,13 @@ pub fn default_dir() -> Option<PathBuf> {
         env("XDG_DATA_HOME").or_else(|| env("HOME").map(|h| h.join(".local/share")))?
     };
     let (dir, legacy) = dirs_under(&root, cfg!(windows) || cfg!(target_os = "macos"));
-    // Compatibility shim (docs/compatibility.md): autosaves made before the rename are copied
-    // to the new folder on first launch; the old folder is left as it was.
-    if let Err(e) = solidcraft_io::adopt_legacy_dir(&dir, &legacy) {
-        log::warn!("recovery: could not copy {} to {}: {e}", legacy.display(), dir.display());
+    // Compatibility shim (docs/compatibility.md): autosaves made before the rename (or, in the
+    // Flatpak sandbox, under the old app id) are copied to the new folder on first launch; the
+    // old folder is left as it was.
+    for old in solidcraft_io::legacy_flatpak_path(&dir).into_iter().chain([legacy]) {
+        if let Err(e) = solidcraft_io::adopt_legacy_dir(&dir, &old) {
+            log::warn!("recovery: could not copy {} to {}: {e}", old.display(), dir.display());
+        }
     }
     Some(dir)
 }
@@ -143,7 +146,8 @@ pub struct Autosaver {
     /// Autosave this often while there are unsaved changes.
     pub interval: Duration,
     lock: Option<File>,
-    last: Option<Arc<Document>>,
+    /// The design and what was hidden at the last autosave.
+    last: Option<(Arc<Document>, crate::Visibility)>,
     last_at: Instant,
     has_entry: bool,
 }
@@ -189,17 +193,17 @@ impl Autosaver {
             crate::crash::rebased(s, s.path.as_deref().map(Path::new), false);
             return Ok(false);
         }
-        if self.last.as_ref().is_some_and(|l| Arc::ptr_eq(l, &s.doc) || **l == *s.doc) {
+        if self.last.as_ref().is_some_and(|(l, v)| (Arc::ptr_eq(l, &s.doc) || **l == *s.doc) && *v == s.visibility) {
             return Ok(false);
         }
         let io = |e: std::io::Error| EngineError::Other(format!("autosave: {e}"));
-        let bytes = solidcraft_io::write_design_container(&s.doc)?;
+        let bytes = solidcraft_io::write_design_container(&s.design())?;
         solidcraft_io::write_atomic(&file(&self.dir, &self.id, solidcraft_io::DESIGN_EXT), &bytes, false).map_err(io)?;
         let entry =
             Entry { id: self.id.clone(), path: s.path.clone(), name: s.doc.name.clone(), saved_at: unix_now(), features: s.doc.features.len() };
         let meta = serde_json::to_vec_pretty(&entry).map_err(|e| EngineError::Other(e.to_string()))?;
         solidcraft_io::write_atomic(&file(&self.dir, &self.id, "json"), &meta, false).map_err(io)?;
-        self.last = Some(s.doc.clone());
+        self.last = Some((s.doc.clone(), s.visibility.clone()));
         self.has_entry = true;
         // Crash replays start from this autosave from here.
         crate::crash::rebased(s, Some(&file(&self.dir, &self.id, solidcraft_io::DESIGN_EXT)), true);

@@ -79,7 +79,7 @@ fn commands(root: &Path, value: &mut Value, depth: usize) -> Result<(), String> 
             let geometry = object.get("command").and_then(Value::as_str).is_some_and(|c| {
                 (c.starts_with("solid.") && c != "solid.decal")
                     || c.starts_with("construct.")
-                    || c.starts_with("component.")
+                    || (c.starts_with("component.") && c != "component.insert_design")
                     || c.starts_with("occurrence.")
             });
             if !geometry
@@ -141,6 +141,10 @@ mod tests {
         assert_eq!(family["params"]["font"], "Liberation Sans");
         assert!(prepare_tool(&root, "crash_reports", &mut json!({})).is_err());
         assert!(prepare_tool(&root, "batch", &mut json!({"commands":[{"command":"diagnostics.crash_reports.clear"}]})).is_err());
+        assert!(prepare_tool(&root, "execute", &mut json!({"command":"component.insert_design","params":{"path":"/etc/passwd"}})).is_err());
+        let mut link = json!({"command":"component.insert_design","params":{"path":"part.solidcraft"}});
+        prepare_tool(&root, "execute", &mut link).unwrap();
+        assert_eq!(link["params"]["path"], root.join("part.solidcraft").to_string_lossy().as_ref());
     }
 
     #[cfg(unix)]

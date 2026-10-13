@@ -80,6 +80,14 @@ longer lies on the face says so: `face ... was found by geometry, not exact hist
 An edge name is found as the edge between the two faces it names, each found as above: when
 exactly one edge runs between them it is that edge, even after a split of one of its faces.
 
+A sketch's link to a projected edge (`sketch.project {edge: [x, y, z]}`, and Intersect and
+Include 3D Geometry of an edge) keeps the edge's name beside its point. The link is that edge
+wherever a change takes it; of an edge that was split it is the piece nearest the link's point,
+and the sketch says so. When no edge has the name any more the link is lost and keeps its last
+geometry, as it does for a face: it does not take whichever edge is nearest now. A link saved
+without a name, by a build that kept only the point, is found by the edge nearest its point, as
+it always was, and takes that edge's name when its sketch is next edited.
+
 A hole placed by a position on a face is the exception to "the point nearest the reference's
 point": its position is a place, not a pick. The hole follows its face along its own axis, so it
 moves with the face when the face moves, and when the face no longer reaches the position it stays

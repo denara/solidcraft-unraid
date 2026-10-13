@@ -10,6 +10,10 @@ use super::{CommandSpec, in_sketch};
 use crate::params::{bad, num, req_vec2, str_, string_list};
 use crate::{Result, Session};
 
+#[cfg(test)]
+#[path = "sketch_text_move_tests.rs"]
+mod text_move_tests;
+
 pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("sketch.line.midpoint", "Midpoint Line", midpoint_line)
         .at("SKETCH", "CREATE")
@@ -131,6 +135,39 @@ fn text(s: &mut Session, p: &Value) -> Result<Value> {
     *doc.sketch_mut(id)? = sk;
     *s.doc_mut() = doc;
     Ok(json!({"link": l, "curves": curves}))
+}
+
+/// The text source owning an outline or one of its linked points.
+pub(super) fn text_link<'a>(sk: &'a Sketch, entity: &str) -> Option<&'a str> {
+    let link = sk
+        .curve_index(entity)
+        .and_then(|i| sk.curves.get(i))
+        .and_then(|c| c.link.as_deref())
+        .or_else(|| sk.resolve_point(entity).and_then(|i| sk.points.get(i)).and_then(|p| p.link.as_deref()))?;
+    sk.link(link).filter(|source| source.kind == LinkKind::Text).map(|source| source.id.as_str())
+}
+
+/// Transform a text source as a unit; generated outlines remain linked and editable.
+pub(super) fn move_text(sk: &mut Sketch, link: &str, translate: Vec2, rotation: f64, center: Vec2, copy: bool) -> Result<Vec<usize>> {
+    let Some(LinkSource::Text { text, at, height, angle, font }) = sk.link(link).map(|l| l.source.clone()) else {
+        return Err(bad("sketch.move", "the selected source is not text"));
+    };
+    let q = at - center;
+    let (sin, cos) = rotation.sin_cos();
+    let at = center + Vec2::new(q.x * cos - q.y * sin, q.x * sin + q.y * cos) + translate;
+    let angle = angle + rotation;
+    let geom = solidcraft_sketch::text_geometry_in(font.as_deref(), &text, at, height, angle)?;
+    let source = LinkSource::Text { text, at, height, angle, font };
+    let link = if copy {
+        sk.add_link(LinkKind::Text, source, &geom)?
+    } else {
+        sk.set_link_source(link, source);
+        if sk.update_link(link, &geom)? {
+            return Err(bad("sketch.move", "moving text must preserve its outline topology; edit the text source first"));
+        }
+        link.to_owned()
+    };
+    Ok(sk.link_curves(&link))
 }
 
 fn edit_text(s: &mut Session, p: &Value) -> Result<Value> {

@@ -3,7 +3,7 @@
 //! as a wall flush with the side of its base. The polygons are rebuilt into a B-rep: coplanar
 //! pieces are merged into faces, T-junctions are split so neighbouring faces share edges.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use solidcraft_geom::{Mesh, Vec3};
 use truck_modeling::{self as mt, builder};
@@ -415,7 +415,7 @@ fn sliced_planar_boolean(a: &Body, b: &Body, op: BoolOp) -> Option<Result<Option
     let tol = (a.size() * 1e-3).max(1e-3);
     let infos = a.faces(tol).ok()?;
     let mesh = a.tessellate(tol).ok()?;
-    let mut curved: HashMap<u32, solidcraft_geom::Aabb3> = HashMap::new();
+    let mut curved: BTreeMap<u32, solidcraft_geom::Aabb3> = BTreeMap::new();
     for (t, fi) in mesh.triangles.iter().zip(&mesh.tri_face) {
         if infos.get(*fi as usize)?.plane_normal.is_some() {
             continue;
@@ -504,7 +504,7 @@ fn sliced_planar_boolean(a: &Body, b: &Body, op: BoolOp) -> Option<Result<Option
         }
         // The rebuild leaves the cut faces' edges split where other polygons were cut; healed,
         // they match the pieces outside edge for edge.
-        let mut pieces: Vec<Traced> = match r {
+        let pieces: Vec<Traced> = match r {
             Some(m) => {
                 let healed = recorded::heal_body(&m, m.deep_copy(), size, a.split_keep(), &record::counts(&[&middle.0, b]))?;
                 let h = recorded::of_pair(&healed, &middle.1, &h_b);
@@ -512,18 +512,51 @@ fn sliced_planar_boolean(a: &Body, b: &Body, op: BoolOp) -> Option<Result<Option
             }
             None => Vec::new(),
         };
-        // Each piece outside meets the middle along its cut face (glued one shell to another).
-        if pieces.iter().chain(&outside).any(|(x, _)| x.solid.boundaries().len() != 1) {
+        // Each piece in its lumps: a cut plane crossing a frame or a ring leaves the middle (or
+        // a piece outside) in several parts, which meet the others along several cut faces.
+        let lumps = |(whole, h): Traced| -> Result<Vec<Traced>> {
+            if whole.solid.boundaries().len() == 1 {
+                return Ok(vec![(whole, h)]);
+            }
+            let parts = whole.lumps()?;
+            let histories = recorded::parts_of(&parts, &whole);
+            Ok(parts
+                .into_iter()
+                .zip(histories)
+                .map(|(p, hp)| {
+                    let h = match (hp, h.as_ref()) {
+                        (Some(hp), Some(h)) => recorded::composed(hp.substituted(0, h)),
+                        _ => None,
+                    };
+                    (p, h)
+                })
+                .collect())
+        };
+        let mut all: Vec<Traced> = Vec::new();
+        for piece in pieces.into_iter().chain(outside) {
+            all.extend(lumps(piece)?);
+        }
+        // Glue pieces that meet along their cut faces until one is left; every cut face pair
+        // goes (a pair left behind would be a slit through the result).
+        let mut joined: Vec<Traced> = Vec::new();
+        while let Some(mut cur) = all.pop() {
+            loop {
+                let found = all.iter().enumerate().find_map(|(i, (o, _))| Some((i, crate::coplanar::glue(&cur.0, o)?.ok()?)));
+                let Some((i, j)) = found else { break };
+                let other = all.swap_remove(i);
+                let h = recorded::of_pair(&j, &cur.1, &other.1);
+                cur = (j, h);
+            }
+            joined.push(cur);
+        }
+        if joined.iter().any(|(x, _)| x.solid.boundaries().len() != 1) {
             return Err(fail("a piece in several parts"));
         }
-        for (o, h_o) in outside {
-            let joined = pieces.iter().enumerate().find_map(|(i, (m, _))| Some((i, crate::coplanar::glue(m, &o)?.ok()?)));
-            let (i, j) = joined.ok_or_else(|| fail("a piece does not join back"))?;
-            if let Some(slot) = pieces.get_mut(i) {
-                let h = recorded::of_pair(&j, &slot.1, &h_o);
-                *slot = (j, h);
-            }
+        // A join onto one piece is one piece: anything apart is a cut face that did not glue.
+        if op == BoolOp::Union && a.solid.boundaries().len() == 1 && joined.len() != 1 {
+            return Err(fail("a piece does not join back"));
         }
+        let pieces = joined;
         recorded::join(pieces.into_iter().map(|(p, h)| (p, dropped(h))).collect(), &counts)
     };
     Some(run())
@@ -556,13 +589,13 @@ struct Sources {
 /// faces (lesser face first).
 struct OperandEdges {
     ends: Vec<(Vec3, Vec3)>,
-    between: HashMap<(usize, usize), Vec<usize>>,
+    between: BTreeMap<(usize, usize), Vec<usize>>,
 }
 
 impl OperandEdges {
     fn of(b: &Body) -> OperandEdges {
         let (edges, bounds) = edge_order(b.solid.face_iter());
-        let mut between: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+        let mut between: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
         for (i, fs) in bounds.iter().enumerate() {
             if let [f, g] = fs.as_slice() {
                 between.entry((*f.min(g), *f.max(g))).or_default().push(i);
@@ -666,6 +699,25 @@ fn csg(pa: Vec<Poly>, pb: Vec<Poly>, op: BoolOp, eps: f64) -> Result<Vec<Poly>> 
     Ok(polys)
 }
 
+/// `shell`'s connected components, each face in the shell's order and the components by their
+/// first face. truck's own come out in the hash order of face addresses, so the same rebuild
+/// gave a body with its faces in a different order from run to run (#707).
+pub(crate) fn components_in_order(shell: &mt::Shell) -> Vec<mt::Shell> {
+    let pos: HashMap<mt::FaceID, usize> = shell.face_iter().enumerate().map(|(i, f)| (f.id(), i)).collect();
+    let key = |f: &mt::Face| pos.get(&f.id()).copied().unwrap_or(usize::MAX);
+    let mut comps: Vec<Vec<mt::Face>> = shell
+        .connected_components()
+        .into_iter()
+        .map(|c| {
+            let mut faces: Vec<mt::Face> = c.into_iter().collect();
+            faces.sort_by_key(|f| key(f));
+            faces
+        })
+        .collect();
+    comps.sort_by_key(|c| c.first().map(key).unwrap_or(usize::MAX));
+    comps.into_iter().map(mt::Shell::from).collect()
+}
+
 /// Position key for vertex merging.
 fn key(p: Vec3, q: f64) -> (i64, i64, i64) {
     ((p.x / q).round() as i64, (p.y / q).round() as i64, (p.z / q).round() as i64)
@@ -678,7 +730,7 @@ fn key(p: Vec3, q: f64) -> (i64, i64, i64) {
 fn rebuild(polys: Vec<Poly>, size: f64, sources: &Sources) -> Result<Body> {
     let q = size * 1e-7;
     // Global vertex table.
-    let mut index: HashMap<(i64, i64, i64), usize> = HashMap::new();
+    let mut index: BTreeMap<(i64, i64, i64), usize> = BTreeMap::new();
     let mut verts: Vec<Vec3> = Vec::new();
     // Points within `q` share a vertex, also across the rounding grid's cell boundaries.
     let mut id = |p: Vec3, verts: &mut Vec<Vec3>| -> usize {
@@ -722,15 +774,15 @@ fn rebuild(polys: Vec<Poly>, size: f64, sources: &Sources) -> Result<Body> {
     let mean = edge_len.iter().sum::<f64>() / edge_len.len().max(1) as f64;
     let cell = mean.max(size * 1e-4).max(1e-9);
     let ckey = |p: Vec3| ((p.x / cell).floor() as i64, (p.y / cell).floor() as i64, (p.z / cell).floor() as i64);
-    let mut grid: HashMap<(i64, i64, i64), Vec<usize>> = HashMap::new();
+    let mut grid: BTreeMap<(i64, i64, i64), Vec<usize>> = BTreeMap::new();
     for (k, v) in verts.iter().enumerate() {
         grid.entry(ckey(*v)).or_default().push(k);
     }
     let mut directed: Vec<(usize, usize, usize)> = Vec::new(); // (plane group, from, to)
     // The polygons (by loop) each directed edge comes from.
-    let mut owners: HashMap<(usize, usize, usize), Vec<usize>> = HashMap::new();
+    let mut owners: BTreeMap<(usize, usize, usize), Vec<usize>> = BTreeMap::new();
     let mut groups: Vec<PlaneEq> = Vec::new();
-    let mut group_of: HashMap<(i64, i64, i64, i64), usize> = HashMap::new();
+    let mut group_of: BTreeMap<(i64, i64, i64, i64), usize> = BTreeMap::new();
     for (li, (pl, l)) in loops.iter().enumerate() {
         let gk = ((pl.n.x * 1e8).round() as i64, (pl.n.y * 1e8).round() as i64, (pl.n.z * 1e8).round() as i64, (pl.w / (tol * 10.0)).round() as i64);
         let g = *group_of.entry(gk).or_insert_with(|| {
@@ -781,7 +833,7 @@ fn rebuild(polys: Vec<Poly>, size: f64, sources: &Sources) -> Result<Body> {
         }
     }
     // Interior edges cancel against their reverse within the same plane group.
-    let mut count: HashMap<(usize, usize, usize), i64> = HashMap::new();
+    let mut count: BTreeMap<(usize, usize, usize), i64> = BTreeMap::new();
     for (g, a, b) in &directed {
         *count.entry((*g, *a, *b)).or_insert(0) += 1;
     }
@@ -805,12 +857,12 @@ fn rebuild(polys: Vec<Poly>, size: f64, sources: &Sources) -> Result<Body> {
         }
     }
     let roots: Vec<usize> = (0..loops.len()).map(|li| find(&mut parent, li)).collect();
-    let mut joined: HashMap<usize, BTreeSet<FaceOrigin>> = HashMap::new();
+    let mut joined: BTreeMap<usize, BTreeSet<FaceOrigin>> = BTreeMap::new();
     for (root, src) in roots.iter().zip(&srcs) {
         joined.entry(*root).or_default().insert(*src);
     }
     // What lies on each side of each boundary edge (from, to): the faces of its polygons.
-    let mut side: HashMap<(usize, usize), BTreeSet<FaceOrigin>> = HashMap::new();
+    let mut side: BTreeMap<(usize, usize), BTreeSet<FaceOrigin>> = BTreeMap::new();
     for (g, a, b) in &boundary {
         let set = side.entry((*a, *b)).or_default();
         for li in owners.get(&(*g, *a, *b)).into_iter().flatten() {
@@ -824,13 +876,11 @@ fn rebuild(polys: Vec<Poly>, size: f64, sources: &Sources) -> Result<Body> {
         joined.get(roots.get(li)?).cloned()
     };
     guard("planar boolean rebuild", || {
-        let tv: Vec<mt::Vertex> = verts.iter().map(|v| builder::vertex(p3(*v))).collect();
-        let mut edges: HashMap<(usize, usize), mt::Edge> = HashMap::new();
-        let mut faces: Vec<mt::Face> = Vec::new();
-        let mut face_from: HashMap<mt::FaceID, Option<BTreeSet<FaceOrigin>>> = HashMap::new();
-        for (g, plane) in groups.iter().enumerate() {
+        let mut verts = verts.clone();
+        // Every plane group's boundary loops (vertex indices).
+        let mut all_loops: Vec<Vec<Vec<usize>>> = Vec::new();
+        for (g, _) in groups.iter().enumerate() {
             let mut segs: Vec<(usize, usize)> = boundary.iter().filter(|e| e.0 == g).map(|e| (e.1, e.2)).collect();
-            let mut wires: Vec<mt::Wire> = Vec::new();
             let mut loops_g: Vec<Vec<usize>> = Vec::new();
             while let Some((s, t)) = segs.pop() {
                 let mut lp = vec![s, t];
@@ -862,7 +912,19 @@ fn rebuild(polys: Vec<Poly>, size: f64, sources: &Sources) -> Result<Body> {
                     }
                 }
             }
-            for lp in &loops_g {
+            all_loops.push(loops_g);
+        }
+        // The original vertex of each vertex index (pinched vertices get copies, below).
+        let mut orig: Vec<usize> = (0..verts.len()).collect();
+        split_pinched_vertices(&mut all_loops, &mut verts, &mut orig);
+        let tv: Vec<mt::Vertex> = verts.iter().map(|v| builder::vertex(p3(*v))).collect();
+        let mut edges: BTreeMap<(usize, usize), mt::Edge> = BTreeMap::new();
+        let mut faces: Vec<mt::Face> = Vec::new();
+        let mut face_from: HashMap<mt::FaceID, Option<BTreeSet<FaceOrigin>>> = HashMap::new();
+        for (g, plane) in groups.iter().enumerate() {
+            let Some(loops_g) = all_loops.get(g) else { continue };
+            let mut wires: Vec<mt::Wire> = Vec::new();
+            for lp in loops_g {
                 let n = lp.len();
                 let mut es = Vec::with_capacity(n);
                 for i in 0..n {
@@ -931,7 +993,7 @@ fn rebuild(polys: Vec<Poly>, size: f64, sources: &Sources) -> Result<Body> {
                         ws.push(wires.get(*h).cloned().ok_or_else(|| KernelError::Failed("wire".into()))?);
                     }
                 }
-                let from = loop_faces(g, ol);
+                let from = loop_faces(g, &ol.iter().map(|k| orig.get(*k).copied().unwrap_or(*k)).collect::<Vec<_>>());
                 // A loop a hair off flat (fine facets of a curved face) takes the group's plane.
                 let face = match builder::try_attach_plane(&ws) {
                     Ok(f) => f,
@@ -947,7 +1009,7 @@ fn rebuild(polys: Vec<Poly>, size: f64, sources: &Sources) -> Result<Body> {
             }
         }
         let shell: mt::Shell = faces.into();
-        let parts = shell.connected_components();
+        let parts = components_in_order(&shell);
         let solid = Solid::try_new(parts).map_err(|e| KernelError::Failed(format!("planar boolean: {e}")))?;
         let regions = solid.face_iter().map(|f| face_from.get(&f.id()).cloned().flatten().map(|o| (o, false))).collect::<Option<Vec<_>>>();
         let tol = size * 1e-6;
@@ -955,6 +1017,7 @@ fn rebuild(polys: Vec<Poly>, size: f64, sources: &Sources) -> Result<Body> {
             .iter()
             .map(|((a, b), e)| {
                 let ends = (*verts.get(*a)?, *verts.get(*b)?);
+                let (a, b) = (orig.get(*a)?, orig.get(*b)?);
                 let mut origins = BTreeSet::new();
                 for p in side.get(&(*a, *b))? {
                     for q in side.get(&(*b, *a))? {
@@ -966,6 +1029,73 @@ fn rebuild(polys: Vec<Poly>, size: f64, sources: &Sources) -> Result<Body> {
             .collect::<Option<HashMap<mt::EdgeID, Vec<EdgeOrigin>>>>();
         record::build(solid, &sources.counts, regions.map(record::regions), edge_from.as_ref())
     })
+}
+
+/// A vertex where the solid's surface pinches, as where two blocks meet at one corner only
+/// (#679): the faces around it form several fans that share no edge there. Each fan past the
+/// first gets its own copy of the vertex (same point), so every vertex of the shell is a
+/// manifold one.
+fn split_pinched_vertices(loops: &mut [Vec<Vec<usize>>], verts: &mut Vec<Vec3>, orig: &mut Vec<usize>) {
+    // Every corner: (group, loop, position), by vertex.
+    let mut corners: BTreeMap<usize, Vec<(usize, usize, usize)>> = BTreeMap::new();
+    for (g, ls) in loops.iter().enumerate() {
+        for (li, l) in ls.iter().enumerate() {
+            for (i, v) in l.iter().enumerate() {
+                corners.entry(*v).or_default().push((g, li, i));
+            }
+        }
+    }
+    let mut renames: Vec<((usize, usize, usize), usize)> = Vec::new();
+    let mut ids: Vec<usize> = corners.keys().copied().collect();
+    ids.sort_unstable();
+    for v in ids {
+        let Some(cs) = corners.get(&v) else { continue };
+        if cs.len() < 2 {
+            continue;
+        }
+        // The two neighbours of each corner; corners sharing an edge (v, x) are in one fan.
+        let nbrs: Vec<[usize; 2]> = cs
+            .iter()
+            .map(|(g, li, i)| {
+                let l = loops.get(*g).and_then(|ls| ls.get(*li)).map(Vec::as_slice).unwrap_or(&[]);
+                let n = l.len().max(1);
+                [l.get((i + n - 1) % n).copied().unwrap_or(v), l.get((i + 1) % n).copied().unwrap_or(v)]
+            })
+            .collect();
+        let mut parent: Vec<usize> = (0..cs.len()).collect();
+        for i in 0..cs.len() {
+            for j in i + 1..cs.len() {
+                let (Some(a), Some(b)) = (nbrs.get(i), nbrs.get(j)) else { continue };
+                if a.iter().any(|x| b.contains(x)) {
+                    let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
+                    if let Some(slot) = parent.get_mut(ri) {
+                        *slot = rj;
+                    }
+                }
+            }
+        }
+        let mut fan_id: BTreeMap<usize, usize> = BTreeMap::new();
+        for (k, c) in cs.iter().enumerate() {
+            let root = find(&mut parent, k);
+            let next = fan_id.len();
+            let fan = *fan_id.entry(root).or_insert(next);
+            if fan > 0 {
+                // A copy per extra fan.
+                let copy = verts.len() + fan - 1;
+                renames.push((*c, copy));
+            }
+        }
+        let p = verts.get(v).copied().unwrap_or_default();
+        for _ in 1..fan_id.len() {
+            verts.push(p);
+            orig.push(v);
+        }
+    }
+    for ((g, li, i), new) in renames {
+        if let Some(slot) = loops.get_mut(g).and_then(|ls| ls.get_mut(li)).and_then(|l| l.get_mut(i)) {
+            *slot = new;
+        }
+    }
 }
 
 #[cfg(test)]

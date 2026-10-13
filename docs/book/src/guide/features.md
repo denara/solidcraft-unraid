@@ -52,6 +52,12 @@ unsupported. A new Emboss without an explicit face infers a unique eligible supp
 select the face when the target is ambiguous. Older saved features without a face retain their
 planar placement.
 
+A **Hole** with **Single** placement drills where you pick a planar face. A pick on or near a
+point of a shown sketch that lies on that face, such as a circle's centre, places the hole
+exactly at that point, as **Multiple** placement picks it; **Select Other** (press and hold) also
+offers the face where you clicked. The hole keeps that place on the face; to have holes follow
+later edits of the sketch, place them with **Multiple**.
+
 Fillets and chamfers handle straight edges between planar faces, whole smooth loops, runs of
 neighbouring edges with mitred or spherical corners, and closed chains of curved edges (a rolling
 ball). See the roadmap's known limitations for the rest.

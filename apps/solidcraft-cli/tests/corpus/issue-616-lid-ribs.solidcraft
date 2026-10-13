@@ -1,0 +1,507 @@
+{
+  "features": [
+    {
+      "body_names": [
+        "Lid"
+      ],
+      "corner": [
+        100.0,
+        0.0,
+        0.0
+      ],
+      "height": "2.4",
+      "id": 1,
+      "length": "76.8",
+      "name": "Box1",
+      "operation": "new_body",
+      "param_names": [
+        "d1",
+        "d2",
+        "d3"
+      ],
+      "suppressed": false,
+      "type": "box",
+      "width": "89.3"
+    },
+    {
+      "edge_names": [
+        "F1:-x|F1:-y",
+        "F1:+x|F1:-y",
+        "F1:+y|F1:-x",
+        "F1:+x|F1:+y"
+      ],
+      "edge_refs": [
+        {
+          "dir": [
+            0.0,
+            0.0,
+            -1.0
+          ],
+          "max": [
+            176.8,
+            89.3,
+            2.4
+          ],
+          "min": [
+            100.0,
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "dir": [
+            0.0,
+            0.0,
+            1.0
+          ],
+          "max": [
+            176.8,
+            89.3,
+            2.4
+          ],
+          "min": [
+            100.0,
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "dir": [
+            0.0,
+            0.0,
+            1.0
+          ],
+          "max": [
+            176.8,
+            89.3,
+            2.4
+          ],
+          "min": [
+            100.0,
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "dir": [
+            0.0,
+            0.0,
+            1.0
+          ],
+          "max": [
+            176.8,
+            89.3,
+            2.4
+          ],
+          "min": [
+            100.0,
+            0.0,
+            0.0
+          ]
+        }
+      ],
+      "edges": [
+        [
+          100.0,
+          0.0,
+          1.2
+        ],
+        [
+          176.8,
+          0.0,
+          1.2
+        ],
+        [
+          100.0,
+          89.3,
+          1.2
+        ],
+        [
+          176.8,
+          89.3,
+          1.2
+        ]
+      ],
+      "id": 2,
+      "name": "Fillet1",
+      "param_names": [
+        "d4"
+      ],
+      "radius": "3",
+      "suppressed": false,
+      "type": "fillet"
+    },
+    {
+      "id": 3,
+      "name": "Skirt",
+      "param_names": [
+        "d5"
+      ],
+      "plane": {
+        "base": {
+          "name": "XY",
+          "type": "origin"
+        },
+        "distance": "2.4",
+        "type": "offset"
+      },
+      "sketch": {
+        "constraints": [
+          {
+            "id": "k1",
+            "l": 0,
+            "type": "horizontal"
+          },
+          {
+            "id": "k2",
+            "l": 2,
+            "type": "horizontal"
+          },
+          {
+            "id": "k3",
+            "l": 1,
+            "type": "vertical"
+          },
+          {
+            "id": "k4",
+            "l": 3,
+            "type": "vertical"
+          },
+          {
+            "id": "k5",
+            "l": 4,
+            "type": "horizontal"
+          },
+          {
+            "id": "k6",
+            "l": 6,
+            "type": "horizontal"
+          },
+          {
+            "id": "k7",
+            "l": 5,
+            "type": "vertical"
+          },
+          {
+            "id": "k8",
+            "l": 7,
+            "type": "vertical"
+          }
+        ],
+        "counters": {
+          "k": 8,
+          "l": 8,
+          "p": 8
+        },
+        "curves": [
+          {
+            "a": 1,
+            "b": 2,
+            "construction": false,
+            "id": "l1",
+            "type": "line"
+          },
+          {
+            "a": 2,
+            "b": 3,
+            "construction": false,
+            "id": "l2",
+            "type": "line"
+          },
+          {
+            "a": 3,
+            "b": 4,
+            "construction": false,
+            "id": "l3",
+            "type": "line"
+          },
+          {
+            "a": 4,
+            "b": 1,
+            "construction": false,
+            "id": "l4",
+            "type": "line"
+          },
+          {
+            "a": 5,
+            "b": 6,
+            "construction": false,
+            "id": "l5",
+            "type": "line"
+          },
+          {
+            "a": 6,
+            "b": 7,
+            "construction": false,
+            "id": "l6",
+            "type": "line"
+          },
+          {
+            "a": 7,
+            "b": 8,
+            "construction": false,
+            "id": "l7",
+            "type": "line"
+          },
+          {
+            "a": 8,
+            "b": 5,
+            "construction": false,
+            "id": "l8",
+            "type": "line"
+          }
+        ],
+        "points": [
+          {
+            "fixed": true,
+            "id": "origin",
+            "pos": [
+              0.0,
+              0.0
+            ]
+          },
+          {
+            "fixed": false,
+            "id": "p1",
+            "pos": [
+              102.65,
+              2.65
+            ]
+          },
+          {
+            "fixed": false,
+            "id": "p2",
+            "pos": [
+              174.15,
+              2.65
+            ]
+          },
+          {
+            "fixed": false,
+            "id": "p3",
+            "pos": [
+              174.15,
+              86.65
+            ]
+          },
+          {
+            "fixed": false,
+            "id": "p4",
+            "pos": [
+              102.65,
+              86.65
+            ]
+          },
+          {
+            "fixed": false,
+            "id": "p5",
+            "pos": [
+              104.15,
+              4.15
+            ]
+          },
+          {
+            "fixed": false,
+            "id": "p6",
+            "pos": [
+              172.65,
+              4.15
+            ]
+          },
+          {
+            "fixed": false,
+            "id": "p7",
+            "pos": [
+              172.65,
+              85.15
+            ]
+          },
+          {
+            "fixed": false,
+            "id": "p8",
+            "pos": [
+              104.15,
+              85.15
+            ]
+          }
+        ]
+      },
+      "suppressed": false,
+      "type": "sketch"
+    },
+    {
+      "extent": {
+        "direction": "positive",
+        "distance": "3"
+      },
+      "id": 4,
+      "name": "Extrude1",
+      "operation": "join",
+      "param_names": [
+        "d6"
+      ],
+      "profiles": {
+        "loops": [
+          [
+            "l1",
+            "l2",
+            "l3",
+            "l4"
+          ]
+        ],
+        "type": "curves"
+      },
+      "sketch": 3,
+      "suppressed": false,
+      "targets": [
+        "Lid"
+      ],
+      "type": "extrude"
+    },
+    {
+      "corner": [
+        104.4,
+        5.4,
+        -1.0
+      ],
+      "height": "8",
+      "id": 5,
+      "length": "68",
+      "name": "Box2",
+      "operation": "cut",
+      "param_names": [
+        "d7",
+        "d8",
+        "d9"
+      ],
+      "suppressed": false,
+      "type": "box",
+      "width": "61"
+    },
+    {
+      "corner": [
+        116.4,
+        72.0,
+        -1.0
+      ],
+      "height": "8",
+      "id": 6,
+      "length": "44",
+      "name": "Box3",
+      "operation": "cut",
+      "param_names": [
+        "d10",
+        "d11",
+        "d12"
+      ],
+      "suppressed": false,
+      "type": "box",
+      "width": "10"
+    },
+    {
+      "corner": [
+        127.4,
+        84.0,
+        2.4
+      ],
+      "height": "4",
+      "id": 7,
+      "length": "22",
+      "name": "Box4",
+      "operation": "cut",
+      "param_names": [
+        "d13",
+        "d14",
+        "d15"
+      ],
+      "suppressed": false,
+      "type": "box",
+      "width": "6"
+    },
+    {
+      "corner": [
+        102.8,
+        14.0,
+        2.4
+      ],
+      "height": "11.7",
+      "id": 8,
+      "length": "1.6",
+      "name": "Rib1",
+      "operation": "join",
+      "param_names": [
+        "d16",
+        "d17",
+        "d18"
+      ],
+      "suppressed": false,
+      "type": "box",
+      "width": "6"
+    },
+    {
+      "corner": [
+        102.8,
+        48.0,
+        2.4
+      ],
+      "height": "11.7",
+      "id": 9,
+      "length": "1.6",
+      "name": "Rib2",
+      "operation": "join",
+      "param_names": [
+        "d19",
+        "d20",
+        "d21"
+      ],
+      "suppressed": false,
+      "type": "box",
+      "width": "6"
+    },
+    {
+      "corner": [
+        172.4,
+        14.0,
+        2.4
+      ],
+      "height": "11.7",
+      "id": 10,
+      "length": "1.6",
+      "name": "Rib3",
+      "operation": "join",
+      "param_names": [
+        "d22",
+        "d23",
+        "d24"
+      ],
+      "suppressed": false,
+      "type": "box",
+      "width": "6"
+    },
+    {
+      "corner": [
+        172.4,
+        48.0,
+        2.4
+      ],
+      "height": "11.7",
+      "id": 11,
+      "length": "1.6",
+      "name": "Rib4",
+      "operation": "join",
+      "param_names": [
+        "d25",
+        "d26",
+        "d27"
+      ],
+      "suppressed": false,
+      "type": "box",
+      "width": "6"
+    }
+  ],
+  "format": "solidcraft/15",
+  "name": "issue-616-lid-ribs",
+  "next_id": 12,
+  "params": [],
+  "units": "mm"
+}

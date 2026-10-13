@@ -425,6 +425,87 @@ fn instance_styles_follow_source_identity_after_collision_rename_and_pending_mov
     assert!(imported.bodies[0].body.paint().unwrap().faces.iter().any(|f| f.color == [0.0, 1.0, 0.0]));
 }
 
+/// A design file path in a fresh temporary folder (removed by the caller).
+fn temp_design(tag: &str, ext: &str) -> (std::path::PathBuf, String) {
+    let dir = std::env::temp_dir().join(format!("solidcraft-visibility-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("design.{ext}")).to_string_lossy().to_string();
+    (dir, path)
+}
+
+/// #531: hiding a placement and a body is saved with the design and comes back when it opens.
+/// It is not an undo step (undoing a later feature leaves it hidden), but the design then has
+/// unsaved changes, and showing it again is saved the same way.
+#[test]
+fn hidden_placements_and_bodies_are_saved_with_the_design_but_not_undone() {
+    let (dir, path) = temp_design("saved", "solidcraft");
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length":4,"width":4,"height":4,"body_name":"Base"}));
+    let (component, first) = created(&mut s, "Part");
+    run(&mut s, "solid.box", json!({"length":2,"width":2,"height":2}));
+    let second = run(&mut s, "occurrence.copy", json!({"occurrence":first,"translate":[20,0,0]}))["occurrence"].as_u64().unwrap();
+    run(&mut s, "component.activate", json!({"component":0}));
+    run(&mut s, "file.save", json!({"path": path}));
+    assert!(!s.is_dirty());
+
+    let undo = s.undo.len();
+    run(&mut s, "browser.visibility", json!({"visible":false,"paths":[[second]]}));
+    run(&mut s, "browser.visibility", json!({"visible":false,"items":["Base"]}));
+    assert_eq!(s.undo.len(), undo, "hiding is not an undo step");
+    assert!(s.is_dirty(), "hiding leaves the design with unsaved changes");
+    run(&mut s, "solid.box", json!({"length":1,"width":1,"height":1,"corner":[50,0,0],"operation":"new","body_name":"Later"}));
+    run(&mut s, "edit.undo", json!({}));
+    assert!(!s.body_visible("Base") && !s.occurrence_visible(&[second]), "undo keeps the hiding");
+
+    run(&mut s, "file.save", json!({}));
+    assert!(!s.is_dirty());
+    run(&mut s, "file.new", json!({}));
+    run(&mut s, "doc.open", json!({"path": path}));
+    assert!(!s.body_visible("Base"), "the hidden body stays hidden");
+    assert!(!s.occurrence_visible(&[second]), "the hidden placement stays hidden");
+    assert!(s.occurrence_visible(&[first]));
+    assert!(s.doc.components.iter().any(|c| c.id == component));
+    assert!(!s.is_dirty(), "an opened design has no unsaved changes");
+    assert!(s.undo.is_empty());
+
+    run(&mut s, "browser.visibility", json!({"visible":true,"folder":"bodies"}));
+    assert!(s.is_dirty());
+    run(&mut s, "file.save", json!({}));
+    run(&mut s, "file.new", json!({}));
+    run(&mut s, "doc.open", json!({"path": path}));
+    assert!(s.body_visible("Base") && s.occurrence_visible(&[second]), "showing again is saved too");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #531: designs saved before visibility was kept (no `visibility` in the file) open with
+/// everything shown, and a design with nothing hidden saves exactly as before.
+#[test]
+fn designs_without_saved_visibility_open_unchanged() {
+    let (dir, path) = temp_design("legacy", "json");
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length":4,"width":4,"height":4,"body_name":"Base"}));
+    let mut legacy: Value = serde_json::from_slice(&solidcraft_io::write_design(&s.doc)).unwrap();
+    assert!(legacy.get("visibility").is_none(), "nothing hidden: no visibility in the file");
+    legacy["format"] = json!("solidcraft/15");
+    std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+    run(&mut s, "file.new", json!({}));
+    run(&mut s, "doc.open", json!({"path": path}));
+    assert!(s.body_visible("Base"));
+    assert_eq!(s.visibility, crate::Visibility::default());
+    assert!(!s.is_dirty());
+    run(&mut s, "file.save", json!({}));
+    let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(saved.get("visibility").is_none());
+
+    run(&mut s, "browser.visibility", json!({"visible":false,"items":["Base"]}));
+    run(&mut s, "file.save", json!({}));
+    let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["visibility"]["hidden_bodies"], json!(["Base"]));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Command names for linking another design are a proposal (#533); adjust them to the real API.
 const INSERT_DESIGN: &str = "component.insert_design";
 const UPDATE_LINKS: &str = "component.update_links";
@@ -436,7 +517,6 @@ fn saved_box_design(path: &std::path::Path, height: f64) {
 }
 
 #[test]
-#[ignore = "fails until #533 is fixed"]
 fn a_linked_design_brings_its_bodies_in_and_follows_edits_to_the_part_file() {
     let dir = std::env::temp_dir().join(format!("solidcraft-linked-design-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

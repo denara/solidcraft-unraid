@@ -13,11 +13,11 @@ use crate::gizmo::{self, Change, Drag};
 use crate::selection::{AXES, BODIES, EDGES, FACES, SelInput, VERTICES};
 
 pub const TYPES: [&str; 5] = ["Free Move", "Translate", "Rotate", "Point to Point", "Point to Position"];
-const FREE: usize = 0;
-const TRANSLATE: usize = 1;
-const ROTATE: usize = 2;
-const POINT_TO_POINT: usize = 3;
-const POINT_TO_POSITION: usize = 4;
+pub const FREE: usize = 0;
+pub const TRANSLATE: usize = 1;
+pub const ROTATE: usize = 2;
+pub const POINT_TO_POINT: usize = 3;
+pub const POINT_TO_POSITION: usize = 4;
 const POINTS: u16 = VERTICES | FACES | EDGES;
 
 /// A fresh Move dialog of a type (all values zero).
@@ -318,3 +318,7 @@ pub fn for_feature(d: &mut Dialog, bodies: &[String], translate: &[String; 3], a
         d.extra.insert("copy".into(), json!(true));
     }
 }
+
+#[cfg(test)]
+#[path = "dialogs_move_tests.rs"]
+mod tests;

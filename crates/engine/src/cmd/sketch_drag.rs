@@ -15,7 +15,7 @@
 use std::f64::consts::{PI, TAU};
 
 use solidcraft_geom::Vec2;
-use solidcraft_sketch::{Analysis, Budget, ConstraintKind, CurveKind, Hold, Sketch};
+use solidcraft_sketch::{Analysis, Budget, ConstraintKind, CurveKind, Hold, Sketch, conic_rho_from_point};
 
 use super::{Ent, Left, counted_solve};
 
@@ -47,13 +47,18 @@ enum Path {
     Radius { c: usize, from: f64, to: f64 },
     /// An arc's ends move along their rays from the centre `o` to the cursor's radius.
     ArcRadius { o: Vec2, ends: Vec<(usize, Vec2)>, from: f64, to: f64 },
+    /// A conic's `rho` follows the cursor, read off its position between the chord's midpoint
+    /// and the apex (see [`solidcraft_sketch::conic_rho_from_point`]). `a`, `b` and `apex` stay
+    /// put; only the curve's fullness changes, the way an ellipse's outline changes its minor
+    /// radius rather than sliding the ellipse.
+    ConicRho { c: usize, from: f64, to: f64 },
 }
 
 impl Path {
     fn length(&self) -> f64 {
         match self {
             Path::Slide { d, .. } => d.len(),
-            Path::Radius { from, to, .. } | Path::ArcRadius { from, to, .. } => (to - from).abs(),
+            Path::Radius { from, to, .. } | Path::ArcRadius { from, to, .. } | Path::ConicRho { from, to, .. } => (to - from).abs(),
         }
     }
 
@@ -61,7 +66,7 @@ impl Path {
     fn points(&self) -> impl Iterator<Item = usize> + '_ {
         let pts = match self {
             Path::Slide { pts, .. } | Path::ArcRadius { ends: pts, .. } => pts.as_slice(),
-            Path::Radius { .. } => &[],
+            Path::Radius { .. } | Path::ConicRho { .. } => &[],
         };
         pts.iter().map(|(q, _)| *q)
     }
@@ -90,13 +95,19 @@ impl Path {
                     *r = from + (to - from) * t;
                 }
             }
+            Path::ConicRho { c, from, to } => {
+                if let Some(CurveKind::Conic { rho, .. }) = sk.curves.get_mut(*c).map(|x| &mut x.kind) {
+                    *rho = from + (to - from) * t;
+                }
+            }
         }
     }
 }
 
-/// Drag: the grabbed entity follows the cursor exactly (a point goes to it; a line,
-/// spline or conic slides by the cursor's move; a circle or arc grabbed on its edge changes
-/// radius about its centre) and the rest of the sketch moves as little as it can, staying on the
+/// Drag: the grabbed entity follows the cursor exactly (a point goes to it; a line or spline
+/// slides by the cursor's move; a circle or arc grabbed on its edge changes radius about its
+/// centre; a conic grabbed on its curve reads its fullness, `rho`, off the cursor) and the rest
+/// of the sketch moves as little as it can, staying on the
 /// solution it started on. Fixed geometry stays. A step that cannot be solved with the entity
 /// held (the path crosses where the geometry cannot reach) is approached by halving the way to
 /// it, and the next steps are tried from the last solved state, the last of them being the whole
@@ -430,8 +441,18 @@ fn plan(sk: &Sketch, e: Ent, from: Vec2, to: Vec2) -> Option<(Path, Hold)> {
                     hold.radii.push(c);
                     Path::Radius { c, from: r, to: if minor > 1e-9 { minor } else { r } }
                 }
+                CurveKind::Conic { a, b, apex, rho } => {
+                    // Grabbed on the curve itself: its fullness (`rho`) follows the drag, the
+                    // way an ellipse's outline changes its minor radius rather than sliding the
+                    // ellipse. `a`, `b` and the apex (the tangent intersection, dragged
+                    // separately as an ordinary point) stay where they are.
+                    let (pa, px, pb) = (sk.point(a)?, sk.point(apex)?, sk.point(b)?);
+                    hold.points.extend([a, b, apex]);
+                    let to_rho = conic_rho_from_point(pa, px, pb, to);
+                    Path::ConicRho { c, from: rho, to: to_rho }
+                }
                 k => {
-                    // Lines, splines and conics slide with the cursor.
+                    // Lines and splines slide with the cursor.
                     let mut ids = k.point_ids();
                     ids.sort_unstable();
                     ids.dedup();

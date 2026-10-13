@@ -114,7 +114,10 @@ fn attrs(e: &BytesStart) -> Vec<(String, String)> {
         .flatten()
         .map(|a| {
             let k = String::from_utf8_lossy(a.key.local_name().as_ref()).to_string();
-            let v = a.unescape_value().map(|v| v.to_string()).unwrap_or_else(|_| String::from_utf8_lossy(&a.value).to_string());
+            let v = a
+                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                .map(|v| v.to_string())
+                .unwrap_or_else(|_| String::from_utf8_lossy(&a.value).to_string());
             (k, v)
         })
         .collect()

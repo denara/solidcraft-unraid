@@ -6,7 +6,9 @@ use solidcraft_doc::expr::Kind;
 use solidcraft_geom::Vec3;
 
 use super::CommandSpec;
-use super::features::{add_feature, axis_dir_param, check_expr, feature_sketch, plane_param, point_param, profiles};
+use super::features::{
+    add_feature, axis_dir_param, check_expr, feature_sketch, length_operands, plane_param, point_param, profiles, typed_length_unit,
+};
 use crate::params::{bad, bool_, expr, req_expr, str_, string_list, vec3};
 use crate::{Result, Session};
 
@@ -49,10 +51,18 @@ fn coil(s: &mut Session, p: &Value) -> Result<Value> {
     check_expr(s, &diameter, Kind::Length, cmd, "diameter")?;
     let turns = expr(p, "revolutions").or_else(|| expr(p, "turns"));
     let (height, pitch) = (expr(p, "height"), expr(p, "pitch"));
+    // The pitch or the revolutions from the height keep the units the lengths were given in.
+    let unit = typed_length_unit(s);
     let (turns, pitch) = match (turns, height, pitch) {
         (Some(n), _, Some(pt)) => (n, pt),
-        (Some(n), Some(h), None) => (n.clone(), format!("({h}) / ({n})")),
-        (None, Some(h), Some(pt)) => (format!("({h}) / ({pt})"), pt),
+        (Some(n), Some(h), None) => {
+            let [h] = length_operands(s, [(&h, &unit)]);
+            (n.clone(), format!("({h}) / ({n})"))
+        }
+        (None, Some(h), Some(pt)) => {
+            let [h, by] = length_operands(s, [(&h, &unit), (&pt, &unit)]);
+            (format!("({h}) / ({by})"), pt)
+        }
         _ => return Err(bad(cmd, "give two of `revolutions`, `height` and `pitch`")),
     };
     check_expr(s, &turns, Kind::Unitless, cmd, "revolutions")?;
