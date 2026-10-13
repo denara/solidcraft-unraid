@@ -11,7 +11,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use solvecraft_geom::Vec3;
+use solidcraft_geom::Vec3;
 use truck_modeling::{self as mt, builder};
 
 use crate::body::{Body, Solid, from_p3, p3};
@@ -55,7 +55,7 @@ fn key(p: Vec3, q: f64) -> Key {
 }
 
 /// Delete faces (indices in the body's face order, as in its mesh's `tri_face`) and heal the
-/// gap by extending the neighbouring planes.
+/// gap by extending the neighbouring planes. The result's history is over `[body]`.
 pub fn delete_faces(body: &Body, faces: &[usize]) -> Result<Body> {
     body.require_brep("Delete Face")?;
     let all: Vec<mt::Face> = body.solid.face_iter().cloned().collect();
@@ -194,6 +194,9 @@ pub fn delete_faces(body: &Body, faces: &[usize]) -> Result<Body> {
             lines.insert((ka, kb), e.clone());
             e
         };
+        // Neighbours rebuilt from themselves, moved edges pieces of themselves; the edges that
+        // close the gap are new.
+        let mut rec = crate::record::Rebuild::default();
         let mut out: Vec<mt::Face> = Vec::new();
         for (fi, f) in all.iter().enumerate() {
             if del.contains(&fi) {
@@ -256,7 +259,9 @@ pub fn delete_faces(body: &Body, faces: &[usize]) -> Result<Body> {
                         new_edges.push(e.clone());
                     } else if matches!(e.oriented_curve(), mt::Curve::Line(_)) {
                         if a.dist(b) > q * 10.0 {
-                            new_edges.push(line(a, b, &mut verts));
+                            let moved = line(a, b, &mut verts);
+                            rec.piece(&moved, e);
+                            new_edges.push(moved);
                         }
                     } else {
                         return Err(fail(format!("face {fi} has a curved edge that would have to stretch")));
@@ -285,17 +290,18 @@ pub fn delete_faces(body: &Body, faces: &[usize]) -> Result<Body> {
                 }
                 _ => face,
             };
+            rec.face(&face, f);
             out.push(face);
         }
         let shell: mt::Shell = out.into();
         let solid = Solid::try_new(vec![shell]).map_err(|e| fail(format!("the neighbouring faces do not close the gap ({e})")))?;
-        Body::new(solid)
+        crate::record::rebuilt(solid, &[&body.solid], &rec)
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use solvecraft_geom::Vec3;
+    use solidcraft_geom::Vec3;
 
     use super::delete_faces;
     use crate::{BoolOp, boolean, box_solid, chamfer, cylinder, fillet};

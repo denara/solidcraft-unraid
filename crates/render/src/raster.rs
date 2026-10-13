@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use solvecraft_geom::{Mesh, Vec3};
+use solidcraft_geom::{Mesh, Vec3};
 
 use crate::Camera;
 

@@ -2,14 +2,14 @@
 
 use egui::pos2;
 use serde_json::json;
-use solvecraft_engine::Session;
+use solidcraft_engine::Session;
 
 use crate::context_menu::{self, Item, Target};
 use crate::{Services, SolveApp};
 
 fn sample_app() -> SolveApp {
     let mut s = Session::default();
-    s.run_script(&solvecraft_engine::sample::script()).unwrap();
+    s.run_script(&solidcraft_engine::sample::script()).unwrap();
     SolveApp::new(s, Services::default())
 }
 
@@ -19,7 +19,7 @@ fn properties_leave_with_the_document_but_survive_a_failed_open() {
     app.menu.props = Some(("Prior body".into(), json!({"volume_mm3":42})));
     app.start("config.table");
     assert!(app.dialog.is_some());
-    assert!(app.run("doc.open", json!({"path":"__missing_properties_regression__.solvecraft"})).is_err());
+    assert!(app.run("doc.open", json!({"path":"__missing_properties_regression__.solidcraft"})).is_err());
     assert!(app.menu.props.is_some());
     assert!(app.dialog.is_some());
     app.run("file.new", json!({"name":"New design"})).unwrap();
@@ -73,7 +73,7 @@ fn appearance_browser_action_targets_the_clicked_body() {
     act(&mut app, &Target::Body { name: b.clone() }, "Appearance");
     let dialog = app.dialog.as_ref().unwrap();
     assert!(matches!(dialog.kind, crate::dialogs::Kind::Appearance(_)));
-    assert_eq!(dialog.inputs[0].items, vec![solvecraft_engine::Sel::Body { name: b }]);
+    assert_eq!(dialog.inputs[0].items, vec![solidcraft_engine::Sel::Body { name: b }]);
 }
 
 #[test]
@@ -102,7 +102,7 @@ fn face_menu_hides_and_finds_the_body() {
     }
     assert!(find(&items, "Appearance").enabled);
     context_menu::run_item(&mut app, &find(&items, "Find in Timeline"), pos2(0.0, 0.0));
-    assert!(matches!(app.session.selection.as_slice(), [solvecraft_engine::Sel::Feature { .. }]));
+    assert!(matches!(app.session.selection.as_slice(), [solidcraft_engine::Sel::Feature { .. }]));
     context_menu::run_item(&mut app, &find(&items, "Show/Hide"), pos2(0.0, 0.0));
     assert_eq!(app.session.visibility.hidden_bodies, vec![b]);
 }
@@ -268,7 +268,7 @@ fn browser_folds_are_kept_in_the_preferences() {
 
 #[test]
 fn delete_key_handles_every_kind_and_asks_about_dependents() {
-    use solvecraft_engine::Sel;
+    use solidcraft_engine::Sel;
     let mut app = sample_app();
     app.run("construct.plane.offset", json!({"base": "XY", "offset": 10})).unwrap();
     app.run("solid.box", json!({"length": 5, "width": 5, "height": 5, "corner": [200, 0, 0]})).unwrap();
@@ -309,7 +309,7 @@ fn delete_key_handles_every_kind_and_asks_about_dependents() {
 fn menu_delete_items_use_the_same_path() {
     let mut app = sample_app();
     let b = body(&app);
-    let original_volume = solvecraft_engine::kernel::measure(&app.session.world_state().body(&b).unwrap().body).unwrap().volume;
+    let original_volume = solidcraft_engine::kernel::measure(&app.session.world_state().body(&b).unwrap().body).unwrap().volume;
     let created = app.run("component.from_bodies", json!({"bodies": [b]})).unwrap();
     let c = app.session.doc.components[0].id;
     let transfer = created["components"][0]["feature"].as_u64().unwrap();
@@ -328,14 +328,14 @@ fn menu_delete_items_use_the_same_path() {
     assert_eq!(restored.bodies.len(), 1, "the original joined plate stays intact");
     let plate = restored.body(&b).unwrap();
     assert_eq!(plate.component, 0);
-    assert!((solvecraft_engine::kernel::measure(&plate.body).unwrap().volume - original_volume).abs() < 1e-6);
-    assert!(plate.mesh().contains(solvecraft_engine::geom::Vec3::new(40.0, 35.0, 12.0)));
-    let mut reopened = solvecraft_engine::Session::new(solvecraft_engine::doc::Document::from_json(&app.session.doc.to_json()).unwrap());
+    assert!((solidcraft_engine::kernel::measure(&plate.body).unwrap().volume - original_volume).abs() < 1e-6);
+    assert!(plate.mesh().contains(solidcraft_engine::geom::Vec3::new(40.0, 35.0, 12.0)));
+    let mut reopened = solidcraft_engine::Session::new(solidcraft_engine::doc::Document::from_json(&app.session.doc.to_json()).unwrap());
     reopened.refresh();
     let reopened_state = reopened.world_state();
     assert_eq!(reopened_state.bodies.len(), 1);
     assert_eq!(reopened_state.body(&b).unwrap().component, 0);
-    assert!((solvecraft_engine::kernel::measure(&reopened_state.body(&b).unwrap().body).unwrap().volume - original_volume).abs() < 1e-6);
+    assert!((solidcraft_engine::kernel::measure(&reopened_state.body(&b).unwrap().body).unwrap().volume - original_volume).abs() < 1e-6);
     // A sketch from the browser: asks, since its features go too.
     let id = app.session.doc.features.iter().find(|f| f.name == "Base").unwrap().id;
     act(&mut app, &Target::Sketch { id }, "Delete");
@@ -349,7 +349,7 @@ fn canvas_menu_hides_renames_calibrates_and_deletes() {
     png.extend(400u32.to_be_bytes());
     png.extend(200u32.to_be_bytes());
     png.extend([8, 6, 0, 0, 0, 0, 0, 0, 0]);
-    let data = solvecraft_engine::doc::canvas::base64_encode(&png);
+    let data = solidcraft_engine::doc::canvas::base64_encode(&png);
     let id = app.run("canvas.insert", json!({"data": data, "plane": "XY", "width": 80})).unwrap()["canvas"].as_u64().unwrap();
     let t = Target::Canvas { id };
     act(&mut app, &t, "Show/Hide");
@@ -476,7 +476,7 @@ fn named_views_save_restore_rename_and_delete() {
     act(&mut app, &Target::NamedViews, "New Named View");
     assert_eq!(app.session.doc.named_views.len(), 1);
     let saved = app.cam;
-    app.cam.set_view(solvecraft_engine::render::StandardView::Top);
+    app.cam.set_view(solidcraft_engine::render::StandardView::Top);
     let t = Target::NamedView { name: "Named View1".into() };
     act(&mut app, &t, "Restore");
     assert_eq!(app.cam_anim.map(|a| a.to), Some(saved), "animates back to the saved camera");
@@ -499,7 +499,7 @@ fn units_menu_changes_the_design_units_and_new_designs_take_the_preference() {
     assert_eq!(items.len(), 5);
     act(&mut app, &Target::Units, "in");
     assert_eq!(app.session.doc.units, "in");
-    assert!(crate::prefs::show_mm(&app, 25.4, 1).starts_with("1.00 in"));
+    assert!(crate::prefs::show_mm(&app, 25.4, 1).starts_with("1.000 in"));
     app.preferences.default_units = "cm".into();
     crate::documents::new_design(&mut app);
     assert_eq!(app.session.doc.units, "cm");
@@ -523,7 +523,7 @@ fn an_uncaptured_move_asks_before_the_next_command() {
     crate::browser::answer_capture(&mut app, "revert").unwrap();
     assert!(app.session.pending_moves.is_empty());
     assert!(app.dialog.is_some(), "Create Sketch started");
-    assert_eq!(app.session.doc.occurrences[0].transform, solvecraft_engine::doc::IDENTITY);
+    assert_eq!(app.session.doc.occurrences[0].transform, solidcraft_engine::doc::IDENTITY);
     // Capture keeps the move.
     app.dialog = None;
     app.run("occurrence.move", json!({"occurrence": occ, "translate": [10, 0, 0], "capture": false})).unwrap();
@@ -552,21 +552,21 @@ fn occurrence_moves_turn_about_their_origin_then_move() {
     app.run("component.from_bodies", json!({"bodies": [b]})).unwrap();
     let occ = app.session.doc.occurrences[0].id;
     let mut m = crate::browser::OccMove::new(occ);
-    m.pivot = Some(solvecraft_engine::geom::Vec3::new(5.0, 0.0, 0.0));
+    m.pivot = Some(solidcraft_engine::geom::Vec3::new(5.0, 0.0, 0.0));
     m.translate = [10.0, 0.0, 0.0];
     m.angles = [0.0, 0.0, 90.0];
     crate::browser::apply_occurrence_move(&mut app, &m);
     let t = *app.session.pending_moves.get(&occ).unwrap();
     // The pivot lands 10 mm along X; X turns into Y.
-    let p = solvecraft_engine::doc::apply_point(&t, solvecraft_engine::geom::Vec3::new(5.0, 0.0, 0.0));
-    let x = solvecraft_engine::doc::apply_vector(&t, solvecraft_engine::geom::Vec3::X);
+    let p = solidcraft_engine::doc::apply_point(&t, solidcraft_engine::geom::Vec3::new(5.0, 0.0, 0.0));
+    let x = solidcraft_engine::doc::apply_vector(&t, solidcraft_engine::geom::Vec3::X);
     assert!((p.x - 15.0).abs() < 1e-9 && p.y.abs() < 1e-9, "{p:?}");
     assert!((x.y - 1.0).abs() < 1e-9, "{x:?}");
     // Changing the values again starts from where it was, not from the last move.
     m.translate = [0.0, 0.0, 0.0];
     m.angles = [0.0; 3];
     crate::browser::apply_occurrence_move(&mut app, &m);
-    assert_eq!(*app.session.pending_moves.get(&occ).unwrap(), solvecraft_engine::doc::IDENTITY);
+    assert_eq!(*app.session.pending_moves.get(&occ).unwrap(), solidcraft_engine::doc::IDENTITY);
 }
 
 #[test]
@@ -594,8 +594,8 @@ fn toolbar_pins_removes_reorders_and_keeps_its_layout() {
     tc::reorder(&mut app, "SOLID", extra, "MODIFY", None);
     assert!(!ids(&app, "CREATE").contains(&extra) && ids(&app, "MODIFY").last() == Some(&extra));
     // Pin to Shortcuts goes to the S box's favourites.
-    act(&mut app, &Target::ToolbarCommand { id: "Extrude".into() }, "Pin to Shortcuts");
-    assert!(app.sbox.pinned.iter().any(|p| p == "Extrude"));
+    act(&mut app, &Target::ToolbarCommand { id: "solid.extrude".into() }, "Pin to Shortcuts");
+    assert!(app.sbox.pinned.iter().any(|p| p == "solid.extrude"));
     // Kept between runs, and exported and imported with the shortcuts.
     let mut other = sample_app();
     other.load_prefs(&app.prefs());
@@ -616,4 +616,5 @@ fn the_workspace_menu_lists_design_and_greys_the_rest() {
     let items = context_menu::items(&app, &Target::Workspace);
     assert!(find(&items, "Design").enabled);
     assert!(!find(&items, "Render").enabled && find(&items, "Render").shortcut == "coming later");
+    assert!(!items.iter().any(|i| i.label.contains("Generative")));
 }

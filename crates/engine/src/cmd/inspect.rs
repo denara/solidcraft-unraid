@@ -1,7 +1,7 @@
 //! Inspection: measure bodies, describe the document, sketches and model topology.
 
 use serde_json::{Value, json};
-use solvecraft_sketch::CurveKind;
+use solidcraft_sketch::CurveKind;
 
 use super::CommandSpec;
 use crate::params::{bad, bool_, str_, string_list};
@@ -34,12 +34,12 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("appearance.list", "List Appearances", appearance_list)
         .noundo()
         .params("body?: name → assigned appearances; with body, its resolved look and its faces' (face index, look)"),
-    CommandSpec::new("material.list", "List Materials", material_list).noundo(),
+    CommandSpec::new("material.list", "List Materials", material_list).noundo().doc_only(),
     CommandSpec::new("engine.commands", "List Commands", commands).noundo(),
 ];
 
-pub fn measure_json(b: &solvecraft_doc::ModelBody) -> Value {
-    match solvecraft_kernel::measure(&b.body) {
+pub fn measure_json(b: &solidcraft_doc::ModelBody) -> Value {
+    match solidcraft_kernel::measure(&b.body) {
         Ok(m) => json!({
             "name": b.name,
             "volume_mm3": m.volume,
@@ -205,6 +205,7 @@ fn inspect(s: &mut Session, p: &Value) -> Result<Value> {
             json!({
                 "id": f.id, "name": f.name, "type": f.kind.type_name(), "suppressed": f.suppressed, "rolled_back": i >= marker,
                 "error": r.and_then(|r| r.error.clone()), "warning": r.and_then(|r| r.warning.clone()), "ms": r.map(|r| r.ms),
+                "boolean_diagnostics": r.map(|r| &r.boolean_diagnostics),
             })
         })
         .collect();
@@ -233,7 +234,7 @@ fn inspect(s: &mut Session, p: &Value) -> Result<Value> {
     }))
 }
 
-fn body_of<'a>(st: &'a solvecraft_doc::ModelState, p: &Value, cmd: &str) -> Result<&'a solvecraft_doc::ModelBody> {
+fn body_of<'a>(st: &'a solidcraft_doc::ModelState, p: &Value, cmd: &str) -> Result<&'a solidcraft_doc::ModelBody> {
     let n = str_(p, "body").ok_or_else(|| bad(cmd, "`body` is required"))?;
     st.body(n).ok_or_else(|| bad(cmd, format!("no body `{n}`")))
 }
@@ -242,7 +243,7 @@ fn model_edges(s: &mut Session, p: &Value) -> Result<Value> {
     let st = s.world_state();
     let b = body_of(&st, p, "model.edges")?;
     let tol = (b.body.size() * 2e-3).max(1e-3);
-    let names = solvecraft_doc::naming::edge_names(b);
+    let names = solidcraft_doc::naming::edge_names(b);
     let edges: Vec<Value> = b
         .body
         .edges(tol)?
@@ -255,13 +256,16 @@ fn model_edges(s: &mut Session, p: &Value) -> Result<Value> {
 fn model_faces(s: &mut Session, p: &Value) -> Result<Value> {
     let st = s.world_state();
     let b = body_of(&st, p, "model.faces")?;
-    let names = solvecraft_doc::naming::face_names(b);
+    let names = solidcraft_doc::naming::face_names(b);
     let tol = (b.body.size() * 2e-3).max(1e-3);
     let faces: Vec<Value> = b
         .body
         .faces(tol)?
         .iter()
-        .map(|f| json!({"index": f.index, "name": names.get(f.index), "area": f.area, "centroid": f.centroid, "plane_normal": f.plane_normal}))
+        .map(|f| {
+            json!({"index": f.index, "name": names.get(f.index), "exact": solidcraft_doc::naming::face_name_exact(b, f.index),
+                   "area": f.area, "centroid": f.centroid, "plane_normal": f.plane_normal})
+        })
         .collect();
     Ok(json!({"body": b.name, "faces": faces}))
 }
@@ -279,7 +283,7 @@ fn physical_material(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "material.assign";
     let bodies = string_list(p, "bodies");
     let material = str_(p, "material").ok_or_else(|| bad(cmd, "`material` must be a material name"))?;
-    let canonical = solvecraft_doc::MATERIALS
+    let canonical = solidcraft_doc::MATERIALS
         .iter()
         .find(|(n, _)| n.eq_ignore_ascii_case(material.trim()))
         .map(|(n, _)| n.to_string())
@@ -314,7 +318,7 @@ fn color_param(v: &Value) -> Option<[u8; 3]> {
 }
 
 fn appearance(s: &mut Session, p: &Value) -> Result<Value> {
-    use solvecraft_doc::appearance::{FaceLook, Look, library};
+    use solidcraft_doc::appearance::{FaceLook, Look, library};
     let cmd = "appearance.assign";
     let look: Option<Look> = match (str_(p, "appearance"), p.get("color")) {
         // A colour with a name: that colour, called that (a name not in the library is fine).
@@ -348,14 +352,14 @@ fn appearance(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad(cmd, "`bodies` must list existing bodies"));
     }
     // Faces: a point on each, on the named body or the nearest one.
-    let mut faces: Vec<(String, solvecraft_geom::Vec3)> = Vec::new();
+    let mut faces: Vec<(String, solidcraft_geom::Vec3)> = Vec::new();
     if let Some(list) = p.get("faces") {
         let list = list.as_array().filter(|a| a.len() <= 10_000).ok_or_else(|| bad(cmd, "`faces` must list points [x, y, z]"))?;
         for v in list {
             let pt = crate::params::vec3(v)
                 .or_else(|| v.get("point").and_then(crate::params::vec3))
                 .ok_or_else(|| bad(cmd, "`faces` must list points [x, y, z]"))?;
-            let on = |b: &solvecraft_doc::ModelBody| solvecraft_doc::appearance::face_index_at(b, pt).is_some();
+            let on = |b: &solidcraft_doc::ModelBody| solidcraft_doc::appearance::face_index_at(b, pt).is_some();
             let body = match v.get("body").and_then(Value::as_str).or_else(|| str_(p, "body")) {
                 Some(n) => st.body(n).filter(|b| on(b)).map(|b| b.name.clone()),
                 None => st.bodies.iter().filter(|b| on(b)).min_by(|a, b| dist_to(a, pt).total_cmp(&dist_to(b, pt))).map(|b| b.name.clone()),
@@ -377,11 +381,11 @@ fn appearance(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad(cmd, "give `bodies`, `faces` or `components`"));
     }
     // Persistent names of the picked faces.
-    let st_names: Vec<(String, solvecraft_geom::Vec3, Option<String>)> = faces
+    let st_names: Vec<(String, solidcraft_geom::Vec3, Option<String>)> = faces
         .iter()
         .map(|(b, pt)| {
             let n = st.body(b).and_then(|mb| {
-                solvecraft_doc::appearance::face_index_at(mb, *pt).and_then(|i| solvecraft_doc::naming::face_names(mb).get(i).cloned())
+                solidcraft_doc::appearance::face_index_at(mb, *pt).and_then(|i| solidcraft_doc::naming::face_names(mb).get(i).cloned())
             });
             (b.clone(), *pt, n)
         })
@@ -419,20 +423,20 @@ fn appearance(s: &mut Session, p: &Value) -> Result<Value> {
             .map(|(b, pt)| {
                 (
                     b.clone(),
-                    st.body(b).and_then(|mb| solvecraft_doc::appearance::face_index_at(mb, *pt)),
+                    st.body(b).and_then(|mb| solidcraft_doc::appearance::face_index_at(mb, *pt)),
                     st_names.iter().find(|(name, p, _)| name == b && p.dist(*pt) < 1e-12).and_then(|(_, _, name)| name.clone()),
                 )
             })
             .collect();
         doc.appearances.faces.retain(|f| {
-            let idx = st.body(&f.body).and_then(|mb| solvecraft_doc::appearance::face_index_at(mb, f.point));
+            let idx = st.body(&f.body).and_then(|mb| solidcraft_doc::appearance::face_index_at(mb, f.point));
             !picked.iter().any(|(b, i, name)| {
                 *b == f.body
                     && (f
                         .name
                         .as_ref()
                         .zip(name.as_ref())
-                        .is_some_and(|(a, b)| solvecraft_doc::naming::strip_piece(a) == solvecraft_doc::naming::strip_piece(b))
+                        .is_some_and(|(a, b)| solidcraft_doc::naming::strip_piece(a) == solidcraft_doc::naming::strip_piece(b))
                         || (!f.strict_name && i.is_some() && *i == idx))
             })
         });
@@ -445,18 +449,18 @@ fn appearance(s: &mut Session, p: &Value) -> Result<Value> {
     }))
 }
 
-fn dist_to(b: &solvecraft_doc::ModelBody, p: solvecraft_geom::Vec3) -> f64 {
+fn dist_to(b: &solidcraft_doc::ModelBody, p: solidcraft_geom::Vec3) -> f64 {
     let bb = b.mesh().bounds();
-    let c = solvecraft_geom::Vec3::new(p.x.clamp(bb.min.x, bb.max.x), p.y.clamp(bb.min.y, bb.max.y), p.z.clamp(bb.min.z, bb.max.z));
+    let c = solidcraft_geom::Vec3::new(p.x.clamp(bb.min.x, bb.max.x), p.y.clamp(bb.min.y, bb.max.y), p.z.clamp(bb.min.z, bb.max.z));
     c.dist(p)
 }
 
-fn look_json(l: &solvecraft_doc::appearance::Look) -> Value {
+fn look_json(l: &solidcraft_doc::appearance::Look) -> Value {
     json!({"name": l.name, "color": l.hex(), "opacity": l.opacity})
 }
 
 fn appearance_library(_s: &mut Session, _p: &Value) -> Result<Value> {
-    let list: Vec<Value> = solvecraft_doc::appearance::LIBRARY
+    let list: Vec<Value> = solidcraft_doc::appearance::LIBRARY
         .iter()
         .map(|(n, c, o)| {
             let category = n.split(" - ").next().unwrap_or(n);
@@ -469,8 +473,8 @@ fn appearance_library(_s: &mut Session, _p: &Value) -> Result<Value> {
 fn appearance_list(s: &mut Session, p: &Value) -> Result<Value> {
     let a = &s.doc.appearances;
     // "In this design": each look used, with where.
-    let mut used: Vec<(solvecraft_doc::appearance::Look, Vec<Value>, Vec<Value>, Vec<Value>)> = Vec::new();
-    fn slot(used: &mut Vec<(solvecraft_doc::appearance::Look, Vec<Value>, Vec<Value>, Vec<Value>)>, l: &solvecraft_doc::appearance::Look) -> usize {
+    let mut used: Vec<(solidcraft_doc::appearance::Look, Vec<Value>, Vec<Value>, Vec<Value>)> = Vec::new();
+    fn slot(used: &mut Vec<(solidcraft_doc::appearance::Look, Vec<Value>, Vec<Value>, Vec<Value>)>, l: &solidcraft_doc::appearance::Look) -> usize {
         match used.iter().position(|(u, ..)| u == l) {
             Some(i) => i,
             None => {
@@ -521,5 +525,5 @@ fn appearance_list(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn material_list(_s: &mut Session, _p: &Value) -> Result<Value> {
-    Ok(json!({"materials": solvecraft_doc::MATERIALS.iter().map(|(n, d)| json!({"name": n, "density_g_cm3": d})).collect::<Vec<_>>()}))
+    Ok(json!({"materials": solidcraft_doc::MATERIALS.iter().map(|(n, d)| json!({"name": n, "density_g_cm3": d})).collect::<Vec<_>>()}))
 }

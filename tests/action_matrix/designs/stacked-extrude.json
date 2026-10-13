@@ -1,0 +1,17 @@
+{"description": "Three extrudes stacked, each sketched on the top face of the last: a 60 x 40 base, a 40 x 24 step and a round boss.",
+ "commands": [
+  {"command": "parameters.change", "params": {"name": "base_h", "expression": "10 mm"}},
+  {"command": "parameters.change", "params": {"name": "step_h", "expression": "12 mm"}},
+  {"command": "sketch.create", "params": {"plane": "XY", "name": "Base"}},
+  {"command": "sketch.rectangle.two_point", "params": {"p0": [0, 0], "p1": [60, 40]}},
+  {"command": "sketch.finish", "params": {}},
+  {"command": "solid.extrude", "params": {"distance": "base_h"}},
+  {"command": "sketch.create", "params": {"plane": {"face": [30, 20, 10]}, "name": "Step"}},
+  {"command": "sketch.rectangle.two_point", "params": {"p0": [10, 8], "p1": [50, 32]}},
+  {"command": "sketch.finish", "params": {}},
+  {"command": "solid.extrude", "params": {"distance": "step_h", "operation": "join"}},
+  {"command": "sketch.create", "params": {"plane": {"face": [30, 20, 22]}, "name": "Boss"}},
+  {"command": "sketch.circle.center", "params": {"center": [30, 20], "radius": 7}},
+  {"command": "sketch.finish", "params": {}},
+  {"command": "solid.extrude", "params": {"distance": "8 mm", "operation": "join"}}
+ ]}

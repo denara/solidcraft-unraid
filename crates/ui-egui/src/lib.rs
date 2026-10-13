@@ -1,6 +1,6 @@
-//! The SolveCraft egui front end.
+//! The SolidCraft egui front end.
 //!
-//! A thin shell over [`solvecraft_engine::Session`]: panels read engine state and act through
+//! A thin shell over [`solidcraft_engine::Session`]: panels read engine state and act through
 //! commands ([`SolveApp::run`]). Nothing here owns design data. The layout follows the familiar
 //! parametric-CAD desktop: application bar, a toolbar of workspace tabs and panels, the browser
 //! on the left, the 3D viewport with an axis view and navigation bar, the command dialog on the
@@ -14,6 +14,7 @@ pub mod browser;
 pub mod canvas;
 pub mod context_menu;
 pub mod control;
+pub mod crash_ui;
 pub mod delete;
 pub mod dialogs;
 pub mod dialogs_appearance;
@@ -54,7 +55,7 @@ mod status_tests {
             "Shell: offset: must be positive"
         );
         assert_eq!(super::friendly_error("edit.undo", "nothing to undo"), "Undo: nothing to undo");
-        let mut app = super::SolveApp::new(solvecraft_engine::Session::default(), Default::default());
+        let mut app = super::SolveApp::new(solidcraft_engine::Session::default(), Default::default());
         app.run("solid.box", serde_json::json!({"length": 5, "width": 5, "height": 5})).unwrap();
         assert_eq!(app.session.log.last().map(String::as_str), Some("Box done"));
         let _ = app.run("edit.redo", serde_json::json!({}));
@@ -78,6 +79,7 @@ mod revolve_edit_tests;
 #[cfg(test)]
 mod revolve_manipulator_tests;
 pub mod scenario;
+pub mod select_other;
 pub mod selection;
 #[cfg(test)]
 mod shell_face_sketch_ui_tests;
@@ -93,8 +95,11 @@ pub(crate) mod sketch_display;
 #[cfg(test)]
 mod sketch_display_ui_tests;
 #[cfg(test)]
+mod sketch_drag_ui_tests;
+#[cfg(test)]
 mod sketch_edit_tests;
 pub mod sketch_palette;
+pub(crate) mod sketch_text;
 pub mod sketch_tools;
 pub mod stand_up;
 pub mod theme;
@@ -111,8 +116,8 @@ use std::sync::mpsc::Receiver;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use solvecraft_engine::Session;
-use solvecraft_engine::render::{Camera, CameraAnim, StandardView};
+use solidcraft_engine::Session;
+use solidcraft_engine::render::{Camera, CameraAnim, StandardView};
 
 pub use control::{ControlRequest, ControlResponse};
 
@@ -140,7 +145,7 @@ pub struct UiState {
     /// A soft shadow on the ground under the model (seen from above).
     pub ground_shadow: bool,
     /// The world's up axis (Z or Y; #3): the camera, axis view, home view and ground follow it.
-    pub up_axis: solvecraft_engine::render::UpAxis,
+    pub up_axis: solidcraft_engine::render::UpAxis,
     /// Sketches whose closed profiles are not shaded.
     pub hidden_profiles: Vec<u64>,
     /// Finished sketches whose dimensions are shown.
@@ -218,6 +223,8 @@ pub struct SolveApp {
     pub help: help::HelpState,
     /// An editable local issue draft and optional captured app frame.
     pub issue_report: issue_report::ReportState,
+    /// The Crash Reports window.
+    pub crashes: crash_ui::CrashUi,
     /// Toolbar buttons the user pinned, removed or reordered.
     pub toolbar_custom: toolbar_custom::ToolbarCustom,
     /// Preferences kept between runs, and their window.
@@ -231,11 +238,16 @@ pub struct SolveApp {
     pub status: Option<(String, f64, bool)>,
     pub quit_requested: bool,
     /// Autosave into the recovery folder (the desktop app turns it on).
-    pub autosave: Option<solvecraft_engine::recovery::Autosaver>,
+    pub autosave: Option<solidcraft_engine::recovery::Autosaver>,
     /// Designs left by crashed apps, offered for recovery.
-    pub recoverable: Vec<solvecraft_engine::recovery::Entry>,
+    pub recoverable: Vec<solidcraft_engine::recovery::Entry>,
     /// The bodies of a just-opened Y-up file, offered to be stood up (`stand_up`).
     pub stand_up: Option<Vec<String>>,
+    /// The anti-aliasing sample counts the graphics device supports (empty without a GPU).
+    pub msaa_supported: Vec<u32>,
+    /// Settings put back at start because they kept SolidCraft from starting, one line each,
+    /// shown until dismissed (`prefs::show_reset_notice`).
+    pub settings_reset: Vec<prefs::SettingReset>,
     /// The last command was a big operation: autosave after it.
     pub big_operation: bool,
     /// Autosave interval (minutes; 0 = only after big operations). A preference.
@@ -256,7 +268,7 @@ pub struct SolveApp {
     shot_token: u64,
     styled: bool,
     fitted: bool,
-    pending_fit: Option<(Camera, solvecraft_engine::geom::Aabb3, bool)>,
+    pending_fit: Option<(Camera, solidcraft_engine::geom::Aabb3, bool)>,
     /// The start page.
     pub home: home::HomeState,
     pub file_load: file_load::FileLoad,
@@ -286,6 +298,7 @@ impl SolveApp {
             keymap: keymap::Keymap::default(),
             help: help::HelpState::default(),
             issue_report: issue_report::ReportState::default(),
+            crashes: crash_ui::CrashUi::default(),
             toolbar_custom: toolbar_custom::ToolbarCustom::default(),
             preferences: prefs::Prefs::default(),
             prefs_window: prefs::PrefsWindow::default(),
@@ -297,6 +310,8 @@ impl SolveApp {
             autosave: None,
             recoverable: Vec::new(),
             stand_up: None,
+            msaa_supported: Vec::new(),
+            settings_reset: Vec::new(),
             big_operation: false,
             autosave_minutes: 5.0,
             custom_titlebar: false,
@@ -332,6 +347,7 @@ impl SolveApp {
     /// stencil buffer bits and MSAA sample count). Without it the viewport renders on the CPU.
     pub fn set_wgpu(&mut self, rs: &egui_wgpu::RenderState, depth_bits: u8, stencil_bits: u8, samples: u32) {
         self.viewport.gpu = Some(gpu::install(rs, depth_bits, stencil_bits, samples));
+        self.msaa_supported = rs.msaa_supported.clone();
         let info = rs.adapter.get_info();
         self.help.gpu = Some(format!("{} ({:?}, {:?})", info.name.trim(), info.backend, info.device_type));
     }
@@ -409,7 +425,10 @@ impl SolveApp {
         if let Some(t) = v.get("toolbar") {
             self.toolbar_custom.load(t);
         }
-        if let Some(p) = v.get("preferences").and_then(|p| serde_json::from_value::<prefs::Prefs>(p.clone()).ok()) {
+        if let Some(mut p) = v.get("preferences").and_then(|p| serde_json::from_value::<prefs::Prefs>(p.clone()).ok()) {
+            if !prefs::MSAA.contains(&p.msaa) {
+                p.msaa = prefs::Prefs::default().msaa;
+            }
             self.preferences = p;
         }
         // Saved before the theme was a preference: the Dark/Light flag says which.
@@ -483,6 +502,10 @@ impl SolveApp {
     /// Start a command the way a toolbar click does: interactive tools and dialogs for commands
     /// that have them, otherwise run it with defaults.
     pub fn start(&mut self, id: &str) {
+        // Another command ends Edit Text (its dialog is not a feature edit to keep).
+        if sketch_text::editing(self) {
+            dialogs::cancel(self);
+        }
         // A component moved without Capture Position: ask first (Capture, Revert or Cancel).
         if browser::needs_capture(self, id) && !(id == "sketch.dimension" && self.session.active_sketch.is_some()) {
             self.tree.capture_prompt = Some(id.to_string());
@@ -516,24 +539,8 @@ impl SolveApp {
         }
         // Press Pull: edges get a fillet, faces and profiles an extrude.
         if id == "solid.press_pull" {
-            let edges = self.session.selection.iter().any(|s| matches!(s, solvecraft_engine::Sel::Edge { .. }));
+            let edges = self.session.selection.iter().any(|s| matches!(s, solidcraft_engine::Sel::Edge { .. }));
             return self.start(if edges { "solid.fillet" } else { "solid.extrude" });
-        }
-        // Fix/Unfix: the selected sketch points and curves change at once, otherwise pick them.
-        if id == "sketch.constraint.fix" {
-            let ents: Vec<String> = self
-                .session
-                .selection
-                .iter()
-                .filter_map(|s| match s {
-                    solvecraft_engine::Sel::SketchCurve { id } | solvecraft_engine::Sel::SketchPoint { id } => Some(id.clone()),
-                    _ => None,
-                })
-                .collect();
-            if !ents.is_empty() {
-                let _ = self.run(id, json!({ "entities": ents }));
-                return;
-            }
         }
         // Construction toggle: selected sketch curves switch at once, otherwise pick them.
         // Construction (X): convert the selection, or switch construction mode; no pick tool.
@@ -541,7 +548,7 @@ impl SolveApp {
             sketch_palette::toggle_construction(self);
             return;
         }
-        if let Some(spec) = solvecraft_engine::find_command(id)
+        if let Some(spec) = solidcraft_engine::find_command(id)
             && (tools::Tool::for_command(id).is_some() || dialogs::Dialog::for_command(self, id).is_some())
             && id != "sketch.create"
         {
@@ -555,6 +562,15 @@ impl SolveApp {
                 }
                 return;
             }
+            if id == "sketch.project"
+                && let Some(refs) = tools::projection_preselection(&self.session.selection)
+            {
+                if self.run(id, json!({"refs":refs})).is_ok() {
+                    let _ = self.session.execute("select.clear", &json!({}));
+                    self.set_status("Projection applied", false);
+                }
+                return;
+            }
             // Curve-pair constraints can consume an exact preselection. Leave ambiguous
             // selections to the ordinary pick tool; never silently constrain a subset.
             if matches!(
@@ -565,7 +581,7 @@ impl SolveApp {
                     | "sketch.constraint.tangent"
                     | "sketch.constraint.concentric"
                     | "sketch.constraint.collinear"
-            ) && let [solvecraft_engine::Sel::SketchCurve { id: a }, solvecraft_engine::Sel::SketchCurve { id: b }] =
+            ) && let [solidcraft_engine::Sel::SketchCurve { id: a }, solidcraft_engine::Sel::SketchCurve { id: b }] =
                 self.session.selection.as_slice()
                 && a != b
             {
@@ -582,7 +598,7 @@ impl SolveApp {
                     .selection
                     .iter()
                     .filter_map(|s| match s {
-                        solvecraft_engine::Sel::SketchCurve { id } | solvecraft_engine::Sel::SketchPoint { id } => Some(id.clone()),
+                        solidcraft_engine::Sel::SketchCurve { id } | solidcraft_engine::Sel::SketchPoint { id } => Some(id.clone()),
                         _ => None,
                     })
                     .take(2)
@@ -607,7 +623,7 @@ impl SolveApp {
     /// Edit a feature the way Fusion does: sketches open in sketch mode; other features roll the
     /// timeline back to just before themselves and reopen their dialog, filled in.
     pub fn edit_feature(&mut self, id: u64) {
-        use solvecraft_engine::doc::FeatureKind;
+        use solidcraft_engine::doc::FeatureKind;
         let Some(f) = self.session.doc.feature(id) else { return };
         if matches!(f.kind, FeatureKind::Sketch { .. }) {
             self.edit_sketch(id);
@@ -637,7 +653,7 @@ impl SolveApp {
     /// puts them back. Editing the sketch that is already open does nothing; editing another one
     /// finishes the current sketch first, so edit sessions never nest.
     pub fn edit_sketch(&mut self, id: u64) {
-        if let solvecraft_engine::doc::FaceAttachmentStatus::Lost { message, .. } =
+        if let solidcraft_engine::doc::FaceAttachmentStatus::Lost { message, .. } =
             self.session.placed_document().sketch_face_attachment(id, &self.session.model)
         {
             browser::redefine_sketch(self, id);
@@ -670,6 +686,9 @@ impl SolveApp {
     /// Finish the active sketch: stop editing, restore the history marker Edit Sketch moved and
     /// return to the view from before the sketch.
     pub fn finish_sketch(&mut self) {
+        if sketch_text::editing(self) {
+            dialogs::cancel(self);
+        }
         dim_view::cancel();
         self.tool = None;
         let _ = self.run("sketch.finish", json!({}));
@@ -686,7 +705,7 @@ impl SolveApp {
     }
 
     /// Everything shown as selected: the selection plus the open dialog's inputs.
-    pub fn highlighted(&self) -> Vec<solvecraft_engine::Sel> {
+    pub fn highlighted(&self) -> Vec<solidcraft_engine::Sel> {
         let mut v = self.session.selection.clone();
         if let Some(d) = &self.dialog {
             v.extend(d.items());
@@ -726,7 +745,7 @@ impl SolveApp {
     /// Insert a STEP file's bodies (an Import base feature) or a 3MF/STL file's meshes into the
     /// current design.
     pub fn insert_path(&mut self, path: &str) {
-        let cmd = if solvecraft_engine::io::is_mesh_path(path) { "file.insert_mesh" } else { "file.insert_step" };
+        let cmd = if solidcraft_engine::io::is_mesh_path(path) { "file.insert_mesh" } else { "file.insert_step" };
         let before: Vec<String> = self.session.world_state().bodies.iter().map(|b| b.name.clone()).collect();
         if let Ok(r) = self.run(cmd, json!({ "path": path })) {
             self.fit_view();
@@ -740,7 +759,7 @@ impl SolveApp {
     /// A dropped file: a STEP, 3MF or STL file joins a design that has features, anything else
     /// opens.
     pub fn drop_path(&mut self, path: &str) {
-        let import = solvecraft_engine::io::is_step_path(path) || solvecraft_engine::io::is_mesh_path(path);
+        let import = solidcraft_engine::io::is_step_path(path) || solidcraft_engine::io::is_mesh_path(path);
         if import && !self.session.doc.features.is_empty() {
             self.insert_path_async(path);
         } else {
@@ -751,7 +770,7 @@ impl SolveApp {
     /// Frame the model at once (programmatic use; the toolbar animates).
     /// Make `up` the world's up axis: the camera turns to the same standard view in that world
     /// (home) and frames the model.
-    pub fn set_up_axis(&mut self, up: solvecraft_engine::render::UpAxis) {
+    pub fn set_up_axis(&mut self, up: solidcraft_engine::render::UpAxis) {
         self.ui.up_axis = up;
         self.cam_anim = None;
         self.cam.up = up;
@@ -763,16 +782,16 @@ impl SolveApp {
         self.cam_anim = None;
         self.viewport.orbit_snap = None;
         self.viewport.orbit_free = None;
-        let bounds = solvecraft_engine::view::bounds(&self.session);
+        let bounds = solidcraft_engine::view::bounds(&self.session);
         self.pending_fit = Some((self.cam, bounds, false));
         self.cam = self.fitted(self.cam);
     }
 
     /// `cam` moved to frame the whole model.
     pub fn fitted(&self, mut cam: Camera) -> Camera {
-        let b = solvecraft_engine::view::bounds(&self.session);
+        let b = solidcraft_engine::view::bounds(&self.session);
         if b.is_empty() {
-            cam.target = solvecraft_engine::geom::Vec3::ZERO;
+            cam.target = solidcraft_engine::geom::Vec3::ZERO;
             cam.distance = 150.0;
         } else {
             cam = self.fitted_bounds(cam, &b);
@@ -780,7 +799,7 @@ impl SolveApp {
         cam
     }
 
-    fn fitted_bounds(&self, mut cam: Camera, bounds: &solvecraft_engine::geom::Aabb3) -> Camera {
+    fn fitted_bounds(&self, mut cam: Camera, bounds: &solidcraft_engine::geom::Aabb3) -> Camera {
         if let Some(layout) = &self.viewport.layout {
             return viewport_layout::fit_bounds(cam, bounds, layout, self.ui.perspective).unwrap_or(cam);
         }
@@ -839,13 +858,13 @@ impl SolveApp {
                     to = self.fitted_bounds(to, &b);
                 }
                 None => {
-                    self.pending_fit = Some((to, solvecraft_engine::view::bounds(&self.session), true));
+                    self.pending_fit = Some((to, solidcraft_engine::view::bounds(&self.session), true));
                     to = self.fitted(to);
                 }
             },
             "home" => {
                 to.set_view(StandardView::Iso);
-                self.pending_fit = Some((to, solvecraft_engine::view::bounds(&self.session), true));
+                self.pending_fit = Some((to, solidcraft_engine::view::bounds(&self.session), true));
                 to = self.fitted(to);
             }
             v => match StandardView::parse(v) {
@@ -977,6 +996,8 @@ impl SolveApp {
         if self.home.open {
             home::show(self, ui);
             if self.home.open {
+                // Preferences and Keyboard Shortcuts open from Home too (its links, the gear, Ctrl+,).
+                prefs::show(self, ui.ctx());
                 return;
             }
         }
@@ -999,6 +1020,7 @@ impl SolveApp {
         params_dialog::show(self, ui.ctx());
         recovery_ui::show(self, ui.ctx());
         stand_up::show(self, ui.ctx());
+        prefs::show_reset_notice(self, ui.ctx());
         context_menu::show(self, ui.ctx());
         delete::show(self, ui.ctx());
         if self.custom_titlebar {
@@ -1006,6 +1028,7 @@ impl SolveApp {
         }
         shortcut_box::show(self, ui.ctx());
         prefs::show(self, ui.ctx());
+        toolbar_custom::window(self, ui.ctx());
     }
 
     fn drain_control(&mut self, ctx: &egui::Context) {
@@ -1094,7 +1117,7 @@ impl SolveApp {
 
 /// A command's name as people see it (its label), for the status bar.
 pub fn command_label(id: &str) -> &str {
-    solvecraft_engine::find_command(id).map_or(id, |c| c.label)
+    solidcraft_engine::find_command(id).map_or(id, |c| c.label)
 }
 
 /// An engine error with the command's label instead of its id: "Shell: offset must be …".

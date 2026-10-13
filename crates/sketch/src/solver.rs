@@ -7,12 +7,19 @@
 //! central differences. Small steps from the current positions are preferred, so
 //! under-constrained sketches move as little as possible. Afterwards the rank of the Jacobian
 //! gives the remaining degrees of freedom and which points are fully determined.
+//!
+//! Unknowns the constraints pin down one after another from the constants (a point at the
+//! crossing of two loci on known points, see [`pinned`]) are eliminated exactly, without
+//! the dense matrices: values the constructive seed placed stay constants for LM, and the rank
+//! analysis runs only on what remains.
 
 use serde::{Deserialize, Serialize};
-use solvecraft_geom::{Seg2, Vec2};
+use solidcraft_geom::{Seg2, Vec2};
 
+use crate::decompose::Budget;
 use crate::linalg::{Mat, determined_vars, solve as lin_solve};
 use crate::model::{ConstraintKind, CurveKind, Sketch};
+use crate::union_find::{find, union};
 
 const MAX_ITERS: usize = 500;
 /// Variables in one connected component. Each component is solved as a dense system: an n by n
@@ -43,8 +50,17 @@ pub struct SolveReport {
     pub dof: usize,
     pub iterations: usize,
     pub max_residual: f64,
-    /// Constraints still violated after a failed solve.
+    /// Constraints still violated after a failed solve, and the ones in `folded`.
     pub failing: Vec<String>,
+    /// Constraints whose orientation (a triangle's turn, an offset's side) the solve for edited
+    /// driving values flipped relative to the stored solved state, where continuation could
+    /// not keep it. The solve keeps that best result (an evaluation shows it with a warning);
+    /// a command that changes values refuses it.
+    #[serde(default)]
+    pub folded: Vec<String>,
+    /// Components this solve stepped from the stored solved state to the edited values.
+    #[serde(default)]
+    pub continuations: usize,
     /// Per point: fully determined by constraints (fixed points count as determined).
     pub point_determined: Vec<bool>,
     /// Per curve: all of its defining values determined.
@@ -58,13 +74,44 @@ impl SolveReport {
     pub fn fully_constrained(&self) -> bool {
         self.dof == 0
     }
+    /// Solved, and no orientation of the stored state flipped: what a value edit accepts.
+    pub fn keeps_orientation(&self) -> bool {
+        self.ok() && self.folded.is_empty()
+    }
+    /// Why a solve failed or turned over: the constraints whose orientation the edit flips,
+    /// or else `conflict` of the constraints still violated (listed, comma-separated).
+    pub fn failure(&self, conflict: impl FnOnce(&str) -> String) -> String {
+        if self.folded.is_empty() {
+            conflict(&self.failing.join(", "))
+        } else {
+            format!("the new values would flip the sketch over ({} would change orientation)", self.folded.join(", "))
+        }
+    }
 }
 
-/// Variable layout: point → (x var, y var), circle → radius var.
+/// Variable layout: point → (x var, y var), circle → radius var. The point coordinates come
+/// first, in pairs (variables `0..points`), then the radii.
 struct Layout {
     pvar: Vec<Option<usize>>,
     rvar: Vec<Option<usize>>,
     n: usize,
+    /// The point coordinates' variables: `0..points`.
+    points: usize,
+}
+
+impl Layout {
+    /// The variable is a point coordinate.
+    fn is_point(&self, v: usize) -> bool {
+        v < self.points
+    }
+    /// The first variable of the unknown `v` belongs to: its point's x, or the radius itself.
+    fn unit(&self, v: usize) -> usize {
+        if self.is_point(v) { v & !1 } else { v }
+    }
+    /// The variables of the unknown starting at `first`.
+    fn width(&self, first: usize) -> usize {
+        if self.is_point(first) { 2 } else { 1 }
+    }
 }
 
 /// Geometry held in place for one solve: point indices and curves whose radius is held.
@@ -74,29 +121,21 @@ pub struct Hold {
     pub radii: Vec<usize>,
 }
 
-fn layout(sk: &Sketch, hold: &Hold) -> Layout {
-    let mut fixed: Vec<bool> = sk.points.iter().map(|p| p.fixed).collect();
+/// Per point: a constant for this solve (locked — fixed, fixed by a constraint, a point of a
+/// fixed curve, linked — or held).
+pub(crate) fn held_points(sk: &Sketch, hold: &Hold) -> Vec<bool> {
+    let mut fixed = sk.locked_points();
     for p in &hold.points {
         if let Some(f) = fixed.get_mut(*p) {
             *f = true;
         }
     }
-    for c in &sk.constraints {
-        if let ConstraintKind::Fix { p } = c.kind
-            && let Some(f) = fixed.get_mut(p)
-        {
-            *f = true;
-        }
-    }
-    for c in sk.curves.iter().filter(|c| c.fixed) {
-        for p in c.kind.point_ids() {
-            if let Some(f) = fixed.get_mut(p) {
-                *f = true;
-            }
-        }
-    }
+    fixed
+}
+
+fn layout(sk: &Sketch, hold: &Hold) -> Layout {
     let mut n = 0;
-    let pvar = fixed
+    let pvar = held_points(sk, hold)
         .iter()
         .map(|f| {
             if *f {
@@ -107,6 +146,7 @@ fn layout(sk: &Sketch, hold: &Hold) -> Layout {
             }
         })
         .collect();
+    let points = n;
     let rvar = sk
         .curves
         .iter()
@@ -119,7 +159,7 @@ fn layout(sk: &Sketch, hold: &Hold) -> Layout {
             _ => None,
         })
         .collect();
-    Layout { pvar, rvar, n }
+    Layout { pvar, rvar, n, points }
 }
 
 /// Read-only view of the sketch with variable values substituted.
@@ -216,8 +256,8 @@ impl State<'_> {
                     return q.dist(p.first().copied().unwrap_or_default());
                 }
                 if *control {
-                    let k = (*degree as usize).min(solvecraft_geom::MAX_BEZIER_DEGREE).min(p.len().saturating_sub(1)).max(1);
-                    crate::curves::bspline_beziers(&p, k).iter().filter_map(|span| solvecraft_geom::bezier(span)).collect()
+                    let k = (*degree as usize).min(solidcraft_geom::MAX_BEZIER_DEGREE).min(p.len().saturating_sub(1)).max(1);
+                    crate::curves::bspline_beziers(&p, k).iter().filter_map(|span| solidcraft_geom::bezier(span)).collect()
                 } else {
                     crate::curves::fit_beziers_mode(&p, *periodic)
                         .unwrap_or_default()
@@ -553,7 +593,7 @@ fn measure(s: &State, k: &ConstraintKind) -> Option<f64> {
 /// What a dimension measures on the sketch as it stands (mm, radians for angles); `None` for a
 /// constraint that is not a dimension.
 pub fn measure_dimension(sk: &Sketch, k: &ConstraintKind) -> Option<f64> {
-    let lay = Layout { pvar: vec![None; sk.points.len()], rvar: vec![None; sk.curves.len()], n: 0 };
+    let lay = Layout { pvar: vec![None; sk.points.len()], rvar: vec![None; sk.curves.len()], n: 0, points: 0 };
     measure(&State { sk, lay: &lay, x: &[] }, k).filter(|v| v.is_finite())
 }
 
@@ -613,9 +653,23 @@ fn block_residuals(s: &State, b: &Block, out: &mut Vec<f64>) {
     }
 }
 
+/// Every (point, curve) pair of a point-on-curve constraint, sorted (for [`touch_point`]).
+pub(crate) fn points_on_curves(sk: &Sketch) -> Vec<(usize, usize)> {
+    let mut on: Vec<(usize, usize)> = sk
+        .constraints
+        .iter()
+        .filter_map(|c| match c.kind {
+            ConstraintKind::PointOnCurve { p, c } => Some((p, c)),
+            _ => None,
+        })
+        .collect();
+    on.sort_unstable();
+    on
+}
+
 /// A point where a tangency must happen: an end point shared by the two curves, or a line end
-/// point constrained onto the round curve.
-fn touch_point(sk: &Sketch, k: &ConstraintKind) -> Option<usize> {
+/// point constrained onto the round curve (`on_curve` from [`points_on_curves`]).
+pub(crate) fn touch_point(sk: &Sketch, k: &ConstraintKind, on_curve: &[(usize, usize)]) -> Option<usize> {
     let ConstraintKind::Tangent { a, b } = *k else { return None };
     let ends = |c: usize| -> Vec<usize> {
         match sk.curves.get(c).map(|c| &c.kind) {
@@ -627,111 +681,105 @@ fn touch_point(sk: &Sketch, k: &ConstraintKind) -> Option<usize> {
     if let Some(p) = ea.iter().find(|p| eb.contains(p)) {
         return Some(*p);
     }
-    let on = |p: usize, c: usize| sk.constraints.iter().any(|x| x.kind == ConstraintKind::PointOnCurve { p, c });
+    let on = |p: usize, c: usize| on_curve.binary_search(&(p, c)).is_ok();
     ea.iter().find(|p| on(**p, b)).or_else(|| eb.iter().find(|p| on(**p, a))).copied()
 }
 
-/// Variables a block depends on.
-fn block_vars(sk: &Sketch, lay: &Layout, b: &Block) -> Vec<usize> {
+/// Variables a block depends on, and whether it reads a point that is a constant of the solve.
+fn block_vars(sk: &Sketch, lay: &Layout, b: &Block) -> (Vec<usize>, bool) {
     let mut v = Vec::new();
-    let pt = |v: &mut Vec<usize>, p: usize| {
-        if let Some(x) = lay.pvar.get(p).copied().flatten() {
+    let mut constant = false;
+    // Adds a point's variables; true when it is a constant.
+    let pt = |v: &mut Vec<usize>, p: usize| match lay.pvar.get(p).copied().flatten() {
+        Some(x) => {
             v.extend([x, x + 1]);
+            false
         }
+        None => true,
     };
-    let curve = |v: &mut Vec<usize>, c: usize| {
-        if let Some(k) = sk.curves.get(c).map(|c| &c.kind) {
-            for q in k.point_ids() {
-                pt(v, q);
+    for r in block_refs(sk, b) {
+        let (c, fits): (usize, fn(&CurveKind) -> bool) = match r {
+            Ref::Point(p) => {
+                constant |= pt(&mut v, p);
+                continue;
             }
-            if let Some(r) = lay.rvar.get(c).copied().flatten() {
-                v.push(r);
-            }
+            Ref::Curve(c) => (c, |_| true),
+            Ref::Line(c) => (c, |k| matches!(k, CurveKind::Line { .. })),
+            Ref::Round(c) => (c, |k| matches!(k, CurveKind::Circle { .. } | CurveKind::Arc { .. })),
+        };
+        // A curve of another kind reads as a constant (see `State::line`, `State::round`).
+        let Some(k) = sk.curves.get(c).map(|c| &c.kind).filter(|k| fits(k)) else {
+            constant = true;
+            continue;
+        };
+        for q in k.point_ids() {
+            constant |= pt(&mut v, q);
         }
-    };
-    use ConstraintKind::*;
-    match b {
-        Block::Closure { a, b } => {
-            pt(&mut v, *a);
-            pt(&mut v, *b);
-        }
-        Block::Arc { c, a, b } => {
-            pt(&mut v, *c);
-            pt(&mut v, *a);
-            pt(&mut v, *b);
-        }
-        Block::User(_, k) => match **k {
-            Coincident { p, q } | HorizontalPoints { p, q } | VerticalPoints { p, q } => {
-                pt(&mut v, p);
-                pt(&mut v, q);
-            }
-            Distance { p, q, .. } | DistanceX { p, q, .. } | DistanceY { p, q, .. } => {
-                pt(&mut v, p);
-                pt(&mut v, q);
-            }
-            PointOnCurve { p, c } | Midpoint { p, l: c } | PointLineDistance { p, l: c, .. } => {
-                pt(&mut v, p);
-                curve(&mut v, c);
-            }
-            Horizontal { l }
-            | Vertical { l }
-            | Length { l, .. }
-            | LineAngle { l, .. }
-            | ArcSweep { c: l, .. }
-            | Radius { c: l, .. }
-            | Diameter { c: l, .. } => curve(&mut v, l),
-            Parallel { a, b }
-            | Perpendicular { a, b }
-            | Collinear { a, b }
-            | Tangent { a, b }
-            | Equal { a, b }
-            | Concentric { a, b }
-            | Angle { a, b, .. }
-            | SlotOverallLength { a, b, .. } => {
-                curve(&mut v, a);
-                curve(&mut v, b);
-            }
-            Symmetric { p, q, l } => {
-                pt(&mut v, p);
-                pt(&mut v, q);
-                curve(&mut v, l);
-            }
-            Fix { .. } => {}
-            Smooth { a, b } => {
-                curve(&mut v, a);
-                curve(&mut v, b);
-            }
-            ArcLength { c, .. } => curve(&mut v, c),
-            LinearDiameter { p, l, .. } => {
-                pt(&mut v, p);
-                curve(&mut v, l);
-            }
-        },
-        Block::TangentAt(_, k, p) => {
-            pt(&mut v, *p);
-            if let ConstraintKind::Tangent { a, b } = **k {
-                curve(&mut v, a);
-                curve(&mut v, b);
-            }
-        }
+        v.extend(lay.rvar.get(c).copied().flatten());
     }
     v.sort_unstable();
     v.dedup();
-    v
+    (v, constant)
 }
 
-fn find(parent: &mut [usize], mut i: usize) -> usize {
-    while let Some(&p) = parent.get(i) {
-        if p == i {
-            break;
+/// What a block reads: a point, or a curve (its points and its radius), of any kind or read
+/// as a line or as a circle or arc (the residual reads another kind as a constant).
+#[derive(Clone, Copy)]
+enum Ref {
+    Point(usize),
+    Curve(usize),
+    Line(usize),
+    Round(usize),
+}
+
+/// What a block reads.
+fn block_refs(sk: &Sketch, b: &Block) -> Vec<Ref> {
+    use ConstraintKind::*;
+    use Ref::{Curve as C, Line as L, Point as P, Round as R};
+    let is = |c: usize, f: fn(&CurveKind) -> bool| sk.curves.get(c).is_some_and(|x| f(&x.kind));
+    let line = |c: usize| is(c, |k| matches!(k, CurveKind::Line { .. }));
+    let freeform = |c: usize| is(c, CurveKind::is_freeform);
+    // A tangency reads a free-form curve as such, else a line and a round, or two rounds.
+    let tangent = |a: usize, b: usize| {
+        if freeform(a) || freeform(b) {
+            [C(a), C(b)]
+        } else if line(a) {
+            [L(a), R(b)]
+        } else if line(b) {
+            [R(a), L(b)]
+        } else {
+            [R(a), R(b)]
         }
-        let gp = parent.get(p).copied().unwrap_or(p);
-        if let Some(slot) = parent.get_mut(i) {
-            *slot = gp;
-        }
-        i = p;
+    };
+    match b {
+        Block::Closure { a, b } => vec![P(*a), P(*b)],
+        Block::Arc { c, a, b } => vec![P(*c), P(*a), P(*b)],
+        Block::User(_, k) => match **k {
+            Coincident { p, q }
+            | HorizontalPoints { p, q }
+            | VerticalPoints { p, q }
+            | Distance { p, q, .. }
+            | DistanceX { p, q, .. }
+            | DistanceY { p, q, .. } => vec![P(p), P(q)],
+            PointOnCurve { p, c } => vec![P(p), C(c)],
+            Midpoint { p, l } | PointLineDistance { p, l, .. } | LinearDiameter { p, l, .. } => vec![P(p), L(l)],
+            Horizontal { l } | Vertical { l } | Length { l, .. } | LineAngle { l, .. } => vec![L(l)],
+            // Another kind reads a constant value, whatever its points: as good as any.
+            ArcSweep { c, .. } | Radius { c, .. } | Diameter { c, .. } | ArcLength { c, .. } => vec![C(c)],
+            Parallel { a, b } | Perpendicular { a, b } | Collinear { a, b } | Angle { a, b, .. } => vec![L(a), L(b)],
+            Equal { a, b } if line(a) => vec![L(a), L(b)],
+            Equal { a, b } | Concentric { a, b } | SlotOverallLength { a, b, .. } => vec![R(a), R(b)],
+            Tangent { a, b } => tangent(a, b).to_vec(),
+            Smooth { a, b } => vec![C(a), C(b)],
+            Symmetric { p, q, l } => vec![P(p), P(q), L(l)],
+            Fix { .. } => vec![],
+        },
+        Block::TangentAt(_, k, p) => match **k {
+            ConstraintKind::Tangent { a, b } if freeform(a) || freeform(b) => vec![P(*p), C(a), C(b)],
+            ConstraintKind::Tangent { a, b } => [P(*p)].into_iter().chain(tangent(a, b)).collect(),
+            _ => vec![P(*p)],
+        },
     }
-    i
 }
 
 /// Residual vector and Jacobian (rows × all n vars) for the given blocks.
@@ -834,15 +882,31 @@ fn norm2(v: &[f64]) -> f64 {
     v.iter().map(|x| x * x).sum()
 }
 
-/// Levenberg–Marquardt on one component (variables `vars`, blocks `blocks`). Returns iterations.
-fn lm(sk: &Sketch, lay: &Layout, blocks: &[(Block, Vec<usize>)], vars: &[usize], x: &mut Vec<f64>, col: &[usize]) -> usize {
+/// Levenberg–Marquardt on one component (variables `vars`, blocks `blocks`). Returns the
+/// iterations and the largest residual left.
+fn lm(sk: &Sketch, lay: &Layout, blocks: &[(Block, Vec<usize>)], vars: &[usize], x: &mut Vec<f64>, col: &[usize]) -> (usize, f64) {
+    lm_capped(sk, lay, blocks, vars, x, col, MAX_ITERS)
+}
+
+/// [`lm`] with at most `max_iters` iterations.
+fn lm_capped(
+    sk: &Sketch,
+    lay: &Layout,
+    blocks: &[(Block, Vec<usize>)],
+    vars: &[usize],
+    x: &mut Vec<f64>,
+    col: &[usize],
+    max_iters: usize,
+) -> (usize, f64) {
     let n = vars.len();
+    #[cfg(test)]
+    lm_vars::add(n);
     let mut lambda = 1e-3;
     let (mut r, _, _) = system(sk, lay, blocks, x, false);
     let mut f = norm2(&r);
-    for it in 0..MAX_ITERS {
+    for it in 0..max_iters {
         if max_abs(&r) < TOL {
-            return it;
+            return (it, max_abs(&r));
         }
         let (_, j, _) = local_system(sk, lay, blocks, x, col, n);
         // Normal equations of this component.
@@ -896,22 +960,741 @@ fn lm(sk: &Sketch, lay: &Layout, blocks: &[(Block, Vec<usize>)], vars: &[usize],
             }
         }
         if !improved {
-            return it;
+            return (it, max_abs(&r));
         }
     }
-    MAX_ITERS
+    (max_iters, max_abs(&r))
+}
+
+/// The variables LM was given and its runs on this thread, for tests that count what the
+/// construction leaves to it.
+#[cfg(test)]
+pub(crate) mod lm_vars {
+    use std::cell::Cell;
+
+    thread_local! {
+        static VARS: Cell<usize> = const { Cell::new(0) };
+        static RUNS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(super) fn add(n: usize) {
+        VARS.with(|c| c.set(c.get() + n));
+        RUNS.with(|c| c.set(c.get() + 1));
+    }
+
+    /// The variables since the last call.
+    pub(crate) fn take() -> usize {
+        VARS.with(|c| c.replace(0))
+    }
+
+    /// The LM runs since the last call.
+    pub(crate) fn runs() -> usize {
+        RUNS.with(|c| c.replace(0))
+    }
+}
+
+/// The pinned analysis is exact (see [`pinned`]); in this crate's tests every analysis is
+/// checked against the dense analysis of the whole component wherever that one is reliable:
+/// its Jacobian finite, and its answer the same from a thousandth to a thousand times its
+/// tolerance. (Where it is not, the Jacobian is nearly singular and the two analyses may
+/// decide its rank differently: the dense one on the whole matrix, the pinned one on the
+/// remainder after eliminating what the constraints pin down, and which pivots fall under the
+/// tolerance depends on that order.)
+#[cfg(test)]
+fn assert_dense_agrees(j: &Mat, rank: usize, determined: &[bool]) {
+    let at = |tol: f64| if j.rows > 0 { determined_vars(j, tol) } else { (vec![false; j.cols], 0) };
+    let dense = at(1e-7);
+    if j.data.iter().any(|v| !v.is_finite()) || at(1e-10) != dense || at(1e-4) != dense {
+        return;
+    }
+    assert_eq!((rank, determined), (dense.1, dense.0.as_slice()), "the pinned rank analysis disagrees with the dense one");
+}
+
+/// Least squared singular value the rows pinning an unknown must have on its own columns
+/// (a singular value of 1e-4, a thousand times the rank analysis' pivot tolerance)…
+const PIN_RANK: f64 = 1e-8;
+/// …and the least ratio of its squared singular values (a condition number of at most 1e4), so
+/// that the 2 × 2 test is decided well clear of rounding.
+const PIN_CONDITION: f64 = 1e-8;
+
+/// What [`pinned`] works for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pin {
+    /// The solve: the candidates are where the seed constructed them, and every row that pins
+    /// one must hold there (below `TOL`), as LM will not move it.
+    Verified,
+    /// The rank analysis of a component some block ties to a constant.
+    Anchored,
+    /// The rank analysis of a component no block ties to a constant: the point whose first
+    /// variable this is counts as a constant (it takes out the translation, see `pinned`).
+    Floating(usize),
+}
+
+impl Pin {
+    /// The first variable of the point taken as a constant.
+    fn anchor(self) -> Option<usize> {
+        match self {
+            Pin::Floating(a) => Some(a),
+            Pin::Verified | Pin::Anchored => None,
+        }
+    }
+}
+
+/// Map `keep` to columns `0..` and the other variables of `all` to none.
+fn columns(col: &mut [usize], keep: &[usize], all: &[usize]) {
+    for v in all {
+        if let Some(c) = col.get_mut(*v) {
+            *c = usize::MAX;
+        }
+    }
+    for (k, v) in keep.iter().enumerate() {
+        if let Some(c) = col.get_mut(*v) {
+            *c = k;
+        }
+    }
+}
+
+/// The variables of `vars` neither pinned nor of the point at `anchor` (sorted, as `vars`).
+fn unpinned(vars: &[usize], pin: &[bool], anchor: Option<usize>) -> Vec<usize> {
+    let anchored = |v: usize| anchor.is_some_and(|a| v == a || v == a + 1);
+    vars.iter().zip(pin).filter(|(v, p)| !**p && !anchored(**v)).map(|(v, _)| *v).collect()
+}
+
+/// The blocks that read one of `vars` (sorted).
+fn blocks_reading<'a>(blocks: &[(Block<'a>, Vec<usize>)], vars: &[usize]) -> Vec<(Block<'a>, Vec<usize>)> {
+    blocks.iter().filter(|(_, bv)| bv.iter().any(|v| vars.binary_search(v).is_ok())).map(|(b, v)| (copy_block(b), v.clone())).collect()
+}
+
+/// Which variables of one component (`vars`, sorted; `blocks` its blocks) the constraints pin
+/// down one unknown after another: an unknown is pinned when the rows of the blocks that read
+/// nothing else but constants and unknowns pinned before it have full column rank on its own
+/// columns (well conditioned: `PIN_RANK`, `PIN_CONDITION`). Only `candidate` unknowns are
+/// pinned; for [`Pin::Verified`] also only where those rows hold.
+///
+/// Why this is exact. Order the pinned unknowns as they were pinned, P, and call the rest R.
+/// Each pinned unknown has its rows S_u, which read nothing after it in P and nothing in R, so
+/// the rows S = ∪ S_u of the Jacobian restricted to the columns of P form a block lower
+/// triangular matrix whose diagonal blocks have full column rank, and they are zero on R. For
+/// any vector (p, r) in the null space of J, S gives p = 0, so the null space is
+/// {(0, r) : J_R r = 0}, where J_R is J's columns of R (every row, those of S included, are zero
+/// there). Hence:
+/// - rank J = |P| + rank J_R: the analysis eliminates P by construction and runs the dense rank
+///   analysis on J_R only;
+/// - every pinned variable is determined (zero in every null vector), and a variable of R is
+///   determined in J exactly when it is in J_R.
+///
+/// For the solve, the same structure means the pinned values are the only ones near them that
+/// satisfy S, given the constants: freezing them at verified values and solving R with LM finds
+/// a solution of the whole system whenever one exists with P where the seed put it. (When LM
+/// cannot solve R that way, the component is solved whole, as without pinning.)
+///
+/// A component no block ties to a constant ([`Pin::Floating`]) is invariant under
+/// translation: every residual depends only on differences of its points (and radii, which a
+/// translation leaves alone), so the translations t_x, t_y are null vectors of J. Removing one
+/// point a's two columns then keeps the rank, as any null vector of J is a null vector of J
+/// without a (all of whose entries on a are zero) plus a translation: rank J = rank J_{-a}, and
+/// J_{-a} is analysed as above with a as a constant. The translations move every point, so no
+/// point coordinate of such a component is determined; a radius is determined when it is in
+/// J_{-a} (the translations leave it alone).
+fn pinned(
+    sk: &Sketch,
+    lay: &Layout,
+    blocks: &[(Block, Vec<usize>)],
+    vars: &[usize],
+    x: &mut [f64],
+    candidate: &dyn Fn(usize) -> bool,
+    pin: Pin,
+) -> Vec<bool> {
+    let nv = vars.len();
+    let local = |v: usize| vars.binary_search(&v).ok();
+    // Per local unknown (by its first variable's index): pinned, or the anchor.
+    let mut done = vec![false; nv];
+    if let Some(a) = pin.anchor().and_then(local).and_then(|a| done.get_mut(a)) {
+        *a = true;
+    }
+    let block_units: Vec<Vec<usize>> = blocks
+        .iter()
+        .map(|(_, bv)| {
+            let mut u: Vec<usize> = bv.iter().filter_map(|v| local(lay.unit(*v))).collect();
+            u.dedup();
+            u
+        })
+        .collect();
+    let mut of_unit: Vec<Vec<usize>> = vec![Vec::new(); nv];
+    for (bi, us) in block_units.iter().enumerate() {
+        for u in us {
+            if let Some(list) = of_unit.get_mut(*u) {
+                list.push(bi);
+            }
+        }
+    }
+    let open = |done: &[bool], u: &usize| !done.get(*u).copied().unwrap_or(true);
+    // Per block: its unknowns not pinned yet. A block is ready for its last one.
+    let mut pending: Vec<usize> = block_units.iter().map(|us| us.iter().filter(|u| open(&done, u)).count()).collect();
+    let mut ready: Vec<usize> = (0..blocks.len()).filter(|bi| pending.get(*bi) == Some(&1)).rev().collect();
+    let mut gram = vec![[0.0_f64; 3]; nv];
+    let mut bad = vec![false; nv];
+    let mut queue = Vec::new();
+    let mut out = vec![false; nv];
+    loop {
+        while let Some(bi) = ready.pop() {
+            let (Some(us), Some((block, _))) = (block_units.get(bi), blocks.get(bi)) else { continue };
+            let Some(&u) = us.iter().find(|u| open(&done, u)) else { continue };
+            let Some(&first) = vars.get(u) else { continue };
+            if bad.get(u).copied().unwrap_or(true) || !candidate(first) {
+                continue;
+            }
+            let Some(g) = gram.get_mut(u) else { continue };
+            let residual = accumulate(sk, lay, block, &[first, first + 1][..lay.width(first)], x, g);
+            if pin == Pin::Verified
+                && !(residual < TOL)
+                && let Some(b) = bad.get_mut(u)
+            {
+                *b = true;
+                continue;
+            }
+            queue.push(u);
+        }
+        let Some(u) = queue.pop() else { break };
+        let (Some(&first), Some(&g)) = (vars.get(u), gram.get(u)) else { continue };
+        let w = lay.width(first);
+        if !open(&done, &u) || bad.get(u).copied().unwrap_or(true) || !full_rank(g, w) {
+            continue;
+        }
+        for k in u..u + w {
+            if let (Some(d), Some(o)) = (done.get_mut(k), out.get_mut(k)) {
+                (*d, *o) = (true, true);
+            }
+        }
+        for &bi in of_unit.get(u).into_iter().flatten() {
+            if let Some(p) = pending.get_mut(bi) {
+                *p = p.saturating_sub(1);
+                if *p == 1 {
+                    ready.push(bi);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Add the rows of block `b`, restricted to the columns of `unit` (one or two variables), to
+/// `gram` (their AᵀA: [a00, a01, a11]), with the same differences as [`local_system`]; returns
+/// the block's largest residual.
+fn accumulate(sk: &Sketch, lay: &Layout, b: &Block, unit: &[usize], x: &mut [f64], gram: &mut [f64; 3]) -> f64 {
+    let mut r = Vec::new();
+    block_residuals(&State { sk, lay, x }, b, &mut r);
+    let mut d = [Vec::new(), Vec::new()];
+    let (mut plus, mut minus) = (Vec::new(), Vec::new());
+    for (&v, dk) in unit.iter().zip(&mut d) {
+        let Some(x0) = x.get(v).copied() else { continue };
+        let h = 1e-7 * x0.abs().max(1.0);
+        for (at, out) in [(x0 + h, &mut plus), (x0 - h, &mut minus)] {
+            if let Some(xv) = x.get_mut(v) {
+                *xv = at;
+            }
+            out.clear();
+            block_residuals(&State { sk, lay, x }, b, out);
+        }
+        if let Some(xv) = x.get_mut(v) {
+            *xv = x0;
+        }
+        *dk = plus.iter().zip(&minus).map(|(p, m)| (p - m) / (2.0 * h)).collect();
+    }
+    let [d0, d1] = &d;
+    for k in 0..r.len() {
+        let (a, b) = (d0.get(k).copied().unwrap_or(0.0), d1.get(k).copied().unwrap_or(0.0));
+        gram[0] += a * a;
+        gram[1] += a * b;
+        gram[2] += b * b;
+    }
+    max_abs(&r)
+}
+
+/// The rows behind `gram` (see [`accumulate`]) have full, well-conditioned column rank on a
+/// unit of `width` variables.
+fn full_rank(gram: [f64; 3], width: usize) -> bool {
+    let [a, b, c] = gram;
+    let (min, max) = if width == 1 {
+        (a, a)
+    } else {
+        let max = 0.5 * (a + c + ((a - c).powi(2) + 4.0 * b * b).sqrt());
+        (if max > 0.0 { (a * c - b * b) / max } else { 0.0 }, max)
+    };
+    min.is_finite() && max.is_finite() && min >= PIN_RANK && min >= PIN_CONDITION * max
 }
 
 /// Solve the sketch in place. On failure the geometry is restored and the report lists the
 /// violated constraints.
 pub fn solve(sk: &mut Sketch) -> SolveReport {
-    solve_holding(sk, &Hold::default())
+    solve_with(sk, &Hold::default(), None, Analysis::Full, None)
 }
 
 /// Solve with some geometry held as if it were fixed (for this solve only): applying a
 /// constraint between two entities holds the first so only the second moves. Everything else
 /// moves as little as it can. On failure the geometry is restored.
 pub fn solve_holding(sk: &mut Sketch, hold: &Hold) -> SolveReport {
+    solve_with(sk, hold, None, Analysis::Full, None)
+}
+
+/// What a solve works out besides placing the geometry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Analysis {
+    /// Degrees of freedom and which geometry the constraints determine: a rank analysis of the
+    /// Jacobian, the costly part of solving an already solved sketch.
+    Full,
+    /// Only whether it solved: the report's `dof` is 0 and its determined flags are empty. For
+    /// solves whose report is only checked with [`SolveReport::ok`] (the frames of a drag).
+    StatusOnly,
+}
+
+/// [`solve`] with some geometry held as if it were fixed (for this solve only): applying a
+/// constraint between two entities holds the first so only the second moves; a drag holds what
+/// it drags. Everything else moves as little as it can. On failure the geometry is restored.
+///
+/// `reference`, after an interactive move: the points' positions from before it. Points the
+/// constraints pin down keep the orientation they had there rather than the one the move left
+/// them in. Points appended after the reference was taken use their current positions; a
+/// reference longer than the point list is ignored.
+///
+/// `budget`: the work the seed's cluster decomposition may do, shared with other solves (the
+/// steps of a live drag frame, [`Budget::frame`]); [`Budget::full`] for this solve alone when
+/// `None`.
+pub fn solve_with(sk: &mut Sketch, hold: &Hold, reference: Option<&[Vec2]>, analysis: Analysis, budget: Option<&mut Budget>) -> SolveReport {
+    let mut own = Budget::full();
+    solve_from(sk, hold, reference, analysis, None, budget.unwrap_or(&mut own))
+}
+
+/// Driving values by constraint id (see [`Sketch::driving_values`]).
+pub type DrivingValues = std::collections::BTreeMap<String, f64>;
+
+/// [`solve`] after driving values changed: the sketch's geometry is its stored solved state,
+/// solved for `old` (by constraint id; constraints added since have none). A component the
+/// construction leaves to the iteration (a triconnected one) can fail to converge, or fold a
+/// constrained triangle over, when solved for the new values in one jump; it is then solved
+/// again by stepping its changed values from old to new (see `continue_values`). Where no
+/// value changed a solve behaves as [`solve`].
+pub fn solve_after_value_edit(sk: &mut Sketch, old: &DrivingValues) -> SolveReport {
+    let old_values: Vec<Option<f64>> = sk.constraints.iter().map(|c| old.get(&c.id).copied()).collect();
+    solve_from(sk, &Hold::default(), None, Analysis::Full, Some(&old_values), &mut Budget::full())
+}
+
+impl Sketch {
+    /// Each dimension's driving value by constraint id, as [`solve_after_value_edit`] takes
+    /// them.
+    pub fn driving_values(&self) -> DrivingValues {
+        self.constraints.iter().filter_map(|c| Some((c.id.clone(), c.kind.value()?))).collect()
+    }
+}
+
+#[cfg(not(test))]
+fn solve_from(
+    sk: &mut Sketch,
+    hold: &Hold,
+    reference: Option<&[Vec2]>,
+    analysis: Analysis,
+    old_values: Option<&[Option<f64>]>,
+    budget: &mut Budget,
+) -> SolveReport {
+    solve_inner(sk, hold, reference, analysis, old_values, budget)
+}
+
+/// In this crate's tests every solve is repeated without the constructive seed: the seed only
+/// chooses where the iteration starts, so status, degrees of freedom and determined flags must
+/// not depend on it, nor the (empty) failing list of a solved sketch. The one difference
+/// allowed is the seed's purpose: the iteration from the plain start fails where the seeded
+/// one solves. Which constraints a failed solve leaves violated depends on where the iteration
+/// stopped; the seed may only narrow it.
+#[cfg(test)]
+fn solve_from(
+    sk: &mut Sketch,
+    hold: &Hold,
+    reference: Option<&[Vec2]>,
+    analysis: Analysis,
+    old_values: Option<&[Option<f64>]>,
+    budget: &mut Budget,
+) -> SolveReport {
+    use crate::construct::switch;
+    if !(switch::seed_on() && switch::differential_on()) {
+        return solve_inner(sk, hold, reference, analysis, old_values, budget);
+    }
+    let mut plain = sk.clone();
+    let without = switch::without_seed(|| solve_inner(&mut plain, hold, reference, analysis, old_values, &mut Budget::full()));
+    let with = solve_inner(sk, hold, reference, analysis, old_values, budget);
+    assert_same_outcome(&with, &without);
+    with
+}
+
+/// The outcome the constructive seed must not change (see `solve_from`).
+#[cfg(test)]
+fn assert_same_outcome(with: &SolveReport, without: &SolveReport) {
+    if with.ok() && !without.ok() {
+        return;
+    }
+    assert_eq!(
+        (with.status, with.dof, &with.point_determined, &with.curve_determined),
+        (without.status, without.dof, &without.point_determined, &without.curve_determined),
+        "the constructive seed changed the solve's outcome"
+    );
+    // Turned-over orientations depend on where the iteration went; only conflicts count.
+    let conflicts = |r: &SolveReport| r.failing.iter().filter(|c| !r.folded.contains(c)).cloned().collect::<Vec<_>>();
+    if with.ok() {
+        assert_eq!(conflicts(with), conflicts(without));
+    } else {
+        assert!(conflicts(with).iter().all(|c| without.failing.contains(c)), "seeded {with:?}, unseeded {without:?}");
+    }
+}
+
+/// Write a point's position into its two variables starting at `v`.
+/// An arc's ends follow its centre: when the seed moved the centre and did not construct an end,
+/// that end starts carried by the centre's displacement (the arc translates, keeping its radius).
+/// Left behind, the ends of an arc whose centre is put on the origin are turned by LM instead of
+/// following it (reference test 20-slot-constrained).
+fn carry_with_seeded(x: &mut [f64], x0: &[f64], constructed: &[bool], blocks: &[(Block, Vec<usize>)], lay: &Layout) {
+    let var = |p: usize| lay.pvar.get(p).copied().flatten();
+    let built = |v: usize| constructed.get(v).copied().unwrap_or(false);
+    let mut carried: Vec<(usize, Vec2)> = Vec::new();
+    for (block, _) in blocks {
+        let Block::Arc { c, a, b } = *block else { continue };
+        let Some(vc) = var(c).filter(|v| built(*v)) else { continue };
+        let (Some(now), Some(was)) = (x.get(vc..vc + 2), x0.get(vc..vc + 2)) else { continue };
+        let d = Vec2::new(now[0] - was[0], now[1] - was[1]);
+        if d.x == 0.0 && d.y == 0.0 {
+            continue;
+        }
+        carried.extend([a, b].into_iter().filter_map(var).filter(|v| !built(*v)).map(|v| (v, d)));
+    }
+    for (v, d) in carried {
+        if let Some([px, py]) = x.get_mut(v..v + 2) {
+            *px += d.x;
+            *py += d.y;
+        }
+    }
+}
+
+fn set_point(x: &mut [f64], v: usize, at: Vec2) {
+    if let Some([sx, sy]) = x.get_mut(v..v.saturating_add(2)) {
+        *sx = at.x;
+        *sy = at.y;
+    }
+}
+
+/// Exactly opposite directions sit on the wrapped angle's derivative discontinuity: nudge one
+/// free endpoint of each such line into a continuous branch before Newton iterations.
+fn nudge_line_angles(sk: &Sketch, lay: &Layout, x: &mut [f64]) {
+    for constraint in &sk.constraints {
+        if constraint.driven {
+            continue;
+        }
+        let ConstraintKind::LineAngle { l, value } = constraint.kind else { continue };
+        let Some(CurveKind::Line { a, b }) = sk.curves.get(l).map(|c| &c.kind) else { continue };
+        let state = State { sk, lay, x };
+        let (pa, pb) = (state.p(*a), state.p(*b));
+        let delta = wrap_angle((pb - pa).angle() - value);
+        if delta.abs() < std::f64::consts::PI - 1e-5 || !delta.is_finite() {
+            continue;
+        }
+        let d = Vec2::from_angle((pb - pa).angle() - delta.signum() * 0.01) * pa.dist(pb);
+        let (point, at) = if lay.pvar.get(*b).copied().flatten().is_some() { (*b, pa + d) } else { (*a, pb - d) };
+        if let Some(index) = lay.pvar.get(point).copied().flatten() {
+            set_point(x, index, at);
+        }
+    }
+}
+
+/// Continuation steps an edit in sixty-fourths of it: the smallest sub-step is one of them.
+const SUBSTEPS: usize = 64;
+/// LM iterations one continuation may spend over all its sub-steps (taken and halved).
+const CONTINUATION_ITERS: usize = 4 * MAX_ITERS;
+/// Triangles of distance dimensions whose turn one component's fold check reads.
+const MAX_TRIPLES: usize = 1024;
+/// Neighbour visits while finding those triangles.
+const MAX_TRIPLE_WORK: usize = 100_000;
+
+/// An orientation the constraints leave open, which an edit of their values must keep: the
+/// mirror image is "the other solution" (Owen 1991 §5: whether three dimensioned points occur
+/// clockwise or counter-clockwise; an unsigned offset's side).
+#[derive(Clone, Copy, Debug)]
+enum Orient {
+    /// The turn of three points pairwise joined by distances (coincident corners merged).
+    Turn([usize; 3]),
+    /// Which side of `p` the point `q` is along x (`DistanceX` of the given size).
+    SideX(usize, usize, f64),
+    /// The same along y (`DistanceY`).
+    SideY(usize, usize, f64),
+    /// Which side of line `l` the point `p` is on (`PointLineDistance`, `LinearDiameter`).
+    OfLine(usize, usize, f64),
+}
+
+/// An orientation's signed offset in a state (a corner's distance from the opposite side, an
+/// offset along its axis or from its line), the size it is measured against and how far the
+/// coordinates are from the origin.
+fn offset(s: &State, o: Orient) -> Option<(f64, f64, f64)> {
+    let coords = |ps: &[Vec2]| ps.iter().fold(0.0_f64, |m, p| m.max(crate::loci::mag(*p)));
+    Some(match o {
+        Orient::Turn([a, b, c]) => {
+            let (pa, pb, pc) = (s.p(a), s.p(b), s.p(c));
+            let size = pa.dist(pb).max(pa.dist(pc)).max(pb.dist(pc));
+            ((pb - pa).normalized()?.cross(pc - pa), size, coords(&[pa, pb, pc]))
+        }
+        Orient::SideX(p, q, size) => {
+            let (pp, pq) = (s.p(p), s.p(q));
+            (pq.x - pp.x, size, coords(&[pp, pq]))
+        }
+        Orient::SideY(p, q, size) => {
+            let (pp, pq) = (s.p(p), s.p(q));
+            (pq.y - pp.y, size, coords(&[pp, pq]))
+        }
+        Orient::OfLine(p, l, size) => {
+            let (a, b) = s.line(l);
+            let pp = s.p(p);
+            ((b - a).normalized()?.cross(pp - a), size, coords(&[pp, a, b]))
+        }
+    })
+}
+
+/// The sign of an orientation in a state; `None` when too close to zero to tell. It is the
+/// constructive seed's side test (`loci::side`, the rounding of the coordinates and a tiny
+/// share of the size), so the seed and the fold check agree on which way a triangle turns.
+/// Belongs in `loci` beside `side` (moved there once the lines-and-rounds work is merged).
+fn orientation(s: &State, o: Orient) -> Option<f64> {
+    offset(s, o).and_then(|(delta, size, coords)| crate::loci::side(delta, size, coords))
+}
+
+/// A reference orientation must be clear: an offset of at least this share of its size (for a
+/// triangle, a height of 1/1000 of its longest side, about 0.06°). Nearer degenerate, solver
+/// noise decides the sign, and no edit is refused for turning it over.
+const ORIENTED: f64 = 1e-3;
+
+/// The orientation of the stored state that an edit must keep: its sign where it is clear
+/// (see [`ORIENTED`]), else `None`.
+fn reference_orientation(s: &State, o: Orient) -> Option<f64> {
+    offset(s, o).filter(|(delta, size, _)| delta.abs() > ORIENTED * size).and_then(|(delta, size, coords)| crate::loci::side(delta, size, coords))
+}
+
+/// A driving value `t` of the way from `old` to `new`: angles of a line or between two lines
+/// turn the short way round.
+fn value_at(kind: &ConstraintKind, old: f64, new: f64, t: f64) -> f64 {
+    if t >= 1.0 {
+        return new;
+    }
+    match kind {
+        ConstraintKind::LineAngle { .. } | ConstraintKind::Angle { .. } => old + wrap_angle(new - old) * t,
+        _ => old + (new - old) * t,
+    }
+}
+
+/// Whether a value can be stepped from `old` to `new`: not a signed arc sweep that changes
+/// sign (the arc's end points swap; there is no path of arcs between the two).
+fn steppable(kind: &ConstraintKind, old: f64, new: f64) -> bool {
+    !(matches!(kind, ConstraintKind::ArcSweep { .. }) && old * new <= 0.0)
+}
+
+/// One component's driving values changed by an edit, and the orientations of the stored
+/// state.
+struct ValueEdit {
+    /// Block index, constraint index, the constraint (with its new value) and its old value.
+    changed: Vec<(usize, usize, ConstraintKind, f64)>,
+    /// Orientations with the constraints that set them and their sign in the stored state.
+    orients: Vec<(Orient, Vec<usize>, Option<f64>)>,
+}
+
+impl ValueEdit {
+    /// The values of `sub` changed against `old` (per constraint), `before` being the stored
+    /// state; `None` when nothing changed.
+    fn of(before: &State, sub: &[(Block, Vec<usize>)], old: &[Option<f64>]) -> Option<Self> {
+        let changed: Vec<_> = sub
+            .iter()
+            .enumerate()
+            .filter_map(|(k, (b, _))| {
+                let Block::User(ci, kind) = b else { return None };
+                let (o, n) = (old.get(*ci).copied().flatten()?, kind.value()?);
+                (o.is_finite() && n.is_finite() && o != n).then(|| (k, *ci, (*kind).clone(), o))
+            })
+            .collect();
+        if changed.is_empty() {
+            return None;
+        }
+        let orients = orients(before, sub).into_iter().map(|(o, cs)| (o, cs, reference_orientation(before, o))).collect();
+        Some(ValueEdit { changed, orients })
+    }
+
+    /// The stored state is solved for the old values: there is a solved state to continue
+    /// from and orientations to keep (a sketch stored unsolved has neither).
+    fn starts_solved(&self, before: &State, sub: &[(Block, Vec<usize>)]) -> bool {
+        let olds = self.kinds_at(0);
+        let mut blocks: Vec<(Block, Vec<usize>)> = sub.iter().map(|(b, v)| (copy_block(b), v.clone())).collect();
+        self.point_at(&mut blocks, &olds);
+        max_abs(&system(before.sk, before.lay, &blocks, &mut before.x.to_vec(), false).0) < ACCEPT
+    }
+
+    /// The values can be stepped (see [`steppable`]).
+    fn continuable(&self) -> bool {
+        self.changed.iter().all(|(_, _, k, o)| k.value().is_some_and(|n| steppable(k, *o, n)))
+    }
+
+    /// The changed constraints `j` sixty-fourths of the way from their old values to the new.
+    fn kinds_at(&self, j: usize) -> Vec<ConstraintKind> {
+        let t = j as f64 / SUBSTEPS as f64;
+        self.changed
+            .iter()
+            .map(|(_, _, kind, o)| {
+                let mut k = kind.clone();
+                if let Some(n) = kind.value() {
+                    k.set_value(value_at(kind, *o, n, t));
+                }
+                k
+            })
+            .collect()
+    }
+
+    /// Point the changed constraints' blocks at `kinds` (as [`ValueEdit::kinds_at`] gives them).
+    fn point_at<'a>(&self, blocks: &mut [(Block<'a>, Vec<usize>)], kinds: &'a [ConstraintKind]) {
+        for ((k, ci, ..), kind) in self.changed.iter().zip(kinds) {
+            if let Some(slot) = blocks.get_mut(*k) {
+                slot.0 = Block::User(*ci, kind);
+            }
+        }
+    }
+
+    /// The constraints setting an orientation of the stored state that `now` turns the other way.
+    fn flipped<'a>(&'a self, now: &'a State) -> impl Iterator<Item = &'a usize> + 'a {
+        self.orients.iter().filter(|(o, _, before)| before.zip(orientation(now, *o)).is_some_and(|(b, n)| b != n)).flat_map(|(_, cs, _)| cs)
+    }
+
+    /// Solved, keeping every orientation of the stored state.
+    fn holds(&self, residual: f64, now: &State) -> bool {
+        residual < ACCEPT && self.flipped(now).next().is_none()
+    }
+}
+
+/// The orientations the driving constraints of `sub` leave open: triangles of distances and
+/// line lengths (coincident points count as one, the corners of a triangle of lines), and the
+/// sides of unsigned offsets. Each with the constraints that set it; capped.
+fn orients(s: &State, sub: &[(Block, Vec<usize>)]) -> Vec<(Orient, Vec<usize>)> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let free = |p: usize| s.lay.pvar.get(p).copied().flatten().is_some();
+    let line = |l: usize| match s.sk.curves.get(l).map(|c| &c.kind) {
+        Some(CurveKind::Line { a, b }) => Some((*a, *b)),
+        _ => None,
+    };
+    let mut out = Vec::new();
+    let mut joins = Vec::new();
+    let mut edges = Vec::new();
+    for (b, _) in sub {
+        let Block::User(ci, kind) = b else { continue };
+        match **kind {
+            ConstraintKind::Coincident { p, q } => joins.push((p, q)),
+            ConstraintKind::Distance { p, q, .. } => edges.push((p, q, *ci)),
+            ConstraintKind::Length { l, .. } => edges.extend(line(l).map(|(p, q)| (p, q, *ci))),
+            ConstraintKind::DistanceX { p, q, value } if free(p) || free(q) => out.push((Orient::SideX(p, q, value), vec![*ci])),
+            ConstraintKind::DistanceY { p, q, value } if free(p) || free(q) => out.push((Orient::SideY(p, q, value), vec![*ci])),
+            ConstraintKind::PointLineDistance { p, l, value } => out.push((Orient::OfLine(p, l, value), vec![*ci])),
+            ConstraintKind::LinearDiameter { p, l, value } => out.push((Orient::OfLine(p, l, value / 2.0), vec![*ci])),
+            _ => {}
+        }
+    }
+    // Union-find over the points these constraints name (not the whole sketch).
+    let mut local: BTreeMap<usize, usize> = BTreeMap::new();
+    for (p, q) in joins.iter().copied().chain(edges.iter().map(|&(p, q, _)| (p, q))) {
+        for i in [p, q] {
+            let n = local.len();
+            local.entry(i).or_insert(n);
+        }
+    }
+    let mut parent: Vec<usize> = (0..local.len()).collect();
+    let at = |i: usize| local.get(&i).copied().unwrap_or(0);
+    for &(p, q) in &joins {
+        union(&mut parent, at(p), at(q));
+    }
+    // Each group stands for the first of its points met; it is free when any of them is.
+    let mut rep: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut free_groups: BTreeSet<usize> = BTreeSet::new();
+    let mut adj: BTreeMap<usize, BTreeMap<usize, usize>> = BTreeMap::new();
+    for &(p, q, ci) in &edges {
+        let [a, b] = [p, q].map(|i| {
+            let r = *rep.entry(find(&mut parent, at(i))).or_insert(i);
+            if free(i) {
+                free_groups.insert(r);
+            }
+            r
+        });
+        if a != b {
+            adj.entry(a).or_default().entry(b).or_insert(ci);
+            adj.entry(b).or_default().entry(a).or_insert(ci);
+        }
+    }
+    let mut work = 0usize;
+    let mut triangles = 0usize;
+    for (&a, na) in &adj {
+        for (&b, &ab) in na.range(a + 1..) {
+            let Some(nb) = adj.get(&b) else { continue };
+            for (&c, &ac) in na.range(b + 1..) {
+                work += 1;
+                if work > MAX_TRIPLE_WORK || triangles >= MAX_TRIPLES {
+                    return out;
+                }
+                if let Some(&bc) = nb.get(&c)
+                    && [a, b, c].iter().any(|p| free_groups.contains(p))
+                {
+                    triangles += 1;
+                    out.push((Orient::Turn([a, b, c]), vec![ab, bc, ac]));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Dimension continuation: solve the component `sub` from `x` (its previous solved state) for
+/// its changed values stepped from old to new, each sub-step from the previous solution. A
+/// sub-step that fails or flips an orientation of the previous state is halved; the step
+/// doubles again after one that holds. Gives up below one [`SUBSTEPS`]th of the edit or after
+/// [`CONTINUATION_ITERS`] iterations. Returns the iterations and whether the new values were
+/// reached; `x` holds the last sub-step's solution either way.
+fn continue_values(
+    sk: &Sketch,
+    lay: &Layout,
+    sub: &[(Block, Vec<usize>)],
+    vars: &[usize],
+    col: &[usize],
+    x: &mut [f64],
+    edit: &ValueEdit,
+) -> (usize, bool) {
+    // Every sub-step lands on a sixty-fourth: the changed constraints at each, built once.
+    let arena: Vec<Vec<ConstraintKind>> = (0..=SUBSTEPS).map(|j| edit.kinds_at(j)).collect();
+    let mut blocks: Vec<(Block, Vec<usize>)> = sub.iter().map(|(b, v)| (copy_block(b), v.clone())).collect();
+    let (mut t, mut h, mut spent) = (0, SUBSTEPS / 2, 0);
+    let mut trial = x.to_vec();
+    while t < SUBSTEPS && spent < CONTINUATION_ITERS {
+        let next = (t + h).min(SUBSTEPS);
+        if let Some(kinds) = arena.get(next) {
+            edit.point_at(&mut blocks, kinds);
+        }
+        trial.copy_from_slice(x);
+        let (its, residual) = lm_capped(sk, lay, &blocks, vars, &mut trial, col, MAX_ITERS.min(CONTINUATION_ITERS - spent));
+        spent += its.max(1);
+        if edit.holds(residual, &State { sk, lay, x: &trial }) {
+            x.copy_from_slice(&trial);
+            t = next;
+            h = (2 * h).min(SUBSTEPS);
+        } else if h > 1 {
+            h /= 2;
+        } else {
+            break;
+        }
+    }
+    (spent, t >= SUBSTEPS)
+}
+
+fn solve_inner(
+    sk: &mut Sketch,
+    hold: &Hold,
+    reference: Option<&[Vec2]>,
+    analysis: Analysis,
+    old_values: Option<&[Option<f64>]>,
+    budget: &mut Budget,
+) -> SolveReport {
     let mut orientation_before = Vec::new();
     for constraint in &sk.constraints {
         if !constraint.driven
@@ -930,12 +1713,7 @@ pub fn solve_holding(sk: &mut Sketch, hold: &Hold) -> SolveReport {
     let mut x = vec![0.0; lay.n];
     for (i, p) in sk.points.iter().enumerate() {
         if let Some(v) = lay.pvar.get(i).copied().flatten() {
-            if let Some(s) = x.get_mut(v) {
-                *s = p.pos.x;
-            }
-            if let Some(s) = x.get_mut(v + 1) {
-                *s = p.pos.y;
-            }
+            set_point(&mut x, v, p.pos);
         }
     }
     for (i, c) in sk.curves.iter().enumerate() {
@@ -946,72 +1724,91 @@ pub fn solve_holding(sk: &mut Sketch, hold: &Hold) -> SolveReport {
         }
     }
     let x0 = x.clone();
-    // Exactly opposite directions sit on the wrapped angle's derivative discontinuity.
-    // Nudge one free endpoint into a continuous branch before Newton iterations. The
-    // untouched x0 still restores the complete original geometry on a failed solve.
-    for constraint in &sk.constraints {
-        if constraint.driven {
-            continue;
-        }
-        let ConstraintKind::LineAngle { l, value } = constraint.kind else { continue };
-        let Some(CurveKind::Line { a, b }) = sk.curves.get(l).map(|c| &c.kind) else { continue };
-        let (pa, pb) = {
-            let state = State { sk, lay: &lay, x: &x };
-            (state.p(*a), state.p(*b))
-        };
-        let delta = wrap_angle((pb - pa).angle() - value);
-        if delta.abs() < std::f64::consts::PI - 1e-5 || !delta.is_finite() {
-            continue;
-        }
-        let d = Vec2::from_angle((pb - pa).angle() - delta.signum() * 0.01) * pa.dist(pb);
-        let (point, at) = if lay.pvar.get(*b).copied().flatten().is_some() { (*b, pa + d) } else { (*a, pb - d) };
-        if let Some(index) = lay.pvar.get(point).copied().flatten() {
-            if let Some(v) = x.get_mut(index) {
-                *v = at.x;
+    let on_curve = points_on_curves(sk);
+    // Start from the constructed positions of the points the constraints pin down (see
+    // `construct`); LM still verifies every constraint from there. A touching placement does
+    // not pin a point down well and is left where it is (`Placement::anchors`). `unseeded`
+    // keeps the start the solve would have without the seed, for the variables the seed moved:
+    // a component the seeded start cannot solve is solved again from there, and only if the
+    // seed moved its start.
+    let mut unseeded = None;
+    // Per variable: the seed constructed it (a candidate to stay where it was put, see `pinned`).
+    let mut constructed = vec![false; lay.n];
+    if crate::construct::switch::seed_on() {
+        let given: Vec<bool> = lay.pvar.iter().map(Option::is_none).collect();
+        let seeded = crate::construct::seed(sk, &given, reference, &on_curve, budget);
+        for (i, (at, how)) in seeded.pos.iter().zip(&seeded.placed_by).enumerate() {
+            if let (Some(at), Some(how), Some(v)) = (at, how, lay.pvar.get(i).copied().flatten())
+                && how.anchors()
+            {
+                set_point(&mut x, v, *at);
+                // A floated cluster's pose is a guess at freedom the constraints leave: LM's
+                // start, never pinned.
+                if how.builds()
+                    && let Some(c) = constructed.get_mut(v..v + 2)
+                {
+                    c.fill(true);
+                }
             }
-            if let Some(v) = x.get_mut(index + 1) {
-                *v = at.y;
+        }
+        for (r, v) in seeded.radius.iter().zip(&lay.rvar) {
+            if let (Some(r), Some(v)) = (r, v)
+                && let Some(slot) = x.get_mut(*v)
+            {
+                *slot = *r;
+                if let Some(c) = constructed.get_mut(*v) {
+                    *c = true;
+                }
             }
+        }
+        if x != x0 {
+            let mut plain = x0.clone();
+            nudge_line_angles(sk, &lay, &mut plain);
+            unseeded = Some(plain);
         }
     }
+    nudge_line_angles(sk, &lay, &mut x);
 
-    let mut blocks: Vec<(Block, Vec<usize>)> = Vec::new();
+    // The blocks, and per block whether it reads a constant point.
+    let mut raw = Vec::new();
     for c in &sk.curves {
         if let CurveKind::Spline { pts, periodic: true, .. } = &c.kind
             && let (Some(a), Some(b)) = (pts.first(), pts.last())
             && a != b
         {
-            let bl = Block::Closure { a: *a, b: *b };
-            let vars = block_vars(sk, &lay, &bl);
-            blocks.push((bl, vars));
+            raw.push(Block::Closure { a: *a, b: *b });
         }
         if let CurveKind::Arc { c, a, b } = c.kind {
-            let bl = Block::Arc { c, a, b };
-            let vars = block_vars(sk, &lay, &bl);
-            blocks.push((bl, vars));
+            raw.push(Block::Arc { c, a, b });
         }
     }
     for (i, c) in sk.constraints.iter().enumerate() {
         if c.driven {
             continue;
         }
-        let bl = match touch_point(sk, &c.kind) {
+        raw.push(match touch_point(sk, &c.kind, &on_curve) {
             Some(p) => Block::TangentAt(i, &c.kind, p),
             None => Block::User(i, &c.kind),
-        };
-        let vars = block_vars(sk, &lay, &bl);
-        blocks.push((bl, vars));
+        });
     }
+    let mut blocks: Vec<(Block, Vec<usize>)> = Vec::with_capacity(raw.len());
+    let mut reads_constant = Vec::with_capacity(raw.len());
+    for bl in raw {
+        let (vars, constant) = block_vars(sk, &lay, &bl);
+        blocks.push((bl, vars));
+        reads_constant.push(constant);
+    }
+
+    carry_with_seeded(&mut x, &x0, &constructed, &blocks, &lay);
+    // The plain start, for the variables whose start the seed (or carrying along it) moved.
+    let unseeded = unseeded.map(|plain: Vec<f64>| plain.into_iter().zip(&x).map(|(p, s)| (p != *s).then_some(p)).collect::<Vec<_>>());
 
     // Connected components over variables.
     let mut parent: Vec<usize> = (0..lay.n).collect();
     for (_, vars) in &blocks {
         if let Some(&first) = vars.first() {
             for &v in vars.iter().skip(1) {
-                let (ra, rb) = (find(&mut parent, first), find(&mut parent, v));
-                if let Some(p) = parent.get_mut(ra) {
-                    *p = rb;
-                }
+                union(&mut parent, first, v);
             }
         }
     }
@@ -1043,26 +1840,124 @@ pub fn solve_holding(sk: &mut Sketch, hold: &Hold) -> SolveReport {
             None => constant_blocks.push(bi),
         }
     }
-    // Column of each variable within its component.
+    // Column of each variable in the system being solved or analysed (usize::MAX outside it).
     let mut col = vec![usize::MAX; lay.n];
-    for (_, vars, _) in &comps {
-        for (k, v) in vars.iter().enumerate() {
-            if let Some(c) = col.get_mut(*v) {
-                *c = k;
-            }
-        }
-    }
 
     let mut iterations = 0;
-    // Solve each component; `blocks` is consumed by index so rebuild per component.
+    let mut continuations = 0;
+    let mut folded: Vec<String> = Vec::new();
     let all_blocks = blocks;
     let oversized = |vars: &[usize]| vars.len() > MAX_COMPONENT_VARS;
+    let blocks_of = |bis: &mut dyn Iterator<Item = usize>| -> Vec<(Block, Vec<usize>)> {
+        bis.filter_map(|bi| all_blocks.get(bi).map(|(b, v)| (copy_block(b), v.clone()))).collect()
+    };
     for (_, vars, bis) in &comps {
         if bis.is_empty() || oversized(vars) {
             continue;
         }
-        let sub: Vec<(Block, Vec<usize>)> = bis.iter().filter_map(|&bi| all_blocks.get(bi).map(|(b, v)| (copy_block(b), v.clone()))).collect();
-        iterations += lm(sk, &lay, &sub, vars, &mut x, &col);
+        let sub = blocks_of(&mut bis.iter().copied());
+        let start: Vec<f64> = vars.iter().filter_map(|v| x.get(*v).copied()).collect();
+        let mut residual = max_abs(&system(sk, &lay, &sub, &mut x, false).0);
+        // Already solved (by the seed, or before): nothing to iterate.
+        if !(residual < TOL) {
+            columns(&mut col, vars, vars);
+            // What the seed constructed and the constraints pin down stays where the seed put it
+            // (see `pinned`); LM solves the rest with those values as constants.
+            let (mut pinned_failed, mut solved) = (false, false);
+            if vars.iter().any(|v| constructed.get(*v).copied().unwrap_or(false)) {
+                let candidate = |v: usize| constructed.get(v).copied().unwrap_or(false);
+                let pin = pinned(sk, &lay, &sub, vars, &mut x, &candidate, Pin::Verified);
+                if pin.contains(&true) {
+                    let rest = unpinned(vars, &pin, None);
+                    let rest_blocks = blocks_reading(&sub, &rest);
+                    columns(&mut col, &rest, vars);
+                    let (its, r) = if rest.is_empty() { (0, 0.0) } else { lm(sk, &lay, &rest_blocks, &rest, &mut x, &col) };
+                    iterations += its;
+                    residual = r;
+                    solved = residual < ACCEPT;
+                    if !solved {
+                        // The rest cannot be solved with the pinned values: the whole component is.
+                        for (&v, s0) in vars.iter().zip(&start) {
+                            if let Some(s) = x.get_mut(v) {
+                                *s = *s0;
+                            }
+                        }
+                        columns(&mut col, vars, vars);
+                        pinned_failed = true;
+                    }
+                }
+            }
+            // A seeded start can leave LM stuck where the plain start solves (a partly
+            // constructed component): the seeded solution is kept whenever it solves, otherwise a
+            // component the seed touched is solved again from where it would have started without
+            // the seed. After a failed pinned solve, the whole component goes straight to that
+            // start (the seeded one is where the pinned solve failed), or to its own start when
+            // the seed did not move it.
+            let reseeded = unseeded.as_ref().filter(|plain| vars.iter().any(|v| plain.get(*v).is_some_and(Option::is_some)));
+            if !(solved || pinned_failed && reseeded.is_some()) {
+                let (its, r) = lm(sk, &lay, &sub, vars, &mut x, &col);
+                iterations += its;
+                residual = r;
+            }
+            if !(residual < ACCEPT)
+                && let Some(plain) = reseeded
+            {
+                for (&v, s0) in vars.iter().zip(&start) {
+                    if let Some(s) = x.get_mut(v) {
+                        *s = plain.get(v).copied().flatten().unwrap_or(*s0);
+                    }
+                }
+                let (its, r) = lm(sk, &lay, &sub, vars, &mut x, &col);
+                iterations += its;
+                residual = r;
+            }
+        }
+        // Continuation (below) solves the whole component: the pinned values belong to the new
+        // values, not to the ones it steps through.
+        columns(&mut col, vars, vars);
+        // After an edit of driving values from a solved state, a component the one-jump solve
+        // left unsolved, or turned over (an orientation of that state flipped), is solved by
+        // continuation from there. Its result replaces the one-jump result only when it solves
+        // and keeps every orientation; a solved result that still flips one is refused.
+        if let Some(old) = old_values
+            && let Some(edit) = ValueEdit::of(&State { sk, lay: &lay, x: &x0 }, &sub, old)
+            && !edit.holds(residual, &State { sk, lay: &lay, x: &x })
+            && edit.starts_solved(&State { sk, lay: &lay, x: &x0 }, &sub)
+        {
+            if edit.continuable() {
+                continuations += 1;
+                // This component's variables restart from the previous state; the components
+                // solved before it keep their solutions (LM here touches only `vars`).
+                let mut from = x.clone();
+                for &v in vars {
+                    if let (Some(s), Some(s0)) = (from.get_mut(v), x0.get(v)) {
+                        *s = *s0;
+                    }
+                }
+                let (its, mut done) = continue_values(sk, &lay, &sub, vars, &col, &mut from, &edit);
+                iterations += its;
+                if !done {
+                    // The last sub-step's solution, solved for the new values in one jump.
+                    let (its, r) = lm(sk, &lay, &sub, vars, &mut from, &col);
+                    iterations += its;
+                    done = edit.holds(r, &State { sk, lay: &lay, x: &from });
+                }
+                if done {
+                    x = from;
+                    residual = 0.0;
+                }
+            }
+            if residual < ACCEPT {
+                let now = State { sk, lay: &lay, x: &x };
+                for ci in edit.flipped(&now) {
+                    if let Some(c) = sk.constraints.get(*ci)
+                        && !folded.contains(&c.id)
+                    {
+                        folded.push(c.id.clone());
+                    }
+                }
+            }
+        }
     }
 
     // Final residuals and analysis, component by component (the Jacobian is block diagonal:
@@ -1091,24 +1986,48 @@ pub fn solve_holding(sk: &mut Sketch, hold: &Hold) -> SolveReport {
         if oversized(vars) {
             continue;
         }
-        let sub: Vec<(Block, Vec<usize>)> = bis.iter().filter_map(|&bi| all_blocks.get(bi).map(|(b, v)| (copy_block(b), v.clone()))).collect();
+        let sub = blocks_of(&mut bis.iter().copied());
         if sub.is_empty() {
             continue;
         }
-        let (r, j, owner) = local_system(sk, &lay, &sub, &mut x, &col, vars.len());
+        let (r, _, owner) = system(sk, &lay, &sub, &mut x, false);
         check(&r, &owner, &sub, &mut failing);
-        if j.rows > 0 {
-            let (d, rk) = determined_vars(&j, 1e-7);
-            rank += rk;
-            for (k, v) in vars.iter().enumerate() {
-                if let (Some(slot), Some(flag)) = (det.get_mut(*v), d.get(k)) {
-                    *slot = *flag;
-                }
+        if analysis == Analysis::StatusOnly {
+            continue;
+        }
+        // The rank analysis runs on what `pinned` leaves: see there for why that is exact.
+        let floating = bis.iter().all(|bi| !reads_constant.get(*bi).copied().unwrap_or(true));
+        let pin = match vars.iter().copied().find(|v| lay.is_point(*v)) {
+            Some(anchor) if floating => Pin::Floating(anchor),
+            _ => Pin::Anchored,
+        };
+        let pin_flags = pinned(sk, &lay, &sub, vars, &mut x, &|_| true, pin);
+        let rest = unpinned(vars, &pin_flags, pin.anchor());
+        columns(&mut col, &rest, vars);
+        let (_, j, _) = local_system(sk, &lay, &blocks_reading(&sub, &rest), &mut x, &col, rest.len());
+        let (rest_det, rest_rank) = if j.rows > 0 { determined_vars(&j, 1e-7) } else { (vec![false; rest.len()], 0) };
+        let comp_rank = pin_flags.iter().filter(|p| **p).count() + rest_rank;
+        rank += comp_rank;
+        for (&v, pinned) in vars.iter().zip(&pin_flags) {
+            let flag = match rest.binary_search(&v) {
+                Ok(k) => rest_det.get(k).copied().unwrap_or(false),
+                Err(_) => *pinned,
+            };
+            // A floating component's translation moves every point.
+            let moves = matches!(pin, Pin::Floating(_)) && lay.is_point(v);
+            if let Some(slot) = det.get_mut(v) {
+                *slot = flag && !moves;
             }
         }
+        #[cfg(test)]
+        {
+            columns(&mut col, vars, vars);
+            let (_, j, _) = local_system(sk, &lay, &sub, &mut x, &col, vars.len());
+            let reduced: Vec<bool> = vars.iter().map(|v| det.get(*v).copied().unwrap_or(false)).collect();
+            assert_dense_agrees(&j, comp_rank, &reduced);
+        }
     }
-    let consts: Vec<(Block, Vec<usize>)> =
-        constant_blocks.iter().filter_map(|&bi| all_blocks.get(bi).map(|(b, v)| (copy_block(b), v.clone()))).collect();
+    let consts = blocks_of(&mut constant_blocks.iter().copied());
     if !consts.is_empty() {
         let (r, _, owner) = system(sk, &lay, &consts, &mut x, false);
         check(&r, &owner, &consts, &mut failing);
@@ -1126,10 +2045,7 @@ pub fn solve_holding(sk: &mut Sketch, hold: &Hold) -> SolveReport {
                 && *a < parent.len()
                 && *b < parent.len()
             {
-                let (a, b) = (find(&mut parent, *a), find(&mut parent, *b));
-                if let Some(slot) = parent.get_mut(b) {
-                    *slot = a;
-                }
+                union(&mut parent, *b, *a);
             }
         }
         let mut representatives = std::collections::BTreeMap::new();
@@ -1171,6 +2087,11 @@ pub fn solve_holding(sk: &mut Sketch, hold: &Hold) -> SolveReport {
         None
     };
     let status = if max_residual < ACCEPT { SolveStatus::Solved } else { SolveStatus::Failed };
+    for id in &folded {
+        if !failing.contains(id) {
+            failing.push(id.clone());
+        }
+    }
     let use_x = if status == SolveStatus::Solved { &x } else { &x0 };
     // Write back.
     for (i, p) in sk.points.iter_mut().enumerate() {
@@ -1207,7 +2128,7 @@ pub fn solve_holding(sk: &mut Sketch, hold: &Hold) -> SolveReport {
         None => true,
     };
     // Driven dimensions measure the solved geometry.
-    let fixed_lay = Layout { pvar: vec![None; sk.points.len()], rvar: vec![None; sk.curves.len()], n: 0 };
+    let fixed_lay = Layout { pvar: vec![None; sk.points.len()], rvar: vec![None; sk.curves.len()], n: 0, points: 0 };
     let measured: Vec<Option<f64>> =
         sk.constraints.iter().map(|c| if c.driven { measure(&State { sk, lay: &fixed_lay, x: &[] }, &c.kind) } else { None }).collect();
     for (c, m) in sk.constraints.iter_mut().zip(measured) {
@@ -1217,17 +2138,93 @@ pub fn solve_holding(sk: &mut Sketch, hold: &Hold) -> SolveReport {
             c.kind.set_value(v);
         }
     }
-    let point_determined: Vec<bool> = (0..sk.points.len()).map(pdet).collect();
-    let curve_determined =
-        sk.curves.iter().enumerate().map(|(i, c)| c.kind.point_ids().into_iter().all(pdet) && vdet(lay.rvar.get(i).copied().flatten())).collect();
+    let (dof, point_determined, curve_determined) = match analysis {
+        Analysis::Full => (
+            lay.n.saturating_sub(rank),
+            (0..sk.points.len()).map(pdet).collect(),
+            sk.curves.iter().enumerate().map(|(i, c)| c.kind.point_ids().into_iter().all(pdet) && vdet(lay.rvar.get(i).copied().flatten())).collect(),
+        ),
+        Analysis::StatusOnly => (0, Vec::new(), Vec::new()),
+    };
     SolveReport {
         status,
-        dof: lay.n.saturating_sub(rank),
+        dof,
         iterations,
         max_residual: if max_residual.is_finite() { max_residual } else { f64::MAX },
         failing,
+        folded,
+        continuations,
         point_determined,
         curve_determined,
+    }
+}
+
+#[cfg(test)]
+mod continuation_unit_tests {
+    use super::*;
+
+    #[test]
+    fn angles_step_the_short_way_round() {
+        let line = ConstraintKind::LineAngle { l: 0, value: 0.0 };
+        let (old, new) = (179f64.to_radians(), (-179f64).to_radians());
+        let half = value_at(&line, old, new, 0.5);
+        assert!((half - 180f64.to_radians()).abs() < 1e-12, "{}", half.to_degrees());
+        let first = value_at(&line, old, new, 1.0 / SUBSTEPS as f64);
+        assert!((first - old).abs() < 2f64.to_radians() / 32.0, "a sixty-fourth of 2°, not of 358°");
+        assert_eq!(value_at(&line, old, new, 1.0), new);
+        let distance = ConstraintKind::Distance { p: 0, q: 1, value: 0.0 };
+        assert_eq!(value_at(&distance, 10.0, 20.0, 0.5), 15.0);
+    }
+
+    #[test]
+    fn a_sweep_changing_sign_is_not_stepped() {
+        let sweep = ConstraintKind::ArcSweep { c: 0, value: 0.0 };
+        assert!(!steppable(&sweep, 1.0, -1.0));
+        assert!(steppable(&sweep, 1.0, 2.0));
+        assert!(steppable(&ConstraintKind::LineAngle { l: 0, value: 0.0 }, 3.0, -3.0));
+    }
+
+    #[test]
+    fn only_clear_orientations_are_kept() {
+        // A triangle flat to solver noise has a side by the seed's test but none to keep.
+        let mut sk = Sketch::new();
+        let a = sk.add_point(Vec2::new(0.0, 0.0), None).unwrap();
+        let b = sk.add_point(Vec2::new(40.0, 0.0), None).unwrap();
+        let c = sk.add_point(Vec2::new(20.0, 1e-6), None).unwrap();
+        let lay = Layout { pvar: vec![None; sk.points.len()], rvar: vec![None; sk.curves.len()], n: 0, points: 0 };
+        let turn = Orient::Turn([a, b, c]);
+        let state =
+            |sk: &Sketch| (orientation(&State { sk, lay: &lay, x: &[] }, turn), reference_orientation(&State { sk, lay: &lay, x: &[] }, turn));
+        assert_eq!(state(&sk), (Some(1.0), None));
+        sk.points[c].pos = Vec2::new(20.0, 0.1);
+        assert_eq!(state(&sk), (Some(1.0), Some(1.0)));
+        // A side offset well below its dimension's size is no reference either.
+        let side = Orient::SideX(a, c, 20.0);
+        sk.points[c].pos = Vec2::new(1e-6, 5.0);
+        assert_eq!(reference_orientation(&State { sk: &sk, lay: &lay, x: &[] }, side), None);
+    }
+
+    #[test]
+    fn offsets_have_a_side() {
+        let mut sk = Sketch::new();
+        let p = sk.add_point(Vec2::new(0.0, 0.0), None).unwrap();
+        let q = sk.add_point(Vec2::new(10.0, 5.0), None).unwrap();
+        let r = sk.add_point(Vec2::new(0.0, 10.0), None).unwrap();
+        let l = sk.add_line(Vec2::new(-5.0, -5.0), Vec2::new(5.0, -5.0), None, None, None).unwrap();
+        let lay = Layout { pvar: vec![None; sk.points.len()], rvar: vec![None; sk.curves.len()], n: 0, points: 0 };
+        let sign = |sk: &Sketch, o: Orient| orientation(&State { sk, lay: &lay, x: &[] }, o);
+        let checks = [Orient::SideX(p, q, 10.0), Orient::SideY(p, q, 5.0), Orient::OfLine(q, l, 10.0), Orient::Turn([p, q, r])];
+        let before: Vec<_> = checks.iter().map(|o| sign(&sk, *o)).collect();
+        assert!(before.iter().all(Option::is_some), "{before:?}");
+        // q mirrored through p and below the line: every side and the turn flip.
+        sk.points[q].pos = Vec2::new(-10.0, -15.0);
+        let after: Vec<_> = checks.iter().map(|o| sign(&sk, *o)).collect();
+        for (b, a) in before.iter().zip(&after) {
+            assert_eq!(b.zip(*a).map(|(b, a)| b == a), Some(false), "{before:?} {after:?}");
+        }
+        // On the line: no side to tell.
+        sk.points[q].pos = Vec2::new(0.0, -5.0);
+        assert_eq!(sign(&sk, Orient::OfLine(q, l, 10.0)), None);
     }
 }
 
@@ -1248,6 +2245,41 @@ mod typed_dimension_tests {
         assert!(!solve(&mut sk).ok());
         assert_eq!(sk.curves, before);
         assert_eq!(sk.points, points);
+    }
+
+    /// A constraint read on a curve of the wrong kind (a midpoint of an arc, pushed past
+    /// validation) reads constants for it: its component is tied to them, not floating, and the
+    /// pinned analysis agrees with the dense one (checked in every test solve).
+    #[test]
+    fn a_curve_read_as_another_kind_ties_its_component() {
+        let mut sk = Sketch::new();
+        let arc = sk.add_arc(Vec2::new(5.0, 5.0), Vec2::new(15.0, 5.0), Vec2::new(5.0, 15.0), [None, None, None], None).unwrap();
+        let p = sk.add_point(Vec2::new(3.0, 1.0), None).unwrap();
+        sk.constraints.push(crate::model::Constraint {
+            id: "m".into(),
+            kind: ConstraintKind::Midpoint { p, l: arc },
+            param: None,
+            driven: false,
+            text: None,
+        });
+        let rep = solve(&mut sk);
+        assert!(rep.ok(), "{rep:?}");
+        assert!(rep.point_determined[p], "the midpoint of the constant line: {rep:?}");
+        assert_eq!(rep.dof, 5, "the arc's centre and ends, less its equal radii: {rep:?}");
+    }
+
+    #[test]
+    fn a_status_only_solve_places_the_geometry_as_a_full_one() {
+        let mut sk = Sketch::new();
+        let l = sk.add_line(Vec2::ZERO, Vec2::new(10.0, 3.0), Some(0), None, None).unwrap();
+        sk.add_constraint(ConstraintKind::LineAngle { l, value: 0.5 }, None).unwrap();
+        let mut quick = sk.clone();
+        let full = solve(&mut sk);
+        let status = solve_with(&mut quick, &Hold::default(), None, Analysis::StatusOnly, None);
+        assert!(full.ok() && status.ok());
+        assert_eq!(quick, sk);
+        assert_eq!(full.dof, 1, "the end slides along the line");
+        assert_eq!((status.dof, status.point_determined.len(), status.curve_determined.len()), (0, 0, 0));
     }
 
     #[test]

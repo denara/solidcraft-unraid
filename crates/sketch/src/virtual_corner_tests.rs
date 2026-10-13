@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::panic)]
 
 use crate::{Constraint, ConstraintKind, CurveKind, Sketch};
-use solvecraft_geom::Vec2;
+use solidcraft_geom::Vec2;
 
 fn point(sk: &mut Sketch, x: f64, y: f64) -> usize {
     sk.add_point(Vec2::new(x, y), None).unwrap()

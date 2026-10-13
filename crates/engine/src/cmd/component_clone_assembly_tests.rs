@@ -1,9 +1,9 @@
 #![allow(clippy::unwrap_used, clippy::panic)]
 use super::*;
-use solvecraft_doc::joints::{Joint, JointKind, MotionLink, NamedOrigin};
-use solvecraft_doc::motion::{ContactSet, ExplodedView, MotionStudy, StudyKey};
-use solvecraft_doc::{IDENTITY, Occurrence};
-use solvecraft_geom::Vec3;
+use solidcraft_doc::joints::{Joint, JointKind, MotionLink, NamedOrigin};
+use solidcraft_doc::motion::{ContactSet, ExplodedView, MotionStudy, StudyKey};
+use solidcraft_doc::{IDENTITY, Occurrence};
+use solidcraft_geom::Vec3;
 
 fn at(occurrence: u64) -> JointOrigin {
     JointOrigin { occurrence, snap: Snap::Point { point: Vec3::ZERO, z: None } }

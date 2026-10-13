@@ -7,6 +7,7 @@
 //! - `{"widget": "Revolute", "near"?: "Type"}`: click a dialog field, choice or button by its
 //!   text (with `near`: the one in that label's row)
 //! - `{"click": AT, "double"?, "shift"?, "ctrl"?, "button"?}`, `{"move": AT}`,
+//!   `{"hold": AT, "frames"?}` (press and hold still: Select Other),
 //!   `{"drag": [AT, AT], "shift"?, "ctrl"?, "steps"?}` where AT is `[x, y]` (screen), `{"world": [x,y,z]}`
 //!   or `{"sketch": [x,y]}` (the sketch being edited)
 //! - `{"queued": "engine.execute", "params": {…}, "min_frames"?: n, "max_frames"?: n}`: a request sent the way an
@@ -18,7 +19,7 @@
 //! - `{"choose_file": "part.step"}`: the next Open picker returns that file of the scenario's
 //!   folder (Save pickers save there)
 //! - `{"shot": "name"}`: a screenshot when run in a window; headless, a render of the model
-//!   into `$SOLVECRAFT_SCENARIO_SHOTS` when that is set; `{"debug": 1}`
+//!   into `$SOLIDCRAFT_SCENARIO_SHOTS` when that is set; `{"debug": 1}`
 //!   prints the UI state (`"widgets"`: also every widget's text; `"handles"`: every published
 //!   handle, browser rows as `row:<label>` and their fold arrows as `fold:<label>`)
 //! - `{"camera": {"yaw": rad, "pitch": rad}}` puts the camera at an orbit; `{"view_anim": "top",
@@ -41,7 +42,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use serde_json::{Value, json};
-use solvecraft_engine::Session;
+use solidcraft_engine::Session;
 
 use crate::control::{ControlRequest, Outcome, handle};
 use crate::{Services, SolveApp};
@@ -54,6 +55,8 @@ thread_local! {
     /// and counts by name, for checks.
     static RECTS: RefCell<Vec<(String, egui::Rect)>> = const { RefCell::new(Vec::new()) };
     static COUNTS: RefCell<Vec<(String, f64)>> = const { RefCell::new(Vec::new()) };
+    /// Widths a scenario's `same_width` checks remembered (by rect name).
+    static WIDTHS: RefCell<Vec<(String, f32)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// A manipulator's handle drawn this frame at `at` (screen), by name: "arrow" (a dialog's value
@@ -112,7 +115,7 @@ fn with_dir(v: Value, dir: &str) -> Value {
 fn scratch_dir() -> PathBuf {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static N: AtomicUsize = AtomicUsize::new(0);
-    let d = std::env::temp_dir().join(format!("solvecraft-scenario-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+    let d = std::env::temp_dir().join(format!("solidcraft-scenario-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
     let _ = std::fs::create_dir_all(&d);
     d
 }
@@ -132,6 +135,8 @@ pub struct Harness {
     queue: Option<std::sync::mpsc::Sender<ControlRequest>>,
     time: f64,
     size: egui::Vec2,
+    /// The camera as the last `camera` step left it.
+    cam_mark: Option<solidcraft_engine::render::Camera>,
 }
 
 impl Default for Harness {
@@ -141,9 +146,9 @@ impl Default for Harness {
 }
 
 impl Drop for Harness {
-    /// The scenario's files go with it (kept with SOLVECRAFT_SCENARIO_KEEP set).
+    /// The scenario's files go with it (kept with SOLIDCRAFT_SCENARIO_KEEP set).
     fn drop(&mut self) {
-        if std::env::var_os("SOLVECRAFT_SCENARIO_KEEP").is_none() {
+        if solidcraft_engine::geom::env::var_os("SCENARIO_KEEP").is_none() {
             let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
@@ -160,7 +165,9 @@ impl Harness {
             queue: None,
             time: 0.0,
             size: egui::vec2(1600.0, 1000.0),
+            cam_mark: None,
         };
+        WIDTHS.with(|m| m.borrow_mut().clear());
         h.install();
         h.ctx.enable_accesskit();
         h.frames(3);
@@ -318,7 +325,7 @@ impl Harness {
     /// frame may turn the view (its right or back vector) by more than `max_deg`, the last
     /// included, so the move ends without a jump.
     fn view_anim(&mut self, v: &str, max_deg: f64) -> Result<(), String> {
-        let basis = |c: &solvecraft_engine::render::Camera| c.basis();
+        let basis = |c: &solidcraft_engine::render::Camera| c.basis();
         let mut prev = basis(&self.app.cam);
         self.app.animate_view(v);
         if self.app.cam_anim.is_none() && self.app.viewport.orbit_snap.is_none() {
@@ -328,7 +335,7 @@ impl Harness {
         for i in 0..240 {
             self.frame();
             let now = basis(&self.app.cam);
-            let ang = |a: solvecraft_engine::geom::Vec3, b: solvecraft_engine::geom::Vec3| a.dot(b).clamp(-1.0, 1.0).acos().to_degrees();
+            let ang = |a: solidcraft_engine::geom::Vec3, b: solidcraft_engine::geom::Vec3| a.dot(b).clamp(-1.0, 1.0).acos().to_degrees();
             let d = ang(prev.0, now.0).max(ang(prev.2, now.2));
             if d > worst.0 {
                 worst = (d, i);
@@ -358,7 +365,7 @@ impl Harness {
                 let [x, y] = self.at(at)?;
                 // Hover first, as a hand does.
                 self.call("ui.move", json!({"x": x, "y": y}));
-                let mut p = json!({"x": x, "y": y, "double": flag("double"), "shift": flag("shift"), "ctrl": flag("ctrl")});
+                let mut p = json!({"x": x, "y": y, "double": flag("double"), "shift": flag("shift"), "ctrl": flag("ctrl"), "alt": flag("alt")});
                 if let Some(b) = s.get("button") {
                     p["button"] = b.clone();
                 }
@@ -372,6 +379,16 @@ impl Harness {
                 let [x, y] = found.ok_or_else(|| format!("no widget `{text}` on screen"))?;
                 self.call("ui.move", json!({"x": x, "y": y}));
                 self.call("ui.click", json!({"x": x, "y": y}))
+            } else if let Some(at) = s.get("hold") {
+                // Press and hold still (Select Other): `frames` with the button down (default 40,
+                // about 0.67 s), then let go.
+                let [x, y] = self.at(at)?;
+                self.call("ui.move", json!({"x": x, "y": y}));
+                let frames = s.get("frames").and_then(Value::as_u64).unwrap_or(40);
+                self.call(
+                    "ui.drag",
+                    json!({"x0": x, "y0": y, "x1": x, "y1": y, "steps": 1, "hold": frames, "shift": flag("shift"), "ctrl": flag("ctrl")}),
+                )
             } else if let Some(at) = s.get("move") {
                 let [x, y] = self.at(at)?;
                 self.call("ui.move", json!({"x": x, "y": y}))
@@ -379,7 +396,10 @@ impl Harness {
                 let [x0, y0] = self.at(d.get(0).unwrap_or(&Value::Null))?;
                 let [x1, y1] = self.at(d.get(1).unwrap_or(&Value::Null))?;
                 let steps = s.get("steps").cloned().unwrap_or(json!(8));
-                self.call("ui.drag", json!({"x0": x0, "y0": y0, "x1": x1, "y1": y1, "steps": steps, "shift": flag("shift"), "ctrl": flag("ctrl")}))
+                self.call(
+                    "ui.drag",
+                    json!({"x0": x0, "y0": y0, "x1": x1, "y1": y1, "steps": steps, "shift": flag("shift"), "ctrl": flag("ctrl"), "alt": flag("alt")}),
+                )
             } else if let Some(m) = s.get("queued").and_then(Value::as_str) {
                 let (v, frames) = self.call_queued(m, s.get("params").cloned().unwrap_or(json!({})));
                 let min = s.get("min_frames").and_then(Value::as_u64).unwrap_or(0);
@@ -394,7 +414,7 @@ impl Harness {
                 v
             } else if let Some(f) = s.get("script").and_then(Value::as_str) {
                 // A command script (`{"commands": [{command, params}]}`, path from the repository
-                // root) run through the engine, as `solvecraft-cli run` does.
+                // root) run through the engine, as `solidcraft-cli run` does.
                 let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(f);
                 let text = std::fs::read_to_string(&path).map_err(|e| format!("{f}: {e}"))?;
                 let v: Value = serde_json::from_str(&text).map_err(|e| format!("{f}: {e}"))?;
@@ -413,8 +433,8 @@ impl Harness {
             } else if s.get("note").is_some() || s.get("pending").is_some() {
                 return Ok(());
             } else if let Some(name) = s.get("shot").and_then(Value::as_str) {
-                // With SOLVECRAFT_SCENARIO_SHOTS set: a render of the model as the camera sees it.
-                if let Ok(dir) = std::env::var("SOLVECRAFT_SCENARIO_SHOTS") {
+                // With SOLIDCRAFT_SCENARIO_SHOTS set: a render of the model as the camera sees it.
+                if let Ok(dir) = solidcraft_engine::geom::env::var("SCENARIO_SHOTS").ok_or(()) {
                     let path = std::path::Path::new(&dir).join(format!("{name}.png"));
                     self.call("ui.render", json!({"path": path.to_string_lossy(), "width": 1000, "height": 700}));
                 }
@@ -429,6 +449,8 @@ impl Harness {
                 }
                 self.app.cam_anim = None;
                 self.frames(2);
+                // Where `camera.panned` and `camera.zoomed` checks measure from.
+                self.cam_mark = Some(self.app.cam);
                 return Ok(());
             } else if let Some(v) = s.get("view_anim").and_then(Value::as_str) {
                 return self.view_anim(v, s.get("max_deg").and_then(Value::as_f64).unwrap_or(10.0));
@@ -608,6 +630,27 @@ pub fn check(h: &mut Harness, e: &Value) -> Result<(), String> {
                 if !near(yaw, &v["yaw_deg"]) || !near(pitch, &v["pitch_deg"]) {
                     return Err(format!("camera yaw {yaw:.2}°, pitch {pitch:.2}°, want {v}"));
                 }
+                // Since the last `camera` step: "panned" (bool: the target moved) and "zoomed"
+                // ("in", "out" or "no": the eye's distance from the target).
+                if !v["panned"].is_null() || !v["zoomed"].is_null() {
+                    let mark = h.cam_mark.ok_or("camera.panned/zoomed need a `camera` step first")?;
+                    let c = &h.app.cam;
+                    let moved = c.target.dist(mark.target) > 1e-6 * mark.distance.max(1.0);
+                    if v["panned"].as_bool().is_some_and(|want| want != moved) {
+                        return Err(format!("camera panned: got {moved}, want {}", v["panned"]));
+                    }
+                    let r = c.distance / mark.distance;
+                    let zoomed = if r < 1.0 - 1e-6 {
+                        "in"
+                    } else if r > 1.0 + 1e-6 {
+                        "out"
+                    } else {
+                        "no"
+                    };
+                    if v["zoomed"].as_str().is_some_and(|want| want != zoomed) {
+                        return Err(format!("camera zoomed: got {zoomed} (distance ×{r:.4}), want {}", v["zoomed"]));
+                    }
+                }
                 // "back": the world direction from the target to the eye.
                 if let Some(want) = v["back"].as_array() {
                     let b = h.app.cam.back();
@@ -623,6 +666,35 @@ pub fn check(h: &mut Harness, e: &Value) -> Result<(), String> {
                 let got = count_of(n);
                 if got != v["value"].as_f64() {
                     return Err(format!("count {n}: got {got:?}, want {}", v["value"]));
+                }
+            }
+            "same_width" => {
+                // {"same_width": "name"}: the published rect is as wide as the first time this
+                // scenario checked it (±0.5 px): a window that keeps its size.
+                let n = v.as_str().unwrap_or_default();
+                let w = rect_of(n).ok_or(format!("no rect {n}"))?.width();
+                let first = WIDTHS.with(|m| {
+                    let mut m = m.borrow_mut();
+                    match m.iter().find(|(k, _)| k == n) {
+                        Some(&(_, w0)) => w0,
+                        None => {
+                            m.push((n.to_string(), w));
+                            w
+                        }
+                    }
+                });
+                if (w - first).abs() > 0.5 {
+                    return Err(format!("{n} is {w:.1} px wide, was {first:.1} px"));
+                }
+            }
+            "right_edge" => {
+                // {"right_edge": {"inner": a, "outer": b, "tol": px}}: published rect a ends at
+                // b's right edge (within tol).
+                let (a, b) = (v["inner"].as_str().unwrap_or_default(), v["outer"].as_str().unwrap_or_default());
+                let (ra, rb) = (rect_of(a).ok_or(format!("no rect {a}"))?, rect_of(b).ok_or(format!("no rect {b}"))?);
+                let tol = v["tol"].as_f64().unwrap_or(2.0) as f32;
+                if (ra.right() - rb.right()).abs() > tol {
+                    return Err(format!("{a} ends at x={:.1}, {b} at x={:.1} (±{tol})", ra.right(), rb.right()));
                 }
             }
             "spans" => {

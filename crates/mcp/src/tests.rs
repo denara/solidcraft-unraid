@@ -29,6 +29,18 @@ fn tool(s: &mut Server, name: &str, args: Value) -> Value {
     if c["type"] == "text" { serde_json::from_str(c["text"].as_str().unwrap()).unwrap_or(Value::Null) } else { c.clone() }
 }
 
+#[test]
+fn crash_reports_are_listed_and_read_without_changing_the_design() {
+    let mut s = server();
+    let list = tool(&mut s, "crash_reports", json!({"limit": 3}));
+    assert!(list["reports"].as_array().is_some_and(|r| r.len() <= 3), "{list}");
+    assert!(list["dir"].is_string(), "{list}");
+    let r = raw_tool(&mut s, "crash_reports", json!({"id": "../../etc"}));
+    assert_eq!(r["result"]["isError"], json!(true), "{r}");
+    let r = raw_tool(&mut s, "crash_reports", json!({"id": 5}));
+    assert!(r.get("error").is_some() || r["result"]["isError"] == json!(true), "{r}");
+}
+
 fn volume(s: &mut Server) -> f64 {
     tool(s, "measure", json!({}))["total"]["volume_mm3"].as_f64().unwrap()
 }
@@ -43,7 +55,7 @@ fn handshake_and_tools_list() {
     let init =
         call(&mut s, 1, "initialize", json!({"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}));
     assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
-    assert_eq!(init["result"]["serverInfo"]["name"], "solvecraft");
+    assert_eq!(init["result"]["serverInfo"]["name"], "solidcraft");
     assert!(init["result"]["capabilities"]["tools"].is_object());
     assert!(init["result"]["instructions"].as_str().unwrap().contains("headless"));
     // An unknown version gets ours.
@@ -67,6 +79,7 @@ fn handshake_and_tools_list() {
         "export",
         "undo",
         "redo",
+        "crash_reports",
         "new_design",
         "open",
         "save",
@@ -84,9 +97,9 @@ fn handshake_and_tools_list() {
 
     let res = call(&mut s, 5, "resources/list", json!({}));
     assert_eq!(res["result"]["resources"].as_array().unwrap().len(), 2);
-    let d = call(&mut s, 6, "resources/read", json!({"uri": "solvecraft://design"}));
+    let d = call(&mut s, 6, "resources/read", json!({"uri": "solidcraft://design"}));
     assert!(d["result"]["contents"][0]["text"].as_str().unwrap().contains("timeline"));
-    assert_eq!(call(&mut s, 7, "resources/read", json!({"uri": "solvecraft://nope"}))["error"]["code"], -32002);
+    assert_eq!(call(&mut s, 7, "resources/read", json!({"uri": "solidcraft://nope"}))["error"]["code"], -32002);
     assert_eq!(call(&mut s, 8, "nope/nope", json!({}))["error"]["code"], -32601);
 }
 
@@ -141,7 +154,7 @@ fn agent_builds_box_fillet_hole() {
     assert!(img["data"].as_str().unwrap().starts_with("iVBORw0KGgo"), "not a PNG");
 
     // Export, save, start over, open.
-    let dir = std::env::temp_dir().join(format!("solvecraft-mcp-test-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("solidcraft-mcp-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let step = dir.join("part.step");
     tool(&mut s, "export", json!({"path": step.to_string_lossy()}));
@@ -152,7 +165,7 @@ fn agent_builds_box_fillet_hole() {
     let shot = dir.join("shot.png");
     tool(&mut s, "screenshot", json!({"path": shot.to_string_lossy(), "width": 64, "height": 64}));
     assert!(std::fs::metadata(&shot).unwrap().len() > 100);
-    let design = dir.join("part.solvecraft");
+    let design = dir.join("part.solidcraft");
     tool(&mut s, "save", json!({"path": design.to_string_lossy()}));
     tool(&mut s, "new_design", json!({"name": "Empty"}));
     assert_eq!(tool(&mut s, "measure", json!({}))["body_count"], 0);
@@ -163,6 +176,38 @@ fn agent_builds_box_fillet_hole() {
     assert_eq!(r["features"], 1, "{r}");
     assert!(rel(volume(&mut s), expect) < 5e-4);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn save_selects_container_or_json_and_reopens_by_contents() {
+    let mut s = server();
+    tool(&mut s, "execute", json!({"command": "solid.box", "params": {"length": 10, "width": 20, "height": 30}}));
+    let dir = std::env::temp_dir().join(format!("solidcraft-mcp-encodings-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, format, is_json) in [
+        ("default.solidcraft", None, false),
+        ("explicit.solidcraft", Some("json"), true),
+        ("legacy.solvecraft", None, false),
+        ("inferred.json", None, true),
+        ("container.json", Some("container"), false),
+    ] {
+        let path = dir.join(name);
+        let mut args = json!({"path": path.to_string_lossy()});
+        if let Some(format) = format {
+            args["format"] = json!(format);
+        }
+        tool(&mut s, "save", args);
+        let bytes = std::fs::read(&path).unwrap();
+        if is_json {
+            assert!(serde_json::from_slice::<Value>(&bytes).unwrap().is_object());
+        } else {
+            assert!(bytes.starts_with(b"PK\x03\x04"));
+        }
+        tool(&mut s, "new_design", json!({}));
+        tool(&mut s, "open", json!({"path": path.to_string_lossy()}));
+        assert!(rel(volume(&mut s), 6000.0) < 1e-9);
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -362,4 +407,106 @@ fn base64_matches_rfc4648() {
     for (i, o) in [("", ""), ("f", "Zg=="), ("fo", "Zm8="), ("foo", "Zm9v"), ("foob", "Zm9vYg=="), ("fooba", "Zm9vYmE="), ("foobar", "Zm9vYmFy")] {
         assert_eq!(base64(i.as_bytes()), o);
     }
+}
+
+/// Filtering by a command id returns that command, not every command whose docs mention it (#269).
+#[test]
+fn list_commands_filter_by_a_command_id_matches_ids() {
+    let mut s = server();
+    let cmds = tool(&mut s, "list_commands", json!({"filter": "sketch.delete"}));
+    let ids: Vec<&str> = cmds.as_array().unwrap().iter().filter_map(|c| c["id"].as_str()).collect();
+    assert!(ids.contains(&"sketch.delete"), "{ids:?}");
+    assert!(ids.iter().all(|id| id.contains("sketch.delete")), "{} commands matched: {ids:?}", ids.len());
+}
+
+/// Compatibility shims (docs/compatibility.md): a design saved before the rename (legacy
+/// extension and format tag) opens through MCP, and the legacy resource URIs still read.
+#[test]
+fn legacy_design_files_and_resource_uris() {
+    let mut s = server();
+    let saved = String::from_utf8(solidcraft_engine::io::write_design(&solidcraft_engine::doc::Document::default())).unwrap();
+    assert!(saved.contains("\"solidcraft/"), "{saved}");
+    let legacy = saved.replace("\"solidcraft/", "\"solvecraft/");
+    let path = std::env::temp_dir().join(format!("solidcraft-mcp-legacy-{}.solvecraft", std::process::id()));
+    std::fs::write(&path, legacy).unwrap();
+    tool(&mut s, "open", json!({"path": path.to_string_lossy()}));
+    let _ = std::fs::remove_file(&path);
+    let d = call(&mut s, 1, "resources/read", json!({"uri": "solvecraft://design"}));
+    assert!(d["result"]["contents"][0]["text"].as_str().unwrap().contains("timeline"));
+}
+
+/// #528: an agent saves the angle of a product photo as a named view once, then renders the
+/// model from that view after each change. The render must use the saved camera, not a
+/// standard view.
+#[test]
+#[ignore = "fails until #528 is fixed"]
+fn screenshot_renders_a_saved_named_view() {
+    let mut s = server();
+    tool(&mut s, "execute", json!({"command": "solid.box", "params": {"length": 40, "width": 20, "height": 10}}));
+    let camera = json!({"target": [20, 10, 5], "yaw": 0.5, "pitch": -0.6, "distance": 150});
+    tool(&mut s, "execute", json!({"command": "view.save", "params": {"name": "Photo", "camera": camera}}));
+    let shot = |s: &mut Server, view: &str| {
+        let img = tool(s, "screenshot", json!({"view": view, "width": 96, "height": 64}));
+        img["data"].as_str().unwrap_or_default().to_string()
+    };
+    let iso = shot(&mut s, "iso");
+    let photo = shot(&mut s, "Photo");
+    assert!(photo.starts_with("iVBORw0KGgo"), "not a PNG");
+    assert_ne!(photo, iso, "the named view rendered like the standard iso view");
+}
+
+/// #530: in a design with many bodies every feature result lists all of them, so a batch reply
+/// is mostly the same body list once per step. A compact batch reply names only what each step
+/// added or changed.
+#[test]
+#[ignore = "fails until #530 is fixed"]
+fn compact_batch_reply_does_not_repeat_the_body_list() {
+    let mut s = server();
+    let cube =
+        |x: i64, y: i64| json!({"command": "solid.box", "params": {"length": 1, "width": 1, "height": 1, "corner": [x, y, 0], "operation": "new"}});
+    let existing: Vec<Value> = (0..50).map(|i| cube(2 * i, 0)).collect();
+    tool(&mut s, "batch", json!({"commands": existing}));
+    let more: Vec<Value> = (0..3).map(|i| cube(2 * i, 5)).collect();
+    let r = raw_tool(&mut s, "batch", json!({"commands": more, "verbose": false}));
+    assert!(r.get("error").is_none() && r["result"]["isError"] != json!(true), "{r}");
+    let reply = r["result"]["content"][0]["text"].as_str().unwrap_or_default();
+    assert_eq!(tool(&mut s, "measure", json!({}))["body_count"], 53);
+    // The new bodies are named; the 50 untouched ones are not repeated.
+    for new in ["Body51", "Body52", "Body53"] {
+        assert!(reply.contains(&format!("\"{new}\"")), "{new} missing from the compact reply: {reply}");
+    }
+    for old in ["Body1", "Body25", "Body50"] {
+        assert!(!reply.contains(&format!("\"{old}\"")), "untouched {old} repeated in the compact reply ({} bytes): {reply}", reply.len());
+    }
+}
+
+/// #531: a product model keeps an optional variant hidden in its default presentation. Hiding
+/// it must survive saving and reopening the design (suppressing it would change the design).
+#[test]
+#[ignore = "fails until #531 is fixed"]
+fn hidden_body_stays_hidden_after_save_and_reopen() {
+    let mut s = server();
+    tool(&mut s, "execute", json!({"command": "solid.box", "params": {"length": 10, "width": 10, "height": 10, "body_name": "Base"}}));
+    tool(
+        &mut s,
+        "execute",
+        json!({"command": "solid.box", "params": {"length": 5, "width": 5, "height": 5, "corner": [20, 0, 0], "operation": "new", "body_name": "Variant"}}),
+    );
+    tool(&mut s, "execute", json!({"command": "browser.visibility", "params": {"items": ["Variant"], "visible": false}}));
+    let visible = |s: &mut Server, body: &str| {
+        let d = tool(s, "inspect_design", json!({"measure": false}));
+        d["bodies"].as_array().into_iter().flatten().find(|b| b["name"] == body).map(|b| b["visible"].clone()).unwrap_or(Value::Null)
+    };
+    assert_eq!(visible(&mut s, "Variant"), false);
+
+    let dir = std::env::temp_dir().join(format!("solidcraft-mcp-visibility-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let design = dir.join("variants.solidcraft");
+    tool(&mut s, "save", json!({"path": design.to_string_lossy()}));
+    tool(&mut s, "new_design", json!({"name": "Empty"}));
+    tool(&mut s, "open", json!({"path": design.to_string_lossy()}));
+    let (base, variant) = (visible(&mut s, "Base"), visible(&mut s, "Variant"));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(base, true);
+    assert_eq!(variant, false, "the hidden body is visible again after reopening");
 }

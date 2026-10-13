@@ -1,6 +1,6 @@
 //! Mesh algorigthms, include tessellations of the shape.
 
-// SolveCraft: compiler warnings no longer fail the build.
+// SolidCraft: compiler warnings no longer fail the build.
 #![deny(clippy::all, rust_2018_idioms)]
 #![warn(
     missing_docs,

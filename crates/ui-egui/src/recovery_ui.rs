@@ -2,7 +2,7 @@
 
 use egui::RichText;
 use serde_json::json;
-use solvecraft_engine::recovery::{self, Autosaver, Entry};
+use solidcraft_engine::recovery::{self, Autosaver, Entry};
 
 use crate::SolveApp;
 

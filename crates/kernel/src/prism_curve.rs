@@ -1,7 +1,7 @@
 //! Whole-span certificates for analytic planar prism boundaries.
 //! Samples propose a circle; only positive rational Bernstein bounds accept it.
 use crate::body::from_p3;
-use solvecraft_geom::{Plane, Seg2, Vec2};
+use solidcraft_geom::{Plane, Seg2, Vec2};
 use truck_modeling::{self as mt, BoundedCurve, Invertible, ParametricCurve};
 
 const MAX_DEGREE: usize = 32;
@@ -334,7 +334,7 @@ mod tests {
         let cap = builder::try_attach_plane(&[wire]).unwrap();
         let body = crate::body::Body::new(builder::tsweep(&cap, mt::Vector3::new(0., 0., 1.))).unwrap();
         assert!(body.validity().is_empty());
-        let tool = crate::box_solid(solvecraft_geom::Vec3::new(-1., -4., 0.5), solvecraft_geom::Vec3::new(12., 7., 1.)).unwrap();
+        let tool = crate::box_solid(solidcraft_geom::Vec3::new(-1., -4., 0.5), solidcraft_geom::Vec3::new(12., 7., 1.)).unwrap();
         assert!(
             crate::prism::prism_boolean(&body, &tool, crate::BoolOp::Cut).is_none(),
             "an actual extruded aliased spline cap must reach the generic route"

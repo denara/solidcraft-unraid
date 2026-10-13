@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
-use solvecraft_geom::Vec3;
+use solidcraft_geom::Vec3;
 
 use crate::body::Body;
 use crate::step_in::p21::{self, Param};
@@ -1214,6 +1214,39 @@ fn brep_exchange(b: &Body, merge: bool) -> Result<(p21::Exchange, HashMap<u64, V
     Ok((ex, merged, paint))
 }
 
+/// The separate pieces of a body for export, each keeping its face colours: a body of several
+/// lumps (a plate and the islands a cut left inside its holes, such as letter counters) is
+/// several solids, never one solid whose other pieces are written as voids. A body in one
+/// piece, or one whose pieces cannot be told apart, is itself.
+fn export_lumps(b: &Body) -> Vec<Body> {
+    if b.mesh.is_some() || b.solid.boundaries().len() < 2 {
+        return vec![b.clone()];
+    }
+    let lumps = match b.lumps() {
+        Ok(l) if l.len() > 1 => l,
+        _ => return vec![b.clone()],
+    };
+    let index: HashMap<_, usize> = b.solid.face_iter().enumerate().map(|(i, f)| (f.id(), i)).collect();
+    lumps
+        .into_iter()
+        .map(|lump| {
+            let paint = b.paint().map(|p| crate::body::Paint {
+                opacity: p.opacity,
+                faces: lump
+                    .solid
+                    .face_iter()
+                    .enumerate()
+                    .filter_map(|(k, f)| {
+                        let i = index.get(&f.id())?;
+                        p.faces.iter().find(|fp| fp.face == *i).map(|fp| crate::body::FacePaint { face: k, ..fp.clone() })
+                    })
+                    .collect(),
+            });
+            lump.with_color(b.color()).with_split_lines(b.split_lines().cloned()).with_paint(paint)
+        })
+        .collect()
+}
+
 /// Faces in the exchange's shells (fewer after merging).
 fn shell_face_count(ex: &p21::Exchange) -> usize {
     ex.entities
@@ -1366,26 +1399,28 @@ fn products_text(products: &[ExportProduct], root: usize, header: &StepHeader, m
         if !p.bodies.is_empty() {
             let mut solids = Vec::new();
             for b in &p.bodies {
-                let (ex, merged, face_paint) = brep_exchange(b.body, merge)?;
-                o.merged = merged;
-                o.faces_out.clear();
-                let mut roots: Vec<u64> =
-                    ex.entities.iter().filter(|(_, e)| matches!(e.name(), "MANIFOLD_SOLID_BREP" | "BREP_WITH_VOIDS")).map(|(i, _)| *i).collect();
-                roots.sort();
-                for r in roots {
-                    let id = o.copy_solid(&ex, r, &b.name).map_err(|e| KernelError::Failed(format!("STEP export: {e}")))?;
-                    solids.push(id);
-                    let opacity = b.body.paint().map(|p| p.opacity).unwrap_or(1.0);
-                    if let Some(c) = b.color {
-                        styled.push(style(&mut o, id, c, opacity));
+                for lump in export_lumps(b.body) {
+                    let (ex, merged, face_paint) = brep_exchange(&lump, merge)?;
+                    o.merged = merged;
+                    o.faces_out.clear();
+                    let mut roots: Vec<u64> =
+                        ex.entities.iter().filter(|(_, e)| matches!(e.name(), "MANIFOLD_SOLID_BREP" | "BREP_WITH_VOIDS")).map(|(i, _)| *i).collect();
+                    roots.sort();
+                    for r in roots {
+                        let id = o.copy_solid(&ex, r, &b.name).map_err(|e| KernelError::Failed(format!("STEP export: {e}")))?;
+                        solids.push(id);
+                        let opacity = lump.paint().map(|p| p.opacity).unwrap_or(1.0);
+                        if let Some(c) = b.color {
+                            styled.push(style(&mut o, id, c, opacity));
+                        }
                     }
-                }
-                // Faces with colours of their own.
-                let mut painted: Vec<(u64, ([f32; 3], f32))> =
-                    face_paint.into_iter().filter_map(|(f, look)| Some((*o.faces_out.get(&f)?, look))).collect();
-                painted.sort_by_key(|(f, _)| *f);
-                for (f, (c, op)) in painted {
-                    styled.push(style(&mut o, f, c, op));
+                    // Faces with colours of their own.
+                    let mut painted: Vec<(u64, ([f32; 3], f32))> =
+                        face_paint.into_iter().filter_map(|(f, look)| Some((*o.faces_out.get(&f)?, look))).collect();
+                    painted.sort_by_key(|(f, _)| *f);
+                    for (f, (c, op)) in painted {
+                        styled.push(style(&mut o, f, c, op));
+                    }
                 }
             }
             let list = solids.iter().chain(std::iter::once(&origin)).map(|i| format!("#{i}")).collect::<Vec<_>>().join(",");
@@ -1485,6 +1520,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn islands_are_solids_of_their_own_not_voids() {
+        use solidcraft_geom::{Loop2, Plane, Region2, Vec2};
+        let square = |a: f64, b: f64| Loop2::polygon(&[Vec2::new(a, a), Vec2::new(b, a), Vec2::new(b, b), Vec2::new(a, b)]);
+        // A plate with a square hole, and an island inside the hole (a letter's counter).
+        let plate = Region2 { outer: square(0.0, 30.0), holes: vec![square(10.0, 20.0).reversed()] };
+        let island = Region2 { outer: square(12.0, 18.0), holes: vec![] };
+        let body = crate::extrude_planar_regions(&Plane::XY, &[plate, island], 0.0, 2.0).unwrap();
+        assert_eq!(body.shell_count(), 2);
+        let text = crate::step_export(&[&body], "test").unwrap();
+        assert_eq!(text.matches("MANIFOLD_SOLID_BREP(").count(), 2, "{text}");
+        assert_eq!(text.matches("BREP_WITH_VOIDS").count(), 0);
+        let imp = crate::step_import(&text).unwrap();
+        let v: f64 = imp.bodies.iter().map(|b| crate::measure(&b.body).unwrap().volume).sum();
+        assert!((v - (800.0 + 36.0) * 2.0).abs() < 1e-6, "{v}");
+        // A real void stays a void.
+        let hollow = crate::boolean(
+            &crate::box_solid(Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0)).unwrap(),
+            &crate::box_solid(Vec3::new(3.0, 3.0, 3.0), Vec3::new(7.0, 7.0, 7.0)).unwrap(),
+            crate::BoolOp::Cut,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(hollow.shell_count(), 2);
+        let text = crate::step_export(&[&hollow], "test").unwrap();
+        assert_eq!(text.matches("BREP_WITH_VOIDS").count(), 1, "{text}");
+    }
+
+    #[test]
     fn numbers_and_strings() {
         assert_eq!(real(1.0), "1.0");
         assert_eq!(real(1e-6), "1.E-6");
@@ -1501,8 +1564,8 @@ mod tests {
     #[test]
     fn assembly_names_colours_round_trip() {
         use crate::{box_solid, cylinder, measure, step_import, step_validate};
-        let bx = box_solid(solvecraft_geom::Vec3::ZERO, solvecraft_geom::Vec3::new(10.0, 20.0, 5.0)).unwrap();
-        let pin = cylinder(solvecraft_geom::Vec3::ZERO, solvecraft_geom::Vec3::Z, 2.0, 8.0).unwrap();
+        let bx = box_solid(solidcraft_geom::Vec3::ZERO, solidcraft_geom::Vec3::new(10.0, 20.0, 5.0)).unwrap();
+        let pin = cylinder(solidcraft_geom::Vec3::ZERO, solidcraft_geom::Vec3::Z, 2.0, 8.0).unwrap();
         let rot90 = [[0.0, 1.0, 0.0, 0.0], [-1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [50.0, 0.0, 0.0, 1.0]];
         let shift = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 5.0, 1.0]];
         let products = vec![
@@ -1530,7 +1593,7 @@ mod tests {
         let m: Vec<_> = imp.bodies.iter().map(|b| measure(&b.body).unwrap()).collect();
         assert!((m[1].bbox.min.z - 5.0).abs() < 1e-6 && (m[1].bbox.max.z - 13.0).abs() < 1e-6);
         // Rotated 90° about Z and moved 50 along X: centre at (50, 0).
-        assert!(m[2].centroid.dist(solvecraft_geom::Vec3::new(50.0, 0.0, 4.0)) < 1e-3, "{:?}", m[2].centroid);
+        assert!(m[2].centroid.dist(solidcraft_geom::Vec3::new(50.0, 0.0, 4.0)) < 1e-3, "{:?}", m[2].centroid);
         // Recursion and bad placements are errors.
         let cyc = vec![ExportProduct {
             name: "A".into(),

@@ -87,13 +87,13 @@ fn revolve_to_a_cylinder_follows_it() {
         }
         let st = s.model.state();
         let (arc, post) = (st.body("Arc").unwrap(), st.body("Post").unwrap());
-        let overlap = solvecraft_kernel::boolean(&arc.body, &post.body, solvecraft_kernel::BoolOp::Intersect)
+        let overlap = solidcraft_kernel::boolean(&arc.body, &post.body, solidcraft_kernel::BoolOp::Intersect)
             .ok()
             .flatten()
-            .map(|b| solvecraft_kernel::measure(&b).map(|m| m.volume).unwrap_or(0.0))
+            .map(|b| solidcraft_kernel::measure(&b).map(|m| m.volume).unwrap_or(0.0))
             .unwrap_or(0.0);
         assert!(overlap < 1e-3, "no overlap: {overlap}");
-        let v = solvecraft_kernel::measure(&arc.body).unwrap().volume;
+        let v = solidcraft_kernel::measure(&arc.body).unwrap().volume;
         let full = PI * (225.0 - 100.0) * 5.0;
         // The post is at a quarter turn one way (three quarters the other): the ring stops
         // short of the post's centre line, within its half-width of it.
@@ -103,4 +103,25 @@ fn revolve_to_a_cylinder_follows_it() {
         return;
     }
     panic!("neither post was reached");
+}
+
+/// To Object picks the face that is at the picked point, not the first body with any face
+/// near it. Here the pick is on a post (r 2.75) only 2 mm above a plate: the ridge must end
+/// on the post. Before, the plate (within 5 % of its size of the pick) was taken as the
+/// target, nothing trimmed the tool, and the ridge ran past the post.
+#[test]
+fn extrude_to_a_cylinder_beside_another_body() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"corner": [-98, -5, 0], "length": 101, "width": 10, "height": 3, "body_name": "Plate"}));
+    run(&mut s, "solid.cylinder", json!({"base": [0, 0, 0], "axis": [0, 0, 1], "radius": 2.75, "height": 10, "body_name": "Post"}));
+    // A ridge above the plate, y -1.5..0, z 4..7, from the plate's far end towards the post.
+    run(&mut s, "sketch.create", json!({"plane": {"origin": [-98, 0, 0], "x_dir": [0, 1, 0], "y_dir": [0, 0, 1]}, "name": "End"}));
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [-1.5, 4], "p1": [0, 7]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"sketch": "End", "to": [-2.75, 0, 5], "operation": "new", "body_name": "Ridge"}));
+    let b = body(&mut s, "Ridge");
+    // Its end follows the post: farthest at the ridge's edge y = -1.5, x = -√(2.75² − 1.5²).
+    let end = b["bbox"]["max"][0].as_f64().unwrap_or(f64::MAX);
+    assert!((end + (2.75f64 * 2.75 - 1.5 * 1.5).sqrt()).abs() < 1e-3, "{b}");
+    assert!((b["bbox"]["min"][0].as_f64().unwrap_or(0.0) + 98.0).abs() < 1e-6, "{b}");
 }

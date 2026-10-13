@@ -1,6 +1,6 @@
-use solvecraft_geom::{Vec2, Vec3};
-use solvecraft_kernel::measure;
-use solvecraft_sketch::{ConstraintKind, Sketch};
+use solidcraft_geom::{Vec2, Vec3};
+use solidcraft_kernel::measure;
+use solidcraft_sketch::{ConstraintKind, Sketch};
 
 use crate::*;
 
@@ -104,8 +104,17 @@ fn set_back_reports_restored_features() {
 #[test]
 fn box_fillet_cut_timeline() {
     let (mut doc, _) = plate_doc();
-    doc.add_feature(FeatureKind::Fillet { edges: vec![Vec3::new(0.0, 0.0, 10.0)], radius: "3".into(), body: None, style: Default::default() }, None)
-        .unwrap();
+    doc.add_feature(
+        FeatureKind::Fillet {
+            edges: vec![Vec3::new(0.0, 0.0, 10.0)],
+            radius: "3".into(),
+            body: None,
+            style: Default::default(),
+            fit: Default::default(),
+        },
+        None,
+    )
+    .unwrap();
     let mut sk = Sketch::new();
     sk.add_circle(Vec2::new(20.0, 15.0), 5.0, None, None).unwrap();
     let s2 = doc.add_feature(FeatureKind::Sketch { plane: PlaneRef::Origin { name: "XY".into() }, sketch: sk }, None).unwrap();
@@ -163,8 +172,17 @@ fn errors_are_reported_not_fatal() {
         None,
     )
     .unwrap();
-    doc.add_feature(FeatureKind::Fillet { edges: vec![Vec3::new(500.0, 0.0, 0.0)], radius: "1".into(), body: None, style: Default::default() }, None)
-        .unwrap();
+    doc.add_feature(
+        FeatureKind::Fillet {
+            edges: vec![Vec3::new(500.0, 0.0, 0.0)],
+            radius: "1".into(),
+            body: None,
+            style: Default::default(),
+            fit: Default::default(),
+        },
+        None,
+    )
+    .unwrap();
     doc.add_feature(
         FeatureKind::Box {
             corner: point_expr(Vec3::ZERO),
@@ -361,7 +379,7 @@ fn input_sketches_lists_every_variant_with_a_sketch_field() {
 
 #[test]
 fn timeline_clones_share_meshes_even_when_cloned_before_tessellation() {
-    let body = solvecraft_kernel::box_solid(Vec3::ZERO, Vec3::new(10., 10., 10.)).unwrap();
+    let body = solidcraft_kernel::box_solid(Vec3::ZERO, Vec3::new(10., 10., 10.)).unwrap();
     let a = crate::eval::ModelBody::new("box".into(), body, 1);
     let b = a.clone();
     assert!(std::sync::Arc::ptr_eq(&a.mesh(), &b.mesh()));

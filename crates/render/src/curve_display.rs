@@ -1,6 +1,6 @@
 //! Pixel-bounded display paths. CAD segments remain untouched; positive homogeneous
 //! control hulls bound perspective projection, including looping and rational curves.
-use solvecraft_geom::{Plane, Seg2, Vec2, Vec3};
+use solidcraft_geom::{Plane, Seg2, Vec2, Vec3};
 
 use crate::Mat4;
 

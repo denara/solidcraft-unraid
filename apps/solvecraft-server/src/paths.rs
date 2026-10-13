@@ -43,6 +43,7 @@ fn file_fields(root: &Path, value: &mut Value) -> Result<(), String> {
 
 pub fn prepare_tool(root: &Path, tool: &str, value: &mut Value) -> Result<(), String> {
     match tool {
+        "crash_reports" => Err("shared desktop crash reports are unavailable through the network gateway".into()),
         "open" | "save" | "export" | "screenshot" => file_fields(root, value),
         "execute" | "batch" => commands(root, value, 0),
         _ => Ok(()),
@@ -57,8 +58,21 @@ fn commands(root: &Path, value: &mut Value, depth: usize) -> Result<(), String> 
         Value::Object(object) => {
             // Recovery metadata can refer to arbitrary original file paths. Network clients
             // use explicit open/save instead; desktop recovery remains unchanged.
-            if object.get("command").and_then(Value::as_str).is_some_and(|c| c.starts_with("doc.recover")) {
+            if object.get("command").and_then(Value::as_str).is_some_and(|c| c.starts_with("doc.recover") || c.starts_with("diagnostics.crash")) {
                 return Err("desktop recovery commands are unavailable through the network gateway; use open/save".into());
+            }
+            if object.get("command").and_then(Value::as_str) == Some("sketch.text")
+                && let Some(font) = object.get_mut("params").and_then(|p| p.get_mut("font"))
+                && let Some(name) = font.as_str()
+            {
+                let name = name.trim();
+                let lower = name.to_ascii_lowercase();
+                if name.contains(['/', '\\']) || [".ttf", ".otf", ".ttc", ".otc"].iter().any(|ext| lower.ends_with(ext)) {
+                    if name.contains(['%', '~']) {
+                        return Err("font path expansion is unavailable through the network gateway".into());
+                    }
+                    *font = Value::String(resolve(root, name)?.to_string_lossy().into_owned());
+                }
             }
             // Sweep/pattern paths, construction references and occurrence paths refer
             // to geometry and may be scalar strings. Decal reads a file instead.
@@ -111,6 +125,22 @@ mod tests {
         assert_eq!(geometry["params"]["path"], "l1");
         assert!(prepare_tool(&root, "screenshot", &mut json!({"path":"../escape","command":"solid.sweep"})).is_err());
         assert!(prepare_tool(&root, "execute", &mut json!({"command":"file.save","params":{"path":"../escape","command":"solid.sweep"}})).is_err());
+    }
+
+    #[test]
+    fn confines_new_font_paths_and_disallows_shared_crash_reports() {
+        let root = std::env::temp_dir();
+        for name in ["../secret.ttf", "/etc/passwd", "%HOME%/font.ttf", "~/font.otf", "C:\\font.ttf"] {
+            assert!(prepare_tool(&root, "execute", &mut json!({"command":"sketch.text","params":{"font":name}})).is_err());
+        }
+        let mut text = json!({"command":"sketch.text","params":{"font":"fonts/part.ttf"}});
+        prepare_tool(&root, "execute", &mut text).unwrap();
+        assert_eq!(text["params"]["font"], root.join("fonts/part.ttf").to_string_lossy().as_ref());
+        let mut family = json!({"command":"sketch.text","params":{"font":"Liberation Sans"}});
+        prepare_tool(&root, "execute", &mut family).unwrap();
+        assert_eq!(family["params"]["font"], "Liberation Sans");
+        assert!(prepare_tool(&root, "crash_reports", &mut json!({})).is_err());
+        assert!(prepare_tool(&root, "batch", &mut json!({"commands":[{"command":"diagnostics.crash_reports.clear"}]})).is_err());
     }
 
     #[cfg(unix)]

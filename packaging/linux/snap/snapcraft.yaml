@@ -1,0 +1,81 @@
+# Snap package (solidcraft-<version>-linux-<arch>.snap on every GitHub release, and the Snap
+# Store when its credentials are configured). Build it with packaging/linux/snap-pack.sh.
+#
+# Like the Flatpak, it repackages the release's own Linux tarball (built on Ubuntu 22.04 by
+# package.sh) instead of compiling Rust: the same binaries as the AppImage/deb/rpm. snap-pack.sh
+# unpacks the tarball into stage/ next to snap/ and writes the package version to version.txt.
+# The binaries need glibc >= 2.35 (core24 has 2.39) and load X11, Wayland, xkbcommon and Vulkan
+# at runtime: the gnome extension supplies the desktop libraries and the GPU userspace (mesa,
+# through the gpu-2404 content interface) for the wgpu viewport.
+name: solidcraft
+title: SolidCraft
+summary: Open-source parametric 3D CAD
+description: |
+  SolidCraft is an open-source parametric 3D CAD application written in Rust. Sketch on a
+  plane, constrain and dimension the sketch, turn profiles into solids on a feature timeline,
+  and change a parameter to watch the timeline rebuild.
+
+  - Sketches with a constraint solver and parameter-driven dimensions
+  - Extrude, revolve, sweep, loft, fillet, chamfer, shell, holes and patterns
+  - Components and joints, sheet metal, and a plastic-enclosure subset
+  - STEP and IGES import and export; 3MF, STL and OBJ
+  - Every action is a command, scriptable from a CLI, a JSON control channel and an MCP server
+
+  The command-line tool is `solidcraft.cli` (for example `solidcraft.cli mcp`).
+adopt-info: solidcraft
+license: MIT OR Apache-2.0
+contact: https://github.com/bherbruck/solidcraft/issues
+website: https://bherbruck.github.io/solidcraft/
+source-code: https://github.com/bherbruck/solidcraft
+issues: https://github.com/bherbruck/solidcraft/issues
+icon: stage/share/icons/hicolor/512x512/apps/ai.storyteller.solvecraft.png
+base: core24
+grade: stable
+confinement: strict
+# lzo starts faster than the default xz, at a somewhat larger download.
+compression: lzo
+platforms:
+  amd64:
+  arm64:
+
+apps:
+  solidcraft:
+    command: usr/bin/solidcraft
+    desktop: usr/share/applications/ai.storyteller.solvecraft.desktop
+    # Ties the snap to the AppStream id (ai.storyteller.solvecraft, a compatibility shim kept by
+    # every package; see docs/compatibility.md) so software centres treat it as the same app.
+    common-id: ai.storyteller.solvecraft
+    extensions: [gnome]
+    plugs:
+      - desktop
+      - desktop-legacy
+      - wayland
+      - x11
+      - opengl
+      # Designs anywhere in the home folder (not hidden files) and on USB drives; Open/Save
+      # also work through the desktop file-chooser portal.
+      - home
+      - removable-media
+      # Opening links (Create Issue, documentation); the optional --control server listens
+      # on 127.0.0.1 for agents and tests.
+      - network
+      - network-bind
+  cli:
+    command: usr/bin/solidcraft-cli
+    plugs: [home, removable-media, network, network-bind]
+
+parts:
+  solidcraft:
+    plugin: dump
+    source: stage
+    organize:
+      bin/: usr/bin/
+      share/: usr/share/
+    override-pull: |
+      craftctl default
+      craftctl set version="$(cat "$CRAFT_PROJECT_DIR/version.txt")"
+    override-prime: |
+      craftctl default
+      # Point the menu entry at the packaged icon (the hicolor name isn't on the host's path).
+      sed -i 's|^Icon=.*|Icon=${SNAP}/usr/share/icons/hicolor/256x256/apps/ai.storyteller.solvecraft.png|' \
+        usr/share/applications/ai.storyteller.solvecraft.desktop

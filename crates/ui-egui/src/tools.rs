@@ -3,7 +3,7 @@
 
 use egui::{Pos2, Stroke};
 use serde_json::{Value, json};
-use solvecraft_engine::geom::Vec2;
+use solidcraft_engine::geom::Vec2;
 
 use crate::SolveApp;
 use crate::viewport::{Hit, Proj, pick, sketch_point_at};
@@ -11,6 +11,10 @@ use crate::viewport::{Hit, Proj, pick, sketch_point_at};
 #[cfg(test)]
 #[path = "sketch_display_preview_tests.rs"]
 mod display_preview_tests;
+
+#[cfg(test)]
+#[path = "sketch_neutral_click_tests.rs"]
+mod neutral_click_tests;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -144,11 +148,17 @@ pub fn on_click(app: &mut SolveApp, proj: &Proj, pos: Pos2) {
         return;
     }
     match tool.kind {
-        Kind::Draw(_) => {
+        Kind::Draw(n) => {
             if let Some(mut p) = sketch_point_at(app, proj, pos) {
                 // Typed values win over the cursor; lines snap to horizontal/vertical.
                 if tool.dims.iter().any(|b| b.locked) || (tool.cmd == "sketch.line" && p.1.is_none()) {
                     p = (crate::sketch_dims::effective(app, &tool, p.0), None);
+                }
+                // A repeated initial point supplies no extent. Keep waiting rather than
+                // attempting a degenerate shape; explicit typed values still validate.
+                if n != 1 && tool.pts.len() == 1 && tool.pts.first().is_some_and(|first| first.0 == p.0) && !tool.dims.iter().any(|b| b.locked) {
+                    app.tool = Some(tool);
+                    return;
                 }
                 app.tool = Some(tool);
                 place(app, p);
@@ -212,7 +222,9 @@ pub fn on_click(app: &mut SolveApp, proj: &Proj, pos: Pos2) {
             }
         }
     }
-    app.tool = Some(tool);
+    if !crate::sketch_text::editing(app) {
+        app.tool = Some(tool);
+    }
 }
 
 /// Put down the next point of the shape being drawn; the last point runs the command (with
@@ -324,13 +336,31 @@ fn run_shape(app: &mut SolveApp, t: &Tool) -> Result<Vec<String>, String> {
 }
 
 /// Only consume a complete, unambiguous selection; command validation owns geometry.
-pub(crate) fn constraint_preselection(command: &str, selection: &[solvecraft_engine::Sel]) -> Option<Value> {
-    use solvecraft_engine::Sel::{SketchCurve, SketchPoint};
+pub(crate) fn constraint_preselection(command: &str, selection: &[solidcraft_engine::Sel]) -> Option<Value> {
+    use solidcraft_engine::Sel::{SketchCurve, SketchPoint};
+    let selected_ids = |curves_only: bool, minimum: usize| -> Option<Vec<&str>> {
+        if !(minimum..=200).contains(&selection.len()) {
+            return None;
+        }
+        let ids: Vec<&str> = selection
+            .iter()
+            .map(|s| match s {
+                SketchCurve { id } => Some(id.as_str()),
+                SketchPoint { id } if !curves_only => Some(id.as_str()),
+                _ => None,
+            })
+            .collect::<Option<_>>()?;
+        let unique: std::collections::BTreeSet<_> = ids.iter().copied().collect();
+        (unique.len() == ids.len()).then_some(ids)
+    };
     match (command, selection) {
+        ("sketch.constraint.fix", _) => selected_ids(false, 1).map(|ids| json!({"entities":ids})),
+        ("sketch.constraint.polygon", _) => selected_ids(true, 3).map(|ids| json!({"lines":ids})),
+        ("sketch.constraint.curvature", [SketchCurve { id: a }, SketchCurve { id: b }]) if a != b => Some(json!({"a":a,"b":b})),
         ("sketch.constraint.horizontal_vertical", [SketchCurve { id }]) => Some(json!({"line":id})),
         ("sketch.constraint.horizontal_vertical", [SketchPoint { id: a }, SketchPoint { id: b }]) if a != b => Some(json!({"points":[a,b]})),
         ("sketch.constraint.coincident", [a, b]) => {
-            let entity = |s: &solvecraft_engine::Sel| match s {
+            let entity = |s: &solidcraft_engine::Sel| match s {
                 SketchPoint { id } | SketchCurve { id } => Some(id.clone()),
                 _ => None,
             };
@@ -358,6 +388,30 @@ pub(crate) fn constraint_preselection(command: &str, selection: &[solvecraft_eng
         }
         _ => None,
     }
+}
+
+pub(crate) fn projection_preselection(selection: &[solidcraft_engine::Sel]) -> Option<Vec<Value>> {
+    use solidcraft_engine::Sel;
+    // The projection command processes at most 1000 references; never consume a subset.
+    if selection.is_empty() || selection.len() > 1000 {
+        return None;
+    }
+    selection
+        .iter()
+        .map(|item| {
+            Some(match item {
+                Sel::Body { name } => json!({"body":name}),
+                Sel::ExternalSketchCurve { sketch, id } => json!({"sketch":sketch,"curve":id}),
+                Sel::ExternalSketchPoint { sketch, id } => json!({"sketch":sketch,"point":id}),
+                Sel::Vertex { body, point } => json!({"body":body,"vertex":[point.x,point.y,point.z]}),
+                Sel::Edge { body, point, .. } => json!({"body":body,"edge":[point.x,point.y,point.z]}),
+                Sel::Face { body, point, .. } => json!({"body":body,"face":[point.x,point.y,point.z]}),
+                Sel::Axis { name } => json!({"axis":name}),
+                Sel::Plane { name } => json!({"plane":name}),
+                _ => return None,
+            })
+        })
+        .collect()
 }
 
 fn run_pick(app: &mut SolveApp, t: &Tool) {
@@ -397,23 +451,23 @@ pub fn finish(app: &mut SolveApp) {
 
 /// Rubber-band preview of the shape being drawn.
 pub(crate) fn paint_preview_curve(
-    sketch: &solvecraft_engine::sketch::Sketch,
-    plane: &solvecraft_engine::geom::Plane,
+    sketch: &solidcraft_engine::sketch::Sketch,
+    plane: &solidcraft_engine::geom::Plane,
     painter: &egui::Painter,
     proj: &Proj,
     stroke: Stroke,
 ) {
-    paint_curve(sketch, 0, plane, painter, proj, stroke, &mut solvecraft_engine::render::SamplingBudget::new(4096, 65_536));
+    paint_curve(sketch, 0, plane, painter, proj, stroke, &mut solidcraft_engine::render::SamplingBudget::new(4096, 65_536));
 }
 
 pub(crate) fn paint_curve(
-    sketch: &solvecraft_engine::sketch::Sketch,
+    sketch: &solidcraft_engine::sketch::Sketch,
     index: usize,
-    plane: &solvecraft_engine::geom::Plane,
+    plane: &solidcraft_engine::geom::Plane,
     painter: &egui::Painter,
     proj: &Proj,
     stroke: Stroke,
-    budget: &mut solvecraft_engine::render::SamplingBudget,
+    budget: &mut solidcraft_engine::render::SamplingBudget,
 ) {
     for part in crate::sketch_display::curve_with_budget(sketch, index, plane, proj, painter.ctx().pixels_per_point(), budget).parts {
         let screen: Vec<_> = part.into_iter().filter_map(|point| proj.to_screen(point)).collect();
@@ -425,9 +479,9 @@ pub(crate) fn paint_curve(
 
 /// Temporary analytic geometry uses the same exact span extraction as committed curves.
 /// It never solves constraints or modifies the document.
-pub(crate) fn preview_curve(t: &Tool, hover: Vec2, sweep: Option<f64>) -> Option<solvecraft_engine::sketch::Sketch> {
-    use solvecraft_engine::sketch::{CurveKind, Sketch};
-    if !hover.is_finite() || t.pts.len() >= solvecraft_engine::sketch::MAX_SPLINE_POINTS || t.pts.iter().any(|p| !p.0.is_finite()) {
+pub(crate) fn preview_curve(t: &Tool, hover: Vec2, sweep: Option<f64>) -> Option<solidcraft_engine::sketch::Sketch> {
+    use solidcraft_engine::sketch::{CurveKind, Sketch};
+    if !hover.is_finite() || t.pts.len() >= solidcraft_engine::sketch::MAX_SPLINE_POINTS || t.pts.iter().any(|p| !p.0.is_finite()) {
         return None;
     }
     let mut sk = Sketch::new();
@@ -527,7 +581,7 @@ pub fn preview(app: &SolveApp, t: &Tool, painter: &egui::Painter, proj: &Proj) {
         painter.text(
             sp + egui::vec2(10.0, 10.0),
             egui::Align2::LEFT_TOP,
-            format!("{:.2}, {:.2}", hp.x, hp.y),
+            format!("{}, {}", crate::prefs::show_mm(app, hp.x, 1), crate::prefs::show_mm(app, hp.y, 1)),
             egui::FontId::proportional(11.0),
             tk.text_dim,
         );

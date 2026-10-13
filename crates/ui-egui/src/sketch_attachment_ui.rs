@@ -2,10 +2,10 @@
 
 use egui::{Pos2, RichText};
 use serde_json::{Value, json};
-use solvecraft_engine::Sel;
-use solvecraft_engine::doc::face_anchor::plane_face_anchor;
-use solvecraft_engine::doc::{EmbossFace, FaceAttachmentStatus, FeatureKind, mat_inverse};
-use solvecraft_engine::geom::{Plane, Vec3};
+use solidcraft_engine::Sel;
+use solidcraft_engine::doc::face_anchor::plane_face_anchor;
+use solidcraft_engine::doc::{EmbossFace, FaceAttachmentStatus, FeatureKind, mat_inverse};
+use solidcraft_engine::geom::{Plane, Vec3};
 
 use crate::SolveApp;
 use crate::theme::Tokens;
@@ -145,8 +145,9 @@ pub fn panel(app: &mut SolveApp, ctx: &egui::Context, at: Pos2) {
     .scroll([false, true])
     .show(ctx, |ui| {
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-        ui.strong(format!("Redefine Sketch Plane: {name}"));
-        ui.separator();
+        // The wrapped notes below fill the width anyway, so the band may too.
+        let width = ui.available_width();
+        crate::frame::heading(ui, crate::frame::Level::Title, width, |ui| ui.strong(format!("Redefine Sketch Plane: {name}")));
         let saved_plane = match &status {
             FaceAttachmentStatus::Healthy { plane, target, path } => {
                 ui.label(format!("Attached to {} / {}", target.body, path_label(app, path)));
@@ -164,6 +165,10 @@ pub fn panel(app: &mut SolveApp, ctx: &egui::Context, at: Pos2) {
             }
             FaceAttachmentStatus::Legacy { plane } => {
                 ui.label("Legacy face attachment. Rebinding to a certified face creates an exact attachment.");
+                *plane
+            }
+            FaceAttachmentStatus::Sheet { plane } => {
+                ui.label("Attached to a flat face of a sheet metal body; it follows that panel when the sheet changes.");
                 *plane
             }
             FaceAttachmentStatus::Fixed { plane } => {
@@ -253,7 +258,7 @@ pub fn panel(app: &mut SolveApp, ctx: &egui::Context, at: Pos2) {
 
 /// Only a lost reference's explicit saved author frame supplies a guide. It is
 /// absent from ModelState, selection, snapping and all downstream evaluation.
-pub fn lost_guide(app: &SolveApp) -> Option<(Plane, &solvecraft_engine::sketch::Sketch)> {
+pub fn lost_guide(app: &SolveApp) -> Option<(Plane, &solidcraft_engine::sketch::Sketch)> {
     let sketch = app.tree.redefine?;
     let FaceAttachmentStatus::Lost { repair_plane: Some(plane), .. } = attachment(app, sketch) else { return None };
     let FeatureKind::Sketch { sketch, .. } = &app.session.doc.feature(sketch)?.kind else { return None };
@@ -270,7 +275,7 @@ pub fn guide_lines(app: &SolveApp) -> Vec<Vec<Vec3>> {
 
 pub fn display_guide_lines(app: &SolveApp, proj: &crate::viewport::Proj) -> Vec<Vec<Vec3>> {
     let Some((plane, sketch)) = lost_guide(app) else { return Vec::new() };
-    let mut budget = solvecraft_engine::render::SamplingBudget::new(65_536, 262_144);
+    let mut budget = solidcraft_engine::render::SamplingBudget::new(65_536, 262_144);
     (0..sketch.curves.len())
         .flat_map(|index| crate::sketch_display::curve_with_budget(sketch, index, &plane, proj, app.viewport.pixels_per_point(), &mut budget).parts)
         .collect()

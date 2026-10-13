@@ -93,6 +93,10 @@ pub struct Tokens {
     pub dialog_bg: Color32,
     pub dialog_border: Color32,
     pub chip: Color32,
+    /// Band behind a panel's heading and, lighter, behind its section headings (both set off
+    /// from `dialog_bg`).
+    pub heading_bg: Color32,
+    pub subheading_bg: Color32,
     /// Inside of bodies cut by a section.
     pub section_cap: Color32,
     /// Closed sketch profiles (translucent fill).
@@ -183,10 +187,12 @@ impl Tokens {
             dialog_bg: Color32::from_rgb(250, 251, 252),
             dialog_border: Color32::from_rgb(208, 212, 220),
             chip: Color32::from_rgb(38, 120, 218),
+            heading_bg: Color32::from_rgb(218, 223, 231),
+            subheading_bg: Color32::from_rgb(234, 237, 242),
             profile_fill: Color32::from_rgba_unmultiplied_const(255, 196, 120, 70),
             glyph_bg: Color32::WHITE,
-            glyph_edge: Color32::from_rgb(90, 150, 90),
-            glyph_text: Color32::from_rgb(40, 110, 40),
+            glyph_edge: Color32::from_rgb(190, 110, 100),
+            glyph_text: Color32::from_rgb(150, 40, 35),
             overlay: Color32::from_rgba_unmultiplied_const(255, 255, 255, 235),
             rubber_band: Color32::from_rgb(30, 120, 230),
             app_bar_text: Color32::from_rgb(230, 234, 242),
@@ -238,9 +244,11 @@ impl Tokens {
         t.dialog_bg = Color32::from_rgb(59, 68, 83);
         t.dialog_border = Color32::from_rgb(72, 83, 99);
         t.chip = Color32::from_rgb(59, 101, 168);
+        t.heading_bg = Color32::from_rgb(38, 44, 55);
+        t.subheading_bg = Color32::from_rgb(48, 55, 68);
         t.glyph_bg = Color32::from_rgb(44, 50, 60);
-        t.glyph_edge = Color32::from_rgb(96, 170, 110);
-        t.glyph_text = Color32::from_rgb(150, 220, 160);
+        t.glyph_edge = Color32::from_rgb(200, 130, 120);
+        t.glyph_text = Color32::from_rgb(240, 165, 155);
         t.overlay = Color32::from_rgba_unmultiplied_const(34, 38, 46, 240);
         t.rubber_band = Color32::from_rgb(92, 160, 255);
         t.timeline_item = Color32::from_rgb(52, 58, 70);
@@ -255,7 +263,7 @@ impl Tokens {
 
 /// How a physical material looks (the default appearance follows the material).
 pub fn material_color(name: &str) -> Option<Color32> {
-    solvecraft_engine::doc::material_color(name).map(|[r, g, b]| Color32::from_rgb(r, g, b))
+    solidcraft_engine::doc::material_color(name).map(|[r, g, b]| Color32::from_rgb(r, g, b))
 }
 
 /// Switch themes (the visuals follow on the next [`apply`]).
@@ -300,6 +308,16 @@ pub fn apply(ctx: &egui::Context) {
 
 #[cfg(test)]
 mod tests {
+    /// Title and section bands stand out from a dialog, the title more than its sections.
+    #[test]
+    fn heading_bands_are_darker_than_the_dialog_in_order() {
+        let luma = |c: egui::Color32| u32::from(c.r()) * 3 + u32::from(c.g()) * 6 + u32::from(c.b());
+        for t in [super::Tokens::light(), super::Tokens::dark()] {
+            assert!(luma(t.heading_bg) < luma(t.subheading_bg), "{t:?}");
+            assert!(luma(t.subheading_bg) < luma(t.dialog_bg), "{t:?}");
+        }
+    }
+
     #[test]
     fn active_movable_window_header_uses_theme_panel_header() {
         for dark in [false, true] {

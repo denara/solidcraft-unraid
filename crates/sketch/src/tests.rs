@@ -1,11 +1,45 @@
 use std::f64::consts::{FRAC_PI_2, PI};
 
-use solvecraft_geom::Vec2;
+use solidcraft_geom::Vec2;
 
 use crate::*;
 
-fn v(x: f64, y: f64) -> Vec2 {
+pub(crate) fn v(x: f64, y: f64) -> Vec2 {
     Vec2::new(x, y)
+}
+
+/// Deterministic pseudo-random numbers for the solver harnesses.
+pub(crate) struct Lcg(pub u64);
+
+impl Lcg {
+    pub(crate) fn next(&mut self) -> f64 {
+        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (self.0 >> 11) as f64 / (1u64 << 53) as f64
+    }
+    pub(crate) fn range(&mut self, lo: f64, hi: f64) -> f64 {
+        lo + self.next() * (hi - lo)
+    }
+    /// ±1, evenly.
+    pub(crate) fn sign(&mut self) -> f64 {
+        if self.next() < 0.5 { 1.0 } else { -1.0 }
+    }
+}
+
+/// Run `f` with the constructive seed on or off, without the seed-on/seed-off comparison (for
+/// tests that measure the difference).
+pub(crate) fn seeded<T>(on: bool, f: impl FnOnce() -> T) -> T {
+    use crate::construct::switch;
+    switch::without_differential(|| if on { f() } else { switch::without_seed(f) })
+}
+
+/// The points that are constants for a plain solve.
+pub(crate) fn given(sk: &Sketch) -> Vec<bool> {
+    crate::solver::held_points(sk, &Hold::default())
+}
+
+/// The constructive seed of a plain solve.
+pub(crate) fn seed_of(sk: &Sketch) -> crate::construct::Seed {
+    crate::construct::seed(sk, &given(sk), None, &crate::solver::points_on_curves(sk), &mut crate::decompose::Budget::full())
 }
 
 /// Rough rectangle from four lines sharing corner points.
@@ -289,17 +323,102 @@ fn profiles_split_at_crossings_and_touch_points() {
 #[test]
 fn merging_adjacent_regions() {
     let a =
-        solvecraft_geom::Region2 { outer: solvecraft_geom::Loop2::polygon(&[v(0.0, 0.0), v(10.0, 0.0), v(10.0, 10.0), v(0.0, 10.0)]), holes: vec![] };
-    let b = solvecraft_geom::Region2 {
-        outer: solvecraft_geom::Loop2::polygon(&[v(10.0, 0.0), v(20.0, 0.0), v(20.0, 10.0), v(10.0, 10.0)]),
+        solidcraft_geom::Region2 { outer: solidcraft_geom::Loop2::polygon(&[v(0.0, 0.0), v(10.0, 0.0), v(10.0, 10.0), v(0.0, 10.0)]), holes: vec![] };
+    let b = solidcraft_geom::Region2 {
+        outer: solidcraft_geom::Loop2::polygon(&[v(10.0, 0.0), v(20.0, 0.0), v(20.0, 10.0), v(10.0, 10.0)]),
         holes: vec![],
     };
-    let c = solvecraft_geom::Region2 { outer: solvecraft_geom::Loop2::polygon(&[v(50.0, 0.0), v(60.0, 0.0), v(60.0, 10.0)]), holes: vec![] };
+    let c = solidcraft_geom::Region2 { outer: solidcraft_geom::Loop2::polygon(&[v(50.0, 0.0), v(60.0, 0.0), v(60.0, 10.0)]), holes: vec![] };
     let m = merge_regions(&[a, b, c]);
     assert_eq!(m.len(), 2);
     let mut areas: Vec<f64> = m.iter().map(|r| r.area()).collect();
     areas.sort_by(f64::total_cmp);
     assert!((areas[0] - 50.0).abs() < 1e-9 && (areas[1] - 200.0).abs() < 1e-9, "{areas:?}");
+    // The two squares make one rectangle: the outline isn't left split where the shared edge was.
+    let sides = m.iter().map(|r| r.outer.segs.len()).collect::<Vec<_>>();
+    assert!(sides.contains(&4) && sides.contains(&3), "{sides:?}");
+}
+
+/// A sketch holding `text` the way `sketch.text` makes it: one text link of the built-in font's
+/// outlines.
+fn text_sketch(text: &str, at: Vec2, height: f64) -> Sketch {
+    let mut sk = Sketch::new();
+    let source = LinkSource::Text { text: text.into(), at, height, angle: 0.0, font: None };
+    sk.add_link(LinkKind::Text, source, &text_geometry(text, at, height, 0.0).unwrap()).unwrap();
+    sk
+}
+
+fn sorted_areas(ps: &[Profile]) -> Vec<f64> {
+    let mut a: Vec<f64> = ps.iter().map(|p| p.area).collect();
+    a.sort_by(f64::total_cmp);
+    a
+}
+
+fn assert_areas(got: &[f64], mut want: Vec<f64>) {
+    want.sort_by(f64::total_cmp);
+    assert_eq!(got.len(), want.len(), "{got:?} against {want:?}");
+    for (g, w) in got.iter().zip(&want) {
+        assert!((g - w).abs() < 2e-3, "{got:?} against {want:?}");
+    }
+}
+
+#[test]
+fn text_counters_are_holes_of_their_letters_not_profiles_of_their_own() {
+    // Areas in mm² at a capital height of 10 mm, summed from the Liberation Sans contours (shoelace
+    // formula, quadratic pieces flattened finely): a glyph's outer contour, then its counters.
+    //   O: 83.3133 - 47.4584   A: 39.2159 - 9.0647   B: 68.9283 - 12.9336 - 16.6277
+    //   8: 56.8394 - 10.6451 - 13.7347
+    let (o, o_counter) = (83.3133 - 47.4584, 47.4584);
+    let (a, a_counter) = (39.2159 - 9.0647, 9.0647);
+    let (b, b_counters) = (68.9283 - 12.9336 - 16.6277, [12.9336, 16.6277]);
+    let (eight, eight_counters) = (56.8394 - 10.6451 - 13.7347, [10.6451, 13.7347]);
+    let check = |text: &str, letters: Vec<f64>, counters: Vec<f64>| {
+        let sk = text_sketch(text, Vec2::ZERO, 10.0);
+        let all = find_drawn_profiles(&sk);
+        // Every counter is a closed region of its own, next to its letter with the hole in it...
+        assert_areas(&sorted_areas(&all), letters.iter().chain(&counters).copied().collect());
+        // ...and "all profiles" of text means the letters.
+        assert_areas(&sorted_areas(&without_text_counters(&sk, all)), letters);
+    };
+    check("O", vec![o], vec![o_counter]);
+    check("8", vec![eight], eight_counters.to_vec());
+    check("AB", vec![a, b], [vec![a_counter], b_counters.to_vec()].concat());
+    // A letter without a counter is untouched.
+    check("I", vec![13.5557], vec![]);
+}
+
+#[test]
+fn text_beside_other_curves_is_drawn_geometry() {
+    // A 30 x 20 rectangle with an "I" (a 10 mm tall bar, 13.5557 mm² in Liberation Sans) beside it.
+    let mut sk = text_sketch("I", v(40.0, 0.0), 10.0);
+    for (p, q) in [((0.0, 0.0), (30.0, 0.0)), ((30.0, 0.0), (30.0, 20.0)), ((30.0, 20.0), (0.0, 20.0)), ((0.0, 20.0), (0.0, 0.0))] {
+        sk.add_line(v(p.0, p.1), v(q.0, q.1), None, None, None).unwrap();
+    }
+    assert_areas(&sorted_areas(&find_drawn_profiles(&sk)), vec![13.5557, 600.0]);
+    // Projected reference geometry still doesn't count as drawn.
+    let square = |s: f64| {
+        vec![
+            LinkGeom::Line(v(100.0, 0.0), v(100.0 + s, 0.0)),
+            LinkGeom::Line(v(100.0 + s, 0.0), v(100.0 + s, s)),
+            LinkGeom::Line(v(100.0 + s, s), v(100.0, s)),
+            LinkGeom::Line(v(100.0, s), v(100.0, 0.0)),
+        ]
+    };
+    sk.add_link(LinkKind::Project, LinkSource::Origin, &square(5.0)).unwrap();
+    assert_eq!(find_profiles(&sk).len(), 3);
+    assert_areas(&sorted_areas(&find_drawn_profiles(&sk)), vec![13.5557, 600.0]);
+}
+
+#[test]
+fn a_letter_merged_with_its_counter_is_the_filled_letter() {
+    // The ring of an O and its counter share the counter's two conics; merged, they cancel along it.
+    let sk = text_sketch("O", Vec2::ZERO, 10.0);
+    let regions: Vec<_> = find_profiles(&sk).into_iter().map(|p| p.region).collect();
+    assert_eq!(regions.len(), 2);
+    let merged = merge_regions(&regions);
+    assert_eq!(merged.len(), 1, "{} regions", merged.len());
+    assert!(merged[0].holes.is_empty(), "{} holes", merged[0].holes.len());
+    assert!((merged[0].area() - 83.3133).abs() < 2e-3, "{}", merged[0].area());
 }
 
 #[test]
@@ -412,7 +531,7 @@ fn long_connected_chain_solves() {
 /// cut in two by a line through it (each side gets an exact sub-curve ending on the line).
 #[test]
 fn exact_profiles_for_high_degree_and_cut_free_form_curves() {
-    use solvecraft_geom::Seg2;
+    use solidcraft_geom::Seg2;
     let exact_loop = |p: &Profile| p.region.outer.segs.iter().all(|s| !matches!(s, Seg2::Line { .. }) || s.length() > 1.0);
     let closed = |p: &Profile| {
         let s = &p.region.outer.segs;

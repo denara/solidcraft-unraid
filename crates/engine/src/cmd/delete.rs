@@ -5,8 +5,8 @@
 //! changing anything, so the UI can ask first.
 
 use serde_json::{Value, json};
-use solvecraft_doc::FeatureKind;
-use solvecraft_geom::Vec3;
+use solidcraft_doc::FeatureKind;
+use solidcraft_geom::Vec3;
 
 use super::CommandSpec;
 use crate::params::{bad, bool_};
@@ -19,8 +19,7 @@ pub static COMMANDS: &[CommandSpec] = &[CommandSpec::new("selection.delete", "De
 /// Run another command's body inside this one (so the whole delete is one undo step).
 fn sub(s: &mut Session, id: &str, p: Value) -> Result<Value> {
     let spec = super::find_command(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
-    (spec.enabled)(s).map_err(|why| EngineError::Disabled(spec.id.to_string(), why))?;
-    let r = (spec.run)(s, &p)?;
+    let r = spec.run_nested(s, &p)?;
     s.refresh();
     Ok(r)
 }
@@ -90,6 +89,7 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
             },
             Sel::Edge { .. } | Sel::Vertex { .. } => skip("edges and vertices are deleted with their body or face".into()),
             Sel::Profile { .. } => skip("a profile goes with its sketch".into()),
+            Sel::ExternalSketchCurve { .. } | Sel::ExternalSketchPoint { .. } => skip("edit the source sketch to delete its geometry".into()),
         }
     }
     features.dedup();

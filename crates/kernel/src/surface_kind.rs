@@ -1,7 +1,7 @@
 //! What surface a face lies on (plane, cylinder, cone, sphere, torus), for construction
 //! geometry: axes through round faces, centres of spheres and tori.
 
-use solvecraft_geom::Vec3;
+use solidcraft_geom::Vec3;
 
 use crate::Body;
 use crate::offset::{Surf, surf_of};

@@ -1,0 +1,10 @@
+{
+ "description": "A 25 x 140 x 140 fan frame with an R68 bore and two crossing 4 x 4 struts whose ends lie on the bore wall, joined into the frame. truck-topology panicked twice (lib.rs:186 'Two same vertices cannot construct an edge'); the kernel guard caught it, but the panic hook printed it. Issue #268.",
+ "commands": [
+  {"command": "solid.box", "params": {"corner": [438, 50, 42], "length": 25, "width": 140, "height": 140, "operation": "new_body", "body_name": "Frame"}},
+  {"command": "solid.cylinder", "params": {"base": [438, 120, 112], "axis": "X", "radius": 68, "height": 25, "operation": "cut"}},
+  {"command": "solid.box", "params": {"corner": [459, 52, 110], "length": 4, "width": 136, "height": 4, "operation": "new_body", "body_name": "StrutH"}},
+  {"command": "solid.box", "params": {"corner": [459, 118, 44], "length": 4, "width": 4, "height": 136, "operation": "new_body", "body_name": "StrutV"}},
+  {"command": "solid.combine", "params": {"target": "Frame", "tools": ["StrutH", "StrutV"], "operation": "join"}}
+ ]
+}

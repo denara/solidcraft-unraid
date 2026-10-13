@@ -6,11 +6,15 @@
 # At midnight Eastern, changed main commits build and publish a nightly pre-release.
 # A version with a suffix (0.2.0-rc.1) is a pre-release. Nothing is signed yet.
 #
-#   Linux x86_64, aarch64   AppImage (+ .zsync), .deb, .rpm, .flatpak, .tar.gz     packaging/linux
+#   Linux x86_64, aarch64   AppImage (+ .zsync), .deb, .rpm, .flatpak, .snap, .tar.gz packaging/linux
 #   FreeBSD x86_64          .tar.gz (built in a FreeBSD VM)                        packaging/freebsd
 #   macOS universal         .dmg, and the CLI as a .zip                            packaging/macos
 #   Windows x64, x86, arm64 .msi and a portable .zip; x64 also the plain .exe      packaging/windows
 #   Web                     a .zip of the static site                              packaging/web
+#
+# The main installers are also attached without the version in their names
+# (solidcraft-windows-x64.msi, solidcraft-linux-x86_64.AppImage, ...) so that
+# releases/latest/download/<name> links in the README keep working across releases.
 #
 # A dry run: dispatch with draft=false (the default). Only the release branch may create drafts.
 name: Release
@@ -79,7 +83,7 @@ jobs:
           { echo "version=$VERSION"; echo "date=$(date -u +%Y-%m-%d)"; echo "prerelease=$pre"; } >>"$GITHUB_OUTPUT"
           echo "### SolidCraft v$VERSION (\`${GITHUB_SHA::9}\`)" >>"$GITHUB_STEP_SUMMARY"
 
-  # The app icon in every size, drawn by solvecraft-cli (no image files are committed), for the
+  # The app icon in every size, drawn by solidcraft-cli (no image files are committed), for the
   # Windows jobs: the ARM64 build is cross-compiled and can't run there to draw its own.
   icons:
     needs: version
@@ -91,10 +95,10 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: release-icons
-      - run: cargo build --release --locked -p solvecraft-cli
+      - run: cargo build --release --locked -p solidcraft-cli
       - run: |
           . packaging/env.sh
-          make_icons target/release/solvecraft-cli icons
+          make_icons target/release/solidcraft-cli icons
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: icons
@@ -114,8 +118,8 @@ jobs:
           - { arch: x86_64, runner: ubuntu-22.04, deb: amd64 }
           - { arch: aarch64, runner: ubuntu-22.04-arm, deb: arm64 }
     env:
-      SOLVECRAFT_VERSION: ${{ needs.version.outputs.version }}
-      SOLVECRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
+      SOLIDCRAFT_VERSION: ${{ needs.version.outputs.version }}
+      SOLIDCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
       NFPM_VERSION: 2.47.0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -135,17 +139,22 @@ jobs:
       - name: Check the packages
         run: |
           dpkg-deb --info dist/release/*.deb
-          dpkg-deb --contents dist/release/*.deb | grep -E 'usr/bin/solvecraft$|usr/bin/solvecraft-cli$|metainfo|applications|THIRD-PARTY-LICENSES.txt'
+          dpkg-deb --contents dist/release/*.deb | grep -E 'usr/bin/solidcraft$|usr/bin/solidcraft-cli$|metainfo|applications|THIRD-PARTY-LICENSES.txt'
+          # Compatibility shims (docs/compatibility.md): the old CLI name and the package rename.
+          dpkg-deb --contents dist/release/*.deb | grep -E 'usr/bin/solvecraft-cli$'
+          dpkg-deb --field dist/release/*.deb Replaces Conflicts Provides | grep -F solvecraft
           rpm -qip dist/release/*.rpm
-          rpm -qlp dist/release/*.rpm | grep -E '/usr/bin/solvecraft$|THIRD-PARTY-LICENSES.txt'
-          tar -tzf dist/release/*.tar.gz | grep -E '/bin/solvecraft$|THIRD-PARTY-LICENSES.txt'
-          ldd target/release/solvecraft
+          rpm -qlp dist/release/*.rpm | grep -E '/usr/bin/solidcraft$|THIRD-PARTY-LICENSES.txt'
+          tar -tzf dist/release/*.tar.gz | grep -E '/bin/solidcraft$|THIRD-PARTY-LICENSES.txt'
+          ldd target/release/solidcraft
           for appimage in dist/release/*.AppImage; do
             chmod +x "$appimage"
             APPIMAGE_EXTRACT_AND_RUN=1 "$appimage" --version
             "$appimage" --appimage-updateinformation | grep -F 'gh-releases-zsync|'
             test -s "$appimage.zsync"
           done
+          # Legacy AppImage update alias (docs/compatibility.md).
+          ls dist/release/solvecraft-*-linux-*.AppImage.zsync
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-linux-${{ matrix.arch }}
@@ -166,8 +175,8 @@ jobs:
           - { arch: x86_64, runner: ubuntu-24.04 }
           - { arch: aarch64, runner: ubuntu-24.04-arm }
     env:
-      SOLVECRAFT_VERSION: ${{ needs.version.outputs.version }}
-      SOLVECRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
+      SOLIDCRAFT_VERSION: ${{ needs.version.outputs.version }}
+      SOLIDCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -181,7 +190,7 @@ jobs:
           # Ubuntu 24.04's AppArmor blocks the unprivileged user namespaces bubblewrap needs.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Build the Flatpak bundle
-        run: packaging/linux/flatpak-bundle.sh "dist/linux/solvecraft-$SOLVECRAFT_VERSION-linux-${{ matrix.arch }}.tar.gz"
+        run: packaging/linux/flatpak-bundle.sh "dist/linux/solidcraft-$SOLIDCRAFT_VERSION-linux-${{ matrix.arch }}.tar.gz"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-flatpak-${{ matrix.arch }}
@@ -189,6 +198,59 @@ jobs:
           if-no-files-found: error
 
 
+
+  snap:
+    name: Snap ${{ matrix.arch }}
+    needs: [version, linux]
+    if: needs.version.outputs.build == 'true'
+    # Repackages the Linux job's tarball, like the Flatpak. On 24.04 because the core24 base is
+    # Ubuntu 24.04, which lets snapcraft build on the runner itself (--destructive-mode).
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    env:
+      SOLIDCRAFT_VERSION: ${{ needs.version.outputs.version }}
+      SOLIDCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-linux-${{ matrix.arch }}
+          path: dist/linux
+      - name: Install snapcraft and the smoke-test tools
+        run: |
+          sudo snap install snapcraft --classic
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb xauth weston dbus-x11
+      - name: Build the snap
+        run: |
+          sudo --preserve-env=SOLIDCRAFT_VERSION,SOLIDCRAFT_BUILD_DATE env "PATH=$PATH" \
+            packaging/linux/snap-pack.sh --destructive-mode "dist/linux/solidcraft-$SOLIDCRAFT_VERSION-linux-${{ matrix.arch }}.tar.gz"
+          sudo chown -R "$(id -u):$(id -g)" dist target
+      - name: Install it and start the app on headless X11 and Wayland
+        run: |
+          snap_file="dist/release/solidcraft-$SOLIDCRAFT_VERSION-linux-${{ matrix.arch }}.snap"
+          sudo snap install --dangerous "$snap_file"
+          snap info --verbose "$snap_file" | head -n 12
+          snap connections solidcraft
+          solidcraft.cli --version
+          # Snaps expect the login session's runtime directory, which runners don't create.
+          sudo install -d -m 700 -o "$(id -u)" -g "$(id -g)" "/run/user/$(id -u)"
+          python3 packaging/linux/snap-smoke.py --out snap-smoke
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: snap-smoke-${{ matrix.arch }}
+          path: snap-smoke/*.png
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-snap-${{ matrix.arch }}
+          path: dist/release/*.snap
+          if-no-files-found: error
 
   freebsd:
     name: FreeBSD x86_64
@@ -198,8 +260,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
-      SOLVECRAFT_VERSION: ${{ needs.version.outputs.version }}
-      SOLVECRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
+      SOLIDCRAFT_VERSION: ${{ needs.version.outputs.version }}
+      SOLIDCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build and package in a FreeBSD VM (tar.gz)
@@ -211,7 +273,7 @@ jobs:
           cpu: 4
           mem: 12288
           # Passed into the VM by name; never templated into the script below.
-          envs: "SOLVECRAFT_VERSION SOLVECRAFT_BUILD_DATE"
+          envs: "SOLIDCRAFT_VERSION SOLIDCRAFT_BUILD_DATE"
           prepare: |
             pkg install -y bash git curl pkgconf libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
@@ -221,10 +283,10 @@ jobs:
             git config --global --add safe.directory "$PWD"
             # Build outside the checkout so only dist/ is copied back out of the VM. 4 jobs: more
             # runs the VM out of memory.
-            export CARGO_TARGET_DIR=/var/tmp/solvecraft-target CARGO_BUILD_JOBS=4
+            export CARGO_TARGET_DIR=/var/tmp/solidcraft-target CARGO_BUILD_JOBS=4
             bash packaging/freebsd/package.sh
-            tar -tzf dist/release/solvecraft-*-freebsd-x86_64.tar.gz \
-              | grep -E '/bin/solvecraft$|/bin/solvecraft-cli$|/share/applications/ai\.storyteller\.solvecraft\.desktop$|/share/doc/solvecraft/THIRD-PARTY-LICENSES\.txt$'
+            tar -tzf dist/release/solidcraft-*-freebsd-x86_64.tar.gz \
+              | grep -E '/bin/solidcraft$|/bin/solidcraft-cli$|/share/applications/ai\.storyteller\.solvecraft\.desktop$|/share/doc/solidcraft/THIRD-PARTY-LICENSES\.txt$'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-freebsd-x86_64
@@ -237,8 +299,8 @@ jobs:
     if: needs.version.outputs.build == 'true'
     runs-on: macos-14
     env:
-      SOLVECRAFT_VERSION: ${{ needs.version.outputs.version }}
-      SOLVECRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
+      SOLIDCRAFT_VERSION: ${{ needs.version.outputs.version }}
+      SOLIDCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@stable
@@ -269,7 +331,7 @@ jobs:
           # Windows on ARM: cross-compiled on the x64 runner.
           - { arch: arm64, target: aarch64-pc-windows-msvc }
     env:
-      SOLVECRAFT_VERSION: ${{ needs.version.outputs.version }}
+      SOLIDCRAFT_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -290,7 +352,7 @@ jobs:
       - name: Build and package (msi, portable zip)
         shell: pwsh
         env:
-          SOLVECRAFT_ICONS: ${{ github.workspace }}/icons
+          SOLIDCRAFT_ICONS: ${{ github.workspace }}/icons
         run: ./packaging/windows/package.ps1 -Arch ${{ matrix.arch }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -304,7 +366,7 @@ jobs:
     if: needs.version.outputs.build == 'true'
     runs-on: ubuntu-latest
     env:
-      SOLVECRAFT_VERSION: ${{ needs.version.outputs.version }}
+      SOLIDCRAFT_VERSION: ${{ needs.version.outputs.version }}
       TRUNK_VERSION: 0.21.14
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -328,7 +390,7 @@ jobs:
 
   release:
     name: GitHub Release or dry-run artifacts
-    needs: [version, linux, flatpak, freebsd, macos, windows, web]
+    needs: [version, linux, flatpak, snap, freebsd, macos, windows, web]
     if: needs.version.outputs.build == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -345,6 +407,24 @@ jobs:
           pattern: release-*
           path: artifacts
           merge-multiple: true
+      - name: Version-less copies for permanent download links
+        # The README links to releases/latest/download/<name>, which must not change between
+        # releases: solidcraft-<version>-windows-x64.msi is also uploaded as
+        # solidcraft-windows-x64.msi, and so on for the main installers.
+        working-directory: artifacts
+        run: |
+          shopt -s nullglob
+          for f in "solidcraft-$VERSION-"*; do
+            case "$f" in
+              *.msi | *-portable.zip | *.dmg | *.AppImage | *.deb | *.rpm | *.flatpak | *.snap)
+                cp -- "$f" "solidcraft-${f#"solidcraft-$VERSION-"}" ;;
+            esac
+          done
+          for f in solidcraft-windows-x64.msi solidcraft-macos-universal.dmg \
+            solidcraft-linux-x86_64.AppImage solidcraft-linux-x86_64.deb solidcraft-linux-x86_64.rpm; do
+            test -s "$f" || { echo "::error::missing version-less copy $f"; exit 1; }
+          done
+          ls -l solidcraft-[!0-9]*
       - name: Checksums and notes
         run: |
           (cd artifacts && sha256sum -- * | tee SHA256SUMS.txt)
@@ -398,6 +478,35 @@ jobs:
             echo
             sed 's/^/    /' SHA256SUMS.txt
           } >>"$GITHUB_STEP_SUMMARY"
+      # Snap Store: nightlies go to the edge channel and release drafts to candidate, only after
+      # every package built and the GitHub release was staged. Publishing the GitHub release
+      # promotes candidate to stable (snap-store.yml). Dry runs never upload. Skipped until the
+      # owner adds the SNAPCRAFT_STORE_CREDENTIALS secret (docs/releasing.md).
+      - id: snapstore
+        name: Check for Snap Store credentials
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+        run: |
+          if [ -n "$SNAPCRAFT_STORE_CREDENTIALS" ]; then
+            echo "configured=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "No SNAPCRAFT_STORE_CREDENTIALS secret: skipping the Snap Store upload."
+          fi
+      - name: Upload the snaps to the Snap Store
+        if: >-
+          steps.snapstore.outputs.configured == 'true' && (github.event_name == 'schedule' ||
+          (github.ref == 'refs/heads/release' && (github.event_name == 'push' || inputs.draft)))
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+        working-directory: artifacts
+        run: |
+          sudo snap install snapcraft --classic
+          channel=candidate
+          if [ "$GITHUB_EVENT_NAME" = schedule ]; then channel=edge; fi
+          for arch in x86_64 aarch64; do
+            snapcraft upload --release="$channel" "solidcraft-$VERSION-linux-$arch.snap"
+          done
+          echo "Uploaded the snaps to the Snap Store's $channel channel." >>"$GITHUB_STEP_SUMMARY"
       - name: Keep the files (dry run)
         if: github.event_name == 'workflow_dispatch' && !inputs.draft
         run: cp notes.md artifacts/release-notes.md

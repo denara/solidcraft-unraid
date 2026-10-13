@@ -1,0 +1,157 @@
+{
+  "bodies": [
+    {
+      "area_mm2": 25751.999999999945,
+      "bbox": {
+        "max": [
+          35.0,
+          42.0,
+          48.00000000000001
+        ],
+        "min": [
+          -35.0,
+          -42.000000000000014,
+          0.0
+        ]
+      },
+      "center_of_mass": [
+        5.524909928104648e-14,
+        -1.0945382096961234e-12,
+        22.366336633663238
+      ],
+      "density_g_cm3": 1.29,
+      "edges": 24,
+      "face_types": {
+        "plane": 10
+      },
+      "faces": 10,
+      "kernel": {
+        "edges": 24,
+        "faces": 10,
+        "shells": 1,
+        "vertices": 16
+      },
+      "mass_g": 328.33079999999734,
+      "material": "Default",
+      "name": "Body1",
+      "vertices": 16,
+      "volume_mm3": 254519.9999999979
+    }
+  ],
+  "body_count": 1,
+  "params": [
+    {
+      "comment": "",
+      "error": null,
+      "expression": "84",
+      "model": true,
+      "name": "d1",
+      "unit": "mm",
+      "value": 84.0
+    },
+    {
+      "comment": "",
+      "error": null,
+      "expression": "70",
+      "model": true,
+      "name": "d2",
+      "unit": "mm",
+      "value": 70.0
+    },
+    {
+      "comment": "",
+      "error": null,
+      "expression": "62",
+      "model": true,
+      "name": "d4",
+      "unit": "mm",
+      "value": 62.0
+    }
+  ],
+  "sketches": [
+    {
+      "curves": 6,
+      "dof": 0,
+      "id": 1,
+      "name": "Sketch1",
+      "profiles": 1,
+      "status": "solved",
+      "visible": false
+    },
+    {
+      "curves": 10,
+      "dof": 1,
+      "id": 3,
+      "name": "Sketch2",
+      "profiles": 3,
+      "status": "solved",
+      "visible": false
+    }
+  ],
+  "timeline": [
+    {
+      "boolean_diagnostics": {
+        "events": [],
+        "truncated": false
+      },
+      "error": null,
+      "id": 1,
+      "ms": 0.131943,
+      "name": "Sketch1",
+      "rolled_back": false,
+      "suppressed": false,
+      "type": "Sketch",
+      "warning": null
+    },
+    {
+      "boolean_diagnostics": {
+        "events": [],
+        "truncated": false
+      },
+      "error": null,
+      "id": 2,
+      "ms": 1.0812709999999999,
+      "name": "Extrude1",
+      "rolled_back": false,
+      "suppressed": false,
+      "type": "ExtrudeFeature",
+      "warning": null
+    },
+    {
+      "boolean_diagnostics": {
+        "events": [],
+        "truncated": false
+      },
+      "error": null,
+      "id": 3,
+      "ms": 0.450002,
+      "name": "Sketch2",
+      "rolled_back": false,
+      "suppressed": false,
+      "type": "Sketch",
+      "warning": null
+    },
+    {
+      "boolean_diagnostics": {
+        "events": [],
+        "truncated": false
+      },
+      "error": null,
+      "id": 4,
+      "ms": 5.191514000000001,
+      "name": "Extrude2",
+      "rolled_back": false,
+      "suppressed": false,
+      "type": "ExtrudeFeature",
+      "warning": null
+    }
+  ],
+  "total": {
+    "area_mm2": 25751.999999999945,
+    "edges": 24,
+    "faces": 10,
+    "mass_g": 328.33079999999734,
+    "vertices": 16,
+    "volume_mm3": 254519.9999999979
+  }
+}

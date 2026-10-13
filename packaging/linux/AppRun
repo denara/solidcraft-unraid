@@ -3,20 +3,22 @@
 # Adapted from PhotoCraft's AppRun (storytold/photocraft, Apache-2.0; see ATTRIBUTION.md).
 #
 # On Wayland the compositor resolves a window's dock icon by taking the window's
-# app_id (ai.storyteller.solvecraft) and looking up an installed .desktop file.
+# app_id (ai.storyteller.solvecraft, kept as a compatibility shim) and looking up an installed .desktop file.
 # An AppImage installs nothing, so every AppImage run would otherwise show the
 # generic "Wayland" icon. Best-effort desktop integration: on first run
 # (and whenever the AppImage's path changes) install the .desktop entry and the
 # hicolor icons into $XDG_DATA_HOME, then launch. Every failure here must leave
-# the launch untouched. Opt out with SOLVECRAFT_NO_DESKTOP_INTEGRATION=1.
+# the launch untouched. Opt out with SOLIDCRAFT_NO_DESKTOP_INTEGRATION=1 (the pre-rename
+# SOLVECRAFT_NO_DESKTOP_INTEGRATION still works: compatibility shim, docs/compatibility.md).
 
 set -u
 
 APPDIR="$(dirname "$(readlink -f "$0")")"
+# Compatibility shim (docs/compatibility.md): the pre-rename reverse-DNS id.
 DESK_ID=ai.storyteller.solvecraft
 
 integrate() {
-  case "${SOLVECRAFT_NO_DESKTOP_INTEGRATION:-}" in
+  case "${SOLIDCRAFT_NO_DESKTOP_INTEGRATION:-${SOLVECRAFT_NO_DESKTOP_INTEGRATION:-}}" in
     1 | true | yes) return 0 ;;
   esac
   # The AppImage runtime exports $APPIMAGE; without it (an extracted AppDir) there
@@ -70,4 +72,4 @@ integrate() {
 }
 
 integrate
-exec "$APPDIR/usr/bin/solvecraft" "$@"
+exec "$APPDIR/usr/bin/solidcraft" "$@"

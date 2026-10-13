@@ -1,13 +1,17 @@
 //! Toolbar customisation: which commands each panel shows as buttons, per workspace and tab.
 //! A command's menu (right-click on a toolbar button, a panel drop-down row or an S box row)
 //! pins it to the toolbar, removes it, or pins it to the S box's favourites; buttons are dragged
-//! to reorder them within and between panels; Reset Toolbar restores the tab. Kept with the
+//! to reorder them within and between panels; a drop-down row dragged onto the toolbar pins it
+//! there, a button dragged off the toolbar (or back into the drop-down) leaves it; the pin icon
+//! on a hovered drop-down row pins or unpins; the toolbar's own menu (right-click its empty
+//! space) has Customize Toolbar… (a window listing every command of the tab with a check box)
+//! and Reset Toolbar; Reset Toolbar restores the tab. Kept with the
 //! preferences and exported or imported with the keyboard shortcuts.
 
 use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
-use solvecraft_engine::{CommandSpec, command_specs};
+use solidcraft_engine::{CommandSpec, command_specs};
 
 use crate::SolveApp;
 use crate::context_menu::Item;
@@ -20,6 +24,8 @@ pub struct ToolbarCustom {
     /// `"<workspace>/<tab>/<panel>"` → the panel's buttons, in order (only panels the user
     /// changed).
     pub panels: BTreeMap<String, Vec<String>>,
+    /// The Customize Toolbar window is open (not kept).
+    pub customizing: bool,
 }
 
 impl ToolbarCustom {
@@ -49,7 +55,7 @@ fn key(tab: &str, panel: &str) -> String {
 /// The buttons a panel shows: the user's list, or the first `promoted` commands of the panel.
 pub fn buttons(app: &SolveApp, tab: &str, panel: &str, cmds: &[&'static CommandSpec], promoted: usize) -> Vec<&'static CommandSpec> {
     match app.toolbar_custom.panels.get(&key(tab, panel)) {
-        Some(ids) => ids.iter().filter_map(|id| solvecraft_engine::find_command(id)).collect(),
+        Some(ids) => ids.iter().filter_map(|id| solidcraft_engine::find_command(id)).collect(),
         None => cmds.iter().take(promoted).copied().collect(),
     }
 }
@@ -95,7 +101,7 @@ fn home_panel(tab: &str, id: &str) -> Option<&'static str> {
 
 /// Pin a command to the toolbar of a tab (as a button of its panel, at the end).
 pub fn pin(app: &mut SolveApp, tab: &str, id: &str) -> Result<(), String> {
-    if solvecraft_engine::find_command(id).is_none() {
+    if solidcraft_engine::find_command(id).is_none() {
         return Err(format!("no command `{id}`"));
     }
     if pinned_on(app, tab, id).is_some() {
@@ -130,6 +136,15 @@ pub fn reorder(app: &mut SolveApp, tab: &str, id: &str, panel: &str, before: Opt
     app.toolbar_custom.panels.insert(key(tab, panel), ids);
 }
 
+/// The pin icon of a drop-down row: pin the command, or remove it when it is pinned.
+pub fn toggle(app: &mut SolveApp, tab: &str, id: &str) {
+    if pinned_on(app, tab, id).is_some() {
+        remove(app, tab, id);
+    } else if let Err(e) = pin(app, tab, id) {
+        app.set_status(e, true);
+    }
+}
+
 /// Reset Toolbar: a tab's panels back to their defaults.
 pub fn reset(app: &mut SolveApp, tab: &str) {
     let prefix = format!("{WORKSPACE}/{tab}/");
@@ -149,8 +164,17 @@ pub fn command_items(app: &SolveApp, id: &str) -> Vec<Item> {
     });
     v.push(Item::action("ui.shortcutPin", if fav { "Unpin from Shortcuts" } else { "Pin to Shortcuts" }, "").with(json!({ "command": id })));
     v.push(Item::sep());
+    v.push(Item::action("ui.toolbarCustomize", "Customize Toolbar…", ""));
     v.push(Item::action("ui.toolbarReset", "Reset Toolbar", "").with(json!({ "tab": tab })));
     v
+}
+
+/// The toolbar's own menu (right-click on its empty space).
+pub fn toolbar_items(app: &SolveApp) -> Vec<Item> {
+    vec![
+        Item::action("ui.toolbarCustomize", "Customize Toolbar…", ""),
+        Item::action("ui.toolbarReset", "Reset Toolbar", "").with(json!({ "tab": app.ui.tab })),
+    ]
 }
 
 /// Run a toolbar item from a menu.
@@ -165,6 +189,7 @@ pub fn run(app: &mut SolveApp, action: &str, p: &Value) {
         }
         "ui.toolbarRemove" => remove(app, &tab, id),
         "ui.toolbarReset" => reset(app, &tab),
+        "ui.toolbarCustomize" => app.toolbar_custom.customizing = true,
         "ui.shortcutPin" => app.sbox.toggle_pin(id),
         _ => {}
     }
@@ -172,11 +197,12 @@ pub fn run(app: &mut SolveApp, action: &str, p: &Value) {
 
 /// Shortcut keys, S box favourites and the toolbar as one file (Keyboard Shortcuts › Export).
 pub fn export(app: &SolveApp) -> Value {
-    json!({ "format": "solvecraft-shortcuts/1", "shortcuts": app.keymap.prefs(), "favourites": app.sbox.pinned, "toolbar": app.toolbar_custom.prefs() })
+    json!({ "format": "solidcraft-shortcuts/1", "shortcuts": app.keymap.prefs(), "favourites": app.sbox.pinned, "toolbar": app.toolbar_custom.prefs() })
 }
 
 pub fn import(app: &mut SolveApp, v: &Value) -> Result<(), String> {
-    if v.get("format").and_then(Value::as_str) != Some("solvecraft-shortcuts/1") {
+    // "solvecraft-shortcuts/1": files exported before the rename (compatibility shim).
+    if !matches!(v.get("format").and_then(Value::as_str), Some("solidcraft-shortcuts/1" | "solvecraft-shortcuts/1")) {
         return Err("not a SolidCraft shortcuts file".into());
     }
     if let Some(s) = v.get("shortcuts") {
@@ -189,4 +215,68 @@ pub fn import(app: &mut SolveApp, v: &Value) -> Result<(), String> {
         app.toolbar_custom.load(t);
     }
     Ok(())
+}
+
+/// Customize Toolbar: every command of the tab's panels with a check box (on the toolbar or
+/// not), how to drag them, and Reset Toolbar.
+pub fn window(app: &mut SolveApp, ctx: &egui::Context) {
+    if !app.toolbar_custom.customizing {
+        return;
+    }
+    let t = crate::theme::Tokens::get();
+    let tab = app.ui.tab.clone();
+    let mut open = true;
+    let mut changes: Vec<(&'static str, bool)> = Vec::new();
+    let mut reset_tab = false;
+    crate::frame::window(ctx, "Customize Toolbar", crate::frame::Width::Normal)
+        .id(egui::Id::new("sc_toolbar_customize"))
+        .open(&mut open)
+        .default_height(520.0)
+        .show(ctx, |ui| {
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} tab. Tick a command to give it a toolbar button. You can also drag a row of a panel's drop-down onto the toolbar, drag a button off the toolbar to remove it, or use the pin on a drop-down row.",
+                    app.tr_label(&tab)
+                ))
+                .color(t.text_dim),
+            );
+            ui.separator();
+            egui::ScrollArea::vertical().max_height(400.0).show(ui, |ui| {
+                for (panel, cmds, n) in panel_lists(&tab) {
+                    if cmds.is_empty() {
+                        continue;
+                    }
+                    ui.label(egui::RichText::new(app.tr_label(panel)).strong().size(11.0));
+                    let shown = buttons(app, &tab, panel, &cmds, n);
+                    for c in &cmds {
+                        let mut on = shown.iter().any(|b| b.id == c.id) || pinned_on(app, &tab, c.id).is_some();
+                        let r = ui.checkbox(&mut on, app.tr_label(c.label));
+                        crate::scenario::publish_handle(&format!("customize:{}", c.id), r.rect.left_center() + egui::vec2(8.0, 0.0));
+                        if r.changed() {
+                            changes.push((c.id, on));
+                        }
+                    }
+                    ui.add_space(4.0);
+                }
+            });
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Reset Toolbar").clicked() {
+                    reset_tab = true;
+                }
+            });
+        });
+    for (id, on) in changes {
+        if on {
+            if let Err(e) = pin(app, &tab, id) {
+                app.set_status(e, true);
+            }
+        } else {
+            remove(app, &tab, id);
+        }
+    }
+    if reset_tab {
+        reset(app, &tab);
+    }
+    app.toolbar_custom.customizing = open;
 }

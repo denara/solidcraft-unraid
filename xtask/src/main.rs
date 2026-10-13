@@ -5,9 +5,9 @@
 
 mod assets;
 mod book;
+mod features;
 mod layers;
 mod licences;
-mod parity;
 mod test;
 
 use std::path::{Path, PathBuf};
@@ -19,15 +19,15 @@ usage: cargo xtask <command>
 commands:
   layers          enforce the crate dependency layering (plan/architecture.md §3)
   assets          check that every non-code asset file is attributed in ATTRIBUTION.md
-  parity [--refresh]
-                  recompute Fusion command parity in docs/parity.md (--refresh rebuilds
-                  xtask/data/fusion-catalog.tsv from plan/fusion/menu-tree.json)
-  oracle          replay plan/fusion/oracle/*/recipe.json and compare with measure.json;
-                  writes docs/oracle.md
-  step-corpus [--iges] [DIR]
-                  import every DIR/*/part.step (default plan/fusion/oracle) and compare
-                  with measure.json; writes docs/step-import.md (--iges: part.igs,
-                  docs/iges-import.md)
+  features        list SolidCraft's commands by area in docs/features.md (from the registry)
+  oracle [--cli BIN]
+                  replay the reference tests (tests/oracle/*/recipe.json), compare with each
+                  case's expected.json and write docs/oracle.md (--cli: a solidcraft-cli
+                  already built, instead of cargo run --release)
+  action-matrix [--bless] [--results FILE]
+                  try every ordinary action on every face, edge, vertex and body of the design
+                  corpus and compare with tests/action_matrix/baseline.json (--bless rewrites it;
+                  --results keeps every outcome with its message). See docs/action-matrix.md
   book [--no-build]
                   generate docs/book's command reference and screenshots, then mdbook build
                   into target/book
@@ -48,9 +48,11 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("layers") => cmd_layers(),
         Some("assets") => assets::run(&root()),
-        Some("parity") => parity::run(&root(), rest.contains(&"--refresh")),
-        Some("oracle") => cmd_oracle(),
-        Some("step-corpus") => cmd_step_corpus(rest.iter().find(|a| !a.starts_with("--")).copied(), rest.contains(&"--iges")),
+        Some("features") => features::run(&root()),
+        Some("oracle") => cmd_oracle(rest.iter().position(|a| *a == "--cli").and_then(|i| rest.get(i + 1)).copied()),
+        Some("action-matrix") => {
+            cmd_action_matrix(rest.contains(&"--bless"), rest.iter().position(|a| *a == "--results").and_then(|i| rest.get(i + 1)).copied())
+        }
         Some("book") => book::run(&root(), !rest.contains(&"--no-build")),
         Some("licences") => licences::run(&root(), rest.contains(&"--check")),
         Some("test") => {
@@ -100,6 +102,33 @@ pub fn metadata() -> Result<serde_json::Value, String> {
     serde_json::from_slice(&out.stdout).map_err(|e| format!("cargo metadata: bad JSON: {e}"))
 }
 
+/// The full action matrix (apps/solidcraft-cli/tests/action_matrix.rs), with the ci profile.
+fn cmd_action_matrix(bless: bool, results: Option<&str>) -> Result<(), String> {
+    let mut c = cargo();
+    c.args([
+        "test",
+        "--profile",
+        "ci",
+        "-p",
+        "solidcraft-cli",
+        "--test",
+        "action_matrix",
+        "action_matrix_all",
+        "--",
+        "--exact",
+        "--ignored",
+        "--nocapture",
+    ]);
+    if bless {
+        c.env("ACTION_MATRIX_BLESS", "1");
+    }
+    if let Some(r) = results {
+        let p = std::path::absolute(r).map_err(|e| format!("{r}: {e}"))?;
+        c.env("ACTION_MATRIX_RESULTS", p);
+    }
+    run(c, "cargo test --profile ci -p solidcraft-cli --test action_matrix action_matrix_all")
+}
+
 fn cmd_layers() -> Result<(), String> {
     let crates = layers::from_metadata(&metadata()?)?;
     println!("Dependency layering (plan/architecture.md §3)\n");
@@ -134,7 +163,8 @@ fn cmd_layers() -> Result<(), String> {
     }
 }
 
-/// Features with no Fusion part to compare with, and the tests that check them analytically.
+/// Features with no reference case yet, and the tests that check them against hand-computed
+/// geometry.
 const NO_ORACLE: [(&str, &str); 5] = [
     ("Boss (draft, root fillet, hole, ribs)", "post, hole and rib volumes (`boss_with_hole_fillet_and_ribs`)"),
     ("Lip / Groove", "band offsets and groove clearance on a shelled box (`lip_and_groove_on_a_shelled_box`, `groove_takes_the_rule_clearance`)"),
@@ -146,41 +176,76 @@ const NO_ORACLE: [(&str, &str); 5] = [
     ),
 ];
 
-/// Run the CLI's oracle replay over every case directory and write docs/oracle.md.
-fn cmd_oracle() -> Result<(), String> {
-    let dir = root().join("plan/fusion/oracle");
+/// Replay every reference case in tests/oracle, compare with its expected.json and write
+/// docs/oracle.md. Fails when a case fails, unless its expected.json names the issue that
+/// tracks it (`known_failure`); a known failure that passes fails too, so the mark is removed.
+fn cmd_oracle(cli: Option<&str>) -> Result<(), String> {
+    let dir = root().join("tests/oracle");
     let mut cases: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .map_err(|e| format!("{}: {e} (the oracle data is local, in plan/fusion/oracle)", dir.display()))?
+        .map_err(|e| format!("{}: {e}", dir.display()))?
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.join("recipe.json").is_file() && p.join("measure.json").is_file())
+        .filter(|p| p.join("recipe.json").is_file())
         .collect();
     cases.sort();
     if cases.is_empty() {
-        return Err("no oracle cases with recipe.json and measure.json".into());
+        return Err(format!("no cases with recipe.json in {}", dir.display()));
     }
-    let mut cmd = cargo();
-    cmd.args(["run", "-q", "--release", "-p", "solvecraft-cli", "--", "oracle", "--json"]);
+    let mut cmd = match cli {
+        Some(bin) => {
+            let mut c = Command::new(bin);
+            c.current_dir(root());
+            c
+        }
+        None => {
+            let mut c = cargo();
+            c.args(["run", "-q", "--release", "-p", "solidcraft-cli", "--"]);
+            c
+        }
+    };
+    cmd.args(["oracle", "--json"]);
     for c in &cases {
-        cmd.arg(c);
+        cmd.arg(c.strip_prefix(root()).unwrap_or(c));
     }
-    let out = cmd.output().map_err(|e| format!("solvecraft-cli: {e}"))?;
+    let out = cmd.output().map_err(|e| format!("solidcraft-cli: {e}"))?;
     let results: serde_json::Value =
         serde_json::from_slice(&out.stdout).map_err(|e| format!("oracle JSON: {e}\n{}", String::from_utf8_lossy(&out.stderr)))?;
     let list = results.as_array().cloned().unwrap_or_default();
-    let pass = list.iter().filter(|r| r["pass"].as_bool().unwrap_or(false)).count();
-    let skipped = list.iter().filter(|r| r["skipped"].as_bool().unwrap_or(false)).count();
-    let mut md = format!(
-        "# Fusion oracle\n\nGenerated by `cargo xtask oracle`. Each case is a part built in Fusion (recipe and measurements kept locally in `plan/fusion/oracle/`, not committed). SolidCraft replays the recipe through its command engine and compares body count, volume and area (relative tolerance 1e-3) and face/edge/vertex counts (exact). SolidCraft counts each closed-surface patch once and ignores seam edges and vertices; when body count, volume and area pass but the raw counts differ, Fusion's counts are normalised the same way from its face, edge and vertex lists (faces cut from one cylinder, cone, sphere or torus and separated only by seams count once; an edge on that surface and no other is a seam and is dropped; a vertex left with two edges joins them) and compared exactly; the note gives both sides' raw counts.\n\n**{pass} / {} cases pass** ({skipped} need features not implemented yet).\n\n| Case | Result | Notes |\n|---|---|---|\n",
-        list.len()
-    );
+    let expected = |case: &str| -> serde_json::Value {
+        std::fs::read_to_string(dir.join(case).join("expected.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+    };
+    let (mut pass, mut missing, mut known, mut failed, mut fixed) = (0, 0, 0, Vec::new(), Vec::new());
+    let mut sources: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut rows = String::new();
     for r in &list {
-        let status = if r["pass"].as_bool().unwrap_or(false) {
-            "pass"
-        } else if r["skipped"].as_bool().unwrap_or(false) {
-            "not yet"
-        } else {
-            "FAIL"
+        let case = r["case"].as_str().unwrap_or("");
+        let want = expected(case);
+        let source = want["source"].as_str().unwrap_or("none yet").to_string();
+        let source_kind = source.split_whitespace().next().unwrap_or("").to_string();
+        *sources.entry(if want.is_null() { "none yet".into() } else { source_kind }).or_default() += 1;
+        let ok = r["pass"].as_bool().unwrap_or(false);
+        let issue = want["known_failure"].as_str().map(str::to_string);
+        let status = match (ok, want.is_null(), &issue) {
+            (_, true, _) => {
+                missing += 1;
+                "no expected values yet".to_string()
+            }
+            (true, _, Some(i)) => {
+                fixed.push(format!("{case} ({i})"));
+                format!("pass (marked known failure {i}: remove the mark)")
+            }
+            (true, _, None) => {
+                pass += 1;
+                "pass".to_string()
+            }
+            (false, _, Some(i)) => {
+                known += 1;
+                format!("known failure ({i})")
+            }
+            (false, _, None) => {
+                failed.push(case.to_string());
+                "**FAIL**".to_string()
+            }
         };
         let mut notes: Vec<String> = r["checks"]
             .as_array()
@@ -189,21 +254,43 @@ fn cmd_oracle() -> Result<(), String> {
             .filter(|c| !c["ok"].as_bool().unwrap_or(false))
             .map(|c| format!("{}: got {} want {}", c["check"].as_str().unwrap_or(""), c["got"], c["want"]))
             .collect();
-        if let Some(e) = r["error"].as_str() {
-            notes.push(e.replace('|', "/"));
+        if let Some(e) = r["error"].as_str().filter(|_| !want.is_null()) {
+            notes.push(e.to_string());
         }
-        if let Some(n) = r["note"].as_str() {
-            notes.push(n.replace('|', "/"));
+        if let Some(n) = want["note"].as_str() {
+            notes.push(n.to_string());
         }
-        md += &format!("| {} | {status} | {} |\n", r["case"].as_str().unwrap_or(""), notes.join("; "));
+        let how = want["method"].as_str().unwrap_or("");
+        let surface = r["checks"]
+            .as_array()
+            .and_then(|cs| cs.iter().find(|c| c["check"] == "surface_distance_mm"))
+            .and_then(|c| Some((c["got"]["max"].as_f64()?, c["got"]["mean"].as_f64()?, c["got"]["worst_at"].as_array()?.clone())))
+            .map(|(max, mean, at)| {
+                let at: Vec<String> = at.iter().filter_map(|x| x.as_f64()).map(|x| format!("{x:.1}")).collect();
+                format!("{max:.3} / {mean:.4} (worst at {})", at.join(", "))
+            })
+            .unwrap_or_default();
+        rows += &format!("| {case} | {source} | {status} | {surface} | {} | {} |\n", how.replace('|', "/"), notes.join("; ").replace('|', "/"));
     }
-    md += "\n## No oracle\n\n| Feature | Status | Tested by |\n|---|---|---|\n";
+    let counts: Vec<String> = sources.iter().map(|(k, v)| format!("{v} {k}")).collect();
+    let mut md = format!(
+        "# Reference tests\n\nGenerated by `cargo xtask oracle`. Each case in [`tests/oracle/`](../tests/oracle/) is a part described by our own `recipe.json`. SolidCraft replays the recipe through its command engine and compares the result with `expected.json`: body count, volume and area (relative tolerance 1e-3 unless the case states another), centre of mass and bounding box (within 1e-3 of the part's size), face count where the geometry fixes it, and, where the case has a `reference.stl`, the sampled symmetric (Hausdorff) distance between the two surfaces and the principal second moments of both triangulations. Every rebuilt part is also exported as STEP, validated and read back.\n\nWhere the expected values come from (the **Source** column):\n\n- **analytic**: closed-form geometry worked out by hand (prisms, cylinders, cones, spheres, tori and Pappus' theorems, constant-radius fillets on straight edges, sheet-metal bends as annular sectors). The scripts in [`tools/oracle-analytic/`](../tools/oracle-analytic/) compute them and give the formulas.\n- **freecad &lt;version&gt;**: the same recipe built with FreeCAD's public Python scripting API by [`tools/freecad-oracle/`](../tools/freecad-oracle/), an independent kernel run as an external program. FreeCAD is not a dependency of SolidCraft. Where the two kernels legitimately build a different shape (for example the corner patch where fillets meet), only volume and area are compared, within the tolerance the case states.\n\nNo expected value comes from a commercial CAD product.\n\n**{pass} / {} cases pass**; sources: {}. {known} known failure(s) tracked in issues; {missing} case(s) without expected values yet.\n\n| Case | Source | Result | Surface distance mm (max / mean) | Method | Notes |\n|---|---|---|---|---|---|\n",
+        list.len(),
+        counts.join(", ")
+    );
+    md += &rows;
+    md += "\n## Not covered by a reference case\n\n| Feature | Tested by |\n|---|---|\n";
     for (feature, test) in NO_ORACLE {
-        md += &format!("| {feature} | no oracle (licence) | {test} |\n");
+        md += &format!("| {feature} | {test} |\n");
     }
-    md += "\nFusion builds these only with its Design Extension, which the oracle account lacks, so there is no Fusion part to compare with. They follow Autodesk's public descriptions of the features and are checked against hand-computed geometry; the plastic rule library values were read from Fusion's API.\n";
     std::fs::write(root().join("docs/oracle.md"), md).map_err(|e| format!("docs/oracle.md: {e}"))?;
-    println!("oracle: {pass}/{} cases pass ({skipped} not yet supported) → docs/oracle.md", list.len());
+    println!("oracle: {pass}/{} cases pass, {known} known failures, {missing} without expected values → docs/oracle.md", list.len());
+    if !failed.is_empty() {
+        return Err(format!("{} case(s) failed: {}", failed.len(), failed.join(", ")));
+    }
+    if !fixed.is_empty() {
+        return Err(format!("now passing, remove `known_failure` from expected.json: {}", fixed.join(", ")));
+    }
     Ok(())
 }
 
@@ -222,115 +309,13 @@ fn wasm_check() -> Result<(Command, usize), String> {
     let crates = layers::from_metadata(&metadata()?)?;
     let mut set: Vec<String> =
         crates.iter().filter(|c| matches!(layers::classify(&c.name), Some(layers::Class::Layer(_)))).map(|c| c.name.clone()).collect();
-    set.push("solvecraft-web".into());
+    set.push("solidcraft-web".into());
     let mut c = cargo();
     c.args(["check", "--target", "wasm32-unknown-unknown", "--profile", "ci"]);
     for p in &set {
         c.args(["-p", p]);
     }
     Ok((c, set.len()))
-}
-
-/// Import every oracle STEP file (exported by Fusion) and compare with Fusion's measurements;
-/// write docs/step-import.md.
-fn cmd_step_corpus(dir: Option<&str>, iges: bool) -> Result<(), String> {
-    let dir = dir.map(PathBuf::from).unwrap_or_else(|| root().join("plan/fusion/oracle"));
-    let file = if iges { "part.igs" } else { "part.step" };
-    let mut cases: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .map_err(|e| format!("{}: {e} (the oracle data is local, in plan/fusion/oracle)", dir.display()))?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.join(file).is_file() && p.join("measure.json").is_file())
-        .collect();
-    cases.sort();
-    if cases.is_empty() {
-        return Err(format!("no cases with {file} and measure.json in {}", dir.display()));
-    }
-    let mut cmd = cargo();
-    cmd.args(["run", "-q", "--release", "-p", "solvecraft-cli", "--", "step-corpus", "--json"]);
-    if iges {
-        cmd.arg("--iges");
-    }
-    for c in &cases {
-        cmd.arg(c);
-    }
-    let out = cmd.output().map_err(|e| format!("solvecraft-cli: {e}"))?;
-    let results: serde_json::Value =
-        serde_json::from_slice(&out.stdout).map_err(|e| format!("step-corpus JSON: {e}\n{}", String::from_utf8_lossy(&out.stderr)))?;
-    let list = results.as_array().cloned().unwrap_or_default();
-    let pass = list.iter().filter(|r| r["pass"].as_bool().unwrap_or(false)).count();
-    let check =
-        |r: &serde_json::Value, name: &str| r["checks"].as_array().and_then(|c| c.iter().find(|c| c["check"] == name).cloned()).unwrap_or_default();
-    let num = |v: &serde_json::Value| v.as_f64().map(|x| format!("{x:.3}")).unwrap_or_else(|| "–".into());
-    let mut md = if iges {
-        format!(
-            "# IGES import (Fusion corpus)\n\nGenerated by `cargo xtask step-corpus --iges`. Each case is a reference part exported from Fusion as IGES 5.3 \
-(kept locally in `plan/fusion/oracle/`, never committed). SolidCraft opens `part.igs` exactly as File → Open does and compares with Fusion's \
-measurements of the part it exported: body count, volume and area (relative tolerance 1e-3) and the number of faces read from the file. \
-How IGES is read: see [STEP import](step-import.md#iges). 50-sweep-tight-bend is written by Fusion as five loose, partly degenerate surfaces \
-(seams running into slits, a ring given twice); Fusion cannot read it back as a solid either.\n\n**{pass} / {} files pass.**\n\n\
-| Case | Result | Bodies | Volume mm³ (got / Fusion) | Area mm² (got / Fusion) | Faces (got / Fusion) | ms | Notes |\n|---|---|---|---|---|---|---|---|\n",
-            list.len()
-        )
-    } else {
-        format!(
-            "# STEP import\n\n\
-SolidCraft reads STEP (ISO 10303-21; AP203, AP214 and AP242 geometry) with its own reader in `crates/kernel/src/step_in` \
-(written from the public standards; no third-party STEP code). A STEP file becomes an **Import** base feature on the \
-timeline: it holds the file's B-rep (the STEP text is kept in the design, so the design reopens without the file) and \
-later features — fillets, holes, cuts sketched on its faces, shells — build on its bodies.\n\n\
-- **Open**: File → Open (`doc.open`) accepts `.step`/`.stp` in any case and starts a new design; `solvecraft part.step`; \
-`solvecraft-cli eval part.step`, `solvecraft-cli run script.json --in part.step`; the MCP `open` tool.\n\
-- **Insert** into the current design: File → Insert STEP… or SOLID → INSERT (`file.insert_step {{path}}`).\n\
-- **Drag and drop** a STEP file on the window: inserted when the design has features, opened otherwise.\n\n\
-Read: manifold solid breps (with voids), faceted breps, shell-based surface models; planes, cylinders, cones, spheres, \
-tori, B-spline and rational B-spline surfaces (with knots, Bézier, uniform, quasi-uniform), surfaces of revolution and \
-linear extrusion, trimmed surfaces; lines, circles, ellipses, B-spline curves, polylines, trimmed/surface/seam curves; \
-length and angle units (SI prefixes, conversion-based units such as inches); product names (body names come from the \
-solid's name, else the product's); surface colours; assemblies (next-assembly-usage occurrences placed by item-defined \
-transformations, and mapped items) — the product tree is kept in the feature for the components milestone. Files are \
-untrusted: sizes, entity counts and nesting are capped and every kernel call is guarded. What cannot be read becomes a \
-warning on the feature (a face left out gives an open body); not read yet: offset surfaces, pcurve-only edges.\n\n\
-## IGES\n\n\
-IGES 5.3 files (`.igs`/`.iges`) open, insert and drop the same way: `crates/kernel/src/iges_in.rs` (written from the \
-published specification) restates the file as STEP and the STEP reader reads it, so the feature holds STEP text. Read: \
-manifold solid B-reps (186) with their shells, faces, loops, edge and vertex lists; trimmed (144) and bounded (143) \
-surfaces, and bare B-spline patches, sewn into a solid by their shared edges (an open body when they do not close); \
-lines, circular arcs, ellipses, composite curves, rational B-spline curves; planes (108, 190), cylinders, cones, \
-spheres, tori, rational B-spline surfaces, surfaces of revolution and tabulated cylinders; transformation matrices; \
-units; colours (314 and the predefined numbers); body names (name properties, else labels). Not read yet: ruled and \
-offset surfaces, curves on surfaces given only in parameter space. Export (`file.export` to `.igs`) writes each body as \
-a manifold solid B-rep on the same surfaces a STEP export uses, with its name and colour.\n\n\
-## Fusion corpus\n\nGenerated by `cargo xtask step-corpus`. Each case is a part exported from Fusion as STEP (AP214; kept locally in `plan/fusion/oracle/`, never committed). SolidCraft opens `part.step` exactly as File → Open does (an Import base feature) and compares with Fusion's own measurements: body count, volume and area (relative tolerance 1e-3) and the number of faces read from the file.\n\n**{pass} / {} files pass.**\n\n| Case | Result | Bodies | Volume mm³ (got / Fusion) | Area mm² (got / Fusion) | Faces (got / Fusion) | ms | Notes |\n|---|---|---|---|---|---|---|---|\n",
-            list.len()
-        )
-    };
-    for r in &list {
-        let status = if r["pass"].as_bool().unwrap_or(false) { "pass" } else { "FAIL" };
-        let (v, a, f) = (check(r, "volume_mm3"), check(r, "area_mm2"), check(r, "faces"));
-        let bodies: Vec<String> = r["bodies"].as_array().into_iter().flatten().filter_map(|b| b.as_str().map(str::to_string)).collect();
-        let mut notes: Vec<String> = r["warnings"].as_array().into_iter().flatten().filter_map(|w| w.as_str().map(|w| w.replace('|', "/"))).collect();
-        if let Some(e) = r["error"].as_str() {
-            notes.push(e.replace('|', "/"));
-        }
-        md += &format!(
-            "| {} | {status} | {} | {} / {} | {} / {} | {} / {} | {:.0} | {} |\n",
-            r["case"].as_str().unwrap_or(""),
-            bodies.join(", "),
-            num(&v["got"]),
-            num(&v["want"]),
-            num(&a["got"]),
-            num(&a["want"]),
-            f["got"].as_f64().map(|x| format!("{x}")).unwrap_or_else(|| "–".into()),
-            f["want"].as_f64().map(|x| format!("{x}")).unwrap_or_else(|| "–".into()),
-            r["ms"].as_f64().unwrap_or(0.0),
-            notes.join("; ")
-        );
-    }
-    let out_md = if iges { "docs/iges-import.md" } else { "docs/step-import.md" };
-    std::fs::write(root().join(out_md), md).map_err(|e| format!("{out_md}: {e}"))?;
-    println!("step-corpus: {pass}/{} files pass → {out_md}", list.len());
-    if pass == list.len() { Ok(()) } else { Err(format!("{} file(s) failed", list.len() - pass)) }
 }
 
 /// The quick gates first, so they fail fast; the wasm check (and doc tests) run while the test

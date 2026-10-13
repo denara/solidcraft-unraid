@@ -1,9 +1,9 @@
-//! Layout checks over every toolbar command, headless (see `solvecraft_ui_egui::scenario`):
+//! Layout checks over every toolbar command, headless (see `solidcraft_ui_egui::scenario`):
 //! each command's dialog opens docked at the viewport's right within its width limits, and
 //! every window it opens fits on screen.
 
 use serde_json::{Value, json};
-use solvecraft_ui_egui::scenario::{Harness, check};
+use solidcraft_ui_egui::scenario::{Harness, check};
 
 /// A box body (its sketch finished) to give feature dialogs something to work on.
 fn harness() -> Harness {
@@ -21,11 +21,11 @@ fn harness() -> Harness {
 }
 
 #[test]
-#[ignore = "pending: the exploded view dialog opens 635 px wide (solvecraft-ui)"]
+#[ignore = "pending: the exploded view dialog opens 635 px wide (solidcraft-ui)"]
 fn every_dialog_opens_docked_within_its_width_limits() {
     let mut bad = Vec::new();
     let mut seen = 0;
-    for spec in solvecraft_engine::command_specs() {
+    for spec in solidcraft_engine::command_specs() {
         if spec.tab.is_empty() || spec.tab == "SKETCH" {
             continue;
         }

@@ -1,6 +1,6 @@
 use super::*;
 use crate::{Body, BoolOp, ExportBody, StepHeader, boolean, box_solid, cylinder, fillet, iges_export_bodies, measure, sphere, torus};
-use solvecraft_geom::Vec3;
+use solidcraft_geom::Vec3;
 
 fn rel(a: f64, b: f64) -> f64 {
     (a - b).abs() / b.abs().max(1e-9)
@@ -146,7 +146,7 @@ fn trimmed_surfaces_sew_into_a_solid() {
 fn a_drill_point_round_trips_through_iges() {
     // A blind hole with a cone tip: the tip's face closes at its apex (its seam runs out to the
     // apex and straight back).
-    use solvecraft_geom::{Loop2, Plane, Region2, Vec2};
+    use solidcraft_geom::{Loop2, Plane, Region2, Vec2};
     let plate = box_solid(Vec3::new(-20.0, -15.0, 0.0), Vec3::new(20.0, 15.0, 10.0)).unwrap();
     let profile =
         Region2 { outer: Loop2::polygon(&[Vec2::new(0.0, 2.0), Vec2::new(4.0, 5.0), Vec2::new(4.0, 11.0), Vec2::new(0.0, 11.0)]), holes: vec![] };

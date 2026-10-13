@@ -14,8 +14,8 @@ use std::collections::BTreeSet;
 
 use egui::{Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, pos2, vec2};
 use serde_json::{Value, json};
-use solvecraft_engine::Sel;
-use solvecraft_engine::doc::FeatureKind;
+use solidcraft_engine::Sel;
+use solidcraft_engine::doc::FeatureKind;
 
 use crate::context_menu::{Item, Target};
 use crate::theme::Tokens;
@@ -72,13 +72,13 @@ pub struct OccMove {
     /// Exact assembly placement used for world-space movement and the pivot.
     pub path: Vec<u64>,
     /// Effective local placement at dialog opening, including its pre-existing pending move.
-    pub baseline: Option<solvecraft_engine::doc::Mat>,
+    pub baseline: Option<solidcraft_engine::doc::Mat>,
     pub had_pending: bool,
     /// Distances along X, Y, Z (mm) and turns about X, Y, Z (degrees) from where it was.
     pub translate: [f64; 3],
     pub angles: [f64; 3],
     /// The occurrence's origin when the move began: what it turns about.
-    pub pivot: Option<solvecraft_engine::geom::Vec3>,
+    pub pivot: Option<solidcraft_engine::geom::Vec3>,
     /// The values when the current triad drag began.
     drag0: Option<([f64; 3], [f64; 3])>,
 }
@@ -98,7 +98,7 @@ pub fn sketch_visible(app: &SolveApp, id: u64) -> bool {
     if app.session.visibility.hidden_sketches.contains(&id) {
         return false;
     }
-    app.session.visibility.shown_sketches.contains(&id) || (app.ui.show_sketches && !solvecraft_engine::view::sketch_consumed(&app.session, id))
+    app.session.visibility.shown_sketches.contains(&id) || (app.ui.show_sketches && !solidcraft_engine::view::sketch_consumed(&app.session, id))
 }
 
 pub fn set_sketch_visible(app: &mut SolveApp, id: u64, on: bool) {
@@ -116,7 +116,7 @@ pub fn redefine_sketch(app: &mut SolveApp, id: u64) {
     app.tree.redefine_draft = Some(crate::sketch_attachment_ui::Draft::new(app, id));
 }
 
-fn find_group(app: &SolveApp, id: u64) -> Option<&solvecraft_engine::doc::BrowserGroup> {
+fn find_group(app: &SolveApp, id: u64) -> Option<&solidcraft_engine::doc::BrowserGroup> {
     app.session.doc.browser_groups.iter().find(|g| g.id == id)
 }
 
@@ -747,7 +747,7 @@ fn doc_settings(app: &mut SolveApp, ui: &mut egui::Ui, depth: usize) {
     }
     let prec = format!(
         "Precision: {} {}, {}°",
-        format_args!("{:.*}", usize::from(app.preferences.length_decimals), 0.0),
+        crate::prefs::show_mm_bare(app, 0.0),
         crate::prefs::unit_scale(&app.session.doc.units).1,
         format_args!("{:.*}", usize::from(app.preferences.angle_decimals), 0.0)
     );
@@ -864,7 +864,7 @@ pub fn restore_view(app: &mut SolveApp, name: &str) {
     }
     let Some(v) = app.session.doc.named_views.iter().find(|v| v.name == name) else { return };
     let j = json!({ "target": v.target, "yaw": v.yaw, "pitch": v.pitch, "distance": v.distance, "fov": v.fov });
-    if let Ok(cam) = serde_json::from_value::<solvecraft_engine::render::Camera>(j) {
+    if let Ok(cam) = serde_json::from_value::<solidcraft_engine::render::Camera>(j) {
         app.animate_to(cam);
     }
 }
@@ -1011,24 +1011,24 @@ fn canvas_panel(app: &mut SolveApp, ctx: &egui::Context) {
                     for (label, p) in [("Point A", &mut m.a), ("Point B", &mut m.b)] {
                         ui.label(label);
                         ui.horizontal(|ui| {
-                            ui.add(egui::DragValue::new(&mut p[0]).speed(0.5).suffix(" mm"));
-                            ui.add(egui::DragValue::new(&mut p[1]).speed(0.5).suffix(" mm"));
+                            ui.add(crate::prefs::length_drag(&mut p[0], &app.session.doc.units, app.preferences.length_decimals));
+                            ui.add(crate::prefs::length_drag(&mut p[1], &app.session.doc.units, app.preferences.length_decimals));
                         });
                         ui.end_row();
                     }
                     ui.label("Distance");
-                    ui.add(egui::DragValue::new(&mut m.distance).speed(0.5).range(0.001..=1e6).suffix(" mm"));
+                    ui.add(crate::prefs::length_drag(&mut m.distance, &app.session.doc.units, app.preferences.length_decimals).range(0.001..=1e6));
                     ui.end_row();
                 } else {
                     let (mut x, mut y, mut w, mut ang, mut op, mut flip) = (c.center.x, c.center.y, c.width, c.angle.to_degrees(), c.opacity, c.flip);
                     ui.label("Center X");
-                    let r1 = ui.add(egui::DragValue::new(&mut x).speed(0.5).suffix(" mm"));
+                    let r1 = ui.add(crate::prefs::length_drag(&mut x, &app.session.doc.units, app.preferences.length_decimals));
                     ui.end_row();
                     ui.label("Center Y");
-                    let r2 = ui.add(egui::DragValue::new(&mut y).speed(0.5).suffix(" mm"));
+                    let r2 = ui.add(crate::prefs::length_drag(&mut y, &app.session.doc.units, app.preferences.length_decimals));
                     ui.end_row();
                     ui.label("Width");
-                    let r3 = ui.add(egui::DragValue::new(&mut w).speed(0.5).range(0.01..=1e6).suffix(" mm"));
+                    let r3 = ui.add(crate::prefs::length_drag(&mut w, &app.session.doc.units, app.preferences.length_decimals).range(0.01..=1e6));
                     ui.end_row();
                     ui.label("Angle");
                     let r4 = ui.add(egui::DragValue::new(&mut ang).speed(1.0).suffix(" deg"));
@@ -1072,7 +1072,7 @@ fn canvas_panel(app: &mut SolveApp, ctx: &egui::Context) {
 /// otherwise it becomes the selection.
 fn pick_from_browser(app: &mut SolveApp, x: Sel) {
     let hit = match &x {
-        Sel::Plane { name } => crate::viewport::Hit::Plane { name: name.clone(), point: solvecraft_engine::geom::Vec3::ZERO },
+        Sel::Plane { name } => crate::viewport::Hit::Plane { name: name.clone(), point: solidcraft_engine::geom::Vec3::ZERO },
         Sel::Axis { name } => crate::viewport::Hit::Axis { name: name.clone() },
         _ => return,
     };
@@ -1146,7 +1146,7 @@ fn entries(app: &SolveApp, comp: u64, folder: &str) -> Vec<Entry> {
             .map(|f| {
                 let active = app.session.active_sketch == Some(f.id);
                 let lost = app.session.model.result(f.id).is_some_and(|result| result.error.is_some())
-                    && matches!(doc.sketch_face_attachment(f.id, &app.session.model), solvecraft_engine::doc::FaceAttachmentStatus::Lost { .. });
+                    && matches!(doc.sketch_face_attachment(f.id, &app.session.model), solidcraft_engine::doc::FaceAttachmentStatus::Lost { .. });
                 Entry {
                     key: f.id.to_string(),
                     row_key: format!("s:{}", f.id),
@@ -1190,9 +1190,9 @@ fn entries(app: &SolveApp, comp: u64, folder: &str) -> Vec<Entry> {
 }
 
 /// A folder's groups (with their items) and the items in no group, in browser order.
-fn arrange(app: &SolveApp, comp: u64, folder: &str, all: Vec<Entry>) -> (Vec<(solvecraft_engine::doc::BrowserGroup, Vec<Entry>)>, Vec<Entry>) {
+fn arrange(app: &SolveApp, comp: u64, folder: &str, all: Vec<Entry>) -> (Vec<(solidcraft_engine::doc::BrowserGroup, Vec<Entry>)>, Vec<Entry>) {
     let doc = &app.session.doc;
-    let groups: Vec<solvecraft_engine::doc::BrowserGroup> =
+    let groups: Vec<solidcraft_engine::doc::BrowserGroup> =
         doc.browser_groups.iter().filter(|g| g.component == comp && g.folder == folder).cloned().collect();
     let mut rest: Vec<Option<Entry>> = all.into_iter().map(Some).collect();
     let mut take = |key: &str| rest.iter_mut().find(|e| e.as_ref().is_some_and(|e| e.key == key)).and_then(Option::take);
@@ -1551,7 +1551,7 @@ fn occurrence_panel(app: &mut SolveApp, ui: &mut egui::Ui) {
         m.pivot = if m.path.is_empty() {
             occurrence_origin(app, m.occurrence)
         } else {
-            app.session.occurrence_placement(&m.path).ok().map(|p| solvecraft_engine::doc::apply_point(&p.world, solvecraft_engine::geom::Vec3::ZERO))
+            app.session.occurrence_placement(&m.path).ok().map(|p| solidcraft_engine::doc::apply_point(&p.world, solidcraft_engine::geom::Vec3::ZERO))
         };
     }
     let name = app.session.doc.occurrences.iter().find(|o| o.id == m.occurrence).map(|o| o.name.clone()).unwrap_or_default();
@@ -1573,7 +1573,7 @@ fn occurrence_panel(app: &mut SolveApp, ui: &mut egui::Ui) {
                 for (k, axis) in ["X distance", "Y distance", "Z distance"].iter().enumerate() {
                     ui.label(*axis);
                     if let Some(v) = m.translate.get_mut(k) {
-                        let response = ui.add(egui::DragValue::new(v).speed(0.5).suffix(" mm"));
+                        let response = ui.add(crate::prefs::length_drag(v, &app.session.doc.units, app.preferences.length_decimals));
                         crate::scenario::publish_handle(&format!("occurrence-move:distance:{k}"), response.rect.center());
                     }
                     ui.end_row();
@@ -1629,7 +1629,7 @@ pub(crate) fn revert_occurrence_dialog(app: &mut SolveApp, m: &OccMove) {
 /// The pending move: turned about X, then Y, then Z through the starting origin, then moved.
 pub fn apply_occurrence_move(app: &mut SolveApp, m: &OccMove) {
     use crate::gizmo;
-    use solvecraft_engine::geom::Vec3;
+    use solidcraft_engine::geom::Vec3;
     let a = m.angles.map(f64::to_radians);
     let r = gizmo::mul(&gizmo::mul(&gizmo::rotation(Vec3::Z, a[2]), &gizmo::rotation(Vec3::Y, a[1])), &gizmo::rotation(Vec3::X, a[0]));
     let (axis, angle) = gizmo::axis_angle(&r);
@@ -1650,7 +1650,7 @@ fn triad(app: &mut SolveApp, ui: &mut egui::Ui, m: &mut OccMove) {
     use crate::gizmo::{self, Change};
     let (Some(rect), Some(pivot)) = (app.viewport.rect, m.pivot) else { return };
     let proj = crate::viewport::projection(app, rect);
-    let center = pivot + solvecraft_engine::geom::Vec3::new(m.translate[0], m.translate[1], m.translate[2]);
+    let center = pivot + solidcraft_engine::geom::Vec3::new(m.translate[0], m.translate[1], m.translate[2]);
     let layer = egui::LayerId::new(egui::Order::Middle, egui::Id::new("sc_occ_triad_layer"));
     let mut gui = ui.new_child(egui::UiBuilder::new().layer_id(layer).max_rect(rect));
     let painter = gui.painter().with_clip_rect(rect);
@@ -1677,8 +1677,8 @@ fn triad(app: &mut SolveApp, ui: &mut egui::Ui, m: &mut OccMove) {
 /// Dimensions of finished sketches whose dimensions are shown (Show Dimensions), drawn over the
 /// viewport like the sketch being edited draws its own (`crate::dim_view`), but not editable.
 pub fn dims_overlay(app: &SolveApp, ctx: &egui::Context) {
-    use solvecraft_engine::geom::Vec2;
-    use solvecraft_engine::sketch::{DimFrame, chain_centres, default_text, dim_frame, dim_layout};
+    use solidcraft_engine::geom::Vec2;
+    use solidcraft_engine::sketch::{DimFrame, chain_centres, default_text, dim_frame, dim_layout};
     let Some(rect) = app.viewport.rect else { return };
     if app.ui.shown_dims.is_empty() {
         return;
@@ -1709,7 +1709,11 @@ pub fn dims_overlay(app: &SolveApp, ctx: &egui::Context) {
             }
             let expr = c.param.as_ref().and_then(|p| app.session.doc.param(p)).map(|p| p.expr.as_str());
             let col = if c.driven { tk.dimension_driven } else { tk.dimension };
-            let galley = painter.layout_no_wrap(crate::dim_view::label(&c.kind, expr, c.driven), FontId::proportional(11.5), col);
+            let galley = painter.layout_no_wrap(
+                crate::dim_view::label(&c.kind, expr, c.driven, &app.session.doc.units, app.preferences.length_decimals),
+                FontId::proportional(11.5),
+                col,
+            );
             let size = galley.size() + vec2(6.0, 2.0);
             let half = Vec2::new(f64::from(size.x) * 0.5 * px, f64::from(size.y) * 0.5 * px);
             let lay = dim_layout(&frame, c.text.or_else(|| default_text(&frame, middle, px)), px, half);
@@ -1811,9 +1815,9 @@ fn capture_prompt(app: &mut SolveApp, ctx: &egui::Context) {
 }
 
 /// Where an occurrence's origin is now (with its pending move).
-fn occurrence_origin(app: &SolveApp, occurrence: u64) -> Option<solvecraft_engine::geom::Vec3> {
+fn occurrence_origin(app: &SolveApp, occurrence: u64) -> Option<solidcraft_engine::geom::Vec3> {
     let o = app.session.doc.occurrences.iter().find(|o| o.id == occurrence)?;
     let parent = app.session.doc.component_transform(o.parent);
     let own = app.session.pending_moves.get(&occurrence).copied().unwrap_or(o.transform);
-    Some(solvecraft_engine::doc::apply_point(&solvecraft_engine::doc::mat_mul(&parent, &own), solvecraft_engine::geom::Vec3::ZERO))
+    Some(solidcraft_engine::doc::apply_point(&solidcraft_engine::doc::mat_mul(&parent, &own), solidcraft_engine::geom::Vec3::ZERO))
 }

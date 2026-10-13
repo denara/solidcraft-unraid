@@ -1,6 +1,6 @@
 //! Autosave and crash recovery.
 //!
-//! A running app keeps one recovery entry in the recovery folder: `<id>.solvecraft` (the design
+//! A running app keeps one recovery entry in the recovery folder: `<id>.solidcraft` (the design
 //! as of the last autosave), `<id>.json` (its file path, name and time) and `<id>.lock`, which
 //! the app holds locked while it runs. Autosaves are written atomically, only when the design
 //! has unsaved changes it hasn't written yet; a design with nothing unsaved has no entry. An
@@ -13,28 +13,41 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use solvecraft_doc::Document;
+use solidcraft_doc::Document;
 
 use crate::{EngineError, Result, Session};
 
-/// The recovery folder: `SOLVECRAFT_RECOVERY_DIR`, else the platform's per-user data folder.
+/// The recovery folder: `SOLIDCRAFT_RECOVERY_DIR`, else the platform's per-user data folder.
 pub fn default_dir() -> Option<PathBuf> {
     // Tests never touch the user's real recovery folder.
     if cfg!(test) {
-        return Some(std::env::temp_dir().join(format!("solvecraft-test-recovery-{}", std::process::id())));
+        return Some(std::env::temp_dir().join(format!("solidcraft-test-recovery-{}", std::process::id())));
     }
-    if let Some(d) = std::env::var_os("SOLVECRAFT_RECOVERY_DIR").filter(|d| !d.is_empty()) {
+    if let Some(d) = solidcraft_geom::env::var_os("RECOVERY_DIR").filter(|d| !d.is_empty()) {
         return Some(PathBuf::from(d));
     }
     let env = |k: &str| std::env::var_os(k).filter(|d| !d.is_empty()).map(PathBuf::from);
-    let base = if cfg!(windows) {
-        env("LOCALAPPDATA")?.join("SolveCraft")
+    let root = if cfg!(windows) {
+        env("LOCALAPPDATA")?
     } else if cfg!(target_os = "macos") {
-        env("HOME")?.join("Library/Application Support/SolveCraft")
+        env("HOME")?.join("Library/Application Support")
     } else {
-        env("XDG_DATA_HOME").or_else(|| env("HOME").map(|h| h.join(".local/share")))?.join("solvecraft")
+        env("XDG_DATA_HOME").or_else(|| env("HOME").map(|h| h.join(".local/share")))?
     };
-    Some(base.join("recovery"))
+    let (dir, legacy) = dirs_under(&root, cfg!(windows) || cfg!(target_os = "macos"));
+    // Compatibility shim (docs/compatibility.md): autosaves made before the rename are copied
+    // to the new folder on first launch; the old folder is left as it was.
+    if let Err(e) = solidcraft_io::adopt_legacy_dir(&dir, &legacy) {
+        log::warn!("recovery: could not copy {} to {}: {e}", legacy.display(), dir.display());
+    }
+    Some(dir)
+}
+
+/// The recovery folder under the per-user data `root`, and the folder earlier releases used.
+/// Windows and macOS name the app's folder in title case, other systems in lower case.
+fn dirs_under(root: &Path, title_case: bool) -> (PathBuf, PathBuf) {
+    let (name, legacy) = if title_case { ("SolidCraft", "SolveCraft") } else { ("solidcraft", "solvecraft") };
+    (root.join(name).join("recovery"), root.join(legacy).join("recovery"))
 }
 
 /// What an entry's `<id>.json` holds.
@@ -57,6 +70,14 @@ fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
+/// An entry's design: `<id>.solidcraft`, or `<id>.solvecraft` for an autosave copied from a
+/// pre-rename recovery folder (compatibility shim, docs/compatibility.md).
+fn design_file(dir: &Path, id: &str) -> PathBuf {
+    let current = file(dir, id, solidcraft_io::DESIGN_EXT);
+    let legacy = file(dir, id, solidcraft_io::LEGACY_DESIGN_EXT);
+    if !current.is_file() && legacy.is_file() { legacy } else { current }
+}
+
 fn file(dir: &Path, id: &str, ext: &str) -> PathBuf {
     dir.join(format!("{id}.{ext}"))
 }
@@ -73,7 +94,7 @@ pub fn orphans(dir: &Path) -> Vec<Entry> {
                 return None;
             }
             let entry: Entry = serde_json::from_slice(&fs::read(&p).ok()?).ok()?;
-            if !valid_id(&entry.id) || !file(dir, &entry.id, "solvecraft").is_file() {
+            if !valid_id(&entry.id) || !design_file(dir, &entry.id).is_file() {
                 return None;
             }
             // Held by a running app: not an orphan.
@@ -100,16 +121,16 @@ pub fn load(dir: &Path, id: &str) -> Result<(Document, Entry)> {
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .ok_or_else(|| EngineError::Other(format!("no recovered design `{id}`")))?;
-    let path = file(dir, id, "solvecraft");
-    let bytes = solvecraft_io::vfs::read(&path.to_string_lossy(), solvecraft_io::MAX_DESIGN_BYTES)
+    let path = design_file(dir, id);
+    let bytes = solidcraft_io::vfs::read(&path.to_string_lossy(), solidcraft_io::MAX_DESIGN_BYTES)
         .map_err(|e| EngineError::Other(format!("recovered design `{id}`: {e}")))?;
-    Ok((solvecraft_io::read_design(&bytes)?, entry))
+    Ok((solidcraft_io::read_design(&bytes)?, entry))
 }
 
 /// Delete an entry.
 pub fn remove(dir: &Path, id: &str) {
     if valid_id(id) {
-        for ext in ["json", "solvecraft", "lock"] {
+        for ext in ["json", solidcraft_io::DESIGN_EXT, solidcraft_io::LEGACY_DESIGN_EXT, "lock"] {
             let _ = fs::remove_file(file(dir, id, ext));
         }
     }
@@ -158,25 +179,30 @@ impl Autosaver {
         self.last_at = Instant::now();
         if !s.is_dirty() {
             if self.has_entry {
-                for ext in ["json", "solvecraft"] {
+                for ext in ["json", "solidcraft"] {
                     let _ = fs::remove_file(file(&self.dir, &self.id, ext));
                 }
                 self.has_entry = false;
             }
             self.last = None;
+            // Crash replays start from the saved file (or a new design) from here.
+            crate::crash::rebased(s, s.path.as_deref().map(Path::new), false);
             return Ok(false);
         }
         if self.last.as_ref().is_some_and(|l| Arc::ptr_eq(l, &s.doc) || **l == *s.doc) {
             return Ok(false);
         }
         let io = |e: std::io::Error| EngineError::Other(format!("autosave: {e}"));
-        solvecraft_io::write_atomic(&file(&self.dir, &self.id, "solvecraft"), &solvecraft_io::write_design(&s.doc), false).map_err(io)?;
+        let bytes = solidcraft_io::write_design_container(&s.doc)?;
+        solidcraft_io::write_atomic(&file(&self.dir, &self.id, solidcraft_io::DESIGN_EXT), &bytes, false).map_err(io)?;
         let entry =
             Entry { id: self.id.clone(), path: s.path.clone(), name: s.doc.name.clone(), saved_at: unix_now(), features: s.doc.features.len() };
         let meta = serde_json::to_vec_pretty(&entry).map_err(|e| EngineError::Other(e.to_string()))?;
-        solvecraft_io::write_atomic(&file(&self.dir, &self.id, "json"), &meta, false).map_err(io)?;
+        solidcraft_io::write_atomic(&file(&self.dir, &self.id, "json"), &meta, false).map_err(io)?;
         self.last = Some(s.doc.clone());
         self.has_entry = true;
+        // Crash replays start from this autosave from here.
+        crate::crash::rebased(s, Some(&file(&self.dir, &self.id, solidcraft_io::DESIGN_EXT)), true);
         Ok(true)
     }
 
@@ -198,11 +224,37 @@ impl Autosaver {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn autosave_from_a_legacy_folder_is_listed_and_loads() {
+        let d = std::env::temp_dir().join(format!("solidcraft-recovery-legacy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        let id = "1-2-3";
+        let doc = Document::default();
+        fs::write(d.join(format!("{id}.solvecraft")), solidcraft_io::write_design(&doc)).unwrap();
+        let entry = Entry { id: id.into(), path: Some("/d/part.solvecraft".into()), name: "part".into(), saved_at: 1, features: 0 };
+        fs::write(d.join(format!("{id}.json")), serde_json::to_vec(&entry).unwrap()).unwrap();
+        assert_eq!(orphans(&d).iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), [id]);
+        let (_, loaded) = load(&d, id).unwrap();
+        assert_eq!(loaded, entry);
+        remove(&d, id);
+        assert!(orphans(&d).is_empty() && !d.join(format!("{id}.solvecraft")).exists());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn recovery_dirs_and_their_legacy_names() {
+        let (dir, legacy) = super::dirs_under(Path::new("/data"), false);
+        assert_eq!((dir.as_path(), legacy.as_path()), (Path::new("/data/solidcraft/recovery"), Path::new("/data/solvecraft/recovery")));
+        let (dir, legacy) = super::dirs_under(Path::new("/data"), true);
+        assert_eq!((dir.as_path(), legacy.as_path()), (Path::new("/data/SolidCraft/recovery"), Path::new("/data/SolveCraft/recovery")));
+    }
+
     use super::*;
     use serde_json::json;
 
     fn dir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("solvecraft-recovery-{tag}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("solidcraft-recovery-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         d
     }
@@ -255,7 +307,7 @@ mod tests {
         assert!(a.tick(&s, false).unwrap());
         s.mark_saved();
         a.tick(&s, false).unwrap();
-        assert!(!file(&d, &a.id, "solvecraft").exists());
+        assert!(!file(&d, &a.id, "solidcraft").exists());
         a.close(&s);
         assert_eq!(fs::read_dir(&d).unwrap().count(), 0);
         // Closing with unsaved changes keeps them for the next launch.

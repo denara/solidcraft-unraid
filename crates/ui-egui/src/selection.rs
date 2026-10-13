@@ -3,8 +3,8 @@
 //! selection. The pure parts are unit tested; the viewport uses them.
 
 use egui::{Pos2, Rect};
-use solvecraft_engine::Sel;
-use solvecraft_engine::geom::Vec3;
+use solidcraft_engine::Sel;
+use solidcraft_engine::geom::Vec3;
 
 use crate::viewport::Hit;
 
@@ -180,7 +180,7 @@ fn segments_cross(p: Pos2, q: Pos2, r: Pos2, s: Pos2) -> bool {
 mod tests {
     use super::*;
     use egui::pos2;
-    use solvecraft_engine::render::{Camera, StandardView};
+    use solidcraft_engine::render::{Camera, StandardView};
 
     #[test]
     fn origin_widget_keeps_its_screen_size() {

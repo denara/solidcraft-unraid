@@ -28,7 +28,7 @@ work=$(mktemp -d)
 export XDG_CONFIG_HOME="$work/config" XDG_DATA_HOME="$work/data" XDG_CACHE_HOME="$work/cache"
 mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME"
 unset WGPU_BACKEND WGPU_BACKENDS
-solvecraft --control 18837 >"$work/app.log" 2>&1 &
+solidcraft --control 18837 >"$work/app.log" 2>&1 &
 app=$!
 cleanup() {
   kill "$app" 2>/dev/null || true
@@ -165,10 +165,10 @@ def frame_statistics(png):
 def probe(gl_saved_four=False):
     shell = SANDBOX_PROBE
     if gl_saved_four:
-        shell = shell.replace('solvecraft --control',
-                              'mkdir -p "$XDG_DATA_HOME/solvecraft"\n'
-                              'printf \'{"msaa":4}\' >"$XDG_DATA_HOME/solvecraft/graphics.json"\n'
-                              'export WGPU_BACKEND=gl\nsolvecraft --control')
+        shell = shell.replace('solidcraft --control',
+                              'mkdir -p "$XDG_DATA_HOME/solidcraft"\n'
+                              'printf \'{"msaa":4}\' >"$XDG_DATA_HOME/solidcraft/graphics.json"\n'
+                              'export WGPU_BACKEND=gl\nsolidcraft --control')
     result = subprocess.run(["flatpak", "run", "--user", "--command=bash", APP_ID, "-c", shell],
                             text=True, capture_output=True, timeout=125)
     if result.returncode:
@@ -201,7 +201,8 @@ def run_backend(backend):
         env.pop("WAYLAND_DISPLAY", None)
         env.pop("WAYLAND_SOCKET", None)
         env.pop("DISPLAY", None)
-        env.pop("SOLVECRAFT_WAYLAND", None)
+        env.pop("SOLIDCRAFT_WAYLAND", None)
+        env.pop("SOLVECRAFT_WAYLAND", None)  # the legacy name is still read
         command = ["dbus-run-session", "--"]
         compositor = None
         with (Path(temporary) / "weston.log").open("wb") as log:

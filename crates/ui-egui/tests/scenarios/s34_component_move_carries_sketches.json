@@ -1,6 +1,6 @@
 [
  {
-  "note": "User bug 4 (owner solvecraft-repo): moving a component carries its sketches, and a sketch on a body face follows the body."
+  "note": "User bug 4 (owner solidcraft-repo): moving a component carries its sketches, and a sketch on a body face follows the body."
  },
  {
   "start": "component.create"
@@ -137,7 +137,7 @@
   }
  },
  {
-  "widget": "0.0 mm",
+  "widget": "0.00 mm",
   "near": "X distance"
  },
  {

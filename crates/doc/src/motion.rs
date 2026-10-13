@@ -3,7 +3,7 @@
 //! shown without changing the design).
 
 use serde::{Deserialize, Serialize};
-use solvecraft_geom::Vec3;
+use solidcraft_geom::Vec3;
 
 /// Occurrences whose bodies may touch but not pass through each other while joints move.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -10,10 +10,11 @@
 use std::f64::consts::TAU;
 
 use serde::{Deserialize, Serialize};
-use solvecraft_geom::{Loop2, Region2, Seg2, Vec2};
+use solidcraft_geom::{Loop2, Region2, Seg2, Vec2};
 
 use crate::model::{CurveKind, Sketch};
 use crate::shape::{Shape, intersections};
+use crate::union_find::{find, union};
 
 const MERGE_TOL: f64 = 1e-6;
 const MAX_EDGES: usize = 50_000;
@@ -399,16 +400,6 @@ impl Grid {
     }
 }
 
-fn find(p: &mut [usize], mut i: usize) -> usize {
-    while let Some(&q) = p.get(i) {
-        if q == i {
-            break;
-        }
-        i = q;
-    }
-    i
-}
-
 /// Signed curvature at the start of a segment (left turns positive).
 fn curvature(s: &Seg2) -> f64 {
     match *s {
@@ -422,22 +413,80 @@ fn curvature(s: &Seg2) -> f64 {
     }
 }
 
-/// Find all closed profiles of a sketch. Curves are split where other curves end on them or
-/// cross them, like a drawing would be read.
-/// Profiles of the drawn geometry only (linked reference curves left out).
+/// Profiles of the drawn geometry only: linked reference curves (projections, intersections)
+/// are left out; text outlines count as drawn.
 pub fn find_drawn_profiles(sk: &Sketch) -> Vec<Profile> {
-    if sk.links.is_empty() {
+    if sk.links.iter().all(|l| l.kind == crate::LinkKind::Text) {
         return find_profiles(sk);
     }
     let mut d = sk.clone();
-    for c in &mut d.curves {
-        if c.link.is_some() {
+    for (ci, c) in d.curves.iter_mut().enumerate() {
+        if c.link.is_some() && !sk.is_text_curve(ci) {
             c.construction = true;
         }
     }
     find_profiles(&d)
 }
 
+/// The profiles without text counters: a profile bounded by text outlines alone that lies inside
+/// an odd number of other such profiles is the counter of a letter (the hole of A, B, 8...),
+/// which the letter's own profile already has as a hole. What "all profiles" means for text:
+/// the letters, not the letters with their counters filled in.
+pub fn without_text_counters(sk: &Sketch, profiles: Vec<Profile>) -> Vec<Profile> {
+    let index: std::collections::HashMap<&str, usize> = sk.curves.iter().enumerate().map(|(i, c)| (c.id.as_str(), i)).collect();
+    let text_only: Vec<bool> = profiles
+        .iter()
+        .map(|p| !p.outer_curves.is_empty() && p.outer_curves.iter().all(|id| index.get(id.as_str()).is_some_and(|ci| sk.is_text_curve(*ci))))
+        .collect();
+    if !text_only.iter().any(|t| *t) {
+        return profiles;
+    }
+    // Outer polylines and their boxes, once.
+    let polys: Vec<Vec<Vec2>> = profiles.iter().map(|p| p.region.outer.polyline(1e-3)).collect();
+    let boxes: Vec<(Vec2, Vec2)> = polys
+        .iter()
+        .map(|pl| {
+            pl.iter().fold((Vec2::new(f64::INFINITY, f64::INFINITY), Vec2::new(f64::NEG_INFINITY, f64::NEG_INFINITY)), |(lo, hi), p| {
+                (Vec2::new(lo.x.min(p.x), lo.y.min(p.y)), Vec2::new(hi.x.max(p.x), hi.y.max(p.y)))
+            })
+        })
+        .collect();
+    let areas: Vec<f64> = profiles.iter().map(|p| p.region.outer.signed_area().abs()).collect();
+    let inside = |pl: &[Vec2], p: Vec2| {
+        let n = pl.len();
+        let mut odd = false;
+        for i in 0..n {
+            let (Some(a), Some(b)) = (pl.get(i), pl.get((i + 1) % n)) else { continue };
+            if (a.y > p.y) != (b.y > p.y) && p.x < a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x) {
+                odd = !odd;
+            }
+        }
+        odd
+    };
+    let keep: Vec<bool> = (0..profiles.len())
+        .map(|i| {
+            if !text_only.get(i).copied().unwrap_or(false) {
+                return true;
+            }
+            let Some(probe) = profiles.get(i).and_then(|p| p.region.outer.segs.first()).map(Seg2::mid) else { return true };
+            let ai = areas.get(i).copied().unwrap_or(0.0);
+            let depth = (0..profiles.len())
+                .filter(|&j| {
+                    j != i
+                        && text_only.get(j).copied().unwrap_or(false)
+                        && areas.get(j).copied().unwrap_or(0.0) > ai
+                        && boxes.get(j).is_some_and(|(lo, hi)| probe.x >= lo.x && probe.x <= hi.x && probe.y >= lo.y && probe.y <= hi.y)
+                        && polys.get(j).is_some_and(|pl| inside(pl, probe))
+                })
+                .count();
+            depth % 2 == 0
+        })
+        .collect();
+    profiles.into_iter().zip(keep).filter(|(_, k)| *k).map(|(p, _)| p).collect()
+}
+
+/// Find all closed profiles of a sketch. Curves are split where other curves end on them or
+/// cross them, like a drawing would be read.
 pub fn find_profiles(sk: &Sketch) -> Vec<Profile> {
     find_profiles_bounded(sk, MAX_EDGES)
 }
@@ -756,12 +805,7 @@ fn find_profiles_bounded(sk: &Sketch, max_edges: usize) -> Vec<Profile> {
     let mut comp: Vec<usize> = (0..n).collect();
     for (e, a) in edges.iter().zip(&alive) {
         if *a {
-            let (ru, rv) = (find(&mut comp, e.u), find(&mut comp, e.v));
-            if ru != rv
-                && let Some(s) = comp.get_mut(rv)
-            {
-                *s = ru;
-            }
+            union(&mut comp, e.v, e.u);
         }
     }
 
@@ -995,8 +1039,33 @@ fn same_seg(a: &Seg2, b: &Seg2, tol: f64) -> bool {
                 && a.end().dist(b.end()) <= tol
                 && a.mid().dist(b.mid()) <= tol
         }
-        _ => false,
+        // Free-form segments (text outlines, ellipses, splines): the same curve when they run
+        // through the same points.
+        (Seg2::Line { .. } | Seg2::Arc { .. }, _) | (_, Seg2::Line { .. } | Seg2::Arc { .. }) => false,
+        _ => [0.0, 0.25, 0.5, 0.75, 1.0].iter().all(|t| a.point_at(*t).dist(b.point_at(*t)) <= tol),
     }
+}
+
+/// A closed loop's segments with each run that `joins` says continue one another made one line.
+fn rejoined(segs: Vec<Seg2>, joins: &impl Fn(&Seg2, &Seg2) -> bool) -> Vec<Seg2> {
+    let n = segs.len();
+    let join = |i: usize| segs.get((i + n - 1) % n).zip(segs.get(i)).is_some_and(|(s, t)| joins(s, t));
+    // Start where a run starts; a loop that is all one run (it can't close) stays as it is.
+    let Some(k) = (0..n).find(|&i| !join(i)) else { return segs };
+    let mut out: Vec<Seg2> = Vec::with_capacity(n);
+    for j in 0..n {
+        let i = (k + j) % n;
+        let Some(s) = segs.get(i).copied() else { continue };
+        if j > 0
+            && join(i)
+            && let Some(Seg2::Line { b, .. }) = out.last_mut()
+        {
+            *b = s.end();
+            continue;
+        }
+        out.push(s);
+    }
+    out
 }
 
 /// Union of regions that touch along shared boundary segments (one extrude of several adjacent
@@ -1036,6 +1105,17 @@ pub fn merge_regions(regions: &[Region2]) -> Vec<Region2> {
     if !shared {
         return regions.to_vec();
     }
+    // Where the shared boundaries ended, the outline is left split in two: the lines on either
+    // side are one edge again (else they make split faces and vertices that booleans trip on).
+    let ends: Vec<Vec2> = segs.iter().zip(&alive).filter(|(_, a)| !**a).flat_map(|(s, _)| [s.start(), s.end()]).collect();
+    let rejoin = |s: &Seg2, t: &Seg2| match (*s, *t) {
+        (Seg2::Line { a, b }, Seg2::Line { a: b2, b: c }) => {
+            b.dist(b2) <= tol
+                && ends.iter().any(|e| e.dist(b) <= tol)
+                && (b - a).normalized().zip((c - b).normalized()).is_some_and(|(u, v)| u.dot(v) > 1.0 - 1e-12)
+        }
+        _ => false,
+    };
     let rest: Vec<Seg2> = segs.iter().zip(&alive).filter(|(_, a)| **a).map(|(s, _)| *s).collect();
     // Chain into loops, taking the sharpest left turn where several continue.
     let mut used = vec![false; rest.len()];
@@ -1071,8 +1151,12 @@ pub fn merge_regions(regions: &[Region2]) -> Vec<Region2> {
                 None => break,
             }
         }
+        // A loop that encloses nothing (pieces running back over themselves) is no boundary.
         if !lp.is_empty() && lp.first().zip(lp.last()).is_some_and(|(f, l)| l.end().dist(f.start()) <= tol) {
-            loops.push(Loop2 { segs: lp });
+            let lp = Loop2 { segs: rejoined(lp, &rejoin) };
+            if lp.signed_area().abs() > 1e-9 {
+                loops.push(lp);
+            }
         }
     }
     let outers: Vec<&Loop2> = loops.iter().filter(|l| l.signed_area() > 0.0).collect();

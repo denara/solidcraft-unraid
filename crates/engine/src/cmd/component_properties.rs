@@ -1,7 +1,7 @@
 //! Physical properties of an assembly placement, with original body material assignments.
 use serde_json::{Value, json};
-use solvecraft_doc::{Document, Mat};
-use solvecraft_geom::Vec3;
+use solidcraft_doc::{Document, Mat};
+use solidcraft_geom::Vec3;
 
 use crate::params::bad;
 use crate::{Result, Session};
@@ -27,8 +27,8 @@ fn placed_doc(s: &Session) -> Document {
 /// A property total must cover the entire assembly. The display traversal intentionally
 /// truncates hostile designs, so use an explicit error instead of accepting its prefix.
 pub(in crate::cmd) fn placements(doc: &Document, cmd: &str) -> Result<Vec<(u64, Vec<u64>, Mat)>> {
-    let mut out = vec![(0, Vec::new(), solvecraft_doc::IDENTITY)];
-    let mut stack = vec![(0, Vec::<u64>::new(), solvecraft_doc::IDENTITY)];
+    let mut out = vec![(0, Vec::new(), solidcraft_doc::IDENTITY)];
+    let mut stack = vec![(0, Vec::<u64>::new(), solidcraft_doc::IDENTITY)];
     let mut children: std::collections::BTreeMap<u64, Vec<_>> = std::collections::BTreeMap::new();
     for occurrence in &doc.occurrences {
         children.entry(occurrence.parent).or_default().push(occurrence);
@@ -40,7 +40,7 @@ pub(in crate::cmd) fn placements(doc: &Document, cmd: &str) -> Result<Vec<(u64, 
             }
             let mut child_path = path.clone();
             child_path.push(occurrence.id);
-            let world = solvecraft_doc::mat_mul(&transform, &occurrence.transform);
+            let world = solidcraft_doc::mat_mul(&transform, &occurrence.transform);
             out.push((occurrence.component, child_path.clone(), world));
             stack.push((occurrence.component, child_path, world));
         }
@@ -95,7 +95,7 @@ fn properties(s: &Session, doc: &Document, selected: &[u64], descendants: bool, 
     let (mut faces, mut edges, mut vertices) = (0, 0, 0);
     let mut placement_count = 0;
     let selected_placements = if selected.is_empty() {
-        if descendants { placements(doc, cmd)? } else { vec![(0, Vec::new(), solvecraft_doc::IDENTITY)] }
+        if descendants { placements(doc, cmd)? } else { vec![(0, Vec::new(), solidcraft_doc::IDENTITY)] }
     } else {
         let placement = s.occurrence_placement(selected).map_err(|e| bad(cmd, e.to_string()))?;
         let mut out = vec![(placement.component, selected.to_vec(), placement.world)];
@@ -107,7 +107,7 @@ fn properties(s: &Session, doc: &Document, selected: &[u64], descendants: bool, 
                 }
                 let mut child = path.clone();
                 child.push(occurrence.id);
-                let world = solvecraft_doc::mat_mul(&transform, &occurrence.transform);
+                let world = solidcraft_doc::mat_mul(&transform, &occurrence.transform);
                 out.push((occurrence.component, child.clone(), world));
                 stack.push((occurrence.component, child, world));
             }
@@ -117,9 +117,9 @@ fn properties(s: &Session, doc: &Document, selected: &[u64], descendants: bool, 
     for (component, path, transform) in selected_placements {
         placement_count += 1;
         for body in state.bodies.iter().filter(|b| doc.model_body_component(b) == component) {
-            let transform: Mat = doc.model_body_offset(body).map(|offset| solvecraft_doc::mat_mul(&transform, offset)).unwrap_or(transform);
-            let placed = solvecraft_kernel::transform_matrix(&body.body, transform)?;
-            let measured = solvecraft_kernel::measure(&placed)?;
+            let transform: Mat = doc.model_body_offset(body).map(|offset| solidcraft_doc::mat_mul(&transform, offset)).unwrap_or(transform);
+            let placed = solidcraft_kernel::transform_matrix(&body.body, transform)?;
+            let measured = solidcraft_kernel::measure(&placed)?;
             let density = doc.density(&body.name);
             let body_mass = measured.volume * density / 1000.0;
             volume += measured.volume;

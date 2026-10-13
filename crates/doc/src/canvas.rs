@@ -2,7 +2,7 @@
 //! The image bytes travel inside the design file (base64), so it reopens without the original.
 
 use serde::{Deserialize, Serialize};
-use solvecraft_geom::{Plane, Vec2, Vec3};
+use solidcraft_geom::{Plane, Vec2, Vec3};
 
 use crate::PlaneRef;
 

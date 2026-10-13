@@ -1,7 +1,15 @@
 # .deb and .rpm packages (nfpm: https://nfpm.goreleaser.com). Run by package.sh, which stages
 # the file tree, substitutes its path for ${STAGE} (nfpm doesn't expand env vars in `src`) and
 # exports VERSION and NFPM_ARCH. Adapted from PhotoCraft's (storytold/photocraft, Apache-2.0).
-name: solvecraft
+name: solidcraft
+# Compatibility shim (docs/compatibility.md): releases before the rename were packaged as `solvecraft`.
+# Installing this package replaces that one (Debian Replaces/Conflicts, set under overrides.deb;
+# nfpm writes `replaces` as RPM Obsoletes), so `apt install ./solidcraft-….deb` or `dnf install ./solidcraft-….rpm`
+# upgrades an old install instead of failing on the shared desktop and icon files.
+replaces:
+  - solvecraft
+provides:
+  - solvecraft
 arch: ${NFPM_ARCH}
 platform: linux
 version: ${VERSION}
@@ -10,14 +18,14 @@ version_schema: semver
 release: 1
 section: graphics
 priority: optional
-maintainer: ${SOLVECRAFT_MAINTAINER}
+maintainer: ${SOLIDCRAFT_MAINTAINER}
 vendor: SolidCraft contributors
 homepage: https://bherbruck.github.io/solidcraft/
 license: MIT OR Apache-2.0
 description: |-
   Open-source parametric 3D CAD in the style of Fusion
   Sketches with a constraint solver, a parametric feature timeline, components and
-  joints, sheet metal; STEP, IGES, 3MF, STL and OBJ. Includes solvecraft-cli, a
+  joints, sheet metal; STEP, IGES, 3MF, STL and OBJ. Includes solidcraft-cli, a
   headless command runner and MCP server for AI agents.
 
 # The binaries link only glibc and libgcc_s directly. Windowing (X11/Wayland, xkbcommon) and the
@@ -25,6 +33,9 @@ description: |-
 # the package tools can't find them: list them here.
 overrides:
   deb:
+    # Debian's rename pattern: Replaces + Conflicts + Provides (docs/compatibility.md).
+    conflicts:
+      - solvecraft
     depends:
       - libc6 (>= 2.35)
       - libgcc-s1
@@ -59,9 +70,13 @@ overrides:
       - xdg-desktop-portal
 
 contents:
-  - src: ${STAGE}/usr/bin/solvecraft
-    dst: /usr/bin/solvecraft
+  - src: ${STAGE}/usr/bin/solidcraft
+    dst: /usr/bin/solidcraft
     file_info: { mode: 0755 }
+  - src: ${STAGE}/usr/bin/solidcraft-cli
+    dst: /usr/bin/solidcraft-cli
+    file_info: { mode: 0755 }
+  # Compatibility shim (docs/compatibility.md): the old CLI name forwards to solidcraft-cli.
   - src: ${STAGE}/usr/bin/solvecraft-cli
     dst: /usr/bin/solvecraft-cli
     file_info: { mode: 0755 }

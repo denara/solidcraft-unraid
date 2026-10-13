@@ -80,6 +80,14 @@ impl FeatureKind {
 
 /// Remap persistent topology tokens without rewriting arbitrary user expressions or labels.
 pub fn remap_topology(name: &str, ids: &BTreeMap<u64, u64>, bodies: &BTreeMap<String, String>) -> String {
+    // An older design's name keeps its mark; what follows it is remapped as any name.
+    if let Some(old) = crate::naming::legacy_name(name) {
+        return format!("{}{}", crate::naming::LEGACY_MARK, remap_topology(old, ids, bodies));
+    }
+    // A flat face of a sheet: `sheet:<body>:<panel>:<side>`, the panel a flange's feature token.
+    if let Some((body, face)) = crate::sheet::split_sheet_face_name(name) {
+        return crate::sheet::sheet_face_name(bodies.get(body).map_or(body, String::as_str), &remap_topology(face, ids, bodies));
+    }
     // Imported names belong to the complete canonical body prefix, even when that prefix
     // happens to contain text resembling a feature token.
     if let Some((body, suffix)) = name.rsplit_once(":face:")
@@ -91,7 +99,9 @@ pub fn remap_topology(name: &str, ids: &BTreeMap<u64, u64>, bodies: &BTreeMap<St
     let mut at = 0;
     while at < name.len() {
         let rest = &name[at..];
-        if rest.starts_with('F') && (at == 0 || matches!(name.as_bytes().get(at - 1), Some(b'@') | Some(b':') | Some(b'|'))) {
+        // A feature token starts a name, or one inside it: after `@`, `:` or `|`, or in a
+        // piece's list of the faces around it (`[`, `,`).
+        if rest.starts_with('F') && (at == 0 || matches!(name.as_bytes().get(at - 1), Some(b'@' | b':' | b'|' | b'[' | b','))) {
             let end = rest.as_bytes().iter().skip(1).take_while(|b| b.is_ascii_digit()).count() + 1;
             if end > 1
                 && matches!(rest.as_bytes().get(end), Some(b':') | Some(b'.'))
@@ -196,13 +206,13 @@ fn remap_plane(
 }
 
 fn remap_link(
-    source: &mut solvecraft_sketch::LinkSource,
+    source: &mut solidcraft_sketch::LinkSource,
     ids: &BTreeMap<u64, u64>,
     names: &BTreeMap<String, String>,
     bodies: &BTreeMap<String, String>,
     depth: usize,
 ) {
-    use solvecraft_sketch::LinkSource;
+    use solidcraft_sketch::LinkSource;
     if depth > 64 {
         return;
     }
@@ -356,9 +366,11 @@ impl crate::Feature {
                     mapped_name(n, bodies);
                 }
             }
-            K::Split { body, .. } | K::SheetConvert { body, .. } | K::SurfaceExtend { body, .. } | K::SurfaceTrim { body, .. } => {
-                mapped_name(body, bodies)
-            }
+            K::Split { body, .. }
+            | K::SheetConvert { body, .. }
+            | K::SurfaceExtend { body, .. }
+            | K::SurfaceTrim { body, .. }
+            | K::MeshConvert { body, .. } => mapped_name(body, bodies),
             _ => {}
         }
         match &mut self.kind {
@@ -433,11 +445,11 @@ fn checked_plane(p: &PlaneRef, depth: usize) -> crate::Result<()> {
     }
     Ok(())
 }
-fn checked_link(source: &solvecraft_sketch::LinkSource, depth: usize) -> crate::Result<()> {
+fn checked_link(source: &solidcraft_sketch::LinkSource, depth: usize) -> crate::Result<()> {
     if depth > 64 {
         return Err(crate::DocError::Invalid("copy link nesting exceeds 64".into()));
     }
-    if let solvecraft_sketch::LinkSource::Intersection { a, b } = source {
+    if let solidcraft_sketch::LinkSource::Intersection { a, b } = source {
         checked_link(a, depth + 1)?;
         checked_link(b, depth + 1)?;
     }
@@ -454,6 +466,14 @@ mod clone_tests {
         assert_eq!(remap_topology("F1:Housing:face:0", &ids, &bodies), "F1:Housing (copy):face:0");
         assert_eq!(remap_topology("F1:+x|F10:end@F1.2", &ids, &bodies), "F2:+x|F20:end@F2.2");
         assert_eq!(remap_topology("UserF1:label", &ids, &bodies), "UserF1:label");
+    }
+    #[test]
+    fn a_sheet_face_follows_its_body_and_its_flange() {
+        let ids = BTreeMap::from([(1, 2), (10, 20)]);
+        let bodies = BTreeMap::from([("Body1".into(), "Body1 (copy)".into())]);
+        assert_eq!(remap_topology("sheet:Body1:F1.0:top", &ids, &bodies), "sheet:Body1 (copy):F2.0:top");
+        assert_eq!(remap_topology("sheet:Body1:base:bottom", &ids, &bodies), "sheet:Body1 (copy):base:bottom");
+        assert_eq!(remap_topology("sheet:Other:F10.1:top", &ids, &bodies), "sheet:Other:F20.1:top");
     }
     #[test]
     fn parameter_remap_is_simultaneous_and_token_scoped() {

@@ -150,8 +150,9 @@ async fn mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, bytes: Byte
         (session_id.to_owned(), Arc::clone(&entry.worker), entry.log_id.clone())
     };
     let tool = message.pointer("/params/name").and_then(Value::as_str).unwrap_or_default().to_owned();
+    let method = message.get("method").and_then(Value::as_str).unwrap_or_default().to_owned();
     if message.get("method").and_then(Value::as_str) == Some("tools/call")
-        && let Some(args) = message.get_mut("params").and_then(|p| p.get_mut("arguments"))
+        && let Some(args) = message.get_mut("params").and_then(Value::as_object_mut).map(|p| p.entry("arguments").or_insert_with(|| json!({})))
         && let Err(e) = paths::prepare_tool(&state.config.files, &tool, args)
     {
         state.audit.emit(Event::ToolFailed, json!({"session":log_id,"reason":"file_access_rejected"}));
@@ -163,6 +164,11 @@ async fn mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, bytes: Byte
     let result = state.exchange(worker, message, log_id.clone()).await;
     let mut response = match result {
         Ok(Some(mut reply)) => {
+            if method == "tools/list"
+                && let Some(tools) = reply.pointer_mut("/result/tools").and_then(Value::as_array_mut)
+            {
+                tools.retain(|tool| tool.get("name").and_then(Value::as_str) != Some("crash_reports"));
+            }
             if reply.get("error").is_some() || reply.pointer("/result/isError").and_then(Value::as_bool) == Some(true) {
                 state.audit.emit(Event::ToolFailed, json!({"session":log_id,"reason":"cad_request_rejected"}));
             }

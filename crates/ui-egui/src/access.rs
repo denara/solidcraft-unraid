@@ -4,8 +4,8 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 
-use solvecraft_engine::SurfaceAnalysis;
-use solvecraft_engine::geom::Vec3;
+use solidcraft_engine::SurfaceAnalysis;
+use solidcraft_engine::geom::Vec3;
 
 use crate::SolveApp;
 use crate::gpu::AccessMap;
@@ -39,7 +39,7 @@ pub fn map(app: &SolveApp) -> Option<AccessMap> {
 }
 
 /// Rasterise the triangles seen along `dir` (orthographic), keeping the highest point per pixel.
-fn build(meshes: &[&solvecraft_engine::geom::Mesh], dir: Vec3, version: u64) -> Option<AccessMap> {
+fn build(meshes: &[&solidcraft_engine::geom::Mesh], dir: Vec3, version: u64) -> Option<AccessMap> {
     let d = dir.normalized()?;
     let u = d.cross(if d.x.abs() < 0.9 { Vec3::X } else { Vec3::Y }).normalized()?;
     let v = d.cross(u);

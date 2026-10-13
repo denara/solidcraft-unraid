@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
-use solvecraft_doc::{FeatureKind, PlaneRef};
+use solidcraft_doc::{FeatureKind, PlaneRef};
 
 use super::CommandSpec;
 use crate::params::{bad, string_list, vec3};
@@ -31,7 +31,7 @@ fn copy(s: &mut Session, p: &Value) -> Result<Value> {
         ids.push(s.doc.find_feature(k).map(|f| f.id).ok_or_else(|| bad(cmd, format!("no feature `{k}`")))?);
     }
     // Keep timeline order so sketches come before the features that use them.
-    let copied: Vec<solvecraft_doc::Feature> = s.doc.features.iter().filter(|f| ids.contains(&f.id)).cloned().collect();
+    let copied: Vec<solidcraft_doc::Feature> = s.doc.features.iter().filter(|f| ids.contains(&f.id)).cloned().collect();
     let names: Vec<String> = copied.iter().map(|f| f.name.clone()).collect();
     s.clipboard = copied;
     Ok(json!({"copied": names}))
@@ -41,7 +41,7 @@ fn copy(s: &mut Session, p: &Value) -> Result<Value> {
 fn explicit_planes(p: &mut PlaneRef) {
     match p {
         PlaneRef::Origin { name } => {
-            if let Some(plane) = solvecraft_geom::Plane::named(name) {
+            if let Some(plane) = solidcraft_geom::Plane::named(name) {
                 *p = PlaneRef::Custom { plane };
             }
         }
@@ -66,7 +66,7 @@ fn paste(s: &mut Session, p: &Value) -> Result<Value> {
     let mut used: std::collections::BTreeSet<String> = s.model.state().bodies.iter().map(|body| body.name.clone()).collect();
     let mut notices = Vec::new();
     let author_path = s.active_occurrence_path.clone().unwrap_or_else(|| s.doc.first_path(comp));
-    solvecraft_doc::EmbossFace::component_frame(&s.placed_document(), comp, &author_path)?;
+    solidcraft_doc::EmbossFace::component_frame(&s.placed_document(), comp, &author_path)?;
     let mut names: BTreeMap<String, String> = BTreeMap::new();
     let mut made = Vec::new();
     for f in feats {
@@ -92,7 +92,7 @@ fn paste(s: &mut Session, p: &Value) -> Result<Value> {
             if let FeatureKind::Sketch { sketch, .. } = &mut kind {
                 for link in &mut sketch.links {
                     if link.auto_face {
-                        if let solvecraft_sketch::LinkSource::Face { body, .. } = &mut link.source
+                        if let solidcraft_sketch::LinkSource::Face { body, .. } = &mut link.source
                             && let Some(mapped) = bodies.get(body)
                         {
                             *body = mapped.clone();
@@ -138,7 +138,7 @@ fn paste(s: &mut Session, p: &Value) -> Result<Value> {
             if let FeatureKind::Sketch { plane, .. } | FeatureKind::ConstructionPlane { plane } = &mut kind {
                 explicit_planes(plane);
             }
-            let mut m = solvecraft_doc::IDENTITY;
+            let mut m = solidcraft_doc::IDENTITY;
             m[3][0] = t.x;
             m[3][1] = t.y;
             m[3][2] = t.z;

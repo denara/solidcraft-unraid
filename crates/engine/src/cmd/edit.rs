@@ -1,15 +1,17 @@
 //! Undo/redo, the timeline, deletion and selection.
 
+use std::collections::BTreeMap;
+
 use serde_json::{Value, json};
-use solvecraft_doc::{Feature, FeatureKind};
+use solidcraft_doc::{Feature, FeatureKind};
 
 use super::CommandSpec;
 use crate::params::{bad, bool_, num, str_, string_list};
 use crate::{EngineError, Result, Sel, Session, Snapshot};
 
 pub static COMMANDS: &[CommandSpec] = &[
-    CommandSpec::new("edit.undo", "Undo", undo).icon("undo").key("Ctrl+Z").noundo(),
-    CommandSpec::new("edit.redo", "Redo", redo).icon("redo").key("Ctrl+Y").noundo(),
+    CommandSpec::new("edit.undo", "Undo", undo).icon("undo").key("Ctrl+Z").noundo().doc_only(),
+    CommandSpec::new("edit.redo", "Redo", redo).icon("redo").key("Ctrl+Y").noundo().doc_only(),
     CommandSpec::new("edit.checkpoint", "Checkpoint", checkpoint)
         .noundo()
         .params("→ {checkpoint: id}: remember the design, active sketch and undo history (restore with edit.restore_checkpoint)"),
@@ -21,8 +23,8 @@ pub static COMMANDS: &[CommandSpec] = &[
         .at("SOLID", "MODIFY")
         .icon("delete")
         .key("Delete")
-        .params("features: [id or name] (a sketch takes its dependent features with it)"),
-    CommandSpec::new("timeline.rename", "Rename", rename).params("feature: id|name, name"),
+        .params("features: [id or name] (a sketch takes its dependent features with it) → deleted: [ids]; failing?: [{feature, error}] (later features that worked and now fail)"),
+    CommandSpec::new("timeline.rename", "Rename", rename).params("feature: id|name, name (references to it follow)"),
     CommandSpec::new("timeline.rollback", "Move Timeline Marker", rollback).params("position: number of features to keep active (omit = end)"),
     CommandSpec::new("timeline.roll_to", "Roll History Marker", rollback)
         .params("position: number of features to keep active (omit = end) | feature: id|name (the marker goes right after it)"),
@@ -51,26 +53,33 @@ pub static COMMANDS: &[CommandSpec] = &[
 
 fn undo(s: &mut Session, _p: &Value) -> Result<Value> {
     let Some(prev) = s.undo.pop() else { return Err(EngineError::Other("nothing to undo".into())) };
-    let label = prev.label.clone();
-    s.redo.push(Snapshot { label: label.clone(), doc: s.doc.clone(), active_sketch: s.active_sketch, pending_moves: s.pending_moves.clone() });
-    s.doc = prev.doc;
-    s.active_sketch = prev.active_sketch;
-    s.pending_moves = prev.pending_moves;
-    s.selection.clear();
-    s.refresh();
+    let now = go_to(s, prev);
+    let label = now.label.clone();
+    s.redo.push(now);
     Ok(json!({"undone": label}))
 }
 
 fn redo(s: &mut Session, _p: &Value) -> Result<Value> {
     let Some(next) = s.redo.pop() else { return Err(EngineError::Other("nothing to redo".into())) };
-    let label = next.label.clone();
-    s.undo.push(Snapshot { label: label.clone(), doc: s.doc.clone(), active_sketch: s.active_sketch, pending_moves: s.pending_moves.clone() });
-    s.doc = next.doc;
-    s.active_sketch = next.active_sketch;
-    s.pending_moves = next.pending_moves;
-    s.selection.clear();
-    s.refresh();
+    let now = go_to(s, next);
+    let label = now.label.clone();
+    s.undo.push(now);
     Ok(json!({"redone": label}))
+}
+
+/// Put the session at `snap`; returns where it was, under the same label.
+fn go_to(s: &mut Session, snap: Snapshot) -> Snapshot {
+    let was = Snapshot { label: snap.label, doc: s.doc.clone(), active_sketch: s.active_sketch, pending_moves: s.pending_moves.clone() };
+    let same = std::sync::Arc::ptr_eq(&s.doc, &snap.doc);
+    s.doc = snap.doc;
+    s.active_sketch = snap.active_sketch;
+    s.pending_moves = snap.pending_moves;
+    s.selection.clear();
+    // A new document is evaluated by `execute`.
+    if same {
+        s.refresh();
+    }
+    was
 }
 
 fn checkpoint(s: &mut Session, _p: &Value) -> Result<Value> {
@@ -89,7 +98,7 @@ fn restore_checkpoint(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn compute_all(s: &mut Session, _p: &Value) -> Result<Value> {
-    s.model = solvecraft_doc::Model::new();
+    s.model = solidcraft_doc::Model::new();
     s.refresh();
     let errors = s.model.results.iter().filter(|r| r.error.is_some()).count();
     Ok(json!({"features": s.model.results.len(), "errors": errors}))
@@ -120,6 +129,9 @@ fn delete(s: &mut Session, p: &Value) -> Result<Value> {
     if keys.is_empty() {
         return Err(bad(cmd, "`features` must list features"));
     }
+    // Features that work now; any of them failing after the delete is reported (a later
+    // feature that names a deleted body, #267).
+    let worked: std::collections::BTreeSet<u64> = s.model.results.iter().filter(|r| r.error.is_none() && !r.skipped).map(|r| r.id).collect();
     let mut gone = Vec::new();
     for k in keys {
         let Some(id) = s.doc.find_feature(&k).map(|f| f.id) else {
@@ -134,7 +146,18 @@ fn delete(s: &mut Session, p: &Value) -> Result<Value> {
         s.active_sketch = None;
     }
     s.selection.clear();
-    Ok(json!({"deleted": gone}))
+    s.refresh();
+    let failing: Vec<Value> = s
+        .model
+        .results
+        .iter()
+        .filter(|r| worked.contains(&r.id))
+        .filter_map(|r| r.error.as_ref().map(|e| json!({"feature": r.name, "error": e})))
+        .collect();
+    if failing.is_empty() {
+        return Ok(json!({"deleted": gone}));
+    }
+    Ok(json!({"deleted": gone, "failing": failing}))
 }
 
 fn rename(s: &mut Session, p: &Value) -> Result<Value> {
@@ -142,11 +165,24 @@ fn rename(s: &mut Session, p: &Value) -> Result<Value> {
     let id = feature_id(s, p.get("feature"), cmd)?;
     let name =
         str_(p, "name").map(str::trim).filter(|n| !n.is_empty() && n.len() <= 128).ok_or_else(|| bad(cmd, "`name` must be 1…128 characters"))?;
+    let old = s.doc.feature(id).map(|f| f.name.clone()).ok_or_else(|| bad(cmd, "feature"))?;
     if s.doc.features.iter().any(|f| f.name == name && f.id != id) {
         return Err(bad(cmd, format!("another feature is called `{name}`")));
     }
-    if let Some(f) = s.doc_mut().feature_mut(id) {
+    if s.doc.feature(id).is_some_and(|f| matches!(f.kind, FeatureKind::ConstructionPlane { .. })) {
+        super::features::check_plane_name(name, cmd)?;
+    }
+    if name == old {
+        return Ok(json!({"feature": id, "name": name}));
+    }
+    let names = BTreeMap::from([(old.clone(), name.to_string())]);
+    let sketches = BTreeMap::new();
+    let doc = s.doc_mut();
+    if let Some(f) = doc.feature_mut(id) {
         f.name = name.to_string();
+    }
+    for f in doc.features.iter_mut() {
+        f.kind.remap_refs(&sketches, &names);
     }
     Ok(json!({"feature": id, "name": name}))
 }
@@ -261,6 +297,7 @@ fn inspect_feature(s: &mut Session, p: &Value) -> Result<Value> {
         "id": f.id, "name": f.name, "type": f.kind.type_name(), "suppressed": f.suppressed, "rolled_back": rolled_back,
         "definition": def, "omitted": omitted, "inputs": inputs,
         "error": r.and_then(|r| r.error.clone()), "warning": r.and_then(|r| r.warning.clone()),
+        "boolean_diagnostics": r.map(|r| &r.boolean_diagnostics),
     }))
 }
 
@@ -278,7 +315,7 @@ fn edit_feature(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad(cmd, "the feature type cannot change"));
     }
     if let FeatureKind::BodyTransfer { bodies, from, to, transform } = &nf.kind {
-        solvecraft_doc::validate_body_transfer(&s.doc, bodies, *from, *to, transform)?;
+        solidcraft_doc::validate_body_transfer(&s.doc, bodies, *from, *to, transform)?;
         nf.component = *to;
     }
     if let (FeatureKind::Sketch { sketch: a, .. }, FeatureKind::Sketch { sketch: b, .. }) = (&nf.kind, &f.kind)
@@ -294,8 +331,16 @@ fn edit_feature(s: &mut Session, p: &Value) -> Result<Value> {
         && a != b
     {
         let before = s.model.state_before(id);
-        nf.edge_refs = solvecraft_doc::edge_refs(&before, body, a);
-        nf.edge_names = solvecraft_doc::edge_names_for(&before, body, a);
+        nf.edge_refs = solidcraft_doc::edge_refs(&before, body, a);
+        nf.edge_names = solidcraft_doc::edge_names_for(&before, body, a);
+    }
+    // New or reordered flange edges: their names now, so each edge's own angle and height stay
+    // with the edge they were given for.
+    if let (FeatureKind::SheetFlange { edges: a, .. }, FeatureKind::SheetFlange { edges: b, .. }) = (&nf.kind, &f.kind) {
+        let points = |e: &[solidcraft_doc::FlangeEdge]| e.iter().map(|x| x.point).collect::<Vec<_>>();
+        if points(a) != points(b) {
+            nf.edge_names = solidcraft_doc::sheet::sheet_edge_names(&s.model.state_before(id), &points(a));
+        }
     }
     // Profiles picked by index or point are kept by their curves, as when the feature was made.
     if nf.kind.clone().profile_sels_mut() != f.kind.clone().profile_sels_mut() {
@@ -303,7 +348,7 @@ fn edit_feature(s: &mut Session, p: &Value) -> Result<Value> {
     }
     // New face points: their faces' names now.
     if nf.kind.face_points() != f.kind.face_points() {
-        nf.face_names = solvecraft_doc::naming::face_names_at(&s.model.state_before(id), &nf.kind.face_points());
+        nf.face_names = solidcraft_doc::naming::face_names_at(&s.model.state_before(id), &nf.kind.face_points());
     }
     if let Some(slot) = s.doc_mut().feature_mut(id) {
         *slot = nf;
@@ -347,7 +392,7 @@ fn select_clear(s: &mut Session, _p: &Value) -> Result<Value> {
 }
 
 /// Features that worked in `before` and fail in `after`: (name, error).
-fn newly_broken(before: &solvecraft_doc::Model, after: &solvecraft_doc::Model) -> Vec<(String, String)> {
+fn newly_broken(before: &solidcraft_doc::Model, after: &solidcraft_doc::Model) -> Vec<(String, String)> {
     after
         .results
         .iter()
@@ -373,7 +418,7 @@ fn reorder(s: &mut Session, p: &Value) -> Result<Value> {
     let name = f.name.clone();
     next.features.insert(to, f);
     // Everything that evaluated before must still evaluate.
-    let mut after = solvecraft_doc::Model::new();
+    let mut after = solidcraft_doc::Model::new();
     after.evaluate(&next);
     let broken = newly_broken(&s.model, &after);
     if !broken.is_empty() {
@@ -384,13 +429,13 @@ fn reorder(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"feature": id, "position": to}))
 }
 
-fn input_keys(kind: &FeatureKind) -> Vec<(String, solvecraft_doc::expr::Kind)> {
+fn input_keys(kind: &FeatureKind) -> Vec<(String, solidcraft_doc::expr::Kind)> {
     let mut keys: Vec<_> = kind.inputs().into_iter().map(|(label, _, unit)| (label.to_string(), unit)).collect();
     if let FeatureKind::Fillet { style, .. } = kind {
         if let Some((key, _)) = keys.first_mut() {
             *key = "fillet.radius".into();
         }
-        if let solvecraft_doc::FilletStyle::Variable { mid, .. } = style {
+        if let solidcraft_doc::FilletStyle::Variable { mid, .. } = style {
             for ((key, _), (position, _)) in keys.iter_mut().skip(2).zip(mid) {
                 *key = format!("fillet.mid.{}", position.to_bits());
             }
@@ -459,8 +504,7 @@ fn redefine(s: &mut Session, p: &Value) -> Result<Value> {
     }
     trial.doc_mut().marker = Some(idx + 1);
     trial.refresh();
-    (spec.enabled)(&trial).map_err(|why| EngineError::Disabled(spec.id.to_string(), why))?;
-    let r = (spec.run)(&mut trial, &params)?;
+    let r = spec.run_nested(&mut trial, &params)?;
     let made = r.get("feature").and_then(Value::as_u64).ok_or_else(|| bad(cmd, format!("`{cid}` did not make a feature")))?;
     let mut new = trial.doc.feature(made).cloned().ok_or_else(|| bad(cmd, format!("`{cid}` did not make a feature")))?;
     if let (FeatureKind::Emboss { face: Some(before), .. }, FeatureKind::Emboss { face: Some(after), .. }) = (&old.kind, &mut new.kind)
@@ -559,7 +603,7 @@ fn dependents(s: &mut Session, p: &Value) -> Result<Value> {
     let id = feature_id(s, p.get("feature"), cmd)?;
     let mut next = (*s.doc).clone();
     let gone = next.delete_feature(id)?;
-    let mut after = solvecraft_doc::Model::new();
+    let mut after = solidcraft_doc::Model::new();
     after.evaluate(&next);
     let names = |ids: &[u64]| -> Vec<String> { ids.iter().filter(|x| **x != id).filter_map(|x| s.doc.feature(*x).map(|f| f.name.clone())).collect() };
     let broken: Vec<String> = newly_broken(&s.model, &after).into_iter().map(|(n, _)| n).collect();

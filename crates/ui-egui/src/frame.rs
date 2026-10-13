@@ -6,6 +6,8 @@
 //! - [`window`]: floating windows (Preferences, Parameters, prompts…), centred by default.
 //! - [`right_aligned`]: right-align a row's last items without widening the window (a
 //!   right-to-left layout would stretch it to its maximum width).
+//! - [`heading`]: a panel's title row and its section headings, each on a band darker than the
+//!   panel ([`Level`]), so every dialog marks them the same way.
 
 use egui::{Align2, Pos2, Ui, WidgetText, vec2};
 
@@ -64,6 +66,38 @@ pub fn window<'a>(ctx: &egui::Context, title: impl Into<WidgetText>, width: Widt
 /// Floating model controls share the report's read-only drawing boundary with windows.
 pub fn area(id: egui::Id) -> egui::Area {
     egui::Area::new(id).enabled(!crate::issue_report::cad_input_blocked())
+}
+
+/// Heading levels inside a panel: its title, and the sections below it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Level {
+    /// The panel's title row (`Tokens::heading_bg`).
+    Title,
+    /// A section heading (`Tokens::subheading_bg`).
+    Section,
+}
+
+/// Horizontal inner margin of a heading band, on each side.
+pub const HEADING_MARGIN: f32 = 4.0;
+
+/// A heading row drawn on a band `width` wide (a content width, so the band never widens the
+/// window); `add` lays out the row left to right in `width - 2 * HEADING_MARGIN`.
+pub fn heading<R>(ui: &mut Ui, level: Level, width: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let t = crate::theme::Tokens::get();
+    let fill = match level {
+        Level::Title => t.heading_bg,
+        Level::Section => t.subheading_bg,
+    };
+    let inner = (width - 2.0 * HEADING_MARGIN).max(0.0);
+    egui::Frame::new()
+        .fill(fill)
+        .corner_radius(3)
+        .inner_margin(egui::Margin::symmetric(HEADING_MARGIN as i8, 1))
+        .show(ui, |ui| {
+            ui.set_width(inner);
+            ui.horizontal(add).inner
+        })
+        .inner
 }
 
 /// The width a window's content had last frame (at least `min`), for laying out rows that end at

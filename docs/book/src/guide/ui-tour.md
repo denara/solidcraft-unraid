@@ -7,15 +7,28 @@
   undo history, selection and camera).
 - **Toolbar.** The workspace switcher (DESIGN) sits on the left. The tabs (SOLID, SURFACE,
   SHEET METAL, PLASTIC, UTILITIES, and SKETCH while you sketch) hold panels of commands. Click a
-  panel's name for all its commands.
+  panel's name for all its commands. Drag a command from the dropdown onto a panel's label
+  or empty space to append it; the insertion line shows its destination. Drop onto an existing
+  button to insert before it. Buttons can also move between panels, and the layout is saved.
 - **Browser** (left). The design as a tree: document settings and units, named views, the
   origin, bodies, sketches, construction planes, canvases, joints and components. The eye shows or
   hides an item, a component's radio button makes it the active component, and right-clicking any
   row gives that item's menu. Rows drag into groups and other components.
-- **Viewport.** Click to select, Shift or Ctrl to add, drag for a window or crossing box. The
+- **Viewport.** Click to select, Shift or Ctrl to add, drag for a window or crossing box. To
+  reach something under something else (two lines drawn on top of each other, coincident points,
+  an edge in front of a face, overlapping bodies), hold the left button still for half a second
+  (long-press on a touch screen) or right-click › **Select Other…**: a list of everything under
+  the cursor opens there, the sketch being edited first. Hovering a row lights it up; clicking it
+  selects it (Shift or Ctrl adds), and in a command's dialog it goes to the active selection box.
+  Esc or a click elsewhere closes the list. Clicking again on the same spot, with nothing changed
+  in between, selects the next thing in that list. The
   wheel zooms at the cursor, the middle button pans and right-drag orbits freely (the mouse
-  preset in Preferences switches to SolidWorks or Inventor style). Shift+middle orbits freely
-  in the default and Inventor presets. Shift+right-drag snaps to the nearest standard or
+<  preset in Preferences switches to SolidWorks, Inventor, Alias or Tinkercad style). On a
+  trackpad, pinch zooms and two-finger scroll pans (Navigation › Two-finger scroll pans;
+  off: scroll zooms like the wheel); mouse wheels zoom and the thumb wheel pans sideways.
+  Shift+middle orbits freely
+  in the default and Inventor presets. In every preset, Ctrl+left drag (Cmd on macOS) that starts
+  on empty space orbits; a Ctrl+click still adds to the selection. Shift+right-drag snaps to the nearest standard or
   diagonal view; Shift does not request snapping when the preset already requires it to orbit.
   The axis view shows the world's X/Y/Z directions in SolidCraft's colors. Click a signed
   axis tip to look along that axis; click the aligned tip again to look from the opposite side.
@@ -44,5 +57,21 @@ trackpad event immediately, with no smoothing tail. It is independent of **Anima
 changes**, which controls axis views, Look At, Home and Fit. Re-enabling smoothing during
 a wheel gesture takes effect after that gesture ends, avoiding leftover zoom being replayed.
 
+Navigation › **Alias** uses Alias's camera keys: Shift+Alt+left drag orbits, Shift+Alt+middle
+drag pans and Shift+Alt+right drag zooms (drag down to move away, up to move closer). Without
+Shift+Alt, a left drag still selects with a box and drags sketch geometry.
+
+Some Linux desktops take Alt+drag for themselves (moving or resizing windows), so the viewport
+never sees it. To free it:
+
+- **KDE Plasma:** System Settings › Window Management › Window Behavior › Window Actions, set
+  **Modifier key** to Meta (or None).
+- **GNOME:** run `gsettings set org.gnome.desktop.wm.preferences mouse-button-modifier '<Super>'`
+  (or set Tweaks › Windows › Window Action Key to Super).
+
 Shift-orbit snapping includes 45-degree edge views and isometric corner views, with a
 lightly damped spring transition and a small boundary margin to prevent flicker.
+
+On desktop, Ctrl/Cmd+Plus (or Equals) enlarges the interface, Ctrl/Cmd+Minus reduces it,
+and Ctrl/Cmd+0 restores 100%. These shortcuts update the UI scale preference. The UI scale
+slider in Preferences applies the new layout when released, so it stays still while dragging.

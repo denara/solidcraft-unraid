@@ -71,6 +71,18 @@ if (-not $Reopen) {
     $taskBadPath = @{jsonrpc = '2.0'; id = 999; method = 'tools/call'; params = @{name = 'save'; arguments = @{path = '../escape.solvecraft'}}} | ConvertTo-Json -Depth 10 -Compress
     $taskRejected = Invoke-RestMethod "$BaseUrl/mcp" -Method Post -ContentType 'application/json' -Headers $taskHeaders -Body $taskBadPath
     if (-not $taskRejected.result.isError) { throw 'Path traversal was not rejected' }
+    foreach ($taskProbe in @(
+        @{name = 'crash_reports'},
+        @{name = 'execute'; arguments = @{command = 'diagnostics.crash_reports.clear'}},
+        @{name = 'execute'; arguments = @{command = 'doc.recover'}},
+        @{name = 'batch'; arguments = @{commands = @(@{command = 'sketch.text'; params = @{font = '../outside.ttf'}})}},
+        @{name = 'execute'; arguments = @{command = 'sketch.text'; params = @{font = '%HOME%/outside.ttf'}}}
+    )) {
+        $taskProbeBody = @{jsonrpc = '2.0'; id = 1000; method = 'tools/call'; params = $taskProbe} | ConvertTo-Json -Depth 15 -Compress
+        $taskProbeReply = Invoke-RestMethod "$BaseUrl/mcp" -Method Post -ContentType 'application/json' -Headers $taskHeaders -Body $taskProbeBody
+        if (-not $taskProbeReply.result.isError) { throw 'Unsafe diagnostics, recovery or font request was accepted' }
+    }
+    if ($taskCatalog.tools.name -contains 'crash_reports') { throw 'Unavailable shared crash reports were advertised' }
     $taskUnauthorized = Invoke-WebRequest "$BaseUrl/mcp" -Method Post -ContentType 'application/json' -Body '{}' -SkipHttpErrorCheck
     if ($taskUnauthorized.StatusCode -ne 401) { throw 'Unauthenticated MCP request was accepted' }
     $taskOriginHeaders = $taskHeaders.Clone()

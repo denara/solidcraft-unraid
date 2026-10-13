@@ -62,7 +62,7 @@
  {
   "expect": {
    "bbox": {
-    "body": "Body3",
+    "body": "Body1 (3)",
     "min": [
      40,
      0,

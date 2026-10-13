@@ -2,7 +2,7 @@
 
 use egui::{Color32, Rect, Sense, Stroke, UiBuilder, pos2, vec2};
 use serde_json::json;
-use solvecraft_engine::doc::FeatureKind;
+use solidcraft_engine::doc::FeatureKind;
 
 use crate::theme::Tokens;
 use crate::{SolveApp, icons};
@@ -19,7 +19,7 @@ fn icon_of(k: &FeatureKind) -> &'static str {
         FeatureKind::Sphere { .. } => "sphere",
         FeatureKind::Torus { .. } => "torus",
         FeatureKind::Combine { .. } => "combine",
-        FeatureKind::Pattern { pattern: solvecraft_engine::doc::PatternKind::Rectangular { .. }, .. } => "pattern_rect",
+        FeatureKind::Pattern { pattern: solidcraft_engine::doc::PatternKind::Rectangular { .. }, .. } => "pattern_rect",
         FeatureKind::Pattern { .. } => "pattern_circ",
         FeatureKind::Mirror { .. } => "mirror",
         FeatureKind::ConstructionPlane { .. } => "plane",
@@ -32,7 +32,7 @@ fn icon_of(k: &FeatureKind) -> &'static str {
         FeatureKind::Draft { .. } => "draft",
         FeatureKind::Split { .. } => "split",
         FeatureKind::Move { .. } => "move",
-        FeatureKind::Import { .. } | FeatureKind::MeshImport { .. } => "import",
+        FeatureKind::Import { .. } | FeatureKind::MeshImport { .. } | FeatureKind::MeshConvert { .. } => "import",
         other => crate::workspace::feature_icon(other).unwrap_or("feature"),
     }
 }
@@ -148,7 +148,7 @@ pub fn timeline(app: &mut SolveApp, ui: &mut egui::Ui) {
                     let err = res.and_then(|r| r.error.clone());
                     let warn = res.and_then(|r| r.warning.clone());
                     let rolled = i >= marker;
-                    let is_it = |s: &solvecraft_engine::Sel| matches!(s, solvecraft_engine::Sel::Feature { id: f } if f == id);
+                    let is_it = |s: &solidcraft_engine::Sel| matches!(s, solidcraft_engine::Sel::Feature { id: f } if f == id);
                     let sel = app.session.selection.iter().any(is_it) || app.dialog.as_ref().is_some_and(|d| d.items().iter().any(is_it));
                     if resp.hovered() {
                         hovered = Some(*id);
@@ -212,7 +212,7 @@ pub fn timeline(app: &mut SolveApp, ui: &mut egui::Ui) {
                         let takes = app.dialog.as_ref().and_then(|d| d.active_input()).is_some_and(|i| i.accept & crate::selection::FEATURES != 0);
                         if takes {
                             if let Some(mut d) = app.dialog.take() {
-                                d.pick(&app.session, solvecraft_engine::Sel::Feature { id: *id });
+                                d.pick(&app.session, solidcraft_engine::Sel::Feature { id: *id });
                                 app.dialog = Some(d);
                             }
                         } else {

@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use egui::RichText;
 use serde_json::{Value, json};
-use solvecraft_engine::command_specs;
+use solidcraft_engine::command_specs;
 
 use crate::SolveApp;
 use crate::theme::Tokens;
@@ -38,13 +38,8 @@ impl Keymap {
     }
     pub fn load(&mut self, v: &Value) {
         self.custom =
-            v.as_object().map(|o| o.iter().take(2000).filter_map(|(k, v)| Some((current(k), v.as_str()?.to_string()))).collect()).unwrap_or_default();
+            v.as_object().map(|o| o.iter().take(2000).filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect()).unwrap_or_default();
     }
-}
-
-/// Saved before the command ids were renamed: the current id.
-fn current(id: &str) -> String {
-    solvecraft_engine::legacy_ids::current_id(id).to_string()
 }
 
 /// A key press as a shortcut name: `E`, `Shift+E`, `Ctrl+Alt+K`, `F5`, `Delete`.
@@ -68,7 +63,7 @@ pub fn effective(app: &SolveApp, id: &str) -> Option<String> {
     match app.keymap.custom.get(id) {
         Some(k) if k.is_empty() => None,
         Some(k) => Some(k.clone()),
-        None => solvecraft_engine::find_command(id).and_then(|c| c.shortcut).map(str::to_string),
+        None => solidcraft_engine::find_command(id).and_then(|c| c.shortcut).map(str::to_string),
     }
 }
 
@@ -79,20 +74,20 @@ pub fn commands_for(app: &SolveApp, key: &str) -> Vec<&'static str> {
 
 /// The enabled command a key press runs, if any.
 pub fn command_for(app: &SolveApp, key: &str) -> Option<&'static str> {
-    commands_for(app, key).into_iter().find(|id| solvecraft_engine::find_command(id).is_some_and(|c| c.info(&app.session).enabled))
+    commands_for(app, key).into_iter().find(|id| solidcraft_engine::find_command(id).is_some_and(|c| c.info(&app.session).enabled))
 }
 
 /// Bind `key` to a command (`""` clears it). Refused for reserved keys, and when other commands
 /// use the key unless `replace` (they lose it).
 pub fn bind(app: &mut SolveApp, id: &str, key: &str, replace: bool) -> Result<(), String> {
-    let spec = solvecraft_engine::find_command(id).ok_or_else(|| format!("no command `{id}`"))?;
+    let spec = solidcraft_engine::find_command(id).ok_or_else(|| format!("no command `{id}`"))?;
     if RESERVED.contains(&key) {
         return Err(format!("{key} is used by SolidCraft itself"));
     }
     if !key.is_empty() {
         let others: Vec<&'static str> = commands_for(app, key).into_iter().filter(|o| *o != id).collect();
         if !others.is_empty() && !replace {
-            let names: Vec<&str> = others.iter().filter_map(|o| solvecraft_engine::find_command(o).map(|c| c.label)).collect();
+            let names: Vec<&str> = others.iter().filter_map(|o| solidcraft_engine::find_command(o).map(|c| c.label)).collect();
             return Err(format!("{key} is already used by {}", names.join(", ")));
         }
         for o in others {
@@ -170,6 +165,13 @@ pub fn page(app: &mut SolveApp, ui: &mut egui::Ui) {
                     }
                 });
             }
+            ui.label(
+                RichText::new(
+                    "Select Other: hold the left button still on the model (or right-click › Select Other…) to list everything under the cursor; click again on the same spot to select the next thing there.",
+                )
+                .size(11.0)
+                .color(t.text_dim),
+            );
             ui.separator();
             let q = app.keymap.filter.to_lowercase();
             egui::ScrollArea::both().max_height(330.0).auto_shrink([false, true]).show(ui, |ui| {
@@ -269,7 +271,7 @@ mod tests {
     use super::*;
 
     fn app() -> SolveApp {
-        SolveApp::new(solvecraft_engine::Session::default(), Default::default())
+        SolveApp::new(solidcraft_engine::Session::default(), Default::default())
     }
 
     #[test]

@@ -518,8 +518,22 @@ struct LOut {
 
 @vertex
 fn vs_line(@builtin(vertex_index) vi: u32, @location(0) a: vec3<f32>, @location(1) b: vec3<f32>, @location(2) c: vec4<f32>, @location(3) w: f32) -> LOut {
-    let ca = u.vp * vec4<f32>(a, 1.0);
-    let cb = u.vp * vec4<f32>(b, 1.0);
+    var pa = a;
+    var pb = b;
+    var ca = u.vp * vec4<f32>(a, 1.0);
+    var cb = u.vp * vec4<f32>(b, 1.0);
+    // An end behind the near plane (clip z < 0) has no screen point: its divide flips the
+    // line or drops it whole (ground grid lines running past the eye at a low angle). Cut
+    // the segment at the plane instead; clip space is linear in the world point.
+    if (ca.z < 0.0 && cb.z > 0.0) {
+        let k = ca.z / (ca.z - cb.z);
+        ca = mix(ca, cb, k);
+        pa = mix(a, b, k);
+    } else if (cb.z < 0.0 && ca.z > 0.0) {
+        let k = cb.z / (cb.z - ca.z);
+        cb = mix(cb, ca, k);
+        pb = mix(b, a, k);
+    }
     let half = u.screen.xy * 0.5;
     let sa = ca.xy / max(ca.w, 1e-6) * half;
     let sb = cb.xy / max(cb.w, 1e-6) * half;
@@ -535,9 +549,9 @@ fn vs_line(@builtin(vertex_index) vi: u32, @location(0) a: vec3<f32>, @location(
     let base = select(ca, cb, t > 0.5);
     let off = nrm * s * w * 0.5 + dir * (t * 2.0 - 1.0) * w * 0.5;
     var o: LOut;
-    o.pos = vec4<f32>(base.xy + off / half * base.w, biased_z(select(a, b, t > 0.5), base, 1.0), base.w);
+    o.pos = vec4<f32>(base.xy + off / half * base.w, biased_z(select(pa, pb, t > 0.5), base, 1.0), base.w);
     o.c = c;
-    o.wp = select(a, b, t > 0.5);
+    o.wp = select(pa, pb, t > 0.5);
     return o;
 }
 

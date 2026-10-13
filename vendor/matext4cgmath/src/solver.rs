@@ -92,7 +92,7 @@ pub fn pre_solve_cubic<F: BaseFloat>(p: F, q: F) -> [Complex<F>; 3] {
     res.iter_mut().for_each(|x| {
         let mut f = *x * *x * *x + *x * p + q;
         let mut f_prime = *x * *x * three + p;
-        // SolveCraft: at most 100 steps. Near a double root (the eigenvalues of a
+        // SolidCraft: at most 100 steps. Near a double root (the eigenvalues of a
         // translation matrix) the iteration can cycle forever without meeting the tolerance.
         let mut steps = 0;
         while f.norm() > eps_2 * f_prime.norm() && steps < 100 {
@@ -193,7 +193,7 @@ pub fn pre_solve_quartic<F: BaseFloat>(p: F, q: F, r: F) -> [Complex<F>; 4] {
     res.iter_mut().for_each(|x| {
         let mut f = *x * *x * *x * *x + *x * *x * p + *x * q + r;
         let mut f_prime = *x * *x * *x * four + *x * p * two + q;
-        // SolveCraft: at most 100 steps. Near a double root (the eigenvalues of a
+        // SolidCraft: at most 100 steps. Near a double root (the eigenvalues of a
         // translation matrix) the iteration can cycle forever without meeting the tolerance.
         let mut steps = 0;
         while f.norm() > eps_2 * f_prime.norm() && steps < 100 {

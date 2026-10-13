@@ -48,7 +48,7 @@ jobs:
       - name: Build the book
         run: cargo xtask book
       - name: Build the web app
-        working-directory: apps/solvecraft-web
+        working-directory: apps/solidcraft-web
         run: trunk build --release --public-url /solidcraft/app/
       - name: Assemble the site
         run: |

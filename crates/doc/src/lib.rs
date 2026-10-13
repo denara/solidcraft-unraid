@@ -1,4 +1,4 @@
-//! The SolveCraft document: user and model parameters, and a parametric timeline of features
+//! The SolidCraft document: user and model parameters, and a parametric timeline of features
 //! (sketches, extrudes, revolves, fillets, primitives, combines…). Evaluating the timeline with
 //! the kernel produces the model (bodies and solved sketches). Evaluation is incremental: a
 //! feature is recomputed only when it, a parameter it uses, or an earlier feature changed.
@@ -22,11 +22,15 @@ pub mod face_anchor;
 pub use face_anchor::{FaceAnchor, FaceAttachmentStatus};
 pub mod format;
 mod format_offsets;
+mod history_names;
 pub use format_offsets::whole_profile_selection_from_value;
 pub mod joints;
+mod lineage;
 pub mod motion;
+mod name_lookup;
 pub mod naming;
 mod params;
+mod piece_names;
 mod profile_refs;
 pub use profile_refs::{capture_profile_selection, profile_selection_indices};
 pub mod plastic;
@@ -43,8 +47,8 @@ pub use eval::{
     state_in_frame_at, through_all_distance, world_state,
 };
 pub use params::{ParamRow, ParamUser, cycles};
-pub use solvecraft_kernel as kernel;
-pub use solvecraft_sketch as sketch;
+pub use solidcraft_kernel as kernel;
+pub use solidcraft_sketch as sketch;
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum DocError {
@@ -55,9 +59,9 @@ pub enum DocError {
     #[error("unknown {0}")]
     Unknown(String),
     #[error(transparent)]
-    Sketch(#[from] solvecraft_sketch::SketchError),
+    Sketch(#[from] solidcraft_sketch::SketchError),
     #[error(transparent)]
-    Kernel(#[from] solvecraft_kernel::KernelError),
+    Kernel(#[from] solidcraft_kernel::KernelError),
 }
 
 pub type Result<T> = std::result::Result<T, DocError>;

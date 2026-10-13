@@ -1,7 +1,7 @@
 use crate::context_menu::{self, Target};
 use crate::scenario::Harness;
 use serde_json::json;
-use solvecraft_engine::Sel;
+use solidcraft_engine::Sel;
 
 #[test]
 fn replaced_body_name_uses_evaluated_owner_in_browser_and_component_actions() {
@@ -104,19 +104,19 @@ fn occurrence_move_dialog_keeps_other_pending_moves_and_reuses_initial_baseline(
     context_menu::run_item(&mut h.app, movement, egui::Pos2::ZERO);
     let mut m = h.app.tree.occurrence_move.clone().unwrap();
     m.pivot =
-        Some(solvecraft_engine::doc::apply_point(&h.app.session.occurrence_placement(&[second]).unwrap().world, solvecraft_engine::geom::Vec3::ZERO));
+        Some(solidcraft_engine::doc::apply_point(&h.app.session.occurrence_placement(&[second]).unwrap().world, solidcraft_engine::geom::Vec3::ZERO));
     m.translate = [10.0, 0.0, 0.0];
     crate::browser::apply_occurrence_move(&mut h.app, &m);
     let at = h.app.session.occurrence_placement(&[second]).unwrap();
-    assert!((solvecraft_engine::doc::apply_point(&at.world, solvecraft_engine::geom::Vec3::ZERO).x - 65.0).abs() < 1e-8);
+    assert!((solidcraft_engine::doc::apply_point(&at.world, solidcraft_engine::geom::Vec3::ZERO).x - 65.0).abs() < 1e-8);
     m.translate = [3.0, 0.0, 0.0];
     crate::browser::apply_occurrence_move(&mut h.app, &m);
     let at = h.app.session.occurrence_placement(&[second]).unwrap();
-    assert!((solvecraft_engine::doc::apply_point(&at.world, solvecraft_engine::geom::Vec3::ZERO).x - 58.0).abs() < 1e-8);
+    assert!((solidcraft_engine::doc::apply_point(&at.world, solidcraft_engine::geom::Vec3::ZERO).x - 58.0).abs() < 1e-8);
     assert_eq!(h.app.session.pending_moves[&first], first_pending);
     crate::browser::revert_occurrence_dialog(&mut h.app, &m);
     let restored = h.app.session.occurrence_placement(&[second]).unwrap();
-    assert!((solvecraft_engine::doc::apply_point(&restored.world, solvecraft_engine::geom::Vec3::ZERO).x - 55.0).abs() < 1e-8);
+    assert!((solidcraft_engine::doc::apply_point(&restored.world, solidcraft_engine::geom::Vec3::ZERO).x - 55.0).abs() < 1e-8);
     assert_eq!(h.app.session.pending_moves[&first], first_pending);
     h.app.run("component.revert_position", json!({"occurrences":[second]})).unwrap();
     context_menu::run_item(&mut h.app, movement, egui::Pos2::ZERO);
@@ -201,4 +201,32 @@ fn occurrence_nested_shared_child_has_distinct_rows_and_scope() {
     let delete = items.iter().find(|i| i.id == "ui.delete").unwrap();
     context_menu::run_item(&mut h.app, delete, egui::Pos2::ZERO);
     assert!(h.app.menu.confirm.is_some(), "shared child deletion must communicate scope before removing both renderings");
+}
+
+#[test]
+fn occurrence_distance_editor_reads_inches_and_keeps_four_digits_in_model_space() {
+    let (mut h, _, first, _) = fixture();
+    h.app.run("document.units", json!({"units":"in"})).unwrap();
+    let target = Target::Occurrence { path: vec![first] };
+    let items = context_menu::items(&h.app, &target);
+    let movement = items.iter().find(|i| i.id == "ui.moveOccurrence").unwrap();
+    context_menu::run_item(&mut h.app, movement, egui::Pos2::ZERO);
+    h.settle();
+    let original = h.app.session.doc.to_json();
+    let point = h.call("ui.at", json!({"handle":"occurrence-move:distance:0"}));
+    let at = &point["result"];
+    h.call("ui.click", json!({"x":at[0],"y":at[1],"double":true}));
+    h.settle();
+    h.step(&json!({"key":"A","cmd":true})).unwrap();
+    h.step(&json!({"text":"1.2345"})).unwrap();
+    h.step(&json!({"key":"Enter"})).unwrap();
+    let m = h.app.tree.occurrence_move.as_ref().unwrap();
+    assert!((m.translate[0] - 31.3563).abs() < 1e-8, "{:?}", m.translate);
+    assert_eq!(h.app.session.doc.to_json(), original, "pending movement does not alter the stored design");
+    h.app.session.selection = vec![Sel::Occurrence { path: vec![first] }];
+    let bounds = crate::viewport::selection_bounds(&h.app).unwrap();
+    assert!((bounds.min.x - 31.3563).abs() < 1e-6);
+    let movement = h.app.tree.occurrence_move.clone().unwrap();
+    crate::browser::revert_occurrence_dialog(&mut h.app, &movement);
+    assert!(h.app.session.pending_moves.is_empty());
 }

@@ -3,9 +3,9 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
-use solvecraft_doc::joints;
-use solvecraft_doc::{IDENTITY, Mat, apply_point, mat_mul};
-use solvecraft_geom::{Aabb3, Mesh, Vec3};
+use solidcraft_doc::joints;
+use solidcraft_doc::{IDENTITY, Mat, apply_point, mat_mul};
+use solidcraft_geom::{Aabb3, Mesh, Vec3};
 
 use crate::params::bad;
 use crate::{Result, Session};

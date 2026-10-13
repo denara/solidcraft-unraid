@@ -1,5 +1,5 @@
 [
-  {"note": "User bug 3 (owner solvecraft-ui): Move opens at 0, and dragging its X arrow moves only along X. The X arrow must be published as handle move_x (scenario::publish_handle)."},
+  {"note": "User bug 3 (owner solidcraft-ui): Move opens at 0, and dragging its X arrow moves only along X. The X arrow must be published as handle move_x (scenario::publish_handle)."},
   {"start": "sketch.create"},
   {"click": {"plane": "XY"}},
   {"start": "sketch.rectangle.two_point"},

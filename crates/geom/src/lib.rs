@@ -1,14 +1,21 @@
-//! Geometry foundation for SolveCraft: 2D/3D vectors, sketch planes, axis-aligned boxes and
-//! triangle meshes with their measures (volume, area, centroid). Units are millimetres.
+//! Geometry foundation for SolidCraft: 2D/3D vectors, sketch planes, axis-aligned boxes,
+//! triangle meshes with their measures (volume, area, centroid), and freeform surface maths
+//! (B-spline basis and NURBS surfaces in [`bspline`], one-surface fills of closed loops in
+//! [`fill`], T-splines in [`tspline`]). Units are millimetres.
 //!
-//! This crate has no knowledge of sketches, documents or the B-rep kernel; every other crate
+//! This crate has no knowledge of sketches, documents or a modelling backend; every other crate
 //! builds on it.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
+pub mod brep;
+pub mod bspline;
+pub mod env;
+pub mod fill;
 mod mesh;
 mod plane;
 mod profile;
+pub mod tspline;
 mod vec;
 
 pub use mesh::{Aabb3, InsideIndex, Mesh, MeshMeasure};

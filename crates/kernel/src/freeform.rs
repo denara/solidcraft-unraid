@@ -1,7 +1,7 @@
 //! Free-form profile edges: Béziers (cubic and higher) as B-spline curves and conics as rational quadratic
 //! NURBS curves (exact ellipses, parabolas and hyperbolas from sketches).
 
-use solvecraft_geom::{Plane, Seg2};
+use solidcraft_geom::{Plane, Seg2};
 use truck_modeling as mt;
 
 use crate::body::p3;
@@ -21,7 +21,7 @@ pub(crate) fn edge(plane: &Plane, s: &Seg2, a: &mt::Vertex, b: &mt::Vertex) -> O
             Some(mt::Edge::new(a, b, mt::Curve::NurbsCurve(curve)))
         }
         Seg2::Bezier { n, ref p } => {
-            let inner = p.get(1..(n as usize).clamp(1, solvecraft_geom::MAX_BEZIER_DEGREE))?;
+            let inner = p.get(1..(n as usize).clamp(1, solidcraft_geom::MAX_BEZIER_DEGREE))?;
             Some(mt::builder::bezier(a, b, inner.iter().map(|q| p3(plane.to_world(*q))).collect()))
         }
         Seg2::Line { .. } | Seg2::Arc { .. } => None,

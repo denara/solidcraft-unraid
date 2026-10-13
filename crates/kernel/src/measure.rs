@@ -1,5 +1,5 @@
 use serde::Serialize;
-use solvecraft_geom::{Aabb3, Mesh, Vec3};
+use solidcraft_geom::{Aabb3, Mesh, Vec3};
 
 use crate::Result;
 use crate::body::Body;

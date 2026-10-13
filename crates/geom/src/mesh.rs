@@ -76,6 +76,40 @@ pub struct Mesh {
     pub edge_faces: Vec<Vec<u32>>,
 }
 
+fn boxes_meet(a: &Aabb3, b: &Aabb3) -> bool {
+    a.min.x <= b.max.x && b.min.x <= a.max.x && a.min.y <= b.max.y && b.min.y <= a.max.y && a.min.z <= b.max.z && b.min.z <= a.max.z
+}
+
+/// Two triangles that pass through each other (see [`Mesh::crosses`]).
+fn triangles_cross(t: &[Vec3; 3], u: &[Vec3; 3], tol: f64) -> bool {
+    // Signed distances of one triangle's corners from the other's plane, when they lie more
+    // than `tol` to both sides of it.
+    let sides = |tri: &[Vec3; 3], plane: &[Vec3; 3]| -> Option<(Vec3, [f64; 3])> {
+        let n = (plane[1] - plane[0]).cross(plane[2] - plane[0]).normalized()?;
+        let d = [n.dot(tri[0] - plane[0]), n.dot(tri[1] - plane[0]), n.dot(tri[2] - plane[0])];
+        let (lo, hi) = d.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+        (lo < -tol && hi > tol).then_some((n, d))
+    };
+    let (Some((nu, dt)), Some((nt, du))) = (sides(t, u), sides(u, t)) else { return false };
+    let Some(line) = nt.cross(nu).normalized() else { return false };
+    // Where a triangle's edges pass through the other's plane, measured along the line the
+    // two planes share.
+    let reach = |tri: &[Vec3; 3], d: &[f64; 3]| -> (f64, f64) {
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        for (i, j) in [(0, 1), (1, 2), (2, 0)] {
+            let (p, q, dp, dq) = (tri[i], tri[j], d[i], d[j]);
+            if (dp < 0.0) != (dq < 0.0) && dp != dq {
+                let at = line.dot(p + (q - p) * (dp / (dp - dq)));
+                lo = lo.min(at);
+                hi = hi.max(at);
+            }
+        }
+        (lo, hi)
+    };
+    let ((t0, t1), (u0, u1)) = (reach(t, &dt), reach(u, &du));
+    t1.min(u1) - t0.max(u0) > tol
+}
+
 /// Mass properties of a closed mesh.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct MeshMeasure {
@@ -279,6 +313,86 @@ impl Mesh {
     pub fn contains(&self, p: Vec3) -> bool {
         let dirs = [Vec3::new(0.5773, 0.5774, 0.5776), Vec3::new(-0.6123, 0.3141, 0.7254), Vec3::new(0.2718, -0.8414, 0.4673)];
         dirs.iter().filter(|d| self.ray_crossings(p, **d) % 2 == 1).count() >= 2
+    }
+
+    /// Whether the surfaces of two meshes pass through each other by more than `tol`: some
+    /// triangle of one has corners more than `tol` to both sides of a triangle of the other,
+    /// and the reverse, and they share a stretch of the line where their planes meet longer
+    /// than `tol`. Faces that only touch, lie on each other or stop on the other surface don't
+    /// count, nor do two facetings of one curved surface that are within `tol` of it. Bodies
+    /// can still overlap without crossing: one inside the other, or sharing a slab between
+    /// faces that are parallel or in one plane.
+    pub fn crosses(&self, o: &Mesh, tol: f64) -> bool {
+        if !tol.is_finite() {
+            return false;
+        }
+        let tol = tol.max(0.0);
+        let (ba, bb) = (self.bounds(), o.bounds());
+        let region = Aabb3 { min: ba.min.max(bb.min), max: ba.max.min(bb.max) };
+        if region.is_empty() {
+            return false;
+        }
+        let near = |m: &Mesh| -> Vec<([Vec3; 3], Aabb3)> {
+            m.triangles
+                .iter()
+                .filter_map(|t| {
+                    let t = m.tri(t)?;
+                    let mut bx = Aabb3::EMPTY;
+                    t.iter().for_each(|p| bx.add(*p));
+                    (!bx.is_empty() && boxes_meet(&bx, &region)).then_some((t, bx))
+                })
+                .collect()
+        };
+        let (ta, tb) = (near(self), near(o));
+        if ta.is_empty() || tb.is_empty() {
+            return false;
+        }
+        // A grid over the shared box holds the other mesh's triangles.
+        let n = ((tb.len() as f64).cbrt().ceil() as usize).clamp(1, 24);
+        let size = region.size();
+        let cell = |v: f64, lo: f64, s: f64| -> usize { if s > 0.0 { (((v - lo) / s * n as f64).floor().max(0.0) as usize).min(n - 1) } else { 0 } };
+        let span = |bx: &Aabb3| -> [(usize, usize); 3] {
+            [
+                (cell(bx.min.x, region.min.x, size.x), cell(bx.max.x, region.min.x, size.x)),
+                (cell(bx.min.y, region.min.y, size.y), cell(bx.max.y, region.min.y, size.y)),
+                (cell(bx.min.z, region.min.z, size.z), cell(bx.max.z, region.min.z, size.z)),
+            ]
+        };
+        let mut cells: Vec<Vec<u32>> = vec![Vec::new(); n * n * n];
+        for (i, (_, bx)) in tb.iter().enumerate() {
+            let [x, y, z] = span(bx);
+            for ix in x.0..=x.1 {
+                for iy in y.0..=y.1 {
+                    for iz in z.0..=z.1 {
+                        if let Some(c) = cells.get_mut((ix * n + iy) * n + iz) {
+                            c.push(i as u32);
+                        }
+                    }
+                }
+            }
+        }
+        // Per triangle of `o`: the last triangle of `self` tested against it, plus one.
+        let mut seen = vec![0usize; tb.len()];
+        for (i, (t, bx)) in ta.iter().enumerate() {
+            let [x, y, z] = span(bx);
+            for ix in x.0..=x.1 {
+                for iy in y.0..=y.1 {
+                    for iz in z.0..=z.1 {
+                        for j in cells.get((ix * n + iy) * n + iz).into_iter().flatten() {
+                            let (Some(mark), Some((u, ub))) = (seen.get_mut(*j as usize), tb.get(*j as usize)) else { continue };
+                            if *mark == i + 1 {
+                                continue;
+                            }
+                            *mark = i + 1;
+                            if boxes_meet(bx, ub) && triangles_cross(t, u, tol) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// Closest intersection of a ray with the mesh: (distance along `dir`, triangle index).

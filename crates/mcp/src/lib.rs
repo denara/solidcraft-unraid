@@ -1,4 +1,4 @@
-//! SolveCraft MCP server.
+//! SolidCraft MCP server.
 //!
 //! JSON-RPC 2.0 over stdio (newline-delimited), implementing the MCP lifecycle, tools and
 //! resources. Tools map onto the control-channel methods (`engine.execute`, `document.inspect`,

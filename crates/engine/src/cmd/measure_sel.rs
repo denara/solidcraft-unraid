@@ -3,7 +3,7 @@
 //! points) and, where both have a direction (planar faces, straight edges), the angle.
 
 use serde_json::{Value, json};
-use solvecraft_geom::{Mesh, Vec3};
+use solidcraft_geom::{Mesh, Vec3};
 
 use crate::params::bad;
 use crate::{Result, Sel, Session};

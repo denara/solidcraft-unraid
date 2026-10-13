@@ -1,4 +1,4 @@
-//! The SolveCraft engine.
+//! The SolidCraft engine.
 //!
 //! Every user-visible action is a command with a stable, dotted, lower-case id
 //! (`solid.extrude`, `sketch.create`, `solid.fillet`, `timeline.rollback`). Commands take JSON
@@ -8,9 +8,9 @@
 #![forbid(unsafe_code)]
 
 pub mod cmd;
+pub mod crash;
 pub mod frames;
 pub mod fuzz;
-pub mod legacy_ids;
 pub mod licences;
 pub mod occurrences;
 pub mod params;
@@ -22,16 +22,16 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use solvecraft_doc::{Document, Model, ModelState};
-use solvecraft_geom::Vec3;
+use solidcraft_doc::{Document, Model, ModelState};
+use solidcraft_geom::Vec3;
 
 pub use cmd::{CommandInfo, CommandSpec, auto_operation, command_specs, find_command};
-pub use solvecraft_doc as doc;
-pub use solvecraft_geom as geom;
-pub use solvecraft_io as io;
-pub use solvecraft_kernel as kernel;
-pub use solvecraft_render as render;
-pub use solvecraft_sketch as sketch;
+pub use solidcraft_doc as doc;
+pub use solidcraft_geom as geom;
+pub use solidcraft_io as io;
+pub use solidcraft_kernel as kernel;
+pub use solidcraft_render as render;
+pub use solidcraft_sketch as sketch;
 
 /// Longest accepted request line on the JSON-lines channels (MCP over stdio and the control
 /// server over loopback), so both refuse runaway input at the same size.
@@ -52,23 +52,23 @@ pub enum EngineError {
     Internal(String, String),
 }
 
-impl From<solvecraft_doc::DocError> for EngineError {
-    fn from(e: solvecraft_doc::DocError) -> Self {
+impl From<solidcraft_doc::DocError> for EngineError {
+    fn from(e: solidcraft_doc::DocError) -> Self {
         EngineError::Other(e.to_string())
     }
 }
-impl From<solvecraft_sketch::SketchError> for EngineError {
-    fn from(e: solvecraft_sketch::SketchError) -> Self {
+impl From<solidcraft_sketch::SketchError> for EngineError {
+    fn from(e: solidcraft_sketch::SketchError) -> Self {
         EngineError::Other(e.to_string())
     }
 }
-impl From<solvecraft_kernel::KernelError> for EngineError {
-    fn from(e: solvecraft_kernel::KernelError) -> Self {
+impl From<solidcraft_kernel::KernelError> for EngineError {
+    fn from(e: solidcraft_kernel::KernelError) -> Self {
         EngineError::Other(e.to_string())
     }
 }
-impl From<solvecraft_io::IoError> for EngineError {
-    fn from(e: solvecraft_io::IoError) -> Self {
+impl From<solidcraft_io::IoError> for EngineError {
+    fn from(e: solidcraft_io::IoError) -> Self {
         EngineError::Other(e.to_string())
     }
 }
@@ -107,6 +107,15 @@ pub enum Sel {
     SketchPoint {
         id: String,
     },
+    /// Geometry of a different sketch, retained for projection preselection.
+    ExternalSketchCurve {
+        sketch: u64,
+        id: String,
+    },
+    ExternalSketchPoint {
+        sketch: u64,
+        id: String,
+    },
     /// A constraint or dimension (by id) of the active sketch.
     SketchConstraint {
         id: String,
@@ -137,7 +146,7 @@ pub struct Snapshot {
     pub label: String,
     pub doc: Arc<Document>,
     pub active_sketch: Option<u64>,
-    pub pending_moves: std::collections::BTreeMap<u64, solvecraft_doc::Mat>,
+    pub pending_moves: std::collections::BTreeMap<u64, solidcraft_doc::Mat>,
 }
 
 /// What some commands would make, evaluated on a scratch copy of a session
@@ -148,6 +157,8 @@ pub struct Preview {
     pub before: Arc<ModelState>,
     /// The model after the commands.
     pub after: Arc<ModelState>,
+    /// What each command replied (as `execute` returns it).
+    pub replies: Vec<Value>,
 }
 
 /// Prepared world geometry depends on design/model identity and placement context, not
@@ -155,15 +166,15 @@ pub struct Preview {
 #[derive(Clone)]
 struct WorldCache {
     doc: Arc<Document>,
-    model: Arc<solvecraft_doc::ModelState>,
-    pending_moves: std::collections::BTreeMap<u64, solvecraft_doc::Mat>,
+    model: Arc<solidcraft_doc::ModelState>,
+    pending_moves: std::collections::BTreeMap<u64, solidcraft_doc::Mat>,
     active_component: u64,
     active_occurrence_path: Option<Vec<u64>>,
-    world: Arc<solvecraft_doc::ModelState>,
+    world: Arc<solidcraft_doc::ModelState>,
 }
 
 impl WorldCache {
-    fn matches(&self, session: &Session, model: &Arc<solvecraft_doc::ModelState>) -> bool {
+    fn matches(&self, session: &Session, model: &Arc<solidcraft_doc::ModelState>) -> bool {
         Arc::ptr_eq(&self.doc, &session.doc)
             && Arc::ptr_eq(&self.model, model)
             && self.pending_moves == session.pending_moves
@@ -182,6 +193,9 @@ pub struct Session {
     pub active_sketch: Option<u64>,
     pub selection: Vec<Sel>,
     pub path: Option<String>,
+    /// One-shot display-only notification during doc.open, before authoritative evaluation.
+    /// Interactive loaders may show it provisionally; it never becomes model state.
+    pub open_preview: Option<Box<dyn Fn(solidcraft_io::DesignPreview) + Send + Sync>>,
     saved: Arc<Document>,
     /// Messages for the command line / log.
     pub log: Vec<String>,
@@ -194,11 +208,11 @@ pub struct Session {
     /// The placement used when authoring shared component geometry.
     pub active_occurrence_path: Option<Vec<u64>>,
     /// Occurrence moves not captured yet (Capture Position keeps them, a recompute drops them).
-    pub pending_moves: std::collections::BTreeMap<u64, solvecraft_doc::Mat>,
+    pub pending_moves: std::collections::BTreeMap<u64, solidcraft_doc::Mat>,
     world_cache: std::sync::Mutex<Option<WorldCache>>,
     occurrence_visibility_cache: std::sync::Mutex<Option<occurrences::VisibilityCache>>,
     /// Features copied with `timeline.copy` (pasted by `timeline.paste`).
-    pub clipboard: Vec<solvecraft_doc::Feature>,
+    pub clipboard: Vec<solidcraft_doc::Feature>,
     /// Section Analysis: a view cut by a plane (origin, unit normal; the normal side is hidden).
     pub section: Option<(Vec3, Vec3)>,
     /// Surface analysis shading the model (zebra, draft, curvature map).
@@ -209,6 +223,22 @@ pub struct Session {
     /// commands are undone however long the undo history is.
     pub(crate) checkpoints: Vec<Checkpoint>,
     next_checkpoint: u64,
+    /// Record this session's top-level commands in the crash journal (the app's own design;
+    /// never previews or other scratch sessions). See [`crash`].
+    pub crash_journal: bool,
+    /// Full model evaluations (`refresh`), for tests.
+    #[cfg(test)]
+    pub(crate) evaluations: usize,
+}
+
+/// A sketch changed by one frame of an interactive gesture (`live: true`).
+#[derive(Clone, Debug)]
+pub struct LiveEdit {
+    pub sketch: u64,
+    /// What the frame's solve found: a full solve's report, or, when the sketch was solved
+    /// without a rank analysis, its last report's degrees of freedom and determined flags (a
+    /// drag does not change them; the evaluation at the gesture's end brings them up to date).
+    pub report: solidcraft_sketch::SolveReport,
 }
 
 /// The design, active sketch, pending positions and undo history at an `edit.checkpoint`.
@@ -217,7 +247,7 @@ pub(crate) struct Checkpoint {
     pub id: u64,
     pub doc: Arc<Document>,
     pub active_sketch: Option<u64>,
-    pub pending_moves: std::collections::BTreeMap<u64, solvecraft_doc::Mat>,
+    pub pending_moves: std::collections::BTreeMap<u64, solidcraft_doc::Mat>,
     pub undo: Vec<Snapshot>,
     pub redo: Vec<Snapshot>,
 }
@@ -280,6 +310,7 @@ impl Session {
             active_sketch: None,
             selection: Vec::new(),
             path: None,
+            open_preview: None,
             log: Vec::new(),
             revision: 1,
             auto_project: true,
@@ -294,6 +325,9 @@ impl Session {
             checkpoints: Vec::new(),
             next_checkpoint: 1,
             visibility: Visibility::default(),
+            #[cfg(test)]
+            evaluations: 0,
+            crash_journal: false,
         }
     }
 
@@ -321,10 +355,19 @@ impl Session {
         Arc::make_mut(&mut self.doc)
     }
 
+    /// Prepared placements only: optional save caches must not compute a cold world.
+    pub(crate) fn cached_world_state(&self) -> Option<Arc<solidcraft_doc::ModelState>> {
+        let state = self.model.state();
+        if self.doc.occurrences.is_empty() {
+            return Some(state);
+        }
+        self.world_cache.lock().ok()?.as_ref().filter(|cache| cache.matches(self, &state)).map(|cache| cache.world.clone())
+    }
+
     /// Re-evaluate the model after a document change.
     /// The model placed in the world through component occurrences (and uncaptured moves): what
     /// to display, measure, pick and export. The same as `model.state()` without components.
-    pub fn world_state(&self) -> Arc<solvecraft_doc::ModelState> {
+    pub fn world_state(&self) -> Arc<solidcraft_doc::ModelState> {
         let st = self.model.state();
         if self.doc.occurrences.is_empty() {
             return st;
@@ -336,7 +379,7 @@ impl Session {
             return cached.world.clone();
         }
         let mut w = if self.pending_moves.is_empty() {
-            solvecraft_doc::world_state(&self.doc, &st)
+            solidcraft_doc::world_state(&self.doc, &st)
         } else {
             let mut d = (*self.doc).clone();
             for o in &mut d.occurrences {
@@ -344,26 +387,27 @@ impl Session {
                     o.transform = *m;
                 }
             }
-            solvecraft_doc::world_state(&d, &st)
+            solidcraft_doc::world_state(&d, &st)
         };
         // Sketch definitions are displayed once, at the placement currently being authored.
         if self.active_occurrence_path.is_some() && self.active_component != 0 {
-            let first = self.occurrence_placement(&self.doc.first_path(self.active_component)).map(|p| p.world).unwrap_or(solvecraft_doc::IDENTITY);
-            if let Some(inverse) = solvecraft_doc::mat_inverse(&first) {
-                let delta = solvecraft_doc::mat_mul(&self.active_component_frame(), &inverse);
+            let first = self.occurrence_placement(&self.doc.first_path(self.active_component)).map(|p| p.world).unwrap_or(solidcraft_doc::IDENTITY);
+            if let Some(inverse) = solidcraft_doc::mat_inverse(&first) {
+                let delta = solidcraft_doc::mat_mul(&self.active_component_frame(), &inverse);
                 for sketch in w.sketches.iter_mut().filter(|sk| self.doc.feature(sk.feature).is_some_and(|f| f.component == self.active_component)) {
+                    let sketch = Arc::make_mut(sketch);
                     let plane = sketch.plane;
-                    if let Some(mapped) = solvecraft_geom::Plane::new(
-                        solvecraft_doc::apply_point(&delta, plane.origin),
-                        solvecraft_doc::apply_vector(&delta, plane.x),
-                        solvecraft_doc::apply_vector(&delta, plane.y),
+                    if let Some(mapped) = solidcraft_geom::Plane::new(
+                        solidcraft_doc::apply_point(&delta, plane.origin),
+                        solidcraft_doc::apply_vector(&delta, plane.x),
+                        solidcraft_doc::apply_vector(&delta, plane.y),
                     ) {
                         sketch.plane = mapped;
                     }
                     for wire in &mut sketch.sketch.wires {
-                        if wire.space == solvecraft_doc::sketch::WireSpace::Component {
+                        if wire.space == solidcraft_doc::sketch::WireSpace::Component {
                             for point in wire.pts.iter_mut().chain(&mut wire.fit) {
-                                *point = solvecraft_doc::apply_point(&delta, *point);
+                                *point = solidcraft_doc::apply_point(&delta, *point);
                             }
                         }
                     }
@@ -386,6 +430,10 @@ impl Session {
 
     pub fn refresh(&mut self) {
         self.model.evaluate(&self.doc);
+        #[cfg(test)]
+        {
+            self.evaluations += 1;
+        }
         self.revision += 1;
         self.prune_occurrence_state();
         // Joints follow the geometry their origins snap to.
@@ -399,10 +447,65 @@ impl Session {
         }
     }
 
+    /// Show the sketch a live frame changed, leaving the features after it as they were last
+    /// evaluated (marked stale); a full `refresh` when the model cannot show it that way.
+    fn refresh_live(&mut self, edit: LiveEdit) {
+        let sketch = self.doc.sketch(edit.sketch).ok().cloned();
+        if sketch.is_some_and(|sketch| self.model.show_live_sketch(edit.sketch, sketch, edit.report)) {
+            self.revision += 1;
+        } else {
+            self.refresh();
+        }
+    }
+
+    /// The sketches whose last evaluation solved, each with its own parameter-driven values
+    /// (taken before a value edit, for [`Session::settle_value_edit`]).
+    pub(crate) fn solved_sketches(&self) -> SketchValues {
+        self.model
+            .results
+            .iter()
+            .filter_map(|r| r.state.sketch(r.id).filter(|k| k.report.keeps_orientation()).map(|k| (r.id, own_values(&k.sketch))))
+            .collect()
+    }
+
+    /// After the document's values changed (parameters, a configuration, the units): evaluate,
+    /// and refuse the edit when a sketch that solved before no longer does, or turns over,
+    /// because its own parameter-driven values changed (the command fails, so `execute`
+    /// restores the document's values and geometry). A sketch broken by a change upstream
+    /// (a projected or linked edge moved) is not the edit's to refuse: it carries a warning,
+    /// as before. Otherwise store each sketch whose values changed as solved, so the next edit
+    /// continues from it (see `Model::adopt_solved_sketches`).
+    pub(crate) fn settle_value_edit(&mut self, solved_before: &SketchValues) -> Result<()> {
+        self.refresh();
+        for r in &self.model.results {
+            let (Some(before), Some(k)) = (solved_before.get(&r.id), r.state.sketch(r.id)) else { continue };
+            if !k.report.keeps_orientation() && own_values(&k.sketch) != *before {
+                let why = k.report.failure(|f| format!("its constraints would conflict ({f})"));
+                return Err(EngineError::Other(format!("sketch `{}`: {why}; the values were not changed", r.name)));
+            }
+        }
+        // Checked first: storing makes the document unique (a copy when the undo step shares it).
+        if self.model.edited_sketches(&self.doc).next().is_some() {
+            self.model.adopt_solved_sketches(Arc::make_mut(&mut self.doc));
+        }
+        Ok(())
+    }
+
     /// Run a command with JSON parameters (no dialogs). Undoable commands record an undo step
     /// when they change the document; a failing or panicking command leaves it unchanged.
+    ///
+    /// A command that takes `live` ([`CommandSpec::live`]) run with `live: true` is one frame of
+    /// an interactive gesture: the model shows its sketch's new solution and keeps every later
+    /// feature's last result (stale) instead of evaluating them. Any other command that reads
+    /// the model ([`CommandSpec::reads_model`]) first evaluates a stale model in full, so the
+    /// gesture's end (`sketch.drag_end`, or whatever runs next after an abandoned gesture) brings
+    /// the model up to date before anything reads it.
     pub fn execute(&mut self, id: &str, params: &Value) -> Result<Value> {
         let spec = find_command(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
+        let live = spec.live.filter(|_| params.get("live").and_then(Value::as_bool) == Some(true));
+        if live.is_none() && spec.reads_model && self.model.is_stale() {
+            self.refresh();
+        }
         (spec.enabled)(self).map_err(|why| EngineError::Disabled(spec.id.to_string(), why))?;
         let before = Snapshot {
             label: spec.label.to_string(),
@@ -412,12 +515,21 @@ impl Session {
         };
         let null = Value::Object(Default::default());
         let params = if params.is_null() { &null } else { params };
+        let given = params;
         // Picks in the world go into their component's frame (once: commands run by commands
         // already have them there).
         let (_nested, outermost) = frames::Nested::enter(spec.id);
         let mapped = if outermost { frames::to_local(self, spec.id, params) } else { None };
         let params = mapped.as_ref().unwrap_or(params);
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (spec.run)(self, params)));
+        if outermost {
+            crash::command_begin(self, spec.id, given);
+        }
+        let scope = crash::Scope::enter();
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match live {
+            Some(run) => run(self, params),
+            None => (spec.run)(self, params).map(|v| (v, None)),
+        }));
+        drop(scope);
         let r = match r {
             Ok(r) => r,
             Err(p) => {
@@ -425,9 +537,20 @@ impl Session {
                 Err(EngineError::Internal(spec.id.to_string(), msg))
             }
         };
+        if outermost && crash::enabled() {
+            // A failed command leaves the design as it was (restored below).
+            let failed = r.as_ref().err().map(ToString::to_string);
+            let after = if failed.is_some() { &before.doc } else { &self.doc };
+            // Commands that only read leave no trace (the journal keeps what a replay needs).
+            let changed = !Arc::ptr_eq(&self.doc, &before.doc)
+                || self.active_sketch != before.active_sketch
+                || self.pending_moves != before.pending_moves
+                || spec.id.starts_with("select.");
+            crash::command_done(self.crash_journal, changed, &before.doc, after, spec.id, given, failed.map_or(Ok(()), Err));
+        }
         let changed = !Arc::ptr_eq(&self.doc, &before.doc);
         match r {
-            Ok(v) => {
+            Ok((v, live_edit)) => {
                 let v = if changed { self.with_created(spec.id, params, &before, v) } else { v };
                 if changed {
                     if spec.undoable {
@@ -437,7 +560,10 @@ impl Session {
                         }
                         self.redo.clear();
                     }
-                    self.refresh();
+                    match live_edit {
+                        Some(edit) => self.refresh_live(edit),
+                        None => self.refresh(),
+                    }
                 }
                 Ok(v)
             }
@@ -525,6 +651,7 @@ impl Session {
             active_sketch: self.active_sketch,
             selection: self.selection.clone(),
             path: None,
+            open_preview: None,
             saved: self.saved.clone(),
             log: Vec::new(),
             revision: self.revision,
@@ -540,6 +667,9 @@ impl Session {
             checkpoints: Vec::new(),
             next_checkpoint: 1,
             visibility: self.visibility.clone(),
+            #[cfg(test)]
+            evaluations: 0,
+            crash_journal: false,
         }
     }
 
@@ -579,12 +709,12 @@ impl Session {
     /// A `timeline.redefine` is shown even while the timeline is rolled back to the feature
     /// being edited.
     pub fn preview(&self, commands: &[(String, Value)]) -> Result<Preview> {
-        self.scratch().preview_in_place(commands).map(|after| Preview { before: self.model.state(), after: after.model.state() })
+        self.scratch().preview_in_place(commands).map(|(after, replies)| Preview { before: self.model.state(), after: after.model.state(), replies })
     }
 
     /// The same evaluated preview in occurrence coordinates, including uncaptured moves.
     pub fn preview_world(&self, commands: &[(String, Value)]) -> Result<Preview> {
-        self.scratch().preview_in_place(commands).map(|after| Preview { before: self.world_state(), after: after.world_state() })
+        self.scratch().preview_in_place(commands).map(|(after, replies)| Preview { before: self.world_state(), after: after.world_state(), replies })
     }
 
     /// World preview with each session's visibility applied, including new body placements.
@@ -595,15 +725,17 @@ impl Session {
             shown.bodies.retain(|body| session.body_visible(&body.name));
             Arc::new(shown)
         };
-        self.scratch().preview_in_place(commands).map(|after| Preview { before: visible(self), after: visible(&after) })
+        self.scratch().preview_in_place(commands).map(|(after, replies)| Preview { before: visible(self), after: visible(&after), replies })
     }
 
-    fn preview_in_place(mut self, commands: &[(String, Value)]) -> Result<Self> {
+    fn preview_in_place(mut self, commands: &[(String, Value)]) -> Result<(Self, Vec<Value>)> {
         if commands.is_empty() {
             return Err(EngineError::Other("nothing to preview".into()));
         }
+        let mut replies = Vec::with_capacity(commands.len());
         for (id, params) in commands {
             let r = self.execute(id, params)?;
+            replies.push(r.clone());
             if id == "timeline.redefine"
                 && let Some(fid) = r.get("feature").and_then(Value::as_u64)
                 && let Some(idx) = self.doc.feature_index(fid)
@@ -616,7 +748,7 @@ impl Session {
                 }
             }
         }
-        Ok(self)
+        Ok((self, replies))
     }
 
     /// Measure one or two selections (see `inspect.measure` with `items`); errors come back as
@@ -661,7 +793,13 @@ mod construct_tests;
 #[cfg(test)]
 mod delete_face_tests;
 #[cfg(test)]
+mod display_mesh_tests;
+#[cfg(test)]
 mod extent_tests;
+#[cfg(test)]
+mod hole_face_tests;
+#[cfg(test)]
+mod naming_history_tests;
 #[cfg(test)]
 mod pattern_suppress_tests;
 #[cfg(test)]
@@ -676,3 +814,12 @@ mod tests;
 mod thread_tests;
 #[cfg(test)]
 mod world_placement_cache_tests;
+
+/// Per sketch feature: its parameter-driven dimensions' values (see [`own_values`]).
+pub(crate) type SketchValues = std::collections::BTreeMap<u64, std::collections::BTreeMap<String, f64>>;
+
+/// The values of a sketch's driving dimensions that come from parameters: what a value edit
+/// changes in it (as opposed to geometry it projects or links from upstream).
+fn own_values(sk: &solidcraft_sketch::Sketch) -> std::collections::BTreeMap<String, f64> {
+    sk.constraints.iter().filter(|c| c.param.is_some() && !c.driven).filter_map(|c| Some((c.id.clone(), c.kind.value()?))).collect()
+}

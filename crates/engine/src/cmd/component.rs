@@ -1,11 +1,11 @@
-//! Components and occurrences: the design as a tree (see `solvecraft_doc` assembly docs).
+//! Components and occurrences: the design as a tree (see `solidcraft_doc` assembly docs).
 //! New sketches and features go into the active component, authored in its frame; bodies
 //! belong to their feature's component unless moved; occurrences place components (instances
 //! share contents, "paste new" copies them) and can be grounded and moved.
 
 use serde_json::{Value, json};
-use solvecraft_doc::{FeatureKind, Mat, Occurrence};
-use solvecraft_geom::Vec3;
+use solidcraft_doc::{FeatureKind, Mat, Occurrence};
+use solidcraft_geom::Vec3;
 
 use super::CommandSpec;
 use crate::params::{bad, bool_, str_, string_list, vec3};
@@ -70,7 +70,7 @@ fn occurrence(s: &Session, p: &Value, cmd: &str) -> Result<u64> {
 }
 
 fn translation(t: Vec3) -> Mat {
-    solvecraft_doc::rigid(t, Vec3::ZERO, Vec3::Z, 0.0)
+    solidcraft_doc::rigid(t, Vec3::ZERO, Vec3::Z, 0.0)
 }
 
 fn move_vector(p: &Value, key: &str, default: Vec3, coordinate: bool, cmd: &str) -> Result<Vec3> {
@@ -285,7 +285,7 @@ fn copy_occurrence(s: &mut Session, p: &Value) -> Result<Value> {
     let parent = if p.get("parent").is_some() { component(s, p, "parent", cmd)? } else { src.parent };
     let t = move_vector(p, "translate", Vec3::ZERO, true, cmd)?;
     let base = s.pending_moves.get(&src.id).unwrap_or(&src.transform);
-    let m = solvecraft_doc::mat_mul(&translation(t), base);
+    let m = solidcraft_doc::mat_mul(&translation(t), base);
     if !valid_position(&m) {
         return Err(bad(cmd, "copy transform exceeds supported numeric range"));
     }
@@ -314,8 +314,8 @@ fn paste_new(s: &mut Session, p: &Value) -> Result<Value> {
         s.doc.occurrence_of(comp).cloned()
     };
     let t = move_vector(p, "translate", Vec3::ZERO, true, cmd)?;
-    let base = occ.as_ref().map(|o| s.pending_moves.get(&o.id).copied().unwrap_or(o.transform)).unwrap_or(solvecraft_doc::IDENTITY);
-    let transform = solvecraft_doc::mat_mul(&translation(t), &base);
+    let base = occ.as_ref().map(|o| s.pending_moves.get(&o.id).copied().unwrap_or(o.transform)).unwrap_or(solidcraft_doc::IDENTITY);
+    let transform = solidcraft_doc::mat_mul(&translation(t), &base);
     if !valid_position(&transform) {
         return Err(bad(cmd, "copy transform exceeds supported numeric range"));
     }
@@ -361,7 +361,7 @@ fn move_occurrence(s: &mut Session, p: &Value) -> Result<Value> {
     let t = move_vector(p, "translate", Vec3::ZERO, true, cmd)?;
     let axis = move_vector(p, "axis", Vec3::Z, false, cmd)?;
     let angle = match p.get("angle") {
-        Some(Value::String(e)) => s.doc.eval(e, solvecraft_doc::expr::Kind::Angle).map_err(|e| bad(cmd, e.to_string()))?,
+        Some(Value::String(e)) => s.doc.eval(e, solidcraft_doc::expr::Kind::Angle).map_err(|e| bad(cmd, e.to_string()))?,
         None => 0.0,
         Some(value) => value.as_f64().ok_or_else(|| bad(cmd, "angle must be a number or angle expression"))?,
     };
@@ -372,7 +372,7 @@ fn move_occurrence(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad(cmd, "rotation axis must have a finite nonzero length"));
     }
     let origin = move_vector(p, "origin", Vec3::ZERO, true, cmd)?;
-    let delta = solvecraft_doc::rigid(t, origin, axis, angle);
+    let delta = solidcraft_doc::rigid(t, origin, axis, angle);
     let space = match p.get("space") {
         None => "local",
         Some(Value::String(space)) => space.as_str(),
@@ -384,8 +384,8 @@ fn move_occurrence(s: &mut Session, p: &Value) -> Result<Value> {
     let path = if p.get("path").is_some() || space == "world" { Some(occurrence_path(s, p, id, cmd)?) } else { None };
     let delta = if space == "world" {
         let placement = s.occurrence_placement(path.as_deref().unwrap_or(&[]))?;
-        let inverse = solvecraft_doc::mat_inverse(&placement.parent_world).ok_or_else(|| bad(cmd, "parent frame is singular"))?;
-        solvecraft_doc::mat_mul(&solvecraft_doc::mat_mul(&inverse, &delta), &placement.parent_world)
+        let inverse = solidcraft_doc::mat_inverse(&placement.parent_world).ok_or_else(|| bad(cmd, "parent frame is singular"))?;
+        solidcraft_doc::mat_mul(&solidcraft_doc::mat_mul(&inverse, &delta), &placement.parent_world)
     } else {
         delta
     };
@@ -396,7 +396,7 @@ fn move_occurrence(s: &mut Session, p: &Value) -> Result<Value> {
             || base[1][3].abs() > 1e-12
             || base[2][3].abs() > 1e-12
             || (base[3][3] - 1.0).abs() > 1e-12
-            || solvecraft_doc::mat_inverse(&base).is_none()
+            || solidcraft_doc::mat_inverse(&base).is_none()
         {
             return Err(bad(cmd, "base_transform must be finite, affine and invertible"));
         }
@@ -404,7 +404,7 @@ fn move_occurrence(s: &mut Session, p: &Value) -> Result<Value> {
     } else {
         s.pending_moves.get(&id).copied().unwrap_or(o.transform)
     };
-    let next = solvecraft_doc::mat_mul(&delta, &cur);
+    let next = solidcraft_doc::mat_mul(&delta, &cur);
     if !valid_position(&next) {
         return Err(bad(cmd, "move transform exceeds supported numeric range"));
     }
@@ -474,10 +474,10 @@ pub fn to_active_frame(s: &Session, kind: &mut FeatureKind) {
         return;
     }
     let m = s.active_component_frame();
-    if solvecraft_doc::is_identity(&m) {
+    if solidcraft_doc::is_identity(&m) {
         return;
     }
-    if let Some(inv) = solvecraft_doc::mat_inverse(&m) {
+    if let Some(inv) = solidcraft_doc::mat_inverse(&m) {
         kind.transform_geometry(&inv);
     }
 }

@@ -1,5 +1,5 @@
 //! Live operation previews. While a feature dialog is open, its commands are evaluated on a
-//! scratch copy of the session ([`solvecraft_engine::Session::preview`]), off the UI thread
+//! scratch copy of the session ([`solidcraft_engine::Session::preview`]), off the UI thread
 //! where threads exist, and the result is drawn in place of the bodies it changes: new surface
 //! tinted, removed material as a translucent ghost. The last good preview stays up while the
 //! next one computes or when an input makes the feature fail (the error shows in the dialog).
@@ -9,9 +9,9 @@ use std::hash::{Hash, Hasher};
 use std::sync::mpsc::{Receiver, TryRecvError};
 
 use serde_json::Value;
-use solvecraft_engine::Session;
-use solvecraft_engine::doc::ModelState;
-use solvecraft_engine::geom::{Aabb3, Mesh, Vec3};
+use solidcraft_engine::Session;
+use solidcraft_engine::doc::ModelState;
+use solidcraft_engine::geom::{Aabb3, Mesh, Vec3};
 
 use crate::SolveApp;
 use crate::gpu::{GpuScene, SceneSlot};
@@ -41,6 +41,8 @@ pub struct Built {
     pub error: Option<String>,
     /// Extent of what the preview shows (the view's depth range must cover it).
     pub bounds: Aabb3,
+    /// The radius a fillet used when it reduced one too large for its edges (`fit: reduce`).
+    pub applied: Option<f64>,
 }
 
 type Job = Result<Built, String>;
@@ -66,6 +68,8 @@ pub struct PreviewState {
     /// Time the last preview took (ms), for `ui.inspect`.
     pub ms: f64,
     started: f64,
+    /// The radius the previewed fillet used when it reduced the one asked for.
+    pub applied: Option<f64>,
 }
 
 impl PreviewState {
@@ -73,6 +77,7 @@ impl PreviewState {
         self.running = None;
         self.shown_key = None;
         self.error = None;
+        self.applied = None;
         self.busy = false;
         if self.active || !self.replaced.is_empty() {
             self.active = false;
@@ -98,9 +103,13 @@ impl PreviewState {
                 self.bounds = b.bounds;
                 self.active = true;
                 self.error = b.error;
+                self.applied = b.applied;
                 self.set_scene(b.scene);
             }
-            Err(e) => self.error = Some(e),
+            Err(e) => {
+                self.error = Some(e);
+                self.applied = None;
+            }
         }
     }
 
@@ -186,7 +195,11 @@ fn spawn(pv: &mut PreviewState, key: u64, scratch: Session, cmds: Vec<(String, V
 /// show their result in place of the bodies they change. When the feature fails (a boolean the
 /// kernel can't do yet), the tool body is still shown, with the error.
 pub fn compute(s: &Session, cmds: &[(String, Value)], colors: Colors) -> Job {
-    if cmds.iter().any(|(command, _)| command == "sketch.redefine") {
+    if cmds.iter().any(|(command, params)| {
+        command == "sketch.redefine"
+            || command == "construct.plane.along_path"
+            || params.get("command").and_then(Value::as_str) == Some("construct.plane.along_path")
+    }) {
         let preview = s.preview_visible_world(cmds).map_err(|error| error.to_string())?;
         return std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut built = build(&preview.before, &preview.after, colors);
@@ -216,6 +229,9 @@ pub fn compute(s: &Session, cmds: &[(String, Value)], colors: Colors) -> Job {
             let p = real.map_err(|e| e.to_string())?;
             let mut b = guard(&|| build(&p.before, &p.after, colors))?;
             b.bounds = state_bounds(&p.after);
+            // The radius a previewed fillet used when it reduced the one asked for (a new
+            // fillet or an edited one: the feature the replies name).
+            b.applied = p.replies.iter().filter_map(|r| r.get("feature").and_then(Value::as_u64)).find_map(|id| p.after.fitted_radius(id));
             Ok(b)
         }
     }
@@ -252,7 +268,7 @@ fn build_tool(before: &ModelState, after: &ModelState, c: Colors, op: &str) -> B
             }
         }
     }
-    Built { scene: sc, replaced: Vec::new(), error: None, bounds: Aabb3::EMPTY }
+    Built { scene: sc, replaced: Vec::new(), error: None, bounds: Aabb3::EMPTY, applied: None }
 }
 
 /// The same commands making a new body instead of joining, cutting or intersecting, and the
@@ -260,7 +276,13 @@ fn build_tool(before: &ModelState, after: &ModelState, c: Colors, op: &str) -> B
 fn as_new_body(cmds: &[(String, Value)]) -> Option<(Vec<(String, Value)>, String)> {
     let mut out = cmds.to_vec();
     let mut changed: Option<String> = None;
-    for (_, p) in &mut out {
+    for (command, p) in &mut out {
+        let inner = p.get("command").and_then(Value::as_str).map(str::to_string);
+        // A combine's operation is between bodies that already exist: it has no new-body form
+        // (and no tool body of its own to show).
+        if inner.as_deref().unwrap_or(command.as_str()) == "solid.combine" {
+            continue;
+        }
         let p = if p.get("command").is_some() { p.get_mut("params")? } else { p };
         if let Some(op) = p.get_mut("operation")
             && let Some(o) = op.as_str().filter(|o| *o != "new").map(str::to_string)
@@ -281,6 +303,24 @@ fn same(a: &Mesh, b: &Mesh) -> bool {
 pub fn build(before: &ModelState, after: &ModelState, c: Colors) -> Built {
     let mut sc = GpuScene::default();
     let mut replaced = Vec::new();
+    for construct in &after.construct {
+        if before.construct.iter().any(|old| old == construct) {
+            continue;
+        }
+        if let solidcraft_engine::doc::construct::ConstructGeom::Plane(plane) = construct.geom {
+            let (o, x, y) = (plane.origin, plane.x * 10.0, plane.y * 10.0);
+            let quad = [o - x - y, o + x - y, o + x + y, o - x + y];
+            let color = [c.added[0], c.added[1], c.added[2], 64];
+            for triangle in [[quad[0], quad[1], quad[2]], [quad[0], quad[2], quad[3]]] {
+                for p in triangle {
+                    sc.xray_tri(p.to_f32(), plane.normal().to_f32(), color);
+                }
+            }
+            for (a, b) in quad.iter().zip(quad.iter().cycle().skip(1)).take(4) {
+                sc.line(a.to_f32(), b.to_f32(), c.added, 1.3, true);
+            }
+        }
+    }
     for a in &after.bodies {
         let am = a.mesh();
         let old = before.body(&a.name).map(|b| b.mesh());
@@ -335,7 +375,7 @@ pub fn build(before: &ModelState, after: &ModelState, c: Colors) -> Built {
             replaced.push(b.name.clone());
         }
     }
-    Built { scene: sc, replaced, error: None, bounds: Aabb3::EMPTY }
+    Built { scene: sc, replaced, error: None, bounds: Aabb3::EMPTY, applied: None }
 }
 
 /// Is face `f` of `m` new surface, i.e. not on the old mesh? Decided by a vote of points on it
@@ -421,13 +461,29 @@ mod tests {
         assert_eq!(pv.error.as_deref(), Some("current invalid expression"), "current errors still prevent invalid Apply");
     }
 
+    /// Combine previews its result (cut, join or intersect between existing bodies) without an
+    /// error, so its dialog's OK is enabled. Before, the preview also tried the command as a new
+    /// body, which a combine has no form of, and always reported "operation must be join, cut or
+    /// intersect".
+    #[test]
+    fn combine_previews_its_result_without_an_error() {
+        let mut s = solidcraft_engine::Session::default();
+        s.execute("solid.box", &json!({"length": 20, "width": 20, "height": 20, "body_name": "Cube"})).unwrap();
+        s.execute("solid.cylinder", &json!({"base": [10, 10, -5], "diameter": 6, "height": 30, "body_name": "Pin"})).unwrap();
+        for op in ["cut", "join", "intersect"] {
+            let cmd = ("solid.combine".to_string(), json!({"target": "Cube", "tools": ["Pin"], "operation": op, "keep_tools": false}));
+            let built = compute(&s, &[cmd], colors()).unwrap_or_else(|e| panic!("{op}: {e}"));
+            assert!(built.error.is_none(), "{op}: {:?}", built.error);
+        }
+    }
+
     fn count(bytes: &[u8], stride: usize, col: [u8; 4]) -> usize {
         bytes.chunks(stride).filter(|v| v.get(24..28) == Some(&col[..])).count()
     }
 
     #[test]
     fn a_hole_shows_its_cut_through_the_body() {
-        let mut s = solvecraft_engine::Session::default();
+        let mut s = solidcraft_engine::Session::default();
         s.execute("solid.box", &json!({"length": 40, "width": 30, "height": 20})).unwrap();
         let p = s.preview(&[("solid.hole".to_string(), json!({"position": [20, 15, 20], "diameter": 5, "depth": 10}))]).unwrap();
         let b = build(&p.before, &p.after, colors());

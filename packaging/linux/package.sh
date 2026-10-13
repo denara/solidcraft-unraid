@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Build and package SolidCraft for Linux (<arch> is x86_64 or aarch64):
 #
-#   $DIST/solvecraft-<version>-linux-<arch>.AppImage        any distro with glibc >= the build host's
-#   $DIST/solvecraft-<version>-linux-<arch>.AppImage.zsync  delta updates (needs zsyncmake)
-#   $DIST/solvecraft-<version>-linux-<arch>.deb             Debian, Ubuntu, Mint, Pop!_OS, ...
-#   $DIST/solvecraft-<version>-linux-<arch>.rpm             Fedora, openSUSE, RHEL, ...
-#   $DIST/solvecraft-<version>-linux-<arch>.tar.gz          plain FHS-style tree (bin/, share/)
+#   $DIST/solidcraft-<version>-linux-<arch>.AppImage        any distro with glibc >= the build host's
+#   $DIST/solidcraft-<version>-linux-<arch>.AppImage.zsync  delta updates (needs zsyncmake)
+#   $DIST/solvecraft-<version>-linux-<arch>.AppImage.zsync  the same, for pre-rename AppImages
+#   $DIST/solidcraft-<version>-linux-<arch>.deb             Debian, Ubuntu, Mint, Pop!_OS, ...
+#   $DIST/solidcraft-<version>-linux-<arch>.rpm             Fedora, openSUSE, RHEL, ...
+#   $DIST/solidcraft-<version>-linux-<arch>.tar.gz          plain FHS-style tree (bin/, share/)
 #
 # Usage: packaging/linux/package.sh [--skip-build] [--formats "appimage deb rpm tar"]
 #
@@ -37,17 +38,17 @@ case "$ARCH" in
   aarch64 | arm64) ARCH=aarch64; DEB_ARCH=arm64 ;;
   *) echo "unsupported architecture $ARCH" >&2; exit 2 ;;
 esac
-export SOLVECRAFT_MAINTAINER="${SOLVECRAFT_MAINTAINER:-SolidCraft contributors <https://github.com/bherbruck/solidcraft>}"
-BASENAME="solvecraft-$VERSION-linux-$ARCH"
+export SOLIDCRAFT_MAINTAINER="${SOLIDCRAFT_MAINTAINER:-${SOLVECRAFT_MAINTAINER:-SolidCraft contributors <https://github.com/bherbruck/solidcraft>}}"  # SOLVECRAFT_*: compatibility shim, see docs/compatibility.md
+BASENAME="solidcraft-$VERSION-linux-$ARCH"
 
 echo "==> SolidCraft $VERSION for Linux $ARCH ($FORMATS)"
 
 if [ "$SKIP_BUILD" = 0 ]; then
   if [ -n "${CROSS_TARGET:-}" ]; then
-    (cd "$ROOT" && cargo build --release --locked -p solvecraft -p solvecraft-cli --target "$CROSS_TARGET")
+    (cd "$ROOT" && cargo build --release --locked -p solidcraft -p solidcraft-cli --target "$CROSS_TARGET")
     BIN="$CARGO_TARGET_DIR/$CROSS_TARGET/release"
   else
-    (cd "$ROOT" && cargo build --release --locked -p solvecraft -p solvecraft-cli)
+    (cd "$ROOT" && cargo build --release --locked -p solidcraft -p solidcraft-cli)
     BIN="$CARGO_TARGET_DIR/release"
   fi
 else
@@ -62,19 +63,21 @@ STAGE="$WORK/root"
 rm -rf "$WORK"
 
 # ---- stage an FHS tree (shared by every format) -------------------------------------------------
-install -Dm755 "$BIN/solvecraft" "$STAGE/usr/bin/solvecraft"
+install -Dm755 "$BIN/solidcraft" "$STAGE/usr/bin/solidcraft"
+install -Dm755 "$BIN/solidcraft-cli" "$STAGE/usr/bin/solidcraft-cli"
+# Compatibility shim (docs/compatibility.md): the old CLI name forwards to solidcraft-cli.
 install -Dm755 "$BIN/solvecraft-cli" "$STAGE/usr/bin/solvecraft-cli"
-strip "$STAGE/usr/bin/solvecraft" "$STAGE/usr/bin/solvecraft-cli" 2>/dev/null || true
+strip "$STAGE/usr/bin/solidcraft" "$STAGE/usr/bin/solidcraft-cli" "$STAGE/usr/bin/solvecraft-cli" 2>/dev/null || true
 install -Dm644 "$HERE/$APP_ID.desktop" "$STAGE/usr/share/applications/$APP_ID.desktop"
 install -Dm644 "$HERE/$APP_ID.mime.xml" "$STAGE/usr/share/mime/packages/$APP_ID.xml"
 mkdir -p "$STAGE/usr/share/metainfo"
-sed -e "s/@VERSION@/$VERSION/g" -e "s/@DATE@/$SOLVECRAFT_BUILD_DATE/g" \
+sed -e "s/@VERSION@/$VERSION/g" -e "s/@DATE@/$SOLIDCRAFT_BUILD_DATE/g" \
   "$HERE/$APP_ID.metainfo.xml.in" >"$STAGE/usr/share/metainfo/$APP_ID.metainfo.xml"
-make_icons "$STAGE/usr/bin/solvecraft-cli" "$WORK/icons"
+make_icons "$STAGE/usr/bin/solidcraft-cli" "$WORK/icons"
 mkdir -p "$STAGE/usr/share/icons"
 cp -R "$WORK/icons/hicolor" "$STAGE/usr/share/icons/"
-mkdir -p "$STAGE/usr/share/doc/solvecraft"
-copy_docs "$STAGE/usr/share/doc/solvecraft"
+mkdir -p "$STAGE/usr/share/doc/solidcraft"
+copy_docs "$STAGE/usr/share/doc/solidcraft"
 
 if command -v desktop-file-validate >/dev/null; then
   desktop-file-validate "$STAGE/usr/share/applications/$APP_ID.desktop"
@@ -107,7 +110,7 @@ fi
 
 # ---- AppImage -----------------------------------------------------------------------------------
 if has appimage; then
-  APPDIR="$WORK/SolveCraft.AppDir"
+  APPDIR="$WORK/SolidCraft.AppDir"
   cp -R "$STAGE" "$APPDIR"
   mv "$APPDIR/usr/share/doc" "$WORK/doc-unused"
   # AppRun is a script, not a symlink: it installs the .desktop entry and icons into
@@ -133,19 +136,25 @@ if has appimage; then
   # Update information: AppImageUpdate and the like fetch only the changed blocks of a newer
   # release through the .zsync published next to each AppImage. `latest` is the newest published
   # release that is not a pre-release.
-  REPO="${GITHUB_REPOSITORY:-bherbruck/solvecraft}"
-  UPDATE_INFO="gh-releases-zsync|${REPO%%/*}|${REPO#*/}|latest|solvecraft-*-linux-$ARCH.AppImage.zsync"
+  REPO="${GITHUB_REPOSITORY:-bherbruck/solidcraft}"
+  UPDATE_INFO="gh-releases-zsync|${REPO%%/*}|${REPO#*/}|latest|solidcraft-*-linux-$ARCH.AppImage.zsync"
   # Extract-and-run: works without FUSE (containers, CI). With zsyncmake on the host appimagetool
   # also writes the .zsync, into its working directory, hence the cd.
   (cd "$DIST" && ARCH="$ARCH" APPIMAGE_EXTRACT_AND_RUN=1 "$TOOL" --no-appstream -u "$UPDATE_INFO" "$APPDIR" "$OUT")
   echo "wrote $OUT"
   if [ -s "$OUT.zsync" ]; then
     echo "wrote $OUT.zsync"
+    # Compatibility shim (docs/compatibility.md): AppImages from before the rename look for
+    # `solvecraft-*-linux-$ARCH.AppImage.zsync` in the latest release. The same .zsync under that
+    # name (its URL is the new AppImage's file name, relative to the release) updates them to
+    # SolidCraft.
+    cp "$OUT.zsync" "$DIST/solvecraft-$VERSION-linux-$ARCH.AppImage.zsync"
+    echo "wrote $DIST/solvecraft-$VERSION-linux-$ARCH.AppImage.zsync (legacy update alias)"
   else
     warn "zsyncmake not found, so $OUT.zsync was not written; AppImage delta updates need it"
   fi
 fi
 
-"$STAGE/usr/bin/solvecraft-cli" --version
+"$STAGE/usr/bin/solidcraft-cli" --version
 echo "==> done"
 ls -lh "$DIST"

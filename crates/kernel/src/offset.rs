@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use solvecraft_geom::Vec3;
+use solidcraft_geom::Vec3;
 use truck_modeling::{self as mt, builder};
 
 use crate::body::{Body, Solid, from_p3, p3};
@@ -42,7 +42,7 @@ fn tube_centre(o: Vec3, a: Vec3, big: f64, h: f64, p: Vec3) -> Option<Vec3> {
 
 impl Surf {
     /// Outward unit normal of the surface at `p` (on or near it).
-    fn normal(&self, p: Vec3) -> Option<Vec3> {
+    pub(crate) fn normal(&self, p: Vec3) -> Option<Vec3> {
         match *self {
             Surf::Plane { n, .. } => Some(n),
             Surf::Cylinder { o, a, convex, .. } => {
@@ -649,7 +649,9 @@ pub(crate) fn arc_mid(e: &mt::Edge, tol: f64) -> Option<Option<Vec3>> {
 }
 
 /// The body with each face moved along its outward normal by `shift(face index, normal at a
-/// face point)`, keeping the topology. Faces must be planes or cylinders.
+/// face point)`, keeping the topology. Faces must be planes or cylinders. The result's history
+/// is over `[b]`: each face is the face it was moved from, each edge the edge it was moved from;
+/// faces moved to nothing are gone, and their neighbours meet along new edges.
 pub(crate) fn offset_body(b: &Body, shift: impl Fn(usize, Vec3) -> f64) -> Result<Body> {
     let faces: Vec<mt::Face> = b.solid.face_iter().cloned().collect();
     let size = b.size();
@@ -755,6 +757,56 @@ pub(crate) fn offset_body(b: &Body, shift: impl Fn(usize, Vec3) -> f64) -> Resul
             ))
         })
         .collect();
+    // Across the collapsed rounds next to edge `e` (its faces `fs`): a round is a strip, crossed
+    // to its side that shares no vertex with the edge, through further collapsed rounds.
+    let opposite_side = |e: &mt::Edge, fs: &[usize]| -> Vec<usize> {
+        let mut out: Vec<usize> = Vec::new();
+        let mut seen: Vec<usize> = Vec::new();
+        let mut queue: Vec<(usize, [mt::VertexID; 2])> =
+            fs.iter().copied().filter(|i| is_collapsed(*i)).map(|i| (i, [e.front().id(), e.back().id()])).collect();
+        while let Some((cf, avoid)) = queue.pop() {
+            if seen.contains(&cf) {
+                continue;
+            }
+            seen.push(cf);
+            let Some(face) = faces.get(cf) else { continue };
+            for side in face.edge_iter() {
+                if avoid.contains(&side.front().id()) || avoid.contains(&side.back().id()) {
+                    continue;
+                }
+                for nb in efaces.get(&side.id()).into_iter().flatten().copied() {
+                    if nb == cf || fs.contains(&nb) {
+                        continue;
+                    }
+                    if is_collapsed(nb) {
+                        queue.push((nb, [side.front().id(), side.back().id()]));
+                    } else if !out.contains(&nb) {
+                        out.push(nb);
+                    }
+                }
+            }
+        }
+        out
+    };
+    // For a point on a collapsed round touching the faces `at`: the faces it keeps (`at`'s
+    // own, not collapsed), and the faces along the rounds it is on, nearest `p` first.
+    let across = |at: &[usize], p: Vec3| -> (Vec<usize>, Vec<usize>) {
+        let own: Vec<usize> = at.iter().copied().filter(|i| !is_collapsed(*i)).collect();
+        let mut cand: Vec<(f64, usize)> = expand(at)
+            .into_iter()
+            .filter(|nb| !own.contains(nb))
+            .map(|nb| {
+                let d = edge_pts
+                    .iter()
+                    .filter(|(fs, _)| fs.contains(&nb) && fs.iter().any(|i| is_collapsed(*i)))
+                    .flat_map(|(_, q)| q.iter().map(|x| x.dist(p)))
+                    .fold(f64::INFINITY, f64::min);
+                (d, nb)
+            })
+            .collect();
+        cand.sort_by(|x, y| x.0.total_cmp(&y.0));
+        (own, cand.into_iter().map(|(_, nb)| nb).collect())
+    };
     let mut newpos: HashMap<mt::VertexID, Vec3> = HashMap::new();
     // Corners whose moved faces meet at several points (see `split_corner`).
     let mut splits: HashMap<mt::VertexID, Vec<(Vec3, Vec<usize>)>> = HashMap::new();
@@ -764,22 +816,7 @@ pub(crate) fn offset_body(b: &Body, shift: impl Fn(usize, Vec3) -> f64) -> Resul
         let fs: Vec<usize> = if at.iter().any(|i| is_collapsed(*i)) {
             // On a collapsed round: its own faces, then the faces along the rounds it is on,
             // nearest first, until they fix a point.
-            let group = expand(at);
-            let mut own: Vec<usize> = at.iter().copied().filter(|i| !is_collapsed(*i)).collect();
-            let mut cand: Vec<(f64, usize)> = group
-                .iter()
-                .copied()
-                .filter(|nb| !own.contains(nb))
-                .map(|nb| {
-                    let d = edge_pts
-                        .iter()
-                        .filter(|(fs, _)| fs.contains(&nb) && fs.iter().any(|i| is_collapsed(*i)))
-                        .flat_map(|(_, q)| q.iter().map(|x| x.dist(p)))
-                        .fold(f64::INFINITY, f64::min);
-                    (d, nb)
-                })
-                .collect();
-            cand.sort_by(|x, y| x.0.total_cmp(&y.0));
+            let (mut own, cand) = across(at, p);
             let rank = |ids: &[usize]| -> usize {
                 let mut basis: Vec<Vec3> = Vec::new();
                 for i in ids {
@@ -794,7 +831,7 @@ pub(crate) fn offset_body(b: &Body, shift: impl Fn(usize, Vec3) -> f64) -> Resul
                 }
                 basis.len()
             };
-            for (_, c) in cand {
+            for c in cand {
                 if rank(&own) >= 3 {
                     break;
                 }
@@ -900,7 +937,10 @@ pub(crate) fn offset_body(b: &Body, shift: impl Fn(usize, Vec3) -> f64) -> Resul
         let mut links: HashMap<(mt::VertexID, usize, usize), mt::Edge> = HashMap::new();
         // Old edge → new edge, and whether it runs the other way (merged with its twin).
         let mut edges: HashMap<mt::EdgeID, (mt::Edge, bool)> = HashMap::new();
-        let mut merged: HashMap<(mt::VertexID, mt::VertexID), mt::Edge> = HashMap::new();
+        // Moved faces and edges; an edge where neighbours of a collapsed face meet is new.
+        let mut rec = crate::record::Rebuild::default();
+        // New edges along collapsed rounds: ends and points along them, for their twins.
+        let mut merged: Vec<(mt::VertexID, mt::VertexID, Vec<Vec3>, mt::Edge)> = Vec::new();
         for e in b.solid.edge_iter() {
             if edges.contains_key(&e.id()) {
                 continue;
@@ -917,13 +957,44 @@ pub(crate) fn offset_body(b: &Body, shift: impl Fn(usize, Vec3) -> f64) -> Resul
                 continue;
             }
             if touches {
-                // Along a collapsed round: a straight edge, shared with its twin from the
-                // round's other side.
-                let ne = match merged.get(&(a.id(), c.id())).or_else(|| merged.get(&(c.id(), a.id()))) {
-                    Some(x) => x.clone(),
+                // Along a collapsed round: where the edge's own face meets the face across the
+                // round, between the edge's moved ends, through the edge's middle moved onto
+                // both: a line (planes, or a plane along a cylinder's axis) or an arc (a plane
+                // square to a coaxial cylinder); faces that meet in another curve are refused.
+                // Shared with its twin from the round's other side: the new edge with the same
+                // ends through the same middle (two arcs of one circle have the same ends).
+                use mt::{BoundedCurve, ParametricCurve};
+                let fs = efaces.get(&e.id()).ok_or_else(|| fail("edge faces"))?;
+                let cv = e.curve();
+                let (t0, t1) = cv.range_tuple();
+                let mid = from_p3(cv.subs((t0 + t1) / 2.0));
+                // The face across: the strip's far side (`opposite_side`), the nearest of them
+                // when several; the nearest along the rounds when the strip has none.
+                let (mut meet, cand) = across(fs, mid);
+                let far = opposite_side(&e, fs);
+                meet.extend(cand.iter().find(|c| far.contains(c)).or(cand.first()));
+                if meet.len() < 2 {
+                    return Err(fail("an edge along a collapsed round with no face across it"));
+                }
+                let (o, s, n) = pick(&meet);
+                let m = move_point(mid, &o, &s, &n, size * 1e-6).ok_or_else(|| fail("faces that don't meet along a collapsed round"))?;
+                let near = size * 1e-5;
+                let twin = merged.iter().find(|(x, y, pts, _)| {
+                    ((*x == a.id() && *y == c.id()) || (*x == c.id() && *y == a.id()))
+                        && pts.windows(2).any(|w| w.first().zip(w.get(1)).is_some_and(|(p, q)| m.dist_to_segment(*p, *q) < near))
+                });
+                let ne = match twin {
+                    Some((_, _, _, x)) => x.clone(),
                     None => {
-                        let x = builder::line(a, c);
-                        merged.insert((a.id(), c.id()), x.clone());
+                        let (pa, pc) = (from_p3(a.point()), from_p3(c.point()));
+                        let x = if m.dist_to_segment(pa, pc) < near { builder::line(a, c) } else { builder::circle_arc(a, c, p3(m)) };
+                        let xc = x.curve();
+                        let (u0, u1) = xc.range_tuple();
+                        let pts: Vec<Vec3> = (0..=16).map(|j| from_p3(xc.subs(u0 + (u1 - u0) * j as f64 / 16.0))).collect();
+                        if !pts.iter().all(|p| n.iter().all(|sf| sf.dist(*p).abs() < near)) {
+                            return Err(fail("not supported yet: faces meeting along a collapsed round in a curve other than a line or circle"));
+                        }
+                        merged.push((a.id(), c.id(), pts, x.clone()));
                         x
                     }
                 };
@@ -949,7 +1020,9 @@ pub(crate) fn offset_body(b: &Body, shift: impl Fn(usize, Vec3) -> f64) -> Resul
                 }
                 pts.push(from_p3(c.point()));
                 let curve = crate::build::interpolate_cubic(&pts).ok_or_else(|| fail("edge curve"))?;
-                edges.insert(e.id(), (mt::Edge::new(a, c, mt::Curve::BSplineCurve(curve)), false));
+                let ne = mt::Edge::new(a, c, mt::Curve::BSplineCurve(curve));
+                rec.piece(&ne, &e);
+                edges.insert(e.id(), (ne, false));
                 continue;
             };
             let ne = match kind {
@@ -962,6 +1035,7 @@ pub(crate) fn offset_body(b: &Body, shift: impl Fn(usize, Vec3) -> f64) -> Resul
                     builder::circle_arc(a, c, p3(m2))
                 }
             };
+            rec.piece(&ne, &e);
             edges.insert(e.id(), (ne, false));
         }
         let mut out = Vec::new();
@@ -1027,6 +1101,7 @@ pub(crate) fn offset_body(b: &Body, shift: impl Fn(usize, Vec3) -> f64) -> Resul
             if !f.orientation() {
                 nf.invert();
             }
+            rec.face(&nf, f);
             out.push(nf);
         }
         // One shell per shell of the body (pieces, voids), less the collapsed faces.
@@ -1039,15 +1114,16 @@ pub(crate) fn offset_body(b: &Body, shift: impl Fn(usize, Vec3) -> f64) -> Resul
             shells.push(it.by_ref().take(keep).collect::<Vec<_>>().into());
         }
         let solid = Solid::try_new(shells).map_err(|e| fail(&e.to_string()))?;
-        Body::new(solid)
+        crate::record::rebuilt(solid, &[&b.solid], &rec)
     })
 }
 
 /// Draft walls parallel to `pull` (planes, and cylinders about axes along `pull`) by `angle`
 /// about their line on the neutral plane: at height h along `pull` a wall moves along its
 /// outward normal by −h·tan(angle), so planes tilt and cylinders become cones. The other
-/// faces must be caps square to `pull`; the topology is kept.
-pub(crate) fn draft_walls(b: &Body, chosen: &[usize], neutral: &solvecraft_geom::Plane, pull: Vec3, angle: f64) -> Result<Body> {
+/// faces must be caps square to `pull`; the topology is kept, and the result's history is over
+/// `[b]` (each face and edge the one it was moved from).
+pub(crate) fn draft_walls(b: &Body, chosen: &[usize], neutral: &solidcraft_geom::Plane, pull: Vec3, angle: f64) -> Result<Body> {
     let faces: Vec<mt::Face> = b.solid.face_iter().cloned().collect();
     let size = b.size();
     let tol = (size * 1e-7).max(1e-9);
@@ -1166,6 +1242,7 @@ pub(crate) fn draft_walls(b: &Body, chosen: &[usize], neutral: &solvecraft_geom:
     guard("draft", || {
         let verts: HashMap<mt::VertexID, mt::Vertex> = newpos.iter().map(|(k, p)| (*k, builder::vertex(p3(*p)))).collect();
         let mut edges: HashMap<mt::EdgeID, mt::Edge> = HashMap::new();
+        let mut rec = crate::record::Rebuild::default();
         for e in b.solid.edge_iter() {
             if edges.contains_key(&e.id()) {
                 continue;
@@ -1181,6 +1258,7 @@ pub(crate) fn draft_walls(b: &Body, chosen: &[usize], neutral: &solvecraft_geom:
                     builder::circle_arc(a, c, p3(m2))
                 }
             };
+            rec.piece(&ne, &e);
             edges.insert(e.id(), ne);
         }
         let mut out = Vec::new();
@@ -1234,11 +1312,12 @@ pub(crate) fn draft_walls(b: &Body, chosen: &[usize], neutral: &solvecraft_geom:
                     nf
                 }
             };
+            rec.face(&nf, f);
             out.push(nf);
         }
         let shell: mt::Shell = out.into();
         let solid = Solid::try_new(vec![shell]).map_err(|e| fail(&e.to_string()))?;
-        Body::new(solid)
+        crate::record::rebuilt(solid, &[&b.solid], &rec)
     })
 }
 

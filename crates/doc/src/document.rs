@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use solvecraft_geom::{Plane, Vec2, Vec3};
-use solvecraft_sketch::Sketch;
+use solidcraft_geom::{Plane, Vec2, Vec3};
+use solidcraft_sketch::Sketch;
 
 use crate::construct::{AxisDef, GeoRef, PointDef};
 use crate::expr::{self, Kind};
@@ -269,6 +269,73 @@ impl EmbossFace {
     }
 }
 
+/// One edge of an edge flange feature: a point on the sheet's edge and, where given, this
+/// edge's own angle and height (expressions) in place of the feature's. In a design file an
+/// edge with neither is the point `[x, y, z]`, as every edge was before; one with its own
+/// values is `{"point": [x, y, z], "angle": "…", "height": "…"}`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FlangeEdge {
+    pub point: Vec3,
+    pub angle: Option<String>,
+    pub height: Option<String>,
+}
+
+impl FlangeEdge {
+    /// An edge that takes the feature's angle and height.
+    pub fn at(point: Vec3) -> Self {
+        Self { point, angle: None, height: None }
+    }
+}
+
+impl Serialize for FlangeEdge {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        if self.angle.is_none() && self.height.is_none() {
+            return self.point.serialize(s);
+        }
+        let mut m = s.serialize_map(None)?;
+        m.serialize_entry("point", &self.point)?;
+        if let Some(a) = &self.angle {
+            m.serialize_entry("angle", a)?;
+        }
+        if let Some(h) = &self.height {
+            m.serialize_entry("height", h)?;
+        }
+        m.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for FlangeEdge {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        use serde::de::value::{MapAccessDeserializer, SeqAccessDeserializer};
+        /// The object form; a key this build doesn't know is refused, not dropped.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Own {
+            point: Vec3,
+            #[serde(default)]
+            angle: Option<String>,
+            #[serde(default)]
+            height: Option<String>,
+        }
+        struct Edge;
+        impl<'de> serde::de::Visitor<'de> for Edge {
+            type Value = FlangeEdge;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a point [x, y, z] or an edge {point, angle?, height?}")
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, seq: A) -> std::result::Result<FlangeEdge, A::Error> {
+                Vec3::deserialize(SeqAccessDeserializer::new(seq)).map(FlangeEdge::at)
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> std::result::Result<FlangeEdge, A::Error> {
+                let o = Own::deserialize(MapAccessDeserializer::new(map))?;
+                Ok(FlangeEdge { point: o.point, angle: o.angle, height: o.height })
+            }
+        }
+        d.deserialize_any(Edge)
+    }
+}
+
 /// Feature definitions.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -328,6 +395,9 @@ pub enum FeatureKind {
         /// radius varying along each edge.
         #[serde(default, skip_serializing_if = "FilletStyle::is_constant")]
         style: FilletStyle,
+        /// What to do when the radius is too large for the geometry around the edges.
+        #[serde(default, skip_serializing_if = "FilletFit::is_exact")]
+        fit: FilletFit,
     },
     Chamfer {
         edges: Vec<Vec3>,
@@ -656,9 +726,10 @@ pub enum FeatureKind {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         reverse: bool,
     },
-    /// Edge flanges on sheet edges (points on the top or bottom edges).
+    /// Edge flanges on sheet edges (points on the top or bottom edges). `height` and `angle`
+    /// hold for every edge that doesn't carry its own (see [`FlangeEdge`]).
     SheetFlange {
-        edges: Vec<Vec3>,
+        edges: Vec<FlangeEdge>,
         height: String,
         angle: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -871,6 +942,10 @@ pub enum FeatureKind {
         rotate_axis: Option<Vec3>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         angle: Option<String>,
+        /// When set, the original bodies are kept and the transform is applied to a new copy
+        /// of each instead of moving them in place.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        copy: bool,
     },
     /// A non-parametric base feature: bodies imported from a STEP file. The STEP text is kept
     /// in the design (it is the B-rep), so the design reopens without the original file.
@@ -881,10 +956,14 @@ pub enum FeatureKind {
         step: String,
         /// The file's product/assembly tree, kept for components.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        components: Vec<solvecraft_kernel::StepNode>,
+        components: Vec<solidcraft_kernel::StepNode>,
     },
-    /// A non-parametric base feature: mesh bodies imported from a 3MF or STL file (kept in the
-    /// design). Mesh bodies render, measure, move and export; solid features cannot use them.
+    /// Rebuild an upstream constant-section mesh with analytic planar/cylindrical faces.
+    MeshConvert {
+        body: String,
+        tolerance: String,
+    },
+    /// Mesh bodies imported from a 3MF or STL file, embedded in the design.
     MeshImport {
         /// Source file name (display only).
         file: String,
@@ -910,6 +989,22 @@ pub enum FilletStyle {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         smooth: bool,
     },
+}
+
+/// A fillet radius too large for the geometry around its edges: refused (`Exact`, the default),
+/// or reduced to the largest that works for all of them (`Reduce`), with a warning.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FilletFit {
+    #[default]
+    Exact,
+    Reduce,
+}
+
+impl FilletFit {
+    pub fn is_exact(&self) -> bool {
+        *self == FilletFit::Exact
+    }
 }
 
 impl FilletStyle {
@@ -1162,6 +1257,7 @@ impl FeatureKind {
             | K::Move { .. }
             | K::Import { .. }
             | K::MeshImport { .. }
+            | K::MeshConvert { .. }
             | K::BodyTransfer { .. } => Vec::new(),
         }
     }
@@ -1247,6 +1343,7 @@ impl FeatureKind {
             FeatureKind::SurfaceExtend { .. } => "ExtendFeature",
             FeatureKind::Import { .. } => "BaseFeature",
             FeatureKind::MeshImport { .. } => "MeshFeature",
+            FeatureKind::MeshConvert { .. } => "MeshConvertFeature",
         }
     }
     /// Default name prefix (`Extrude` → `Extrude1`).
@@ -1312,6 +1409,7 @@ impl FeatureKind {
             FeatureKind::SurfaceExtend { .. } => "Extend",
             FeatureKind::Import { .. } => "Import",
             FeatureKind::MeshImport { .. } => "Mesh",
+            FeatureKind::MeshConvert { .. } => "ConvertMesh",
         }
     }
     /// Every expression the feature uses.
@@ -1495,9 +1593,12 @@ impl FeatureKind {
                 v.extend([length, draft, thickness].into_iter().flatten().map(String::as_str));
             }
             FeatureKind::SheetContour { distance, .. } => v.push(distance),
-            FeatureKind::SheetFlange { height, angle, radius, .. } => {
+            FeatureKind::SheetFlange { edges, height, angle, radius, .. } => {
                 v.extend([height.as_str(), angle]);
                 v.extend(radius.iter().map(String::as_str));
+                for e in edges {
+                    v.extend([&e.angle, &e.height].into_iter().flatten().map(String::as_str));
+                }
             }
             FeatureKind::SheetFold { angle, radius, .. } => {
                 v.push(angle);
@@ -1520,6 +1621,7 @@ impl FeatureKind {
             FeatureKind::ReplaceFace { target, .. } => plane_exprs(target, &mut v),
             FeatureKind::Align { .. } | FeatureKind::Remove { .. } | FeatureKind::BoundaryFill { .. } | FeatureKind::DeleteFace { .. } => {}
             FeatureKind::Stitch { tolerance, .. } => v.push(tolerance),
+            FeatureKind::MeshConvert { tolerance, .. } => v.push(tolerance),
             FeatureKind::Thicken { thickness, .. } => v.push(thickness),
             FeatureKind::SurfaceTrim { plane, .. } => plane_exprs(plane, &mut v),
             FeatureKind::SurfaceExtend { distance, .. } => v.push(distance),
@@ -1536,7 +1638,8 @@ pub struct Feature {
     pub name: String,
     #[serde(default)]
     pub suppressed: bool,
-    /// Names for the bodies this feature creates (in order); missing ones get `BodyN`.
+    /// Names for the bodies this feature creates (in order); missing ones are numbered after the
+    /// first (`Ribs (4)`), or get `BodyN` when there is none (or see `shell_piece_order`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub body_names: Vec<String>,
     /// Parameter names of the feature's inputs (see `FeatureKind::inputs`), e.g. `d3`.
@@ -1559,6 +1662,13 @@ pub struct Feature {
     /// component's bodies.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub participants: Vec<String>,
+    /// The pieces this feature splits a body into take its body names in the kernel's shell order,
+    /// as builds before format 14 named them, instead of after their faces (`lineage::order_lumps`).
+    /// Set on the features of designs saved before then, whose stored body names mean that order.
+    /// Such features also name the bodies past their `body_names` `BodyN`, as those builds did,
+    /// where newer ones number them after the first name (`Ribs (4)`, #373).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shell_piece_order: bool,
     #[serde(flatten)]
     pub kind: FeatureKind,
 }
@@ -1662,7 +1772,7 @@ pub struct Document {
 pub struct NamedView {
     #[serde(default)]
     pub name: String,
-    pub target: solvecraft_geom::Vec3,
+    pub target: solidcraft_geom::Vec3,
     pub yaw: f64,
     pub pitch: f64,
     pub distance: f64,
@@ -1739,13 +1849,13 @@ impl Document {
         let mut st = state.clone();
         for b in &mut st.bodies {
             let c = self.body_color(b);
-            let faces: Vec<solvecraft_kernel::FacePaint> = self
+            let faces: Vec<solidcraft_kernel::FacePaint> = self
                 .face_colors(b)
                 .into_iter()
-                .map(|(face, l)| solvecraft_kernel::FacePaint { face, color: l.rgb(), opacity: l.opacity as f32 })
+                .map(|(face, l)| solidcraft_kernel::FacePaint { face, color: l.rgb(), opacity: l.opacity as f32 })
                 .collect();
             let opacity = self.model_body_opacity(b) as f32;
-            let paint = solvecraft_kernel::Paint { opacity, faces };
+            let paint = solidcraft_kernel::Paint { opacity, faces };
             if c != b.body.color() || b.body.paint() != Some(&paint) {
                 b.body = b.body.clone().with_color(c).with_paint(Some(paint));
             }
@@ -1893,6 +2003,7 @@ impl Document {
             edge_names: Vec::new(),
             face_names: Vec::new(),
             participants: Vec::new(),
+            shell_piece_order: false,
             kind,
         };
         match self.marker {
@@ -2166,6 +2277,28 @@ impl Document {
             sk.validate(&c.kind)?;
         }
         Ok(())
+    }
+
+    /// Apply parameter values to a sketch's dimensions and solve it. `stored` are the values
+    /// its geometry is solved for (the stored sketch's): what the solve cannot reach in one
+    /// jump it reaches by stepping the changed values from there, and an edit that would turn
+    /// the sketch over is refused. Offsets whose sources moved are refreshed and solved again:
+    /// from the stored state again after a refused or failed first solve (the geometry is still
+    /// the stored one), from the solved one otherwise.
+    pub fn solve_sketch(
+        &self,
+        vals: &std::collections::BTreeMap<String, expr::Value>,
+        sk: &mut Sketch,
+        stored: &solidcraft_sketch::DrivingValues,
+    ) -> Result<solidcraft_sketch::SolveReport> {
+        self.apply_dimension_values(vals, sk)?;
+        let mut report = solidcraft_sketch::solve_after_value_edit(sk, stored);
+        if !sk.offsets.is_empty() || !sk.freeform_offsets.is_empty() {
+            // Source dimensions may have moved curves during the solve.
+            sk.refresh_offsets()?;
+            report = if report.ok() { solidcraft_sketch::solve(sk) } else { solidcraft_sketch::solve_after_value_edit(sk, stored) };
+        }
+        Ok(report)
     }
 }
 

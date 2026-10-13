@@ -1,6 +1,6 @@
 use crate::Session;
 use serde_json::{Value, json};
-use solvecraft_geom::Vec3;
+use solidcraft_geom::Vec3;
 
 fn run(s: &mut Session, command: &str, params: Value) -> Value {
     s.execute(command, &params).unwrap_or_else(|error| panic!("{command} {params}: {error}"))
@@ -41,7 +41,7 @@ fn exact_selected_base_follows_height_and_never_retargets_control() {
     assert!(s.model.state().body("Badge").is_none());
     assert!((s.world_state().body("Control").unwrap().mesh().bounds().max.z - 30.).abs() < 1e-6);
     let before = s.doc.to_json();
-    let reopened = Session::new(solvecraft_doc::Document::from_json(&before).unwrap());
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&before).unwrap());
     assert!(reopened.model.result(sketch).unwrap().error.is_some());
 }
 #[test]
@@ -69,14 +69,15 @@ fn explicit_rebind_preserves_geometry_dimensions_context_and_one_undo() {
     assert_eq!(s.doc.to_json(), before);
     assert!(s.model.result(id).unwrap().error.is_some());
     run(&mut s, "edit.redo", json!({}));
-    let reopened = Session::new(solvecraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
     assert!((reopened.model.state().sketch(id).unwrap().plane.origin.z - 30.).abs() < 1e-6);
 }
 #[test]
 fn unsupported_face_has_explicit_fixed_alternative_and_no_live_projection() {
     let mut s = Session::default();
     run(&mut s, "solid.box", json!({"length":10,"width":10,"height":10,"body_name":"Base"}));
-    run(&mut s, "solid.box", json!({"length":2,"width":2,"height":2,"corner":[4,4,10],"operation":"join"}));
+    // The tops of two joined boxes merge into one face that no single construction owns.
+    run(&mut s, "solid.box", json!({"length":10,"width":10,"height":10,"corner":[10,0,0],"operation":"join"}));
     let mut pick = top_pick(&s, "Base");
     let before = s.doc.to_json();
     let error = s.execute("sketch.create", &json!({"plane":pick})).unwrap_err();
@@ -84,7 +85,7 @@ fn unsupported_face_has_explicit_fixed_alternative_and_no_live_projection() {
     assert_eq!(s.doc.to_json(), before);
     pick["fixed"] = json!(true);
     let id = run(&mut s, "sketch.create", json!({"plane":pick}))["sketch"].as_u64().unwrap();
-    assert!(matches!(s.doc.feature(id).unwrap().kind, solvecraft_doc::FeatureKind::Sketch { plane: solvecraft_doc::PlaneRef::Custom { .. }, .. }));
+    assert!(matches!(s.doc.feature(id).unwrap().kind, solidcraft_doc::FeatureKind::Sketch { plane: solidcraft_doc::PlaneRef::Custom { .. }, .. }));
     assert!(s.doc.sketch(id).unwrap().links.is_empty());
 }
 #[test]
@@ -130,7 +131,7 @@ fn default_certified_borders_follow_width_and_height_with_stable_entities() {
     let max_y = sketch.sketch.points.iter().map(|point| point.pos.y).fold(f64::NEG_INFINITY, f64::max);
     let min_y = sketch.sketch.points.iter().map(|point| point.pos.y).fold(f64::INFINITY, f64::min);
     assert!(((max_x - min_x) * (max_y - min_y) - 160.).abs() < 1e-5);
-    let reopened = Session::new(solvecraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
     assert!(reopened.model.state().sketch(id).unwrap().sketch.links.iter().all(|link| !link.lost));
 }
 
@@ -175,7 +176,7 @@ fn exact_nested_source_and_cross_owner_pending_paths_capture_only_involved_posit
     let before = s.doc.to_json();
     let pending = s.pending_moves.clone();
     let id = run(&mut s, "sketch.create", json!({"plane":pick,"project_edges":false}))["sketch"].as_u64().unwrap();
-    let solvecraft_doc::FeatureKind::Sketch { plane, .. } = &s.doc.feature(id).unwrap().kind else { panic!("not sketch") };
+    let solidcraft_doc::FeatureKind::Sketch { plane, .. } = &s.doc.feature(id).unwrap().kind else { panic!("not sketch") };
     let anchor = super::anchor(plane).unwrap();
     assert_eq!(anchor.path, vec![second, child_occ]);
     assert_eq!(anchor.author_path, vec![author["occurrence"].as_u64().unwrap()]);
@@ -186,7 +187,7 @@ fn exact_nested_source_and_cross_owner_pending_paths_capture_only_involved_posit
     assert_eq!(s.doc.to_json(), before);
     assert_eq!(s.pending_moves, pending);
     run(&mut s, "edit.redo", json!({}));
-    let mut reopened = Session::new(solvecraft_doc::Document::from_json(&saved).unwrap());
+    let mut reopened = Session::new(solidcraft_doc::Document::from_json(&saved).unwrap());
     assert!(reopened.model.result(id).unwrap().error.is_none());
     run(&mut reopened, "component.activate", json!({"component":0}));
     let original = reopened.doc.to_json();
@@ -225,7 +226,7 @@ fn fixed_rebind_freezes_current_resized_borders_and_only_detaches_auto_links() {
         visible.curves.iter().map(|curve| curve.id.clone()).collect::<Vec<_>>()
     );
     assert_eq!(fixed.points.iter().map(|point| point.pos).collect::<Vec<_>>(), visible.points.iter().map(|point| point.pos).collect::<Vec<_>>());
-    let reopened = Session::new(solvecraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
     assert!(reopened.model.result(id).unwrap().error.is_none());
     run(&mut s, "edit.undo", json!({}));
     assert_eq!(s.doc.to_json(), before);
@@ -249,13 +250,13 @@ fn strict_anchor_timeline_copy_remaps_producer_and_refuses_external_translation_
     let pasted = run(&mut s, "timeline.paste", json!({"translate":[30,0,0]}));
     assert!(pasted["errors"].as_array().unwrap().is_empty(), "{pasted}");
     let new_id = pasted["pasted"][1]["id"].as_u64().unwrap();
-    let solvecraft_doc::FeatureKind::Sketch { plane, .. } = &s.doc.feature(new_id).unwrap().kind else { panic!("not sketch") };
+    let solidcraft_doc::FeatureKind::Sketch { plane, .. } = &s.doc.feature(new_id).unwrap().kind else { panic!("not sketch") };
     let anchor = super::anchor(plane).unwrap();
     assert_ne!(anchor.target.origin_feature, s.doc.find_feature("BaseFeature").unwrap().id);
     assert_ne!(anchor.target.body, "Base");
     assert!(s.model.state().sketch(new_id).unwrap().sketch.links.iter().all(|link| !link.lost));
     assert!(s.model.state().sketch(id).unwrap().sketch.links.iter().all(|link| !link.lost));
-    let reopened = Session::new(solvecraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
     assert!(reopened.model.result(new_id).unwrap().error.is_none());
 }
 
@@ -274,10 +275,10 @@ fn strict_anchor_deep_clone_is_independent_and_rename_preserves_certified_projec
         .doc
         .features
         .iter()
-        .find(|feature| feature.component == owner && matches!(feature.kind, solvecraft_doc::FeatureKind::Sketch { .. }))
+        .find(|feature| feature.component == owner && matches!(feature.kind, solidcraft_doc::FeatureKind::Sketch { .. }))
         .unwrap();
     let new_id = new_feature.id;
-    let solvecraft_doc::FeatureKind::Sketch { plane, .. } = &new_feature.kind else { panic!("not sketch") };
+    let solidcraft_doc::FeatureKind::Sketch { plane, .. } = &new_feature.kind else { panic!("not sketch") };
     let anchor = super::anchor(plane).unwrap();
     let body = anchor.target.body.clone();
     assert_eq!(anchor.component, owner);
@@ -287,7 +288,7 @@ fn strict_anchor_deep_clone_is_independent_and_rename_preserves_certified_projec
     run(&mut s, "body.rename", json!({"body":body,"name":"Independent"}));
     assert!(s.model.result(new_id).unwrap().error.is_none());
     assert!(s.model.state().sketch(new_id).unwrap().sketch.links.iter().all(|link| !link.lost));
-    let reopened = Session::new(solvecraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
     assert!(reopened.model.result(new_id).unwrap().error.is_none());
 }
 
@@ -308,7 +309,7 @@ fn legacy_or_fixed_rebind_needs_explicit_author_path_for_repeated_owner() {
     assert!(error.to_string().contains("ambiguous"), "{error}");
     assert_eq!(s.doc.to_json(), before);
     run(&mut s, "sketch.redefine", json!({"sketch":id,"plane":pick,"author_path":[second]}));
-    let solvecraft_doc::FeatureKind::Sketch { plane, .. } = &s.doc.feature(id).unwrap().kind else { panic!("not sketch") };
+    let solidcraft_doc::FeatureKind::Sketch { plane, .. } = &s.doc.feature(id).unwrap().kind else { panic!("not sketch") };
     assert_eq!(super::anchor(plane).unwrap().author_path, vec![second]);
     assert_eq!(s.active_component, 0);
 }
@@ -370,12 +371,12 @@ fn freezing_rebuilt_arc_borders_keeps_authored_dimension_entity_indices() {
     let dimension = frozen
         .constraints
         .iter()
-        .find(|constraint| matches!(constraint.kind, solvecraft_sketch::ConstraintKind::Radius { c, .. } if c == circle_index))
+        .find(|constraint| matches!(constraint.kind, solidcraft_sketch::ConstraintKind::Radius { c, .. } if c == circle_index))
         .unwrap();
-    assert!((solvecraft_sketch::measure_dimension(frozen, &dimension.kind).unwrap() - 2.).abs() < 1e-6);
+    assert!((solidcraft_sketch::measure_dimension(frozen, &dimension.kind).unwrap() - 2.).abs() < 1e-6);
     assert_eq!(frozen.curves.iter().map(|curve| &curve.id).collect::<Vec<_>>(), visible.curves.iter().map(|curve| &curve.id).collect::<Vec<_>>());
     assert!(s.model.result(id).unwrap().error.is_none());
-    let reopened = Session::new(solvecraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
     assert!(reopened.model.result(id).unwrap().error.is_none());
     run(&mut s, "edit.undo", json!({}));
     assert_eq!(s.doc.to_json(), before);
@@ -388,21 +389,21 @@ fn angled_attachment_tracks_source_plane_and_reopens() {
     let pick = top_pick(&s, "Base");
     let id = run(&mut s, "sketch.create", json!({"plane":pick,"project_edges":false}))["sketch"].as_u64().unwrap();
     run(&mut s, "sketch.finish", json!({}));
-    let solvecraft_doc::FeatureKind::Sketch { plane, .. } = &mut s.doc_mut().feature_mut(id).unwrap().kind else { panic!("not sketch") };
-    *plane = solvecraft_doc::PlaneRef::AtAngle { base: Box::new(plane.clone()), axis_origin: Vec3::ZERO, axis_dir: Vec3::X, angle: "90 deg".into() };
+    let solidcraft_doc::FeatureKind::Sketch { plane, .. } = &mut s.doc_mut().feature_mut(id).unwrap().kind else { panic!("not sketch") };
+    *plane = solidcraft_doc::PlaneRef::AtAngle { base: Box::new(plane.clone()), axis_origin: Vec3::ZERO, axis_dir: Vec3::X, angle: "90 deg".into() };
     s.refresh();
     let height = s.doc.find_feature("BaseFeature").unwrap().param_names[2].clone();
     run(&mut s, "parameters.change", json!({"name":height,"expression":"20 mm"}));
     let placed = s.model.state().sketch(id).unwrap().plane;
     assert!((placed.origin.y + 20.).abs() < 1e-6);
     assert!(placed.origin.z.abs() < 1e-6);
-    let reopened = Session::new(solvecraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
     assert_eq!(reopened.model.state().sketch(id).unwrap().plane, placed);
 }
 
 #[test]
 fn rounded_enclosure_shell_side_and_floor_attach_through_width_wall_and_reopen() {
-    use solvecraft_doc::{FeatureKind, config::FaceCertificate, face_anchor::plane_face_anchor};
+    use solidcraft_doc::{FeatureKind, config::FaceCertificate, face_anchor::plane_face_anchor};
     let mut s = Session::default();
     for (name, expression) in [("width", "80 mm"), ("depth", "60 mm"), ("height", "30 mm"), ("wall", "2 mm")] {
         run(&mut s, "parameters.add", json!({"name":name,"expression":expression}));
@@ -463,7 +464,7 @@ fn rounded_enclosure_shell_side_and_floor_attach_through_width_wall_and_reopen()
     }
     run(&mut s, "parameters.change", json!({"name":"width","expression":"100 mm"}));
     run(&mut s, "parameters.change", json!({"name":"wall","expression":"3 mm"}));
-    let reopened = Session::new(solvecraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
     for session in [&s, &reopened] {
         for id in [side, floor] {
             let result = session.model.result(id).unwrap();
@@ -481,7 +482,7 @@ fn rounded_enclosure_shell_side_and_floor_attach_through_width_wall_and_reopen()
         assert!(state.sketch(floor).unwrap().plane.normal().dot(Vec3::Z) > 0.999);
         let mesh = state.body("Case").unwrap().body.tessellate_with(1e-4, true).unwrap();
         let case = &state.body("Case").unwrap().body;
-        let corners: Vec<_> = (0..case.face_count()).filter(|i| matches!(solvecraft_kernel::face_surface(case, *i), Some(solvecraft_kernel::FaceSurface::Cylinder { radius, .. }) if (radius - 6.).abs() < 1e-6)).collect();
+        let corners: Vec<_> = (0..case.face_count()).filter(|i| matches!(solidcraft_kernel::face_surface(case, *i), Some(solidcraft_kernel::FaceSurface::Cylinder { radius, .. }) if (radius - 6.).abs() < 1e-6)).collect();
         assert_eq!(corners.len(), 4, "later port/boss features must not subdivide untouched outer corners");
         for index in corners {
             let points: Vec<_> = mesh
@@ -498,7 +499,7 @@ fn rounded_enclosure_shell_side_and_floor_attach_through_width_wall_and_reopen()
         assert!(!mesh.contains(Vec3::new(49., 0., 12.)), "USB must remain open after resize/reopen");
         assert!(mesh.contains(Vec3::new(49., 15., 12.)), "adjacent right wall remains solid");
         assert!(mesh.contains(Vec3::new(-49., 0., 12.)), "opposite wall must stay solid");
-        let seed = state.sketch(floor).unwrap().plane.to_world(solvecraft_geom::Vec2::new(40., 20.)) + Vec3::Z * 6.;
+        let seed = state.sketch(floor).unwrap().plane.to_world(solidcraft_geom::Vec2::new(40., 20.)) + Vec3::Z * 6.;
         assert!(mesh.contains(seed), "seed boss starts on current floor");
         for shift in [Vec3::ZERO, Vec3::new(-80., 0., 0.), Vec3::new(0., -40., 0.), Vec3::new(-80., -40., 0.)] {
             assert!(mesh.contains(seed + shift), "each patterned boss must survive resize/reopen at {:?}", seed + shift);
@@ -525,14 +526,14 @@ fn offset_rectangle_pocket_has_one_logical_outer_wall_and_closed_face_projection
     run(&mut s, "sketch.finish", json!({}));
     run(&mut s, "solid.extrude", json!({"sketch":control_sketch,"distance":10,"operation":"new","body_name":"Control"}));
     let untouched = s.model.state().body("Control").unwrap().body.clone();
-    let before_control = solvecraft_kernel::step_export(&[&untouched], "control snapshot").unwrap();
+    let before_control = solidcraft_kernel::step_export(&[&untouched], "control snapshot").unwrap();
     let pick = top_pick(&s, "Stock");
     let pocket = run(&mut s, "sketch.create", json!({"plane":pick}))["sketch"].as_u64().unwrap();
     let side = {
         let state = s.model.state();
         let sk = &state.sketch(pocket).unwrap().sketch;
         let curve = sk.curves.iter().find(|c| c.id == "l1").unwrap();
-        let solvecraft_sketch::CurveKind::Line { a, b } = curve.kind else { panic!() };
+        let solidcraft_sketch::CurveKind::Line { a, b } = curve.kind else { panic!() };
         sk.point(a).unwrap() + sk.point(b).unwrap()
     };
     let outer = run(&mut s, "sketch.offset", json!({"curves":["l1"],"distance":0.3425231845240546,"side":[side.x,side.y]}))["curves"].clone();
@@ -541,7 +542,7 @@ fn offset_rectangle_pocket_has_one_logical_outer_wall_and_closed_face_projection
     run(&mut s, "solid.extrude", json!({"sketch":pocket,"profiles":[{"curves":inner}],"distance":-9,"operation":"cut"}));
     let control = s.model.state().body("Control").unwrap().body.clone();
     assert!(control.same(&untouched), "a separate body crossing the cutter end plane remains the exact same solid");
-    assert_eq!(solvecraft_kernel::step_export(&[&control], "control snapshot").unwrap(), before_control);
+    assert_eq!(solidcraft_kernel::step_export(&[&control], "control snapshot").unwrap(), before_control);
     let state = s.model.state();
     let body = state.body("Stock").unwrap();
     let display = body.body.display_mesh(0.01).unwrap();
@@ -556,7 +557,7 @@ fn offset_rectangle_pocket_has_one_logical_outer_wall_and_closed_face_projection
     assert_eq!(display.surface_patch(face.index).len(), 1);
     let attached = run(&mut s, "sketch.create", json!({"plane":{"body":"Stock","index":face.index,"face":[30,0,0.5]}}))["sketch"].as_u64().unwrap();
     run(&mut s, "sketch.finish", json!({}));
-    let reopened = Session::new(solvecraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
     for session in [&s, &reopened] {
         let result = session.model.result(attached).unwrap();
         assert!(result.error.is_none(), "{:?}", result.error);

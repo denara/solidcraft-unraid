@@ -4,11 +4,13 @@
 //! between stations, mitred at the corners.
 
 use mt::builder;
-use solvecraft_geom::{Loop2, Plane, Region2, Vec2, Vec3};
+use solidcraft_geom::{Plane, Region2, Vec2, Vec3};
 use truck_modeling as mt;
 
 use crate::body::{Body, p3};
 use crate::build::{cap_and_close, interpolate_cubic, uniform_wire};
+use crate::numbered::{NumberedLoop, NumberedRegion};
+use crate::record::{self, Side};
 use crate::{KernelError, Result, guard};
 
 /// Most path points accepted.
@@ -138,7 +140,10 @@ pub fn sweep_path(plane: &Plane, region: &Region2, path: &[Vec3]) -> Result<Body
     }
     let pts = clean(path)?;
     let corner = pts.windows(3).any(|w| turn(w[1] - w[0], w[2] - w[1]) > CORNER);
-    let lp = region.outer.ccw();
+    let profile = crate::numbered::number_regions(std::slice::from_ref(region))
+        .pop()
+        .map(|r| r.oriented())
+        .ok_or_else(|| KernelError::Invalid("profile".into()))?;
     if !corner && region.holes.is_empty() {
         // Smooth: evenly spaced stations, tangents from neighbours.
         let len: f64 = pts.windows(2).map(|w| w[0].dist(w[1])).sum();
@@ -147,11 +152,11 @@ pub fn sweep_path(plane: &Plane, region: &Region2, path: &[Vec3]) -> Result<Body
         let tangents = central_tangents(&sp)?;
         let st = stations(&sp, &tangents, &[])?;
         let expected = region.area().abs() * len * start_cos(plane, &tangents);
-        if let Ok(b) = smooth_walls(plane, &lp, &st, expected) {
+        if let Ok(b) = smooth_walls(plane, &profile.outer, &st, expected) {
             return Ok(b);
         }
     }
-    ruled(plane, region, &pts)
+    ruled(plane, &profile, &pts)
 }
 
 fn central_tangents(p: &[Vec3]) -> Result<Vec<Vec3>> {
@@ -170,8 +175,9 @@ fn start_cos(plane: &Plane, tangents: &[Vec3]) -> f64 {
     tangents.first().map(|t| t.dot(plane.normal()).abs()).unwrap_or(1.0).max(1e-3)
 }
 
-/// Ruled walls between stations at the path's points (mitred at corners), every loop.
-fn ruled(plane: &Plane, region: &Region2, pts: &[Vec3]) -> Result<Body> {
+/// Ruled walls between stations at the path's points (mitred at corners), every loop of the
+/// (oriented) profile.
+fn ruled(plane: &Plane, profile: &NumberedRegion, pts: &[Vec3]) -> Result<Body> {
     let pts: Vec<Vec3> = if pts.len() > MAX_RULED_STATIONS { resample(pts, MAX_RULED_STATIONS) } else { pts.to_vec() };
     let n = pts.len();
     let seg_dir = |i: usize| -> Option<Vec3> { (*pts.get(i + 1)? - *pts.get(i)?).normalized() };
@@ -197,27 +203,30 @@ fn ruled(plane: &Plane, region: &Region2, pts: &[Vec3]) -> Result<Body> {
     }
     let st = stations(&pts, &tangents, &mitre)?;
     let s0 = pts.first().copied().unwrap_or_default();
-    let loops: Vec<Loop2> = std::iter::once(region.outer.ccw()).chain(region.holes.iter().map(|h| h.ccw().reversed())).collect();
+    let loops: Vec<&NumberedLoop> = profile.loops().collect();
     let mut wires: Vec<Vec<mt::Wire>> = Vec::with_capacity(st.len());
     for s in &st {
         let pl = station_plane(plane, s0, s);
-        wires.push(loops.iter().map(|l| uniform_wire(&pl, l)).collect::<Result<Vec<_>>>()?);
+        wires.push(loops.iter().map(|l| uniform_wire(&pl, &l.lp)).collect::<Result<Vec<_>>>()?);
     }
     guard("path sweep", || {
-        let mut faces: Vec<mt::Face> = Vec::new();
+        // Every station's wires have the loops' segments, edge for edge.
+        let mut faces: Vec<Side> = Vec::new();
         for w in wires.windows(2) {
-            for (a, b) in w[0].iter().zip(&w[1]) {
+            let (Some(w0), Some(w1)) = (w.first(), w.get(1)) else { continue };
+            for ((a, b), l) in w0.iter().zip(w1).zip(&loops) {
                 let sides = builder::try_wire_homotopy(a, b).map_err(|e| KernelError::Failed(format!("path sweep: {e}")))?;
-                faces.extend(sides.face_iter().cloned());
+                faces.extend(record::ruled(&sides, a, b, &l.from, &l.from));
             }
         }
         let (Some(first), Some(last)) = (wires.first(), wires.last()) else { return Err(KernelError::Failed("path sweep".into())) };
-        cap_and_close(faces, first, last)
+        cap_and_close(faces, first, last, false)
     })
 }
 
 /// One B-spline wall per profile segment through the stations, capped; checked by volume.
-fn smooth_walls(plane: &Plane, lp: &Loop2, st: &[Station], expected: f64) -> Result<Body> {
+fn smooth_walls(plane: &Plane, profile: &NumberedLoop, st: &[Station], expected: f64) -> Result<Body> {
+    let lp = &profile.lp;
     let nseg = lp.segs.len();
     let fail = |w: &str| KernelError::Failed(format!("path sweep: {w}"));
     if nseg == 0 || nseg > 64 || st.len() < 4 {
@@ -270,13 +279,14 @@ fn smooth_walls(plane: &Plane, lp: &Loop2, st: &[Station], expected: f64) -> Res
                 return Err(fail("edges"));
             };
             let w: mt::Wire = vec![sa.clone(), b.clone(), sb.inverse(), a.inverse()].into();
-            walls.push(mt::Face::try_new(vec![w], mt::Surface::BSplineSurface(surf.clone())).map_err(|e| fail(&e.to_string()))?);
+            let wall = mt::Face::try_new(vec![w], mt::Surface::BSplineSurface(surf.clone())).map_err(|e| fail(&e.to_string()))?;
+            walls.push((wall, Some(record::profile(profile.numbers(j)))));
         }
         let w0: mt::Wire = e0.iter().cloned().collect();
         let w1: mt::Wire = e1.iter().cloned().collect();
         let tol = (lp.signed_area().abs().sqrt() * 0.05).max(1e-3);
-        for ws in [walls.clone(), walls.iter().map(|f| f.inverse()).collect()] {
-            if let Ok(b) = cap_and_close(ws, std::slice::from_ref(&w0), std::slice::from_ref(&w1))
+        for ws in [walls.clone(), walls.iter().map(|(f, prov)| (f.inverse(), prov.clone())).collect()] {
+            if let Ok(b) = cap_and_close(ws, std::slice::from_ref(&w0), std::slice::from_ref(&w1), false)
                 && b.tessellate(tol).is_ok_and(|m| (m.measure().volume - expected).abs() <= 0.15 * expected.abs())
             {
                 return Ok(b);
@@ -288,7 +298,7 @@ fn smooth_walls(plane: &Plane, lp: &Loop2, st: &[Station], expected: f64) -> Res
 
 #[cfg(test)]
 mod tests {
-    use solvecraft_geom::{Loop2, Plane, Region2, Vec2, Vec3};
+    use solidcraft_geom::{Loop2, Plane, Region2, Vec2, Vec3};
 
     use super::sweep_path;
 

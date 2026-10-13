@@ -1,8 +1,8 @@
 //! Constraint tools accept a selected curve pair as well as tool-first clicks.
 
 use serde_json::json;
-use solvecraft_engine::{Sel, sketch::ConstraintKind};
-use solvecraft_ui_egui::scenario::Harness;
+use solidcraft_engine::{Sel, sketch::ConstraintKind};
+use solidcraft_ui_egui::scenario::Harness;
 
 fn lines() -> Harness {
     let mut h = Harness::new();
@@ -145,4 +145,107 @@ fn rejected_preselection_preserves_document_and_error() {
     h.run(&json!([{"start":"sketch.constraint.parallel"}])).unwrap();
     assert!(!h.app.status.as_ref().is_some_and(|(_, _, error)| *error));
     assert!(h.app.session.selection.is_empty());
+}
+
+#[test]
+fn curvature_polygon_and_fix_consume_clicked_operands_atomically() {
+    for command in ["fix", "curvature", "polygon"] {
+        let mut h = Harness::new();
+        h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+        let picks = match command {
+            "curvature" => {
+                h.app.run("sketch.line", json!({"points":[[10,10],[30,10]],"infer":false})).unwrap();
+                h.app.run("sketch.spline.control_point", json!({"points":["l1.end",[40,12],[50,16],[60,25]]})).unwrap();
+                vec![[20., 10.], [45., 14.875]]
+            }
+            "polygon" => {
+                h.app.run("sketch.line", json!({"points":[[10,10],[40,10],[40,30],[10,30]],"closed":true,"infer":false})).unwrap();
+                vec![[25., 10.], [40., 20.], [25., 30.], [10., 20.]]
+            }
+            _ => {
+                h.app.run("sketch.line", json!({"points":[[10,10],[40,10]],"infer":false})).unwrap();
+                h.app.run("sketch.point", json!({"point":[20,25],"id":"p"})).unwrap();
+                vec![[25., 10.], [20., 25.]]
+            }
+        };
+        h.call("ui.view", json!({"view":"top"}));
+        h.app.cam.distance = 80.0;
+        h.app.cam.target = solidcraft_engine::geom::Vec3::new(30.0, 15.0, 0.0);
+        h.settle();
+        for (i, p) in picks.iter().enumerate() {
+            h.step(&json!({"click":{"sketch":p},"shift":i>0})).unwrap();
+        }
+        assert_eq!(h.app.session.selection.len(), picks.len(), "{command}: {:?}", h.app.session.selection);
+        let before = h.app.session.doc.to_json();
+        let undo = h.app.session.undo.len();
+        h.step(&json!({"start":format!("sketch.constraint.{command}")})).unwrap();
+        assert!(!h.app.status.as_ref().is_some_and(|(_, _, error)| *error), "{command}: {:?}", h.app.status);
+        assert!(h.app.tool.is_none());
+        assert!(h.app.session.selection.is_empty());
+        assert_eq!(h.app.session.undo.len(), undo + 1);
+        let st = h.app.session.world_state();
+        let sk = &st.sketch(h.app.session.active_sketch.unwrap()).unwrap().sketch;
+        assert!(sk.constraints.iter().any(|c| match command {
+            "fix" => matches!(c.kind, ConstraintKind::Fix { .. }),
+            "curvature" => matches!(c.kind, ConstraintKind::Smooth { .. }),
+            _ => matches!(c.kind, ConstraintKind::Equal { .. }),
+        }));
+        match command {
+            "fix" => {
+                assert!(sk.curve_locked(sk.curve_index("l1").unwrap()));
+                assert!(sk.point_locked(sk.resolve_point("p").unwrap()));
+            }
+            "curvature" => {
+                let spline = sk.curves.iter().find(|c| c.id != "l1").unwrap();
+                let pts: Vec<_> = spline.kind.point_ids().iter().map(|i| sk.point(*i).unwrap()).collect();
+                let line = sk.polyline(sk.curve_index("l1").unwrap());
+                let direction = (line[1] - line[0]).normalized().unwrap();
+                assert!((pts[1] - pts[0]).cross(direction).abs() < 1e-5);
+                assert!((pts[2] - pts[1]).cross(pts[1] - pts[0]).abs() < 1e-3);
+            }
+            _ => {
+                let lengths: Vec<_> = ["l1", "l2", "l3", "l4"]
+                    .iter()
+                    .map(|id| {
+                        let pts = sk.polyline(sk.curve_index(id).unwrap());
+                        pts[0].dist(pts[1])
+                    })
+                    .collect();
+                assert!(lengths[0] > 1.0);
+                assert!(lengths.iter().all(|l| (l - lengths[0]).abs() < 1e-6));
+            }
+        }
+        assert!(st.sketch(h.app.session.active_sketch.unwrap()).unwrap().report.ok());
+        let after = h.app.session.doc.to_json();
+        h.app.run("edit.undo", json!({})).unwrap();
+        assert_eq!(h.app.session.doc.to_json(), before);
+        h.app.run("edit.redo", json!({})).unwrap();
+        assert_eq!(h.app.session.doc.to_json(), after);
+    }
+}
+
+#[test]
+fn remaining_constraints_preserve_mixed_selections_and_rejected_geometry() {
+    for command in ["fix", "curvature", "polygon"] {
+        let mut h = lines();
+        let before = h.app.session.doc.to_json();
+        let undo = h.app.session.undo.len();
+        let mixed = vec![Sel::SketchCurve { id: "l1".into() }, Sel::Body { name: "missing".into() }];
+        h.app.session.selection = mixed.clone();
+        h.step(&json!({"start":format!("sketch.constraint.{command}")})).unwrap();
+        assert!(h.app.tool.is_some());
+        assert_eq!(h.app.session.selection, mixed);
+        assert_eq!(h.app.session.doc.to_json(), before);
+        assert_eq!(h.app.session.undo.len(), undo);
+    }
+    let mut h = lines();
+    let selection = vec![Sel::SketchCurve { id: "l1".into() }, Sel::SketchCurve { id: "missing".into() }];
+    h.app.session.selection = selection.clone();
+    let before = h.app.session.doc.to_json();
+    let undo = h.app.session.undo.len();
+    h.step(&json!({"start":"sketch.constraint.curvature"})).unwrap();
+    assert!(h.app.status.as_ref().is_some_and(|(_, _, error)| *error));
+    assert_eq!(h.app.session.selection, selection);
+    assert_eq!(h.app.session.doc.to_json(), before);
+    assert_eq!(h.app.session.undo.len(), undo);
 }

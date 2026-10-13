@@ -10,4 +10,4 @@ The PLASTIC tab has a small enclosure subset:
   clearance per material, used as the features' defaults.
 
 Rib and web (on the SOLID tab) complete the set. These features are checked against
-hand-computed geometry rather than a Fusion oracle.
+hand-computed geometry.

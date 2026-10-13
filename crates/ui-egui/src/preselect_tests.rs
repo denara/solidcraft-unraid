@@ -2,11 +2,63 @@
 //! type, whether the command starts from a shortcut, the toolbar or a menu.
 
 use serde_json::json;
-use solvecraft_engine::geom::Vec3;
-use solvecraft_engine::{Sel, Session};
+use solidcraft_engine::geom::Vec3;
+use solidcraft_engine::{Sel, Session};
 
 use crate::dialogs::{Dialog, Kind, apply_commands};
 use crate::{Services, SolveApp};
+
+#[test]
+fn path_plane_click_retains_source_and_previews_then_edits_in_place() {
+    let mut h = crate::scenario::Harness::new();
+    let source = h.app.run("sketch.create", json!({"plane":"XY","name":"Bridge"})).unwrap()["sketch"].as_u64().unwrap();
+    h.app.run("sketch.options", json!({"sketch_3d":true})).unwrap();
+    let wire = h.app.run("sketch.line3d", json!({"points":[[10,20,10],[30,35,40]]})).unwrap()["curves"][0].as_str().unwrap().to_string();
+    h.app.run("sketch.finish", json!({})).unwrap();
+    h.app.run("sketch.create", json!({"plane":"XY","name":"Other"})).unwrap();
+    h.app.run("sketch.options", json!({"sketch_3d":true})).unwrap();
+    let duplicate = h.app.run("sketch.line3d", json!({"points":[[-30,0,0],[-20,0,0]]})).unwrap()["curves"][0].as_str().unwrap().to_string();
+    assert_eq!(wire, duplicate, "exercise duplicate curve ids in different sketches");
+    h.app.run("sketch.finish", json!({})).unwrap();
+    h.app.ui.show_origin = false;
+    h.settle();
+    h.call("ui.view", json!({"view":"home"}));
+    h.call("ui.view", json!({"view":"fit"}));
+    h.app.start("construct.plane.along_path");
+    h.frames(2);
+    h.step(&json!({"click":{"world":[20,27.5,25]}})).unwrap();
+    let d = h.app.dialog.as_ref().unwrap();
+    let commands = apply_commands(&h.app, d).unwrap();
+    assert_eq!(commands[0].1["path"]["sketch"], json!(source));
+    let history = h.app.session.undo.len();
+    let count = h.app.session.doc.features.len();
+    let preview = h.app.session.preview_visible_world(&commands).unwrap();
+    let built = crate::preview::compute(&h.app.session, &commands, crate::preview::Colors::from_tokens(&crate::theme::Tokens::dark())).unwrap();
+    assert!(!built.scene.xray.is_empty(), "construction preview must contain visible geometry");
+    let plane = preview.after.construct.last().unwrap();
+    let solidcraft_engine::doc::construct::ConstructGeom::Plane(pl) = plane.geom else { panic!("plane") };
+    assert!(pl.origin.dist(Vec3::new(20.0, 27.5, 25.0)) < 1e-6);
+    assert_eq!(h.app.session.doc.features.len(), count);
+    assert_eq!(h.app.session.undo.len(), history);
+    h.step(&json!({"key":"Enter"})).unwrap();
+    assert!(h.app.dialog.is_none(), "{:?}", h.app.dialog);
+    let feature = h.app.session.doc.features.last().unwrap().clone();
+    assert_eq!(h.app.session.undo.len(), history + 1);
+    h.app.edit_feature(feature.id);
+    h.frames(2);
+    let d = h.app.dialog.as_mut().unwrap();
+    assert!(matches!(d.kind,Kind::PathPlane{sketch:Some(s),..} if s==source));
+    if let Kind::PathPlane { t, .. } = &mut d.kind {
+        *t = "0.25".into();
+    }
+    h.step(&json!({"key":"Enter"})).unwrap();
+    assert!(h.app.dialog.is_none(), "{:?}", h.app.dialog);
+    assert_eq!(h.app.session.doc.features.len(), count + 1);
+    let p = solidcraft_engine::view::construction_planes(&h.app.session).into_iter().find(|p| p.0 == feature.id).unwrap().2;
+    assert!(p.origin.dist(Vec3::new(15.0, 23.75, 17.5)) < 1e-6, "{p:?}");
+    h.app.run("edit.undo", json!({})).unwrap();
+    assert_eq!(h.app.session.doc.feature(feature.id).unwrap().kind, feature.kind);
+}
 
 #[test]
 fn cylinder_emboss_empty_target_face_applies_automatic_wrap_and_deboss() {
@@ -42,7 +94,7 @@ fn cylinder_emboss_empty_target_face_applies_automatic_wrap_and_deboss() {
         h.step(&json!({"key":"Enter"})).unwrap();
         assert!(h.app.dialog.is_none(), "{:?}", h.app.dialog);
         let feature = h.app.session.doc.features.last().unwrap().clone();
-        let solvecraft_engine::doc::FeatureKind::Emboss { face: Some(face), deboss: actual, .. } = &feature.kind else {
+        let solidcraft_engine::doc::FeatureKind::Emboss { face: Some(face), deboss: actual, .. } = &feature.kind else {
             panic!("automatic Apply must save its cylinder anchor: {:?}", feature.kind)
         };
         assert_eq!(*actual, deboss);
@@ -120,7 +172,7 @@ fn cylinder_emboss_edit_retains_second_source_and_author_paths_and_all_profiles(
         .as_u64()
         .unwrap();
     let before = h.app.session.doc.feature(feature).unwrap().clone();
-    let solvecraft_engine::doc::FeatureKind::Emboss { face: Some(face), .. } = &before.kind else { panic!("selected face") };
+    let solidcraft_engine::doc::FeatureKind::Emboss { face: Some(face), .. } = &before.kind else { panic!("selected face") };
     assert_eq!(face.path, vec![source_second]);
     assert_eq!(face.author_path, vec![author_second]);
     h.app.run("component.activate", json!({"component":"root"})).unwrap();
@@ -344,7 +396,7 @@ fn hole_at_sketch_points() {
         {"command": "sketch.point", "params": {"point": [30, 20], "id": "h2"}},
         {"command": "sketch.finish", "params": {}},
     ]));
-    let sk = app.session.doc.features.iter().find(|f| matches!(f.kind, solvecraft_engine::doc::FeatureKind::Sketch { .. })).unwrap().id;
+    let sk = app.session.doc.features.iter().find(|f| matches!(f.kind, solidcraft_engine::doc::FeatureKind::Sketch { .. })).unwrap().id;
     app.start("solid.hole");
     let mut d = app.dialog.clone().unwrap();
     if let Kind::Hole { opts, .. } = &mut d.kind {
@@ -418,6 +470,19 @@ fn a_hole_is_mirrored_as_a_feature() {
     assert_eq!(cmds[0].1["features"], json!(["Hole1"]));
 }
 
+/// The radius arrow points into the body: dragging toward the material grows the round.
+#[test]
+fn fillet_and_chamfer_arrows_point_into_the_body() {
+    for id in ["solid.fillet", "solid.chamfer"] {
+        let mut app = boxed();
+        let e = edge(&app, Vec3::new(20.0, 0.0, 20.0));
+        let d = start(&mut app, vec![e], id);
+        let (_, dir) = crate::canvas::anchor(&app, &d).unwrap();
+        let dir = dir.unwrap();
+        assert!(dir.y > 0.5 && dir.z < -0.5, "{id}: {dir:?}");
+    }
+}
+
 #[test]
 fn chamfer_types_send_their_values() {
     let mut app = boxed();
@@ -445,6 +510,43 @@ fn chamfer_types_send_their_values() {
     let ch = app.session.doc.features.last().unwrap().id;
     let e = crate::dialogs::for_feature(&app, ch, None).unwrap();
     assert!(matches!(&e.kind, Kind::Fillet { chamfer: true, ctype: 2, angle, flip: true, .. } if angle == "30 deg"), "{:?}", e.kind);
+}
+
+/// Radius Fit: the fillet reduces a radius too large for its edges, the preview shows the radius
+/// it used, and editing the feature keeps the choice (#293).
+#[test]
+fn fillet_radius_fit_reduces_and_shows_the_applied_radius() {
+    let mut app = app_with(serde_json::json!([
+        {"command": "solid.box", "params": {"length": 14, "width": 6, "height": 10, "corner": [14, 0, 0]}}
+    ]));
+    let edges: Vec<Sel> = [Vec3::new(14.0, 0.0, 5.0), Vec3::new(28.0, 0.0, 5.0), Vec3::new(14.0, 6.0, 5.0), Vec3::new(28.0, 6.0, 5.0)]
+        .into_iter()
+        .map(|p| edge(&app, p))
+        .collect();
+    let mut d = start(&mut app, edges, "solid.fillet");
+    if let Kind::Fillet { radius, .. } = &mut d.kind {
+        *radius = "3.5 mm".into();
+    }
+    // Exact (the default) sends no fit and the preview refuses the radius.
+    let (id, p) = apply_commands(&app, &d).unwrap().remove(0);
+    assert!(p.get("fit").is_none(), "{p}");
+    assert!(app.session.preview(&[(id.clone(), p)]).is_err());
+    // Reduce to Fit: the preview builds it, at the radius that fits.
+    d.extra.insert("fit".into(), json!("reduce"));
+    let (id, p) = apply_commands(&app, &d).unwrap().remove(0);
+    assert_eq!(p["fit"], json!("reduce"));
+    let job = crate::preview::compute(&app.session, &[(id.clone(), p.clone())], crate::preview::Colors::from_tokens(&crate::theme::Tokens::dark()))
+        .unwrap();
+    assert_eq!(job.applied, Some(3.0));
+    // Applied and edited again, the fillet keeps its fit.
+    app.session.execute(&id, &p).unwrap();
+    let fillet = app.session.doc.features.last().unwrap().id;
+    let e = crate::dialogs::for_feature(&app, fillet, None).unwrap();
+    assert_eq!(e.extra.get("fit"), Some(&json!("reduce")));
+    // Its edit preview shows the radius it uses too.
+    let cmds = apply_commands(&app, &e).unwrap();
+    let job = crate::preview::compute(&app.session, &cmds, crate::preview::Colors::from_tokens(&crate::theme::Tokens::dark())).unwrap();
+    assert_eq!(job.applied, Some(3.0));
 }
 
 /// Apply a dialog's commands to the session; the new feature's id.
@@ -543,7 +645,7 @@ fn boundary_fill_finds_the_cells_and_fills_the_ticked_ones() {
         {"command": "solid.box", "params": {"length": 20, "width": 20, "height": 20}},
         {"command": "solid.box", "params": {"length": 20, "width": 20, "height": 20, "corner": [10, 10, 0], "operation": "new"}}
     ]));
-    let mut d = start(&mut app, vec![], "SurfaceSculpt");
+    let mut d = start(&mut app, vec![], "solid.boundary_fill");
     d.inputs[0].items = vec![Sel::Body { name: "Body1".into() }, Sel::Body { name: "Body2".into() }];
     app.dialog = Some(d);
     // The dialog finds the cells on its next frame.
@@ -605,6 +707,31 @@ fn surface_dialogs_make_their_commands() {
     app.session.execute(&id, &p).unwrap();
     let v = app.session.model.state().bodies.iter().map(|b| b.mesh().measure().volume).fold(0.0, f64::max);
     assert!((v - 30.0 * 20.0 * 2.0).abs() < 1.0, "{v}");
+}
+
+#[test]
+fn patch_dialog_fills_a_loop_of_edges_that_is_not_planar() {
+    // A box with its top cut away by a sideways cylinder: its rim is a closed loop of four
+    // curved edges, not in a plane. Picking them in the Patch dialog fills it with one face.
+    let mut app = app_with(json!([
+        {"command": "solid.box", "params": {"length": 28, "width": 28, "height": 20, "corner": [-14, -14, 0], "body_name": "Saddle"}},
+        {"command": "solid.cylinder", "params": {"radius": 40, "height": 120, "base": [0, -60, 50], "axis": "Y", "operation": "cut", "targets": ["Saddle"]}}
+    ]));
+    let z = |x: f64| 50.0 - (1600.0 - x * x).sqrt();
+    let rim = [Vec3::new(14.0, 0.0, z(14.0)), Vec3::new(0.0, 14.0, z(0.0)), Vec3::new(-14.0, 0.0, z(-14.0)), Vec3::new(0.0, -14.0, z(0.0))];
+    let mut d = start(&mut app, vec![], "surface.patch");
+    d.inputs[0].items = rim.iter().enumerate().map(|(i, p)| Sel::Edge { body: "Saddle".into(), index: i, point: *p }).collect();
+    let cmds = apply_commands(&app, &d).unwrap();
+    assert_eq!(cmds.len(), 1);
+    assert_eq!(cmds[0].0, "surface.patch");
+    app.session.execute(&cmds[0].0, &cmds[0].1).unwrap();
+    let st = app.session.model.state();
+    let fill = st.bodies.iter().find(|b| b.name != "Saddle").unwrap();
+    assert!(fill.body.is_surface() && fill.body.face_count() == 1);
+    // One smooth face over the rim: its area is close to the cylinder's inside the rim.
+    let area = fill.mesh().measure().area;
+    let want = 28.0 * 40.0 * 2.0 * (14.0f64 / 40.0).asin();
+    assert!((area - want).abs() < want * 1e-2, "{area} vs {want}");
 }
 
 #[test]

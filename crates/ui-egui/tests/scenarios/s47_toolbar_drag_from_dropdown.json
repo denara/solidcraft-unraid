@@ -1,0 +1,119 @@
+[
+ {
+  "note": "#289: drag a command from a panel's drop-down onto the toolbar to pin it (a drop line shows where), drag a button off the toolbar or back into the drop-down to unpin it, the pin icon on a hovered drop-down row, and Customize Toolbar… in the toolbar's own menu. Kept with the preferences."
+ },
+ {
+  "expect": {
+   "shown_handles": ["toolbar:solid.extrude"],
+   "hidden_handles": ["toolbar:solid.sphere", "toolbar:solid.torus"]
+  }
+ },
+ {
+  "click": {"handle": "panel:SOLID:CREATE"}
+ },
+ {
+  "drag": [{"handle": "dropdown:solid.sphere"}, {"handle": "button:solid.extrude"}],
+  "steps": 12
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "expect": {
+   "hidden_handles": ["dropdown:solid.sphere"],
+   "handle_order": ["toolbar:solid.sphere", "toolbar:solid.extrude"]
+  }
+ },
+ {
+  "note": "A button dragged off the toolbar leaves it."
+ },
+ {
+  "drag": [{"handle": "toolbar:solid.sphere"}, [700, 600]],
+  "steps": 12
+ },
+ {
+  "expect": {
+   "hidden_handles": ["toolbar:solid.sphere"],
+   "shown_handles": ["toolbar:solid.extrude"]
+  }
+ },
+ {
+  "note": "The pin icon on a hovered drop-down row pins the command."
+ },
+ {
+  "click": {"handle": "panel:SOLID:CREATE"}
+ },
+ {
+  "move": {"handle": "dropdown:solid.torus"}
+ },
+ {
+  "expect": {
+   "shown_handles": ["dropdown_pin:solid.torus"],
+   "hidden_handles": ["dropdown_pin:solid.box"]
+  }
+ },
+ {
+  "click": {"handle": "dropdown_pin:solid.torus"}
+ },
+ {
+  "expect": {
+   "shown_handles": ["dropdown:solid.box"],
+   "tool": null,
+   "dialog": null
+  }
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "expect": {
+   "shown_handles": ["toolbar:solid.torus"]
+  }
+ },
+ {
+  "note": "A button dragged back into its open drop-down leaves the toolbar."
+ },
+ {
+  "click": {"handle": "panel:SOLID:CREATE"}
+ },
+ {
+  "drag": [{"handle": "button:solid.torus"}, {"handle": "dropdown:solid.box"}],
+  "steps": 12
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "expect": {
+   "hidden_handles": ["toolbar:solid.torus", "dropdown:solid.box"]
+  }
+ },
+ {
+  "note": "Customize Toolbar… in the toolbar's own menu: tick a command."
+ },
+ {
+  "call": "ui.menu",
+  "params": {"x": 1000, "y": 60, "target": {"type": "toolbar"}}
+ },
+ {
+  "call": "ui.menuPick",
+  "params": {"item": "Customize Toolbar…"}
+ },
+ {
+  "click": {"handle": "customize:solid.sphere"}
+ },
+ {
+  "expect": {
+   "shown_handles": ["toolbar:solid.sphere"]
+  }
+ },
+ {
+  "restart": "close"
+ },
+ {
+  "expect": {
+   "shown_handles": ["toolbar:solid.sphere", "toolbar:solid.extrude"],
+   "hidden_handles": ["toolbar:solid.torus"]
+  }
+ }
+]

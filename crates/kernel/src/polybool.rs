@@ -3,13 +3,16 @@
 //! as a wall flush with the side of its base. The polygons are rebuilt into a B-rep: coplanar
 //! pieces are merged into faces, T-junctions are split so neighbouring faces share edges.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
-use solvecraft_geom::{Mesh, Vec3};
+use solidcraft_geom::{Mesh, Vec3};
 use truck_modeling::{self as mt, builder};
 
-use crate::body::{Body, Solid, p3};
-use crate::{BoolOp, KernelError, Result, guard};
+use crate::body::{Body, Solid, edge_order, from_p3, p3};
+use crate::boolean_record::{self as recorded, Traced};
+use crate::heal::find;
+use crate::history::{EdgeOrigin, FaceOrigin, History};
+use crate::{BoolOp, KernelError, Result, guard, record};
 
 const MAX_DEPTH: usize = 4000;
 const MAX_POLYS: usize = 200_000;
@@ -30,6 +33,8 @@ impl PlaneEq {
 struct Poly {
     v: Vec<Vec3>,
     plane: PlaneEq,
+    /// The operand face this is (a piece of).
+    src: FaceOrigin,
 }
 
 impl Poly {
@@ -95,10 +100,10 @@ fn split(pl: PlaneEq, p: &Poly, eps: f64, cf: &mut Vec<Poly>, cb: &mut Vec<Poly>
                 }
             }
             if fv.len() >= 3 {
-                f.push(Poly { v: fv, plane: p.plane });
+                f.push(Poly { v: fv, plane: p.plane, src: p.src });
             }
             if bv.len() >= 3 {
-                b.push(Poly { v: bv, plane: p.plane });
+                b.push(Poly { v: bv, plane: p.plane, src: p.src });
             }
         }
     }
@@ -263,8 +268,8 @@ fn face_planes(b: &Body, faces: &[crate::FaceInfo]) -> std::result::Result<Vec<P
     if curved.is_empty() { Ok(out) } else { Err(NotPlanar::Curved(curved)) }
 }
 
-/// Polygons of a body whose faces are all planar.
-fn planar_polys(b: &Body) -> std::result::Result<Vec<Poly>, NotPlanar> {
+/// Polygons of a body whose faces are all planar, as pieces of its faces as operand `operand`.
+fn planar_polys(b: &Body, operand: usize) -> std::result::Result<Vec<Poly>, NotPlanar> {
     let tol = (b.size() * 1e-3).max(1e-3);
     let unmeshed = |e: KernelError| NotPlanar::Other(format!("faces could not be meshed ({e})"));
     let faces = b.faces(tol).map_err(unmeshed)?;
@@ -284,13 +289,14 @@ fn planar_polys(b: &Body) -> std::result::Result<Vec<Poly>, NotPlanar> {
         if (v[1] - v[0]).cross(v[2] - v[0]).dot(plane.n) < 0.0 {
             v.reverse();
         }
-        out.push(Poly { v, plane });
+        out.push(Poly { v, plane, src: FaceOrigin::Face { operand, face: *fi as usize } });
     }
     Ok(out)
 }
 
-/// Polygons of any body: planar faces exactly, curved ones as their triangles (within `tol`).
-fn faceted_polys(b: &Body, tol: f64) -> Option<Vec<Poly>> {
+/// Polygons of any body: planar faces exactly, curved ones as their triangles (within `tol`);
+/// pieces of its faces as operand `operand`.
+fn faceted_polys(b: &Body, tol: f64, operand: usize) -> Option<Vec<Poly>> {
     let faces = b.faces(tol).ok()?;
     let mesh = b.tessellate(tol).ok()?;
     let planes: Vec<Option<PlaneEq>> = faces.iter().map(|f| f.plane_normal.map(|n| PlaneEq { n, w: n.dot(f.centroid) })).collect();
@@ -309,7 +315,7 @@ fn faceted_polys(b: &Body, tol: f64) -> Option<Vec<Poly>> {
         if (v[1] - v[0]).cross(v[2] - v[0]).dot(plane.n) < 0.0 {
             v.reverse();
         }
-        out.push(Poly { v, plane });
+        out.push(Poly { v, plane, src: FaceOrigin::Face { operand, face: *fi as usize } });
     }
     (out.len() <= MAX_POLYS).then_some(out)
 }
@@ -317,20 +323,27 @@ fn faceted_polys(b: &Body, tol: f64) -> Option<Vec<Poly>> {
 /// Boolean of a body, its curved faces faceted to `tol`, with a closed triangle mesh (wound
 /// outward); the result has planar faces only. For tools the B-rep boolean cannot take, such as
 /// the helical groove of a thread.
+///
+/// The result's history is over `[a, b]`, the mesh's faces being its triangles (and it having
+/// no edges): a face of the result lies on faces of `a` (a facet of a curved one) or on
+/// triangles of `b`; an edge between facets of one face of `a`, or between triangles of `b`,
+/// has no origin.
 pub fn faceted_boolean(a: &Body, b: &Mesh, op: BoolOp, tol: f64) -> Result<Option<Body>> {
     a.require_brep("a boolean")?;
     if !(tol.is_finite() && tol > 0.0) {
         return Err(KernelError::Invalid("facet tolerance".into()));
     }
-    let Some(pa) = faceted_polys(a, tol) else {
+    let Some(pa) = faceted_polys(a, tol, 0) else {
         return Err(KernelError::Failed("the body is too detailed to facet".into()));
     };
     let mut pb = Vec::with_capacity(b.triangles.len());
-    for t in &b.triangles {
+    for (face, t) in b.triangles.iter().enumerate() {
         let Some([p, q, r]) = b.tri(t) else { continue };
         let Some(n) = (q - p).cross(r - p).normalized() else { continue };
-        pb.push(Poly { v: vec![p, q, r], plane: PlaneEq { n, w: n.dot(p) } });
+        pb.push(Poly { v: vec![p, q, r], plane: PlaneEq { n, w: n.dot(p) }, src: FaceOrigin::Face { operand: 1, face } });
     }
+    let edges = OperandEdges::of(a);
+    let sources = Sources { counts: vec![(a.face_count(), edges.ends.len()), (b.triangles.len(), 0)], edges: vec![Some(edges), None] };
     if pa.len() + pb.len() > MAX_POLYS {
         return Err(KernelError::Failed("the bodies are too detailed to facet".into()));
     }
@@ -362,7 +375,7 @@ pub fn faceted_boolean(a: &Body, b: &Mesh, op: BoolOp, tol: f64) -> Result<Optio
         if out.is_empty() {
             return Ok(None);
         }
-        match rebuild(out, size) {
+        match rebuild(out, size, &sources) {
             Ok(b) => return Ok(Some(b)),
             Err(e) => last = e,
         }
@@ -374,7 +387,7 @@ pub fn faceted_boolean(a: &Body, b: &Mesh, op: BoolOp, tol: f64) -> Result<Optio
 pub fn planar_boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Option<Body>> {
     a.require_brep("a boolean")?;
     b.require_brep("a boolean")?;
-    let (pa, pb) = match (planar_polys(a), planar_polys(b)) {
+    let (pa, pb) = match (planar_polys(a, 0), planar_polys(b, 1)) {
         (Ok(pa), Ok(pb)) => (pa, pb),
         (ra, rb) => {
             if let Some(r) = sliced_planar_boolean(a, b, op) {
@@ -389,7 +402,7 @@ pub fn planar_boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Option<Body>> {
         }
     };
     let size = a.size().max(b.size());
-    polys_boolean(pa, pb, size, op, size * 1e-9)
+    polys_boolean(pa, pb, size, op, size * 1e-9, &Sources::of(&[a, b]))
 }
 
 /// [`planar_boolean`] of a body with curved faces and an all-planar one, when a slab between
@@ -397,22 +410,22 @@ pub fn planar_boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Option<Body>> {
 /// hole): `a` is split across the slab, the middle piece takes the exact boolean, and the
 /// pieces outside are joined back on. `None` when no such slab exists.
 fn sliced_planar_boolean(a: &Body, b: &Body, op: BoolOp) -> Option<Result<Option<Body>>> {
-    let pb = planar_polys(b).ok()?;
+    let pb = planar_polys(b, 1).ok()?;
     let size = a.size().max(b.size());
     let tol = (a.size() * 1e-3).max(1e-3);
     let infos = a.faces(tol).ok()?;
     let mesh = a.tessellate(tol).ok()?;
-    let mut curved: HashMap<u32, solvecraft_geom::Aabb3> = HashMap::new();
+    let mut curved: HashMap<u32, solidcraft_geom::Aabb3> = HashMap::new();
     for (t, fi) in mesh.triangles.iter().zip(&mesh.tri_face) {
         if infos.get(*fi as usize)?.plane_normal.is_some() {
             continue;
         }
-        let bx = curved.entry(*fi).or_insert(solvecraft_geom::Aabb3::EMPTY);
+        let bx = curved.entry(*fi).or_insert(solidcraft_geom::Aabb3::EMPTY);
         for p in mesh.tri(t)? {
             bx.add(p);
         }
     }
-    let mut tool = solvecraft_geom::Aabb3::EMPTY;
+    let mut tool = solidcraft_geom::Aabb3::EMPTY;
     for p in pb.iter().flat_map(|p| &p.v) {
         tool.add(*p);
     }
@@ -460,47 +473,140 @@ fn sliced_planar_boolean(a: &Body, b: &Body, op: BoolOp) -> Option<Result<Option
     let axis = *axes.get(k)?;
     let run = || -> Result<Option<Body>> {
         let fail = |m: &str| KernelError::Failed(format!("planar boolean beside curved faces: {m}"));
-        let mut middle = a.clone();
-        let mut outside = Vec::new();
-        for (cut, keep_positive) in [(lo, true), (hi, false)] {
+        // Every piece with its history over [a, b, then the boxes of each cut: the one away
+        // from the middle, the one around it]; the boxes' faces are gone from the result (glued
+        // away), so they are dropped at the end.
+        let n = 6;
+        let mut middle: Traced = (a.clone(), recorded::kept(a, 0, n));
+        let mut outside: Vec<Traced> = Vec::new();
+        for (slot, (cut, keep_positive)) in [(2, (lo, true)), (4, (hi, false))] {
             let Some(x) = cut else { continue };
-            let plane = solvecraft_geom::Plane::new(axis * x, u, w).ok_or_else(|| fail("plane"))?;
-            outside.extend(crate::ops::half_space(&middle, &plane, !keep_positive)?);
-            middle = crate::ops::half_space(&middle, &plane, keep_positive)?.ok_or_else(|| fail("nothing beside the tool"))?;
+            let plane = solidcraft_geom::Plane::new(axis * x, u, w).ok_or_else(|| fail("plane"))?;
+            let (away, kept) = (crate::ops::half_box(&middle.0, &plane, !keep_positive)?, crate::ops::half_box(&middle.0, &plane, keep_positive)?);
+            let (h_away, h_kept) = (recorded::kept(&away, slot, n), recorded::kept(&kept, slot + 1, n));
+            if let Some(o) = crate::ops::boolean(&middle.0, &away, BoolOp::Intersect)? {
+                let h = recorded::of_pair(&o, &middle.1, &h_away);
+                outside.push((o, h));
+            }
+            let m = crate::ops::boolean(&middle.0, &kept, BoolOp::Intersect)?.ok_or_else(|| fail("nothing beside the tool"))?;
+            let h = recorded::of_pair(&m, &middle.1, &h_kept);
+            middle = (m, h);
         }
-        let pm = planar_polys(&middle).map_err(|e| fail(&e.describe("middle piece")))?;
-        let r = polys_boolean(pm, pb, size, op, size * 1e-9)?;
+        let pm = planar_polys(&middle.0, 0).map_err(|e| fail(&e.describe("middle piece")))?;
+        let r = polys_boolean(pm, pb, size, op, size * 1e-9, &Sources::of(&[&middle.0, b]))?;
+        let h_b = recorded::kept(b, 1, n);
+        let counts = record::counts(&[a, b]);
         if op == BoolOp::Intersect {
-            return Ok(r);
+            return Ok(r.map(|r| {
+                let h = dropped(recorded::of_pair(&r, &middle.1, &h_b));
+                r.with_checked_history(h, &counts)
+            }));
         }
         // The rebuild leaves the cut faces' edges split where other polygons were cut; healed,
         // they match the pieces outside edge for edge.
-        let mut pieces: Vec<Body> = match r {
-            Some(m) => vec![Body::new(crate::heal::heal_keep(m.deep_copy(), size, a.split_keep()))?],
+        let mut pieces: Vec<Traced> = match r {
+            Some(m) => {
+                let healed = recorded::heal_body(&m, m.deep_copy(), size, a.split_keep(), &record::counts(&[&middle.0, b]))?;
+                let h = recorded::of_pair(&healed, &middle.1, &h_b);
+                vec![(healed, h)]
+            }
             None => Vec::new(),
         };
         // Each piece outside meets the middle along its cut face (glued one shell to another).
-        if pieces.iter().chain(&outside).any(|x| x.solid.boundaries().len() != 1) {
+        if pieces.iter().chain(&outside).any(|(x, _)| x.solid.boundaries().len() != 1) {
             return Err(fail("a piece in several parts"));
         }
-        for o in outside {
-            let joined = pieces.iter().enumerate().find_map(|(i, m)| Some((i, crate::coplanar::glue(m, &o)?.ok()?)));
+        for (o, h_o) in outside {
+            let joined = pieces.iter().enumerate().find_map(|(i, (m, _))| Some((i, crate::coplanar::glue(m, &o)?.ok()?)));
             let (i, j) = joined.ok_or_else(|| fail("a piece does not join back"))?;
             if let Some(slot) = pieces.get_mut(i) {
-                *slot = j;
+                let h = recorded::of_pair(&j, &slot.1, &h_o);
+                *slot = (j, h);
             }
         }
-        crate::ops::join_pieces(pieces)
+        recorded::join(pieces.into_iter().map(|(p, h)| (p, dropped(h))).collect(), &counts)
     };
     Some(run())
 }
 
-fn polys_boolean(pa: Vec<Poly>, pb: Vec<Poly>, size: f64, op: BoolOp, eps: f64) -> Result<Option<Body>> {
+/// `h` over `[a, b]`: the operands after them (the boxes a piece was cut with) dropped, which
+/// fails where something of them is left.
+fn dropped(h: Option<History>) -> Option<History> {
+    let h = h?;
+    let map: Vec<Option<usize>> = (0..h.operands).map(|op| (op < 2).then_some(op)).collect();
+    recorded::composed(h.renumbered(&map, 2))
+}
+
+fn polys_boolean(pa: Vec<Poly>, pb: Vec<Poly>, size: f64, op: BoolOp, eps: f64, sources: &Sources) -> Result<Option<Body>> {
     let polys = csg(pa, pb, op, eps)?;
     if polys.is_empty() {
         return Ok(None);
     }
-    rebuild(polys, size).map(Some)
+    rebuild(polys, size, sources).map(Some)
+}
+
+/// What a rebuilt body's history is over: each operand's face and edge counts and, where it is
+/// a B-rep, its edges in its edge order (the faces each bounds, and its ends).
+struct Sources {
+    counts: Vec<(usize, usize)>,
+    edges: Vec<Option<OperandEdges>>,
+}
+
+/// An operand's edges in its edge order (each one's ends), and those between each pair of its
+/// faces (lesser face first).
+struct OperandEdges {
+    ends: Vec<(Vec3, Vec3)>,
+    between: HashMap<(usize, usize), Vec<usize>>,
+}
+
+impl OperandEdges {
+    fn of(b: &Body) -> OperandEdges {
+        let (edges, bounds) = edge_order(b.solid.face_iter());
+        let mut between: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+        for (i, fs) in bounds.iter().enumerate() {
+            if let [f, g] = fs.as_slice() {
+                between.entry((*f.min(g), *f.max(g))).or_default().push(i);
+            }
+        }
+        let ends = edges.iter().map(|e| (from_p3(e.absolute_front().point()), from_p3(e.absolute_back().point()))).collect();
+        OperandEdges { ends, between }
+    }
+}
+
+impl Sources {
+    fn of(bodies: &[&Body]) -> Sources {
+        let edges: Vec<OperandEdges> = bodies.iter().map(|b| OperandEdges::of(b)).collect();
+        let counts = bodies.iter().zip(&edges).map(|(b, e)| (b.face_count(), e.ends.len())).collect();
+        Sources { counts, edges: edges.into_iter().map(Some).collect() }
+    }
+
+    /// The origins of an edge between a piece of `p` and a piece of `q` running from `ends.0`
+    /// to `ends.1`: where faces of two operands meet; the edge between two faces of one
+    /// operand (the one the piece lies along, when they share several); none between pieces of
+    /// one face, or between triangles of a mesh operand. `None` when it can't be told.
+    fn edge(&self, p: FaceOrigin, q: FaceOrigin, ends: (Vec3, Vec3), tol: f64) -> Option<Vec<EdgeOrigin>> {
+        let (FaceOrigin::Face { operand: x, face: f }, FaceOrigin::Face { operand: y, face: g }) = (p, q) else { return None };
+        if x != y {
+            return Some(vec![EdgeOrigin::meet(p, q)]);
+        }
+        let Some(edges) = self.edges.get(x)?.as_ref() else { return Some(Vec::new()) };
+        if f == g {
+            return Some(Vec::new());
+        }
+        let between = edges.between.get(&(f.min(g), f.max(g)))?;
+        let along: Vec<usize> = match between.as_slice() {
+            [_] => between.clone(),
+            _ => between
+                .iter()
+                .copied()
+                .filter(|i| edges.ends.get(*i).is_some_and(|(s, t)| ends.0.dist_to_segment(*s, *t) <= tol && ends.1.dist_to_segment(*s, *t) <= tol))
+                .collect(),
+        };
+        match along.as_slice() {
+            [edge] => Some(vec![EdgeOrigin::Edge { operand: x, edge: *edge }]),
+            _ => None,
+        }
+    }
 }
 
 /// Enclosed volume of a closed set of polygons (divergence theorem).
@@ -566,7 +672,10 @@ fn key(p: Vec3, q: f64) -> (i64, i64, i64) {
 }
 
 /// Turn polygons into a B-rep solid: merge by plane, split T-junctions, chain boundary loops.
-fn rebuild(polys: Vec<Poly>, size: f64) -> Result<Body> {
+/// Its history over the operands the polygons are pieces of (`sources`): each face the
+/// operand faces whose pieces it joins (pieces joined across the edges between them), each edge
+/// what the pieces either side of it say (see [`Sources::edge`]).
+fn rebuild(polys: Vec<Poly>, size: f64, sources: &Sources) -> Result<Body> {
     let q = size * 1e-7;
     // Global vertex table.
     let mut index: HashMap<(i64, i64, i64), usize> = HashMap::new();
@@ -590,6 +699,7 @@ fn rebuild(polys: Vec<Poly>, size: f64) -> Result<Body> {
         verts.len() - 1
     };
     let mut loops: Vec<(PlaneEq, Vec<usize>)> = Vec::new();
+    let mut srcs: Vec<FaceOrigin> = Vec::new();
     for p in &polys {
         let mut l: Vec<usize> = p.v.iter().map(|v| id(*v, &mut verts)).collect();
         l.dedup();
@@ -598,6 +708,7 @@ fn rebuild(polys: Vec<Poly>, size: f64) -> Result<Body> {
         }
         if l.len() >= 3 {
             loops.push((p.plane, l));
+            srcs.push(p.src);
         }
     }
     // Split every polygon edge at vertices lying on it (T-junctions). Vertices are binned in a
@@ -616,9 +727,11 @@ fn rebuild(polys: Vec<Poly>, size: f64) -> Result<Body> {
         grid.entry(ckey(*v)).or_default().push(k);
     }
     let mut directed: Vec<(usize, usize, usize)> = Vec::new(); // (plane group, from, to)
+    // The polygons (by loop) each directed edge comes from.
+    let mut owners: HashMap<(usize, usize, usize), Vec<usize>> = HashMap::new();
     let mut groups: Vec<PlaneEq> = Vec::new();
     let mut group_of: HashMap<(i64, i64, i64, i64), usize> = HashMap::new();
-    for (pl, l) in &loops {
+    for (li, (pl, l)) in loops.iter().enumerate() {
         let gk = ((pl.n.x * 1e8).round() as i64, (pl.n.y * 1e8).round() as i64, (pl.n.z * 1e8).round() as i64, (pl.w / (tol * 10.0)).round() as i64);
         let g = *group_of.entry(gk).or_insert_with(|| {
             groups.push(*pl);
@@ -660,9 +773,11 @@ fn rebuild(polys: Vec<Poly>, size: f64) -> Result<Body> {
             let mut prev = a;
             for (_, k) in on {
                 directed.push((g, prev, k));
+                owners.entry((g, prev, k)).or_default().push(li);
                 prev = k;
             }
             directed.push((g, prev, b));
+            owners.entry((g, prev, b)).or_default().push(li);
         }
     }
     // Interior edges cancel against their reverse within the same plane group.
@@ -678,10 +793,41 @@ fn rebuild(polys: Vec<Poly>, size: f64) -> Result<Body> {
         }
     }
     boundary.sort_unstable();
+    // Pieces either side of an edge inside a plane group lie in one face.
+    let mut parent: Vec<usize> = (0..loops.len()).collect();
+    for ((g, a, b), here) in &owners {
+        let (Some(there), Some(&first)) = (owners.get(&(*g, *b, *a)), here.first()) else { continue };
+        for other in here.iter().chain(there) {
+            let (rp, rq) = (find(&mut parent, first), find(&mut parent, *other));
+            if let Some(slot) = parent.get_mut(rp) {
+                *slot = rq;
+            }
+        }
+    }
+    let roots: Vec<usize> = (0..loops.len()).map(|li| find(&mut parent, li)).collect();
+    let mut joined: HashMap<usize, BTreeSet<FaceOrigin>> = HashMap::new();
+    for (root, src) in roots.iter().zip(&srcs) {
+        joined.entry(*root).or_default().insert(*src);
+    }
+    // What lies on each side of each boundary edge (from, to): the faces of its polygons.
+    let mut side: HashMap<(usize, usize), BTreeSet<FaceOrigin>> = HashMap::new();
+    for (g, a, b) in &boundary {
+        let set = side.entry((*a, *b)).or_default();
+        for li in owners.get(&(*g, *a, *b)).into_iter().flatten() {
+            set.extend(srcs.get(*li));
+        }
+    }
+    // The faces of one boundary loop's polygons.
+    let loop_faces = |g: usize, lp: &[usize]| -> Option<BTreeSet<FaceOrigin>> {
+        let (a, b) = (*lp.first()?, *lp.get(1)?);
+        let li = *owners.get(&(g, a, b))?.first()?;
+        joined.get(roots.get(li)?).cloned()
+    };
     guard("planar boolean rebuild", || {
         let tv: Vec<mt::Vertex> = verts.iter().map(|v| builder::vertex(p3(*v))).collect();
         let mut edges: HashMap<(usize, usize), mt::Edge> = HashMap::new();
         let mut faces: Vec<mt::Face> = Vec::new();
+        let mut face_from: HashMap<mt::FaceID, Option<BTreeSet<FaceOrigin>>> = HashMap::new();
         for (g, plane) in groups.iter().enumerate() {
             let mut segs: Vec<(usize, usize)> = boundary.iter().filter(|e| e.0 == g).map(|e| (e.1, e.2)).collect();
             let mut wires: Vec<mt::Wire> = Vec::new();
@@ -785,7 +931,7 @@ fn rebuild(polys: Vec<Poly>, size: f64) -> Result<Body> {
                         ws.push(wires.get(*h).cloned().ok_or_else(|| KernelError::Failed("wire".into()))?);
                     }
                 }
-                let _ = ol;
+                let from = loop_faces(g, ol);
                 // A loop a hair off flat (fine facets of a curved face) takes the group's plane.
                 let face = match builder::try_attach_plane(&ws) {
                     Ok(f) => f,
@@ -796,13 +942,29 @@ fn rebuild(polys: Vec<Poly>, size: f64) -> Result<Body> {
                             .map_err(|e2| KernelError::Failed(format!("planar boolean face: {e}; {e2}")))?
                     }
                 };
+                face_from.insert(face.id(), from);
                 faces.push(face);
             }
         }
         let shell: mt::Shell = faces.into();
         let parts = shell.connected_components();
         let solid = Solid::try_new(parts).map_err(|e| KernelError::Failed(format!("planar boolean: {e}")))?;
-        Body::new(solid)
+        let regions = solid.face_iter().map(|f| face_from.get(&f.id()).cloned().flatten().map(|o| (o, false))).collect::<Option<Vec<_>>>();
+        let tol = size * 1e-6;
+        let edge_from = edges
+            .iter()
+            .map(|((a, b), e)| {
+                let ends = (*verts.get(*a)?, *verts.get(*b)?);
+                let mut origins = BTreeSet::new();
+                for p in side.get(&(*a, *b))? {
+                    for q in side.get(&(*b, *a))? {
+                        origins.extend(sources.edge(*p, *q, ends, tol)?);
+                    }
+                }
+                Some((e.id(), origins.into_iter().collect()))
+            })
+            .collect::<Option<HashMap<mt::EdgeID, Vec<EdgeOrigin>>>>();
+        record::build(solid, &sources.counts, regions.map(record::regions), edge_from.as_ref())
     })
 }
 

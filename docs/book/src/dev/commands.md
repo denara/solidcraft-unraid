@@ -16,7 +16,7 @@ CommandSpec::new("solid.fillet", "Fillet", fillet)
 
 `run` is `fn(&mut Session, &Value) -> Result<Value>`, and `enabled` is
 `fn(&Session) -> Result<(), String>`; the error string is the disabled-button tooltip. The
-`params` string is the one-line documentation shown by `solvecraft-cli commands`, MCP's
+`params` string is the one-line documentation shown by `solidcraft-cli commands`, MCP's
 `list_commands` and the [command reference](../reference/commands.md).
 
 A command that changes the design is undoable by default: the session snapshots the document
@@ -24,8 +24,8 @@ before it runs, and a failing command leaves the document unchanged. Feature com
 feature to the timeline and let the document evaluate it; they validate their inputs first
 (units, ranges, references) and return `BadParams` instead of building a broken feature.
 
-Ids used before the 2026-10 rename still resolve through `crates/engine/src/legacy_ids.rs`, so
-old scripts, recipes, saved shortcuts and toolbar layouts keep working.
+Only the registry's own dotted ids name commands (matched ignoring case); any other id fails
+with `unknown command`.
 
 ## Adding a command
 

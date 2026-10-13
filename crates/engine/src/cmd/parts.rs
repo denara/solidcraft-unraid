@@ -8,7 +8,7 @@
 //! washer, the top of a set screw or pin); the shank runs down −z.
 
 use serde_json::{Value, json};
-use solvecraft_geom::Vec3;
+use solidcraft_geom::Vec3;
 
 use super::CommandSpec;
 use crate::params::{bad, num, str_, vec3};
@@ -355,7 +355,7 @@ fn insert(s: &mut Session, p: &Value) -> Result<Value> {
     let c = run(s, "component.create", json!({"name": name}))?;
     let (comp, occ) = (c["component"].as_u64().unwrap_or(0), c["occurrence"].as_u64().unwrap_or(0));
     build(s, &sh)?;
-    s.doc_mut().parts.insert(comp, solvecraft_doc::StandardPart { family: family.clone(), size: size.clone(), length: shape_len(&sh) });
+    s.doc_mut().parts.insert(comp, solidcraft_doc::StandardPart { family: family.clone(), size: size.clone(), length: shape_len(&sh) });
     run(s, "component.activate", json!({"component": active}))?;
     let mut out = json!({"component": comp, "occurrence": occ, "name": name});
     if let (Some(a), Some(h)) = (at, host) {
@@ -370,7 +370,7 @@ fn insert(s: &mut Session, p: &Value) -> Result<Value> {
     } else if let Some(pt) = p.get("point").and_then(vec3) {
         // Placed at a point, its +z along `direction`.
         let dir = p.get("direction").and_then(vec3).and_then(|d| d.normalized()).unwrap_or(Vec3::Z);
-        let m = solvecraft_doc::rigid(
+        let m = solidcraft_doc::rigid(
             Vec3::ZERO,
             Vec3::ZERO,
             Vec3::Z.cross(dir).normalized().unwrap_or(Vec3::X),
@@ -393,7 +393,7 @@ fn hole_wall(s: &Session, a: Vec3) -> Option<Vec3> {
         for b in &st.bodies {
             for d in dirs {
                 let q = a + d * step;
-                if let Some(c) = solvecraft_doc::kernel::cylinder_face_at(&b.body, q) {
+                if let Some(c) = solidcraft_doc::kernel::cylinder_face_at(&b.body, q) {
                     let v = q - c.axis_point;
                     let along = v.dot(c.axis);
                     let on_wall = ((v - c.axis * along).len() - c.radius).abs() < 1e-3 && along > c.start && along < c.end;
@@ -435,7 +435,7 @@ fn resize(s: &mut Session, p: &Value) -> Result<Value> {
     run(s, "component.activate", json!({"component": comp}))?;
     build(s, &sh)?;
     let name = part_name(&part.family, &size, &sh);
-    s.doc_mut().parts.insert(comp, solvecraft_doc::StandardPart { family: part.family.clone(), size: size.clone(), length: shape_len(&sh) });
+    s.doc_mut().parts.insert(comp, solidcraft_doc::StandardPart { family: part.family.clone(), size: size.clone(), length: shape_len(&sh) });
     if let Some(c) = s.doc_mut().components.iter_mut().find(|c| c.id == comp) {
         c.name = name.clone();
     }
@@ -460,14 +460,14 @@ mod tests {
         }
     }
 
-    fn bbox(s: &Session, prefix: &str) -> (solvecraft_geom::Vec3, solvecraft_geom::Vec3) {
+    fn bbox(s: &Session, prefix: &str) -> (solidcraft_geom::Vec3, solidcraft_geom::Vec3) {
         let st = s.world_state();
         let comp = s.doc.components.iter().find(|c| c.name.starts_with(prefix)).map(|c| c.id).unwrap_or(0);
-        let (mut lo, mut hi) = (solvecraft_geom::Vec3::new(f64::MAX, f64::MAX, f64::MAX), solvecraft_geom::Vec3::new(f64::MIN, f64::MIN, f64::MIN));
+        let (mut lo, mut hi) = (solidcraft_geom::Vec3::new(f64::MAX, f64::MAX, f64::MAX), solidcraft_geom::Vec3::new(f64::MIN, f64::MIN, f64::MIN));
         for b in st.bodies.iter().filter(|b| s.doc.model_body_component(b) == comp) {
             let m = b.mesh().bounds();
-            lo = solvecraft_geom::Vec3::new(lo.x.min(m.min.x), lo.y.min(m.min.y), lo.z.min(m.min.z));
-            hi = solvecraft_geom::Vec3::new(hi.x.max(m.max.x), hi.y.max(m.max.y), hi.z.max(m.max.z));
+            lo = solidcraft_geom::Vec3::new(lo.x.min(m.min.x), lo.y.min(m.min.y), lo.z.min(m.min.z));
+            hi = solidcraft_geom::Vec3::new(hi.x.max(m.max.x), hi.y.max(m.max.y), hi.z.max(m.max.z));
         }
         (lo, hi)
     }

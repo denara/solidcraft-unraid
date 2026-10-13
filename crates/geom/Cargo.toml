@@ -1,5 +1,5 @@
 [package]
-name = "solvecraft-geom"
+name = "solidcraft-geom"
 description = "SolidCraft geometry foundation: vectors, planes, frames, meshes and their measures"
 version.workspace = true
 edition.workspace = true
@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 serde = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

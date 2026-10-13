@@ -131,6 +131,10 @@ pub struct RenderState {
     /// Custom paint callbacks must use this, rather than the requested setting.
     pub msaa_samples: u32,
 
+    /// SolidCraft: the MSAA sample counts this device can render the target (and depth) format
+    /// with, ascending, always starting with 1.
+    pub msaa_supported: Vec<u32>,
+
     /// Egui renderer responsible for drawing the UI.
     pub renderer: Arc<RwLock<Renderer>>,
 
@@ -284,8 +288,19 @@ impl RenderState {
         // SolidCraft: the OpenGL resolve path can present an entirely black frame with MSAA
         // (notably Mesa/llvmpipe). Decide after selecting the real surface adapter,
         // before creating either pipelines or attachments; no second GPU probe.
+        // A sample count the device doesn't support for the target or depth format fails
+        // pipeline validation (a panic at start): fall back to the largest supported one.
+        let msaa_supported =
+            supported_msaa_samples(&adapter, &device, target_format, options.depth_stencil_format);
+        let wanted = effective_msaa_samples(adapter.get_info().backend, options.msaa_samples);
+        let msaa_samples = clamp_msaa_samples(&msaa_supported, wanted);
+        if msaa_samples != wanted {
+            log::warn!(
+                "MSAA {wanted}x is not supported for {target_format:?} on this device (supported: {msaa_supported:?}); using {msaa_samples}x"
+            );
+        }
         let options = RendererOptions {
-            msaa_samples: effective_msaa_samples(adapter.get_info().backend, options.msaa_samples),
+            msaa_samples,
             ..options
         };
         let renderer = Renderer::new(&device, target_format, options);
@@ -302,6 +317,7 @@ impl RenderState {
             queue,
             target_format,
             msaa_samples: options.msaa_samples,
+            msaa_supported,
             renderer: Arc::new(RwLock::new(renderer)),
             surface_config: config.surface,
         })
@@ -571,6 +587,58 @@ pub fn effective_msaa_samples(backend: wgpu::Backend, requested: u32) -> u32 {
     if backend == wgpu::Backend::Gl { 1 } else { requested.max(1) }
 }
 
+/// SolidCraft: the MSAA sample counts `device` can render `target_format` and
+/// `depth_stencil_format` with (ascending, always starting with 1). Without
+/// [`wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES`] the device allows only the counts
+/// WebGPU guarantees for a format (1 and 4), whatever the adapter could do.
+pub fn supported_msaa_samples(
+    adapter: &wgpu::Adapter,
+    device: &wgpu::Device,
+    target_format: wgpu::TextureFormat,
+    depth_stencil_format: Option<wgpu::TextureFormat>,
+) -> Vec<u32> {
+    let features = device.features();
+    let flags = |format: wgpu::TextureFormat| {
+        if features.contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES) {
+            adapter.get_texture_format_features(format).flags
+        } else {
+            format.guaranteed_format_features(features).flags
+        }
+    };
+    let target = flags(target_format);
+    let depth = depth_stencil_format.map(flags);
+    msaa_counts(target, depth)
+}
+
+/// The sample counts both the colour target and the depth buffer support. A multisampled colour
+/// target must also resolve into the single-sampled surface.
+fn msaa_counts(
+    target: wgpu::TextureFormatFeatureFlags,
+    depth: Option<wgpu::TextureFormatFeatureFlags>,
+) -> Vec<u32> {
+    let resolves = target.contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_RESOLVE);
+    [1, 2, 4, 8, 16]
+        .into_iter()
+        .filter(|&n| {
+            n == 1
+                || (resolves
+                    && target.sample_count_supported(n)
+                    && depth.is_none_or(|d| d.sample_count_supported(n)))
+        })
+        .collect()
+}
+
+/// SolidCraft: the largest of the `supported` sample counts that is at most `requested` (1 when
+/// none is).
+pub fn clamp_msaa_samples(supported: &[u32], requested: u32) -> u32 {
+    supported
+        .iter()
+        .copied()
+        .filter(|&n| n <= requested.max(1))
+        .max()
+        .unwrap_or(1)
+}
+
 #[cfg(test)]
 mod msaa_tests {
     #[test]
@@ -581,5 +649,24 @@ mod msaa_tests {
                 assert_eq!(super::effective_msaa_samples(backend, requested), requested.max(1));
             }
         }
+    }
+
+    #[test]
+    fn unsupported_sample_counts_fall_back_to_the_largest_supported_one() {
+        use wgpu::TextureFormatFeatureFlags as F;
+        // WebGPU's guarantee for Bgra8Unorm without adapter-specific features: 1 and 4 (a
+        // saved 8x failed pipeline validation at start).
+        let guaranteed = F::MULTISAMPLE_X4 | F::MULTISAMPLE_RESOLVE;
+        let supported = super::msaa_counts(guaranteed, Some(F::MULTISAMPLE_X4));
+        assert_eq!(supported, [1, 4]);
+        assert_eq!(super::clamp_msaa_samples(&supported, 8), 4);
+        assert_eq!(super::clamp_msaa_samples(&supported, 2), 1);
+        assert_eq!(super::clamp_msaa_samples(&supported, 0), 1);
+        // The depth buffer limits it too, and a target that can't resolve can't multisample.
+        let adapter = F::MULTISAMPLE_X2 | F::MULTISAMPLE_X4 | F::MULTISAMPLE_X8 | F::MULTISAMPLE_RESOLVE;
+        assert_eq!(super::msaa_counts(adapter, None), [1, 2, 4, 8]);
+        assert_eq!(super::msaa_counts(adapter, Some(F::MULTISAMPLE_X4)), [1, 4]);
+        assert_eq!(super::msaa_counts(F::MULTISAMPLE_X4, None), [1]);
+        assert_eq!(super::clamp_msaa_samples(&[], 8), 1);
     }
 }

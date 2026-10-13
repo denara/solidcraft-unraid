@@ -1,0 +1,16 @@
+{"description": "A transition piece: a 40 x 30 rectangle lofted to a 12 mm circle 35 mm above it, on a 6 mm base plate.",
+ "commands": [
+  {"command": "parameters.change", "params": {"name": "rise", "expression": "35 mm"}},
+  {"command": "sketch.create", "params": {"plane": "XY", "name": "Plate"}},
+  {"command": "sketch.rectangle.center", "params": {"center": [0, 0], "corner": [30, 25]}},
+  {"command": "sketch.finish", "params": {}},
+  {"command": "solid.extrude", "params": {"distance": "6 mm"}},
+  {"command": "sketch.create", "params": {"plane": {"face": [0, 0, 6]}, "name": "Bottom"}},
+  {"command": "sketch.rectangle.center", "params": {"center": [0, 0], "corner": [20, 15]}},
+  {"command": "sketch.finish", "params": {}},
+  {"command": "construct.plane.offset", "params": {"base": "XY", "offset": "rise + 6 mm", "name": "TopPlane"}},
+  {"command": "sketch.create", "params": {"plane": "TopPlane", "name": "Top"}},
+  {"command": "sketch.circle.center", "params": {"center": [0, 0], "radius": 6}},
+  {"command": "sketch.finish", "params": {}},
+  {"command": "solid.loft", "params": {"sections": [{"sketch": "Bottom"}, {"sketch": "Top"}], "operation": "join"}}
+ ]}

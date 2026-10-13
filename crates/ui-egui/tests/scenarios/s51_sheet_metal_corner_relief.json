@@ -1,0 +1,217 @@
+[
+ {
+  "note": "Sheet Metal Rules: the Corner Relief Shape row sets the rule's corner_relief_shape, and the tray made with the rule follows. The bend on the 120 mm edge is 120 - 2*s0 long (s0 = 3*tan 36 deg) and 8 mm shorter with a relief 8 mm across at both its ends."
+ },
+ {
+  "call": "ui.set",
+  "params": {
+   "tab": "SHEET METAL"
+  }
+ },
+ {
+  "call": "engine.execute",
+  "params": {
+   "command": "sheet.manage_rules",
+   "params": {
+    "name": "Sheet 2 mm",
+    "thickness": "2 mm",
+    "k_factor": 0.5,
+    "bend_radius": "1 mm",
+    "gap": "0.5 mm",
+    "corner_relief": "8 mm",
+    "active": true
+   }
+  }
+ },
+ {
+  "call": "engine.execute",
+  "params": {
+   "command": "sketch.create",
+   "params": {
+    "plane": "XY",
+    "name": "Base"
+   }
+  }
+ },
+ {
+  "call": "engine.execute",
+  "params": {
+   "command": "sketch.rectangle.two_point",
+   "params": {
+    "p0": [
+     0,
+     0
+    ],
+    "p1": [
+     120,
+     90
+    ]
+   }
+  }
+ },
+ {
+  "call": "engine.execute",
+  "params": {
+   "command": "sketch.finish",
+   "params": {}
+  }
+ },
+ {
+  "call": "engine.execute",
+  "params": {
+   "command": "sheet.flange",
+   "params": {
+    "sketch": "Base"
+   }
+  }
+ },
+ {
+  "call": "engine.execute",
+  "params": {
+   "command": "sheet.flange",
+   "params": {
+    "edges": [
+     [
+      60,
+      0,
+      2
+     ],
+     [
+      120,
+      45,
+      2
+     ],
+     [
+      60,
+      90,
+      2
+     ],
+     [
+      0,
+      45,
+      2
+     ]
+    ],
+    "height": 20,
+    "angle": "72 deg"
+   }
+  }
+ },
+ {
+  "call": "ui.view",
+  "params": {
+   "view": "iso"
+  }
+ },
+ {
+  "expect": {
+   "bodies": 1,
+   "errors": 0,
+   "query": {
+    "command": "sheet.flat_pattern",
+    "path": [
+     "bends",
+     0,
+     "length"
+    ],
+    "value": 115.640744832
+   }
+  }
+ },
+ {
+  "start": "sheet.manage_rules"
+ },
+ {
+  "click": {
+   "handle": "dialog:Corner Relief Shape"
+  }
+ },
+ {
+  "click": {
+   "handle": "dialog:Corner Relief Shape:Round"
+  }
+ },
+ {
+  "widget": "OK"
+ },
+ {
+  "expect": {
+   "dialog": null,
+   "errors": 0,
+   "query": {
+    "command": "sheet.rules",
+    "path": [
+     "rules",
+     0,
+     "rule",
+     "corner_relief_shape"
+    ],
+    "value": "round"
+   }
+  }
+ },
+ {
+  "expect": {
+   "query": {
+    "command": "sheet.flat_pattern",
+    "path": [
+     "bends",
+     0,
+     "length"
+    ],
+    "value": 107.640744832
+   }
+  }
+ },
+ {
+  "shot": "s51_round_reliefs"
+ },
+ {
+  "start": "sheet.manage_rules"
+ },
+ {
+  "click": {
+   "handle": "dialog:Corner Relief Shape"
+  }
+ },
+ {
+  "click": {
+   "handle": "dialog:Corner Relief Shape:Rectangular"
+  }
+ },
+ {
+  "widget": "OK"
+ },
+ {
+  "expect": {
+   "dialog": null,
+   "errors": 0,
+   "query": {
+    "command": "sheet.rules",
+    "path": [
+     "rules",
+     0,
+     "rule",
+     "corner_relief_shape"
+    ],
+    "value": "rectangular"
+   }
+  }
+ },
+ {
+  "expect": {
+   "query": {
+    "command": "sheet.flat_pattern",
+    "path": [
+     "bends",
+     0,
+     "length"
+    ],
+    "value": 107.640744832
+   }
+  }
+ },
+ {
+  "shot": "s51_rectangular_reliefs"
+ }
+]

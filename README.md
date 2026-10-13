@@ -4,36 +4,69 @@
 
 Sketch, constrain, and build solids with a parametric feature timeline. Change a dimension
 and watch your model rebuild. Run it on your desktop, in your browser, or let AI agents
-model through the built-in MCP server. Part of the storytold "craft" family.
+model through the built-in MCP server.
 
-![SolidCraft: draw a rounded electronics enclosure, sketch its USB port directly on a face, add four mounting bosses and resize it through Parameters](docs/screenshots/enclosure-demo-0.2.1.gif)
+![SolidCraft 0.6: model a Raspberry Pi 4 case from an empty design: a sketch dimensioned with parameters, extrude, fillets and shell, standoffs patterned on the board's mounting holes, port cut-outs, vent slots, a colour and a height change in Parameters](docs/screenshots/demo-0.6.gif)
 
-*Start with an empty design and draw the original parametric electronics enclosure in the English desktop UI: rounded corners, a shell, a USB port sketched directly on the wall and a four-boss pattern. Change width from 80 → 100 mm and wall thickness from 2 → 3 mm in Parameters and watch it rebuild. Original animated pointer and click cues; 4× playback. [Full video](https://github.com/bherbruck/solidcraft/raw/refs/heads/main/docs/screenshots/enclosure-demo-0.2.1.mp4), generated with the [demo script](examples/demo/record_ui.sh).*
+*A Raspberry Pi 4 case from an empty design: a sketch dimensioned with the board's parameters, extrude, fillet, shell, an M2.5 standoff patterned on the 58 × 49 mm hole rectangle, port cut-outs, vent slots and a colour, then height 24 → 32 mm in Parameters and it all rebuilds. 6× playback. [Full video](https://github.com/bherbruck/solidcraft/raw/refs/heads/main/docs/screenshots/demo-0.6.mp4), recorded with the [demo script](examples/demo/record_ui.sh).*
+
+## Download
+
+[![Download for Windows][badge-windows]][windows-msi]
+[![Download for macOS][badge-macos]][macos-dmg]
+[![Download for Linux][badge-linux]][linux-appimage]
+[![Get it from the Snap Store][badge-snap]][snap-store]
+[![Try it in your browser][badge-web]][web-app]
+
+- **Windows:** download and run the [installer][windows-msi].
+  Also for [ARM64][windows-arm64-msi] and [32-bit][windows-x86-msi] PCs, or as a
+  [portable zip][windows-portable] that runs without installing.
+- **macOS:** open the [disk image][macos-dmg] and drag SolidCraft into Applications
+  (Apple silicon and Intel).
+- **Linux:** download the [AppImage][linux-appimage], allow it to run as a program and open it.
+  Or install the [.deb][linux-deb] (Ubuntu, Debian, Mint) or [.rpm][linux-rpm] (Fedora,
+  openSUSE), or use [Flatpak](https://bherbruck.github.io/solidcraft/guide/getting-started.html#linux-flatpak).
+  With Snap: `sudo snap install solidcraft` ([Snap Store][snap-store], or the [.snap file][linux-snap]).
+  For ARM64: [AppImage][linux-arm64-appimage], [.deb][linux-arm64-deb], [.rpm][linux-arm64-rpm].
+- **Web:** [try it in your browser][web-app], no install.
+
+The downloads aren't signed yet. On Windows, if SmartScreen warns you, choose **More info**, then
+**Run anyway**. On macOS, the first time, right-click SolidCraft in Applications and choose **Open**.
+
+Older versions, checksums and other formats are on the [releases page](https://github.com/bherbruck/solidcraft/releases).
+Install details, upgrading from earlier builds and building from source are in
+[Getting started](https://bherbruck.github.io/solidcraft/guide/getting-started.html).
+
+[badge-windows]: https://img.shields.io/badge/Windows-Download-0078D6?style=for-the-badge&logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0id2hpdGUiPjxwYXRoIGQ9Ik0yIDJoOS41djkuNUgyek0xMi41IDJIMjJ2OS41aC05LjV6TTIgMTIuNWg5LjVWMjJIMnpNMTIuNSAxMi41SDIyVjIyaC05LjV6Ii8%2BPC9zdmc%2B
+[badge-macos]: https://img.shields.io/badge/macOS-Download-333333?style=for-the-badge&logo=apple&logoColor=white
+[badge-linux]: https://img.shields.io/badge/Linux-AppImage-E95420?style=for-the-badge&logo=linux&logoColor=white
+[badge-snap]: https://img.shields.io/badge/Snap-Snap_Store-82BEA0?style=for-the-badge&logo=snapcraft&logoColor=white
+[badge-web]: https://img.shields.io/badge/Web-Try_in_browser-2EA44F?style=for-the-badge&logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIyIj48Y2lyY2xlIGN4PSIxMiIgY3k9IjEyIiByPSIxMCIvPjxwYXRoIGQ9Ik0yIDEyaDIwTTEyIDJhMTUgMTUgMCAwIDEgMCAyME0xMiAyYTE1IDE1IDAgMCAwIDAgMjAiLz48L3N2Zz4%3D
+[windows-msi]: https://github.com/bherbruck/solidcraft/releases/latest/download/solidcraft-windows-x64.msi
+[windows-arm64-msi]: https://github.com/bherbruck/solidcraft/releases/latest/download/solidcraft-windows-arm64.msi
+[windows-x86-msi]: https://github.com/bherbruck/solidcraft/releases/latest/download/solidcraft-windows-x86.msi
+[windows-portable]: https://github.com/bherbruck/solidcraft/releases/latest/download/solidcraft-windows-x64-portable.zip
+[macos-dmg]: https://github.com/bherbruck/solidcraft/releases/latest/download/solidcraft-macos-universal.dmg
+[linux-appimage]: https://github.com/bherbruck/solidcraft/releases/latest/download/solidcraft-linux-x86_64.AppImage
+[linux-deb]: https://github.com/bherbruck/solidcraft/releases/latest/download/solidcraft-linux-x86_64.deb
+[linux-rpm]: https://github.com/bherbruck/solidcraft/releases/latest/download/solidcraft-linux-x86_64.rpm
+[linux-arm64-appimage]: https://github.com/bherbruck/solidcraft/releases/latest/download/solidcraft-linux-aarch64.AppImage
+[linux-arm64-deb]: https://github.com/bherbruck/solidcraft/releases/latest/download/solidcraft-linux-aarch64.deb
+[linux-arm64-rpm]: https://github.com/bherbruck/solidcraft/releases/latest/download/solidcraft-linux-aarch64.rpm
+[linux-snap]: https://github.com/bherbruck/solidcraft/releases/latest/download/solidcraft-linux-x86_64.snap
+[snap-store]: https://snapcraft.io/solidcraft
+[web-app]: https://bherbruck.github.io/solidcraft/app/
 
 **Documentation:** the [SolidCraft book](https://bherbruck.github.io/solidcraft/) (user guide,
-developer guide and command reference; sources in [docs/book](docs/book)), and the
-[web app](https://bherbruck.github.io/solidcraft/app/) to try it in the browser.
+developer guide and command reference; sources in [docs/book](docs/book)).
 
-Linux Flatpak installation needs the Freedesktop runtime from Flathub as well as the
-SolidCraft application feed. See [install and launch commands](https://bherbruck.github.io/solidcraft/guide/getting-started.html#linux-flatpak).
-
-**Status: early but usable for simple parts.** The historical benchmark report records
-76 of 76 reference parts matching volume, area and topology ([docs/oracle.md](docs/oracle.md)).
-These checks do not establish complete geometric or workflow equivalence. Feature coverage
-is tracked in [docs/parity.md](docs/parity.md) and [ROADMAP.md](ROADMAP.md).
+**Status: early but usable for simple parts.** 75 of 76 public reference parts
+match their analytic or FreeCAD-computed volume, area, centre of mass and bounding box
+([docs/oracle.md](docs/oracle.md)); the other is a tracked bug.
+These checks do not establish complete geometric or workflow equivalence. The commands SolidCraft has
+are listed by area in [docs/features.md](docs/features.md); status and plans are in [ROADMAP.md](ROADMAP.md).
 Open work and known bugs are in [GitHub issues](https://github.com/bherbruck/solidcraft/issues),
 and help is welcome: see [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## Name and compatibility
-
-SolidCraft was previously called SolveCraft. The product display name and repository are
-changing; existing identifiers remain compatible: `.solvecraft` designs, `solvecraft-cli`,
-Cargo package names, settings/recovery locations and package IDs keep their existing names.
-Published 0.2.0 and 0.2.1 packages and demo recordings retain their original SolveCraft branding
-and filenames.
-
-Use the SolidCraft documentation and web-app URLs above. GitHub redirects links to the
-renamed repository; old-name Pages and Flatpak URLs are not maintained as permanent aliases.
 
 ## What works
 
@@ -48,11 +81,15 @@ renamed repository; old-name Pages and Flatpak URLs are not maintained as perman
   the boundary and keeps existing extrusions usable.
   Curve drawing and picking adapt together to zoom and display scale, including small circles
   at Fit and sketches in placed components.
-- **Constraints and dimensions** solved by our own solver (damped Gauss–Newton with
-  degree-of-freedom analysis): coincident, horizontal/vertical, parallel, perpendicular, tangent,
-  equal, concentric, collinear, midpoint, symmetry, fix; linear, aligned, horizontal, vertical,
-  radius, diameter and angle dimensions driven by parameters. Over-constraining edits are
-  rejected; fully constrained geometry turns black.
+- **Constraints and dimensions** solved by our own solver. Points the constraints fix relative
+  to known geometry are placed exactly by construction (loci intersections and rigid-cluster
+  decomposition, after Owen 1991 and Fudos–Hoffmann 1997); Levenberg–Marquardt solves the rest,
+  and the rank of its Jacobian gives the remaining degrees of freedom. Constraints: coincident,
+  point on curve, horizontal/vertical, parallel, perpendicular, tangent, curvature (G2), equal,
+  concentric, collinear, midpoint, symmetry, fix; linear, aligned, horizontal, vertical,
+  point-to-line, radius, diameter, angle, arc sweep, arc length and slot length dimensions driven
+  by parameters. Over-constraining edits are rejected; fully constrained geometry turns black.
+  Dragging solves the sketch every frame and rebuilds the model once, when the drag ends.
   Select a line or its two endpoints, type its dimension and press Enter to commit one undo
   step. Fit keeps sketch geometry clear of the palette and navigation controls.
 - **Profiles** found automatically, including regions split by lines and holes inside outlines.
@@ -73,11 +110,15 @@ renamed repository; old-name Pages and Flatpak URLs are not maintained as perman
   retained shallow prismatic pockets, exact line/arc/circle DXF outlines and bend tables;
   plastic enclosure features and rules. Pocket depth and side survive unfold/refold and appear
   separately from through-hole outlines in the flat preview and DXF.
-- **Files**: designs as JSON (`.solvecraft`), export to STEP (AP242 with body names, colours and
+- **Files**: design containers (`.solidcraft`) with lossless binary mesh payloads;
+  plain JSON remains supported for opening, Save As and export. Desktop Open can show a saved
+  provisional picture from warm geometry caches while rebuilding before editing; caches never
+  replace the parametric design. Export to STEP (AP242 with body names, colours and
   components as assemblies; revolved faces as native planes, cylinders, cones, spheres and tori),
   IGES 5.3 (manifold solid B-reps with names and colours), 3MF, STL (binary/ASCII) and OBJ;
   3MF, STL and OBJ import as mesh bodies (they render, measure, move and export; solid features
-  need B-rep bodies);
+  need B-rep bodies). Convert Mesh reconstructs supported closed constant-section parts
+  as parametric solids with planar and circular cylindrical faces;
   STEP import (AP203/AP214/AP242 solids, assemblies, units, names, colours) and IGES import
   (manifold solid B-reps, or trimmed and bounded surfaces sewn into solids) as a base feature
   that later features build on — open a `.step`/`.stp`/`.igs`/`.iges` file, insert one into a
@@ -87,9 +128,9 @@ renamed repository; old-name Pages and Flatpak URLs are not maintained as perman
   control channel so agents and tests can drive it.
   Feature errors and Help can open an editable **Create Issue** draft with relevant context
   and an optional reviewed screenshot; opening GitHub does not submit the report.
-- **Headless CLI** `solvecraft-cli`: run command scripts, measure (volume, area, centre of mass,
+- **Headless CLI** `solidcraft-cli`: run command scripts, measure (volume, area, centre of mass,
   face/edge/vertex counts), export, render PNG snapshots and replay reference recipes.
-- **MCP server** `solvecraft-cli mcp`: AI agents model, measure and look at parts headless or
+- **MCP server** `solidcraft-cli mcp`: AI agents model, measure and look at parts headless or
   in the running app (see below).
 
 ## Build and run
@@ -98,23 +139,37 @@ For this fork's local container prototype (independent browser app plus authenti
 HTTP MCP service), see [Unraid setup](docs/unraid.md).
 
 ```sh
-cargo run --release -p solvecraft -- --sample          # desktop app with a sample part
-cargo run --release -p solvecraft-cli -- commands      # the command registry
-cargo run --release -p solvecraft-cli -- run examples/bracket.json --out bracket.step
-cargo run --release -p solvecraft-cli -- snapshot examples/bracket.json --out bracket.png
-cargo run --release -p solvecraft -- part.step          # open a STEP file as a new design
-cargo run --release -p solvecraft-cli -- eval part.step # measure an imported STEP file
+cargo run --release -p solidcraft -- --sample          # desktop app with a sample part
+cargo run --release -p solidcraft-cli -- commands      # the command registry
+cargo run --release -p solidcraft-cli -- run examples/bracket.json --out bracket.step
+cargo run --release -p solidcraft-cli -- snapshot examples/bracket.json --out bracket.png
+cargo run --release -p solidcraft -- part.step          # open a STEP file as a new design
+cargo run --release -p solidcraft-cli -- eval part.step # measure an imported STEP file
 cargo xtask ci                                          # fmt, clippy, tests, assets, layers, wasm
 ```
 
-Windows builds: `cargo xwin build --release --target x86_64-pc-windows-msvc -p solvecraft`.
+Windows builds: `cargo xwin build --release --target x86_64-pc-windows-msvc -p solidcraft`.
 
-On Windows, SolidCraft detects a connected 3Dconnexion SpaceNavigator or SpaceMouse through its
+On Windows and Linux, SolidCraft detects a connected 3Dconnexion SpaceNavigator or SpaceMouse through its
 multi-axis HID interface. Move the cap to pan and zoom, and tilt or twist it to rotate the 3D view.
 While editing a sketch, the cap pans and zooms without changing the sketch view. The Navigation
 page in Preferences has an on/off switch and a speed control for the 3D mouse.
 
-In the browser: `cd apps/solvecraft-web && trunk build --release --public-url ./` (WebGPU, or
+On Linux SolidCraft reads `/dev/hidrawN` directly, so the logged-in user needs access to the
+device. A udev rule that adds the `uaccess` tag does that, for example
+`/etc/udev/rules.d/70-3d-mouse.rules` for devices with 3Dconnexion's vendor id:
+
+```
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="256f", TAG+="uaccess"
+```
+
+Older SpaceNavigators use Logitech's vendor id `046d`; add a rule with their product id (see `lsusb`)
+instead of matching every Logitech device. Reload with `sudo udevadm control --reload && sudo udevadm trigger`, then replug the device. The Flatpak
+sandbox does not expose hidraw devices, so the 3D mouse only works with native builds there for now.
+Devices that send all six axes in HID report 1 (some homemade ones do) are recognised from their
+report descriptor, so they work as well.
+
+In the browser: `cd apps/solidcraft-web && trunk build --release --public-url ./` (WebGPU, or
 WebGL2 with `?webgl`; `?sample` opens the sample part).
 
 ## Scripts
@@ -132,12 +187,12 @@ A script is a JSON list of commands, the same ones the UI runs:
 
 ## AI agents (MCP)
 
-`solvecraft-cli mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server on
+`solidcraft-cli mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server on
 stdio. Headless it runs its own design session; with `--connect 127.0.0.1:PORT` it drives the app
-started with `solvecraft --control PORT`, so you can watch the agent model. Tools:
+started with `solidcraft --control PORT`, so you can watch the agent model. Tools:
 `list_commands`, `execute`, `batch`, `inspect_design`, `measure`, `body_topology`,
 `set_parameter`, `screenshot` (returns the image), `export`, `undo`, `redo`, `new_design`, `open`,
-`save`. Claude Code: `claude mcp add solvecraft -- solvecraft-cli mcp`. Details, client
+`save`. Claude Code: `claude mcp add solidcraft -- solidcraft-cli mcp`. Details, client
 configuration and an example session: [docs/mcp.md](docs/mcp.md).
 
 ## Architecture
@@ -151,7 +206,7 @@ configuration and an example session: [docs/mcp.md](docs/mcp.md).
 | L3 | `io` | design files, STL/OBJ/STEP/3MF export, STEP and 3MF/STL import features |
 | L4 | `engine` | the session and the command registry (everything is a command) |
 | L5 | `ui-egui`, `mcp` | the swappable desktop front end; the MCP server (headless or bridged to the app) |
-| apps | `solvecraft`, `solvecraft-cli` | desktop app, headless CLI |
+| apps | `solidcraft`, `solidcraft-cli` | desktop app, headless CLI |
 <!-- ANCHOR_END: architecture -->
 
 ## Contributing
@@ -169,6 +224,7 @@ MIT OR Apache-2.0, at your option. Developed under the
 [clean-room contribution rules](CLAUDE.md); third-party code and assets retain their
 documented licences and attribution.
 
-References to other products describe workflow comparisons and benchmark provenance.
+SolidCraft is independent. Behaviour is designed from public documentation, general CAD
+conventions and user feedback. Reference tests use analytic values and open-source tools.
 SolidCraft is not affiliated with, sponsored by or endorsed by Autodesk. Autodesk and
 Fusion are trademarks of Autodesk, Inc.

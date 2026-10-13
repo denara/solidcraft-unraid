@@ -7,7 +7,7 @@ use std::cell::{Cell, RefCell};
 
 use egui::{Pos2, Stroke};
 use serde_json::{Value, json};
-use solvecraft_engine::geom::{Vec2, Vec3};
+use solidcraft_engine::geom::{Vec2, Vec3};
 
 use crate::SolveApp;
 use crate::tools::{Kind, Tool};
@@ -55,9 +55,9 @@ const ALSO_IN: &[(&str, &str, &str)] = &[
 pub fn also_in<'a>(
     tab: &str,
     panel: &str,
-    mut cmds: Vec<&'a solvecraft_engine::CommandSpec>,
-    specs: &[&'a solvecraft_engine::CommandSpec],
-) -> Vec<&'a solvecraft_engine::CommandSpec> {
+    mut cmds: Vec<&'a solidcraft_engine::CommandSpec>,
+    specs: &[&'a solidcraft_engine::CommandSpec],
+) -> Vec<&'a solidcraft_engine::CommandSpec> {
     for (t, p, id) in ALSO_IN {
         if *t == tab
             && *p == panel
@@ -75,7 +75,7 @@ fn analysis(app: &mut SolveApp, cmd: &str, p: Value) {
     let Ok(v) = app.run(cmd, p) else { return };
     let mark = match cmd {
         "inspect.center_of_mass" => v3(&v["center"]).map(|c| (c, "Center of mass".to_string())),
-        _ => v3(&v["at"]).zip(v["min_radius"].as_f64()).map(|(c, r)| (c, format!("R min {r:.3} mm"))),
+        _ => v3(&v["at"]).zip(v["min_radius"].as_f64()).map(|(c, r)| (c, format!("R min {}", crate::prefs::show_mm(app, r, 1)))),
     };
     if let Some(m) = mark {
         MARKS.with(|k| k.borrow_mut().push(m));
@@ -125,8 +125,14 @@ fn marks(app: &SolveApp, painter: &egui::Painter, proj: &Proj) {
 /// Commands that start with a step of their own: Canvas and Decal ask for the image first,
 /// Edit Canvas opens the canvas panel. False when the command should not go on.
 pub fn start_hook(app: &mut SolveApp, id: &str) -> bool {
+    if id == "sketch.edit_text"
+        && let Some(dialog) = crate::dialogs::Dialog::for_command(app, id)
+    {
+        app.dialog = Some(dialog);
+        return false;
+    }
     // Surface analyses toggle: a second click turns the same one off.
-    use solvecraft_engine::SurfaceAnalysis as A;
+    use solidcraft_engine::SurfaceAnalysis as A;
     let same = match (id, app.session.analysis) {
         ("inspect.zebra", Some(A::Zebra { .. })) => Some(true),
         ("inspect.draft", Some(A::Draft { .. })) => Some(true),
@@ -195,8 +201,8 @@ fn combs(app: &SolveApp, painter: &egui::Painter, proj: &Proj) {
 pub fn refine_snap(
     app: &SolveApp,
     proj: &Proj,
-    sk: &solvecraft_engine::sketch::Sketch,
-    plane: &solvecraft_engine::geom::Plane,
+    sk: &solidcraft_engine::sketch::Sketch,
+    plane: &solidcraft_engine::geom::Plane,
     lp: Vec2,
 ) -> Option<(Vec2, Option<String>)> {
     crate::inference::clear();
@@ -214,8 +220,8 @@ pub fn refine_snap(
     let mut best: Option<(f64, &'static str, Vec2)> = None;
     let mut mid_of: Option<String> = None;
     for (i, c) in sk.curves.iter().enumerate() {
-        if let solvecraft_engine::sketch::CurveKind::Line { .. } = c.kind
-            && let Some(solvecraft_engine::sketch::Shape::Line { a, b }) = sk.shape(i)
+        if let solidcraft_engine::sketch::CurveKind::Line { .. } = c.kind
+            && let Some(solidcraft_engine::sketch::Shape::Line { a, b }) = sk.shape(i)
         {
             let m = (a + b) * 0.5;
             let d = m.dist(lp);
@@ -261,7 +267,7 @@ pub fn refine_snap(
     {
         let (dx, dy) = ((lp.x - prev.x).abs(), (lp.y - prev.y).abs());
         // The free coordinate still follows the grid.
-        let step = solvecraft_engine::view::grid_step(app.cam.half_height()).0 / 10.0;
+        let step = solidcraft_engine::view::grid_step(app.cam.half_height()).0 / 10.0;
         let g = |v: f64| (v / step).round() * step;
         if dy < tol && dx > tol {
             best = Some((dy, "H", Vec2::new(g(lp.x), prev.y)));
@@ -349,6 +355,7 @@ fn mode(id: &str) -> Option<Mode> {
         "sketch.slot.arc_three_point" | "sketch.slot.arc_center" => Mode::Points(4),
         "sketch.spline.fit_point" | "sketch.spline.control_point" | "sketch.spline.control_point_5" => Mode::Points(0),
         "sketch.text" => Mode::Points(1),
+        "sketch.edit_text" => Mode::Entities(1),
         "sketch.blend_curve" => Mode::Points(2),
         "sketch.offset" => Mode::Entities(1),
         "sketch.fillet" | "sketch.chamfer.equal_distance" | "sketch.chamfer.distance_angle" | "sketch.chamfer.two_distance" => Mode::Entities(1),
@@ -365,7 +372,7 @@ fn mode(id: &str) -> Option<Mode> {
 /// A tool for one of the extra sketch commands.
 pub fn tool_for(id: &str) -> Option<Tool> {
     mode(id)?;
-    let spec = solvecraft_engine::find_command(id)?;
+    let spec = solidcraft_engine::find_command(id)?;
     Some(Tool {
         cmd: spec.id,
         kind: Kind::Ext,
@@ -406,6 +413,7 @@ pub fn hint(id: &str) -> Option<String> {
             "sketch.spline.fit_point" => "Spline: click fit points; click the start to close smoothly, or right-click to finish",
             "sketch.spline.control_point" | "sketch.spline.control_point_5" => "Control point spline: click control points; right-click to finish",
             "sketch.text" => "Text: click where the text starts",
+            "sketch.edit_text" => "Edit Text: click an outline of the text to edit",
             "sketch.blend_curve" => "Blend curve: click the ends of two curves",
             "sketch.offset" => "Offset: click a curve (its chain is offset), then the side and distance",
             "sketch.fillet" => "Fillet: click the corner of two lines",
@@ -482,8 +490,8 @@ pub(super) fn corner_point(app: &SolveApp, proj: &Proj, pos: Pos2, cmd: &str) ->
                 .collect();
             if curves.len() != 2
                 || curves.iter().any(|(_, c)| {
-                    !matches!(c.kind, solvecraft_engine::sketch::CurveKind::Line { .. })
-                        && (cmd != "sketch.fillet" || !matches!(c.kind, solvecraft_engine::sketch::CurveKind::Arc { .. }))
+                    !matches!(c.kind, solidcraft_engine::sketch::CurveKind::Line { .. })
+                        && (cmd != "sketch.fillet" || !matches!(c.kind, solidcraft_engine::sketch::CurveKind::Arc { .. }))
                 })
             {
                 return None;
@@ -521,7 +529,7 @@ fn corner_len(app: &SolveApp, point: &str) -> f64 {
     sk.curves
         .iter()
         .enumerate()
-        .filter(|(_, c)| c.kind.uses(q) && matches!(c.kind, solvecraft_engine::sketch::CurveKind::Line { .. }))
+        .filter(|(_, c)| c.kind.uses(q) && matches!(c.kind, solidcraft_engine::sketch::CurveKind::Line { .. }))
         .map(|(i, _)| sk.polyline(i).windows(2).map(|w| w[0].dist(w[1])).sum::<f64>())
         .fold(f64::INFINITY, f64::min)
         .min(1e6)
@@ -730,6 +738,10 @@ pub fn on_click(app: &mut SolveApp, tool: &mut Tool, proj: &Proj, pos: Pos2) {
                 return;
             }
             let Some((id, _)) = sketch_entity(app, &hits) else { return };
+            if cmd == "sketch.edit_text" {
+                crate::sketch_text::open(app, &id);
+                return;
+            }
             if cmd == "sketch.centerline" {
                 let _ = app.run(cmd, json!({"curves": [id]}));
                 return;
@@ -976,7 +988,7 @@ pub fn preview(app: &SolveApp, t: &Tool, painter: &egui::Painter, proj: &Proj) {
         crate::tools::paint_preview_curve(&curve, &ss.plane, painter, proj, stroke);
     }
     // Picked curves highlighted.
-    let mut display_budget = solvecraft_engine::render::SamplingBudget::new(32_768, 65_536);
+    let mut display_budget = solidcraft_engine::render::SamplingBudget::new(32_768, 65_536);
     for id in t.picks.iter().filter(|x| *x != "|") {
         if let Some(ci) = ss.sketch.curve_index(id) {
             crate::tools::paint_curve(&ss.sketch, ci, &ss.plane, painter, proj, Stroke::new(3.0, tk.accent.gamma_multiply(0.7)), &mut display_budget);
@@ -1048,7 +1060,7 @@ fn glyphs(app: &SolveApp, painter: &egui::Painter, proj: &Proj, hover: Option<Po
         && let Some(c) = ss.sketch.constraints.iter().find(|c| &c.id == id)
     {
         let (cs, ps) = constraint_entities(&c.kind);
-        let mut display_budget = solvecraft_engine::render::SamplingBudget::new(32_768, 65_536);
+        let mut display_budget = solidcraft_engine::render::SamplingBudget::new(32_768, 65_536);
         for ci in cs {
             crate::tools::paint_curve(&ss.sketch, ci, &ss.plane, painter, proj, Stroke::new(3.0, tk.accent.gamma_multiply(0.7)), &mut display_budget);
         }
@@ -1063,7 +1075,7 @@ fn glyphs(app: &SolveApp, painter: &egui::Painter, proj: &Proj, hover: Option<Po
         let Some(c) = ss.sketch.constraints.iter().find(|c| &c.id == id) else { continue };
         let failing = ss.report.failing.contains(id);
         let selected = picked.as_deref() == Some(id.as_str())
-            || app.session.selection.iter().any(|s| matches!(s, solvecraft_engine::Sel::SketchConstraint { id: x } if x == id));
+            || app.session.selection.iter().any(|s| matches!(s, solidcraft_engine::Sel::SketchConstraint { id: x } if x == id));
         let lit = selected || hovered.as_deref() == Some(id.as_str());
         let col = if failing {
             tk.error
@@ -1118,8 +1130,8 @@ fn glyph_icon(name: &str) -> Option<&'static str> {
 }
 
 /// The curves and points a constraint ties together.
-fn constraint_entities(k: &solvecraft_engine::sketch::ConstraintKind) -> (Vec<usize>, Vec<usize>) {
-    use solvecraft_engine::sketch::ConstraintKind::*;
+fn constraint_entities(k: &solidcraft_engine::sketch::ConstraintKind) -> (Vec<usize>, Vec<usize>) {
+    use solidcraft_engine::sketch::ConstraintKind::*;
     match *k {
         Coincident { p, q } | HorizontalPoints { p, q } | VerticalPoints { p, q } => (vec![], vec![p, q]),
         Fix { p } => (vec![], vec![p]),
@@ -1148,8 +1160,8 @@ fn glyph_letter(name: &str) -> &'static str {
 
 /// Where a constraint's glyphs go: one per entity (the middle of a curve, with its direction
 /// there; a point, without).
-fn glyph_anchors(sk: &solvecraft_engine::sketch::Sketch, k: &solvecraft_engine::sketch::ConstraintKind) -> Vec<(Vec2, Option<Vec2>)> {
-    use solvecraft_engine::sketch::ConstraintKind::*;
+fn glyph_anchors(sk: &solidcraft_engine::sketch::Sketch, k: &solidcraft_engine::sketch::ConstraintKind) -> Vec<(Vec2, Option<Vec2>)> {
+    use solidcraft_engine::sketch::ConstraintKind::*;
     // Half way along the curve, and the direction there.
     let mid = |c: usize| -> Option<(Vec2, Option<Vec2>)> {
         let poly = sk.polyline(c);

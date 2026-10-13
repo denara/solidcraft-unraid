@@ -233,3 +233,55 @@ fn split_at_and_closest_param() {
     assert!(l.end().dist(q) < 1e-12 && r.start().dist(q) < 1e-12);
     assert!((quarter.closest_param(Vec2::new(20.0, 20.0)) - 0.5).abs() < 1e-9);
 }
+
+/// An axis-aligned box as a closed mesh, with `n` x `n` quads on each side.
+fn box_mesh(min: Vec3, max: Vec3, n: usize) -> Mesh {
+    let mut m = Mesh::default();
+    let s = max - min;
+    let at = |c: [f64; 3]| min + Vec3::new(s.x * c[0], s.y * c[1], s.z * c[2]);
+    for axis in 0..3 {
+        for side in [0.0, 1.0] {
+            for i in 0..n {
+                for j in 0..n {
+                    let corner = |a: usize, b: usize| {
+                        let mut c = [0.0; 3];
+                        c[axis] = side;
+                        c[(axis + 1) % 3] = a as f64 / n as f64;
+                        c[(axis + 2) % 3] = b as f64 / n as f64;
+                        at(c)
+                    };
+                    let k = m.positions.len() as u32;
+                    m.positions.extend([corner(i, j), corner(i + 1, j), corner(i + 1, j + 1), corner(i, j + 1)]);
+                    m.triangles.extend(if side > 0.0 { [[k, k + 1, k + 2], [k, k + 2, k + 3]] } else { [[k, k + 2, k + 1], [k, k + 3, k + 2]] });
+                }
+            }
+        }
+    }
+    m
+}
+
+#[test]
+fn meshes_cross_only_where_their_surfaces_pass_through_each_other() {
+    let cube = |x: f64, y: f64, n: usize| box_mesh(Vec3::new(x, y, 0.0), Vec3::new(x + 10.0, y + 10.0, 10.0), n);
+    let a = cube(0.0, 0.0, 1);
+    // A corner 0.15 deep in the other cube (0.02 % of its volume), and a deep overlap.
+    for (x, y, n) in [(9.85, 3.0, 1), (9.85, 3.0, 7), (9.85, 9.85, 2), (5.0, 5.0, 3)] {
+        assert!(a.crosses(&cube(x, y, n), 0.01), "{x} {y} {n}");
+        assert!(cube(x, y, n).crosses(&a, 0.01), "{x} {y} {n}");
+    }
+    // Apart, touching on a face or an edge, and the same body.
+    for (x, y, n) in [(10.5, 0.0, 1), (10.0, 0.0, 1), (10.0, 3.0, 5), (10.0, 10.0, 2), (0.0, 0.0, 1), (0.0, 0.0, 4)] {
+        assert!(!a.crosses(&cube(x, y, n), 0.01), "{x} {y} {n}");
+    }
+    // One inside the other, standing on a face, and sharing a face plane from inside.
+    let inner = box_mesh(Vec3::new(2.0, 2.0, 2.0), Vec3::new(8.0, 8.0, 8.0), 2);
+    let on_top = box_mesh(Vec3::new(2.0, 2.0, 10.0), Vec3::new(8.0, 8.0, 14.0), 2);
+    let flush = box_mesh(Vec3::new(2.0, 2.0, 4.0), Vec3::new(8.0, 8.0, 10.0), 2);
+    assert!(!a.crosses(&inner, 0.01) && !inner.crosses(&a, 0.01));
+    assert!(!a.crosses(&on_top, 0.01) && !a.crosses(&flush, 0.01));
+    // A slab overlap between faces that are parallel or in one plane has no crossing.
+    assert!(!a.crosses(&cube(9.85, 0.0, 1), 0.01));
+    // Passing through by less than the tolerance doesn't count.
+    assert!(!a.crosses(&cube(9.995, 3.0, 1), 0.01));
+    assert!(!a.crosses(&cube(9.85, 3.0, 1), f64::NAN));
+}

@@ -71,7 +71,7 @@ fn export_keeps_split_faces_through_later_features() {
     run(&mut s, "solid.fillet", json!({"edges": [[20, 0, 0]], "radius": 2}));
     let (f, _) = faces_volume(&mut s, "B");
     assert_eq!(f, 8);
-    let dir = std::env::temp_dir().join(format!("solvecraft-split-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("solidcraft-split-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let step = dir.join("split.step");
     run(&mut s, "file.export", json!({"path": step.to_string_lossy()}));

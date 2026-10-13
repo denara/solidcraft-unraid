@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::panic)]
 use crate::*;
-use solvecraft_geom::{Loop2, Plane, Region2, Seg2, Vec2, Vec3};
+use solidcraft_geom::{Loop2, Plane, Region2, Seg2, Vec2, Vec3};
 
 fn fixture() -> (Body, Body, Vec3, f64) {
     let slope = 1f64.to_radians().tan();
@@ -62,7 +62,7 @@ fn thin_connected_web_between_bore_stations_survives_union() {
     let direct = crate::coplanar::bore_union(&target, &ring, &accept);
     eprintln!("direct fallback result={}", direct.is_some());
     let public = boolean(&target, &ring, BoolOp::Union);
-    if let Ok(dir) = std::env::var("SOLVECRAFT_BORE_AUDIT_DIR") {
+    if let Ok(dir) = solidcraft_geom::env::var("BORE_AUDIT_DIR").ok_or(()) {
         let dir = std::path::Path::new(&dir);
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join("target-with-web.step"), step_export(&[&target], "target with web").unwrap()).unwrap();
@@ -115,4 +115,21 @@ fn unproved_curved_boundary_between_clear_endpoints_refuses_recut() {
     let before = step_export(&[&body], "curved source").unwrap();
     assert!(crate::bore_guard::boundaries_clear(&body, &[], Vec3::ZERO, Vec3::Z, 5., 14., 24., 1e-6).is_none());
     assert_eq!(step_export(&[&body], "curved source").unwrap(), before);
+}
+
+/// Posts sunk into one floor have their tops in a common plane but apart: they don't
+/// coincide, so joining another post doesn't go through pushing faces apart (#261).
+#[test]
+fn coplanar_faces_apart_from_each_other_do_not_coincide() {
+    let floor = box_solid(Vec3::new(0., 0., 0.), Vec3::new(80., 60., 2.)).unwrap();
+    let post = |x: f64| cylinder(Vec3::new(x, 30., 1.), Vec3::Z, 3., 6.).unwrap();
+    let with_one = boolean(&floor, &post(10.), BoolOp::Union).unwrap().unwrap();
+    assert!(crate::coplanar::coincident_planes(&with_one, &post(60.)).is_empty());
+    assert!(crate::coplanar::boolean_apart(&with_one, &post(60.), BoolOp::Union).is_none());
+    // A post over the first one's top does meet it there.
+    assert!(!crate::coplanar::coincident_planes(&with_one, &cylinder(Vec3::new(12., 30., 7.), Vec3::Z, 3., 6.).unwrap()).is_empty());
+    let joined = boolean(&with_one, &post(60.), BoolOp::Union).unwrap().unwrap();
+    let v = joined.tessellate_with(1e-3, true).unwrap().measure().volume;
+    let expected = 80. * 60. * 2. + 2. * std::f64::consts::PI * 9. * 5.;
+    assert!((v - expected).abs() < 0.5, "volume {v}, expected {expected}");
 }

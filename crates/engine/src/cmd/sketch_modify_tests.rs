@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
-use solvecraft_geom::Vec2;
-use solvecraft_sketch::CurveKind;
+use solidcraft_geom::Vec2;
+use solidcraft_sketch::CurveKind;
 
 use crate::Session;
 
@@ -15,7 +15,7 @@ fn ids(v: &Value) -> Vec<String> {
     v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default()
 }
 
-fn sketch(s: &Session) -> solvecraft_sketch::Sketch {
+fn sketch(s: &Session) -> solidcraft_sketch::Sketch {
     let id = s.active_sketch.unwrap();
     s.model.state().sketch(id).unwrap().sketch.clone()
 }
@@ -63,7 +63,7 @@ fn explicit_freeform_break_preserves_exact_geometry_and_undo() {
             }
         }
         let encoded = serde_json::to_value(&after).unwrap();
-        let restored: solvecraft_sketch::Sketch = serde_json::from_value(encoded).unwrap();
+        let restored: solidcraft_sketch::Sketch = serde_json::from_value(encoded).unwrap();
         assert_eq!(restored.curves.len(), after.curves.len());
         run(&mut s, "edit.undo", json!({}));
         assert!(sketch(&s).curve_index(&id).is_some());
@@ -120,7 +120,7 @@ fn analytic_trim_and_break_use_freeform_cutters() {
     let sk = sketch(&s);
     for id in ids(&out["curves"]) {
         let shape = sk.shape(sk.curve_index(&id).unwrap()).unwrap();
-        assert!(matches!(shape, solvecraft_sketch::Shape::Line { a, b } if (a.y - 5.0).abs() < 1e-6 && (b.y - 5.0).abs() < 1e-6));
+        assert!(matches!(shape, solidcraft_sketch::Shape::Line { a, b } if (a.y - 5.0).abs() < 1e-6 && (b.y - 5.0).abs() < 1e-6));
     }
 
     let mut s = new_sketch();
@@ -144,7 +144,7 @@ fn trim_extend_break() {
     let sk = sketch(&s);
     let sh = sk.shape(sk.curve_index(&h).unwrap()).unwrap();
     assert!(
-        matches!(sh, solvecraft_sketch::Shape::Line { a, b } if a.dist(Vec2::new(0.0, 0.0)) < 1e-9 && b.dist(Vec2::new(10.0, 0.0)) < 1e-9),
+        matches!(sh, solidcraft_sketch::Shape::Line { a, b } if a.dist(Vec2::new(0.0, 0.0)) < 1e-9 && b.dist(Vec2::new(10.0, 0.0)) < 1e-9),
         "{sh:?}"
     );
     // Trim the lower half of the vertical line: the original id survives on the upper piece.
@@ -198,7 +198,7 @@ fn exact_extend_ellipse_preserves_support_target_and_history() {
         assert!(end.dist(Vec2::new(expected_x, y)) < 1e-7, "exact ellipse contact {end:?}");
         assert_eq!(sk.exact_segs(0).unwrap(), target);
         let persisted = s.doc.to_json();
-        let reopened = solvecraft_doc::format::read(&persisted).unwrap();
+        let reopened = solidcraft_doc::format::read(&persisted).unwrap();
         assert_eq!(reopened.to_json(), persisted);
         run(&mut s, "edit.undo", json!({}));
         assert_eq!(s.doc.to_json(), before);
@@ -429,6 +429,113 @@ fn text_makes_profiles_that_extrude_and_edit() {
     assert!(s.execute("sketch.text", &json!({"text": "", "at": [0, 0]})).is_err());
 }
 
+/// Volumes (mm³) of the bodies in the design, smallest first.
+fn body_volumes(s: &mut Session) -> Vec<f64> {
+    let m = run(s, "inspect.measure", json!({}));
+    let mut v: Vec<f64> = m["bodies"].as_array().unwrap().iter().map(|b| b["volume_mm3"].as_f64().unwrap()).collect();
+    v.sort_by(f64::total_cmp);
+    v
+}
+
+#[test]
+fn text_extrudes_with_its_counters_and_beside_other_curves() {
+    // Letter areas in mm² at a capital height of 10 mm, summed from the Liberation Sans contours (shoelace
+    // formula, quadratic pieces flattened finely), each outer contour minus its counters:
+    //   A 39.2159 - 9.0647   B 68.9283 - 12.9336 - 16.6277   8 56.8394 - 10.6451 - 13.7347   I 13.5557
+    // Extruded 2 mm, so the volumes are twice that. Faceted walls: within 0.02 mm³.
+    let near = |got: &[f64], want: &[f64]| {
+        assert_eq!(got.len(), want.len(), "{got:?} against {want:?}");
+        assert!(got.iter().zip(want).all(|(g, w)| (g - w).abs() < 0.02), "{got:?} against {want:?}");
+    };
+    // Letters with counters, alone: a letter is one body with its counters as holes. (A counter used to be
+    // extruded as a body of its own, or the extrude failed with "profile has no area".)
+    for (text, want) in
+        [("AB", vec![2.0 * (39.2159 - 9.0647), 2.0 * (68.9283 - 12.9336 - 16.6277)]), ("8", vec![2.0 * (56.8394 - 10.6451 - 13.7347)])]
+    {
+        let mut s = new_sketch();
+        run(&mut s, "sketch.text", json!({"text": text, "at": [0, 0], "height": 10}));
+        run(&mut s, "sketch.finish", json!({}));
+        run(&mut s, "solid.extrude", json!({"distance": 2}));
+        near(&body_volumes(&mut s), &want);
+    }
+    // Text beside a drawn rectangle is extruded with it (it used to be left out): the 30 x 20 x 2 plate and an "I".
+    let mut s = new_sketch();
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [30, 20]}));
+    run(&mut s, "sketch.text", json!({"text": "I", "at": [40, 0], "height": 10}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"distance": 2}));
+    near(&body_volumes(&mut s), &[2.0 * 13.5557, 1200.0]);
+    // A counter can still be picked on its own, by a point inside it: the inner contour of an O, 47.4584 mm².
+    let mut s = new_sketch();
+    run(&mut s, "sketch.text", json!({"text": "O", "at": [0, 0], "height": 10}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"distance": 2, "profiles": [{"point": [5.65, 5.0]}]}));
+    near(&body_volumes(&mut s), &[2.0 * 47.4584]);
+}
+
+#[test]
+fn text_embossed_or_debossed_leaves_its_counters_alone() {
+    // A 40 x 30 x 5 plate (6000 mm³) with 10 mm tall text raised from, or cut 1 mm into, its top. Only the letters
+    // change the volume, by their area in mm² (see above) x 1 mm; the counters of the O and of A and B stay as
+    // they are. (Emboss and deboss used to fail with "boolean Cut: no result" or "boolean Union: no result",
+    // because each counter was a tool body of its own, filling the hole of its letter.)
+    let (o, ab) = (83.3133 - 47.4584, (39.2159 - 9.0647) + (68.9283 - 12.9336 - 16.6277));
+    for (text, mode, change) in [("O", "deboss", -o), ("O", "emboss", o), ("AB", "deboss", -ab)] {
+        let mut s = new_sketch();
+        run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [40, 30]}));
+        run(&mut s, "sketch.finish", json!({}));
+        run(&mut s, "solid.extrude", json!({"distance": 5, "body_name": "Plate"}));
+        run(&mut s, "construct.plane.offset", json!({"base": "XY", "offset": 5, "name": "Lid"}));
+        run(&mut s, "sketch.create", json!({"plane": "Lid", "name": "Text"}));
+        run(&mut s, "sketch.text", json!({"text": text, "at": [10, 10], "height": 10}));
+        run(&mut s, "sketch.finish", json!({}));
+        run(&mut s, "solid.emboss", json!({"sketch": "Text", "depth": 1, "mode": mode}));
+        let v = body_volumes(&mut s);
+        assert!(v.len() == 1 && (v[0] - (6000.0 + change)).abs() < 0.02, "{text} {mode}: {v:?} against {}", 6000.0 + change);
+    }
+}
+
+#[test]
+fn text_takes_a_font_and_edit_text_keeps_or_changes_it() {
+    // The repository's second font is BIZ UDPGothic. Its "I" is a polygon of two 606 x 145 bars and a 188 x 1369
+    // stem in font units, with a capital height of 1567 units, so at 10 mm its area is
+    // (2 x 606 x 145 + 188 x 1369) x (10 / 1567)^2 = 17.6385 mm². The built-in Liberation Sans "I" is 13.5557 mm².
+    let font = concat!(env!("CARGO_MANIFEST_DIR"), "/../../apps/solidcraft-web/fonts/BIZUDPGothic-Regular.ttf");
+    let near = |s: &Session, want: f64| {
+        let a = profiles(s);
+        assert!(a.len() == 1 && (a[0] - want).abs() < 1e-3, "{a:?} against {want}");
+    };
+    let mut s = new_sketch();
+    let r = run(&mut s, "sketch.text", json!({"text": "I", "at": [0, 0], "height": 10}));
+    near(&s, 13.5557);
+    let link = r["link"].as_str().unwrap().to_string();
+    // A font by file path changes the outlines; the same edit with the built-in family's name changes them back.
+    run(&mut s, "sketch.edit_text", json!({"link": link, "font": font}));
+    near(&s, 17.6385);
+    run(&mut s, "sketch.edit_text", json!({"link": link, "font": "Liberation Sans"}));
+    near(&s, 13.5557);
+    run(&mut s, "sketch.edit_text", json!({"link": link, "font": font}));
+    // An edit that does not name a font keeps it (the height scales the area by 4), and an empty name is the built-in font.
+    run(&mut s, "sketch.edit_text", json!({"link": link, "height": 20}));
+    near(&s, 4.0 * 17.6385);
+    run(&mut s, "sketch.edit_text", json!({"link": link, "font": ""}));
+    near(&s, 4.0 * 13.5557);
+    run(&mut s, "sketch.edit_text", json!({"link": link, "font": font}));
+    // The font is kept in the design: after saving and reopening, the text is still in it.
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    let source = reopened.doc.sketch(s.active_sketch.unwrap()).unwrap().link(&link).unwrap().source.clone();
+    assert!(matches!(&source, solidcraft_sketch::LinkSource::Text { font: Some(f), .. } if f == font), "{source:?}");
+    // A new text takes the font too. Unknown fonts and values that are not names are errors.
+    let mut s = new_sketch();
+    run(&mut s, "sketch.text", json!({"text": "I", "at": [0, 0], "height": 10, "font": font}));
+    near(&s, 17.6385);
+    let e = s.execute("sketch.text", &json!({"text": "I", "at": [0, 0], "font": "No Such Family 12345"})).unwrap_err().to_string();
+    assert!(e.contains("unknown font `No Such Family 12345`"), "{e}");
+    assert!(s.execute("sketch.text", &json!({"text": "I", "at": [0, 0], "font": 12})).is_err());
+    assert!(s.execute("sketch.text", &json!({"text": "I", "at": [0, 0], "font": "C:/no/such/dir/font.ttf"})).is_err());
+    near(&s, 17.6385);
+}
+
 #[test]
 fn blend_curve_joins_tangentially() {
     let mut s = new_sketch();
@@ -645,7 +752,7 @@ fn certified_offset_follows_dimension_drag_reopen_break_and_undo() {
     run(&mut s, "sketch.drag", json!({"entity":ellipse,"from":[0,0],"to":[4,3]}));
     verify(&s);
     let mut reopened = Session {
-        doc: std::sync::Arc::new(solvecraft_doc::format::read(&s.doc.to_json()).unwrap()),
+        doc: std::sync::Arc::new(solidcraft_doc::format::read(&s.doc.to_json()).unwrap()),
         active_sketch: s.active_sketch,
         ..Session::default()
     };
@@ -677,7 +784,7 @@ fn certified_offset_delete_output_undo_reopen_and_refuse_dependent_source() {
     assert!(sk.curve_index(&id).is_none());
     assert!(sk.curve_index("e1").is_some());
     let deleted = s.doc.to_json();
-    let reopened = solvecraft_doc::format::read(&deleted).unwrap();
+    let reopened = solidcraft_doc::format::read(&deleted).unwrap();
     assert_eq!(reopened.to_json(), deleted);
     run(&mut s, "edit.undo", json!({}));
     assert_eq!(s.doc.to_json(), attached);
@@ -706,7 +813,7 @@ fn periodic_closed_offset_chain_break_drag_reopen_and_material_volume() {
     let check = |session: &Session| {
         let sk = sketch(session);
         assert_eq!(sk.freeform_offsets.iter().map(|r| r.certificate).collect::<Vec<_>>(), [2, 2]);
-        assert_eq!(solvecraft_sketch::find_profiles(&sk).len(), 3);
+        assert_eq!(solidcraft_sketch::find_profiles(&sk).len(), 3);
         for id in [&a, &b] {
             assert!(matches!(sk.curves[sk.curve_index(id).unwrap()].kind, CurveKind::Spline { periodic: true, .. }));
         }
@@ -719,7 +826,7 @@ fn periodic_closed_offset_chain_break_drag_reopen_and_material_volume() {
     run(&mut s, "parameters.change", json!({"name":"d1","expression":12}));
     check(&s);
     let mut reopened =
-        Session { doc: solvecraft_doc::format::read(&s.doc.to_json()).unwrap().into(), active_sketch: s.active_sketch, ..Default::default() };
+        Session { doc: solidcraft_doc::format::read(&s.doc.to_json()).unwrap().into(), active_sketch: s.active_sketch, ..Default::default() };
     reopened.refresh();
     check(&reopened);
     let attached = reopened.doc.to_json();
@@ -736,12 +843,12 @@ fn periodic_closed_offset_chain_break_drag_reopen_and_material_volume() {
     let indices = moved.curves[moved.curve_index(&b).unwrap()].kind.point_ids();
     assert_eq!(moved.point(indices[0]), moved.point(*indices.last().unwrap()));
     assert!(moved.point(indices[0]).unwrap().dist(from) > 0.1);
-    assert_eq!(solvecraft_doc::format::read(&reopened.doc.to_json()).unwrap().to_json(), reopened.doc.to_json());
+    assert_eq!(solidcraft_doc::format::read(&reopened.doc.to_json()).unwrap().to_json(), reopened.doc.to_json());
     run(&mut reopened, "edit.undo", json!({}));
     run(&mut reopened, "edit.undo", json!({}));
     assert_eq!(reopened.doc.to_json(), attached);
     // An independent ring area multiplied by height probes actual profile material.
-    let regions = solvecraft_sketch::find_profiles(&sketch(&s));
+    let regions = solidcraft_sketch::find_profiles(&sketch(&s));
     let selected = regions.iter().enumerate().min_by(|(_, x), (_, y)| x.area.total_cmp(&y.area)).unwrap();
     let n = 4096;
     let h = std::f64::consts::TAU / n as f64;
@@ -767,7 +874,7 @@ fn periodic_closed_offset_chain_break_drag_reopen_and_material_volume() {
     run(&mut s, "sketch.finish", json!({}));
     run(&mut s, "solid.extrude", json!({"sketch":sketch_id,"profiles":[selected.0],"distance":3,"operation":"new"}));
     let state = s.world_state();
-    let volume = solvecraft_kernel::measure(&state.bodies.last().unwrap().body).unwrap().volume;
+    let volume = solidcraft_kernel::measure(&state.bodies.last().unwrap().body).unwrap().volume;
     assert!((volume - expected).abs() < 0.05, "{volume} vs {expected}");
 }
 
@@ -780,7 +887,7 @@ fn periodic_fit_creator_keeps_legacy_and_refuses_hostile_intent_atomically() {
     let i = sk.curve_index(&id).unwrap();
     assert!(matches!(sk.curves[i].kind, CurveKind::Spline { periodic: true, .. }));
     sk.validate_periodic_splines().unwrap();
-    assert_eq!(solvecraft_sketch::find_profiles(&sk).len(), 1);
+    assert_eq!(solidcraft_sketch::find_profiles(&sk).len(), 1);
     let before = s.doc.to_json();
     let history = s.undo.len();
     for (cmd, p) in [
@@ -822,7 +929,7 @@ fn analytic_offset_partial_delete_releases_survivors_preserves_source_and_undo()
     }
     assert!(sk.curve_index("l1").is_some());
     let saved = s.doc.to_json();
-    assert_eq!(solvecraft_doc::format::read(&saved).unwrap().to_json(), saved);
+    assert_eq!(solidcraft_doc::format::read(&saved).unwrap().to_json(), saved);
     run(&mut s, "edit.undo", json!({}));
     assert_eq!(s.doc.to_json(), before);
 }
@@ -835,7 +942,7 @@ fn periodic_offset_extrusion_survives_post_extrude_span_changes_and_cold_reopen(
     let a = run(&mut s, "sketch.offset", json!({"curves":["e1"],"distance":-1,"chain":false}))["curves"][0].as_str().unwrap().to_string();
     run(&mut s, "sketch.offset", json!({"curves":[a],"distance":-0.5,"chain":false}));
     let sk_id = s.active_sketch.unwrap();
-    let initial = solvecraft_sketch::find_profiles(&sketch(&s));
+    let initial = solidcraft_sketch::find_profiles(&sketch(&s));
     let (index, ring) = initial.iter().enumerate().min_by(|(_, a), (_, b)| a.area.total_cmp(&b.area)).unwrap();
     let initial_count = ring.outer_curves.len();
     let boundary = ring.whole_curve_boundaries().unwrap();
@@ -887,21 +994,21 @@ fn periodic_offset_extrusion_survives_post_extrude_span_changes_and_cold_reopen(
         let body = &state.bodies[0].body;
         for (distance, material) in [(1.25, true), (0.5, false), (1.75, false)] {
             let point = ellipse + normal * distance;
-            assert_eq!(body.contains(solvecraft_geom::Vec3::new(point.x, point.y, 1.5)), material);
+            assert_eq!(body.contains(solidcraft_geom::Vec3::new(point.x, point.y, 1.5)), material);
         }
         // Repeat at the exact major-axis seam as a physical material control.
         for (distance, material) in [(1.25, true), (0.5, false), (1.75, false)] {
             let point = centre + u * (major + distance);
             assert_eq!(ring.region.contains(point), material);
-            assert_eq!(body.contains(solvecraft_geom::Vec3::new(point.x, point.y, 1.5)), material);
+            assert_eq!(body.contains(solidcraft_geom::Vec3::new(point.x, point.y, 1.5)), material);
         }
-        let volume = solvecraft_kernel::measure(body).unwrap().volume;
+        let volume = solidcraft_kernel::measure(body).unwrap().volume;
         assert!((volume - expected).abs() < 0.05, "{major}: {volume} vs independent {expected}");
-        let mut cold = Session { doc: solvecraft_doc::format::read(&s.doc.to_json()).unwrap().into(), ..Default::default() };
+        let mut cold = Session { doc: solidcraft_doc::format::read(&s.doc.to_json()).unwrap().into(), ..Default::default() };
         cold.refresh();
         let cold_state = cold.world_state();
         assert_eq!(cold_state.bodies.len(), 1);
-        let cold_volume = solvecraft_kernel::measure(&cold_state.bodies[0].body).unwrap().volume;
+        let cold_volume = solidcraft_kernel::measure(&cold_state.bodies[0].body).unwrap().volume;
         assert!((cold_volume - volume).abs() < 1e-8);
         let edited = s.doc.to_json();
         run(&mut s, "edit.undo", json!({}));

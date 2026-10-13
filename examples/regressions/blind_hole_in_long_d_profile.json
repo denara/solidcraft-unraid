@@ -1,0 +1,14 @@
+{
+ "description": "A blind 2 mm hole drilled 10.5 mm from 0.5 mm behind the flat back of a 452 mm D-profile bar (flat back 9.2 wide at x = -7.4, half-round front R 4.6 reaching x = 4.6). The hole ends at x = 2.6, 2 mm inside the material and clear of the round face, but the cut was refused: the exact fallback takes planar faces only, and the nudged tool gave an implausible volume (#544). The same cut works on a 350 mm bar. Result: the bar less pi * 1^2 * 10 mm3.",
+ "commands": [
+  {"command": "sketch.create", "params": {"plane": "XY", "name": "D"}},
+  {"command": "sketch.line", "params": {"points": [[0, 4.6], [-7.4, 4.6], [-7.4, -4.6], [0, -4.6]], "closed": false}},
+  {"command": "sketch.arc.center_point", "params": {"center": [0, 0], "start": [0, -4.6], "end": [0, 4.6]}},
+  {"command": "sketch.finish", "params": {}},
+  {"command": "solid.extrude", "params": {"sketch": "D", "distance": 452.0, "body_name": "Slat"}},
+  {"command": "sketch.create", "params": {"plane": {"origin": [-7.9, 0, 0], "x_dir": [0, 1, 0], "y_dir": [0, 0, 1]}, "name": "H"}},
+  {"command": "sketch.circle.center", "params": {"center": [0, 35.0], "radius": 1}},
+  {"command": "sketch.finish", "params": {}},
+  {"command": "solid.extrude", "params": {"sketch": "H", "distance": 10.5, "operation": "cut", "targets": ["Slat"]}}
+ ]
+}

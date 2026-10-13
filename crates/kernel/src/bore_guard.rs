@@ -3,7 +3,7 @@
 //! cylinder recut from silently removing an additional material boundary that
 //! the fallback's coarse material samples do not see.
 use crate::body::{Body, from_p3};
-use solvecraft_geom::{Plane, Seg2, Vec3};
+use solidcraft_geom::{Plane, Seg2, Vec3};
 use std::collections::HashSet;
 use truck_modeling as mt;
 

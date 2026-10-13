@@ -1,10 +1,10 @@
 //! Plastic (enclosure) features: Boss, Lip / Groove, Snap Fit and Rest, and plastic rules.
 
 use serde_json::{Value, json};
-use solvecraft_doc::FeatureKind;
-use solvecraft_doc::expr::Kind;
-use solvecraft_doc::plastic::PlasticRule;
-use solvecraft_geom::Vec3;
+use solidcraft_doc::FeatureKind;
+use solidcraft_doc::expr::Kind;
+use solidcraft_doc::plastic::PlasticRule;
+use solidcraft_geom::Vec3;
 
 use super::CommandSpec;
 use super::features::{add_feature, check_expr};
@@ -267,7 +267,7 @@ fn snap_fit(s: &mut Session, p: &Value) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
-    use solvecraft_geom::Vec3;
+    use solidcraft_geom::Vec3;
     use std::f64::consts::PI;
 
     use serde_json::{Value, json};
@@ -362,7 +362,7 @@ mod tests {
         run(&mut s, "parameters.change", json!({"name":"board_d","expression":"50 mm"}));
         let before = s.model.state_before(feature.id);
         let name = feature.face_names.first().unwrap();
-        let point = solvecraft_doc::naming::point_on_face(&before, name, Vec3::new(0., -28., 20.))
+        let point = solidcraft_doc::naming::point_on_face(&before, name, Vec3::new(0., -28., 20.))
             .expect("the original wall identity survives merged pieces")
             .0;
         assert!((point - Vec3::new(0., -33., 20.)).len() < 1e-8, "{point:?}");
@@ -372,7 +372,7 @@ mod tests {
             let after = &session.model.result(feature.id).unwrap().state;
             let old = before.body("Case").unwrap();
             let body = after.body("Case").unwrap();
-            let added = solvecraft_kernel::measure(&body.body).unwrap().volume - solvecraft_kernel::measure(&old.body).unwrap().volume;
+            let added = solidcraft_kernel::measure(&body.body).unwrap().volume - solidcraft_kernel::measure(&old.body).unwrap().volume;
             // Rectangular arm + triangular catch; the small attachment overlap lies inside the wall.
             assert!((added - (8. * 1.2 + 0.8 * 1.5 / 2.) * 6.).abs() < 0.05, "{added}");
             let mesh = body.mesh();
@@ -382,7 +382,7 @@ mod tests {
             assert!(!mesh.contains(Vec3::new(0., -24., 19.4)), "the arm ends at its specified length");
         };
         check(&s);
-        let cold = Session::new(solvecraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+        let cold = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
         assert!(cold.model.results.iter().all(|result| result.error.is_none()));
         check(&cold);
     }

@@ -9,7 +9,7 @@ it.
 |---|---|
 | Create | extrude (one side, two sides, symmetric, taper, start offset, to a distance or through all; new body, join, cut, intersect), revolve, sweep, loft, box, cylinder, sphere, torus, coil, pipe, rib, web, emboss, hole (simple, counterbore, countersink, tapped; on faces or at sketch points), thread, rectangular/circular/path patterns, mirror |
 | Modify | press pull, fillet, chamfer, shell, draft, scale, combine, split body, offset face, replace face, move/copy, align, remove |
-| Construct | offset plane, plane at angle |
+| Construct | offset plane, plane at angle, plane along path |
 | Inspect | measure, section analysis, interference, curvature comb and map, zebra, draft, minimum radius, isocurves, centre of mass |
 
 Extrude automatically selects **Join** for additions when the active component already has a
@@ -60,7 +60,20 @@ Feature references to faces and edges are stored by name, so an upstream edit th
 keeps them on the right face (see [Persistent naming](../dev/naming.md)). When a reference can't
 be found, the feature warns instead of silently picking another face.
 
+**Plane Along Path** accepts one sketch curve (including a drawn 3D wire) or model edge.
+Pick the path in the viewport and enter **Position (0 to 1)**: 0 starts the path, 1 ends it,
+and 0.5 places the plane halfway along its length. The plane is perpendicular to the path's
+local segment. Preview does not change the design; OK creates one editable timeline feature.
+The plane follows later path edits. Curved paths use their sampled polyline; absolute distance,
+reference-object placement and multi-curve chains are not yet available in this dialog.
+
 ## Editing a feature from a script
+
+For `solid.pattern.circular`, `axis` accepts `X`, `Y`, `Z`, or `{origin, dir}`.
+An explicit origin must contain three finite numeric coordinates in millimetres
+(`[x, y, z]` or `{x, y, z}`); omitting it uses the world origin. Expressions and
+construction-axis references are not supported. Invalid origins are rejected rather than
+silently replaced with zero.
 
 `timeline.inspect {feature}` returns a feature's `definition`: the fields `timeline.edit` changes,
 with their current values. `timeline.edit {feature, set}` merges `set` into that definition

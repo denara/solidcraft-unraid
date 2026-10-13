@@ -1,0 +1,16 @@
+[
+  {"note": "Alias preset (#304): a plain left drag still box-selects sketch geometry; the same drag with Shift+Alt orbits and selects nothing."},
+  {"call": "ui.prefs", "params": {"nav": "alias"}},
+  {"start": "sketch.create"},
+  {"click": {"plane": "XY"}},
+  {"call": "engine.execute", "params": {"command": "sketch.line", "params": {"points": [[10, 10], [30, 10]]}}},
+  {"call": "ui.view", "params": {"view": "top"}},
+  {"expect": {"camera": {"yaw_deg": 0, "pitch_deg": 90}}},
+  {"drag": [{"sketch": [5, 4]}, {"sketch": [40, 20]}], "steps": 10},
+  {"debug": 1},
+  {"expect": {"selection": 3, "camera": {"yaw_deg": 0, "pitch_deg": 90}}},
+  {"key": "Escape"},
+  {"expect": {"selection": 0}},
+  {"drag": [{"sketch": [5, 4]}, {"sketch": [40, 20]}], "steps": 10, "shift": true, "alt": true},
+  {"expect": {"selection": 0, "sketching": true}}
+]

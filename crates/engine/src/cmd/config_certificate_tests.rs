@@ -1,10 +1,10 @@
 use crate::Session;
 use serde_json::{Value, json};
-use solvecraft_doc::{
+use solidcraft_doc::{
     FeatureKind,
     config::{Column, FaceCertificate},
 };
-use solvecraft_geom::Vec3;
+use solidcraft_geom::Vec3;
 
 fn run(session: &mut Session, command: &str, params: Value) -> Value {
     session.execute(command, &params).unwrap_or_else(|error| panic!("{command} {params}: {error}"))
@@ -21,11 +21,11 @@ fn painted_radius(session: &Session, name: &str, radius: f64) -> usize {
         state.body(name).unwrap_or_else(|| panic!("missing {name}; bodies {:?}", state.bodies.iter().map(|body| &body.name).collect::<Vec<_>>()));
     let painted = session.doc.face_colors(body);
     let mesh = body.body.tessellate(0.001).unwrap();
-    let inverse = solvecraft_doc::mat_inverse(&body.source_transform).unwrap();
+    let inverse = solidcraft_doc::mat_inverse(&body.source_transform).unwrap();
     for (triangle, face) in mesh.triangles.iter().zip(&mesh.tri_face) {
         if painted.iter().any(|(index, _)| *index == *face as usize) {
             for vertex in mesh.tri(triangle).unwrap() {
-                let vertex = solvecraft_doc::apply_point(&inverse, vertex);
+                let vertex = solidcraft_doc::apply_point(&inverse, vertex);
                 assert!((vertex.x.hypot(vertex.y) - radius).abs() < 1e-7, "{name}: {vertex:?}");
             }
         }
@@ -60,7 +60,7 @@ fn certified_annulus_side_rows_follow_radius_edits_and_clone() {
     assert_eq!(s.doc.configs.columns.len(), 2);
     run(&mut s, "config.activate", json!({"row":"Painted"}));
     assert_eq!(painted_radius(&s, "Ring (copy)", 12.), 2);
-    let reopened = solvecraft_doc::Document::from_json(&s.doc.to_json()).unwrap();
+    let reopened = solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap();
     let mut reopened = Session::new(reopened);
     run(&mut reopened, "config.activate", json!({"row":"Painted"}));
     assert_eq!(painted_radius(&reopened, "Ring", 12.), 2);
@@ -83,19 +83,19 @@ fn imported(session: &mut Session, step: String, name: &str) -> u64 {
 #[test]
 fn legacy_v9_imported_emboss_anchor_and_ordinary_face_paint_replay_without_renaming() {
     let mut s = Session::default();
-    let cylinder = solvecraft_kernel::cylinder(Vec3::ZERO, Vec3::Z, 10., 20.).unwrap();
-    let step = solvecraft_kernel::step_export(&[&cylinder], "legacy anchored cylinder").unwrap();
+    let cylinder = solidcraft_kernel::cylinder(Vec3::ZERO, Vec3::Z, 10., 20.).unwrap();
+    let step = solidcraft_kernel::step_export(&[&cylinder], "legacy anchored cylinder").unwrap();
     let source = imported(&mut s, step, "Sleeve");
     run(&mut s, "material.assign", json!({"bodies":["Sleeve"],"material":"Steel"}));
     let before_volume = s.model.state().body("Sleeve").unwrap().body.tessellate_with(1e-4, true).unwrap().measure().volume;
-    let legacy_names = solvecraft_doc::naming::face_names(s.model.state().body("Sleeve").unwrap());
+    let legacy_names = solidcraft_doc::naming::face_names(s.model.state().body("Sleeve").unwrap());
     assert!(legacy_names.iter().all(|name| name.starts_with(&format!("F{source}:face:"))));
     run(&mut s, "appearance.assign", json!({"faces":[{"body":"Sleeve","point":[6,0,20]}],"appearance":"ABS - Blue"}));
     assert!(s.doc.appearances.faces[0].certificate.is_none());
     let badge = run(&mut s, "sketch.create", json!({"plane":{"face":[0,0,20]},"name":"Badge","project_edges":false}))["sketch"].as_u64().unwrap();
     let FeatureKind::Sketch { plane: saved_plane, .. } = &s.doc.feature(badge).unwrap().kind else { panic!() };
     let saved_plane = saved_plane.clone();
-    assert!(matches!(&saved_plane, solvecraft_doc::PlaneRef::Face { name: Some(name), .. } if legacy_names.contains(name)));
+    assert!(matches!(&saved_plane, solidcraft_doc::PlaneRef::Face { name: Some(name), .. } if legacy_names.contains(name)));
     run(&mut s, "sketch.rectangle.two_point", json!({"p0":[-2,-2],"p1":[2,2]}));
     run(&mut s, "sketch.finish", json!({}));
     run(&mut s, "solid.emboss", json!({"sketch":"Badge","profiles":"all","depth":1,"targets":["Sleeve"],"name":"Raised Badge"}));
@@ -106,9 +106,27 @@ fn legacy_v9_imported_emboss_anchor_and_ordinary_face_paint_replay_without_renam
     assert!((volume - before_volume - 16.).abs() < 0.01, "addedvolume {} baseline {before_volume}", volume - before_volume);
     let paint = s.doc.appearances.faces.clone();
     let mut legacy: Value = serde_json::from_str(&s.doc.to_json()).unwrap();
-    legacy["format"] = json!("solvecraft/9");
-    let reopened = Session::new(solvecraft_doc::Document::from_json(&legacy.to_string()).unwrap());
+    legacy["format"] = json!("solidcraft/9");
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&legacy.to_string()).unwrap());
+    // Saved before format 14, it keeps naming the pieces it makes in the kernel's shell order.
+    let anchored = solidcraft_doc::Feature { shell_piece_order: true, ..anchored };
     assert_eq!(reopened.doc.feature(anchored.id).unwrap(), &anchored);
+    // Names saved before format 14 keep naming the face they named, marked so they are found as
+    // the build that saved them found them.
+    let mark = |name: &Option<String>| name.as_ref().map(|n| format!("{}{n}", solidcraft_doc::naming::LEGACY_MARK));
+    let mut saved_plane = saved_plane;
+    if let solidcraft_doc::PlaneRef::Face { name, .. } = &mut saved_plane {
+        *name = mark(name);
+    }
+    let paint: Vec<_> = paint
+        .into_iter()
+        .map(|mut face| {
+            if !face.strict_name {
+                face.name = mark(&face.name);
+            }
+            face
+        })
+        .collect();
     let FeatureKind::Sketch { plane, .. } = &reopened.doc.feature(badge).unwrap().kind else { panic!() };
     assert_eq!(plane, &saved_plane);
     assert_eq!(reopened.doc.appearances.faces, paint);
@@ -155,11 +173,11 @@ fn legacy_v9_annulus_outer_side_emboss_keeps_its_original_heuristic_anchor() {
     run(&mut s, "sketch.circle.center", json!({"center":[0,0],"radius":9,"id":"inner"}));
     run(&mut s, "sketch.finish", json!({}));
     run(&mut s, "solid.extrude", json!({"distance":20,"profiles":[{"point":[9.5,0]}],"body_name":"Sleeve"}));
-    let names = solvecraft_doc::naming::face_names(s.model.state().body("Sleeve").unwrap());
-    // Preserve the legacy centroid-family name even though strict paint uses
-    // the separately certified outer source curve.
-    let name = solvecraft_doc::naming::face_names_at(&s.model.state(), &[Vec3::new(0., 10., 7.5)]).remove(0);
-    assert!(name.contains("side:inner"));
+    let names = solidcraft_doc::naming::face_names(s.model.state().body("Sleeve").unwrap());
+    // The outer wall is named after its own sketch curve: its history says so. (Builds before
+    // format 14 named it after the curve nearest its centre, the inner circle; see below.)
+    let name = solidcraft_doc::naming::face_names_at(&s.model.state(), &[Vec3::new(0., 10., 7.5)]).remove(0);
+    assert!(name.contains("side:outer"));
     run(&mut s, "sketch.create", json!({"plane":{"origin":[0,10,0],"x_dir":[-1,0,0],"y_dir":[0,0,1]},"name":"Badge"}));
     run(&mut s, "sketch.rectangle.two_point", json!({"p0":[-2,5],"p1":[2,10]}));
     run(&mut s, "sketch.finish", json!({}));
@@ -171,8 +189,15 @@ fn legacy_v9_annulus_outer_side_emboss_keeps_its_original_heuristic_anchor() {
     let volume = s.model.state().body("Sleeve").unwrap().body.tessellate_with(1e-4, true).unwrap().measure().volume;
     assert!((volume - std::f64::consts::PI * 380. - 21.).abs() < 0.2, "volume {volume}");
     let mut legacy: Value = serde_json::from_str(&s.doc.to_json()).unwrap();
-    legacy["format"] = json!("solvecraft/9");
-    let reopened = Session::new(solvecraft_doc::Document::from_json(&legacy.to_string()).unwrap());
+    legacy["format"] = json!("solidcraft/9");
+    // What a version 9 design stored for that pick: the centroid-family name of the outer wall
+    // piece holding the point. It keeps finding that piece, as it did when saved.
+    for feature in legacy["features"].as_array_mut().unwrap() {
+        if feature["id"] == json!(feature_id) {
+            feature["face_names"] = json!(["F2:side:inner#4"]);
+        }
+    }
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&legacy.to_string()).unwrap());
     assert!(reopened.model.result(feature_id).unwrap().error.is_none());
     assert!((reopened.model.state().body("Sleeve").unwrap().body.tessellate_with(1e-4, true).unwrap().measure().volume - volume).abs() < 1e-8);
 }
@@ -193,7 +218,7 @@ fn certified_side_transfer_preserves_geometry_and_unsupported_taper_refuses_atom
     run(&mut s, "config.activate", json!({"row":"Painted"}));
     assert_eq!(painted_radius(&s, "Round", 10.), 2);
     let before = s.world_state().body("Round").unwrap().mesh().bounds();
-    let mut s = Session::new(solvecraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    let mut s = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
     run(&mut s, "config.activate", json!({"row":"Painted"}));
     assert_eq!(painted_radius(&s, "Round", 10.), 2);
     assert!(
@@ -217,8 +242,8 @@ fn certified_side_transfer_preserves_geometry_and_unsupported_taper_refuses_atom
 
 #[test]
 fn certified_import_payload_binding_roundtrip_clone_and_replacement_refusal() {
-    let geometry = solvecraft_kernel::cylinder(Vec3::ZERO, Vec3::Z, 10., 10.).unwrap();
-    let step = solvecraft_kernel::step_export(&[&geometry], "certificate fixture").unwrap();
+    let geometry = solidcraft_kernel::cylinder(Vec3::ZERO, Vec3::Z, 10., 10.).unwrap();
+    let step = solidcraft_kernel::step_export(&[&geometry], "certificate fixture").unwrap();
     let mut s = Session::default();
     let part = run(&mut s, "component.create", json!({"name":"ImportedPart"}))["component"].as_u64().unwrap();
     let source = imported(&mut s, step.clone(), "Imported");
@@ -231,7 +256,7 @@ fn certified_import_payload_binding_roundtrip_clone_and_replacement_refusal() {
     run(&mut s, "component.paste_new", json!({"component":part,"translate":[30,0,0]}));
     run(&mut s, "config.activate", json!({"row":"Painted"}));
     assert_eq!(painted_radius(&s, "Imported (copy)", 10.), pieces);
-    let reopened = solvecraft_doc::Document::from_json(&s.doc.to_json()).unwrap();
+    let reopened = solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap();
     let mut s = Session::new(reopened);
     run(&mut s, "config.activate", json!({"row":"Painted"}));
     assert_eq!(painted_radius(&s, "Imported", 10.), pieces);

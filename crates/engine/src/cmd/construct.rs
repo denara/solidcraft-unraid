@@ -7,8 +7,8 @@
 //! persistent names.
 
 use serde_json::Value;
-use solvecraft_doc::construct::{AxisDef, GeoRef, PointDef};
-use solvecraft_doc::{FeatureKind, PlaneRef};
+use solidcraft_doc::construct::{AxisDef, GeoRef, PointDef};
+use solidcraft_doc::{FeatureKind, PlaneRef};
 
 use super::CommandSpec;
 use super::features::{add_feature, check_expr, plane_param, sketch_id};
@@ -137,7 +137,7 @@ fn geo(s: &Session, v: Option<&Value>, cmd: &str, what: &str) -> Result<GeoRef> 
 
 fn t_param(s: &Session, p: &Value, cmd: &str) -> Result<String> {
     let t = if p.get("t").is_some() { req_expr(cmd, p, "t")? } else { "0.5".to_string() };
-    check_expr(s, &t, solvecraft_doc::expr::Kind::Unitless, cmd, "t")?;
+    check_expr(s, &t, solidcraft_doc::expr::Kind::Unitless, cmd, "t")?;
     Ok(t)
 }
 

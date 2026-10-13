@@ -1,12 +1,13 @@
 //! Clean-up after operations: coplanar neighbouring faces become one face, and two straight
 //! edges meeting in line at a vertex nothing else uses become one edge (as Fusion keeps them).
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
-use solvecraft_geom::Vec3;
+use solidcraft_geom::Vec3;
 use truck_modeling::{self as mt, builder};
 
 use crate::body::{Solid, from_p3};
+use crate::history::{Change, EdgeOrigin, FaceProv};
 
 fn plane_of(f: &mt::Face) -> Option<(Vec3, f64)> {
     match f.oriented_surface() {
@@ -31,7 +32,7 @@ pub(crate) fn absolute_face(f: &mt::Face, wires: Vec<mt::Wire>) -> Option<mt::Fa
     Some(nf)
 }
 
-fn find(p: &mut [usize], mut i: usize) -> usize {
+pub(crate) fn find(p: &mut [usize], mut i: usize) -> usize {
     while let Some(&q) = p.get(i) {
         if q == i {
             break;
@@ -77,8 +78,6 @@ fn inside(p: Vec3, edges: &[mt::Edge], n: Vec3) -> bool {
     c
 }
 
-/// Merge each group of edge-connected coplanar faces into one face. Returns None when nothing
-/// changed or the result would not be a valid solid.
 /// Do the points lie along one of the lines faces were split along on purpose (polylines;
 /// chords of a curved line sag by under a tenth of their length)?
 pub(crate) fn on_split_line(pts: &[Vec3], keep: &[Vec<Vec3>]) -> bool {
@@ -98,7 +97,10 @@ pub(crate) fn edge_points(e: &mt::Edge) -> Vec<Vec3> {
     (0..=4).map(|k| from_p3(c.subs(t0 + (t1 - t0) * k as f64 / 4.0))).collect()
 }
 
-fn merge_coplanar(shell: &mt::Shell, tol: f64, keep: &[Vec<Vec3>]) -> Option<mt::Shell> {
+/// Merge each group of edge-connected coplanar faces into one face (keeping faces apart along
+/// the lines in `keep`). Returns the new shell and, for each of its faces, the faces of `shell`
+/// it was made from (by position); None when nothing changed or a merged face can't be built.
+fn merge_coplanar(shell: &mt::Shell, tol: f64, keep: &[Vec<Vec3>]) -> Option<(mt::Shell, Vec<Vec<usize>>)> {
     let faces: Vec<mt::Face> = shell.face_iter().cloned().collect();
     let planes: Vec<Option<(Vec3, f64)>> = faces.iter().map(plane_of).collect();
     let mut parent: Vec<usize> = (0..faces.len()).collect();
@@ -136,12 +138,14 @@ fn merge_coplanar(shell: &mt::Shell, tol: f64, keep: &[Vec<Vec3>]) -> Option<mt:
         groups.entry(r).or_default().push(i);
     }
     let mut out: Vec<mt::Face> = Vec::new();
+    let mut from: Vec<Vec<usize>> = Vec::new();
     let mut order: Vec<usize> = groups.keys().copied().collect();
     order.sort_unstable();
     for g in order {
         let members = groups.get(&g)?;
         if members.len() == 1 {
             out.push(faces.get(*members.first()?)?.clone());
+            from.push(members.clone());
             continue;
         }
         let (n, _) = (*planes.get(*members.first()?)?)?;
@@ -189,13 +193,14 @@ fn merge_coplanar(shell: &mt::Shell, tol: f64, keep: &[Vec<Vec3>]) -> Option<mt:
                 }
             }
             out.push(mt::Face::try_new(wires, surface.clone()).ok()?);
+            from.push(members.clone());
         }
     }
-    Some(out.into())
+    Some((out.into(), from))
 }
 
 /// Join pairs of collinear straight edges at vertices only they use.
-fn merge_collinear(shell: &mt::Shell) -> Option<mt::Shell> {
+fn merge_collinear(shell: &mt::Shell, trace: &mut Trace) -> Option<mt::Shell> {
     let mut faces: Vec<mt::Face> = shell.face_iter().cloned().collect();
     let mut changed = false;
     for _round in 0..10_000 {
@@ -222,6 +227,7 @@ fn merge_collinear(shell: &mt::Shell) -> Option<mt::Shell> {
         });
         let Some((a, b, va, vb)) = pair else { break };
         let joined = builder::line(&va, &vb);
+        trace.made(&joined, [a.id(), b.id()]);
         for f in &mut faces {
             if !f.edge_iter().any(|e| e.id() == a.id()) {
                 continue;
@@ -292,12 +298,13 @@ fn fit_exact(e: &mt::Edge, tol: f64) -> Option<mt::Edge> {
 }
 
 /// Replace approximate edges that are really lines or arcs with exact ones.
-fn exact_edges(shell: &mt::Shell, tol: f64) -> Option<mt::Shell> {
+fn exact_edges(shell: &mt::Shell, tol: f64, trace: &mut Trace) -> Option<mt::Shell> {
     let mut subst: HashMap<mt::EdgeID, mt::Edge> = HashMap::new();
     for e in shell.edge_iter() {
         if !subst.contains_key(&e.id())
             && let Some(x) = exact_curve(&e, tol)
         {
+            trace.made(&x, [e.id()]);
             subst.insert(e.id(), x);
         }
     }
@@ -398,45 +405,167 @@ fn planar_surfaces(shell: &mt::Shell, tol: f64) -> Option<mt::Shell> {
 }
 
 /// Heal a solid; returns the input unchanged when nothing applies or healing fails.
+#[cfg(test)]
 pub fn heal(solid: Solid, size: f64) -> Solid {
-    heal_keep(solid, size, &[])
+    healed(solid, size, &[], false).0
 }
 
-/// [`heal`], keeping faces apart along lines they were split along on purpose.
-pub(crate) fn heal_keep(solid: Solid, size: f64, keep: &[Vec<Vec3>]) -> Solid {
+/// What healing made each face and edge of its result from.
+#[derive(Debug)]
+pub(crate) struct HealMap {
+    /// For each face of the result (in its face order), the input faces it was made from (by
+    /// position in the input's face order): one, or several merged into it.
+    pub faces: Vec<Vec<usize>>,
+    /// For each edge of the result (by identity), the input edges it was made from (by
+    /// position in the input's edge order): one, or several joined into it.
+    pub edges: HashMap<mt::EdgeID, Vec<usize>>,
+}
+
+impl HealMap {
+    /// The history of the healed solid, from that of its input (`faces` in the input's face
+    /// order, each a region of operand faces; `edges` the origins of each edge, in its edge
+    /// order): a face healing merged from several is Merged when they came from several, the
+    /// rest keep their origins (see [`crate::record::regions`]). Faces in the healed solid's
+    /// face order, edges by identity.
+    pub(crate) fn carry(&self, faces: &[FaceProv], edges: &[Vec<EdgeOrigin>]) -> Option<(Vec<FaceProv>, HashMap<mt::EdgeID, Vec<EdgeOrigin>>)> {
+        let regions = self
+            .faces
+            .iter()
+            .map(|under| {
+                let whole = matches!(under.as_slice(), [i] if faces.get(*i).is_some_and(|f| f.change == Change::Kept));
+                let mut origins = BTreeSet::new();
+                for i in under {
+                    origins.extend(faces.get(*i)?.origins.iter().copied());
+                }
+                Some((origins, whole))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let edges = self
+            .edges
+            .iter()
+            .map(|(id, under)| {
+                let mut origins = BTreeSet::new();
+                for i in under {
+                    origins.extend(edges.get(*i)?.iter().cloned());
+                }
+                Some((*id, origins.into_iter().collect()))
+            })
+            .collect::<Option<HashMap<_, _>>>()?;
+        Some((crate::record::regions(regions), edges))
+    }
+
+    /// Every face and edge of `solid` as itself (nothing healed).
+    fn identity(solid: &Solid) -> HealMap {
+        let faces = (0..solid.face_iter().count()).map(|i| vec![i]).collect();
+        let edges = crate::record::edge_index(solid).into_iter().map(|(id, i)| (id, vec![i])).collect();
+        HealMap { faces, edges }
+    }
+}
+
+/// Heal a solid (the input unchanged when nothing applies or healing fails), keeping faces apart
+/// along lines they were split along on purpose (`keep`), with what each face and edge of the
+/// result was made from (`None` when that could not be followed).
+pub(crate) fn heal_traced(solid: Solid, size: f64, keep: &[Vec<Vec3>]) -> (Solid, Option<HealMap>) {
+    healed(solid, size, keep, true)
+}
+
+/// The healed solid, and what it was made from when `traced`.
+fn healed(solid: Solid, size: f64, keep: &[Vec<Vec3>], traced: bool) -> (Solid, Option<HealMap>) {
     // Edges a boolean made are intersection curves, which panic where they no longer
     // evaluate; the solid then stays as it is.
-    crate::guard("heal", || Ok(heal_shells(&solid, size, keep))).ok().flatten().unwrap_or(solid)
+    match crate::guard("heal", || Ok(heal_shells(&solid, size, keep, traced))) {
+        Ok(Some((healed, map))) => (healed, map),
+        _ => {
+            let map = if traced { crate::guard("heal map", || Ok(HealMap::identity(&solid))).ok() } else { None };
+            (solid, map)
+        }
+    }
 }
 
-fn heal_shells(solid: &Solid, size: f64, keep: &[Vec<Vec3>]) -> Option<Solid> {
+/// The input edges each edge made while healing comes from. Input edges live as long as the
+/// healing (the input solid is borrowed throughout), so their identities are never reused; an
+/// edge healing makes is recorded when it is made, from edges then alive, which overwrites any
+/// entry left under its identity by an edge made earlier and dropped since. Records nothing
+/// when not `on`.
+struct Trace {
+    on: bool,
+    input: HashMap<mt::EdgeID, usize>,
+    made: HashMap<mt::EdgeID, Vec<usize>>,
+}
+
+impl Trace {
+    /// The input edges under the live edge `id`.
+    fn of(&self, id: &mt::EdgeID) -> Vec<usize> {
+        match self.made.get(id) {
+            Some(from) => from.clone(),
+            None => self.input.get(id).map(|i| vec![*i]).unwrap_or_default(),
+        }
+    }
+
+    /// `edge` was made from the live edges `from`.
+    fn made<const N: usize>(&mut self, edge: &mt::Edge, from: [mt::EdgeID; N]) {
+        if !self.on {
+            return;
+        }
+        let mut under: Vec<usize> = from.iter().flat_map(|id| self.of(id)).collect();
+        under.sort_unstable();
+        under.dedup();
+        self.made.insert(edge.id(), under);
+    }
+}
+
+fn heal_shells(solid: &Solid, size: f64, keep: &[Vec<Vec3>], traced: bool) -> Option<(Solid, Option<HealMap>)> {
     let tol = (size * 1e-7).max(1e-9);
     let mut shells = Vec::new();
     let mut changed = false;
+    let input = if traced { crate::record::edge_index(solid) } else { HashMap::new() };
+    let mut trace = Trace { on: traced, input, made: HashMap::new() };
+    // Each face of the shells so far, as the input faces it was made from.
+    let mut faces: Vec<Vec<usize>> = Vec::new();
+    let mut first = 0;
     for sh in solid.boundaries() {
         let mut cur = sh.clone();
+        let count = cur.face_iter().count();
+        let mut from: Vec<Vec<usize>> = (first..first + count).map(|i| vec![i]).collect();
+        first += count;
+        // Faces come out in place, one for one, except where coplanar ones merge.
         if let Some(m) = planar_surfaces(&cur, (size * 1e-7).max(1e-9)) {
             cur = m;
             changed = true;
         }
-        if let Some(m) = exact_edges(&cur, (size * 1e-5).max(1e-7)) {
+        if let Some(m) = exact_edges(&cur, (size * 1e-5).max(1e-7), &mut trace) {
             cur = m;
             changed = true;
         }
-        if let Some(m) = merge_coplanar(&cur, tol, keep) {
+        if let Some((m, groups)) = merge_coplanar(&cur, tol, keep) {
+            cur = m;
+            from = groups.iter().map(|g| g.iter().filter_map(|i| from.get(*i)).flatten().copied().collect()).collect();
+            changed = true;
+        }
+        if let Some(m) = merge_collinear(&cur, &mut trace) {
             cur = m;
             changed = true;
         }
-        if let Some(m) = merge_collinear(&cur) {
-            cur = m;
-            changed = true;
-        }
+        faces.extend(from);
         shells.push(cur);
     }
     if !changed {
         return None;
     }
-    Solid::try_new(shells).ok()
+    let healed = Solid::try_new(shells).ok()?;
+    if !traced {
+        return Some((healed, None));
+    }
+    let edges: Option<HashMap<mt::EdgeID, Vec<usize>>> = crate::body::edge_order(healed.face_iter())
+        .0
+        .iter()
+        .map(|e| {
+            let under = trace.of(&e.id());
+            (!under.is_empty()).then(|| (e.id(), under))
+        })
+        .collect();
+    let map = edges.map(|edges| HealMap { faces, edges });
+    Some((healed, map))
 }
 
 #[cfg(test)]

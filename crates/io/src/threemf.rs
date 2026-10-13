@@ -12,7 +12,7 @@ use std::io::{Cursor, Read, Write};
 
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
-use solvecraft_geom::Vec3;
+use solidcraft_geom::Vec3;
 
 use crate::{IoError, Result};
 

@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Help reproduce and fix a SolveCraft problem
+about: Help reproduce and fix a SolidCraft problem
 title: ''
 labels: ''
 assignees: ''
@@ -12,7 +12,7 @@ What did you expect, and what happened instead?
 
 ## Reproduction
 
-Include steps, SolveCraft version/commit and relevant environment details. Prefer a small example without private design data.
+Include steps, SolidCraft version/commit and relevant environment details. Prefer a small example without private design data.
 
 ## Screenshots of the behavior (when observable)
 

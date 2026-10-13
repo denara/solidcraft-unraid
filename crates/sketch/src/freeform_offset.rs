@@ -4,7 +4,7 @@
 //! bounds their distance everywhere, rather than just at selected samples.
 use crate::{CurveKind, Sketch, SketchError, fit_beziers_mode};
 use serde::{Deserialize, Serialize};
-use solvecraft_geom::{Seg2, Vec2};
+use solidcraft_geom::{Seg2, Vec2};
 
 pub const OFFSET_TOLERANCE: f64 = 0.002;
 const MAX_PIECES: usize = 256;

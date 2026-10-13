@@ -2,8 +2,8 @@
 //! through the control channel (the toolbar's way) and measured as drawn.
 
 use serde_json::json;
-use solvecraft_ui_egui::frame::{DIALOG_MAX_W, DIALOG_MIN_W, DIALOG_WIDE_MAX_W, WINDOW_WIDE_MAX_W};
-use solvecraft_ui_egui::scenario::Harness;
+use solidcraft_ui_egui::frame::{DIALOG_MAX_W, DIALOG_MIN_W, DIALOG_WIDE_MAX_W, WINDOW_WIDE_MAX_W};
+use solidcraft_ui_egui::scenario::Harness;
 
 /// Widths of the windows on screen (their areas in the middle layer).
 fn window_widths(h: &Harness) -> Vec<(String, f32)> {
@@ -30,7 +30,7 @@ fn command_dialogs_shrink_to_their_content_within_limits() {
     let mut bad = Vec::new();
     // The frame border and shadow add a little to the content limits.
     let slack = 4.0;
-    for spec in solvecraft_engine::command_specs() {
+    for spec in solidcraft_engine::command_specs() {
         h.call("ui.start", json!({"command": spec.id}));
         h.frames(4);
         let wide = h.app.dialog.as_ref().is_some_and(|d| d.is_wide());
@@ -82,7 +82,7 @@ fn floating_windows_stay_within_limits() {
     h.app.keymap.open = true;
     h.app.help.about = true;
     h.app.ui.palette_open = true;
-    solvecraft_ui_egui::params_dialog::open(&mut h.app);
+    solidcraft_ui_egui::params_dialog::open(&mut h.app);
     h.frames(6);
     let ws = window_widths(&h);
     // Keyboard Shortcuts is a page of Preferences (one window, #36).

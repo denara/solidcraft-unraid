@@ -94,7 +94,7 @@ fn random_sketch_editing_never_breaks() {
             }
         }
         // The design round-trips.
-        let back = solvecraft_doc::Document::from_json(&s.doc.to_json()).unwrap();
+        let back = solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap();
         assert_eq!(back, *s.doc, "seed {seed}");
     }
 }

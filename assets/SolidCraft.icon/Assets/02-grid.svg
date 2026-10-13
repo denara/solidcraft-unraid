@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <radialGradient id="radial-gradient-1" cx="0" cy="0" r="699.707" gradientTransform="matrix(1 0 0 0.5 512 740.159)" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#507eaa"/>
+      <stop offset="0.3" stop-color="#507eaa" stop-opacity="0.9"/>
+      <stop offset="0.65" stop-color="#507eaa" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#507eaa" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <title>Untitled-2</title>
+  <g id="_02_Grid" data-name="02 Grid">
+    <path id="Grid___elliptical_radial_alpha_beneath_solid" data-name="Grid • elliptical radial alpha beneath solid" d="M-19.692 -364.359 L1043.692 248.564 M-19.692 248.564 L1043.692 -364.359 M-19.692 -250.351 L1043.692 362.572 M-19.692 362.572 L1043.692 -250.351 M-19.692 -136.343 L1043.692 476.58 M-19.692 476.58 L1043.692 -136.343 M-19.692 -22.335 L1043.692 590.588 M-19.692 590.588 L1043.692 -22.335 M-19.692 91.673 L1043.692 704.596 M-19.692 704.596 L1043.692 91.673 M-19.692 205.681 L1043.692 818.604 M-19.692 818.604 L1043.692 205.681 M-19.692 319.689 L1043.692 932.612 M-19.692 932.612 L1043.692 319.689 M-19.692 547.705 L1043.692 1160.628 M-19.692 1160.628 L1043.692 547.705 M-19.692 661.713 L1043.692 1274.636 M-19.692 1274.636 L1043.692 661.713 M-19.692 775.721 L1043.692 1388.644 M-19.692 1388.644 L1043.692 775.721 M-19.692 889.729 L1043.692 1502.652 M-19.692 1502.652 L1043.692 889.729 M-19.692 1003.737 L1043.692 1616.66 M-19.692 1616.66 L1043.692 1003.737 M-19.692 1117.745 L1043.692 1730.668 M-19.692 1730.668 L1043.692 1117.745" fill="none" stroke="url(#radial-gradient-1)" stroke-width="3.938" stroke-miterlimit="10" opacity="0.28"/>
+    <path id="Origin_axes___shared_elliptical_radial_alpha" data-name="Origin axes • shared elliptical radial alpha" d="M-19.692 433.697 L1043.692 1046.62 M-19.692 1046.62 L1043.692 433.697" fill="none" stroke="url(#radial-gradient-1)" stroke-width="4.431" stroke-miterlimit="10" opacity="0.28"/>
+  </g>
+</svg>

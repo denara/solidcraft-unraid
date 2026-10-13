@@ -11,8 +11,55 @@ The SHEET METAL tab builds parts from a sheet of constant thickness under a **sh
 - **Create Flat Pattern** (`sheet.flat_pattern`) shows the flat part with its bend lines and a
   bend table, and exports it as DXF or a bend-table CSV through the save picker.
 
-Bends follow the rule's K-factor, so flat lengths match what a press brake will make. The
-oracle checks these against parts built in Fusion.
+Bends follow the rule's K-factor, so flat lengths match what a press brake will make. Tests
+check flat lengths against hand-computed bend allowances.
+
+Where two bends of one edge flange feature meet at a corner of the base, the rule's **corner
+relief shape** (`corner_relief_shape`; Corner Relief Shape in Sheet Metal Rules) says what is
+cut there. `notch`, the default, cuts nothing more: the bends end square at the corner. `round`
+and `rectangular` cut a relief the rule's **corner relief** across, centred on the corner where
+the two bend lines meet: out of the base a round with half that size as its radius, or a square
+with half that size as its side, and both bends stop where it begins, cut straight across. The
+flange panels keep their ends. The relief is in the folded part, the flat pattern, the bend
+table (the bends are shorter) and the DXF (a round relief is an arc). At a corner that isn't
+square the round follows the angle of the base and the square becomes a kite, its two cuts
+square to the edges. Changing the shape in a rule changes the parts made with that rule. A
+relief that doesn't fit (under 0.01 mm across, leaving nothing of a bend, or reaching as far
+from its corner as another edge of the base is) is left out, and the flange feature reports a
+warning saying where.
+
+```json
+{"command":"sheet.manage_rules","params":{"name":"Sheet 2 mm","thickness":"2 mm","k_factor":0.5,
+ "bend_radius":"1 mm","corner_relief_shape":"round","corner_relief":"8 mm","active":true}}
+```
+
+Where the edge flanges of one feature meet at a corner of the base, their panels are closed
+toward each other at any bend angle: each end is cut square to the sheet, on a line in the flat
+chosen so that the edges nearest each other (on the inner faces) run parallel, the rule's
+**gap** apart, either side of the plane halfway between the flanges. Flanges at 72° get slanted
+ends in the flat; corners that aren't square close the same way, and at 90° it is the corner
+the rule always gave. A corner that can't be closed (a gap under 0.01 mm, flanges bending
+opposite ways, ends that would overlap in the flat pattern) stays open, and the flange feature
+reports a warning saying where. A flange added by a later feature leaves the corner as it was:
+the earlier flange keeps its length and the new one ends at its bend.
+
+The flanges of one edge flange feature can each have an angle and a height of their own. An
+entry of `edges` is a point `[x, y, z]`, which takes the feature's `height` and `angle`, or an
+object `{"point": [x, y, z], "angle": "105 deg", "height": "30 mm"}` whose `angle` and `height`
+(either one, or both) replace them for that edge. They are expressions like the feature's own,
+so parameters work, and each is a feature input of its own (`Edge angle`, `Edge height`) after
+`Height` and `Angle`. The corners between such flanges close like those between equal ones:
+the ends run toward each other the rule's gap apart, either side of the plane halfway between
+the two flanges, and a taller flange's end keeps that line up to its own tip. This is how to
+close a corner between flanges at different angles, because flanges of separate features
+don't close toward each other. In the Flange dialog, picking more than one edge shows a row
+per edge with an angle and a height box; an empty box takes the value above.
+
+```json
+{"command":"sheet.flange","params":{"edges":[[60,0,2],{"point":[120,45,2],"angle":"90 deg"},
+ {"point":[60,90,2],"angle":"105 deg","height":"30 mm"},{"point":[0,45,2],"angle":"120 deg","height":"25 mm"}],
+ "height":38.6,"angle":"75 deg"}}
+```
 
 For a shop drawing or spreadsheet, `sheet.export_bend_table` returns CSV by default; choose
 `format: "json"` for structured data. It includes the sheet rule, thickness, bend angles,
@@ -61,3 +108,15 @@ tool with varying depth is refused before changing sheet geometry. Pocket profil
 but a pocket crossing a bend zone cannot yet be refolded. Machining folded bend material,
 tapered sheet cuts and other unsupported 3D sheet Cut/Intersect operations report an error before changing
 the design; they cannot silently restore removed material during a later sheet rebuild.
+
+A sketch can be drawn on a flat face of the sheet: the base or a flange, on either side. Pick
+the face (or give `sketch.create` the point `plane: {face: [x, y, z]}`) and the sketch attaches
+to that panel instead of to a certified source face. It keeps the face's name,
+`sheet:<body>:<panel>:<top|bottom>` (the panel is `base` or the flange's feature tag), and finds
+the face again whenever the sheet is rebuilt: after a parameter change such as the thickness or
+a flange angle, through Unfold / Refold, after the file is reopened and when the body is
+renamed. Sketch coordinates are the flat pattern's, so a point drawn on a flange lies where the
+flat pattern and its DXF have it, and on the bottom face y runs the other way, as seen from
+below. When the face is gone (its flange is suppressed or deleted) the sketch reports a lost
+attachment instead of moving to another face; **Redefine Sketch Plane** attaches it to another
+face. `fixed: true` still freezes the picked plane in space.

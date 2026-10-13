@@ -6,13 +6,24 @@ and orientation are stored in the source face's canonical plane. Editing the sou
 or moving its placement therefore updates the sketch plane while preserving its local
 geometry and dimensions.
 
-Supported planar sources are exact Box faces, untapered New Body Extrude caps and straight
-sketch sides, and planar faces of immutable STEP imports. Extrude caps also identify their
+Supported planar sources are exact Box faces, untapered New Body and Join Extrude caps and
+straight sketch sides, and planar faces of immutable STEP imports. Extrude caps also identify their
 outer boundary and holes by source curve IDs. Reordering profiles cannot substitute another
-profile's cap. Curved surfaces cannot host a planar sketch through this workflow.
+profile's cap. A profile drawn over a face sketch's projected boundary (a rectangle
+traced over the whole face, or a strip whose sides lie on the face's edges) is identified by
+the drawn curves: where a drawn curve and a projected one cover the same edge, the drawn curve
+is the source. Two drawn curves, or two projections, over one edge remain ambiguous. Curved surfaces cannot host a planar sketch through this workflow.
 Edited surfaces without retained construction provenance, ambiguous sources, and unsupported
-generators require an explicit fixed plane instead. A nearby or parallel face is never used
+generators require an explicit fixed plane instead. A face that a Join merged from two features' coplanar
+faces belongs to neither, so it also needs a fixed plane. The error says why, and the Create
+Sketch dialog then offers **Use fixed plane**, which places the sketch on that face's current
+plane without following later changes. A nearby or parallel face is never used
 to repair a new attachment automatically.
+
+The flat faces of a sheet metal body are the exception: they have no construction
+certificate, so a sketch on one attaches to its panel by name (`sheet:<body>:<panel>:<side>`)
+and finds it again after every rebuild, unfold and refold. If that panel no longer exists the
+sketch reports a lost attachment, as above. See the sheet metal guide.
 
 ## Create and repair
 

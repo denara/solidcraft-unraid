@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use egui::{Color32, Mesh, Shape, TextureHandle, TextureId, pos2};
-use solvecraft_engine::doc::canvas::Canvas;
-use solvecraft_engine::geom::Vec2;
+use solidcraft_engine::doc::canvas::Canvas;
+use solidcraft_engine::geom::Vec2;
 
 use crate::SolveApp;
 use crate::gpu::GpuImage;

@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::panic)]
 use serde_json::{Value, json};
-use solvecraft_doc::{FeatureKind, ProfileSel};
-use solvecraft_geom::Vec3;
+use solidcraft_doc::{FeatureKind, ProfileSel};
+use solidcraft_geom::Vec3;
 
 use crate::Session;
 
@@ -37,7 +37,7 @@ fn breaking_offset_preserves_downstream_material_history_and_source_independence
         run(&mut session, "parameters.change", json!({"name":radius,"expression":"2 mm"}));
         assert!(session.model.results.iter().all(|result| result.error.is_none()));
         assert!((session.world_state().bodies.last().unwrap().mesh().measure().volume.abs() - before_volume).abs() < 1e-6);
-        let reopened = Session::new(solvecraft_doc::Document::from_json(&session.doc.to_json()).unwrap());
+        let reopened = Session::new(solidcraft_doc::Document::from_json(&session.doc.to_json()).unwrap());
         assert!(reopened.model.results.iter().all(|result| result.error.is_none()));
         assert!((reopened.world_state().bodies.last().unwrap().mesh().measure().volume.abs() - before_volume).abs() < 1e-6);
     }
@@ -87,7 +87,7 @@ fn inset_past_corner_radius_creates_a_real_boundary_and_saved_profile_identity()
     };
     check(&session);
     let saved = session.doc.to_json();
-    let reopened = Session::new(solvecraft_doc::Document::from_json(&saved).unwrap());
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&saved).unwrap());
     check(&reopened);
     assert_eq!(reopened.doc.to_json(), saved);
     let undo = session.undo.len();

@@ -1,6 +1,6 @@
 //! Shape creation and its typed driving dimensions form one command and one undo step.
 use serde_json::{Value, json};
-use solvecraft_doc::expr::Kind;
+use solidcraft_doc::expr::Kind;
 
 use crate::{
     Result, Session,

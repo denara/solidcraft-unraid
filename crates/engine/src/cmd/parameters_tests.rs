@@ -67,9 +67,11 @@ fn width_follows_an_expression() {
     assert!(e.contains("expected a length, got an angle"), "{e}");
 }
 
-/// Setting a parameter back rebuilds nothing (the earlier results are reused) and says so: the
-/// features it restored are reported next to `recomputed`, so `recomputed: 0` is not mistaken
-/// for "nothing changed". timeline.edit reports the same.
+/// Setting a value back reuses the earlier results and says so: the features it restored are
+/// reported next to `recomputed`, so `recomputed: 0` is not mistaken for "nothing changed". A
+/// sketch dimension set back solves the sketch again from its current state (value edits
+/// continue from the last solved state); the features after it see the same geometry and are
+/// restored.
 #[test]
 fn setting_a_parameter_back_reports_restored_features() {
     let mut s = Session::default();
@@ -77,7 +79,7 @@ fn setting_a_parameter_back_reports_restored_features() {
     let r = run(&mut s, "parameters.change", json!({"name": "len", "expression": "100 mm"}));
     assert_eq!((r["recomputed"].as_u64(), r["restored"].as_u64()), (Some(2), Some(0)), "{r}");
     let r = run(&mut s, "parameters.change", json!({"name": "len", "expression": "60 mm"}));
-    assert_eq!((r["recomputed"].as_u64(), r["restored"].as_u64()), (Some(0), Some(2)), "{r}");
+    assert_eq!((r["recomputed"].as_u64(), r["restored"].as_u64()), (Some(1), Some(1)), "{r}");
     assert!(rel(volume(&mut s), 40.0 * 30.0 * 10.0) < 1e-9);
     let r = run(&mut s, "timeline.edit", json!({"feature": "Extrude1", "set": {"extent": {"distance": "20"}}}));
     assert_eq!((r["recomputed"].as_u64(), r["restored"].as_u64()), (Some(1), Some(0)), "{r}");
@@ -155,7 +157,7 @@ fn rename_updates_every_reference() {
     assert!(rel(volume(&mut s), 40.0 * 40.0 * 10.0) < 1e-9);
     // Model and feature parameters can be renamed too: dimensions and features follow.
     let dim = s.doc.features.first().and_then(|f| match &f.kind {
-        solvecraft_doc::FeatureKind::Sketch { sketch, .. } => sketch.constraints.iter().filter_map(|c| c.param.clone()).next(),
+        solidcraft_doc::FeatureKind::Sketch { sketch, .. } => sketch.constraints.iter().filter_map(|c| c.param.clone()).next(),
         _ => None,
     });
     let dim = dim.unwrap_or_default();
@@ -233,7 +235,7 @@ fn csv_and_json_round_trip() {
     assert_eq!(s.doc.param("len").map(|p| p.expr.as_str()), Some("80 mm"));
     assert!(matches!(s.execute("parameters.import", &json!({})), Err(EngineError::BadParams { .. })));
 
-    let dir = std::env::temp_dir().join(format!("solvecraft-params-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("solidcraft-params-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("p.json");
     let r = run(&mut s, "parameters.export", json!({"path": path.to_string_lossy()}));
@@ -242,4 +244,303 @@ fn csv_and_json_round_trip() {
     run(&mut v, "parameters.import", json!({"path": path.to_string_lossy()}));
     assert_eq!(v.doc.param("len").map(|p| p.expr.as_str()), Some("80 mm"));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Two triangles joined by three links (a b c, d e f; links a–d, b–e, c–f), a on the origin,
+/// a–b horizontal, every distance a dimension: the construction leaves it to the iteration.
+/// Returns the session, the sketch feature and the nine dimensions' parameters.
+fn linkage_session() -> (Session, u64, Vec<String>) {
+    let layout = [[0.0, 0.0], [40.0, 0.0], [18.0, 30.0], [8.0, 55.0], [52.0, 48.0], [30.0, 80.0]];
+    let pairs = [(0, 1), (1, 2), (2, 0), (3, 4), (4, 5), (5, 3), (0, 3), (1, 4), (2, 5)];
+    let ids = ["a", "b", "c", "d", "e", "f"];
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Linkage"}));
+    for (id, at) in ids.iter().zip(layout) {
+        run(&mut s, "sketch.point", json!({"point": at, "id": id}));
+    }
+    run(&mut s, "sketch.constraint.horizontal_vertical", json!({"points": ["a", "b"], "mode": "horizontal"}));
+    let params = pairs
+        .iter()
+        .map(|&(i, j)| run(&mut s, "sketch.dimension", json!({"entities": [ids[i], ids[j]]}))["param"].as_str().unwrap_or_default().to_string())
+        .collect();
+    let feature = s.doc.find_feature("Linkage").map(|f| f.id).unwrap_or_default();
+    (s, feature, params)
+}
+
+/// Edited values the iteration cannot reach in one jump from the layout.
+const REACHED_BY_CONTINUATION: [f64; 9] = [
+    49.75798473660107,
+    44.249179252138724,
+    28.66332553713371,
+    49.725624597008775,
+    45.81086166277159,
+    35.887660702567544,
+    45.64700450204954,
+    50.756441510188495,
+    63.72063313963373,
+];
+
+/// Turn of both triangles in the evaluated sketch.
+fn linkage_turns(s: &Session, feature: u64) -> [bool; 2] {
+    let state = s.model.state();
+    let sk = &state.sketch(feature).unwrap().sketch;
+    let p = |id: &str| sk.point(sk.resolve_point(id).unwrap()).unwrap();
+    [(p("b") - p("a")).cross(p("c") - p("a")) > 0.0, (p("e") - p("d")).cross(p("f") - p("d")) > 0.0]
+}
+
+/// Set the parameters in the document only (as an edit that does not store the sketch).
+fn set_params(s: &mut Session, params: &[String], values: &[f64]) {
+    let changes: Vec<(String, String)> = params.iter().zip(values).map(|(name, value)| (name.clone(), format!("{value} mm"))).collect();
+    s.doc_mut().change_params_atomic(&changes).unwrap();
+}
+
+#[test]
+fn dimension_edits_of_a_triconnected_linkage_continue_and_store_the_solved_sketch() {
+    // The edit steps to the new values from the stored sketch, keeping both triangles' turn,
+    // and stores what it reached: evaluating the document afresh needs no continuation.
+    let (mut s, feature, params) = linkage_session();
+    run(&mut s, "sketch.finish", json!({}));
+    let before = linkage_turns(&s, feature);
+    // All nine at once: one at a time, some intermediate values have no solution.
+    let batch: Vec<_> = params.iter().zip(REACHED_BY_CONTINUATION).map(|(n, v)| json!({"name": n, "expression": format!("{v} mm")})).collect();
+    run(&mut s, "parameters.import", json!({"text": serde_json::to_string(&batch).unwrap()}));
+    let solved = s.model.state().sketch(feature).unwrap().report.clone();
+    assert!(solved.ok(), "{solved:?}");
+    assert_eq!(linkage_turns(&s, feature), before);
+    let mut fresh = solidcraft_doc::Model::default();
+    fresh.evaluate(&s.doc);
+    let again = fresh.state().sketch(feature).unwrap().report.clone();
+    assert!(again.ok() && again.continuations == 0, "{again:?}");
+    // The kept results are what evaluating the stored document gives.
+    let (kept, afresh) = (s.model.state(), fresh.state());
+    let pairs = kept.sketch(feature).unwrap().sketch.points.iter().zip(&afresh.sketch(feature).unwrap().sketch.points);
+    assert!(pairs.into_iter().all(|(a, b)| a.pos.dist(b.pos) < 1e-9));
+    // In one go (one evaluation from the layout) it needs continuation.
+    let (mut t, feature, params) = linkage_session();
+    run(&mut t, "sketch.finish", json!({}));
+    set_params(&mut t, &params, &REACHED_BY_CONTINUATION);
+    t.refresh();
+    let once = t.model.state().sketch(feature).unwrap().report.clone();
+    assert!(once.ok() && once.continuations > 0, "{once:?}");
+}
+
+#[test]
+fn extending_after_a_parameter_edit_continues_from_the_stored_sketch() {
+    let (mut s, feature, params) = linkage_session();
+    run(&mut s, "sketch.line", json!({"points": [[100, 0], [110, 0]], "ids": ["ext"]}));
+    run(&mut s, "sketch.line", json!({"points": [[130, -20], [130, 20]], "ids": ["wall"]}));
+    let before = linkage_turns(&s, feature);
+    set_params(&mut s, &params, &REACHED_BY_CONTINUATION);
+    run(&mut s, "sketch.extend", json!({"curve": "ext", "at": [110, 0]}));
+    let solved = s.model.state().sketch(feature).unwrap().report.clone();
+    assert!(solved.ok(), "{solved:?}");
+    assert_eq!(linkage_turns(&s, feature), before);
+}
+
+#[test]
+fn a_failed_edit_keeps_the_stored_sketch_solved_for_its_values() {
+    // Parameters no geometry satisfies, then an edit that does not insist on a solution: the
+    // stored dimensions keep the values its geometry is solved for.
+    let (mut s, feature, params) = linkage_session();
+    let mut values = REACHED_BY_CONTINUATION;
+    values[7] = 500.0;
+    set_params(&mut s, &params, &values);
+    run(&mut s, "sketch.point", json!({"point": [200, 200]}));
+    let stored = s.doc.sketch(feature).unwrap();
+    for c in stored.constraints.iter().filter(|c| c.param.is_some()) {
+        let measured = solidcraft_sketch::measure_dimension(stored, &c.kind).unwrap();
+        assert!((measured - c.kind.value().unwrap()).abs() < 1e-6, "{}: {measured} vs {:?}", c.id, c.kind.value());
+    }
+}
+
+/// Values the linkage reaches only with its top triangle mirrored.
+const FLIPPING: [f64; 9] = [
+    26.483003374917082,
+    90.0253808040292,
+    84.67215428223084,
+    54.580784880976275,
+    68.12871394439186,
+    30.98508537669166,
+    116.94895853350752,
+    103.75535113133466,
+    32.83103173640168,
+];
+
+/// All nine parameters set by one command.
+fn import_values(params: &[String], values: &[f64]) -> Value {
+    let batch: Vec<_> = params.iter().zip(values).map(|(n, v)| json!({"name": n, "expression": format!("{v} mm")})).collect();
+    json!({"text": serde_json::to_string(&batch).unwrap()})
+}
+
+#[test]
+fn an_edit_that_would_flip_the_sketch_is_refused_and_named() {
+    let (mut s, feature, params) = linkage_session();
+    run(&mut s, "sketch.finish", json!({}));
+    let (points, before) = (stored_points(&s, feature), params.iter().map(|n| s.doc.param(n).map(|p| p.expr.clone())).collect::<Vec<_>>());
+    let why = err(&mut s, "parameters.import", import_values(&params, &FLIPPING));
+    assert!(why.contains("Linkage") && why.contains("flip the sketch over"), "{why}");
+    assert_eq!(params.iter().map(|n| s.doc.param(n).map(|p| p.expr.clone())).collect::<Vec<_>>(), before);
+    assert_eq!(stored_points(&s, feature), points);
+    assert!(s.model.state().sketch(feature).unwrap().report.keeps_orientation());
+}
+
+#[test]
+fn a_design_stored_with_other_values_still_rebuilds() {
+    // A design whose stored sketch is not solved for its parameters (saved before value edits
+    // stored their solve): evaluating it never refuses. The flipped solve is kept, with a
+    // warning, the flipped constraints listed as conflicts, and the solid built from it.
+    let (mut s, feature, params) = linkage_session();
+    for line in [[[8.0, 55.0], [52.0, 48.0]], [[52.0, 48.0], [30.0, 80.0]], [[30.0, 80.0], [8.0, 55.0]]] {
+        run(&mut s, "sketch.line", json!({"points": line}));
+    }
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"sketch": "Linkage", "distance": 5}));
+    set_params(&mut s, &params, &FLIPPING);
+    let s = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    let state = s.model.state();
+    let solved = state.sketch(feature).unwrap();
+    assert!(solved.report.ok() && !solved.report.folded.is_empty(), "{:?}", solved.report);
+    let warning = s.model.result(feature).and_then(|r| r.warning.clone()).unwrap_or_default();
+    assert!(warning.contains("flip the sketch over") && solved.report.folded.iter().all(|id| warning.contains(id.as_str())), "{warning}");
+    assert!(s.model.results.iter().all(|r| r.error.is_none()), "{:?}", s.model.results.iter().map(|r| &r.error).collect::<Vec<_>>());
+    assert_eq!(state.bodies.len(), 1);
+    // Listed as conflicts wherever conflicts are shown.
+    let mut s = s;
+    s.active_sketch = Some(feature);
+    let si = run(&mut s, "sketch.inspect", json!({}));
+    let glyphs = run(&mut s, "sketch.glyphs", json!({}));
+    for id in &solved.report.folded {
+        assert!(si["failing"].as_array().unwrap().contains(&json!(id)), "{si}");
+        assert!(glyphs["conflicts"].as_array().unwrap().contains(&json!(id)), "{glyphs}");
+    }
+}
+
+#[test]
+fn an_edit_that_breaks_a_projecting_sketch_downstream_applies_with_a_warning() {
+    // `w` places a guide line; a second sketch projects it and ends a 12 mm line on it. Moving
+    // the guide out of reach is the guide sketch's edit, not a value edit of the projecting
+    // sketch: it applies, and the projecting sketch carries a warning.
+    let mut s = Session::default();
+    run(&mut s, "parameters.add", json!({"name": "w", "expression": "10 mm"}));
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Guide"}));
+    run(&mut s, "sketch.line", json!({"points": [[10, -30], [10, 30]], "ids": ["guide"], "connect": false}));
+    run(&mut s, "sketch.constraint.horizontal_vertical", json!({"line": "guide", "mode": "vertical"}));
+    run(&mut s, "sketch.dimension", json!({"entities": ["origin", "guide.start"], "type": "horizontal", "value": "w"}));
+    run(&mut s, "sketch.finish", json!({}));
+    let id = run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Reach"}))["sketch"].as_u64().unwrap();
+    let projected = run(&mut s, "sketch.project", json!({"refs": [{"sketch": "Guide", "curve": "guide"}]}))["links"][0]["curves"][0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let line = run(&mut s, "sketch.line", json!({"points": [[0, 0], [10, -(44.0_f64).sqrt()]]}))["curves"][0].as_str().unwrap().to_string();
+    run(&mut s, "sketch.dimension", json!({"entities": [line], "value": 12}));
+    run(&mut s, "sketch.constraint.coincident", json!({"a": format!("{line}.end"), "b": projected}));
+    run(&mut s, "sketch.finish", json!({}));
+    assert!(s.model.state().sketch(id).unwrap().report.ok());
+    let r = run(&mut s, "parameters.change", json!({"name": "w", "expression": "20 mm"}));
+    assert_eq!(r["value"], json!(20.0), "the edit applies: {r}");
+    assert!(!s.model.state().sketch(id).unwrap().report.ok());
+    assert!(s.model.result(id).and_then(|r| r.warning.clone()).is_some_and(|w| w.contains("conflict")));
+}
+
+#[test]
+fn a_failed_auto_constrain_keeps_the_stored_sketch_consistent() {
+    // Auto-constrain works on the current values: reached by continuation, its result is
+    // stored solved for them; values no geometry satisfies refuse it and change nothing.
+    let consistent = |s: &Session, feature: u64| {
+        let stored = s.doc.sketch(feature).unwrap();
+        stored.constraints.iter().filter(|c| c.param.is_some()).all(|c| {
+            let measured = solidcraft_sketch::measure_dimension(stored, &c.kind).unwrap();
+            (measured - c.kind.value().unwrap()).abs() < 1e-6
+        })
+    };
+    let (mut s, feature, params) = linkage_session();
+    let mut values = REACHED_BY_CONTINUATION;
+    values[7] = 500.0;
+    set_params(&mut s, &params, &values);
+    let before = s.doc.sketch(feature).unwrap().clone();
+    let why = err(&mut s, "sketch.auto_constrain", json!({}));
+    assert!(why.contains("conflict"), "{why}");
+    assert_eq!(*s.doc.sketch(feature).unwrap(), before);
+    assert!(consistent(&s, feature));
+    set_params(&mut s, &params, &REACHED_BY_CONTINUATION);
+    run(&mut s, "sketch.auto_constrain", json!({}));
+    assert!(consistent(&s, feature));
+    let stored = s.doc.sketch(feature).unwrap();
+    for (c, v) in stored.constraints.iter().filter(|c| c.param.is_some()).zip(REACHED_BY_CONTINUATION) {
+        assert!((c.kind.value().unwrap() - v).abs() < 1e-9, "{}", c.id);
+    }
+}
+
+/// The stored sketch's points, by id.
+fn stored_points(s: &Session, feature: u64) -> Vec<solidcraft_geom::Vec2> {
+    s.doc.sketch(feature).unwrap().points.iter().map(|p| p.pos).collect()
+}
+
+#[test]
+fn an_unsolvable_value_edit_is_refused_and_changes_nothing() {
+    let (mut s, feature, params) = linkage_session();
+    run(&mut s, "sketch.finish", json!({}));
+    let (expr, points) = (s.doc.param(&params[7]).map(|p| p.expr.clone()), stored_points(&s, feature));
+    let why = err(&mut s, "parameters.change", json!({"name": params[7], "expression": "500 mm"}));
+    assert!(why.contains("Linkage") && why.contains("conflict"), "{why}");
+    assert_eq!(s.doc.param(&params[7]).map(|p| p.expr.clone()), expr);
+    assert_eq!(stored_points(&s, feature), points);
+    assert!(s.model.state().sketch(feature).unwrap().report.ok());
+    // A batch with one such value: none of it.
+    let before: Vec<_> = params.iter().map(|n| s.doc.param(n).map(|p| p.expr.clone())).collect();
+    let batch: Vec<_> = params
+        .iter()
+        .enumerate()
+        .map(|(i, n)| json!({"name": n, "expression": if i == 7 { "500 mm".to_string() } else { format!("{} mm", REACHED_BY_CONTINUATION[i]) }}))
+        .collect();
+    let why = err(&mut s, "parameters.import", json!({"text": serde_json::to_string(&batch).unwrap()}));
+    assert!(why.contains("Linkage"), "{why}");
+    assert_eq!(params.iter().map(|n| s.doc.param(n).map(|p| p.expr.clone())).collect::<Vec<_>>(), before);
+    assert_eq!(stored_points(&s, feature), points);
+}
+
+#[test]
+fn value_edits_continue_from_the_last_solved_state() {
+    // A → B → C, each a small edit solved in one jump; C is solved from B (the stored state),
+    // and setting both values back reproduces A (the linkage is fully constrained).
+    let close = |a: &[solidcraft_geom::Vec2], b: &[solidcraft_geom::Vec2], tol: f64| a.iter().zip(b).all(|(p, q)| p.dist(*q) < tol);
+    let (mut s, feature, params) = linkage_session();
+    run(&mut s, "sketch.finish", json!({}));
+    let a = stored_points(&s, feature);
+    let (p7, p8) = (s.doc.param(&params[7]).unwrap().expr.clone(), s.doc.param(&params[8]).unwrap().expr.clone());
+    run(&mut s, "parameters.change", json!({"name": params[8], "expression": "53 mm"}));
+    let b_sketch = s.doc.sketch(feature).unwrap().clone();
+    let b = stored_points(&s, feature);
+    assert!(!close(&a, &b, 1e-3) && s.model.state().sketch(feature).unwrap().report.continuations == 0);
+    run(&mut s, "parameters.change", json!({"name": params[7], "expression": "50 mm"}));
+    let c = stored_points(&s, feature);
+    // The same edit solved from B directly.
+    let mut from_b = b_sketch.clone();
+    let stored = from_b.driving_values();
+    let (vals, _) = s.doc.param_values();
+    s.doc.apply_dimension_values(&vals, &mut from_b).unwrap();
+    assert!(solidcraft_sketch::solve_after_value_edit(&mut from_b, &stored).ok());
+    assert!(close(&c, &from_b.points.iter().map(|p| p.pos).collect::<Vec<_>>(), 1e-6) && !close(&c, &b, 1e-3));
+    run(&mut s, "parameters.change", json!({"name": params[7], "expression": p7}));
+    run(&mut s, "parameters.change", json!({"name": params[8], "expression": p8}));
+    assert!(close(&stored_points(&s, feature), &a, 1e-6));
+}
+
+#[test]
+fn switching_configurations_back_reuses_the_later_features() {
+    // Rows A and B of `len`: back on A, the sketch solves again from B's state to A's
+    // geometry, and the extrude after it is restored from the cache.
+    let mut s = Session::default();
+    block(&mut s);
+    run(&mut s, "config.configure", json!({"params": ["len"]}));
+    run(&mut s, "config.row", json!({"name": "A", "values": {"len": "60 mm"}}));
+    run(&mut s, "config.row", json!({"name": "B", "values": {"len": "100 mm"}}));
+    run(&mut s, "config.activate", json!({"row": "B"}));
+    assert!(rel(volume(&mut s), 40.0 * 50.0 * 10.0) < 1e-9);
+    let hits = |s: &Session| s.model.cache.lock().map(|c| c.hits).unwrap_or(0);
+    let before = hits(&s);
+    let r = run(&mut s, "config.activate", json!({"row": "A"}));
+    assert!(rel(volume(&mut s), 40.0 * 30.0 * 10.0) < 1e-9);
+    assert!(hits(&s) > before, "{r}");
 }

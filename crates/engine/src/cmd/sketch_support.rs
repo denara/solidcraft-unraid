@@ -1,7 +1,7 @@
 //! Bounded roots on exact curve pieces against an infinite line or complete circle.
 //! Rational pieces are intersected in homogeneous coordinates, without sampled chords.
-use solvecraft_geom::{Seg2, Vec2};
-use solvecraft_sketch::{Shape, intersections};
+use solidcraft_geom::{Seg2, Vec2};
+use solidcraft_sketch::{Shape, intersections};
 
 use crate::{Result, params::bad};
 

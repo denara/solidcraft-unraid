@@ -5,6 +5,7 @@ set -euo pipefail
 
 site="${1:?site directory required}"
 tag="${RELEASE_TAG:-}"
+# Compatibility shim (docs/compatibility.md): the Flatpak app id keeps its pre-rename value.
 app_id=ai.storyteller.solvecraft
 if [ -z "$tag" ]; then
   tag="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
@@ -36,7 +37,7 @@ if curl --fail --silent --location --output /dev/null "$previous_url/summary"; t
   ostree --repo="$repo_dir" remote delete previous
 fi
 for arch in x86_64 aarch64; do
-  asset="solvecraft-$version-linux-$arch.flatpak"
+  asset="solidcraft-$version-linux-$arch.flatpak"
   gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir "$bundles"
   (
     cd "$bundles"
@@ -53,7 +54,7 @@ flatpak build-update-repo --title="SolidCraft" --comment='Official SolidCraft re
   --description='Official Flatpak repository for SolidCraft' \
   --homepage="https://github.com/$GITHUB_REPOSITORY" --default-branch=stable "$repo_dir"
 test -s "$repo_dir/summary"
-cat >"$site/flatpak/solvecraft.flatpakrepo" <<META
+cat >"$site/flatpak/solidcraft.flatpakrepo" <<META
 [Flatpak Repo]
 Title=SolidCraft
 Comment=Official SolidCraft releases
@@ -62,9 +63,12 @@ Url=$base_url/flatpak/repo/
 Homepage=https://github.com/$GITHUB_REPOSITORY
 META
 cat >"$site/flatpak/index.html" <<HTML
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>SolidCraft Flatpak repository</title></head><body><main><h1>SolidCraft Flatpak repository</h1><p>Latest published release: <strong>$tag</strong></p><p><a href="solvecraft.flatpakrepo">Add the SolidCraft repository</a></p><p>Flathub provides the required Freedesktop runtime. Add both remotes to the same user installation:</p><pre>flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-flatpak remote-add --user --if-not-exists solvecraft $base_url/flatpak/solvecraft.flatpakrepo
-flatpak install --user solvecraft $app_id
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>SolidCraft Flatpak repository</title></head><body><main><h1>SolidCraft Flatpak repository</h1><p>Latest published release: <strong>$tag</strong></p><p><a href="solidcraft.flatpakrepo">Add the SolidCraft repository</a></p><p>Flathub provides the required Freedesktop runtime. Add both remotes to the same user installation:</p><pre>flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+flatpak remote-add --user --if-not-exists solidcraft $base_url/flatpak/solidcraft.flatpakrepo
+flatpak install --user solidcraft $app_id
 flatpak run $app_id</pre></main></body></html>
 HTML
+# Compatibility shim (docs/compatibility.md): links and instructions from before the rename point
+# at solvecraft.flatpakrepo. Existing remotes keep working either way: they store the repo URL.
+cp "$site/flatpak/solidcraft.flatpakrepo" "$site/flatpak/solvecraft.flatpakrepo"
 touch "$site/.nojekyll"

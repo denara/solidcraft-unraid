@@ -1,8 +1,8 @@
 //! Coincident accepts clicked line bodies as well as explicit sketch points.
 
 use serde_json::json;
-use solvecraft_engine::sketch::ConstraintKind;
-use solvecraft_ui_egui::scenario::Harness;
+use solidcraft_engine::sketch::ConstraintKind;
+use solidcraft_ui_egui::scenario::Harness;
 
 fn setup() -> Harness {
     let mut h = Harness::new();

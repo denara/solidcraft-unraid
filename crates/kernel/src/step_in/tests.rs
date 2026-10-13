@@ -1,10 +1,199 @@
-use solvecraft_geom::{Loop2, Plane, Region2, Vec2, Vec3};
+use solidcraft_geom::{Loop2, Plane, Region2, Vec2, Vec3};
 
 use super::*;
 use crate::{BoolOp, boolean, box_solid, cylinder, extrude, fillet, measure, revolve, sphere, step_export, torus};
 
 fn rel(a: f64, b: f64) -> f64 {
     (a - b).abs() / b.abs().max(1e-9)
+}
+
+#[test]
+#[ignore = "manual STEP import timing; run without concurrent builds"]
+fn benchmark_independent_step_solids() {
+    let count = solidcraft_geom::env::var("STEP_BENCH_COUNT").map(|s| s.parse::<usize>().unwrap().clamp(1, 512)).unwrap_or(48);
+    let kind = solidcraft_geom::env::var("STEP_BENCH_KIND").unwrap_or_else(|| "cylinder".into());
+    let bodies: Vec<_> = (0..count)
+        .map(|i| {
+            let at = Vec3::new((i % 8) as f64 * 60.0, (i / 8) as f64 * 60.0, 0.0);
+            match kind.as_str() {
+                "torus" => torus(at, 20.0, 4.0).unwrap(),
+                "box" => box_solid(at, at + Vec3::new(10.0, 15.0, 12.0)).unwrap(),
+                _ => cylinder(at, Vec3::Z, 5.0, 12.0).unwrap(),
+            }
+        })
+        .collect();
+    let text = step_export(&bodies.iter().collect::<Vec<_>>(), "independent bodies").unwrap();
+    if let Ok(path) = solidcraft_geom::env::var("STEP_BENCH_FIXTURE").ok_or(()) {
+        std::fs::write(path, &text).unwrap();
+    }
+    let start = std::time::Instant::now();
+    let ex = p21::parse(&text).unwrap();
+    let parse = start.elapsed();
+    let cx = Ctx { ex: &ex, len: 1.0, ang: 1.0, tol: 0.01 };
+    let mut items: Vec<_> = ex.entities.iter().filter(|(_, e)| e.name() == "MANIFOLD_SOLID_BREP").map(|(id, _)| *id).collect();
+    items.sort();
+    let start = std::time::Instant::now();
+    let solids: Vec<_> = items.iter().map(|id| guard("benchmark read", || brep::read_item(&cx, *id).map_err(KernelError::Failed)).unwrap()).collect();
+    let read = start.elapsed();
+    let start = std::time::Instant::now();
+    for solid in solids {
+        std::hint::black_box(Body::new(solid.solid).unwrap().unmeshed_faces());
+    }
+    println!(
+        "STEP_PHASE parse_ms={:.3} brep_ms={:.3} body_ms={:.3}",
+        parse.as_secs_f64() * 1000.0,
+        read.as_secs_f64() * 1000.0,
+        start.elapsed().as_secs_f64() * 1000.0
+    );
+    for run in 0..5 {
+        for workers in if run % 2 == 0 { [1, 8] } else { [8, 1] } {
+            let start = std::time::Instant::now();
+            let imported = step_import_with_workers(&text, workers).unwrap();
+            let elapsed = start.elapsed();
+            assert_eq!(imported.bodies.len(), count);
+            assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
+            println!(
+                "STEP_BENCH kind={kind} run={run} workers={workers} bodies={count} bytes={} ms={:.3}",
+                text.len(),
+                elapsed.as_secs_f64() * 1000.0
+            );
+            std::hint::black_box(imported);
+        }
+    }
+}
+
+fn assert_same_import(serial: &StepImport, parallel: &StepImport) {
+    assert_eq!(serial.tree, parallel.tree);
+    assert_eq!(serial.warnings, parallel.warnings);
+    assert_eq!((&serial.schema, &serial.system), (&parallel.schema, &parallel.system));
+    assert_eq!(serial.bodies.len(), parallel.bodies.len());
+    assert_eq!(
+        step_export(&serial.bodies.iter().map(|b| &b.body).collect::<Vec<_>>(), "equivalence").unwrap(),
+        step_export(&parallel.bodies.iter().map(|b| &b.body).collect::<Vec<_>>(), "equivalence").unwrap()
+    );
+    for (a, b) in serial.bodies.iter().zip(&parallel.bodies) {
+        assert_eq!(
+            (&a.name, &a.path, a.source_item, &a.face_origin, a.closed, a.file_faces, a.color),
+            (&b.name, &b.path, b.source_item, &b.face_origin, b.closed, b.file_faces, b.color)
+        );
+        assert_eq!(a.body.paint(), b.body.paint());
+        assert_eq!(a.body.face_sources, b.body.face_sources);
+        assert_same_measure(&measure(&a.body).unwrap(), &measure(&b.body).unwrap());
+        let (a, b) = (a.body.display_mesh(0.05).unwrap(), b.body.display_mesh(0.05).unwrap());
+        assert_eq!(a.positions, b.positions);
+        assert_eq!(a.normals, b.normals);
+        assert_eq!(a.triangles, b.triangles);
+        assert_eq!(a.tri_face, b.tri_face);
+        assert_eq!(a.edges, b.edges);
+        assert_eq!(a.seams, b.seams);
+        assert_eq!(a.smooth_edges, b.smooth_edges);
+        assert_eq!(a.sharp_edges, b.sharp_edges);
+        assert_eq!(a.edge_faces, b.edge_faces);
+    }
+}
+
+fn assert_same_measure(a: &crate::BodyMeasure, b: &crate::BodyMeasure) {
+    assert_eq!((a.volume, a.area, a.centroid, a.bbox.min, a.bbox.max), (b.volume, b.area, b.centroid, b.bbox.min, b.bbox.max));
+    assert_eq!((a.faces, a.edges, a.vertices, a.shells, &a.merged), (b.faces, b.edges, b.vertices, b.shells, &b.merged));
+}
+
+#[test]
+fn parallel_import_retains_units_order_sources_and_partial_failure_across_batches() {
+    let mut text = String::from(HEAD);
+    text += "#8=PRODUCT_DEFINITION_CONTEXT('part definition',#9,'design');\n#9=APPLICATION_CONTEXT('');\n";
+    text += &cube_entities();
+    text += &context(20, "(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.CENTI.,.METRE.))");
+    text += &product(50, "Batch");
+    let mut refs = Vec::new();
+    for i in 0..70 {
+        let id = 2000 + i;
+        text += &format!("#{id}=MANIFOLD_SOLID_BREP('Cube{i}',#100);\n");
+        refs.push(format!("#{id}"));
+    }
+    refs.insert(3, "#3000".into());
+    refs.insert(8, "#2000".into());
+    text += "#3000=MANIFOLD_SOLID_BREP('Broken',#999999);\n";
+    text += &format!("#60=ADVANCED_BREP_SHAPE_REPRESENTATION('',({}),#20);\n#61=SHAPE_DEFINITION_REPRESENTATION(#54,#60);\n", refs.join(","));
+    text += TAIL;
+    let serial = step_import_with_workers(&text, 1).unwrap();
+    assert_eq!(serial.bodies.len(), 70);
+    assert!(serial.warnings.iter().any(|warning| warning.contains("Broken")));
+    assert_eq!(serial.bodies.first().unwrap().name, "Cube0");
+    assert_eq!(serial.bodies.last().unwrap().name, "Cube69");
+    assert!((measure(&serial.bodies[0].body).unwrap().volume - 1000.0).abs() < 1e-9);
+    for workers in [2, 3, 8, usize::MAX] {
+        assert_same_import(&serial, &step_import_with_workers(&text, workers).unwrap());
+    }
+}
+
+#[test]
+fn parallel_body_preparation_reports_errors_in_place_and_preserves_placement() {
+    let body = cylinder(Vec3::new(2.0, 2.0, 0.0), Vec3::Z, 2.0, 4.0).unwrap();
+    let solids = vec![body.solid.as_ref().clone(), mt::Solid::new(Vec::new()), body.solid.as_ref().clone(), body.solid.as_ref().clone()];
+    let placement = mt::Matrix4::from_translation(mt::Vector3::new(10.0, 20.0, 30.0));
+    let jobs: Vec<_> = solids.into_iter().map(|solid| parallel::Job { solid, check_mesh: true }).collect();
+    let serial = parallel::bodies(&jobs, &placement, 1);
+    let threaded = parallel::bodies(&jobs, &placement, 4);
+    assert_eq!(serial.len(), 4);
+    assert_eq!(threaded.len(), 4);
+    for (index, (a, b)) in serial.iter().zip(&threaded).enumerate() {
+        if index == 1 {
+            assert_eq!(a.as_ref().unwrap_err(), b.as_ref().unwrap_err());
+        } else {
+            assert_eq!(a.as_ref().unwrap().1, b.as_ref().unwrap().1);
+            let a = measure(&a.as_ref().unwrap().0).unwrap();
+            let b = measure(&b.as_ref().unwrap().0).unwrap();
+            assert_same_measure(&a, &b);
+            // Curved bounds come from the measurement tessellation, not analytic extrema.
+            assert!(a.bbox.min.dist(Vec3::new(10.0, 20.0, 30.0)) < 1e-3);
+        }
+    }
+}
+
+#[test]
+fn parallel_curved_import_keeps_face_colours_and_exact_display_meshes() {
+    let bodies: Vec<_> = (0..8)
+        .map(|i| {
+            let body = cylinder(Vec3::new(i as f64 * 20.0, 0.0, 0.0), Vec3::Z, 5.0, 12.0).unwrap();
+            body.with_color(Some([0.2, 0.4, 0.6]))
+                .with_paint(Some(crate::Paint { opacity: 0.7, faces: vec![crate::FacePaint { face: 0, color: [0.8, 0.1, 0.3], opacity: 0.5 }] }))
+        })
+        .collect();
+    let text = step_export(&bodies.iter().collect::<Vec<_>>(), "coloured cylinders").unwrap();
+    let serial = step_import_with_workers(&text, 1).unwrap();
+    assert_eq!(serial.bodies.len(), 8);
+    assert!(serial.bodies.iter().all(|b| b.color == Some([0.2, 0.4, 0.6])));
+    assert!(serial.bodies.iter().all(|b| b.body.paint().is_some_and(|p| !p.faces.is_empty())));
+    for workers in [2, 3, 8] {
+        assert_same_import(&serial, &step_import_with_workers(&text, workers).unwrap());
+    }
+}
+
+#[test]
+fn parallel_import_does_not_prepare_past_body_budget_with_duplicates_or_mapped_items() {
+    let text = format!(
+        "{HEAD}{}#2000=MANIFOLD_SOLID_BREP('Duplicate',#100);\n#2001=MANIFOLD_SOLID_BREP('First',#100);\n#2002=MANIFOLD_SOLID_BREP('Second',#100);\n#2003=MANIFOLD_SOLID_BREP('Beyond budget',#999999);\n#3000=MAPPED_ITEM('',#999998,#999997);\n#60=SHAPE_REPRESENTATION('',(#2000,#2000,#2001,#3000,#2002,#2003),$);\n{TAIL}",
+        cube_entities()
+    );
+    let ex = p21::parse(&text).unwrap();
+    let seed =
+        step_import_with_workers(&format!("{HEAD}{}#60=SHAPE_REPRESENTATION('',(#101),$);\n{TAIL}", cube_entities()), 1).unwrap().bodies.remove(0);
+    for workers in [1, 8] {
+        let mut reader = Reader::new(&ex, workers);
+        reader.index();
+        reader.bodies = vec![seed.clone(); MAX_BODIES - 2];
+        reader.node_items.insert(2000);
+        let mut out = Vec::new();
+        reader.rep_bodies(60, &mt::Matrix4::from_scale(1.0), &[], "Budget", &mut out, 0);
+        assert_eq!(reader.bodies.len(), MAX_BODIES);
+        assert_eq!(out, vec![MAX_BODIES - 2, MAX_BODIES - 1]);
+        assert_eq!(reader.bodies.last().unwrap().name, "Second");
+        assert_eq!(reader.solids.len(), 2);
+        assert!(!reader.solids.contains_key(&2003));
+        assert!(!reader.used_items.contains(&3000));
+        assert_eq!(reader.warnings.len(), 1);
+        assert!(reader.warnings.keys().next().unwrap().contains("more than"));
+    }
 }
 
 /// Export → import → same volume, area and face count.
@@ -301,6 +490,13 @@ fn hand_written_assembly() {
     }
     t += TAIL;
     let imp = step_import(&t).unwrap();
+    assert_same_import(&step_import_with_workers(&t, 1).unwrap(), &step_import_with_workers(&t, 8).unwrap());
+    let expanded = t.replace("(#101,#65)", "(#101,#2000,#2001,#2002,#2003,#65)");
+    let extra: String = (0..4).map(|i| format!("#{}=MANIFOLD_SOLID_BREP('Extra{i}',#100);\n", 2000 + i)).collect();
+    let expanded = expanded.replace(TAIL, &(extra + TAIL));
+    let serial = step_import_with_workers(&expanded, 1).unwrap();
+    assert_eq!(serial.bodies.len(), 10);
+    assert_same_import(&serial, &step_import_with_workers(&expanded, 8).unwrap());
     assert!(imp.warnings.is_empty(), "{:?}", imp.warnings);
     assert_eq!(imp.bodies.len(), 2);
     let boxes: Vec<_> = imp.bodies.iter().map(|b| measure(&b.body).unwrap()).collect();

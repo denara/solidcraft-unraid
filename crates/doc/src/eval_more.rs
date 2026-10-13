@@ -5,7 +5,7 @@ use super::*;
 use crate::EmbossFace;
 use crate::apply_point;
 use crate::sheet;
-use solvecraft_geom::{Loop2, Seg2};
+use solidcraft_geom::{Loop2, Seg2};
 
 pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut ModelState) -> Result<()> {
     match &f.kind {
@@ -51,7 +51,7 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
                     }
                     let (index, _, _) = crate::project::nearest_face(&mb.mesh(), picked)
                         .ok_or_else(|| DocError::Invalid("selected cylinder face cannot be resolved".into()))?;
-                    if crate::naming::face_names(&mb).get(index as usize) != Some(name) {
+                    if !crate::naming::face_has_name(&mb, index as usize, name) {
                         return Err(DocError::Invalid("selected cylinder face is ambiguous".into()));
                     }
                     at = kernel::cylinder_emboss_anchor(&mb.body, index as usize, picked)?;
@@ -357,7 +357,7 @@ pub(super) fn sheet_eval(
     match &f.kind {
         FeatureKind::SheetBase { sketch, profiles, rule, flip } => {
             let ss = st.sketch(*sketch).ok_or_else(|| DocError::Unknown(format!("sketch {sketch}")))?.clone();
-            let regions = solvecraft_sketch::merge_regions(&select_profiles(&ss, profiles)?);
+            let regions = solidcraft_sketch::merge_regions(&select_profiles(&ss, profiles)?);
             let r = doc.sheet_rule(rule.as_deref());
             let rv = doc.rule_values(vals, &r)?;
             for (k, region) in regions.into_iter().enumerate() {
@@ -415,8 +415,21 @@ pub(super) fn sheet_eval(
             Ok(())
         }
         FeatureKind::SheetFlange { edges, height, angle, radius, position, flip, body } => {
-            let i = sheet_for(st, body, edges.first().copied())?;
+            let i = sheet_for(st, body, edges.first().map(|e| e.point))?;
             let (h, a) = (val(vals, height, Kind::Length)?, val(vals, angle, Kind::Angle)?);
+            // Each edge's own height and angle, else the feature's.
+            let mut own = Vec::with_capacity(edges.len());
+            for e in edges {
+                let height = match &e.height {
+                    Some(x) => val(vals, x, Kind::Length)?,
+                    None => h,
+                };
+                let angle = match &e.angle {
+                    Some(x) => val(vals, x, Kind::Angle)?,
+                    None => a,
+                };
+                own.push((height, angle));
+            }
             let rr = match radius {
                 Some(e) => val(vals, e, Kind::Length)?,
                 None => {
@@ -428,9 +441,21 @@ pub(super) fn sheet_eval(
             if sh.flat {
                 return Err(DocError::Invalid("refold the sheet before adding flanges".into()));
             }
-            let picks = sheet_picks(sh, f, edges, warning);
+            let points: Vec<Vec3> = edges.iter().map(|e| e.point).collect();
+            let each: Vec<sheet::EdgeFlange> = sheet_picks(sh, f, &points, warning)
+                .into_iter()
+                .zip(own)
+                .map(|(pick, (height, angle))| sheet::EdgeFlange { pick, height, angle })
+                .collect();
             let n0 = sh.flanges.len();
-            sh.add_flanges(&picks, h, a, rr, position, *flip)?;
+            let (_, notes) = sh.add_flanges_each(&each, rr, position, *flip)?;
+            if !notes.is_empty() {
+                let notes = notes.join("; ");
+                *warning = Some(match warning.take() {
+                    Some(w) => format!("{w}; {notes}"),
+                    None => notes,
+                });
+            }
             tag_flanges(sh, n0, f.id);
             rebuild_sheet(st, i)
         }
@@ -631,7 +656,7 @@ pub(super) fn sheet_cut(
         return Ok(Vec::new());
     }
     let Some(ss) = st.sketch(*sketch).cloned() else { return Ok(Vec::new()) };
-    let regions = solvecraft_sketch::merge_regions(&select_profiles(&ss, profiles)?);
+    let regions = solidcraft_sketch::merge_regions(&select_profiles(&ss, profiles)?);
     let n = ss.plane.normal();
     let mut work = sheet::FlatWork::new();
     let faces = tools.iter().fold(0usize, |count, body| count.saturating_add(body.face_count()));
@@ -687,7 +712,7 @@ pub(super) fn sheet_cut(
             plans.push((sh.body.clone(), Some((sh, mb.body.clone()))));
             continue;
         }
-        if let Some(bends) = sh.unmodeled_solid(&ss.plane)? {
+        for bends in sh.unmodeled_solids(&ss.plane)? {
             for tool in tools {
                 if kernel::boolean(&bends, tool, kernel::BoolOp::Intersect)?.is_some() {
                     return Err(DocError::Invalid(
@@ -836,7 +861,7 @@ pub(super) fn sheet_cut(
 
 /// Outline loops (in `plane` coordinates) of the mesh triangles lying in the plane at distance
 /// `level` from `at` along `n`: the edges used by one of them only, chained.
-fn face_loops(mesh: &solvecraft_geom::Mesh, plane: &Plane, at: Vec3, n: Vec3, level: f64, tol: f64) -> Vec<Vec<Vec2>> {
+fn face_loops(mesh: &solidcraft_geom::Mesh, plane: &Plane, at: Vec3, n: Vec3, level: f64, tol: f64) -> Vec<Vec<Vec2>> {
     let on: Vec<[u32; 3]> = mesh
         .triangles
         .iter()

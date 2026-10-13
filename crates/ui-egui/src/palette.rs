@@ -3,7 +3,7 @@
 
 use egui::{RichText, vec2};
 use serde_json::Value;
-use solvecraft_engine::command_specs;
+use solidcraft_engine::command_specs;
 
 use crate::SolveApp;
 use crate::theme::Tokens;
@@ -38,7 +38,7 @@ pub fn submit(app: &mut SolveApp, line: &str) {
         Some(i) => (&line[..i], line[i..].trim()),
         None => (line, ""),
     };
-    if solvecraft_engine::find_command(id).is_some() {
+    if solidcraft_engine::find_command(id).is_some() {
         if rest.is_empty() {
             app.start(id);
         } else {
@@ -113,7 +113,7 @@ pub fn popup(app: &mut SolveApp, ctx: &egui::Context) {
             }
             egui::ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
                 for (id, label, icon) in list.iter().take(60) {
-                    let enabled = solvecraft_engine::find_command(id).is_some_and(|c| c.info(&app.session).enabled);
+                    let enabled = solidcraft_engine::find_command(id).is_some_and(|c| c.info(&app.session).enabled);
                     ui.horizontal(|ui| {
                         let (ir, _) = ui.allocate_exact_size(vec2(18.0, 18.0), egui::Sense::hover());
                         crate::icons::paint(ui.painter(), ir, icon, t.icon, t.icon_fill, t.accent);

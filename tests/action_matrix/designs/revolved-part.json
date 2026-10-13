@@ -1,0 +1,90 @@
+{
+ "description": "A stepped knob revolved about Z: a flange, a waist and a cap, then the cap's top edge rounded.",
+ "commands": [
+  {
+   "command": "parameters.change",
+   "params": {
+    "name": "flange_r",
+    "expression": "20 mm"
+   }
+  },
+  {
+   "command": "sketch.create",
+   "params": {
+    "plane": "XZ",
+    "name": "Profile"
+   }
+  },
+  {
+   "command": "sketch.line",
+   "params": {
+    "points": [
+     [
+      0,
+      0
+     ],
+     [
+      20,
+      0
+     ],
+     [
+      20,
+      6
+     ],
+     [
+      10,
+      6
+     ],
+     [
+      10,
+      24
+     ],
+     [
+      14,
+      24
+     ],
+     [
+      14,
+      34
+     ],
+     [
+      0,
+      34
+     ]
+    ],
+    "closed": true,
+    "ids": [
+     "l1",
+     "l2",
+     "l3",
+     "l4",
+     "l5",
+     "l6",
+     "l7",
+     "l8"
+    ]
+   }
+  },
+  {
+   "command": "sketch.dimension",
+   "params": {
+    "entities": [
+     "origin",
+     "l1.end"
+    ],
+    "type": "horizontal",
+    "value": "flange_r"
+   }
+  },
+  {
+   "command": "sketch.finish",
+   "params": {}
+  },
+  {
+   "command": "solid.revolve",
+   "params": {
+    "axis": "Z"
+   }
+  }
+ ]
+}

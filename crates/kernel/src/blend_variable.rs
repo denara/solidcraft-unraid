@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use solvecraft_geom::Vec3;
+use solidcraft_geom::Vec3;
 use truck_modeling::{self as mt, builder};
 
 use crate::blend::{plane_normal, rebuild_face, unsupported, vtx};
@@ -229,6 +229,9 @@ pub fn fillet_variable_points(body: &Body, edge_at: Vec3, start: Vec3, points: &
                 subst.insert(e.id(), ne);
             }
         }
+        // The side edges at the ends are pieces of themselves; the contacts and end arcs are new.
+        let mut rec = crate::record::Rebuild::default();
+        rec.pieces(&subst);
         let mut new_faces: Vec<mt::Face> = Vec::with_capacity(faces.len() + 1);
         for (i, f) in faces.iter().enumerate() {
             let nf = if i == fr.i1 {
@@ -246,6 +249,7 @@ pub fn fillet_variable_points(body: &Body, edge_at: Vec3, start: Vec3, points: &
             } else {
                 (*f).clone()
             };
+            rec.face(&nf, f);
             new_faces.push(nf);
         }
         // The blend surface: rational quadratic arcs (tangent points and the edge point, middle
@@ -279,12 +283,14 @@ pub fn fillet_variable_points(body: &Body, edge_at: Vec3, start: Vec3, points: &
             vec![la.clone(), c1.clone(), lb.inverse(), c0.inverse()].into()
         };
         let blend = mt::Face::try_new(vec![wire], surf).map_err(|e| KernelError::Failed(format!("fillet face: {e}")))?;
+        rec.blend(&blend, [edge.id()]);
         new_faces.push(blend);
         let mut shells = solid.boundaries().clone();
         if let Some(sh) = shells.get_mut(si) {
             *sh = new_faces.into();
         }
-        Body::new(Solid::try_new(shells).map_err(|e| KernelError::Failed(format!("variable fillet produced an invalid solid: {e}")))?)
+        let out = Solid::try_new(shells).map_err(|e| KernelError::Failed(format!("variable fillet produced an invalid solid: {e}")))?;
+        crate::record::rebuilt(out, &[solid], &rec)
     })
 }
 
@@ -312,9 +318,11 @@ pub fn fillet_chord(body: &Body, edges: &[Vec3], chord: f64) -> Result<Body> {
             None => groups.push((r, vec![*p])),
         }
     }
-    let mut cur = body.clone();
+    // Each step's result carries its history over `[body]`.
+    let counts = crate::record::counts(&[body]);
+    let mut cur = crate::boolean_record::operand(body, 0, &counts);
     for (r, pts) in groups {
-        cur = crate::fillet(&cur, &pts, r)?;
+        cur = crate::record::after(crate::fillet(&cur, &pts, r)?, &cur, &counts);
     }
     Ok(cur)
 }

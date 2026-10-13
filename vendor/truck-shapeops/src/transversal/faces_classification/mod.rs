@@ -26,7 +26,7 @@ impl<P, C, S> FacesClassification<P, C, S> {
     pub fn and_or_unknown(&self) -> [Shell<P, C, S>; 3] {
         let [mut and, mut or, mut unknown] = <[Shell<P, C, S>; 3]>::default();
         for face in &self.shell {
-            // SolveCraft: no panics (wasm can't catch them).
+            // SolidCraft: no panics (wasm can't catch them).
             match self.status.get(&face.id()) {
                 Some(ShapesOpStatus::And) => and.push(face.clone()),
                 Some(ShapesOpStatus::Or) => or.push(face.clone()),

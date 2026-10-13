@@ -1,5 +1,5 @@
 use super::*;
-use solvecraft_engine::sketch::CurveKind;
+use solidcraft_engine::sketch::CurveKind;
 
 #[test]
 fn clicked_periodic_fit_closes_at_start_and_right_click_keeps_natural() {
@@ -19,7 +19,7 @@ fn clicked_periodic_fit_closes_at_start_and_right_click_keeps_natural() {
     assert_eq!(sk.curves.len(), 1, "{:?}", h.app.status);
     assert!(matches!(sk.curves[0].kind, CurveKind::Spline { periodic: true, .. }));
     sk.validate_periodic_splines().unwrap();
-    assert_eq!(solvecraft_engine::sketch::find_profiles(&sk).len(), 1);
+    assert_eq!(solidcraft_engine::sketch::find_profiles(&sk).len(), 1);
     assert!(h.app.tool.as_ref().unwrap().pts.is_empty());
     for point in [[15, 2, 0], [20, 2, 0], [20, 6, 0]] {
         h.step(&json!({"click":{"world":point}})).unwrap();
@@ -54,7 +54,7 @@ fn clicked_ellipse_offset_then_closed_offset_preserves_exact_distance_and_undo()
     assert_eq!(sk.freeform_offsets.len(), 2, "{:?}", h.app.status);
     assert!((sk.freeform_offsets[1].distance + 0.5).abs() < 1e-4);
     assert!(sk.freeform_offsets.iter().all(|r| r.certificate == 2));
-    assert_eq!(solvecraft_engine::sketch::find_profiles(&sk).len(), 3);
+    assert_eq!(solidcraft_engine::sketch::find_profiles(&sk).len(), 3);
     let last = sk.curve_index(&sk.freeform_offsets[1].output).unwrap();
     assert!(sk.exact_segs(last).unwrap()[0].point_at(0.0).dist(Vec2::new(11.5, 0.0)) < 1e-4);
     h.app.run("edit.undo", json!({})).unwrap();
@@ -86,7 +86,7 @@ fn derived_offset_context_action_releases_geometry_and_undo_restores() {
     h.app.run("sketch.ellipse", json!({"center":[0,0],"major":[10,0],"minor_radius":5})).unwrap();
     let out = h.app.run("sketch.offset", json!({"curves":["e1"],"distance":-1,"chain":false})).unwrap();
     let id = out["curves"][0].as_str().unwrap().to_string();
-    h.app.session.selection = vec![solvecraft_engine::Sel::SketchCurve { id: id.clone() }];
+    h.app.session.selection = vec![solidcraft_engine::Sel::SketchCurve { id: id.clone() }];
     let items = crate::context_menu::items(&h.app, &crate::context_menu::Target::Viewport);
     let item = items.iter().find(|item| item.id == "sketch.offset.break").unwrap();
     assert_eq!(item.params, Some(json!({"curve":id})));

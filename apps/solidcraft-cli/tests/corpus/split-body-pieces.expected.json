@@ -1,0 +1,171 @@
+{
+  "bodies": [
+    {
+      "area_mm2": 1962.6028137423857,
+      "bbox": {
+        "max": [
+          40.0,
+          30.0,
+          10.0
+        ],
+        "min": [
+          0.0,
+          18.0,
+          0.0
+        ]
+      },
+      "center_of_mass": [
+        20.0,
+        23.94794952681388,
+        4.957413249211356
+      ],
+      "density_g_cm3": 1.29,
+      "edges": 15,
+      "face_types": {
+        "plane": 7
+      },
+      "faces": 7,
+      "kernel": {
+        "edges": 15,
+        "faces": 7,
+        "shells": 1,
+        "vertices": 10
+      },
+      "mass_g": 6.13395,
+      "material": "Default",
+      "name": "Body1",
+      "vertices": 10,
+      "volume_mm3": 4755.0
+    },
+    {
+      "area_mm2": 1963.9401350108699,
+      "bbox": {
+        "max": [
+          40.00000000000002,
+          12.000000000000002,
+          10.0
+        ],
+        "min": [
+          -8.881784197001252e-15,
+          0.0,
+          0.0
+        ]
+      },
+      "center_of_mass": [
+        20.00000000000079,
+        6.040035701025577,
+        4.967173993940324
+      ],
+      "density_g_cm3": 1.29,
+      "edges": 15,
+      "face_types": {
+        "cylinder": 1,
+        "plane": 6
+      },
+      "faces": 7,
+      "kernel": {
+        "edges": 15,
+        "faces": 7,
+        "shells": 1,
+        "vertices": 10
+      },
+      "mass_g": 6.147677129601969,
+      "material": "Default",
+      "name": "Body1 (1)",
+      "vertices": 10,
+      "volume_mm3": 4765.64118573796
+    }
+  ],
+  "body_count": 2,
+  "params": [],
+  "sketches": [
+    {
+      "curves": 4,
+      "dof": 2,
+      "id": 1,
+      "name": "Base",
+      "profiles": 1,
+      "status": "solved",
+      "visible": false
+    },
+    {
+      "curves": 4,
+      "dof": 4,
+      "id": 3,
+      "name": "SlotSketch",
+      "profiles": 1,
+      "status": "solved",
+      "visible": false
+    }
+  ],
+  "timeline": [
+    {
+      "error": null,
+      "id": 1,
+      "ms": 0.07066700000000001,
+      "name": "Base",
+      "rolled_back": false,
+      "suppressed": false,
+      "type": "Sketch",
+      "warning": null
+    },
+    {
+      "error": null,
+      "id": 2,
+      "ms": 0.7462909999999999,
+      "name": "Block",
+      "rolled_back": false,
+      "suppressed": false,
+      "type": "ExtrudeFeature",
+      "warning": null
+    },
+    {
+      "error": null,
+      "id": 3,
+      "ms": 0.035125,
+      "name": "SlotSketch",
+      "rolled_back": false,
+      "suppressed": false,
+      "type": "Sketch",
+      "warning": null
+    },
+    {
+      "error": null,
+      "id": 4,
+      "ms": 9.647208000000001,
+      "name": "Slot",
+      "rolled_back": false,
+      "suppressed": false,
+      "type": "ExtrudeFeature",
+      "warning": null
+    },
+    {
+      "error": null,
+      "id": 5,
+      "ms": 3.443708,
+      "name": "NearRound",
+      "rolled_back": false,
+      "suppressed": false,
+      "type": "FilletFeature",
+      "warning": null
+    },
+    {
+      "error": null,
+      "id": 6,
+      "ms": 3.947834,
+      "name": "FarBevel",
+      "rolled_back": false,
+      "suppressed": false,
+      "type": "ChamferFeature",
+      "warning": null
+    }
+  ],
+  "total": {
+    "area_mm2": 3926.5429487532556,
+    "edges": 30,
+    "faces": 14,
+    "mass_g": 12.281627129601969,
+    "vertices": 20,
+    "volume_mm3": 9520.64118573796
+  }
+}

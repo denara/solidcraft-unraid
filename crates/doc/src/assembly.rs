@@ -9,7 +9,7 @@
 //! and the engine maps a new feature's geometry into the active component's frame.
 
 use serde::{Deserialize, Serialize};
-use solvecraft_geom::{Plane, Vec3};
+use solidcraft_geom::{Plane, Vec3};
 
 use crate::{AxisRef, DocError, Document, FeatureKind, PatternKind, PlaneRef, Result};
 
@@ -263,7 +263,8 @@ impl FeatureKind {
                 dir(direction);
             }
             FeatureKind::Thread { face, .. } => pt(face),
-            FeatureKind::SheetFlange { edges, .. } | FeatureKind::SheetHem { edges, .. } => edges.iter_mut().for_each(pt),
+            FeatureKind::SheetFlange { edges, .. } => edges.iter_mut().for_each(|e| pt(&mut e.point)),
+            FeatureKind::SheetHem { edges, .. } => edges.iter_mut().for_each(pt),
             FeatureKind::SheetConvert { face, .. } => pt(face),
             FeatureKind::SheetFold { a, b, fixed, .. } => {
                 pt(a);
@@ -329,6 +330,7 @@ impl FeatureKind {
             | FeatureKind::Thicken { .. }
             | FeatureKind::Import { .. }
             | FeatureKind::MeshImport { .. }
+            | FeatureKind::MeshConvert { .. }
             | FeatureKind::BodyTransfer { .. } => {}
             FeatureKind::Patch { edges, .. } | FeatureKind::SurfaceExtend { edges, .. } => edges.iter_mut().for_each(pt),
             FeatureKind::SurfaceTrim { plane, tool, keep, .. } => {

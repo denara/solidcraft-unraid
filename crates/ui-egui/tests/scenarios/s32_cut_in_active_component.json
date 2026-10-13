@@ -1,6 +1,6 @@
 [
  {
-  "note": "User bug 2 (owner solvecraft-params): with two components, a cut made in the active one leaves the other untouched."
+  "note": "User bug 2 (owner solidcraft-params): with two components, a cut made in the active one leaves the other untouched."
  },
  {
   "start": "component.create"

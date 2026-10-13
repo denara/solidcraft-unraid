@@ -1,6 +1,6 @@
 use serde_json::json;
-use solvecraft_engine::{Sel, sketch::ConstraintKind};
-use solvecraft_ui_egui::scenario::Harness;
+use solidcraft_engine::{Sel, sketch::ConstraintKind};
+use solidcraft_ui_egui::scenario::Harness;
 
 fn setup() -> Harness {
     let mut h = Harness::new();

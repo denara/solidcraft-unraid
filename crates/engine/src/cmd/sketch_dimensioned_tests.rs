@@ -1,6 +1,6 @@
 use crate::Session;
 use serde_json::{Value, json};
-use solvecraft_sketch::ConstraintKind;
+use solidcraft_sketch::ConstraintKind;
 
 fn run(s: &mut Session, command: &str, params: Value) -> Value {
     s.execute(command, &params).unwrap_or_else(|error| panic!("{command} {params}: {error}"))
@@ -10,7 +10,7 @@ fn session() -> Session {
     run(&mut s, "sketch.create", json!({"plane":"XY"}));
     s
 }
-fn sketch(s: &Session) -> solvecraft_sketch::Sketch {
+fn sketch(s: &Session) -> solidcraft_sketch::Sketch {
     s.model.state().sketch(s.active_sketch.unwrap()).unwrap().sketch.clone()
 }
 fn draw(s: &mut Session, command: &str, params: Value, dimensions: Value) -> Value {
@@ -22,7 +22,7 @@ fn close(a: f64, b: f64) {
 fn measure(s: &Session, kind: fn(&ConstraintKind) -> bool) -> f64 {
     let sk = sketch(s);
     let c = sk.constraints.iter().find(|c| kind(&c.kind)).unwrap();
-    solvecraft_sketch::measure_dimension(&sk, &c.kind).unwrap()
+    solidcraft_sketch::measure_dimension(&sk, &c.kind).unwrap()
 }
 
 #[test]
@@ -41,7 +41,7 @@ fn typed_line_angle_survives_quadrants_move_reopen_and_one_undo() {
         close(measure(&s, |k| matches!(k, ConstraintKind::Length { .. })), 10.0);
     }
     let encoded = serde_json::to_value(&*s.doc).unwrap();
-    let doc: solvecraft_doc::Document = serde_json::from_value(encoded).unwrap();
+    let doc: solidcraft_doc::Document = serde_json::from_value(encoded).unwrap();
     let mut reopened = Session { doc: std::sync::Arc::new(doc), active_sketch: s.active_sketch, ..Session::default() };
     reopened.refresh();
     close(measure(&reopened, |k| matches!(k, ConstraintKind::LineAngle { .. })), 90f64.to_radians());
@@ -161,7 +161,7 @@ fn dimensioned_authoring_uses_selected_occurrence_and_keeps_local_geometry() {
     assert_eq!(s.active_occurrence_path, Some(vec![second]));
     let sk = sketch(&s);
     let line = sk.curve_index(out["curves"][0].as_str().unwrap()).unwrap();
-    let solvecraft_sketch::CurveKind::Line { a, b } = sk.curves[line].kind else { panic!("line") };
+    let solidcraft_sketch::CurveKind::Line { a, b } = sk.curves[line].kind else { panic!("line") };
     close(sk.points[a].pos.x, 0.0);
     close(sk.points[b].pos.x, 5.0 / std::f64::consts::SQRT_2);
 }

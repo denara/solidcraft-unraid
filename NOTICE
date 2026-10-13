@@ -1,5 +1,5 @@
-SolveCraft
-Copyright (c) 2026 SolveCraft contributors.
+SolidCraft
+Copyright (c) 2026 SolidCraft contributors.
 Licensed under the MIT License or the Apache License, Version 2.0, at your option
 (LICENSE-MIT, LICENSE-APACHE).
 
@@ -7,10 +7,10 @@ Third-party material
 
 Software dependencies are listed in Cargo.lock; their licences are in THIRD-PARTY-LICENSES.txt
 (`cargo xtask licences`), which the programs also carry (Help > About > Licences,
-`solvecraft-cli licences`). The geometry kernel builds on the truck crates
+`solidcraft-cli licences`). The geometry kernel builds on the truck crates
 (truck-modeling, truck-shapeops, truck-meshalgo, truck-stepio, truck-topology and their
 dependencies, https://github.com/ricosjp/truck), licensed under the Apache License 2.0 and used
-as libraries. truck-shapeops 0.4.0 is vendored in vendor/truck-shapeops with SolveCraft
+as libraries. truck-shapeops 0.4.0 is vendored in vendor/truck-shapeops with SolidCraft
 modifications (listed in vendor/README.md and marked in the source); its licence is in
 vendor/truck-shapeops/LICENSE. Copyright (c) RICOS Co. Ltd.
 
@@ -19,9 +19,10 @@ licensed MIT OR Apache-2.0; ATTRIBUTION.md lists the files.
 The release packaging (.github/workflows/release.yml, packaging/) is adapted from PhotoCraft
 (https://github.com/storytold/photocraft), licensed under the Apache License 2.0.
 
-None of the bundled assets come from third parties: every icon is drawn in code. The per-file
-list is in ATTRIBUTION.md.
+Most bundled assets are drawn in code or contributed originally; third-party fonts (Liberation Sans
+for sketch text, BIZ UDPGothic for web Japanese display) are licensed under SIL OFL 1.1. The
+per-file list is in ATTRIBUTION.md.
 
-SolveCraft is an independent project and is not affiliated with, sponsored by or endorsed by
+SolidCraft is an independent project and is not affiliated with, sponsored by or endorsed by
 Autodesk, Inc. Autodesk and Fusion are trademarks of Autodesk, Inc.; they are used here only to
 describe compatibility goals.

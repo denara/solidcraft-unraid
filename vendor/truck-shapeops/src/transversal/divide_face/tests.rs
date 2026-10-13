@@ -198,11 +198,11 @@ fn independent_intersection() {
         geom_loops_store0: loops_store0,
         geom_loops_store1: loops_store1,
         ..
-    } = create_loops_stores(&shell0, &poly_shell0, &shell1, &poly_shell1, TOL).unwrap();
-    let [and0, or0, unknown0] = divide_faces(&shell0, &loops_store0, TOL)
+    } = create_loops_stores(&shell0, &poly_shell0, &shell1, &poly_shell1, TOL, &mut Default::default()).unwrap();
+    let [and0, or0, unknown0] = divide_faces(&shell0, &loops_store0, TOL, &mut Default::default())
         .unwrap()
         .and_or_unknown();
-    let [and1, or1, unknown1] = divide_faces(&shell1, &loops_store1, TOL)
+    let [and1, or1, unknown1] = divide_faces(&shell1, &loops_store1, TOL, &mut Default::default())
         .unwrap()
         .and_or_unknown();
     assert_eq!(and0.len(), 1);

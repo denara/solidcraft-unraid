@@ -1,5 +1,5 @@
 [package]
-name = "solvecraft-sketch"
+name = "solidcraft-sketch"
 description = "SolidCraft sketches: points, curves, geometric constraints and dimensions, the constraint solver, and profile detection"
 version.workspace = true
 edition.workspace = true
@@ -9,7 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-solvecraft-geom = { workspace = true }
+solidcraft-geom = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 ttf-parser = { workspace = true }

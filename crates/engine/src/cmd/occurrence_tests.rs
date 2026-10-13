@@ -190,8 +190,8 @@ fn duplicate_nested_labels_use_full_path_and_reopen_undo_preserve_placements() {
     let (parent_component, parent) = created(&mut s, "Parent");
     let (_, child) = created(&mut s, "Child");
     run(&mut s, "solid.box", json!({"length":1,"width":1,"height":1}));
-    let parent2 = s.doc_mut().add_occurrence(parent_component, 0, solvecraft_doc::IDENTITY).unwrap();
-    let parent3 = s.doc_mut().add_occurrence(parent_component, 0, solvecraft_doc::IDENTITY).unwrap();
+    let parent2 = s.doc_mut().add_occurrence(parent_component, 0, solidcraft_doc::IDENTITY).unwrap();
+    let parent3 = s.doc_mut().add_occurrence(parent_component, 0, solidcraft_doc::IDENTITY).unwrap();
     for o in s.doc_mut().occurrences.iter_mut().filter(|o| o.id == parent2 || o.id == parent3) {
         o.name = "Same".into();
     }
@@ -199,7 +199,7 @@ fn duplicate_nested_labels_use_full_path_and_reopen_undo_preserve_placements() {
     let a = s.occurrence_bodies(&[parent2, child], false).unwrap()[0].clone();
     let b = s.occurrence_bodies(&[parent3, child], false).unwrap()[0].clone();
     assert_ne!(a, b);
-    let mut reopened = Session::new(solvecraft_doc::format::read(&s.doc.to_json()).unwrap());
+    let mut reopened = Session::new(solidcraft_doc::format::read(&s.doc.to_json()).unwrap());
     assert_eq!(reopened.occurrence_bodies(&[parent2, child], false).unwrap()[0], a);
     assert_eq!(reopened.occurrence_bodies(&[parent3, child], false).unwrap()[0], b);
     run(&mut reopened, "selection.delete", json!({"occurrences":[parent3]}));
@@ -218,7 +218,7 @@ fn compact_duplicated_assembly_exact_resolution_and_expansion_limit() {
         let component = s.doc_mut().add_component(Some(&format!("Level{i}")), parent).unwrap();
         let occurrence = s.doc.occurrence_of(component).unwrap().id;
         path.push(occurrence);
-        s.doc_mut().add_occurrence(component, parent, solvecraft_doc::IDENTITY).unwrap();
+        s.doc_mut().add_occurrence(component, parent, solidcraft_doc::IDENTITY).unwrap();
         parent = component;
     }
     assert!(s.occurrence_placement(&path).is_ok());
@@ -326,7 +326,7 @@ fn isolate_nested_child_hides_ancestor_material_and_sibling() {
         .add_occurrence(
             child_component,
             parent_component,
-            solvecraft_doc::rigid(crate::geom::Vec3::new(20.0, 0.0, 0.0), crate::geom::Vec3::ZERO, crate::geom::Vec3::Z, 0.0),
+            solidcraft_doc::rigid(crate::geom::Vec3::new(20.0, 0.0, 0.0), crate::geom::Vec3::ZERO, crate::geom::Vec3::Z, 0.0),
         )
         .unwrap();
     s.refresh();
@@ -412,15 +412,50 @@ fn instance_styles_follow_source_identity_after_collision_rename_and_pending_mov
         assert!((measured["bodies"][0]["mass_g"].as_f64().unwrap() - 0.068).abs() < 1e-8);
     }
     let definition = s.model.state();
-    assert_eq!(solvecraft_kernel::measure(&definition.body("Shared Renamed").unwrap().body).unwrap().bbox.min, crate::geom::Vec3::ZERO);
+    assert_eq!(solidcraft_kernel::measure(&definition.body("Shared Renamed").unwrap().body).unwrap().bbox.min, crate::geom::Vec3::ZERO);
     let painted = s.doc.painted(&world);
     let secondname = s.occurrence_bodies(&[second], false).unwrap()[0].clone();
     let body = painted.body(&secondname).unwrap();
     assert_eq!(body.body.color(), Some([1.0, 0.0, 0.0]));
     assert!(body.body.paint().unwrap().faces.iter().any(|f| f.color == [0.0, 1.0, 0.0]));
-    let bytes = solvecraft_io::export(&painted, &[secondname], solvecraft_io::Format::Step, "InstanceStyles").unwrap();
-    let imported = solvecraft_kernel::step_import(&String::from_utf8(bytes).unwrap()).unwrap();
+    let bytes = solidcraft_io::export(&painted, &[secondname], solidcraft_io::Format::Step, "InstanceStyles").unwrap();
+    let imported = solidcraft_kernel::step_import(&String::from_utf8(bytes).unwrap()).unwrap();
     assert_eq!(imported.bodies.len(), 1);
     assert_eq!(imported.bodies[0].body.color(), Some([1.0, 0.0, 0.0]));
     assert!(imported.bodies[0].body.paint().unwrap().faces.iter().any(|f| f.color == [0.0, 1.0, 0.0]));
+}
+
+/// Command names for linking another design are a proposal (#533); adjust them to the real API.
+const INSERT_DESIGN: &str = "component.insert_design";
+const UPDATE_LINKS: &str = "component.update_links";
+
+fn saved_box_design(path: &std::path::Path, height: f64) {
+    let mut part = Session::default();
+    run(&mut part, "solid.box", json!({"length": 10, "width": 20, "height": height, "body_name": "Plate"}));
+    run(&mut part, "file.save", json!({"path": path}));
+}
+
+#[test]
+#[ignore = "fails until #533 is fixed"]
+fn a_linked_design_brings_its_bodies_in_and_follows_edits_to_the_part_file() {
+    let dir = std::env::temp_dir().join(format!("solidcraft-linked-design-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let part = dir.join("plate.solidcraft");
+    // Given a part saved in its own design: a 10 x 20 x 30 plate.
+    saved_box_design(&part, 30.0);
+    // When an assembly inserts it as a linked component, the plate's body is in the assembly.
+    let mut assembly = Session::default();
+    let inserted = assembly.execute(INSERT_DESIGN, &json!({"path": part, "translate": [50, 0, 0]}));
+    let inserted = inserted.unwrap_or_else(|e| panic!("{INSERT_DESIGN}: {e}"));
+    let occurrence = inserted["occurrence"].as_u64().unwrap_or_else(|| panic!("no occurrence in {inserted}"));
+    let measured = run(&mut assembly, "occurrence.properties", json!({"occurrence": occurrence, "path": [occurrence]}));
+    near(&measured["total"]["volume_mm3"], 6000.0);
+    near(&measured["total"]["center_of_mass"][0], 55.0);
+    // When the part is edited (30 -> 45 tall) and saved again, updating the links follows it.
+    saved_box_design(&part, 45.0);
+    run(&mut assembly, UPDATE_LINKS, json!({}));
+    let measured = run(&mut assembly, "occurrence.properties", json!({"occurrence": occurrence, "path": [occurrence]}));
+    near(&measured["total"]["volume_mm3"], 9000.0);
+    near(&measured["total"]["center_of_mass"][0], 55.0);
+    let _ = std::fs::remove_dir_all(&dir);
 }

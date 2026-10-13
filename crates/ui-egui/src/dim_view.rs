@@ -2,7 +2,7 @@
 //! dimension line (or arc) with arrowheads, and the value centred on it; radius and diameter
 //! leaders with R / Ø, angles as an arc between the two lines, arc lengths with the arc mark,
 //! driven (reference) dimensions in parentheses in a muted colour. The geometry comes from
-//! `solvecraft_sketch::dim_layout`.
+//! `solidcraft_sketch::dim_layout`.
 //!
 //! A click selects a dimension (Delete removes it), a drag moves its text (and so the offset of
 //! its dimension line), a double-click edits its value in place with parameter completion.
@@ -14,9 +14,9 @@ use std::sync::Arc;
 
 use egui::{FontId, Pos2, Rect, Shape, Stroke, vec2};
 use serde_json::json;
-use solvecraft_engine::Sel;
-use solvecraft_engine::geom::Vec2;
-use solvecraft_engine::sketch::{ConstraintKind, DimFrame, chain_centres, default_text, dim_frame, dim_layout};
+use solidcraft_engine::Sel;
+use solidcraft_engine::geom::Vec2;
+use solidcraft_engine::sketch::{ConstraintKind, DimFrame, chain_centres, default_text, dim_frame, dim_layout};
 
 use crate::SolveApp;
 use crate::theme::Tokens;
@@ -52,17 +52,20 @@ struct Edit {
 /// document also makes the editor's identity check safe across document replacements.
 #[derive(Clone, Debug)]
 struct DimensionDraft {
-    baseline: Arc<solvecraft_engine::doc::Document>,
+    baseline: Arc<solidcraft_engine::doc::Document>,
     sketch: u64,
     component: u64,
     path: Option<Vec<u64>>,
-    pending: std::collections::BTreeMap<u64, solvecraft_engine::doc::Mat>,
+    pending: std::collections::BTreeMap<u64, solidcraft_engine::doc::Mat>,
     entities: Vec<String>,
     at: Vec2,
     checked_expr: String,
-    preview_doc: Arc<solvecraft_engine::doc::Document>,
-    preview: Arc<solvecraft_engine::doc::ModelState>,
+    preview_doc: Arc<solidcraft_engine::doc::Document>,
+    preview: Arc<solidcraft_engine::doc::ModelState>,
     error: Option<String>,
+    /// A dimension that would over-constrain the sketch, placed as a driven (reference) one:
+    /// it has no parameter and no value to edit (#320).
+    driven: bool,
 }
 
 impl DimensionDraft {
@@ -76,7 +79,7 @@ impl DimensionDraft {
     fn params(&self, expr: &str) -> serde_json::Value {
         json!({"entities": self.entities, "text_at": [self.at.x, self.at.y], "value": expr})
     }
-    fn evaluate(&self, app: &SolveApp, expr: &str) -> Result<solvecraft_engine::Session, String> {
+    fn evaluate(&self, app: &SolveApp, expr: &str) -> Result<solidcraft_engine::Session, String> {
         let mut scratch = app.session.scratch();
         let result = scratch.execute("sketch.dimension", &self.params(expr)).map_err(|e| e.to_string())?;
         let param = result.get("param").and_then(serde_json::Value::as_str).ok_or("The dimension value is unavailable")?;
@@ -102,8 +105,15 @@ pub fn cancel() {
 
 /// Infer the measured value through the same command as scripts, without creating a real
 /// parameter or an undo entry. Only accepting the editor executes the command on the design.
-pub fn begin_dimension(app: &SolveApp, entities: Vec<String>, at: Vec2) -> Result<(), String> {
+/// A driven dimension has no value to accept, so it is added at once.
+pub fn begin_dimension(app: &mut SolveApp, entities: Vec<String>, at: Vec2) -> Result<(), String> {
     let (param, expr, draft) = dimension_draft(app, entities, at)?;
+    if draft.driven {
+        PLACEMENT.with(|preview| *preview.borrow_mut() = None);
+        app.run("sketch.dimension", json!({"entities": draft.entities, "text_at": [at.x, at.y], "driven": true}))?;
+        app.set_status("That dimension would over-constrain the sketch, so it was added as a driven (reference) dimension", false);
+        return Ok(());
+    }
     EDIT.with(|edit| *edit.borrow_mut() = Some(Edit { param, expr, at: None, fresh: FRESH, wait: 10, draft: Some(draft) }));
     PLACEMENT.with(|preview| *preview.borrow_mut() = None);
     Ok(())
@@ -114,22 +124,41 @@ fn dimension_draft(app: &SolveApp, entities: Vec<String>, at: Vec2) -> Result<(S
     if entities.is_empty() || entities.len() > 2 || !at.x.is_finite() || !at.y.is_finite() {
         return Err("Pick one edge or two endpoints, then place the dimension".into());
     }
+    // A dimension the sketch can't take (it would over-constrain it) becomes a driven one,
+    // which only measures; when that fails too, the first refusal is the one to report.
+    draft_of(app, sketch, &entities, at, false).or_else(|error| draft_of(app, sketch, &entities, at, true).map_err(|_| error))
+}
+
+/// The draft of one dimension: its parameter (for a driven one, its constraint id, since it
+/// has no parameter), the parameter's expression, and the scratch session it was added in.
+fn draft_of(app: &SolveApp, sketch: u64, entities: &[String], at: Vec2, driven: bool) -> Result<(String, String, DimensionDraft), String> {
     let mut scratch = app.session.scratch();
-    let result = scratch.execute("sketch.dimension", &json!({"entities": entities, "text_at": [at.x, at.y]})).map_err(|e| e.to_string())?;
-    let param = result.get("param").and_then(serde_json::Value::as_str).ok_or("This dimension has no editable value")?.to_string();
-    let expr = scratch.doc.param(&param).ok_or("The dimension value is unavailable")?.expr.clone();
+    let result =
+        scratch.execute("sketch.dimension", &json!({"entities": entities, "text_at": [at.x, at.y], "driven": driven})).map_err(|e| e.to_string())?;
+    let (param, expr) = if driven {
+        let before =
+            app.session.doc.sketch(sketch).ok().map(|sk| sk.constraints.iter().map(|c| c.id.clone()).collect::<Vec<_>>()).unwrap_or_default();
+        let added =
+            scratch.doc.sketch(sketch).ok().and_then(|sk| sk.constraints.iter().find(|c| c.driven && !before.contains(&c.id)).map(|c| c.id.clone()));
+        (added.ok_or("The driven dimension is unavailable")?, String::new())
+    } else {
+        let param = result.get("param").and_then(serde_json::Value::as_str).ok_or("This dimension has no editable value")?.to_string();
+        let expr = scratch.doc.param(&param).ok_or("The dimension value is unavailable")?.expr.clone();
+        (param, expr)
+    };
     let draft = DimensionDraft {
         baseline: app.session.doc.clone(),
         sketch,
         component: app.session.active_component,
         path: app.session.active_occurrence_path.clone(),
         pending: app.session.pending_moves.clone(),
-        entities,
+        entities: entities.to_vec(),
         at,
         checked_expr: expr.clone(),
         preview: scratch.world_state(),
         preview_doc: scratch.doc.clone(),
         error: None,
+        driven,
     };
     if !draft.preview.sketch(sketch).is_some_and(|solved| solved.report.ok()) {
         return Err("That dimension conflicts with the sketch constraints".into());
@@ -140,11 +169,11 @@ fn dimension_draft(app: &SolveApp, entities: Vec<String>, at: Vec2) -> Result<(S
 /// Cache inference at a stationary pointer, including incomplete/unsupported picks.
 #[derive(Clone)]
 struct Placement {
-    baseline: Arc<solvecraft_engine::doc::Document>,
+    baseline: Arc<solidcraft_engine::doc::Document>,
     sketch: Option<u64>,
     component: u64,
     path: Option<Vec<u64>>,
-    pending: std::collections::BTreeMap<u64, solvecraft_engine::doc::Mat>,
+    pending: std::collections::BTreeMap<u64, solidcraft_engine::doc::Mat>,
     entities: Vec<String>,
     at: Vec2,
     draft: Option<(String, DimensionDraft)>,
@@ -258,9 +287,10 @@ pub fn double_click(app: &mut SolveApp, pos: Pos2) -> bool {
 }
 
 /// Start dragging the text of the dimension under `press` (true: a dimension took the drag).
-pub fn drag_start(app: &SolveApp, press: Pos2, press_sketch: Vec2) -> bool {
+/// Its lines take it only off sketch geometry (`on_geometry`: a point or curve is under `press`).
+pub fn drag_start(app: &SolveApp, press: Pos2, press_sketch: Vec2, on_geometry: bool) -> bool {
     let Some(d) = DRAWN.with(|d| {
-        let id = hit(press)?;
+        let id = hit_text(press).or_else(|| if on_geometry { None } else { hit(press) })?;
         d.borrow().iter().find(|x| x.id == id).cloned()
     }) else {
         return false;
@@ -290,9 +320,18 @@ pub fn drag_end() {
 
 /// The text shown for a dimension: the value (R / Ø for radius and diameter, degrees for
 /// angles), "fx: value" when an expression drives it, in parentheses when driven.
-pub fn label(k: &ConstraintKind, expr: Option<&str>, driven: bool) -> String {
+pub fn label(k: &ConstraintKind, expr: Option<&str>, driven: bool, units: &str, decimals: u8) -> String {
     let v = k.value().unwrap_or(0.0);
-    let num = if k.is_angle() { format!("{:.1}°", v.to_degrees()) } else { format!("{v:.2}") };
+    // Retain deliberately authored trailing zeros in a four-place inch literal too.
+    let authored_four = units == "in"
+        && expr.is_some_and(|e| {
+            e.trim().strip_suffix("in").map(str::trim).is_some_and(|number| {
+                number.parse::<f64>().is_ok()
+                    && number.split_once('.').is_some_and(|(_, fraction)| fraction.len() >= 4 && fraction.bytes().all(|b| b.is_ascii_digit()))
+            })
+        });
+    let decimals = if authored_four { decimals.max(4) } else { decimals };
+    let num = if k.is_angle() { format!("{:.1}°", v.to_degrees()) } else { crate::prefs::length_number(v, units, decimals) };
     let num = match k {
         ConstraintKind::Radius { .. } => format!("R{num}"),
         ConstraintKind::Diameter { .. } | ConstraintKind::LinearDiameter { .. } => format!("Ø{num}"),
@@ -300,7 +339,7 @@ pub fn label(k: &ConstraintKind, expr: Option<&str>, driven: bool) -> String {
     };
     let plain = expr.is_none_or(|e| {
         let e = e.trim();
-        let e = e.strip_suffix("mm").or_else(|| e.strip_suffix("deg")).or_else(|| e.strip_suffix('°')).unwrap_or(e);
+        let e = ["mm", "cm", "in", "ft", "m", "deg", "rad", "°"].iter().find_map(|unit| e.strip_suffix(unit)).unwrap_or(e);
         e.trim().parse::<f64>().is_ok()
     });
     let text = if plain { num } else { format!("fx: {num}") };
@@ -358,7 +397,9 @@ pub fn show(app: &mut SolveApp, ui: &egui::Ui, painter: &egui::Painter, proj: &P
     let draft_centres = draft_sketch.map(|solved| chain_centres(&solved.sketch));
     let mut constraints = sk.constraints.iter().map(|c| (ss, c, false)).collect::<Vec<_>>();
     if let (Some(source), Some((param, _))) = (draft_sketch, draft.as_ref()) {
-        constraints.extend(source.sketch.constraints.iter().filter(|c| c.param.as_deref() == Some(param.as_str())).map(|c| (source, c, true)));
+        // A driven draft is keyed by its constraint id (it has no parameter).
+        let ours = |c: &&solidcraft_engine::sketch::Constraint| c.param.as_deref() == Some(param.as_str()) || (c.driven && c.id == *param);
+        constraints.extend(source.sketch.constraints.iter().filter(ours).map(|c| (source, c, true)));
     }
     for (source, c, is_draft) in constraints {
         if ss.sketch.view.hide_dimensions && !is_draft {
@@ -392,7 +433,8 @@ pub fn show(app: &mut SolveApp, ui: &egui::Ui, painter: &egui::Painter, proj: &P
         } else {
             tk.dimension
         };
-        let galley = painter.layout_no_wrap(label(&c.kind, expr, c.driven), font.clone(), col);
+        let galley =
+            painter.layout_no_wrap(label(&c.kind, expr, c.driven, &app.session.doc.units, app.preferences.length_decimals), font.clone(), col);
         let size = galley.size() + vec2(6.0, 2.0);
         let half = Vec2::new(f64::from(size.x) * 0.5 * px, f64::from(size.y) * 0.5 * px);
         // Unplaced linear dimensions sit outside the shape they measure.
@@ -441,7 +483,7 @@ pub fn show(app: &mut SolveApp, ui: &egui::Ui, painter: &egui::Painter, proj: &P
 }
 
 /// A point a dimension measures (for the shape it belongs to).
-fn first_point(sk: &solvecraft_engine::sketch::Sketch, k: &ConstraintKind) -> Option<usize> {
+fn first_point(sk: &solidcraft_engine::sketch::Sketch, k: &ConstraintKind) -> Option<usize> {
     use ConstraintKind::*;
     match *k {
         Length { l, .. } => sk.curves.get(l).and_then(|c| c.kind.point_ids().first().copied()),
@@ -528,7 +570,15 @@ fn edit_box(app: &mut SolveApp, ctx: &egui::Context) {
                     Err("The sketch changed; place the dimension again".into())
                 }
             } else {
-                app.run("parameters.change", json!({"name": e.param, "expression": e.expr}))
+                let kind = app
+                    .session
+                    .doc
+                    .param(&e.param)
+                    .and_then(|p| solidcraft_engine::doc::expr::unit_info(&p.unit))
+                    .map(|(k, _)| k)
+                    .unwrap_or(solidcraft_engine::doc::expr::Kind::Unitless);
+                let expression = app.session.doc.with_design_unit(&e.expr, kind);
+                app.run("parameters.change", json!({"name": e.param, "expression": expression}))
             };
             if let Err(err) = result {
                 app.set_status(err, true);
@@ -586,6 +636,35 @@ mod tests {
         cancel();
     }
 
+    /// Placing a dimension the sketch can't take previews it as driven: in the draft it is a
+    /// driven constraint with no parameter, labelled in parentheses (#320).
+    #[test]
+    fn an_over_constraining_placement_previews_a_driven_dimension() {
+        cancel();
+        let mut h = crate::scenario::Harness::new();
+        h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+        h.app.run("sketch.line", json!({"points":[[10,10],[30,10]],"infer":false})).unwrap();
+        h.app.run("sketch.dimension", json!({"entities":["l1"],"value":"20 mm"})).unwrap();
+        h.call("ui.view", json!({"view":"top"}));
+        let baseline = h.app.session.doc.to_json();
+        h.step(&json!({"start":"sketch.dimension"})).unwrap();
+        h.step(&json!({"click":{"sketch":[20,10]}})).unwrap();
+        h.step(&json!({"move":{"sketch":[20,20]}})).unwrap();
+        h.settle();
+        let (id, draft) = placement_preview(&h.app).expect("an over-constraining dimension still previews");
+        assert!(draft.driven);
+        let sk = &draft.preview.sketch(draft.sketch).unwrap().sketch;
+        let c = sk.constraints.iter().find(|c| c.id == id).unwrap();
+        assert!(c.driven && c.param.is_none(), "{c:?}");
+        assert!(matches!(c.kind, ConstraintKind::Length {value,..} if (value-20.).abs()<1e-6));
+        assert_eq!(label(&c.kind, None, c.driven, "mm", 2), "(20.00)");
+        assert!(!editing());
+        assert_eq!(h.app.session.doc.to_json(), baseline);
+        h.step(&json!({"key":"Escape"})).unwrap();
+        h.step(&json!({"key":"Escape"})).unwrap();
+        cancel();
+    }
+
     #[test]
     fn placement_follows_real_pointer_without_editing_or_mutating_design() {
         cancel();
@@ -622,14 +701,32 @@ mod tests {
     }
 
     #[test]
+    fn inch_labels_convert_all_lengths_preserve_four_digits_and_leave_angles_alone() {
+        let length = ConstraintKind::Length { l: 0, value: 25.4 };
+        assert_eq!(label(&length, Some("25.4 mm"), false, "in", 2), "1.000");
+        assert_eq!(label(&length, Some("1 in"), false, "in", 2), "1.000");
+        assert_eq!(label(&length, Some("1.0000 in"), false, "in", 2), "1.0000");
+        let radius = ConstraintKind::Radius { c: 0, value: 1.2345 * 25.4 };
+        assert_eq!(label(&radius, Some("1.2345 in"), false, "in", 2), "R1.2345");
+        assert_eq!(label(&radius, Some("width / 2"), true, "in", 2), "(fx: R1.2345)");
+        let diameter = ConstraintKind::Diameter { c: 0, value: 0.001 * 25.4 };
+        assert_eq!(label(&diameter, None, false, "in", 2), "Ø0.001");
+        assert_eq!(crate::prefs::length_number(25.4 * (1.0 + 1e-12), "in", 2), "1.000");
+        assert_eq!(crate::prefs::length_number(25.4, "in", 5), "1.00000");
+        assert_eq!(crate::prefs::length_number(25.4, "cm", 2), "2.54");
+        let angle = ConstraintKind::Angle { a: 0, b: 1, value: std::f64::consts::FRAC_PI_4, flip: false };
+        assert_eq!(label(&angle, Some("45 deg"), false, "in", 2), "45.0°");
+    }
+
+    #[test]
     fn labels_show_the_value_or_fx() {
         let k = ConstraintKind::Length { l: 0, value: 25.0 };
-        assert_eq!(label(&k, Some("25 mm"), false), "25.00");
-        assert_eq!(label(&k, Some("width * 2"), false), "fx: 25.00");
-        assert_eq!(label(&k, None, true), "(25.00)");
-        assert_eq!(label(&ConstraintKind::Radius { c: 0, value: 5.0 }, Some("5 mm"), false), "R5.00");
-        assert_eq!(label(&ConstraintKind::Diameter { c: 0, value: 10.0 }, Some("10"), false), "Ø10.00");
+        assert_eq!(label(&k, Some("25 mm"), false, "mm", 2), "25.00");
+        assert_eq!(label(&k, Some("width * 2"), false, "mm", 2), "fx: 25.00");
+        assert_eq!(label(&k, None, true, "mm", 2), "(25.00)");
+        assert_eq!(label(&ConstraintKind::Radius { c: 0, value: 5.0 }, Some("5 mm"), false, "mm", 2), "R5.00");
+        assert_eq!(label(&ConstraintKind::Diameter { c: 0, value: 10.0 }, Some("10"), false, "mm", 2), "Ø10.00");
         let a = ConstraintKind::Angle { a: 0, b: 1, value: std::f64::consts::FRAC_PI_4, flip: false };
-        assert_eq!(label(&a, Some("45 deg"), false), "45.0°");
+        assert_eq!(label(&a, Some("45 deg"), false, "mm", 2), "45.0°");
     }
 }

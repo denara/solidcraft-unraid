@@ -168,7 +168,7 @@ mod tests {
     impl Editor {
         fn new(text: &str) -> Self {
             let ctx = egui::Context::default();
-            let mut app = SolveApp::new(solvecraft_engine::Session::default(), Default::default());
+            let mut app = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
             for (name, value) in [("width", 40), ("width_extra", 50), ("wing", 20), ("wire", 10)] {
                 app.run("parameters.add", json!({"name":name,"expression":format!("{value} mm")})).unwrap();
             }

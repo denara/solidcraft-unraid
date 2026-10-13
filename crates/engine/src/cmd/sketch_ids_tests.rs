@@ -3,7 +3,7 @@
 //! new geometry right away; ids are never reused after a delete.
 
 use serde_json::{Value, json};
-use solvecraft_sketch::{CurveKind, Sketch};
+use solidcraft_sketch::{CurveKind, Sketch};
 
 use crate::Session;
 

@@ -3,8 +3,8 @@
 //! edges become lines, circular edges circles or arcs, anything else a chain of lines.
 
 use serde_json::{Value, json};
-use solvecraft_doc::{EmbossFace, apply_point, mat_inverse, mat_mul};
-use solvecraft_geom::{Mesh, Vec2, Vec3};
+use solidcraft_doc::{EmbossFace, apply_point, mat_inverse, mat_mul};
+use solidcraft_geom::{Mesh, Vec2, Vec3};
 
 use crate::params::bad;
 use crate::{Result, Session};

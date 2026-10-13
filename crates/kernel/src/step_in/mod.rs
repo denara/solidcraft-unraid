@@ -10,6 +10,7 @@
 mod brep;
 pub(crate) mod geom;
 pub(crate) mod p21;
+mod parallel;
 mod split;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -243,9 +244,32 @@ struct Reader<'a> {
     /// Items whose meshing was checked.
     unmeshed_checked: HashSet<u64>,
     bodies: Vec<ImportedBody>,
+    workers: usize,
 }
 
 impl<'a> Reader<'a> {
+    fn new(ex: &'a Exchange, workers: usize) -> Self {
+        Self {
+            ex,
+            units: HashMap::new(),
+            warnings: BTreeMap::new(),
+            reps: HashMap::new(),
+            rep_links: HashMap::new(),
+            pd_reps: HashMap::new(),
+            children: HashMap::new(),
+            placements: HashMap::new(),
+            colors: HashMap::new(),
+            opacity: HashMap::new(),
+            solids: HashMap::new(),
+            used_items: HashSet::new(),
+            node_items: HashSet::new(),
+            visits: 0,
+            unmeshed_checked: HashSet::new(),
+            bodies: Vec::new(),
+            workers,
+        }
+    }
+
     fn warn(&mut self, msg: impl Into<String>) {
         *self.warnings.entry(msg.into()).or_default() += 1;
     }
@@ -468,71 +492,85 @@ impl<'a> Reader<'a> {
             return;
         }
         let u = self.units_of(rep);
-        let items = self.reps.get(&rep).map(|r| r.0.clone()).unwrap_or_default();
-        for item in items {
+        let mut items = self.reps.get(&rep).map(|r| r.0.clone()).unwrap_or_default().into_iter().peekable();
+        while let Some(item) = items.next() {
             let Some(e) = self.ex.get(item) else { continue };
             match e.name() {
                 "MANIFOLD_SOLID_BREP" | "BREP_WITH_VOIDS" | "FACETED_BREP" | "SHELL_BASED_SURFACE_MODEL" => {
-                    self.used_items.insert(item);
-                    if !self.node_items.insert(item) {
-                        continue;
-                    }
-                    if self.bodies.len() >= MAX_BODIES {
-                        self.warn(format!("more than {MAX_BODIES} bodies: the rest are left out"));
-                        return;
-                    }
-                    let Some((solid, closed, file_faces, face_origin)) = self.item_solid(item, u) else { continue };
-                    let identity = *m == mt::Matrix4::from_scale(1.0);
-                    let placed = if identity {
-                        Ok(solid)
-                    } else {
-                        let mm = *m;
-                        guard("step placement", || Ok(mt::builder::transformed(&solid, mm)))
-                    };
-                    let body = placed.and_then(Body::new);
-                    match body {
-                        Ok(body) => {
-                            let own = e.params().first().and_then(Param::as_str).unwrap_or("").trim().to_string();
-                            let name = if own.is_empty() { product.to_string() } else { own };
-                            // Faces the mesher gives up on (or that the budget cut short) are reported.
-                            if self.unmeshed_checked.insert(item) {
-                                let n = body.unmeshed_faces();
-                                if n > 0 {
-                                    self.warn(format!("solid '{name}': {n} face(s) could not be meshed and are not shown"));
-                                }
-                            }
-                            out.push(self.bodies.len());
-                            let color = self.colors.get(&item).copied();
-                            // See-through bodies and faces with colours of their own.
-                            let faces = face_origin
-                                .iter()
-                                .enumerate()
-                                .filter_map(|(i, f)| {
-                                    let c = self.colors.get(f)?;
-                                    Some(crate::FacePaint { face: i, color: *c, opacity: self.opacity.get(f).copied().unwrap_or(1.0) })
-                                })
-                                .collect();
-                            let paint = crate::Paint { opacity: self.opacity.get(&item).copied().unwrap_or(1.0), faces };
-                            let body = body.with_color(color).with_paint(Some(paint));
-                            let identities = face_origin
-                                .iter()
-                                .map(|face| Some(crate::FaceSource::Imported { item, face: *face, payload_sha256: None, producer: None }))
-                                .collect();
-                            let body = body.with_face_sources(Some(std::sync::Arc::new(identities)));
-                            self.bodies.push(ImportedBody {
-                                name,
-                                body,
-                                color,
-                                path: path.to_vec(),
-                                closed,
-                                file_faces,
-                                source_item: item,
-                                face_origin,
-                            });
+                    // Only batch consecutive solids: mapped items must retain traversal and
+                    // first-use unit/cache order. Bound temporary geometry independently of file size.
+                    let mut batch = vec![item];
+                    let capacity = MAX_BODIES.saturating_sub(self.bodies.len()).min(64);
+                    while batch.len() < capacity
+                        && items.peek().is_some_and(|id| {
+                            self.ex.get(*id).is_some_and(|e| {
+                                matches!(e.name(), "MANIFOLD_SOLID_BREP" | "BREP_WITH_VOIDS" | "FACETED_BREP" | "SHELL_BASED_SURFACE_MODEL")
+                            })
+                        })
+                    {
+                        if let Some(next) = items.next() {
+                            batch.push(next);
                         }
-                        Err(err) => {
-                            let label = self.label(item);
-                            self.warn(format!("{label}: not imported: {err}"));
+                    }
+                    let mut sources = Vec::new();
+                    let mut solids = Vec::new();
+                    for item in batch {
+                        self.used_items.insert(item);
+                        if !self.node_items.insert(item) {
+                            continue;
+                        }
+                        if self.bodies.len() >= MAX_BODIES {
+                            self.warn(format!("more than {MAX_BODIES} bodies: the rest are left out"));
+                            return;
+                        }
+                        let Some((solid, closed, file_faces, face_origin)) = self.item_solid(item, u) else { continue };
+                        sources.push((item, closed, file_faces, face_origin));
+                        solids.push(parallel::Job { solid, check_mesh: !self.unmeshed_checked.contains(&item) });
+                    }
+                    let prepared = parallel::bodies(&solids, m, self.workers);
+                    for ((item, closed, file_faces, face_origin), body) in sources.into_iter().zip(prepared) {
+                        let Some(e) = self.ex.get(item) else { continue };
+                        match body {
+                            Ok((body, missing)) => {
+                                let own = e.params().first().and_then(Param::as_str).unwrap_or("").trim().to_string();
+                                let name = if own.is_empty() { product.to_string() } else { own };
+                                // Faces the mesher gives up on (or that the budget cut short) are reported.
+                                if self.unmeshed_checked.insert(item) && missing > 0 {
+                                    self.warn(format!("solid '{name}': {missing} face(s) could not be meshed and are not shown"));
+                                }
+                                out.push(self.bodies.len());
+                                let color = self.colors.get(&item).copied();
+                                // See-through bodies and faces with colours of their own.
+                                let faces = face_origin
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(i, f)| {
+                                        let c = self.colors.get(f)?;
+                                        Some(crate::FacePaint { face: i, color: *c, opacity: self.opacity.get(f).copied().unwrap_or(1.0) })
+                                    })
+                                    .collect();
+                                let paint = crate::Paint { opacity: self.opacity.get(&item).copied().unwrap_or(1.0), faces };
+                                let body = body.with_color(color).with_paint(Some(paint));
+                                let identities = face_origin
+                                    .iter()
+                                    .map(|face| Some(crate::FaceSource::Imported { item, face: *face, payload_sha256: None, producer: None }))
+                                    .collect();
+                                let body = body.with_face_sources(Some(std::sync::Arc::new(identities)));
+                                self.bodies.push(ImportedBody {
+                                    name,
+                                    body,
+                                    color,
+                                    path: path.to_vec(),
+                                    closed,
+                                    file_faces,
+                                    source_item: item,
+                                    face_origin,
+                                });
+                            }
+                            Err(err) => {
+                                let label = self.label(item);
+                                self.warn(format!("{label}: not imported: {err}"));
+                            }
                         }
                     }
                 }
@@ -826,25 +864,12 @@ pub fn step_import_shared(text: &str) -> Result<std::sync::Arc<StepImport>> {
 
 /// Read a STEP file: its solids (as bodies, placed by the assembly structure) and the tree.
 pub fn step_import(text: &str) -> Result<StepImport> {
+    step_import_with_workers(text, parallel::workers())
+}
+
+fn step_import_with_workers(text: &str, workers: usize) -> Result<StepImport> {
     let ex = p21::parse(text).map_err(KernelError::Invalid)?;
-    let mut rd = Reader {
-        ex: &ex,
-        units: HashMap::new(),
-        warnings: BTreeMap::new(),
-        reps: HashMap::new(),
-        rep_links: HashMap::new(),
-        pd_reps: HashMap::new(),
-        children: HashMap::new(),
-        placements: HashMap::new(),
-        colors: HashMap::new(),
-        opacity: HashMap::new(),
-        solids: HashMap::new(),
-        used_items: HashSet::new(),
-        node_items: HashSet::new(),
-        visits: 0,
-        unmeshed_checked: HashSet::new(),
-        bodies: Vec::new(),
-    };
+    let mut rd = Reader::new(&ex, workers);
     rd.index();
     // Roots: product definitions that are nobody's component.
     let child_pds: HashSet<u64> =

@@ -3,10 +3,12 @@
 //! directly from the body's faces (the band's walls continue the walls below, which a boolean
 //! union can't join: their faces would coincide).
 
-use solvecraft_geom::Vec3;
+use solidcraft_geom::Vec3;
 use truck_modeling::{self as mt, builder};
 
 use crate::body::{Body, Solid, from_p3, p3, v3};
+use crate::history::{Change, FaceOrigin, FaceProv};
+use crate::record::Operand;
 use crate::{KernelError, Result, guard};
 
 fn fail(m: &str) -> KernelError {
@@ -175,6 +177,15 @@ pub fn raise_band(body: &Body, at: Vec3, width: f64, height: f64, outside: bool)
                 Some(m) => builder::circle_arc(a, b, p3(m)),
             });
         }
+        // The loop's edges and the band's edge beside each, by the loop edge's index in the body.
+        let operand = Operand::new(body);
+        let mut wall_edge: std::collections::HashMap<mt::EdgeID, usize> = std::collections::HashMap::new();
+        for (e, ce) in along.edge_iter().zip(&cedges) {
+            if let Some(i) = operand.edges.get(&e.id()) {
+                wall_edge.insert(e.id(), *i);
+                wall_edge.insert(ce.id(), *i);
+            }
+        }
         let c: mt::Wire = cedges.into();
         // The rest of the face: its other loop, and the band's edge as a loop of its own.
         // (The band's edge runs the face's way round: a hole when the band follows the inner
@@ -190,6 +201,19 @@ pub fn raise_band(body: &Body, at: Vec3, width: f64, height: f64, outside: bool)
         let flipped = |sh: &mt::Shell, yes: bool| -> mt::Shell {
             if yes { sh.face_iter().map(|x| x.inverse()).collect::<Vec<_>>().into() } else { sh.clone() }
         };
+        // History (one operand, the body), face by face as gathered below: the other faces
+        // kept, the face trimmed to what the band leaves, each wall made along the loop
+        // edge it rises from (the band's inner wall along the edge it runs beside), and the
+        // band's top an offset of the face. (Flipping a face keeps its edges.)
+        let history: Option<Vec<FaceProv>> = crate::record::kept_except(faces.len(), fi)
+            .map(Some)
+            .chain([Some(crate::record::from_face(0, fi, Change::Modified))])
+            .chain(wall_along.face_iter().chain(wall_c.face_iter()).map(|w| {
+                let edge = w.absolute_boundaries().iter().flatten().find_map(|e| wall_edge.get(&e.id()))?;
+                Some(crate::record::generated(vec![FaceOrigin::Edge { operand: 0, edge: *edge }]))
+            }))
+            .chain([Some(crate::record::generated(vec![FaceOrigin::Offset { operand: 0, face: fi }]))])
+            .collect();
         let mut last = String::new();
         for flip in 0..8u32 {
             let (wa, wc) = (flipped(&wall_along, flip & 1 == 1), flipped(&wall_c, flip & 2 == 2));
@@ -211,7 +235,7 @@ pub fn raise_band(body: &Body, at: Vec3, width: f64, height: f64, outside: bool)
                 Ok(s) => {
                     let b = Body::new(s)?;
                     if b.validity().is_empty() {
-                        return Ok(b);
+                        return crate::record::attach(b, std::slice::from_ref(&operand), history.clone(), Default::default());
                     }
                     last = b.validity().join("; ");
                 }

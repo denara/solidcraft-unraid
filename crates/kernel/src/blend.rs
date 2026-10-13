@@ -9,10 +9,12 @@
 
 use std::collections::HashMap;
 
-use solvecraft_geom::Vec3;
+use solidcraft_geom::Vec3;
 use truck_modeling::{self as mt, builder};
 
 use crate::body::{Body, Solid, from_p3, p3, v3};
+use crate::history::{FaceOrigin, History};
+use crate::record::{self, Rebuild};
 use crate::{KernelError, Result, guard};
 
 #[derive(Clone, Copy, PartialEq)]
@@ -23,6 +25,11 @@ enum Shape {
 
 pub(crate) fn unsupported(msg: &str) -> KernelError {
     KernelError::Failed(format!("not supported yet: {msg}"))
+}
+
+/// A blend too large for the faces around it.
+pub(crate) fn too_large(msg: &str) -> KernelError {
+    KernelError::TooLarge(msg.into())
 }
 
 pub(crate) fn vtx(v: &mt::Vertex) -> Vec3 {
@@ -43,10 +50,15 @@ pub(crate) fn plane_normal(f: &mt::Face) -> Option<Vec3> {
 /// Replace edges in a face's oriented boundary (by id, keeping orientation), and insert extra
 /// edges where consecutive edges no longer connect.
 pub(crate) fn rebuild_face(f: &mt::Face, subst: &HashMap<mt::EdgeID, mt::Edge>, connectors: &[mt::Edge]) -> Result<mt::Face> {
+    rebuild_face_dropping(f, subst, &[], connectors)
+}
+
+/// [`rebuild_face`], also leaving out the `dropped` edges (consumed by a blend).
+fn rebuild_face_dropping(f: &mt::Face, subst: &HashMap<mt::EdgeID, mt::Edge>, dropped: &[mt::EdgeID], connectors: &[mt::Edge]) -> Result<mt::Face> {
     let mut wires = Vec::new();
     for w in f.absolute_boundaries() {
         let mut edges: Vec<mt::Edge> = Vec::new();
-        for e in w.edge_iter() {
+        for e in w.edge_iter().filter(|e| !dropped.contains(&e.id())) {
             let ne = match subst.get(&e.id()) {
                 Some(n) => {
                     // `n` was built in the orientation of the stored edge; match this use.
@@ -84,7 +96,8 @@ pub(crate) fn rebuild_face(f: &mt::Face, subst: &HashMap<mt::EdgeID, mt::Edge>, 
     crate::heal::absolute_face(f, wires).ok_or_else(|| KernelError::Failed("blend: a face could not be rebuilt".into()))
 }
 
-fn blend_one(solid: &Solid, edge: &mt::Edge, size: f64, r: f64, shape: Shape) -> Result<Solid> {
+/// Blend one edge of `solid`, with what was built from it (see [`Rebuild`]).
+fn blend_one(solid: &Solid, edge: &mt::Edge, size: f64, r: f64, shape: Shape) -> Result<(Solid, Rebuild)> {
     if !matches!(edge.curve(), mt::Curve::Line(_)) {
         return Err(unsupported("only straight edges can be blended"));
     }
@@ -198,116 +211,230 @@ fn blend_geometry(
     size: f64,
     r: f64,
     shape: Shape,
-) -> Result<Solid> {
+) -> Result<(Solid, Rebuild)> {
     let s = setback(r, phi, shape);
     let tol = (size * 1e-7).max(1e-9);
-    // End faces and the side edges at each end.
+    // The arc centre is r from both faces (inside the material for a convex edge, outside for a
+    // concave one), in the cross-section through `p`.
+    let centre = |p: Vec3| p + t1 * s + n1 * (r * side);
+    // Each end of the blend lies in one more face (the end face, square to the edge or at an
+    // angle) or, for a fillet, in two that meet at the edge's end (Vida, Martin and Várady 1994:
+    // trimlines joined across existing faces): the blend then crosses the edge between them,
+    // which is cut back to the crossing. The rails run parallel to the edge, set back by s in
+    // their side faces, and end in the end plane they reach (`ga` from f1, `gb` from f2). A side
+    // edge that the setback uses up exactly is consumed: the rail ends at its far vertex (`ca`,
+    // `cb`; one end face only).
     struct End {
         v: mt::Vertex,
-        g: usize,
+        g: Vec<usize>,
         e1: mt::Edge,
         e2: mt::Edge,
+        /// The edge between two end faces, and where the blend crosses it.
+        e3: Option<(mt::Edge, Vec3)>,
         a: Vec3,
         b: Vec3,
+        /// The end's section of the blend, from A to B (across both faces when two).
+        planes: Vec<(Vec3, Vec3)>,
+        ca: Option<mt::Vertex>,
+        cb: Option<mt::Vertex>,
     }
     let mut ends: Vec<End> = Vec::new();
     for (v, p) in [(&v0, p0), (&v1, p1)] {
         let at_v: Vec<usize> = (0..faces.len()).filter(|i| faces.get(*i).is_some_and(|f| f.vertex_iter().any(|x| &x == v))).collect();
         let others: Vec<usize> = at_v.iter().copied().filter(|i| *i != i1 && *i != i2).collect();
-        let [g] = others[..] else { return Err(unsupported("each end of the edge must touch exactly one more face")) };
-        let gf = faces.get(g).ok_or_else(|| KernelError::Failed("face".into()))?;
-        let ng = plane_normal(gf).ok_or_else(|| unsupported("the faces at the edge ends must be planar"))?;
-        if shape == Shape::Round && ng.dot(d).abs() < 1.0 - 1e-9 {
-            return Err(unsupported("the faces at the edge ends must be perpendicular to the edge"));
-        }
-        if ng.dot(d).abs() < 1e-9 {
-            return Err(unsupported("an end face parallel to the edge"));
-        }
-        // Each rail is parallel to the original edge and set back by s in its side
-        // face. Slide its endpoint along d until it lies on the actual end plane.
-        let endpoint = |t: Vec3| {
-            let q = p + t * s;
-            if shape == Shape::Flat { q - d * (ng.dot(t) * s / ng.dot(d)) } else { q }
+        // The edge at v that face `fi` shares with face `g`, other than the blended edge.
+        let shared = |fi: usize, g: usize| -> Option<mt::Edge> {
+            let (f, gf) = (faces.get(fi)?, faces.get(g)?);
+            f.edge_iter().find(|e| e.id() != edge.id() && (e.front() == v || e.back() == v) && gf.edge_iter().any(|x| x.id() == e.id()))
         };
-        let (a, b) = (endpoint(t1), endpoint(t2));
-        // Edges at v shared by g with f1 and with f2.
-        let shared = |fi: usize| -> Result<mt::Edge> {
-            let f = faces.get(fi).ok_or_else(|| KernelError::Failed("face".into()))?;
-            f.edge_iter()
-                .find(|e| e.id() != edge.id() && (e.front() == v || e.back() == v) && gf.edge_iter().any(|x| x.id() == e.id()))
-                .ok_or_else(|| unsupported("unexpected corner topology"))
+        let (ga, gb) = match others[..] {
+            [g] => (g, g),
+            [x, y] if shape == Shape::Round && shared(i1, x).is_some() && shared(i2, y).is_some() => (x, y),
+            [x, y] if shape == Shape::Round && shared(i1, y).is_some() && shared(i2, x).is_some() => (y, x),
+            _ => return Err(unsupported("each end of the edge must touch exactly one more face")),
         };
-        let (e1, e2) = (shared(i1)?, shared(i2)?);
-        for (e, q, t, fi) in [(&e1, a, t1, i1), (&e2, b, t2, i2)] {
+        let normal = |g: usize| -> Result<Vec3> {
+            let n = faces.get(g).and_then(|f| plane_normal(f)).ok_or_else(|| unsupported("the faces at the edge ends must be planar"))?;
+            if n.dot(d).abs() < 1e-9 {
+                return Err(unsupported("an end face parallel to the edge"));
+            }
+            Ok(n)
+        };
+        let (na, nb) = (normal(ga)?, normal(gb)?);
+        // Slide a point of the cross-section through `p` along d onto the end plane through p.
+        let slide = |x: Vec3, n: Vec3| x - d * (n.dot(x - p) / n.dot(d));
+        let (a, b) = (slide(p + t1 * s, na), slide(p + t2 * s, nb));
+        let (e1, e2) = (
+            shared(i1, ga).ok_or_else(|| unsupported("unexpected corner topology"))?,
+            shared(i2, gb).ok_or_else(|| unsupported("unexpected corner topology"))?,
+        );
+        let mut consumed: [Option<mt::Vertex>; 2] = [None, None];
+        for (k, (e, q, fi)) in [(&e1, a, i1), (&e2, b, i2)].into_iter().enumerate() {
             if !matches!(e.curve(), mt::Curve::Line(_)) {
                 return Err(unsupported("the edges at the corners must be straight"));
             }
-            let other = if e.front() == v { vtx(e.back()) } else { vtx(e.front()) };
-            let delta = other - p;
-            if shape == Shape::Round {
-                // Fillets retain the square-end check: the original corner edge
-                // must run in the setback direction and have enough length left.
-                let along = delta.dot(t);
-                if (delta - t * along).len() > tol * 100.0 + 1e-7 || along <= s + tol {
-                    return Err(unsupported("the blend is larger than the neighbouring faces"));
-                }
-                continue;
-            }
+            let far = if e.front() == v { e.back().clone() } else { e.front().clone() };
+            let delta = vtx(&far) - p;
             let len = delta.len();
             let dir = delta.normalized().ok_or_else(|| unsupported("zero-length corner edge"))?;
             let along = (q - p).dot(dir);
-            // An inner rim extends the neighbouring rim edge away from its other
-            // vertex. This is valid only within the trimmed side face.
-            if (q - p - dir * along).len() > tol * 100.0 + 1e-7
-                || along >= len - tol
-                || (along < 0.0 && !faces.get(fi).is_some_and(|f| extension_fits(f, p, q, tol)))
-            {
+            if (q - p - dir * along).len() > tol * 100.0 + 1e-7 {
                 return Err(unsupported("the blend is larger than the neighbouring faces"));
             }
+            // A fillet's setback that uses up the side edge exactly consumes it.
+            if shape == Shape::Round && ga == gb && (along - len).abs() <= tol {
+                if let Some(slot) = consumed.get_mut(k) {
+                    *slot = Some(far);
+                }
+                continue;
+            }
+            // A rail ending before the old corner extends the neighbouring rim edge away from its
+            // other vertex: valid only within the trimmed side face.
+            if along >= len - tol || (along < 0.0 && !faces.get(fi).is_some_and(|f| extension_fits(f, p, q, tol))) {
+                return Err(too_large("the blend is larger than the neighbouring faces"));
+            }
         }
-        ends.push(End { v: v.clone(), g, e1, e2, a, b });
+        // Across two end faces: where the blend's cylinder crosses the edge between them, on the
+        // blend's side of the axis (between its two rails).
+        let e3 = if ga == gb {
+            None
+        } else {
+            let (Some(fa), Some(fb)) = (faces.get(ga), faces.get(gb)) else { return Err(KernelError::Failed("face".into())) };
+            let e3 = fa
+                .edge_iter()
+                .find(|e| (e.front() == v || e.back() == v) && fb.edge_iter().any(|x| x.id() == e.id()))
+                .ok_or_else(|| unsupported("unexpected corner topology"))?;
+            if !matches!(e3.curve(), mt::Curve::Line(_)) {
+                return Err(unsupported("the edges at the corners must be straight"));
+            }
+            let far = if e3.front() == v { vtx(e3.back()) } else { vtx(e3.front()) };
+            let (len3, u) = (far.dist(p), (far - p).normalized().ok_or_else(|| unsupported("zero-length corner edge"))?);
+            let c0 = centre(p);
+            let perp = |x: Vec3| x - d * x.dot(d);
+            let (w, up) = (perp(p - c0), perp(u));
+            // |w + λ up|² = r²
+            let (qa, qb, qc) = (up.len2(), 2.0 * w.dot(up), w.len2() - r * r);
+            let disc = qb * qb - 4.0 * qa * qc;
+            if qa < 1e-18 || disc < 0.0 {
+                return Err(unsupported("the blend does not cross the edge between the end faces"));
+            }
+            let (ra, rb) = (perp(p + t1 * s - c0), perp(p + t2 * s - c0));
+            let angle = |x: Vec3, y: Vec3| (x.dot(y) / (x.len() * y.len()).max(1e-300)).clamp(-1.0, 1.0).acos();
+            let between = |x: Vec3| (angle(ra, x) + angle(x, rb) - angle(ra, rb)).abs() < 1e-6;
+            let root = [(-qb - disc.sqrt()) / (2.0 * qa), (-qb + disc.sqrt()) / (2.0 * qa)]
+                .into_iter()
+                .filter(|l| *l > tol && *l < len3 - tol)
+                .find(|l| between(w + up * *l))
+                .ok_or_else(|| unsupported("the blend does not cross the edge between the end faces"))?;
+            Some((e3.clone(), p + u * root))
+        };
+        let planes = if ga == gb { vec![(p, na)] } else { vec![(p, na), (p, nb)] };
+        let [ca, cb] = consumed;
+        ends.push(End { v: v.clone(), g: if ga == gb { vec![ga] } else { vec![ga, gb] }, e1, e2, e3, a, b, planes, ca, cb });
     }
     let [end0, end1] = &ends[..] else { return Err(KernelError::Failed("ends".into())) };
-    if end0.g == end1.g {
+    if end0.g.iter().any(|g| end1.g.contains(g)) {
         return Err(unsupported("both ends touch the same face"));
     }
     if (end1.a - end0.a).dot(d) <= tol || (end1.b - end0.b).dot(d) <= tol {
-        return Err(unsupported("the blend is larger than the neighbouring faces"));
+        return Err(too_large("the blend is larger than the neighbouring faces"));
     }
-    let a0 = builder::vertex(p3(end0.a));
-    let b0 = builder::vertex(p3(end0.b));
-    let a1 = builder::vertex(p3(end1.a));
-    let b1 = builder::vertex(p3(end1.b));
-    // Corner curves on the end faces (A → B) and the blend surface. The arc centre is r from
-    // both faces (inside the material for a convex edge, outside for a concave one); the arc's
-    // middle is the point nearest the old edge.
-    let centre = |p: Vec3| p + t1 * s + n1 * (r * side);
-    let arc_mid = |p: Vec3| {
+    // A side face whose corner edges are consumed at both ends is used up: its remaining edge,
+    // parallel to the old edge at the setback, becomes the rail and the face is removed.
+    let used_up = |fi: usize, c0: &Option<mt::Vertex>, c1: &Option<mt::Vertex>| -> Result<Option<mt::Edge>> {
+        let (Some(x0), Some(x1)) = (c0, c1) else {
+            return match (c0, c1) {
+                (None, None) => Ok(None),
+                _ => Err(unsupported("the blend uses up a neighbouring face at one end only")),
+            };
+        };
+        let f = faces.get(fi).ok_or_else(|| KernelError::Failed("face".into()))?;
+        if f.boundaries().len() != 1 || f.edge_iter().count() != 4 {
+            return Err(unsupported("the blend uses up a neighbouring face with more edges"));
+        }
+        let rail = f
+            .edge_iter()
+            .find(|e| matches!(e.curve(), mt::Curve::Line(_)) && ((e.front() == x0 && e.back() == x1) || (e.front() == x1 && e.back() == x0)))
+            .ok_or_else(|| unsupported("the blend uses up a neighbouring face with more edges"))?;
+        Ok(Some(if rail.front() == x0 { rail.clone() } else { rail.inverse() }))
+    };
+    let rail_a = used_up(i1, &end0.ca, &end1.ca)?;
+    let rail_b = used_up(i2, &end0.cb, &end1.cb)?;
+    let vertex = |c: &Option<mt::Vertex>, p: Vec3| c.clone().unwrap_or_else(|| builder::vertex(p3(p)));
+    // Corner curves on the end faces (A → B): the blend's cross-section through the end vertex,
+    // slid along the edge onto each end plane (an ellipse arc; the circle itself on a square
+    // end face).
+    let section = |p: Vec3, va: &mt::Vertex, vb: &mt::Vertex, from: Vec3, to: Vec3, plane: (Vec3, Vec3)| -> Result<mt::Edge> {
+        if shape == Shape::Flat {
+            return Ok(builder::line(va, vb));
+        }
         let c = centre(p);
-        c + (p - c).normalized().unwrap_or(-n1) * r
-    };
-    let corner = |a: &mt::Vertex, b: &mt::Vertex, p: Vec3| -> mt::Edge {
-        match shape {
-            Shape::Round => builder::circle_arc(a, b, p3(arc_mid(p))),
-            Shape::Flat => builder::line(a, b),
+        let mid = c + ((from - c) + (to - c)).normalized().unwrap_or(-n1) * r;
+        let (o, n) = plane;
+        if n.dot(d).abs() >= 1.0 - 1e-12 {
+            return Ok(builder::circle_arc(va, vb, p3(mid)));
         }
+        let arc = builder::circle_arc(&builder::vertex(p3(from)), &builder::vertex(p3(to)), p3(mid));
+        let den = d.dot(n);
+        // x ↦ x − d ((x − o)·n) / (d·n), column-major.
+        let col = |j: usize| {
+            let ej = [Vec3::X, Vec3::Y, Vec3::Z][j];
+            ej - d * (ej.dot(n) / den)
+        };
+        let (c0, c1, c2) = (col(0), col(1), col(2));
+        let tr = d * (o.dot(n) / den);
+        let mat = mt::Matrix4::new(c0.x, c0.y, c0.z, 0.0, c1.x, c1.y, c1.z, 0.0, c2.x, c2.y, c2.z, 0.0, tr.x, tr.y, tr.z, 1.0);
+        let mut curve = arc.curve();
+        mt::Transformed::transform_by(&mut curve, mat);
+        Ok(mt::Edge::new(va, vb, curve))
     };
-    let c0 = corner(&a0, &b0, p0);
-    let c1 = corner(&a1, &b1, p1);
-    let la = builder::line(&a0, &a1);
-    let lb = builder::line(&b0, &b1);
+    let mut corners: Vec<(mt::Vertex, mt::Vertex, Vec<mt::Edge>, Option<mt::Vertex>)> = Vec::new();
+    for (end, p) in [(end0, p0), (end1, p1)] {
+        let (va, vb) = (vertex(&end.ca, end.a), vertex(&end.cb, end.b));
+        let (sa, sb) = (p + t1 * s, p + t2 * s);
+        let (chain, vq) = match (&end.e3, &end.planes[..]) {
+            (None, [plane]) => (vec![section(p, &va, &vb, sa, sb, *plane)?], None),
+            (Some((_, q)), [pa, pb]) => {
+                let vq = builder::vertex(p3(*q));
+                let sq = *q - d * (*q - p).dot(d);
+                (vec![section(p, &va, &vq, sa, sq, *pa)?, section(p, &vq, &vb, sq, sb, *pb)?], Some(vq))
+            }
+            _ => return Err(KernelError::Failed("blend end".into())),
+        };
+        corners.push((va, vb, chain, vq));
+    }
+    let [(a0, b0, c0, q0), (a1, b1, c1, q1)] = &corners[..] else { return Err(KernelError::Failed("ends".into())) };
+    let la = rail_a.clone().unwrap_or_else(|| builder::line(a0, a1));
+    let lb = rail_b.clone().unwrap_or_else(|| builder::line(b0, b1));
 
-    // Substitutions: side edges at the ends now stop at A/B; the blended edge moves to A or B.
+    // Substitutions: side edges at the ends now stop at A/B (consumed ones are dropped), an edge
+    // between two end faces stops where the blend crosses it; the blended edge moves to A or B.
     let mut subst: HashMap<mt::EdgeID, mt::Edge> = HashMap::new();
-    for (end, a, b) in [(end0, &a0, &b0), (end1, &a1, &b1)] {
-        for (e, nv) in [(&end.e1, a), (&end.e2, b)] {
-            let (f, bk) = (e.absolute_front(), e.absolute_back());
-            let ne = if f == &end.v { builder::line(nv, bk) } else { builder::line(f, nv) };
-            subst.insert(e.id(), ne);
+    let mut dropped: Vec<mt::EdgeID> = Vec::new();
+    let shorten = |e: &mt::Edge, v: &mt::Vertex, nv: &mt::Vertex| {
+        let (f, bk) = (e.absolute_front(), e.absolute_back());
+        if f == v { builder::line(nv, bk) } else { builder::line(f, nv) }
+    };
+    for (end, a, b, q) in [(end0, a0, b0, q0), (end1, a1, b1, q1)] {
+        for (e, nv, used) in [(&end.e1, a, &end.ca), (&end.e2, b, &end.cb)] {
+            if used.is_some() {
+                dropped.push(e.id());
+                continue;
+            }
+            subst.insert(e.id(), shorten(e, &end.v, nv));
+        }
+        if let (Some((e3, _)), Some(q)) = (&end.e3, q) {
+            subst.insert(e3.id(), shorten(e3, &end.v, q));
         }
     }
+    // The side edges at the ends are pieces of themselves; the rails and corner curves are new.
+    let mut rec = Rebuild::default();
+    rec.pieces(&subst);
     let mut new_faces: Vec<mt::Face> = Vec::with_capacity(faces.len() + 1);
     for (i, f) in faces.iter().enumerate() {
+        if (i == i1 && rail_a.is_some()) || (i == i2 && rail_b.is_some()) {
+            continue;
+        }
         let nf = if i == i1 {
             let mut m = subst.clone();
             m.insert(edge.id(), la.clone());
@@ -316,30 +443,53 @@ fn blend_geometry(
             let mut m = subst.clone();
             m.insert(edge.id(), lb.clone());
             rebuild_face(f, &m, &[])?
-        } else if i == end0.g {
-            rebuild_face(f, &subst, std::slice::from_ref(&c0))?
-        } else if i == end1.g {
-            rebuild_face(f, &subst, std::slice::from_ref(&c1))?
+        } else if end0.g.contains(&i) {
+            rebuild_face_dropping(f, &subst, &dropped, c0)?
+        } else if end1.g.contains(&i) {
+            rebuild_face_dropping(f, &subst, &dropped, c1)?
+        } else if f.edge_iter().any(|e| subst.contains_key(&e.id())) {
+            rebuild_face(f, &subst, &[])?
         } else {
             (*f).clone()
         };
+        rec.face(&nf, f);
         new_faces.push(nf);
     }
     // The blend face uses each new edge opposite to its neighbour.
     let f1_forward = faces.get(i1).is_some_and(|f| f.boundaries().iter().any(|w| w.edge_iter().any(|e| e.id() == edge.id() && e.front() == &v0)));
-    let wire: mt::Wire = if f1_forward {
-        vec![c0.clone(), lb.clone(), c1.inverse(), la.inverse()].into()
+    let reversed = |chain: &[mt::Edge]| chain.iter().rev().map(|e| e.inverse()).collect::<Vec<_>>();
+    let mut edges_out: Vec<mt::Edge> = Vec::new();
+    if f1_forward {
+        edges_out.extend(c0.iter().cloned());
+        edges_out.push(lb.clone());
+        edges_out.extend(reversed(c1));
+        edges_out.push(la.inverse());
     } else {
-        vec![la.clone(), c1.clone(), lb.inverse(), c0.inverse()].into()
-    };
+        edges_out.push(la.clone());
+        edges_out.extend(c1.iter().cloned());
+        edges_out.push(lb.inverse());
+        edges_out.extend(reversed(c0));
+    }
+    let wire: mt::Wire = edges_out.into();
     let blend_face = match shape {
         Shape::Flat => builder::try_attach_plane(&[wire]).map_err(|e| KernelError::Failed(format!("chamfer face: {e}")))?,
         Shape::Round => {
-            let swept: mt::Face = builder::tsweep(&c0, v3(p1 - p0));
+            // The cylinder, from a cross-section before the first end to one past the second, so
+            // it holds the end sections wherever the end planes slide them.
+            let reach = ends
+                .iter()
+                .flat_map(|e| e.planes.iter().map(|(_, n)| (s + r) * (1.0 - n.dot(d).powi(2)).max(0.0).sqrt() / n.dot(d).abs()))
+                .fold(0.0, f64::max)
+                + r;
+            let start = p0 - d * reach;
+            let (sa, sb) = (start + t1 * s, start + t2 * s);
+            let c = centre(start);
+            let mid = c + ((sa - c) + (sb - c)).normalized().unwrap_or(-n1) * r;
+            let base = builder::circle_arc(&builder::vertex(p3(sa)), &builder::vertex(p3(sb)), p3(mid));
+            let swept: mt::Face = builder::tsweep(&base, v3(p1 - p0 + d * (2.0 * reach)));
             let mut surf = swept.oriented_surface();
             // Outward normal at the arc middle: away from the centre on a convex edge (the
             // centre is in the material), toward it on a concave one.
-            let (c, mid) = (centre(p0), arc_mid(p0));
             let outward = (mid - c) * (-side);
             use mt::{ParametricSurface3D, SearchParameter};
             if let Some((u, v)) = surf.search_parameter(p3(mid), None, 100) {
@@ -351,13 +501,15 @@ fn blend_geometry(
             mt::Face::try_new(vec![wire], surf).map_err(|e| KernelError::Failed(format!("fillet face: {e}")))?
         }
     };
+    rec.blend(&blend_face, [edge.id()]);
     new_faces.push(blend_face);
     let mut shells = solid.boundaries().clone();
     let new_shell: mt::Shell = new_faces.into();
     if let Some(sh) = shells.get_mut(si) {
         *sh = new_shell;
     }
-    Solid::try_new(shells).map_err(|e| KernelError::Failed(format!("blend produced an invalid solid: {e}")))
+    let solid = Solid::try_new(shells).map_err(|e| KernelError::Failed(format!("blend produced an invalid solid: {e}")))?;
+    Ok((solid, rec))
 }
 
 fn blend(body: &Body, edges: &[Vec3], r: f64, shape: Shape, what: &str) -> Result<Body> {
@@ -370,8 +522,10 @@ fn blend(body: &Body, edges: &[Vec3], r: f64, shape: Shape, what: &str) -> Resul
     if edges.len() > 1000 {
         return Err(KernelError::Invalid("too many edges".into()));
     }
+    // Each step's result carries its history over `[body]`.
+    let counts = record::counts(&[body]);
     // Coplanar neighbours as one face (as after a join), so corners look as they should.
-    let mut cur = Body::new(crate::heal::heal_keep(body.deep_copy(), body.size(), body.split_keep()))?;
+    let mut cur = crate::boolean_record::healed(body)?;
     // Every edge of a convex planar body: rounded as a whole (sphere corners).
     if shape == Shape::Round && edges.len() >= 6 {
         let solid = cur.deep_copy();
@@ -388,7 +542,7 @@ fn blend(body: &Body, edges: &[Vec3], r: f64, shape: Shape, what: &str) -> Resul
             if hit.len() == all.len()
                 && let Ok(b) = crate::polyhedron::round_all_edges(&cur, r)
             {
-                return Ok(b);
+                return Ok(record::after(b, &cur, &counts));
             }
         }
     }
@@ -401,8 +555,8 @@ fn blend(body: &Body, edges: &[Vec3], r: f64, shape: Shape, what: &str) -> Resul
     {
         let _ = groups;
         let loop_pts: Vec<Vec3> = edges.iter().filter(|p| !rest.iter().any(|q| q.dist(**p) < 1e-12)).copied().collect();
-        cur = blend(&cur, &rest, r, shape, what)?;
-        return blend(&cur, &loop_pts, r, shape, what);
+        cur = record::after(blend(&cur, &rest, r, shape, what)?, &cur, &counts);
+        return Ok(record::after(blend(&cur, &loop_pts, r, shape, what)?, &cur, &counts));
     }
     if let Some(groups) = loop_groups(&cur, edges)? {
         for g in groups {
@@ -410,7 +564,10 @@ fn blend(body: &Body, edges: &[Vec3], r: f64, shape: Shape, what: &str) -> Resul
             let solid = cur.deep_copy();
             let ids = edge_ids(&cur, &solid, &g)?;
             match crate::loopblend::loop_blend(&solid, &ids, size, r, shape == Shape::Round) {
-                Some(res) => cur = Body::new(guard(what, || res)?)?,
+                Some(res) => {
+                    let (made, rec) = guard(what, || res)?;
+                    cur = record::after(record::rebuilt(made, &[&solid], &rec)?, &cur, &counts);
+                }
                 None => return Err(unsupported("the edges are not a whole loop of a planar face")),
             }
         }
@@ -429,10 +586,10 @@ fn blend(body: &Body, edges: &[Vec3], r: f64, shape: Shape, what: &str) -> Resul
         let solid = cur.deep_copy();
         if todo.len() >= 2
             && let Some((ids, covered)) = run_on_loop(&cur, &solid, &todo)?
-            && let Some(Ok(res)) = crate::loopblend::loop_blend(&solid, &ids, size, r, shape == Shape::Round)
-            && let Ok(b) = guard(what, || Ok(res)).and_then(Body::new)
+            && let Some(Ok((res, rec))) = crate::loopblend::loop_blend(&solid, &ids, size, r, shape == Shape::Round)
+            && let Ok(b) = guard(what, || Ok(res)).and_then(|res| record::rebuilt(res, &[&solid], &rec))
         {
-            cur = b;
+            cur = record::after(b, &cur, &counts);
             todo.retain(|p| !covered.iter().any(|q| q.dist(*p) < 1e-12));
             continue;
         }
@@ -464,18 +621,23 @@ fn blend(body: &Body, edges: &[Vec3], r: f64, shape: Shape, what: &str) -> Resul
                             .collect();
                         guard(what, || crate::curveblend::curve_blend(&solid, &ids, size, r, shape == Shape::Round))
                             .map(|o| (o, if on_chain.is_empty() { vec![j] } else { on_chain }))
-                            .map_err(|e2| KernelError::Failed(format!("{e2} ({e})")))
+                            .map_err(|e2| match e2 {
+                                KernelError::TooLarge(m) => KernelError::TooLarge(format!("{m} ({e})")),
+                                e2 => KernelError::Failed(format!("{e2} ({e})")),
+                            })
                     }
                     None => Err(e),
                 },
             };
-            match attempt.and_then(|(o, js)| Body::new(o).map(|b| (b, js))) {
+            match attempt.and_then(|((o, rec), js)| record::rebuilt(o, &[&solid], &rec).map(|b| (b, js))) {
                 Ok(x) => {
                     done = Some(x);
                     break;
                 }
+                // Reported: the first refusal, unless a later one is a size a smaller radius may
+                // fit (the others may be refused only until that edge is blended).
                 Err(e) => {
-                    if first_err.is_none() {
+                    if first_err.is_none() || (matches!(e, KernelError::TooLarge(_)) && !matches!(first_err, Some(KernelError::TooLarge(_)))) {
                         first_err = Some(e);
                     }
                 }
@@ -483,7 +645,7 @@ fn blend(body: &Body, edges: &[Vec3], r: f64, shape: Shape, what: &str) -> Resul
         }
         match done {
             Some((b, js)) => {
-                cur = b;
+                cur = record::after(b, &cur, &counts);
                 let mut k = 0;
                 todo.retain(|_| {
                     let keep = !js.contains(&k);
@@ -636,7 +798,7 @@ fn smooth_chain(solid: &Solid, edge: &mt::Edge) -> Option<Vec<mt::EdgeID>> {
     Some(ids)
 }
 
-fn edge_mid(e: &mt::Edge) -> Option<Vec3> {
+pub(crate) fn edge_mid(e: &mt::Edge) -> Option<Vec3> {
     use mt::{BoundedCurve, ParametricCurve};
     let c = e.curve();
     let (t0, t1) = c.range_tuple();
@@ -741,14 +903,56 @@ fn loop_split(cur: &Body, pts: &[Vec3]) -> Result<Option<(Vec<Vec<Vec3>>, Vec<Ve
     Ok((!groups.is_empty()).then_some((groups, rest)))
 }
 
-/// Constant-radius fillet of the edges nearest to the given points.
+/// Constant-radius fillet of the edges nearest to the given points. A radius too large for the
+/// faces around the edges is refused with [`KernelError::TooLarge`] ([`fillet_max`] finds the
+/// largest that works).
 pub fn fillet(body: &Body, edges: &[Vec3], radius: f64) -> Result<Body> {
     body.require_brep("fillet")?;
     // Corners the local blends refuse (an earlier round at an edge's end): radius per edge.
     blend(body, edges, radius, Shape::Round, "fillet").or_else(|e| {
         let sel: Vec<(Vec3, f64)> = edges.iter().map(|p| (*p, radius)).collect();
-        crate::blend_corner::fillet_radii(body, &sel).map_err(|_| e)
+        // The local blend's refusal, unless only the corner build found the radius too large.
+        crate::blend_corner::fillet_radii(body, &sel).map_err(|e2| match (&e, e2) {
+            (KernelError::TooLarge(_), _) => e,
+            (_, e2 @ KernelError::TooLarge(_)) => e2,
+            _ => e,
+        })
     })
+}
+
+/// The step of the radius search: three significant digits of the requested radius.
+fn radius_step(radius: f64) -> f64 {
+    10f64.powf(radius.log10().floor() - 3.0)
+}
+
+/// The largest radius below `radius` (to three significant digits) at which the fillet of
+/// these edges works, with its result; `None` when none does. Each candidate is a real fillet
+/// of the edges, so the radius returned is one that was built; the search runs up to 16 of
+/// them, so it is for an explicit request, not every refusal.
+pub fn fillet_max(body: &Body, edges: &[Vec3], radius: f64) -> Option<(f64, Body)> {
+    if !(radius.is_finite() && radius > 1e-6) {
+        return None;
+    }
+    let q = radius_step(radius);
+    // Radii n·q for n in [0, hi): hi fails (it is the request, or above it), lo works.
+    let mut hi = (radius / q).ceil() as u64;
+    let mut lo = 0u64;
+    let mut best: Option<Body> = None;
+    // log2(10⁴) steps reach the step size; the cap keeps a slow body from stalling.
+    for _ in 0..16 {
+        if hi - lo <= 1 {
+            break;
+        }
+        let mid = lo + (hi - lo) / 2;
+        match fillet(body, edges, mid as f64 * q) {
+            Ok(b) => {
+                lo = mid;
+                best = Some(b);
+            }
+            Err(_) => hi = mid,
+        }
+    }
+    best.map(|b| (lo as f64 * q, b))
 }
 
 /// Equal-distance chamfer of the edges nearest to the given points. Each edge is cut with a
@@ -762,15 +966,21 @@ pub fn chamfer(body: &Body, edges: &[Vec3], distance: f64) -> Result<Body> {
     if edges.is_empty() || edges.len() > 1000 {
         return Err(KernelError::Invalid("select 1…1000 edges".into()));
     }
+    // Each step's result carries its history over `[body]`.
+    let counts = record::counts(&[body]);
     // All cutters at once (their union mitres the corners), else one edge at a time.
-    let tools: Result<Vec<Body>> = edges.iter().enumerate().map(|(i, p)| chamfer_tool(body, *p, distance, i)).collect();
+    let tools: Result<Vec<Cutter>> = edges.iter().enumerate().map(|(i, p)| chamfer_tool(body, *p, distance, i)).collect();
     if let Ok(tools) = tools {
-        let mut acc: Option<Body> = None;
+        // The union so far, with its history over the cutters it joined.
+        let mut acc: Option<(Body, Option<History>)> = None;
         let mut ok = true;
-        for t in tools {
+        for t in &tools {
             let next = match &acc {
-                None => Some(t),
-                Some(a) => crate::ops::boolean(a, &t, crate::BoolOp::Union).ok().flatten(),
+                None => Some((t.body.clone(), Some(History::identity(&t.body)))),
+                Some((a, h)) => crate::ops::boolean(a, &t.body, crate::BoolOp::Union).ok().flatten().map(|u| {
+                    let h = crate::boolean_record::through(&u, 0, h.as_ref());
+                    (u, h)
+                }),
             };
             if next.is_none() {
                 ok = false;
@@ -779,10 +989,11 @@ pub fn chamfer(body: &Body, edges: &[Vec3], distance: f64) -> Result<Body> {
             acc = next;
         }
         if ok
-            && let Some(tool) = acc
+            && let Some((tool, h)) = acc
             && let Ok(Some(r)) = crate::ops::boolean(body, &tool, crate::BoolOp::Cut)
         {
-            return Ok(r);
+            let h = cut_history(crate::boolean_record::through(&r, 1, h.as_ref()), body, &tools);
+            return Ok(r.with_checked_history(h, &counts));
         }
     }
     // At a pocket rim the cutters cannot extend beyond the selected edges. Rebuild
@@ -794,26 +1005,47 @@ pub fn chamfer(body: &Body, edges: &[Vec3], distance: f64) -> Result<Body> {
         return Ok(result);
     }
     // Coplanar neighbours as one face (as after a join), so corners look as they should.
-    let mut cur = Body::new(crate::heal::heal_keep(body.deep_copy(), body.size(), body.split_keep()))?;
+    let mut cur = crate::boolean_record::healed(body)?;
     if let Some(groups) = loop_groups(&cur, edges)? {
         for g in groups {
             let size = cur.size();
             let solid = cur.deep_copy();
             let ids = edge_ids(&cur, &solid, &g)?;
             match crate::loopblend::loop_blend(&solid, &ids, size, distance, false) {
-                Some(res) => cur = Body::new(guard("chamfer", || res)?)?,
+                Some(res) => {
+                    let (made, rec) = guard("chamfer", || res)?;
+                    cur = record::after(record::rebuilt(made, &[&solid], &rec)?, &cur, &counts);
+                }
                 None => return Err(unsupported("the edges are not a whole loop of a planar face")),
             }
         }
         return Ok(cur);
     }
     for p in edges {
-        cur = match chamfer_tool(&cur, *p, distance, 0).and_then(|t| crate::ops::boolean(&cur, &t, crate::BoolOp::Cut)) {
+        let step = match chamfer_tool(&cur, *p, distance, 0).and_then(|t| cut_one(&cur, &t)) {
             Ok(Some(b)) => b,
             _ => blend(&cur, std::slice::from_ref(p), distance, Shape::Flat, "chamfer")?,
         };
+        cur = record::after(step, &cur, &counts);
     }
     Ok(cur)
+}
+
+/// `cur` cut by one cutter, with its history over `[cur]` (`None`: nothing left).
+fn cut_one(cur: &Body, t: &Cutter) -> Result<Option<Body>> {
+    let counts = record::counts(&[cur]);
+    Ok(crate::ops::boolean(cur, &t.body, crate::BoolOp::Cut)?.map(|r| {
+        let h = cut_history(r.history().cloned(), cur, std::slice::from_ref(t));
+        r.with_checked_history(h, &counts)
+    }))
+}
+
+/// A cut of `cur` by cutters (their union), from its history `h` over `[cur, cutter 0, …]`, as
+/// over `[cur]`: each cutter's chamfer face is made in place of its edge, and nothing else of a
+/// cutter may be left (`None` where something is).
+fn cut_history(h: Option<History>, cur: &Body, tools: &[Cutter]) -> Option<History> {
+    let parts: Vec<History> = std::iter::once(History::identity(cur)).chain(tools.iter().map(Cutter::history)).collect();
+    crate::boolean_record::composed(h?.over(&parts.iter().collect::<Vec<_>>()))
 }
 
 /// Geometry of a straight convex edge between two planar faces.
@@ -827,7 +1059,8 @@ struct EdgeFrame {
     t2: Vec3,
 }
 
-fn edge_frame(cur: &Body, p: Vec3) -> Result<EdgeFrame> {
+/// The edge nearest `p` (its index in `cur`'s edge order) and its frame.
+fn edge_frame(cur: &Body, p: Vec3) -> Result<(usize, EdgeFrame)> {
     let size = cur.size();
     let tol = (size * 2e-3).max(1e-3);
     let Some((idx, dist)) = cur.nearest_edge(p, tol)? else { return Err(KernelError::Invalid("the body has no edges".into())) };
@@ -855,7 +1088,7 @@ fn edge_frame(cur: &Body, p: Vec3) -> Result<EdgeFrame> {
     if n1.dot(t2) > 1e-9 || n2.dot(t1) > 1e-9 || t1.dot(t2) < -1.0 + 1e-6 {
         return Err(unsupported("only convex edges"));
     }
-    Ok(EdgeFrame { p0, p1, d, n1, n2, t1, t2 })
+    Ok((idx, EdgeFrame { p0, p1, d, n1, n2, t1, t2 }))
 }
 
 /// The prism that cuts a chamfer of size `s` on the edge nearest `p`. `k` varies the parts that
@@ -885,20 +1118,41 @@ pub fn chamfer_sides(body: &Body, edges: &[Vec3], d1: f64, side: ChamferSide, fl
     if edges.is_empty() || edges.len() > 1000 {
         return Err(KernelError::Invalid("select 1…1000 edges".into()));
     }
-    let mut cur = body.clone();
+    let counts = record::counts(&[body]);
+    let mut cur = crate::boolean_record::operand(body, 0, &counts);
     for (k, p) in edges.iter().enumerate() {
         let t = chamfer_tool_sides(&cur, *p, d1, Some((side, flip)), k)?;
-        cur = crate::ops::boolean(&cur, &t, crate::BoolOp::Cut)?.ok_or_else(|| KernelError::Failed("the chamfer removed everything".into()))?;
+        let step = cut_one(&cur, &t)?.ok_or_else(|| KernelError::Failed("the chamfer removed everything".into()))?;
+        cur = record::after(step, &cur, &counts);
     }
     Ok(cur)
 }
 
-pub(crate) fn chamfer_tool(cur: &Body, p: Vec3, s: f64, k: usize) -> Result<Body> {
+/// The prism that cuts a chamfer: the body, which of its faces is the chamfer plane, and the
+/// edge (of the body it chamfers, in its edge order) that face is made in place of.
+pub(crate) struct Cutter {
+    body: Body,
+    face: Option<usize>,
+    edge: usize,
+}
+
+impl Cutter {
+    /// The cutter as made from the body it chamfers: its chamfer face in place of the edge, its
+    /// other faces (all outside that body) from nothing of it.
+    fn history(&self) -> History {
+        let faces = (0..self.body.face_count())
+            .map(|i| record::generated(if Some(i) == self.face { vec![FaceOrigin::Edge { operand: 0, edge: self.edge }] } else { Vec::new() }))
+            .collect();
+        record::from_faces(&self.body.solid, 1, faces)
+    }
+}
+
+pub(crate) fn chamfer_tool(cur: &Body, p: Vec3, s: f64, k: usize) -> Result<Cutter> {
     chamfer_tool_sides(cur, p, s, None, k)
 }
 
-fn chamfer_tool_sides(cur: &Body, p: Vec3, s: f64, sides: Option<(ChamferSide, bool)>, k: usize) -> Result<Body> {
-    let mut f = edge_frame(cur, p)?;
+fn chamfer_tool_sides(cur: &Body, p: Vec3, s: f64, sides: Option<(ChamferSide, bool)>, k: usize) -> Result<Cutter> {
+    let (edge, mut f) = edge_frame(cur, p)?;
     // Setbacks along each face: equal, or by the second side's rule.
     let (s1, s2) = match sides {
         None => (s, s),
@@ -930,7 +1184,7 @@ fn chamfer_tool_sides(cur: &Body, p: Vec3, s: f64, sides: Option<(ChamferSide, b
     let ext = (s * 2.0).max(size * 0.01) * (1.0 + 0.093 * (k % 5) as f64);
     // Cross-section at p0 - d*ext, in a plane with normal d.
     let base = f.p0 - f.d * ext;
-    let plane = solvecraft_geom::Plane::from_normal(base, f.d).ok_or_else(|| KernelError::Failed("chamfer plane".into()))?;
+    let plane = solidcraft_geom::Plane::from_normal(base, f.d).ok_or_else(|| KernelError::Failed("chamfer plane".into()))?;
     let a = base + f.t1 * s1;
     let b = base + f.t2 * s2;
     let ab = (a - b).normalized().ok_or_else(|| KernelError::Failed("chamfer".into()))?;
@@ -947,19 +1201,24 @@ fn chamfer_tool_sides(cur: &Body, p: Vec3, s: f64, sides: Option<(ChamferSide, b
             return Err(unsupported("chamfers ending at a concave corner"));
         }
     }
-    let loc: Vec<solvecraft_geom::Vec2> = [a_ext, b_ext, e_far].iter().map(|q| plane.to_local(*q)).collect();
-    let mut lp = solvecraft_geom::Loop2::polygon(&loc);
+    let loc: Vec<solidcraft_geom::Vec2> = [a_ext, b_ext, e_far].iter().map(|q| plane.to_local(*q)).collect();
+    let mut lp = solidcraft_geom::Loop2::polygon(&loc);
+    // The chamfer plane is swept from the segment a → b: first, or last once turned round.
+    let mut chamfer_segment = 0;
     if lp.signed_area() < 0.0 {
         lp = lp.reversed();
+        chamfer_segment = lp.segs.len().saturating_sub(1);
     }
-    let region = solvecraft_geom::Region2 { outer: lp, holes: vec![] };
-    crate::build::extrude(&plane, &[region], 0.0, len + 2.0 * ext)?.pop().ok_or_else(|| KernelError::Failed("chamfer tool".into()))
+    let region = solidcraft_geom::Region2 { outer: lp, holes: vec![] };
+    let body = crate::build::extrude(&plane, &[region], 0.0, len + 2.0 * ext)?.pop().ok_or_else(|| KernelError::Failed("chamfer tool".into()))?;
+    let face = body.history().and_then(|h| h.faces.iter().position(|f| f.origins == [FaceOrigin::Profile { segment: chamfer_segment }]));
+    Ok(Cutter { body, face, edge })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use solvecraft_geom::{Loop2, Plane, Region2, Vec2};
+    use solidcraft_geom::{Loop2, Plane, Region2, Vec2};
 
     #[test]
     fn chamfer_extension_cannot_cross_a_hole_and_reenter_the_face() {
@@ -996,8 +1255,16 @@ mod tests {
                 assert!(result.solid.vertex_iter().any(|v| vtx(&v).dist(point) < 1e-8));
             }
             assert!(blend(&body, &pick, 25.0, Shape::Flat, "chamfer").is_err());
-            // Oblique fillet caps need elliptical trims, which this local path does not build.
-            assert!(blend(&body, &pick, 2.0, Shape::Round, "fillet").is_err());
+            // A fillet ends in each sloped end plane along an ellipse: the removed section's
+            // length is taken at its centroid, c from the edge.
+            let rounded = blend(&body, &pick, 2.0, Shape::Round, "fillet").unwrap();
+            let (area, c) =
+                ((1.0 - std::f64::consts::PI / 4.0) * 4.0, 2.0 * (10.0 - 3.0 * std::f64::consts::PI) / (3.0 * (4.0 - std::f64::consts::PI)));
+            let removed = area * (40.0 - 2.0 * slope * c);
+            let actual = crate::measure(&body).unwrap().volume - crate::measure(&rounded).unwrap().volume;
+            // `measure` reads a round about 6e-4 heavy, square ends too.
+            assert!((actual - removed).abs() < 1e-3 * removed, "{actual} vs {removed}");
+            assert!(rounded.validity().is_empty());
         }
     }
 }

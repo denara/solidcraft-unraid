@@ -11,20 +11,165 @@
 use egui::{Modifiers, Pos2, RichText};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use solvecraft_engine::geom::Vec3;
+use solidcraft_engine::geom::Vec3;
+
+/// The key the apps keep the preferences under in eframe's storage.
+pub const STORAGE_KEY: &str = "solidcraft.prefs";
+/// The key earlier releases used. Compatibility shim (docs/compatibility.md): read when the
+/// current key is missing, never written.
+pub const LEGACY_STORAGE_KEY: &str = "solvecraft.prefs";
+
+/// The stored preferences, from the current key or else the legacy one.
+pub fn stored(get: impl Fn(&str) -> Option<String>) -> Option<String> {
+    get(STORAGE_KEY).or_else(|| get(LEGACY_STORAGE_KEY))
+}
 
 use crate::SolveApp;
 use crate::theme::Tokens;
 use crate::viewport::NavMode;
 
 pub const UNITS: [&str; 5] = ["mm", "cm", "m", "in", "ft"];
-/// Mouse mappings: (id, label).
-pub const NAV_PRESETS: [(&str, &str); 5] =
-    [("fusion", "Fusion"), ("solidworks", "SolidWorks"), ("inventor", "Inventor"), ("alias", "Alias"), ("tinkercad", "Tinkercad")];
+pub const OPENSCAD_NAV: &str = "openscad";
+/// A mouse button that can drag the camera.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NavButton {
+    Left,
+    Middle,
+    Right,
+}
+
+/// Modifier keys a binding needs held (others may be held too).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct NavKeys {
+    pub shift: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+}
+
+impl NavKeys {
+    const NONE: NavKeys = NavKeys { shift: false, ctrl: false, alt: false };
+    const SHIFT: NavKeys = NavKeys { shift: true, ctrl: false, alt: false };
+    const CTRL: NavKeys = NavKeys { shift: false, ctrl: true, alt: false };
+    const SHIFT_ALT: NavKeys = NavKeys { shift: true, ctrl: false, alt: true };
+
+    /// All of these keys are held (Ctrl is Cmd on macOS).
+    fn held(self, m: Modifiers) -> bool {
+        (!self.shift || m.shift) && (!self.ctrl || m.ctrl || m.command) && (!self.alt || m.alt)
+    }
+}
+
+/// One camera binding: dragging `button` with `keys` held does `mode`.
+#[derive(Clone, Copy, Debug)]
+pub struct NavBinding {
+    pub button: NavButton,
+    pub keys: NavKeys,
+    pub mode: NavMode,
+}
+
+const fn bind(button: NavButton, keys: NavKeys, mode: NavMode) -> NavBinding {
+    NavBinding { button, keys, mode }
+}
+
+/// A mouse mapping: its bindings, most specific first (the first one whose button is dragged
+/// with all its keys held wins).
+pub struct NavPreset {
+    pub id: &'static str,
+    pub label: &'static str,
+    /// What the mouse does, for the Preferences page.
+    pub help: &'static str,
+    /// Choosing the preset turns the wheel the other way.
+    pub reverse_zoom: bool,
+    pub bindings: &'static [NavBinding],
+}
+
+impl NavPreset {
+    /// What dragging `button` with `mods` held does, if anything.
+    pub fn mode(&self, button: NavButton, mods: Modifiers) -> Option<NavMode> {
+        self.bindings.iter().find(|b| b.button == button && b.keys.held(mods)).map(|b| b.mode)
+    }
+}
+
+use NavButton::{Left, Middle, Right};
+use NavMode::{Orbit, Pan, Zoom};
+
+/// The mouse mappings. The first is the default.
+pub const NAV_PRESETS: [NavPreset; 6] = [
+    NavPreset {
+        id: "fusion",
+        label: "Fusion",
+        help: "Middle drag pans, Shift+middle orbits, right drag orbits",
+        reverse_zoom: false,
+        bindings: &[bind(Middle, NavKeys::SHIFT, Orbit), bind(Middle, NavKeys::NONE, Pan), bind(Right, NavKeys::NONE, Orbit)],
+    },
+    NavPreset {
+        id: "solidworks",
+        label: "SolidWorks",
+        help: "Middle drag orbits, Ctrl+middle pans, Shift+middle zooms, right drag orbits",
+        reverse_zoom: true,
+        bindings: &[
+            bind(Middle, NavKeys::CTRL, Pan),
+            bind(Middle, NavKeys::SHIFT, Zoom),
+            bind(Middle, NavKeys::NONE, Orbit),
+            bind(Right, NavKeys::NONE, Orbit),
+        ],
+    },
+    NavPreset {
+        id: "inventor",
+        label: "Inventor",
+        help: "Middle drag pans, Shift+middle orbits, Ctrl+middle zooms, right drag orbits",
+        reverse_zoom: false,
+        bindings: &[
+            bind(Middle, NavKeys::SHIFT, Orbit),
+            bind(Middle, NavKeys::CTRL, Zoom),
+            bind(Middle, NavKeys::NONE, Pan),
+            bind(Right, NavKeys::NONE, Orbit),
+        ],
+    },
+    NavPreset {
+        id: "alias",
+        label: "Alias",
+        help: "Shift+Alt+left drag orbits, Shift+Alt+middle pans, Shift+Alt+right zooms; middle drag also pans and right drag orbits",
+        reverse_zoom: false,
+        bindings: &[
+            bind(Left, NavKeys::SHIFT_ALT, Orbit),
+            bind(Middle, NavKeys::SHIFT_ALT, Pan),
+            bind(Right, NavKeys::SHIFT_ALT, Zoom),
+            bind(Middle, NavKeys::CTRL, Zoom),
+            bind(Middle, NavKeys::NONE, Pan),
+            bind(Right, NavKeys::NONE, Orbit),
+        ],
+    },
+    NavPreset {
+        id: "tinkercad",
+        label: "Tinkercad",
+        help: "Right drag orbits, middle or Shift+right drag pans",
+        reverse_zoom: false,
+        bindings: &[bind(Right, NavKeys::SHIFT, Pan), bind(Right, NavKeys::NONE, Orbit), bind(Middle, NavKeys::NONE, Pan)],
+    },
+    NavPreset {
+        id: OPENSCAD_NAV,
+        label: "OpenSCAD",
+        help: "Left drag on empty space orbits, Shift+left drag box-selects, sketch geometry drags edit; right or middle drag pans, Shift+right or Shift+middle drag zooms",
+        reverse_zoom: false,
+        bindings: &[
+            bind(Left, NavKeys::NONE, Orbit),
+            bind(Right, NavKeys::SHIFT, Zoom),
+            bind(Middle, NavKeys::SHIFT, Zoom),
+            bind(Right, NavKeys::NONE, Pan),
+            bind(Middle, NavKeys::NONE, Pan),
+        ],
+    },
+];
+
+/// The preset with this id (the default for an unknown one).
+pub fn nav_preset(id: &str) -> &'static NavPreset {
+    NAV_PRESETS.iter().find(|p| p.id == id).unwrap_or(&NAV_PRESETS[0])
+}
 /// The dialog's pages, in order.
 pub const PAGES: [&str; 7] = ["General", "Navigation", "Keyboard Shortcuts", "Design", "Graphics", "Sketch", "Selection"];
 pub const PAGE_SHORTCUTS: usize = 2;
 pub const PAGE_DESIGN: usize = 3;
+pub const PAGE_GRAPHICS: usize = 4;
 pub const THEMES: [(&str, &str); 3] = [("dark", "Dark"), ("light", "Light"), ("system", "System")];
 pub const MSAA: [u32; 4] = [1, 2, 4, 8];
 
@@ -60,6 +205,8 @@ pub struct Prefs {
     pub zoom_to_cursor: bool,
     /// Spread discrete wheel input across frames (off: apply each event immediately).
     pub smooth_wheel_zoom: bool,
+    /// Two-finger trackpad scroll pans (off: it zooms like the wheel); pinch always zooms.
+    pub trackpad_pan: bool,
     /// View changes (axis view, Look At, Home) animate; `look_at_speed` scales how fast.
     pub look_at_anim: bool,
     pub look_at_speed: f32,
@@ -87,6 +234,7 @@ impl Default for Prefs {
             ui_scale: 1.0,
             zoom_to_cursor: true,
             smooth_wheel_zoom: true,
+            trackpad_pan: true,
             look_at_anim: true,
             look_at_speed: 1.0,
             up_axis: "z".into(),
@@ -188,6 +336,7 @@ fn defaults(app: &mut SolveApp, page: usize) {
             p.zoom_reverse = d.zoom_reverse;
             p.zoom_to_cursor = d.zoom_to_cursor;
             p.smooth_wheel_zoom = d.smooth_wheel_zoom;
+            p.trackpad_pan = d.trackpad_pan;
             p.orbit_cursor = d.orbit_cursor;
             p.space_mouse_enabled = d.space_mouse_enabled;
             p.space_mouse_speed = d.space_mouse_speed;
@@ -199,7 +348,7 @@ fn defaults(app: &mut SolveApp, page: usize) {
             p.up_axis = d.up_axis;
             p.offer_stand_up = d.offer_stand_up;
         }
-        4 => {
+        PAGE_GRAPHICS => {
             let msaa = p.msaa != d.msaa;
             p.msaa = d.msaa;
             app.ui.visual_style = 0;
@@ -227,8 +376,24 @@ pub fn apply(app: &mut SolveApp, ctx: &egui::Context) {
     {
         app.ui.dark = t == egui::Theme::Dark;
     }
+    // egui's end-of-frame shortcuts only change its context; the saved preference would
+    // overwrite that change next frame. Consume the desktop shortcuts into the preference.
+    if ctx.options(|o| o.zoom_with_keyboard) && !crate::keymap::capturing(app) {
+        use egui::gui_zoom::kb_shortcuts::{ZOOM_IN, ZOOM_IN_SECONDARY, ZOOM_OUT, ZOOM_RESET};
+        if ctx.input_mut(|i| i.consume_shortcut(&ZOOM_RESET)) {
+            app.preferences.ui_scale = 1.0;
+        } else {
+            let zoom_in = ctx.input_mut(|i| i.consume_shortcut(&ZOOM_IN) || i.consume_shortcut(&ZOOM_IN_SECONDARY));
+            let zoom_out = ctx.input_mut(|i| i.consume_shortcut(&ZOOM_OUT));
+            if zoom_in != zoom_out {
+                app.preferences.ui_scale = (app.preferences.ui_scale + if zoom_in { 0.1 } else { -0.1 }).clamp(0.5, 2.5);
+            }
+        }
+    }
+    // Scaling while the pointer is held moves the slider under the pointer, feeding a
+    // different value back into it. Commit the layout change after the drag ends.
     let z = app.preferences.ui_scale.clamp(0.5, 2.5);
-    if z.is_finite() && (ctx.zoom_factor() - z).abs() > 1e-3 {
+    if z.is_finite() && !ctx.input(|i| i.pointer.any_down()) && (ctx.zoom_factor() - z).abs() > 1e-3 {
         ctx.set_zoom_factor(z);
     }
 }
@@ -254,40 +419,9 @@ pub fn set_autosave(app: &mut SolveApp) {
     }
 }
 
-/// Which navigation a mouse drag does under the preset.
-pub fn nav_mode(app: &SolveApp, middle: bool, secondary: bool, mods: Modifiers) -> Option<NavMode> {
-    if secondary && !middle {
-        // Tinkercad: Shift+right pans; everywhere else right drag orbits.
-        return Some(if app.preferences.nav == "tinkercad" && mods.shift { NavMode::Pan } else { NavMode::Orbit });
-    }
-    if !middle {
-        return None;
-    }
-    let ctrl = mods.ctrl || mods.command;
-    match app.preferences.nav.as_str() {
-        // Middle orbits, Ctrl+middle pans, Shift+middle zooms.
-        "solidworks" => Some(if ctrl {
-            NavMode::Pan
-        } else if mods.shift {
-            NavMode::Zoom
-        } else {
-            NavMode::Orbit
-        }),
-        // Middle pans, Shift+middle orbits, Ctrl+middle zooms.
-        "inventor" => Some(if mods.shift {
-            NavMode::Orbit
-        } else if ctrl {
-            NavMode::Zoom
-        } else {
-            NavMode::Pan
-        }),
-        // Alias: middle pans, Ctrl+middle zooms (right drag orbits).
-        "alias" => Some(if ctrl { NavMode::Zoom } else { NavMode::Pan }),
-        // Tinkercad: middle pans.
-        "tinkercad" => Some(NavMode::Pan),
-        // Fusion: middle pans, Shift+middle orbits.
-        _ => Some(if mods.shift { NavMode::Orbit } else { NavMode::Pan }),
-    }
+/// Which navigation dragging `button` with `mods` held does under the preset.
+pub fn nav_mode(app: &SolveApp, button: NavButton, mods: Modifiers) -> Option<NavMode> {
+    nav_preset(&app.preferences.nav).mode(button, mods)
 }
 
 /// +1, or −1 when the wheel zooms the other way.
@@ -296,7 +430,9 @@ pub fn zoom_sign(app: &SolveApp) -> f64 {
 }
 
 /// Orbit by pixel deltas: around the view's centre, or, with "orbit around the cursor", around
-/// the model point that was under the cursor when the drag began (kept still on screen).
+/// the model point that was under the cursor when the drag began (kept still on screen). A drag
+/// that begins over empty space turns around the centre of the visible geometry instead, so the
+/// model never swings around a far-off point. The pivot is chosen once, when the drag begins.
 pub fn orbit(app: &mut SolveApp, rect: egui::Rect, dx: f64, dy: f64, press: Option<Pos2>) {
     if !app.preferences.orbit_cursor {
         app.cam.orbit(dx, dy);
@@ -320,7 +456,8 @@ pub fn orbit(app: &mut SolveApp, rect: egui::Rect, dx: f64, dy: f64, press: Opti
     }
 }
 
-/// The model point under a screen position, or the point at the view's depth.
+/// The model point under a screen position. Over empty space: the centre of the visible bodies
+/// and sketches (what Fit frames), or the view's centre when nothing is visible.
 fn pivot_under(app: &SolveApp, proj: &crate::viewport::Proj, at: Pos2) -> Vec3 {
     use crate::viewport::Hit;
     for h in crate::viewport::pick(app, proj, at) {
@@ -330,10 +467,8 @@ fn pivot_under(app: &SolveApp, proj: &crate::viewport::Proj, at: Pos2) -> Vec3 {
             _ => {}
         }
     }
-    let (o, d) = proj.ray(at);
-    let n = app.cam.back();
-    let den = d.dot(n);
-    if den.abs() > 1e-9 { o + d * ((app.cam.target - o).dot(n) / den) } else { app.cam.target }
+    let b = solidcraft_engine::view::bounds(&app.session);
+    if b.is_empty() { app.cam.target } else { b.center() }
 }
 
 /// Units per millimetre and the unit's name.
@@ -347,10 +482,49 @@ pub fn unit_scale(units: &str) -> (f64, &'static str) {
     }
 }
 
+/// Inch labels retain a meaningful fourth digit without promoting floating-point noise.
+pub fn length_precision(value: f64, units: &str, decimals: u8) -> usize {
+    let base = usize::from(decimals.min(8));
+    if units != "in" {
+        return base;
+    }
+    let needs_four = ((value * 10_000.0).round() - (value * 1000.0).round() * 10.0).abs() >= 0.5;
+    base.max(if needs_four { 4 } else { 3 })
+}
+
+pub fn length_number(mm: f64, units: &str, decimals: u8) -> String {
+    let value = mm * unit_scale(units).0;
+    format!("{:.*}", length_precision(value, units, decimals), value)
+}
+
+/// Edit a millimetre value through a control expressed in the current design units.
+/// Keep the stored value untouched unless the user actually changes the field.
+pub fn length_drag<'a>(value: &'a mut f64, units: &str, decimals: u8) -> egui::DragValue<'a> {
+    let (scale, unit) = unit_scale(units);
+    egui::DragValue::new(value)
+        .speed(0.5)
+        .suffix(format!(" {unit}"))
+        .custom_formatter(move |mm, _| length_number(mm, unit, decimals))
+        .custom_parser(move |text| parse_length_mm(text, scale))
+}
+
+/// A length typed into a field, in millimetres: a bare number is in the design's units (`scale`
+/// units per millimetre); an explicit unit ("10 mm", "0.5 in", "2 cm + 3 mm") is honoured.
+pub fn parse_length_mm(text: &str, scale: f64) -> Option<f64> {
+    use solidcraft_engine::doc::expr;
+    if !(scale.is_finite() && scale > 0.0) {
+        return None;
+    }
+    let defaults = expr::Defaults { len: 1.0 / scale, ..expr::Defaults::default() };
+    let no_params = |n: &str| Err(solidcraft_engine::doc::DocError::Expr(format!("unknown parameter `{n}`")));
+    let value = expr::eval_with_defaults(text.trim(), &no_params, defaults).ok()?.to_kind_in(expr::Kind::Length, defaults).ok()?;
+    value.is_finite().then_some(value)
+}
+
 /// A length in millimetres in `units`, with `decimals` (for display).
 pub fn format_length(mm: f64, units: &str, decimals: u8) -> String {
-    let (k, u) = unit_scale(units);
-    format!("{:.*} {u}", usize::from(decimals.min(8)), mm * k)
+    let (_, u) = unit_scale(units);
+    format!("{} {u}", length_number(mm, units, decimals))
 }
 
 /// A length, area (`power` 2) or volume (3) given in millimetres, shown in the design's units
@@ -362,13 +536,13 @@ pub fn show_mm(app: &SolveApp, v: f64, power: i32) -> String {
         3 => "³",
         _ => "",
     };
-    format!("{:.*} {u}{sup}", usize::from(app.preferences.length_decimals.min(8)), v * k.powi(power))
+    let value = v * k.powi(power);
+    format!("{:.*} {u}{sup}", length_precision(value, &app.session.doc.units, app.preferences.length_decimals), value)
 }
 
 /// Numbers in millimetres, in the design's units without the unit name.
 pub fn show_mm_bare(app: &SolveApp, v: f64) -> String {
-    let (k, _) = unit_scale(&app.session.doc.units);
-    format!("{:.*}", usize::from(app.preferences.length_decimals.min(8)), v * k)
+    length_number(v, &app.session.doc.units, app.preferences.length_decimals)
 }
 
 /// Write the anti-aliasing setting where the host reads it at start (the window's samples can't
@@ -376,6 +550,77 @@ pub fn show_mm_bare(app: &SolveApp, v: f64) -> String {
 fn save_graphics(app: &SolveApp) {
     if let Some(path) = &app.services.graphics_path {
         let _ = std::fs::write(path, json!({ "msaa": app.preferences.msaa }).to_string());
+    }
+}
+
+/// At start, with the graphics device known: the saved anti-aliasing (`requested` samples, as
+/// the host read it) is more than the device supports. The window would not have opened with it,
+/// so the renderer fell back; put the setting back to its default (or the largest supported
+/// count below it) and tell the user what changed.
+pub fn check_msaa(app: &mut SolveApp, requested: u32) {
+    let supported = &app.msaa_supported;
+    if requested <= 1 || supported.is_empty() || supported.contains(&requested) {
+        return;
+    }
+    let default = Prefs::default().msaa;
+    let reset = supported.iter().copied().filter(|&n| n <= default).max().unwrap_or(1);
+    let supported = supported.clone();
+    app.preferences.msaa = reset;
+    save_graphics(app);
+    app.settings_reset.push(SettingReset::Msaa { requested, reset, supported });
+}
+
+/// A setting put back at start because it would keep SolidCraft from starting.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SettingReset {
+    /// Anti-aliasing samples the graphics device can't render with.
+    Msaa { requested: u32, reset: u32, supported: Vec<u32> },
+}
+
+impl SettingReset {
+    /// The line the notice shows, in the current interface language.
+    pub fn message(&self) -> String {
+        match self {
+            SettingReset::Msaa { requested, reset, supported } => {
+                let setting = format!("{} › {}", crate::i18n::tr("ui.graphics"), crate::i18n::tr("ui.anti_aliasing"));
+                let supported = supported.iter().map(|n| format!("{n}")).collect::<Vec<_>>().join("×, ") + "×";
+                crate::i18n::format(
+                    "settings.msaa_reset",
+                    &[("setting", &setting), ("requested", &requested.to_string()), ("reset", &reset.to_string()), ("supported", &supported)],
+                )
+            }
+        }
+    }
+}
+
+/// Settings put back at start (`SolveApp::settings_reset`), until dismissed.
+pub fn show_reset_notice(app: &mut SolveApp, ctx: &egui::Context) {
+    if app.settings_reset.is_empty() {
+        return;
+    }
+    let mut ok = false;
+    let mut prefs = false;
+    crate::frame::window(ctx, app.tr("settings.reset_title"), crate::frame::Width::Normal)
+        .id(egui::Id::new("sc_settings_reset"))
+        .collapsible(false)
+        .resizable(false)
+        .show(ctx, |ui| {
+            ui.label(app.tr("settings.reset_intro"));
+            ui.add_space(4.0);
+            for reset in &app.settings_reset {
+                ui.label(format!("• {}", reset.message()));
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ok = ui.button(app.tr("ui.heading_ok")).clicked();
+                prefs = ui.button(app.tr("ui.open_preferences")).clicked();
+            });
+        });
+    if ok || prefs {
+        app.settings_reset.clear();
+    }
+    if prefs {
+        open_at(app, PAGE_GRAPHICS);
     }
 }
 
@@ -396,52 +641,64 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     let mut open = true;
     let mut button: Option<&str> = None;
     let before = app.preferences.clone();
-    crate::frame::window(ctx, app.tr("ui.preferences"), crate::frame::Width::Wide)
+    let shown = crate::frame::window(ctx, app.tr("ui.preferences"), crate::frame::Width::Wide)
         .id(egui::Id::new("sc_prefs"))
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
         .show(ctx, |ui| {
-            // A fixed page area: the vertical separator fills the height it is given, so an
-            // auto-sized one would grow every frame.
-            ui.allocate_ui_with_layout(egui::vec2(700.0, 400.0), egui::Layout::left_to_right(egui::Align::Min), |ui| {
-                ui.set_min_size(egui::vec2(700.0, 400.0));
-                ui.vertical(|ui| {
-                    ui.set_width(140.0);
-                    for (i, s) in PAGES.iter().enumerate() {
-                        if ui.selectable_label(app.prefs_window.section == i, app.tr_label(s)).clicked() {
-                            app.prefs_window.section = i;
-                            app.keymap.read_only = false;
-                        }
+            // One fixed size for every page (#290): the page is drawn into a clipped child of
+            // that size and only that size is allocated, so no page (or translation) can widen
+            // the window; descriptions wrap and tall pages scroll inside it.
+            ui.set_max_width(PREFS_W);
+            let (body, _) = ui.allocate_exact_size(egui::vec2(PREFS_W, PREFS_H), egui::Sense::hover());
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body).layout(egui::Layout::left_to_right(egui::Align::Min)));
+            child.shrink_clip_rect(body);
+            let ui_body = &mut child;
+            ui_body.vertical(|ui| {
+                ui.set_width(PREFS_NAV_W);
+                for (i, s) in PAGES.iter().enumerate() {
+                    if ui.selectable_label(app.prefs_window.section == i, app.tr_label(s)).clicked() {
+                        app.prefs_window.section = i;
+                        app.keymap.read_only = false;
                     }
-                });
-                ui.separator();
-                ui.vertical(|ui| {
-                    // A fixed width, so the window keeps its size from page to page.
-                    ui.set_width(540.0);
-                    ui.label(RichText::new(app.tr_label(PAGES.get(app.prefs_window.section).copied().unwrap_or_default())).strong().size(14.0));
-                    ui.add_space(6.0);
+                }
+            });
+            ui_body.separator();
+            ui_body.vertical(|ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new(app.tr_label(PAGES.get(app.prefs_window.section).copied().unwrap_or_default())).strong().size(14.0));
+                ui.add_space(6.0);
+                if app.prefs_window.section == PAGE_SHORTCUTS {
+                    // The shortcuts table scrolls by itself.
                     page(app, ui, &t);
-                });
+                } else {
+                    egui::ScrollArea::vertical().id_salt("sc_prefs_page").auto_shrink([false, false]).show(ui, |ui| page(app, ui, &t));
+                }
             });
             ui.separator();
+            // Restore Defaults at the left; OK, Cancel and Apply flush right, as in every dialog.
             ui.horizontal(|ui| {
+                ui.set_width(PREFS_W);
                 if ui.button(app.tr("ui.restore_defaults")).on_hover_text(app.tr("ui.reset_the_settings_on_this_page")).clicked() {
                     button = Some("defaults");
                 }
-                crate::frame::right_aligned(ui, 700.0, 170.0, |ui| {
-                    if ui.button(app.tr("ui.heading_ok")).clicked() {
-                        button = Some("ok");
-                    }
-                    if ui.button(app.tr("ui.cancel")).clicked() {
-                        button = Some("cancel");
-                    }
-                    if ui.button(app.tr("ui.apply")).clicked() {
-                        button = Some("apply");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Right to left: Apply is the rightmost.
+                    for (key, id) in [("ui.apply", "apply"), ("ui.cancel", "cancel"), ("ui.heading_ok", "ok")] {
+                        let r = ui.button(app.tr(key));
+                        crate::scenario::publish_rect(&format!("prefs:{id}"), r.rect);
+                        if r.clicked() {
+                            button = Some(id);
+                        }
                     }
                 });
+                crate::scenario::publish_rect("prefs:footer", ui.max_rect());
             });
         });
+    if let Some(w) = &shown {
+        crate::scenario::publish_rect("prefs:window", w.response.rect);
+    }
     if app.preferences.msaa != before.msaa {
         save_graphics(app);
     }
@@ -477,7 +734,7 @@ fn close(app: &mut SolveApp, revert: bool) {
 
 /// The default orientation changed: the view turns to match.
 fn up_axis_changed(app: &mut SolveApp) {
-    use solvecraft_engine::render::UpAxis;
+    use solidcraft_engine::render::UpAxis;
     app.prefs_window.applied_up = Some(app.preferences.up_axis.clone());
     let up = if app.preferences.up_axis.eq_ignore_ascii_case("y") { UpAxis::Y } else { UpAxis::Z };
     if app.ui.up_axis != up || app.cam.up != up {
@@ -485,12 +742,18 @@ fn up_axis_changed(app: &mut SolveApp) {
     }
 }
 
+/// The Preferences window's content size: the same on every page.
+const PREFS_W: f32 = 744.0;
+const PREFS_H: f32 = 400.0;
+/// The page list at its left.
+const PREFS_NAV_W: f32 = 128.0;
+
 /// One page of the dialog.
 fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
-    let _language = crate::i18n::scope(&app.preferences.language);
     let note = |ui: &mut egui::Ui, s: &str| {
         ui.label("");
-        ui.label(RichText::new(s).size(11.0).color(t.text_dim));
+        // Descriptions wrap within the page instead of widening it.
+        ui.add(egui::Label::new(RichText::new(s).size(11.0).color(t.text_dim)).wrap());
         ui.end_row();
     };
     if app.prefs_window.section == PAGE_SHORTCUTS {
@@ -523,7 +786,10 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
             });
             ui.end_row();
             ui.label(app.tr("ui.ui_scale"));
-            ui.add(egui::Slider::new(&mut app.preferences.ui_scale, 0.75..=2.0).step_by(0.05).custom_formatter(|v, _| format!("{:.0} %", v * 100.0)));
+            let scale = ui.add(
+                egui::Slider::new(&mut app.preferences.ui_scale, 0.5..=2.5).step_by(0.05).custom_formatter(|v, _| format!("{:.0} %", v * 100.0)),
+            );
+            crate::scenario::publish_rect("prefs:scale", scale.rect);
             ui.end_row();
             ui.label(app.tr("ui.units_of_new_designs"));
             egui::ComboBox::from_id_salt("pref_units").selected_text(app.preferences.default_units.clone()).show_ui(ui, |ui| {
@@ -560,17 +826,16 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
         }
         1 => {
             ui.label("Pan, zoom, orbit");
-            egui::ComboBox::from_id_salt("pref_nav")
-                .selected_text(NAV_PRESETS.iter().find(|(id, _)| *id == app.preferences.nav).map_or("Fusion", |x| x.1))
-                .show_ui(ui, |ui| {
-                    for (id, label) in NAV_PRESETS {
-                        if ui.selectable_value(&mut app.preferences.nav, id.to_string(), label).clicked() {
-                            app.preferences.zoom_reverse = id == "solidworks";
-                        }
+            egui::ComboBox::from_id_salt("pref_nav").selected_text(nav_preset(&app.preferences.nav).label).show_ui(ui, |ui| {
+                for p in &NAV_PRESETS {
+                    if ui.selectable_value(&mut app.preferences.nav, p.id.to_string(), p.label).clicked() {
+                        app.preferences.zoom_reverse = p.reverse_zoom;
                     }
-                });
+                }
+            });
             ui.end_row();
-            note(ui, &format!("{}; hold Shift during orbit to snap; the wheel zooms", nav_help(&app.preferences.nav)));
+            let snap_help = if app.preferences.nav == OPENSCAD_NAV { "" } else { "; hold Shift during orbit to snap" };
+            note(ui, &format!("{}; Ctrl+left drag on empty space orbits{snap_help}; the wheel zooms", nav_preset(&app.preferences.nav).help));
             ui.label("Context menu");
             ui.checkbox(&mut app.preferences.radial_context_menu, "Radial context menu");
             ui.end_row();
@@ -584,6 +849,11 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
             ui.label("Smooth wheel zoom");
             ui.checkbox(&mut app.preferences.smooth_wheel_zoom, "")
                 .on_hover_text("Turn off to apply each wheel event immediately, without a smoothing tail");
+            ui.end_row();
+            ui.label("Two-finger scroll pans");
+            ui.checkbox(&mut app.preferences.trackpad_pan, "").on_hover_text(
+                "Trackpad gestures pan (off: they zoom like the wheel); mouse wheel zooms, thumb wheel pans sideways, pinch always zooms",
+            );
             ui.end_row();
             ui.label("Orbit around");
             ui.horizontal(|ui| {
@@ -642,14 +912,18 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
             ui.label("Perspective view");
             ui.checkbox(&mut app.ui.perspective, "");
             ui.end_row();
-            ui.label("Anti-aliasing");
+            ui.label(app.tr("ui.anti_aliasing"));
             egui::ComboBox::from_id_salt("pref_msaa").selected_text(format!("{}×", app.preferences.msaa)).show_ui(ui, |ui| {
                 for m in MSAA {
-                    ui.selectable_value(&mut app.preferences.msaa, m, format!("{m}×"));
+                    // Counts the graphics device can't do would keep the window from opening.
+                    let ok = app.msaa_supported.is_empty() || app.msaa_supported.contains(&m);
+                    ui.add_enabled_ui(ok, |ui| ui.selectable_value(&mut app.preferences.msaa, m, format!("{m}×")))
+                        .inner
+                        .on_disabled_hover_text(app.tr("settings.msaa_unsupported"));
                 }
             });
             ui.end_row();
-            note(ui, "Anti-aliasing applies the next time SolidCraft starts");
+            note(ui, app.tr("settings.msaa_applies_on_restart"));
             ui.label("Renderer");
             ui.label(match (&app.viewport.gpu, &app.help.gpu) {
                 (Some(_), Some(g)) => format!("GPU: {g}"),
@@ -672,17 +946,6 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
             ui.end_row();
         }
     });
-}
-
-/// What the mouse does under a preset.
-pub fn nav_help(preset: &str) -> &'static str {
-    match preset {
-        "solidworks" => "Middle drag orbits, Ctrl+middle pans, Shift+middle zooms, right drag orbits",
-        "inventor" => "Middle drag pans, Shift+middle orbits, Ctrl+middle zooms, right drag orbits",
-        "alias" => "Alt+right or right drag orbits, middle drag pans, Ctrl+middle zooms",
-        "tinkercad" => "Right drag orbits, middle or Shift+right drag pans",
-        _ => "Middle drag pans, Shift+middle orbits, right drag orbits",
-    }
 }
 
 /// The control channel's `ui.prefs`: `open` (a page name) opens the dialog there, `button`
@@ -737,8 +1000,11 @@ pub fn set(app: &mut SolveApp, p: &serde_json::Value) -> Result<serde_json::Valu
     if !UNITS.contains(&new.default_units.as_str()) {
         return Err(format!("units must be one of {}", UNITS.join(", ")));
     }
-    if !NAV_PRESETS.iter().any(|(id, _)| *id == new.nav) || !MSAA.contains(&new.msaa) {
-        return Err("`nav` must be fusion, solidworks, inventor, alias or tinkercad and `msaa` 1, 2, 4 or 8".into());
+    if !NAV_PRESETS.iter().any(|p| p.id == new.nav) || !MSAA.contains(&new.msaa) {
+        return Err("`nav` must be fusion, solidworks, inventor, alias, tinkercad or openscad and `msaa` 1, 2, 4 or 8".into());
+    }
+    if new.msaa != app.preferences.msaa && !app.msaa_supported.is_empty() && !app.msaa_supported.contains(&new.msaa) {
+        return Err(format!("this graphics device doesn't support `msaa` {}; it supports {:?}", new.msaa, app.msaa_supported));
     }
     if !THEMES.iter().any(|(id, _)| *id == new.theme) || !["z", "y"].contains(&new.up_axis.as_str()) {
         return Err("`theme` must be dark, light or system and `up_axis` z or y".into());
@@ -766,7 +1032,85 @@ pub fn set(app: &mut SolveApp, p: &serde_json::Value) -> Result<serde_json::Valu
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stored_prefs_fall_back_to_the_legacy_key() {
+        let only_old = |k: &str| (k == super::LEGACY_STORAGE_KEY).then(|| "old".to_string());
+        assert_eq!(super::stored(only_old).as_deref(), Some("old"));
+        let both = |k: &str| Some(if k == super::STORAGE_KEY { "new" } else { "old" }.to_string());
+        assert_eq!(super::stored(both).as_deref(), Some("new"));
+        assert_eq!(super::stored(|_| None), None);
+    }
+
     use super::*;
+
+    #[test]
+    fn unsupported_saved_msaa_is_reset_to_the_default_with_a_notice() {
+        let dir = std::env::temp_dir().join(format!("sc_msaa_reset_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("graphics.json");
+        let services = crate::Services { graphics_path: Some(path.to_string_lossy().to_string()), ..Default::default() };
+        let mut app = SolveApp::new(solidcraft_engine::Session::default(), services);
+        // WebGPU's guarantee for the surface format: 8x saved, the device can only do 1x and 4x.
+        app.msaa_supported = vec![1, 4];
+        app.preferences.msaa = 8;
+        check_msaa(&mut app, 8);
+        assert_eq!(app.preferences.msaa, 4);
+        let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap_or_default()).unwrap_or_default();
+        assert_eq!(saved["msaa"], 4);
+        assert_eq!(app.settings_reset, [SettingReset::Msaa { requested: 8, reset: 4, supported: vec![1, 4] }]);
+        assert_eq!(
+            app.settings_reset[0].message(),
+            "Graphics › Anti-aliasing: 8× isn't supported by this graphics device; it is now 4× (supported: 1×, 4×)."
+        );
+        {
+            let _de = crate::i18n::scope("de");
+            assert_eq!(
+                app.settings_reset[0].message(),
+                "Grafik › Kantenglättung: 8× wird von diesem Grafikgerät nicht unterstützt; jetzt 4× (unterstützt: 1×, 4×)."
+            );
+        }
+        // Below the default when the device can't do that either.
+        app.settings_reset.clear();
+        app.msaa_supported = vec![1, 2];
+        check_msaa(&mut app, 8);
+        assert_eq!(app.preferences.msaa, 2);
+        // Supported, off, or no GPU: nothing changes (OpenGL's 1x policy isn't a reset either).
+        for (supported, requested) in [(vec![1, 2, 4, 8], 8), (vec![1, 4], 1), (vec![], 8), (vec![1, 4], 4)] {
+            app.settings_reset.clear();
+            app.preferences.msaa = requested;
+            app.msaa_supported = supported;
+            check_msaa(&mut app, requested);
+            assert!(app.settings_reset.is_empty());
+            assert_eq!(app.preferences.msaa, requested);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn control_channel_rejects_msaa_the_device_cannot_do_and_bad_saved_msaa_loads_as_default() {
+        let mut app = SolveApp::new(solidcraft_engine::Session::default(), crate::Services::default());
+        app.msaa_supported = vec![1, 4];
+        assert!(set(&mut app, &serde_json::json!({ "msaa": 8 })).is_err());
+        assert!(set(&mut app, &serde_json::json!({ "msaa": 1 })).is_ok());
+        app.load_prefs(&serde_json::json!({ "preferences": { "msaa": 16 } }).to_string());
+        assert_eq!(app.preferences.msaa, Prefs::default().msaa);
+    }
+
+    #[test]
+    fn length_fields_read_bare_numbers_in_design_units_and_honour_explicit_units() {
+        let inch = unit_scale("in").0;
+        let close = |a: Option<f64>, b: f64| a.is_some_and(|a| (a - b).abs() < 1e-9);
+        assert!(close(parse_length_mm("2", inch), 50.8));
+        assert!(close(parse_length_mm(" 10 mm ", inch), 10.0));
+        assert!(close(parse_length_mm("0.5 in", 1.0), 12.7));
+        assert!(close(parse_length_mm("1 in + 5 mm", unit_scale("cm").0), 30.4));
+        assert!(close(parse_length_mm("3", unit_scale("cm").0), 30.0));
+        assert!(close(parse_length_mm("3", 1.0), 3.0));
+        assert_eq!(parse_length_mm("10 deg", inch), None);
+        assert_eq!(parse_length_mm("abc", inch), None);
+        assert_eq!(parse_length_mm("", inch), None);
+        assert_eq!(parse_length_mm("1e400", 1.0), None);
+    }
 
     #[test]
     fn radial_context_menu_defaults_off_and_follows_preferences_transactions() {
@@ -777,7 +1121,7 @@ mod tests {
         h.call("ui.prefs", json!({"open":"Navigation"}));
         h.step(&json!({"widget":"Radial context menu"})).unwrap();
         assert!(h.app.preferences.radial_context_menu, "the actual checkbox enables radial menus");
-        let mut restored = SolveApp::new(solvecraft_engine::Session::default(), Default::default());
+        let mut restored = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
         restored.load_prefs(&h.app.prefs());
         assert!(restored.preferences.radial_context_menu, "enabled preference survives save/load");
         h.call("ui.prefs", json!({"button":"cancel"}));
@@ -793,7 +1137,7 @@ mod tests {
     #[test]
     fn wheel_smoothing_persists_and_follows_dialog_buttons() {
         assert!(serde_json::from_value::<Prefs>(json!({})).unwrap().smooth_wheel_zoom);
-        let mut app = SolveApp::new(solvecraft_engine::Session::default(), Default::default());
+        let mut app = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
         control(&mut app, &json!({"open":"Navigation", "smooth_wheel_zoom":false})).unwrap();
         control(&mut app, &json!({"button":"cancel"})).unwrap();
         assert!(app.preferences.smooth_wheel_zoom);
@@ -801,7 +1145,7 @@ mod tests {
         control(&mut app, &json!({"button":"apply"})).unwrap();
         control(&mut app, &json!({"smooth_wheel_zoom":true, "button":"cancel"})).unwrap();
         assert!(!app.preferences.smooth_wheel_zoom);
-        let mut other = SolveApp::new(solvecraft_engine::Session::default(), Default::default());
+        let mut other = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
         other.load_prefs(&app.prefs());
         assert!(!other.preferences.smooth_wheel_zoom);
         control(&mut app, &json!({"open":"Navigation", "button":"defaults"})).unwrap();
@@ -811,25 +1155,69 @@ mod tests {
     }
 
     #[test]
+    fn openscad_preset_maps_navigation_and_persists() {
+        let mut app = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
+        set(&mut app, &json!({"nav": OPENSCAD_NAV})).unwrap();
+        for button in [NavButton::Middle, NavButton::Right] {
+            assert_eq!(nav_mode(&app, button, Modifiers::default()), Some(NavMode::Pan));
+            assert_eq!(nav_mode(&app, button, Modifiers { shift: true, ..Default::default() }), Some(NavMode::Zoom));
+        }
+        assert_eq!(nav_mode(&app, NavButton::Left, Modifiers::default()), Some(NavMode::Orbit));
+        let mut other = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
+        other.load_prefs(&app.prefs());
+        assert_eq!(other.preferences.nav, OPENSCAD_NAV);
+    }
+
+    #[test]
+    fn trackpad_pan_defaults_on_persists_and_follows_dialog_buttons() {
+        assert!(serde_json::from_value::<Prefs>(json!({})).unwrap().trackpad_pan);
+        assert!(Prefs::default().trackpad_pan);
+        let mut app = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
+        control(&mut app, &json!({"open":"Navigation", "trackpad_pan":false})).unwrap();
+        control(&mut app, &json!({"button":"cancel"})).unwrap();
+        assert!(app.preferences.trackpad_pan);
+        control(&mut app, &json!({"open":"Navigation", "trackpad_pan":false})).unwrap();
+        control(&mut app, &json!({"button":"apply"})).unwrap();
+        assert!(!app.preferences.trackpad_pan);
+        let mut other = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
+        other.load_prefs(&app.prefs());
+        assert!(!other.preferences.trackpad_pan);
+        control(&mut app, &json!({"open":"Navigation", "button":"defaults"})).unwrap();
+        assert!(app.preferences.trackpad_pan);
+        control(&mut app, &json!({"button":"cancel"})).unwrap();
+        assert!(!app.preferences.trackpad_pan);
+    }
+
+    #[test]
     fn presets_map_the_mouse_and_prefs_round_trip() {
-        let mut app = SolveApp::new(solvecraft_engine::Session::default(), Default::default());
+        let mut app = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
         let shift = Modifiers { shift: true, ..Default::default() };
         let ctrl = Modifiers { ctrl: true, ..Default::default() };
         let none = Modifiers::default();
-        assert!(matches!(nav_mode(&app, true, false, none), Some(NavMode::Pan)));
-        assert!(matches!(nav_mode(&app, true, false, shift), Some(NavMode::Orbit)));
+        assert!(matches!(nav_mode(&app, NavButton::Middle, none), Some(NavMode::Pan)));
+        assert!(matches!(nav_mode(&app, NavButton::Middle, shift), Some(NavMode::Orbit)));
         set(&mut app, &json!({"nav": "solidworks"})).unwrap();
-        assert!(matches!(nav_mode(&app, true, false, none), Some(NavMode::Orbit)));
-        assert!(matches!(nav_mode(&app, true, false, ctrl), Some(NavMode::Pan)));
+        assert!(matches!(nav_mode(&app, NavButton::Middle, none), Some(NavMode::Orbit)));
+        assert!(matches!(nav_mode(&app, NavButton::Middle, ctrl), Some(NavMode::Pan)));
         set(&mut app, &json!({"nav": "inventor", "zoom_reverse": true})).unwrap();
-        assert!(matches!(nav_mode(&app, true, false, ctrl), Some(NavMode::Zoom)));
+        assert!(matches!(nav_mode(&app, NavButton::Middle, ctrl), Some(NavMode::Zoom)));
         assert_eq!(zoom_sign(&app), -1.0);
-        assert!(matches!(nav_mode(&app, false, true, none), Some(NavMode::Orbit)), "right drag orbits everywhere");
+        assert!(matches!(nav_mode(&app, NavButton::Right, none), Some(NavMode::Orbit)), "right drag orbits everywhere");
+        assert_eq!(nav_mode(&app, NavButton::Left, none), None, "left drag selects");
+        let shift_alt = Modifiers { shift: true, alt: true, ..Default::default() };
+        assert_eq!(nav_mode(&app, NavButton::Left, shift_alt), None, "only Alias navigates with the left button");
+        set(&mut app, &json!({"nav": "alias"})).unwrap();
+        assert_eq!(nav_mode(&app, NavButton::Left, shift_alt), Some(NavMode::Orbit));
+        assert_eq!(nav_mode(&app, NavButton::Middle, shift_alt), Some(NavMode::Pan));
+        assert_eq!(nav_mode(&app, NavButton::Right, shift_alt), Some(NavMode::Zoom));
+        assert_eq!(nav_mode(&app, NavButton::Left, none), None, "a plain left drag still selects");
+        assert_eq!(nav_mode(&app, NavButton::Left, shift), None);
+        assert_eq!(nav_mode(&app, NavButton::Right, none), Some(NavMode::Orbit));
         assert!(set(&mut app, &json!({"nav": "blender"})).is_err());
         assert!(set(&mut app, &json!({"default_units": "furlong"})).is_err());
         assert!(set(&mut app, &json!({"nope": 1})).is_err());
         // Kept between runs.
-        let mut other = SolveApp::new(solvecraft_engine::Session::default(), Default::default());
+        let mut other = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
         other.load_prefs(&app.prefs());
         assert_eq!(other.preferences, app.preferences);
         assert_eq!(format_length(25.4, "in", 3), "1.000 in");
@@ -839,7 +1227,7 @@ mod tests {
     /// keeps them, Restore Defaults resets one page, and the shortcuts menus open its page.
     #[test]
     fn preferences_dialog_cancel_apply_and_defaults() {
-        let mut app = SolveApp::new(solvecraft_engine::Session::default(), Default::default());
+        let mut app = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
         control(&mut app, &json!({"open": "general"})).unwrap();
         assert!(app.prefs_window.open && app.prefs_window.section == 0);
         control(&mut app, &json!({"theme": "light", "ui_scale": 1.25, "zoom_to_cursor": false})).unwrap();
@@ -857,7 +1245,7 @@ mod tests {
         assert_eq!(app.preferences.nav, "alias", "Cancel goes back to the last Apply");
         let to = {
             let mut c = app.cam;
-            c.set_view(solvecraft_engine::render::StandardView::Top);
+            c.set_view(solidcraft_engine::render::StandardView::Top);
             c
         };
         app.animate_to(to);
@@ -884,7 +1272,7 @@ mod tests {
 
     #[test]
     fn language_preference_switches_and_persists() {
-        let mut app = SolveApp::new(solvecraft_engine::Session::default(), Default::default());
+        let mut app = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
         assert_eq!(app.preferences.language, "en");
         assert_eq!(app.tr("ui.preferences"), "Preferences");
         assert_eq!(app.tr("ui.extrude"), "Extrude");
@@ -896,7 +1284,7 @@ mod tests {
         assert_eq!(app.tr("ui.extrude"), "押し出し");
 
         // Preferences round-trip
-        let mut other = SolveApp::new(solvecraft_engine::Session::default(), Default::default());
+        let mut other = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
         other.load_prefs(&app.prefs());
         assert_eq!(other.preferences.language, "ja");
         assert_eq!(other.tr("ui.preferences"), "環境設定");
@@ -905,18 +1293,18 @@ mod tests {
     /// A STEP file opened Z-up is offered to be stood up: a quarter turn about X, undoable.
     #[test]
     fn a_y_up_step_file_can_be_stood_up() {
-        let dir = std::env::temp_dir().join(format!("solvecraft-standup-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("solidcraft-standup-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("tall_in_y.step").to_string_lossy().to_string();
-        let mut src = SolveApp::new(solvecraft_engine::Session::default(), Default::default());
+        let mut src = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
         src.run("solid.box", json!({"length": 10, "width": 40, "height": 5})).unwrap();
         src.run("file.export", json!({"path": path})).unwrap();
 
-        let mut app = SolveApp::new(solvecraft_engine::Session::default(), Default::default());
+        let mut app = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
         app.open_path(&path);
         let offered = app.stand_up.clone().unwrap_or_default();
         assert_eq!(offered.len(), 1, "the file's body is offered");
-        let size = |app: &SolveApp| solvecraft_engine::view::bounds(&app.session);
+        let size = |app: &SolveApp| solidcraft_engine::view::bounds(&app.session);
         assert!((size(&app).max.y - size(&app).min.y - 40.0).abs() < 1e-6);
         control(&mut app, &json!({"stand_up": true})).unwrap();
         let b = size(&app);
@@ -926,11 +1314,11 @@ mod tests {
         assert!((size(&app).max.y - size(&app).min.y - 40.0).abs() < 1e-6, "one undo step");
 
         // Not offered when turned off, or with Y up as the default orientation.
-        let mut app = SolveApp::new(solvecraft_engine::Session::default(), Default::default());
+        let mut app = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
         app.preferences.offer_stand_up = false;
         app.open_path(&path);
         assert!(app.stand_up.is_none());
-        let mut app = SolveApp::new(solvecraft_engine::Session::default(), Default::default());
+        let mut app = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
         app.preferences.up_axis = "y".into();
         app.open_path(&path);
         assert!(app.stand_up.is_none());
@@ -939,7 +1327,7 @@ mod tests {
 
     #[test]
     fn orbiting_around_the_cursor_keeps_that_point_still() {
-        let mut app = SolveApp::new(solvecraft_engine::Session::default(), Default::default());
+        let mut app = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
         app.run("solid.box", json!({"length": 40, "width": 40, "height": 40})).unwrap();
         app.preferences.orbit_cursor = true;
         let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
@@ -951,11 +1339,36 @@ mod tests {
         assert!(s.distance(at) < 2.0, "{s:?}");
     }
 
+    /// A drag that starts over empty space turns around the visible geometry's centre, not a
+    /// point far off to the side; with nothing visible it turns around the view's centre.
+    #[test]
+    fn orbiting_from_empty_space_turns_around_the_visible_geometry() {
+        let mut app = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
+        app.run("solid.box", json!({"length": 40, "width": 40, "height": 40})).unwrap();
+        app.preferences.orbit_cursor = true;
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        app.fit_view();
+        let corner = egui::pos2(10.0, 10.0);
+        let proj = crate::viewport::projection(&app, rect);
+        let hits = crate::viewport::pick(&app, &proj, corner);
+        use crate::viewport::Hit;
+        assert!(!hits.iter().any(|h| matches!(h, Hit::Face { .. } | Hit::Edge { .. } | Hit::Vertex { .. })), "the corner is empty space");
+        let centre = solidcraft_engine::view::bounds(&app.session).center();
+        orbit(&mut app, rect, 40.0, 25.0, Some(corner));
+        assert_eq!(app.viewport.orbit_pivot, Some(centre));
+
+        let mut app = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
+        app.preferences.orbit_cursor = true;
+        app.cam.target = solidcraft_engine::geom::Vec3::new(5.0, -3.0, 2.0);
+        orbit(&mut app, rect, 40.0, 25.0, Some(corner));
+        assert_eq!(app.viewport.orbit_pivot, Some(solidcraft_engine::geom::Vec3::new(5.0, -3.0, 2.0)));
+    }
+
     /// The Y up preference turns the view: the camera's up axis follows it, startup included.
     #[test]
     fn up_axis_preference_turns_the_view() {
-        use solvecraft_engine::render::UpAxis;
-        let mut app = SolveApp::new(solvecraft_engine::Session::default(), crate::Services::default());
+        use solidcraft_engine::render::UpAxis;
+        let mut app = SolveApp::new(solidcraft_engine::Session::default(), crate::Services::default());
         let ctx = egui::Context::default();
         apply(&mut app, &ctx);
         assert_eq!(app.cam.up, UpAxis::Z);
@@ -967,5 +1380,59 @@ mod tests {
         app.preferences.up_axis = "z".into();
         apply(&mut app, &ctx);
         assert_eq!(app.cam.up, UpAxis::Z);
+    }
+}
+
+#[cfg(test)]
+mod ui_scale_regression_tests {
+    use super::*;
+    use egui::{Event, Modifiers, PointerButton, pos2};
+
+    #[test]
+    fn desktop_zoom_shortcuts_update_and_persist_the_scale_preference() {
+        let mut h = crate::scenario::Harness::new();
+        h.call("ui.key", json!({"key":"Minus","cmd":true}));
+        assert!((h.app.preferences.ui_scale - 0.9).abs() < 1e-4);
+        assert!((h.ctx.zoom_factor() - 0.9).abs() < 1e-4);
+        h.frames(12);
+        assert!((h.ctx.zoom_factor() - 0.9).abs() < 1e-4, "must not flash back to the old preference");
+        h.step(&json!({"restart":"close"})).unwrap();
+        assert!((h.app.preferences.ui_scale - 0.9).abs() < 1e-4);
+        h.call("ui.key", json!({"key":"Equals","cmd":true}));
+        assert!((h.ctx.zoom_factor() - 1.0).abs() < 1e-4);
+        h.call("ui.key", json!({"key":"Plus","cmd":true}));
+        assert!((h.ctx.zoom_factor() - 1.1).abs() < 1e-4);
+        h.call("ui.key", json!({"key":"0","cmd":true}));
+        assert!((h.ctx.zoom_factor() - 1.0).abs() < 1e-4);
+        h.call("ui.prefs", json!({"ui_scale":0.5}));
+        h.call("ui.key", json!({"key":"Minus","cmd":true}));
+        assert_eq!(h.app.preferences.ui_scale, 0.5);
+        h.call("ui.prefs", json!({"ui_scale":2.5}));
+        h.call("ui.key", json!({"key":"Plus","cmd":true}));
+        assert_eq!(h.app.preferences.ui_scale, 2.5);
+    }
+
+    #[test]
+    fn dragging_the_scale_slider_keeps_its_window_still_until_release() {
+        let mut h = crate::scenario::Harness::new();
+        h.call("ui.prefs", json!({"open":"General"}));
+        let window = crate::scenario::rect_of("prefs:window").unwrap();
+        let slider = crate::scenario::rect_of("prefs:scale").unwrap();
+        let a = pos2(slider.left() + 20.0, slider.center().y);
+        let b = pos2(slider.left() + 90.0, slider.center().y);
+        h.app.synthetic.push(Event::PointerMoved(a));
+        h.app.synthetic.push(Event::PointerButton { pos: a, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+        h.frames(3);
+        h.app.synthetic.push(Event::PointerMoved(b));
+        h.frames(4);
+        assert_ne!(h.app.preferences.ui_scale, 1.0, "the slider changes its value during the drag");
+        assert_eq!(h.ctx.zoom_factor(), 1.0, "layout must remain stable until release");
+        assert_eq!(crate::scenario::rect_of("prefs:window").unwrap(), window);
+        h.app.synthetic.push(Event::PointerButton { pos: b, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+        h.frames(5);
+        assert!((h.ctx.zoom_factor() - h.app.preferences.ui_scale).abs() < 1e-4);
+        h.call("ui.prefs", json!({"button":"cancel"}));
+        assert_eq!(h.app.preferences.ui_scale, 1.0, "Cancel restores the original scale");
+        assert_eq!(h.ctx.zoom_factor(), 1.0);
     }
 }

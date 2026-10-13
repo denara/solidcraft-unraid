@@ -108,7 +108,7 @@ fn exact_cylinder_volume(s: &Session) -> f64 {
 
 #[test]
 fn cylinder_emboss_persists_selection_and_replays_radial_depth() {
-    use solvecraft_geom::Vec3;
+    use solidcraft_geom::Vec3;
     let mut s = cylinder_badge();
     let before = exact_cylinder_volume(&s);
     run(
@@ -124,10 +124,10 @@ fn cylinder_emboss_persists_selection_and_replays_radial_depth() {
     assert!(mesh.contains(Vec3::new(-10.5 * 0.15_f64.sin(), 10.5 * 0.15_f64.cos(), 7.5)));
     let feature = s.doc.find_feature("Raised Badge").unwrap();
     assert!(
-        matches!(&feature.kind,solvecraft_doc::FeatureKind::Emboss{face:Some(face),..} if face.body=="Sleeve"&&face.at.dist(Vec3::new(0.,10.,7.5))<1e-10)
+        matches!(&feature.kind,solidcraft_doc::FeatureKind::Emboss{face:Some(face),..} if face.body=="Sleeve"&&face.at.dist(Vec3::new(0.,10.,7.5))<1e-10)
     );
     let saved = s.doc.to_json();
-    let mut loaded = Session { doc: solvecraft_doc::Document::from_json(&saved).unwrap().into(), ..Default::default() };
+    let mut loaded = Session { doc: solidcraft_doc::Document::from_json(&saved).unwrap().into(), ..Default::default() };
     loaded.refresh();
     assert!(loaded.model.results.iter().all(|f| f.error.is_none()), "{:?}", loaded.model.results);
     assert!((exact_cylinder_volume(&loaded) - before - 21.0).abs() < 0.02);
@@ -171,7 +171,7 @@ fn cylinder_small_chord_pick_is_saved_on_the_exact_surface() {
         .unwrap();
     assert!(((pick.x * pick.x + pick.y * pick.y).sqrt() - 0.1).abs() > 1e-7);
     run(&mut s, "solid.emboss", json!({"sketch":"Badge","profiles":"all","face":[pick.x,pick.y,pick.z],"depth":"0.01mm","targets":["Tiny"]}));
-    let solvecraft_doc::FeatureKind::Emboss { face: Some(face), .. } = &s.doc.features.last().unwrap().kind else {
+    let solidcraft_doc::FeatureKind::Emboss { face: Some(face), .. } = &s.doc.features.last().unwrap().kind else {
         panic!("missing face");
     };
     assert!(((face.at.x * face.at.x + face.at.y * face.at.y).sqrt() - 0.1).abs() < 1e-12);
@@ -186,7 +186,7 @@ fn cylinder_cross_component_emboss_keeps_source_owner_and_placements() {
         let a = run(&mut s, "component.create", json!({"name":"Source"}))["component"].as_u64().unwrap();
         run(&mut s, "solid.cylinder", json!({"radius":10,"height":20,"body_name":"Sleeve"}));
         let source_feature = s.model.state().bodies.first().unwrap().feature;
-        let source_names = solvecraft_doc::naming::face_names(s.model.state().body("Sleeve").unwrap());
+        let source_names = solidcraft_doc::naming::face_names(s.model.state().body("Sleeve").unwrap());
         let before = exact_cylinder_volume(&s);
         run(&mut s, "occurrence.move", json!({"occurrence":"Source:1","axis":[0,0,1],"angle":"90 deg","translate":[50,0,0]}));
         let second = run(&mut s, "occurrence.copy", json!({"component":a,"translate":[80,0,0]}))["occurrence"].as_u64().unwrap();
@@ -204,7 +204,7 @@ fn cylinder_cross_component_emboss_keeps_source_owner_and_placements() {
             .world_state()
             .bodies
             .iter()
-            .find(|b| b.body.tessellate_with(0.001, true).unwrap().contains(solvecraft_geom::Vec3::new(40.5 + pick_offset, 0., 7.5)))
+            .find(|b| b.body.tessellate_with(0.001, true).unwrap().contains(solidcraft_geom::Vec3::new(40.5 + pick_offset, 0., 7.5)))
             .unwrap()
             .name
             .clone();
@@ -213,7 +213,7 @@ fn cylinder_cross_component_emboss_keeps_source_owner_and_placements() {
             "solid.emboss",
             json!({"sketch":"Badge","profiles":"all","face":[40.+pick_offset,0,7.5],"depth":"badge_depth","targets":[target.clone()]}),
         );
-        let solvecraft_doc::FeatureKind::Emboss { face: Some(face), .. } = &s.doc.features.last().unwrap().kind else {
+        let solidcraft_doc::FeatureKind::Emboss { face: Some(face), .. } = &s.doc.features.last().unwrap().kind else {
             panic!("missing selection");
         };
         assert_eq!(face.path, if pick_offset == 0. { s.doc.first_path(a) } else { vec![second] });
@@ -228,9 +228,9 @@ fn cylinder_cross_component_emboss_keeps_source_owner_and_placements() {
         assert!((exact_cylinder_volume(&s) - before - 21.).abs() < 0.02);
         let world = s.world_state();
         for x in [39.5, 119.5] {
-            assert!(world.bodies.iter().any(|b| b.body.tessellate_with(0.001, true).unwrap().contains(solvecraft_geom::Vec3::new(x, 0., 7.5))));
+            assert!(world.bodies.iter().any(|b| b.body.tessellate_with(0.001, true).unwrap().contains(solidcraft_geom::Vec3::new(x, 0., 7.5))));
         }
-        let mut loaded = Session { doc: solvecraft_doc::Document::from_json(&s.doc.to_json()).unwrap().into(), ..Default::default() };
+        let mut loaded = Session { doc: solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap().into(), ..Default::default() };
         loaded.refresh();
         assert!(loaded.model.results.iter().all(|r| r.error.is_none()), "{:?}", loaded.model.results);
         run(&mut loaded, "parameters.change", json!({"name":"badge_depth","expression":"2mm"}));
@@ -254,7 +254,7 @@ fn cylinder_cross_component_emboss_keeps_source_owner_and_placements() {
         assert!((exact_cylinder_volume(&loaded) - before - 69.).abs() < 0.02);
         let mut broken = loaded.doc.as_ref().clone();
         let id = broken.features.last().unwrap().id;
-        let solvecraft_doc::FeatureKind::Emboss { face: Some(face), .. } = &mut broken.feature_mut(id).unwrap().kind else {
+        let solidcraft_doc::FeatureKind::Emboss { face: Some(face), .. } = &mut broken.feature_mut(id).unwrap().kind else {
             panic!("missing selection");
         };
         face.path = vec![u64::MAX];
@@ -283,12 +283,12 @@ fn check_active_second_source(auto: bool) {
     run(&mut s, "sketch.finish", json!({}));
     run(&mut s, "solid.emboss", json!({"sketch":"Badge","profiles":"all","face":[80,10,7.5],"depth":1}));
     assert!((exact_cylinder_volume(&s) - before - 21.).abs() < 0.02);
-    let solvecraft_doc::FeatureKind::Emboss { face: Some(face), .. } = &s.doc.features.last().unwrap().kind else {
+    let solidcraft_doc::FeatureKind::Emboss { face: Some(face), .. } = &s.doc.features.last().unwrap().kind else {
         panic!("missing selection");
     };
     assert_eq!(face.path, vec![second]);
     assert_eq!(face.author_path, vec![second]);
-    let mut loaded = Session { doc: solvecraft_doc::Document::from_json(&s.doc.to_json()).unwrap().into(), ..Default::default() };
+    let mut loaded = Session { doc: solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap().into(), ..Default::default() };
     loaded.refresh();
     assert!(loaded.model.results.iter().all(|r| r.error.is_none()), "{:?}", loaded.model.results);
     assert!((exact_cylinder_volume(&loaded) - before - 21.).abs() < 0.02);
@@ -376,7 +376,7 @@ fn check_body_offset(auto: bool) {
     assert!((exact_cylinder_volume(&s) - before - 21.).abs() < 0.02);
     assert_eq!(s.doc.body_offsets["Sleeve"], offset);
     assert_eq!(s.doc.body_component("Sleeve", s.model.state().body("Sleeve").unwrap().feature), holder);
-    assert!(s.world_state().body("Sleeve").unwrap().body.tessellate_with(0.001, true).unwrap().contains(solvecraft_geom::Vec3::new(0., 10.5, 7.5)));
+    assert!(s.world_state().body("Sleeve").unwrap().body.tessellate_with(0.001, true).unwrap().contains(solidcraft_geom::Vec3::new(0., 10.5, 7.5)));
 }
 
 #[test]
@@ -486,14 +486,14 @@ fn loft_cut_through_a_shelled_basin_in_either_order() {
 
 #[test]
 fn cylinder_auto_inference_saves_a_profile_anchor_and_replays_both_depth_signs() {
-    use solvecraft_geom::Vec3;
+    use solidcraft_geom::Vec3;
     for mode in ["emboss", "deboss"] {
         let mut s = cylinder_badge();
         let before = exact_cylinder_volume(&s);
         let initial = s.doc.to_json();
         run(&mut s, "solid.emboss", json!({"sketch":"Badge","profiles":"all","depth":"badge_depth","mode":mode,"name":"Auto Badge"}));
         let feature = s.doc.find_feature("Auto Badge").unwrap().clone();
-        let solvecraft_doc::FeatureKind::Emboss { face: Some(face), targets, .. } = &feature.kind else {
+        let solidcraft_doc::FeatureKind::Emboss { face: Some(face), targets, .. } = &feature.kind else {
             panic!("missing inferred association");
         };
         assert_eq!(targets, &["Sleeve"]);
@@ -514,7 +514,7 @@ fn cylinder_auto_inference_saves_a_profile_anchor_and_replays_both_depth_signs()
         assert_eq!(s.doc.to_json(), initial);
         run(&mut s, "edit.redo", json!({}));
         assert_eq!(s.doc.find_feature("Auto Badge").unwrap().kind, feature.kind);
-        let mut loaded = Session { doc: solvecraft_doc::Document::from_json(&s.doc.to_json()).unwrap().into(), ..Default::default() };
+        let mut loaded = Session { doc: solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap().into(), ..Default::default() };
         loaded.refresh();
         assert!(loaded.model.results.iter().all(|r| r.error.is_none()), "{:?}", loaded.model.results);
         run(
@@ -551,7 +551,7 @@ fn cylinder_auto_inference_ignores_remote_finite_tangent_walls_in_each_body_orde
 
 #[test]
 fn cylinder_auto_inference_retains_selected_holes_and_nested_islands() {
-    use solvecraft_geom::Vec3;
+    use solidcraft_geom::Vec3;
     for mode in ["emboss", "deboss"] {
         let mut s = cylinder_badge();
         run(&mut s, "sketch.edit", json!({"sketch":"Badge"}));
@@ -584,7 +584,7 @@ fn cylinder_auto_inference_refuses_ambiguity_curves_and_seam_crossing_atomically
     assert!(error.contains("multiple tangent cylinders"), "{error}");
     assert_eq!(s.doc.to_json(), before);
     run(&mut s, "solid.emboss", json!({"sketch":"Badge","depth":1,"targets":["Sleeve"]}));
-    assert!(matches!(&s.doc.features.last().unwrap().kind,solvecraft_doc::FeatureKind::Emboss{face:Some(face),..} if face.body=="Sleeve"));
+    assert!(matches!(&s.doc.features.last().unwrap().kind,solidcraft_doc::FeatureKind::Emboss{face:Some(face),..} if face.body=="Sleeve"));
     for circle in [false, true] {
         let mut s = cylinder_badge();
         run(&mut s, "sketch.create", json!({"plane":{"origin":[0,10,0],"x_dir":[-1,0,0],"y_dir":[0,0,1]},"name":"Unsupported"}));
@@ -601,4 +601,27 @@ fn cylinder_auto_inference_refuses_ambiguity_curves_and_seam_crossing_atomically
         assert_eq!(s.doc.to_json(), before);
         assert_eq!(exact_cylinder_volume(&s), volume);
     }
+}
+
+/// A cone that takes only a 1 mm chamfer off a cylinder's top edge leaves nearly all of the
+/// cylinder inside it; the intersection is still the chamfered cylinder (#443).
+#[test]
+fn loft_intersect_that_trims_one_edge_changes_the_body() {
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY"}));
+    run(&mut s, "sketch.circle.center", json!({"center": [0, 0], "radius": 35}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"distance": 10, "body_name": "Body"}));
+    for (name, offset, radius) in [("A", -1, 45), ("B", 11, 33)] {
+        run(&mut s, "sketch.create", json!({"plane": "XY", "offset": offset, "name": name}));
+        run(&mut s, "sketch.circle.center", json!({"center": [0, 0], "radius": radius}));
+        run(&mut s, "sketch.finish", json!({}));
+    }
+    run(&mut s, "solid.loft", json!({"sections": [{"sketch": "A"}, {"sketch": "B"}], "operation": "intersect"}));
+    // r 35 up to z = 9, then a frustum to r 34 at z = 10.
+    let want = std::f64::consts::PI * (35.0 * 35.0 * 9.0 + (35.0 * 35.0 + 35.0 * 34.0 + 34.0 * 34.0) / 3.0);
+    let got = volume(&mut s);
+    assert!((got - want).abs() < want * 2e-4, "{got} vs {want}");
+    let m = measure(&mut s);
+    assert_eq!(m["bodies"][0]["face_types"]["cone"], 1, "{m}");
 }

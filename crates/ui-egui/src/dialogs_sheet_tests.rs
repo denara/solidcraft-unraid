@@ -1,5 +1,5 @@
 use serde_json::json;
-use solvecraft_engine::Session;
+use solidcraft_engine::Session;
 
 use super::*;
 use crate::Services;
@@ -145,7 +145,7 @@ fn shallow_pocket_overlay_labels_depth_without_drawing_a_through_void() {
     let ctx = egui::Context::default();
     let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
         let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("flat-pocket-test")));
-        assert!(overlay(&painter, Rect::from_min_size(Pos2::ZERO, vec2(1400.0, 900.0)), &dialog));
+        assert!(overlay(&app, &painter, Rect::from_min_size(Pos2::ZERO, vec2(1400.0, 900.0)), &dialog));
     });
     output.textures_delta.clear();
     let texts: Vec<&str> = output
@@ -156,7 +156,7 @@ fn shallow_pocket_overlay_labels_depth_without_drawing_a_through_void() {
             _ => None,
         })
         .collect();
-    assert!(texts.contains(&"Bottom pocket: 1 mm deep"));
+    assert!(texts.contains(&"Bottom pocket: 1.00 mm deep"));
     assert!(texts.contains(&"Pocket boundary (material remains)"));
     let paths: Vec<_> = output
         .shapes
@@ -198,7 +198,7 @@ fn flat_pattern_islands_fit_before_the_actual_command_panel() {
                 ui.label("Flat size: 50 × 10 × 2.5 mm");
             });
             let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("island-fit")));
-            assert!(overlay(&painter, Rect::from_min_max(pos2(250.0, 126.0), pos2(1400.0, 832.0)), &dialog));
+            assert!(overlay(&app, &painter, Rect::from_min_max(pos2(250.0, 126.0), pos2(1400.0, 832.0)), &dialog));
         });
         output.textures_delta.clear();
     }
@@ -237,7 +237,7 @@ fn coincident_top_and_bottom_pocket_depths_share_a_readable_annotation() {
     let ctx = egui::Context::default();
     let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
         let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("coincident-pocket-test")));
-        assert!(overlay(&painter, Rect::from_min_size(Pos2::ZERO, vec2(1400.0, 900.0)), &dialog));
+        assert!(overlay(&app, &painter, Rect::from_min_size(Pos2::ZERO, vec2(1400.0, 900.0)), &dialog));
     });
     output.textures_delta.clear();
     let labels: Vec<_> = output
@@ -249,8 +249,8 @@ fn coincident_top_and_bottom_pocket_depths_share_a_readable_annotation() {
         })
         .collect();
     assert_eq!(labels.len(), 1, "coincident depths must not overwrite one another");
-    assert!(labels[0].contains("Top pocket: 1 mm deep"));
-    assert!(labels[0].contains("Bottom pocket: 0.5 mm deep"));
+    assert!(labels[0].contains("Top pocket: 1.00 mm deep"));
+    assert!(labels[0].contains("Bottom pocket: 0.50 mm deep"));
     assert!(labels[0].contains('\n'));
     assert_eq!(app.session.doc.to_json(), doc);
 }
@@ -295,7 +295,7 @@ fn bend_table_picker_writes_the_current_body() {
     app.run("sheet.flange", json!({"sketch": "Base"})).unwrap();
     app.run("sheet.flange", json!({"edges": [[50, 0, 2.5]], "height": 20})).unwrap();
     let body = app.session.model.state().sheets[0].body.clone();
-    let path = std::env::temp_dir().join(format!("solvecraft-bend-table-{}.csv", std::process::id()));
+    let path = std::env::temp_dir().join(format!("solidcraft-bend-table-{}.csv", std::process::id()));
     let output = path.to_string_lossy().into_owned();
     let chosen = output.clone();
     app.services.pick_save = Some(Box::new(move |_, extensions| {
@@ -309,4 +309,115 @@ fn bend_table_picker_writes_the_current_body() {
     assert_eq!(contents.lines().count(), 2);
     assert!(contents.contains(",90.000000000,up,2.500000000,"), "{contents}");
     assert_eq!(app.session.undo.len(), undo);
+}
+
+/// The rule manager's shape selector: picked in the dialog, the shape reaches the rule and the part
+/// made with it, and the dialog shows it the next time.
+#[test]
+fn rules_dialog_picks_the_corner_relief_shape() {
+    let mut h = crate::scenario::Harness::new();
+    h.app
+        .run(
+            "sheet.manage_rules",
+            json!({"name": "AL2", "thickness": "2 mm", "k_factor": 0.5, "bend_radius": "1 mm", "gap": "0.5 mm", "active": true}),
+        )
+        .unwrap();
+    h.app.run("sketch.create", json!({"plane": "XY", "name": "Base"})).unwrap();
+    h.app.run("sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [120, 90]})).unwrap();
+    h.app.run("sketch.finish", json!({})).unwrap();
+    h.app.run("sheet.flange", json!({"sketch": "Base"})).unwrap();
+    h.app.run("sheet.flange", json!({"edges": [[60, 0, 2], [120, 45, 2], [60, 90, 2], [0, 45, 2]], "height": 20, "angle": "72 deg"})).unwrap();
+    // The rounds in the base of the tray, and the shape the open dialog shows.
+    let rounds = |app: &SolveApp| {
+        let state = app.session.model.state();
+        state.sheets.last().map(|s| s.base.outer.segs.iter().filter(|g| matches!(g, solidcraft_engine::geom::Seg2::Arc { .. })).count())
+    };
+    let shown = |app: &SolveApp| match app.dialog.as_ref().map(|d| &d.kind) {
+        Some(Kind::Sheet(Sm::Rules { relief, .. })) => Some(*relief),
+        _ => None,
+    };
+    assert_eq!(rounds(&h.app), Some(0));
+    h.step(&json!({"start": "sheet.manage_rules"})).unwrap();
+    h.frames(3);
+    assert_eq!(shown(&h.app), Some(0), "a rule starts with the notch");
+    h.step(&json!({"click": {"handle": "dialog:Corner Relief Shape"}})).unwrap();
+    h.step(&json!({"click": {"handle": "dialog:Corner Relief Shape:Round"}})).unwrap();
+    assert_eq!(shown(&h.app), Some(1));
+    h.step(&json!({"widget": "OK"})).unwrap();
+    assert!(h.app.dialog.is_none(), "{:?}", h.app.dialog);
+    assert_eq!(h.app.session.doc.sheet_rule(None).corner_relief_shape, "round");
+    assert_eq!(rounds(&h.app), Some(4), "one round at each corner of the tray");
+    h.step(&json!({"start": "sheet.manage_rules"})).unwrap();
+    h.frames(3);
+    assert_eq!(shown(&h.app), Some(1), "the dialog shows the rule's shape");
+}
+
+#[test]
+fn pocket_depth_labels_follow_inches_without_changing_flat_data() {
+    let mut app = plate();
+    app.run("document.units", json!({"units":"in"})).unwrap();
+    assert_eq!(super::pocket_label(&app, &json!({"side":"top","depth_mm":25.4*0.1234})).as_deref(), Some("Top pocket: 0.1234 in deep"));
+    assert!(super::pocket_label(&app, &json!({"side":"top","depth_mm":-1})).is_none());
+}
+
+/// Edges with an angle and/or a height of their own: the texts of the dialog's rows per edge
+/// become `{point, angle?, height?}` edges while the others stay plain points; Edit Feature
+/// brings them back and rebuilds the same flanges.
+#[test]
+fn edge_flanges_can_have_an_angle_and_a_height_of_their_own() {
+    let mut app = plate();
+    app.run("sheet.flange", json!({"sketch": "Base"})).unwrap();
+    let edges: Vec<Sel> = [[50.0, 0.0, 2.5], [50.0, 60.0, 2.5], [0.0, 30.0, 2.5], [100.0, 30.0, 2.5]]
+        .iter()
+        .filter_map(|p| edge_sel(&app.session, Vec3::new(p[0], p[1], p[2])))
+        .collect();
+    assert_eq!(edges.len(), 4);
+    let point = |i: usize| if let Sel::Edge { point, .. } = &edges[i] { *point } else { Vec3::ZERO };
+    app.session.selection = edges.clone();
+    app.start("sheet.flange");
+    let mut d = app.dialog.clone().unwrap();
+    if let Kind::Sheet(Sm::Flange { height, angle, own, .. }) = &mut d.kind {
+        *height = "20 mm".into();
+        *angle = "75 deg".into();
+        // The second edge: its own angle; the fourth: both; the third: texts left blank.
+        own.push((point(1), "100 deg".into(), String::new()));
+        own.push((point(3), "90 deg".into(), "15 mm".into()));
+        own.push((point(2), "  ".into(), String::new()));
+    }
+    let c = apply_commands(&app, &d).unwrap();
+    assert_eq!(
+        c[0].1["edges"],
+        json!([pt(point(0)), {"point": pt(point(1)), "angle": "100 deg"}, pt(point(2)), {"point": pt(point(3)), "angle": "90 deg", "height": "15 mm"}]),
+        "no text or a blank one: a plain point"
+    );
+    run_all(&mut app, c);
+    let bends = app.session.execute("sheet.flat_pattern", &json!({})).unwrap()["bends"].clone();
+    let angles: Vec<f64> = bends.as_array().unwrap().iter().map(|b| b["angle_deg"].as_f64().unwrap().round()).collect();
+    assert_eq!(angles, [75.0, 100.0, 75.0, 90.0], "{bends}");
+    assert!(app.session.model.results.iter().all(|r| r.error.is_none()), "{:?}", app.session.model.results);
+    // Edit Feature: the edges and their own values come back, and OK rebuilds the same part.
+    let f = app.session.doc.features.last().unwrap().clone();
+    let mut e = edit_dialog(&app, f.id, None).unwrap();
+    assert_eq!(e.inputs[0].items.len(), 4);
+    let Kind::Sheet(Sm::Flange { own, .. }) = &e.kind else { panic!("not a flange dialog") };
+    assert_eq!(own.len(), 2, "{own:?}");
+    assert!(own.iter().any(|o| o.0.dist(point(1)) < 1e-9 && o.1 == "100 deg" && o.2.is_empty()), "{own:?}");
+    assert!(own.iter().any(|o| o.0.dist(point(3)) < 1e-9 && o.1 == "90 deg" && o.2 == "15 mm"), "{own:?}");
+    let volume = |app: &mut SolveApp| app.session.execute("inspect.measure", &json!({})).unwrap()["total"]["volume_mm3"].as_f64().unwrap();
+    let before = volume(&mut app);
+    let c = apply_commands(&app, &e).unwrap();
+    assert_eq!(c[0].0, "timeline.redefine");
+    assert_eq!(c[0].1["params"]["edges"][1], json!({"point": pt(point(1)), "angle": "100 deg"}));
+    assert_eq!(c[0].1["params"]["edges"][3]["height"], "15 mm");
+    run_all(&mut app, c);
+    let after = volume(&mut app);
+    assert!((after - before).abs() < 1e-6 * before, "{after} vs {before}");
+    // Taking edges out of the selection leaves each value with its edge.
+    e.inputs[0].items.remove(2);
+    e.inputs[0].items.remove(0);
+    let c = apply_commands(&app, &e).unwrap();
+    assert_eq!(
+        c[0].1["params"]["edges"],
+        json!([{"point": pt(point(1)), "angle": "100 deg"}, {"point": pt(point(3)), "angle": "90 deg", "height": "15 mm"}])
+    );
 }

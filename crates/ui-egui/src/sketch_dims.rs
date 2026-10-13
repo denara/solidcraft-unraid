@@ -6,8 +6,8 @@
 
 use egui::{Pos2, vec2};
 use serde_json::{Value, json};
-use solvecraft_engine::doc::expr::Kind as ValueKind;
-use solvecraft_engine::geom::Vec2;
+use solidcraft_engine::doc::expr::Kind as ValueKind;
+use solidcraft_engine::geom::Vec2;
 
 use crate::SolveApp;
 use crate::theme::Tokens;
@@ -170,11 +170,11 @@ fn live(t: &Tool, e: Vec2, px: f64) -> Vec<(f64, Vec2)> {
     }
 }
 
-fn fmt(kind: ValueKind, v: f64) -> String {
+fn fmt(app: &SolveApp, kind: ValueKind, v: f64) -> String {
     match kind {
         ValueKind::Angle => format!("{:.1} deg", v.to_degrees()),
         ValueKind::Unitless => format!("{}", v.round()),
-        ValueKind::Length => format!("{v:.2}"),
+        ValueKind::Length => crate::prefs::show_mm_bare(app, v),
     }
 }
 
@@ -310,7 +310,7 @@ fn boxes(app: &SolveApp, ui: &mut egui::Ui, proj: &Proj, t: &mut Tool) -> Option
     for (i, b) in t.dims.iter_mut().enumerate() {
         let Some((v, at)) = lv.get(i).copied() else { continue };
         if !b.locked {
-            b.value = fmt(b.kind, v);
+            b.value = fmt(app, b.kind, v);
         }
         let Some(sp) = proj.to_screen(plane.to_world(at)) else { continue };
         let id = egui::Id::new(("sc_dim", i));

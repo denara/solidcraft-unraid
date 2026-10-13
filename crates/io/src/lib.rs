@@ -1,11 +1,20 @@
-//! File formats. Designs are saved as JSON (`.solvecraft`): the parametric document only, the
-//! model is recomputed on load. Bodies export as STL (binary or ASCII), OBJ, STEP and 3MF; STEP
+//! File formats. Designs use JSON or versioned containers (`.solidcraft`); the authoritative
+//! document rebuilds on load and optional display caches remain provisional. Bodies export
+//! as STL (binary or ASCII), OBJ, STEP and 3MF; STEP
 //! files import as a base feature (see [`step_import_feature`]), 3MF and STL files as mesh bodies
 //! (see [`mesh_import_feature`]).
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
+mod design;
+mod design_metadata;
 mod dxf;
+pub use design::{
+    DesignCompression, DesignContainerReader, DesignGeometry, DesignPreview, is_design_container, read_design_file, read_design_geometry,
+    read_design_preview, write_design_container, write_design_container_with_cache, write_design_container_with_compression,
+    write_design_container_with_preview,
+};
+mod legacy_dir;
 pub mod safe_write;
 mod sketch2d;
 mod svg;
@@ -13,6 +22,7 @@ mod threemf;
 pub mod vfs;
 
 pub use dxf::{read_dxf, write_dxf};
+pub use legacy_dir::adopt_legacy_dir;
 pub use safe_write::{backup_path, write_atomic};
 pub use sketch2d::{Geom2, MAX_DRAWING_BYTES};
 pub use svg::read_svg;
@@ -20,26 +30,39 @@ mod obj;
 pub use obj::read_obj;
 pub use threemf::{MAX_3MF_BYTES, MeshObject, model_xml, read_3mf, weld, write_3mf};
 
-use solvecraft_doc::{Document, ModelState};
-use solvecraft_geom::{Mesh, Vec3};
+use solidcraft_doc::{Document, ModelState};
+use solidcraft_geom::{Mesh, Vec3};
 
 /// Design file extension.
-pub const DESIGN_EXT: &str = "solvecraft";
+pub const DESIGN_EXT: &str = "solidcraft";
+/// The design extension of earlier releases. Compatibility shim (docs/compatibility.md): such
+/// files still open everywhere a design opens; new designs are saved as [`DESIGN_EXT`].
+pub const LEGACY_DESIGN_EXT: &str = "solvecraft";
+/// Every extension a design file may have, current first.
+pub const DESIGN_EXTS: [&str; 2] = [DESIGN_EXT, LEGACY_DESIGN_EXT];
+
+/// Is this a design file name (`.solidcraft`, or the legacy extension), any case?
+pub fn is_design_path(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| DESIGN_EXTS.iter().chain(["json"].iter()).any(|x| e.eq_ignore_ascii_case(x)))
+}
 /// Largest design file we read.
 pub const MAX_DESIGN_BYTES: usize = 256 << 20;
 
 #[derive(Debug, thiserror::Error)]
 pub enum IoError {
-    #[error("unsupported format `{0}` (use stl, obj, step, 3mf or solvecraft)")]
+    #[error("unsupported format `{0}` (use stl, obj, step, 3mf or solidcraft)")]
     Format(String),
     #[error("nothing to export: the design has no bodies")]
     Empty,
     #[error("{0}")]
     Invalid(String),
     #[error(transparent)]
-    Kernel(#[from] solvecraft_kernel::KernelError),
+    Kernel(#[from] solidcraft_kernel::KernelError),
     #[error(transparent)]
-    Doc(#[from] solvecraft_doc::DocError),
+    Doc(#[from] solidcraft_doc::DocError),
 }
 
 pub type Result<T> = std::result::Result<T, IoError>;
@@ -65,7 +88,7 @@ pub fn is_iges_path(path: &str) -> bool {
 pub struct StepFeature {
     /// Timeline name: the root product's name, else the file name.
     pub name: String,
-    pub kind: solvecraft_doc::FeatureKind,
+    pub kind: solidcraft_doc::FeatureKind,
     /// Body names from the file (solid names, else product names).
     pub body_names: Vec<String>,
     pub warnings: Vec<String>,
@@ -81,8 +104,8 @@ pub fn step_import_feature(bytes: &[u8], file: &str) -> Result<StepFeature> {
     // (the feature keeps that STEP text).
     let text = String::from_utf8_lossy(bytes).into_owned();
     let (text, iges_warnings) =
-        if is_iges_path(file) { solvecraft_kernel::iges_to_step(&text).map_err(IoError::Invalid)? } else { (text, Vec::new()) };
-    let imp = solvecraft_kernel::step_import_shared(&text)?;
+        if is_iges_path(file) { solidcraft_kernel::iges_to_step(&text).map_err(IoError::Invalid)? } else { (text, Vec::new()) };
+    let imp = solidcraft_kernel::step_import_shared(&text)?;
     let stem = std::path::Path::new(file)
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
@@ -99,7 +122,7 @@ pub fn step_import_feature(bytes: &[u8], file: &str) -> Result<StepFeature> {
     Ok(StepFeature {
         name,
         body_names: imp.bodies.iter().map(|b| b.name.clone()).collect(),
-        kind: solvecraft_doc::FeatureKind::Import { file: file_name, step: text, components: imp.tree.clone() },
+        kind: solidcraft_doc::FeatureKind::Import { file: file_name, step: text, components: imp.tree.clone() },
         warnings: iges_warnings.into_iter().chain(imp.warnings.iter().cloned()).collect(),
     })
 }
@@ -113,7 +136,7 @@ pub fn is_mesh_path(path: &str) -> bool {
 pub struct MeshFeature {
     /// Timeline name: the only mesh's name, else the file name.
     pub name: String,
-    pub kind: solvecraft_doc::FeatureKind,
+    pub kind: solidcraft_doc::FeatureKind,
     pub body_names: Vec<String>,
     pub warnings: Vec<String>,
 }
@@ -143,8 +166,8 @@ pub fn mesh_import_feature(bytes: &[u8], file: &str) -> Result<MeshFeature> {
     // Check every mesh now, so the command fails rather than the timeline.
     let mut meshes = Vec::with_capacity(objects.len());
     for o in &objects {
-        solvecraft_kernel::mesh_body(&o.positions, &o.triangles).map_err(|e| IoError::Invalid(format!("mesh `{}`: {e}", o.name)))?;
-        meshes.push(solvecraft_doc::MeshData {
+        solidcraft_kernel::mesh_body(&o.positions, &o.triangles).map_err(|e| IoError::Invalid(format!("mesh `{}`: {e}", o.name)))?;
+        meshes.push(solidcraft_doc::MeshData {
             name: o.name.clone(),
             positions: o.positions.iter().flat_map(|p| [p.x, p.y, p.z]).collect(),
             triangles: o.triangles.iter().flatten().copied().collect(),
@@ -159,7 +182,7 @@ pub fn mesh_import_feature(bytes: &[u8], file: &str) -> Result<MeshFeature> {
     Ok(MeshFeature {
         name,
         body_names: objects.iter().map(|o| o.name.clone()).collect(),
-        kind: solvecraft_doc::FeatureKind::MeshImport { file: file_name, meshes },
+        kind: solidcraft_doc::FeatureKind::MeshImport { file: file_name, meshes },
         warnings,
     })
 }
@@ -187,14 +210,14 @@ impl Format {
             "step" | "stp" => Format::Step,
             "igs" | "iges" => Format::Iges,
             "3mf" => Format::ThreeMf,
-            "solvecraft" | "json" => Format::Design,
+            "solidcraft" | "solvecraft" | "json" => Format::Design,
             _ => return Err(IoError::Format(ext)),
         })
     }
 }
 
 /// Fine export mesh for a body (chord tolerance 2e-4 of its size).
-pub fn export_mesh(b: &solvecraft_kernel::Body) -> Result<Mesh> {
+pub fn export_mesh(b: &solidcraft_kernel::Body) -> Result<Mesh> {
     Ok(b.tessellate((b.size() * 2e-4).max(1e-3))?)
 }
 
@@ -263,7 +286,7 @@ pub fn obj(meshes: &[(String, Mesh)]) -> String {
 
 /// Export the given bodies of a model (all when `bodies` is empty) in a format.
 pub fn export(state: &ModelState, bodies: &[String], format: Format, name: &str) -> Result<Vec<u8>> {
-    let sel: Vec<&solvecraft_doc::ModelBody> = state.bodies.iter().filter(|b| bodies.is_empty() || bodies.contains(&b.name)).collect();
+    let sel: Vec<&solidcraft_doc::ModelBody> = state.bodies.iter().filter(|b| bodies.is_empty() || bodies.contains(&b.name)).collect();
     if sel.is_empty() {
         return Err(IoError::Empty);
     }
@@ -277,16 +300,16 @@ pub fn export(state: &ModelState, bodies: &[String], format: Format, name: &str)
             }
         }
         Format::Step => {
-            let bs: Vec<solvecraft_kernel::ExportBody> =
-                sel.iter().map(|b| solvecraft_kernel::ExportBody { name: b.name.clone(), body: &b.body, color: b.body.color() }).collect();
-            let header = solvecraft_kernel::StepHeader { file_name: format!("{name}.step"), ..Default::default() };
-            solvecraft_kernel::step_export_bodies(&bs, &header)?.into_bytes()
+            let bs: Vec<solidcraft_kernel::ExportBody> =
+                sel.iter().map(|b| solidcraft_kernel::ExportBody { name: b.name.clone(), body: &b.body, color: b.body.color() }).collect();
+            let header = solidcraft_kernel::StepHeader { file_name: format!("{name}.step"), ..Default::default() };
+            solidcraft_kernel::step_export_bodies(&bs, &header)?.into_bytes()
         }
         Format::Iges => {
-            let bs: Vec<solvecraft_kernel::ExportBody> =
-                sel.iter().map(|b| solvecraft_kernel::ExportBody { name: b.name.clone(), body: &b.body, color: b.body.color() }).collect();
-            let header = solvecraft_kernel::StepHeader { file_name: format!("{name}.igs"), ..Default::default() };
-            solvecraft_kernel::iges_export_bodies(&bs, &header)?.into_bytes()
+            let bs: Vec<solidcraft_kernel::ExportBody> =
+                sel.iter().map(|b| solidcraft_kernel::ExportBody { name: b.name.clone(), body: &b.body, color: b.body.color() }).collect();
+            let header = solidcraft_kernel::StepHeader { file_name: format!("{name}.igs"), ..Default::default() };
+            solidcraft_kernel::iges_export_bodies(&bs, &header)?.into_bytes()
         }
         Format::ThreeMf => {
             let objs: Vec<MeshObject> = sel
@@ -311,7 +334,7 @@ pub fn export(state: &ModelState, bodies: &[String], format: Format, name: &str)
                 .collect::<Result<_>>()?;
             write_3mf(&objs)?
         }
-        Format::Design => return Err(IoError::Format("solvecraft (save the document instead)".into())),
+        Format::Design => return Err(IoError::Format("solidcraft (save the document instead)".into())),
     })
 }
 
@@ -319,7 +342,7 @@ pub fn export(state: &ModelState, bodies: &[String], format: Format, name: &str)
 /// the component's own frame (`local` is the model before placing occurrences), and an
 /// assembly occurrence per component occurrence.
 pub fn step_assembly(doc: &Document, local: &ModelState, name: &str) -> Result<Vec<u8>> {
-    use solvecraft_kernel::{ExportBody, ExportProduct};
+    use solidcraft_kernel::{ExportBody, ExportProduct};
     let mut index: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
     index.insert(0, 0);
     let mut products = vec![ExportProduct { name: doc.name.clone(), bodies: Vec::new(), children: Vec::new() }];
@@ -338,14 +361,17 @@ pub fn step_assembly(doc: &Document, local: &ModelState, name: &str) -> Result<V
             p.children.push((child, o.transform, o.name.clone()));
         }
     }
-    let header = solvecraft_kernel::StepHeader { file_name: format!("{name}.step"), ..Default::default() };
-    Ok(solvecraft_kernel::step_export_products(&products, 0, &header)?.into_bytes())
+    let header = solidcraft_kernel::StepHeader { file_name: format!("{name}.step"), ..Default::default() };
+    Ok(solidcraft_kernel::step_export_products(&products, 0, &header)?.into_bytes())
 }
 
 /// Read a design file's bytes.
 pub fn read_design(bytes: &[u8]) -> Result<Document> {
     if bytes.len() > MAX_DESIGN_BYTES {
         return Err(IoError::Invalid("design file too large".into()));
+    }
+    if is_design_container(bytes) {
+        return design::read(bytes);
     }
     let s = std::str::from_utf8(bytes).map_err(|_| IoError::Invalid("design file is not UTF-8 JSON".into()))?;
     Ok(Document::from_json(s)?)
@@ -425,8 +451,8 @@ pub const MAX_STL_TRIANGLES: usize = 20_000_000;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use solvecraft_doc::{FeatureKind, Model, Operation, point_expr};
-    use solvecraft_geom::Vec3;
+    use solidcraft_doc::{FeatureKind, Model, Operation, point_expr};
+    use solidcraft_geom::Vec3;
 
     fn model() -> (Document, Model) {
         let mut doc = Document::new("t");
@@ -472,11 +498,11 @@ mod tests {
 
     fn mesh_volume(bytes: &[u8]) -> f64 {
         let f = mesh_import_feature(bytes, "x.stl").unwrap();
-        let solvecraft_doc::FeatureKind::MeshImport { meshes, .. } = f.kind else { panic!() };
+        let solidcraft_doc::FeatureKind::MeshImport { meshes, .. } = f.kind else { panic!() };
         let m = &meshes[0];
         let pos: Vec<Vec3> = m.positions.chunks(3).map(|c| Vec3::new(c[0], c[1], c[2])).collect();
         let tris: Vec<[u32; 3]> = m.triangles.chunks(3).map(|c| [c[0], c[1], c[2]]).collect();
-        solvecraft_kernel::measure(&solvecraft_kernel::mesh_body(&pos, &tris).unwrap()).unwrap().volume
+        solidcraft_kernel::measure(&solidcraft_kernel::mesh_body(&pos, &tris).unwrap()).unwrap().volume
     }
 
     /// STL quirks: a binary header starting with "solid", a zero triangle count, garbage
@@ -539,9 +565,23 @@ mod tests {
         assert_eq!(f.body_names, ["Body1"]);
         assert_eq!(f.body_names.len(), 1);
         assert!(matches!(&f.kind, FeatureKind::Import { file, .. } if file == "My Part.step"));
+        let mut imported = Document::new("Imported STEP round trip");
+        imported.add_feature(f.kind, None).unwrap();
+        let packaged = read_design(&write_design_container(&imported).unwrap()).unwrap();
+        assert_eq!(packaged, imported);
+        let mut rebuilt = Model::new();
+        rebuilt.evaluate(&packaged);
+        assert!(rebuilt.results.iter().all(|r| r.error.is_none()));
+        let state = rebuilt.state();
+        assert_eq!(state.bodies.len(), 1);
+        assert!((solidcraft_kernel::measure(&state.bodies[0].body).unwrap().volume - 6000.0).abs() < 1e-6);
         assert!(step_import_feature(b"ISO-10303-21;", "x.step").is_err());
         assert!(step_import_feature(&[0xff, 0xfe, 0x00], "x.step").is_err());
         assert!(Format::from_name("a.dwg").is_err());
+        // Compatibility shim: the legacy design extension is still a design.
+        assert_eq!(Format::from_name("old.solvecraft").unwrap(), Format::Design);
+        assert_eq!(Format::from_name("new.solidcraft").unwrap(), Format::Design);
+        assert!(is_design_path("/d/old.SOLVECRAFT") && is_design_path("new.solidcraft") && !is_design_path("a.step"));
         assert!(read_stl(&[0u8; 10]).is_err());
         let mut fake = vec![0u8; 84];
         fake[80..84].copy_from_slice(&u32::MAX.to_le_bytes());
@@ -575,7 +615,13 @@ mod tests {
         )
         .unwrap();
         doc.add_feature(
-            FeatureKind::Fillet { edges: vec![Vec3::new(0.0, 0.0, 5.0)], radius: "4".into(), body: None, style: Default::default() },
+            FeatureKind::Fillet {
+                edges: vec![Vec3::new(0.0, 0.0, 5.0)],
+                radius: "4".into(),
+                body: None,
+                style: Default::default(),
+                fit: Default::default(),
+            },
             None,
         )
         .unwrap();
@@ -618,7 +664,7 @@ mod tests {
             assert_eq!(a.name, b.name);
             assert!(b.body.is_mesh() && b.body.is_closed_mesh(), "{} is not watertight", b.name);
             let v_stl = stl_volume(&export(&st, std::slice::from_ref(&a.name), Format::StlBinary, "t").unwrap());
-            let v = solvecraft_kernel::measure(&b.body).unwrap().volume;
+            let v = solidcraft_kernel::measure(&b.body).unwrap().volume;
             assert!((v - v_stl).abs() <= 1e-6 * v_stl.abs(), "{}: {v} vs {v_stl}", a.name);
         }
         // Mesh bodies export again (3MF, STL, OBJ) but not as STEP.

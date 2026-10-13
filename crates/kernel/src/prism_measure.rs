@@ -1,7 +1,7 @@
 //! Independent current-geometry intervals for uniform prisms.
 //! These are not mesh measurements or certificates of construction history.
 use crate::body::from_p3;
-use solvecraft_geom::{Plane, Seg2, Vec2, Vec3};
+use solidcraft_geom::{Plane, Seg2, Vec2, Vec3};
 use truck_modeling as mt;
 
 #[derive(Clone, Copy, Debug)]
@@ -750,7 +750,7 @@ mod tests {
     use mt::builder;
 
     fn drilled(radius: f64, shift: f64) -> crate::Body {
-        use solvecraft_geom::{Loop2, Region2};
+        use solidcraft_geom::{Loop2, Region2};
         let region = Region2 {
             outer: Loop2::polygon(&[Vec2::ZERO, Vec2::new(20., 0.), Vec2::new(20., 20.), Vec2::new(0., 20.)]),
             holes: vec![Loop2::circle(Vec2::new(10. + shift, 10.), radius)],
@@ -874,7 +874,7 @@ mod tests {
         let arc = Seg2::Arc { center: Vec2::ZERO, radius: 6., start: 0., sweep: std::f64::consts::TAU };
         let retraced = CapLoop { segments: vec![arc, arc.reversed(), arc], area: Interval::enclosing(36. * std::f64::consts::PI, 1e-8).unwrap() };
         assert!(circle(&retraced, 1e-6).is_none());
-        let region = solvecraft_geom::Loop2::polygon(&[Vec2::ZERO, Vec2::new(20., 0.), Vec2::new(20., 20.), Vec2::new(0., 20.)]);
+        let region = solidcraft_geom::Loop2::polygon(&[Vec2::ZERO, Vec2::new(20., 0.), Vec2::new(20., 20.), Vec2::new(0., 20.)]);
         let doubled = CapLoop { segments: region.segs.iter().chain(&region.segs).copied().collect(), area: Interval::enclosing(800., 1e-8).unwrap() };
         assert!(separated_material(&[doubled], 1e-6, &mut 16_000_000).is_none());
         let thin = crate::box_solid(Vec3::ZERO, Vec3::new(20., 20., 1e-5)).unwrap();

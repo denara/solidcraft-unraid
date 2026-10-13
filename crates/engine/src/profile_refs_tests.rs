@@ -48,8 +48,8 @@ fn bodies(s: &Session) -> Vec<(String, f64)> {
 fn a_port_picked_by_index_stays_a_cut_after_a_width_change() {
     let mut s = enclosure();
     let f = s.doc.features.last().unwrap();
-    let solvecraft_doc::FeatureKind::Extrude { profiles, .. } = &f.kind else { panic!("{:?}", f.kind) };
-    assert!(matches!(profiles, solvecraft_doc::ProfileSel::Curves { .. }), "stored by curves: {profiles:?}");
+    let solidcraft_doc::FeatureKind::Extrude { profiles, .. } = &f.kind else { panic!("{:?}", f.kind) };
+    assert!(matches!(profiles, solidcraft_doc::ProfileSel::Curves { .. }), "stored by curves: {profiles:?}");
     let before = bodies(&s);
     assert_eq!(before.len(), 1, "{before:?}");
     run(&mut s, "parameters.change", json!({"name": "width", "expression": "100 mm"}));
@@ -63,14 +63,14 @@ fn a_port_picked_by_index_stays_a_cut_after_a_width_change() {
     assert!((s.model.state().sketch(port).unwrap().plane.origin.x - 50.).abs() < 1e-6);
     let world = s.world_state();
     let mesh = world.body("Enclosure").unwrap().mesh();
-    assert!(!mesh.contains(solvecraft_geom::Vec3::new(49., 0., 12.)));
-    assert!(mesh.contains(solvecraft_geom::Vec3::new(49., 0., 20.)));
-    let reopened = Session::new(solvecraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    assert!(!mesh.contains(solidcraft_geom::Vec3::new(49., 0., 12.)));
+    assert!(mesh.contains(solidcraft_geom::Vec3::new(49., 0., 20.)));
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
     assert!(reopened.model.result(id).unwrap().error.is_none());
     let world = reopened.world_state();
     let mesh = world.body("Enclosure").unwrap().mesh();
-    assert!(!mesh.contains(solvecraft_geom::Vec3::new(49., 0., 12.)));
-    assert!(mesh.contains(solvecraft_geom::Vec3::new(49., 0., 20.)));
+    assert!(!mesh.contains(solidcraft_geom::Vec3::new(49., 0., 12.)));
+    assert!(mesh.contains(solidcraft_geom::Vec3::new(49., 0., 20.)));
 }
 
 /// A pick the sketch no longer has is an error on the feature, never a different profile.
@@ -88,7 +88,7 @@ fn a_lost_profile_is_an_error_not_another_pick() {
     // Delete the picked circle: the extrude fails with a message instead of taking the square.
     let sk = s.doc.find_feature("S").unwrap().id;
     let picked = match &s.doc.features.last().unwrap().kind {
-        solvecraft_doc::FeatureKind::Extrude { profiles: solvecraft_doc::ProfileSel::Curves { loops }, .. } => loops[0].clone(),
+        solidcraft_doc::FeatureKind::Extrude { profiles: solidcraft_doc::ProfileSel::Curves { loops }, .. } => loops[0].clone(),
         k => panic!("{k:?}"),
     };
     run(&mut s, "sketch.edit", json!({"sketch": sk}));

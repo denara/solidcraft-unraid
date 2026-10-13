@@ -69,7 +69,7 @@ class DesktopProbe(unittest.TestCase):
 
     def test_cli_version_or_partial_control_output_is_not_desktop_success(self):
         with self.assertRaises(ValueError):
-            SMOKE.validate_replies("solvecraft-cli 0.3.0\n")
+            SMOKE.validate_replies("solidcraft-cli 0.3.0\n")
         with self.assertRaises(ValueError):
             SMOKE.validate_replies(output(healthy_replies()[:1]))
 

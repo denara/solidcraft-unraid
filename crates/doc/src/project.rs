@@ -8,8 +8,8 @@
 
 use std::collections::BTreeMap;
 
-use solvecraft_geom::{Mesh, Plane, Vec2, Vec3};
-use solvecraft_sketch::{CurveKind, LinkGeom, LinkKind, LinkSource, Sketch};
+use solidcraft_geom::{Mesh, Plane, Vec2, Vec3};
+use solidcraft_sketch::{CurveKind, LinkGeom, LinkKind, LinkSource, Sketch};
 
 use crate::eval::ModelState;
 use crate::expr::Value;
@@ -259,7 +259,10 @@ fn resolve_uncached(
                 _ => vec![LinkGeom::Point(o)],
             }
         }
-        LinkSource::Text { text, at, height, angle } => solvecraft_sketch::text_geometry(text, *at, *height, *angle)?,
+        LinkSource::SketchAxis { name } => {
+            vec![solidcraft_sketch::sketch_axis_geom(name).ok_or_else(|| DocError::Unknown(format!("sketch axis `{name}`")))?]
+        }
+        LinkSource::Text { text, at, height, angle, font } => solidcraft_sketch::text_geometry_in(font.as_deref(), text, *at, *height, *angle)?,
         LinkSource::Plane { name } => {
             let pr =
                 if Plane::named(name).is_some() { PlaneRef::Origin { name: name.clone() } } else { PlaneRef::Construction { name: name.clone() } };
@@ -310,7 +313,7 @@ fn projection_face_edges(body: &crate::ModelBody, mesh: &Mesh, index: u32, plane
         .body
         .face_sources()
         .and_then(|sources| sources.get(index as usize))
-        .is_some_and(|source| matches!(source, Some(solvecraft_kernel::FaceSource::ShellPlanar { .. })));
+        .is_some_and(|source| matches!(source, Some(solidcraft_kernel::FaceSource::ShellPlanar { .. })));
     if shell_plane { order::raw_face_edges(mesh, index, plane) } else { order::face_edges(mesh, index, plane) }
 }
 
@@ -319,10 +322,11 @@ fn certified_planar_construction(body: &crate::ModelBody, index: usize) -> bool 
         matches!(
             source,
             Some(
-                solvecraft_kernel::FaceSource::ShellPlanar { producer: Some(_), .. }
-                    | solvecraft_kernel::FaceSource::Box { producer: Some(_), .. }
-                    | solvecraft_kernel::FaceSource::CertifiedExtrudeSide { plane: Some(_), .. }
-                    | solvecraft_kernel::FaceSource::CertifiedExtrudeCap { .. }
+                solidcraft_kernel::FaceSource::ShellPlanar { producer: Some(_), .. }
+                    | solidcraft_kernel::FaceSource::Box { producer: Some(_), .. }
+                    | solidcraft_kernel::FaceSource::CylinderCap { .. }
+                    | solidcraft_kernel::FaceSource::CertifiedExtrudeSide { plane: Some(_), .. }
+                    | solidcraft_kernel::FaceSource::CertifiedExtrudeCap { .. }
             )
         )
     })
@@ -497,7 +501,7 @@ fn refresh_links_in(
                     && name != stem
                     && st.body(body).is_some_and(|target| {
                         (certified_planar_construction(target, index) || target.body.face_was_coalesced(index))
-                            && crate::naming::face_names(target).get(index).is_some_and(|current| current == stem)
+                            && crate::naming::face_has_name(target, index, stem)
                     });
                 if removed_piece {
                     sk.set_link_lost(&l.id, true);
@@ -785,7 +789,7 @@ fn as_spline(pts: &[Vec2], tol: f64) -> Option<LinkGeom> {
         if fit.len() < 2 {
             return None;
         }
-        let poly = solvecraft_sketch::spline_polyline(&fit, false, 3);
+        let poly = solidcraft_sketch::spline_polyline(&fit, false, 3);
         let ok = pts.iter().all(|q| {
             poly.windows(2)
                 .map(|w| {

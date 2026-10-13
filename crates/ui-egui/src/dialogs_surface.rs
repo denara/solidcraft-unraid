@@ -2,10 +2,10 @@
 //! Trim and Split Face. Each has a live preview and Edit Feature.
 
 use serde_json::{Map, Value, json};
-use solvecraft_engine::Sel;
-use solvecraft_engine::doc::expr::Kind as ValueKind;
-use solvecraft_engine::doc::{FaceAt, FeatureKind, PlaneRef};
-use solvecraft_engine::geom::Vec3;
+use solidcraft_engine::Sel;
+use solidcraft_engine::doc::expr::Kind as ValueKind;
+use solidcraft_engine::doc::{FaceAt, FeatureKind, PlaneRef};
+use solidcraft_engine::geom::Vec3;
 
 use crate::SolveApp;
 use crate::dialogs::{Kind, OP_LABELS, OPS, combo, field, op_index, row_label};
@@ -16,6 +16,7 @@ use crate::selection::{BODIES, EDGES, FACES, PLANES, PROFILES, SelInput};
 pub enum Surf {
     Patch,
     Stitch { tolerance: String },
+    ConvertMesh { tolerance: String },
     Thicken { thickness: String, symmetric: bool, operation: usize },
     Extend { distance: String },
     Trim,
@@ -27,6 +28,7 @@ impl Surf {
         match self {
             Surf::Patch => "PATCH",
             Surf::Stitch { .. } => "STITCH",
+            Surf::ConvertMesh { .. } => "CONVERT MESH",
             Surf::Thicken { .. } => "THICKEN",
             Surf::Extend { .. } => "EXTEND",
             Surf::Trim => "TRIM",
@@ -48,6 +50,7 @@ fn inputs(k: &Surf) -> Vec<SelInput> {
     match k {
         Surf::Patch => vec![SelInput::new("Boundary", PROFILES | EDGES, true)],
         Surf::Stitch { .. } => vec![SelInput::new("Surfaces", BODIES, true)],
+        Surf::ConvertMesh { .. } => vec![SelInput::new("Mesh body", BODIES, false)],
         Surf::Thicken { .. } => vec![SelInput::new("Surfaces", BODIES, true)],
         Surf::Extend { .. } => vec![SelInput::new("Edges", EDGES, true)],
         Surf::Trim => vec![
@@ -64,6 +67,7 @@ pub fn start(_app: &SolveApp, id: &str) -> Option<(Kind, Vec<SelInput>)> {
     let k = match id {
         "surface.patch" => Surf::Patch,
         "surface.stitch" => Surf::Stitch { tolerance: String::new() },
+        "mesh.convert" => Surf::ConvertMesh { tolerance: "0.05 mm".into() },
         "surface.thicken" => Surf::Thicken { thickness: "2 mm".into(), symmetric: false, operation: 0 },
         "surface.extend" => Surf::Extend { distance: "10 mm".into() },
         "surface.trim" => Surf::Trim,
@@ -78,7 +82,7 @@ pub fn start(_app: &SolveApp, id: &str) -> Option<(Kind, Vec<SelInput>)> {
 pub fn rows(ui: &mut egui::Ui, k: &mut Surf) -> bool {
     let mut enter = false;
     match k {
-        Surf::Stitch { tolerance } => {
+        Surf::Stitch { tolerance } | Surf::ConvertMesh { tolerance } => {
             row_label(ui, "Tolerance");
             let r = ui.add(egui::TextEdit::singleline(tolerance).hint_text("tight"));
             crate::params_dialog::complete(ui, &r, tolerance);
@@ -159,6 +163,11 @@ pub fn commands(app: &SolveApp, k: &Surf, inputs: &[SelInput], extra: &Map<Strin
             }
             ("surface.stitch", p)
         }
+        Surf::ConvertMesh { tolerance } => {
+            need(0, "a closed mesh body")?;
+            let body = bodies(inputs, 0).into_iter().next().ok_or("select a mesh body")?;
+            ("mesh.convert", json!({"body":body,"tolerance":tolerance}))
+        }
         Surf::Thicken { thickness, symmetric, operation } => {
             need(0, "the surfaces to thicken")?;
             (
@@ -235,6 +244,9 @@ pub fn for_feature(app: &SolveApp, kind: &FeatureKind) -> Option<(Kind, Vec<SelI
             Surf::Stitch { tolerance: if tolerance.trim() == "0" { String::new() } else { tolerance.clone() } },
             vec![bodies.iter().map(|n| Sel::Body { name: n.clone() }).collect()],
         ),
+        FeatureKind::MeshConvert { body, tolerance } => {
+            (Surf::ConvertMesh { tolerance: tolerance.clone() }, vec![vec![Sel::Body { name: body.clone() }]])
+        }
         FeatureKind::Thicken { bodies, thickness, symmetric, operation, .. } => (
             Surf::Thicken { thickness: thickness.clone(), symmetric: *symmetric, operation: op_index(operation) },
             vec![bodies.iter().map(|n| Sel::Body { name: n.clone() }).collect()],

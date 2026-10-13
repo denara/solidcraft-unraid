@@ -8,8 +8,8 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use solvecraft_geom::{Plane, Vec2, Vec3};
-use solvecraft_kernel::{self as kernel, FaceSurface};
+use solidcraft_geom::{Plane, Vec2, Vec3};
+use solidcraft_kernel::{self as kernel, FaceSurface};
 
 use crate::eval::{ModelBody, ModelState};
 use crate::expr::{Kind, Value};
@@ -202,6 +202,14 @@ fn sketch_world(ctx: &Ctx, sketch: u64, q: Vec2) -> Result<Vec3> {
 
 fn sketch_curve_points(ctx: &Ctx, sketch: u64, curve: &str) -> Result<Vec<Vec3>> {
     let ss = ctx.st.sketch(sketch).ok_or_else(|| DocError::Unknown(format!("sketch {sketch}")))?;
+    if let Some(wire) = ss.sketch.wires.iter().find(|wire| wire.id == curve) {
+        if wire.pts.len() < 2 {
+            return Err(bad(format!("curve `{curve}` has no length")));
+        }
+        // Evaluation has already mapped wires into this component's frame. Their coordinates
+        // are independent of the sketch plane; applying it again would move the path twice.
+        return Ok(wire.pts.clone());
+    }
     let ci = ss.sketch.curve_index(curve).ok_or_else(|| DocError::Unknown(format!("curve `{curve}`")))?;
     let pl = ss.sketch.polyline(ci);
     if pl.len() < 2 {

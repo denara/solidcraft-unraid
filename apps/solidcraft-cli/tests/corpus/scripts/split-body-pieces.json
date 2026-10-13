@@ -1,0 +1,107 @@
+{
+ "commands": [
+  {
+   "command": "sketch.create",
+   "params": {
+    "plane": "XY",
+    "name": "Base"
+   }
+  },
+  {
+   "command": "sketch.rectangle.two_point",
+   "params": {
+    "p0": [
+     0,
+     0
+    ],
+    "p1": [
+     40,
+     30
+    ]
+   }
+  },
+  {
+   "command": "sketch.finish",
+   "params": {}
+  },
+  {
+   "command": "solid.extrude",
+   "params": {
+    "distance": 10,
+    "name": "Block"
+   }
+  },
+  {
+   "command": "sketch.create",
+   "params": {
+    "plane": "XY",
+    "name": "SlotSketch"
+   }
+  },
+  {
+   "command": "sketch.rectangle.two_point",
+   "params": {
+    "p0": [
+     -5,
+     12
+    ],
+    "p1": [
+     45,
+     18
+    ]
+   }
+  },
+  {
+   "command": "sketch.finish",
+   "params": {}
+  },
+  {
+   "command": "solid.extrude",
+   "params": {
+    "sketch": "SlotSketch",
+    "distance": 10,
+    "operation": "cut",
+    "name": "Slot"
+   }
+  },
+  {
+   "command": "solid.fillet",
+   "params": {
+    "edges": [
+     [
+      20,
+      0,
+      10
+     ]
+    ],
+    "radius": 2,
+    "body": "Body1 (1)",
+    "name": "NearRound"
+   }
+  },
+  {
+   "command": "solid.chamfer",
+   "params": {
+    "edges": [
+     [
+      20,
+      30,
+      10
+     ]
+    ],
+    "distance": 1.5,
+    "body": "Body1",
+    "name": "FarBevel"
+   }
+  },
+  {
+   "command": "appearance.assign",
+   "params": {
+    "bodies": [
+     "Body1 (1)"
+    ],
+    "color": "#cc3333"
+   }
+  }
+ ]
+}

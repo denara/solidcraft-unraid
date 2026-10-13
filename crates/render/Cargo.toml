@@ -1,5 +1,5 @@
 [package]
-name = "solvecraft-render"
+name = "solidcraft-render"
 description = "SolidCraft view math (orbit camera, projection, picking rays) and a CPU rasterizer for headless snapshots"
 version.workspace = true
 edition.workspace = true
@@ -9,7 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-solvecraft-geom = { workspace = true }
+solidcraft-geom = { workspace = true }
 serde = { workspace = true }
 image = { workspace = true }
 

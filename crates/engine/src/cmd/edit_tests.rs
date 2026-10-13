@@ -135,7 +135,7 @@ fn redefine_rejects_sheet_exports_before_they_touch_any_files() {
     run(&mut s, "sketch.finish", json!({}));
     run(&mut s, "sheet.flange", json!({"name": "Plate"}));
     let doc = s.doc.clone();
-    let base = std::env::temp_dir().join(format!("solvecraft-redefine-export-{}", std::process::id()));
+    let base = std::env::temp_dir().join(format!("solidcraft-redefine-export-{}", std::process::id()));
     std::fs::create_dir_all(&base).unwrap();
     for command in ["sheet.export_dxf", "sheet.export_bend_table"] {
         for existing in [false, true] {
@@ -182,9 +182,9 @@ fn redefine_keeps_allocator_above_component_and_occurrence_ids() {
     assert_eq!(s.doc.find_feature("Join").unwrap().id, original_feature);
     let combine_index = s.doc.feature_index(original_feature).unwrap();
     assert!(
-        matches!(&s.doc.features[combine_index + 1].kind, solvecraft_doc::FeatureKind::BodyTransfer { bodies, to, .. } if bodies == &["Base"] && *to == destination)
+        matches!(&s.doc.features[combine_index + 1].kind, solidcraft_doc::FeatureKind::BodyTransfer { bodies, to, .. } if bodies == &["Base"] && *to == destination)
     );
-    assert!((solvecraft_kernel::measure(&s.world_state().body("Base").unwrap().body).unwrap().volume - 6000.0).abs() < 1e-6);
+    assert!((solidcraft_kernel::measure(&s.world_state().body("Base").unwrap().body).unwrap().volume - 6000.0).abs() < 1e-6);
     assert_eq!(s.world_state().bodies.len(), 1);
     run(&mut s, "timeline.rollback", json!({"position":combine_index + 1}));
     assert_eq!(s.world_state().body("Base").unwrap().component, 0, "the result transfers only AFTER Combine");
@@ -192,9 +192,9 @@ fn redefine_keeps_allocator_above_component_and_occurrence_ids() {
     run(&mut s, "edit.undo", json!({}));
     assert_eq!(*s.doc, *original);
     run(&mut s, "edit.redo", json!({}));
-    let reopened = Session::new(solvecraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
     assert_eq!(reopened.world_state().body("Base").unwrap().component, destination);
-    assert!((solvecraft_kernel::measure(&reopened.world_state().body("Base").unwrap().body).unwrap().volume - 6000.0).abs() < 1e-6);
+    assert!((solidcraft_kernel::measure(&reopened.world_state().body("Base").unwrap().body).unwrap().volume - 6000.0).abs() < 1e-6);
     let max_id =
         s.doc.components.iter().map(|c| c.id).chain(s.doc.occurrences.iter().map(|o| o.id)).chain(s.doc.features.iter().map(|f| f.id)).max().unwrap();
     assert!(s.doc.next_id > max_id);
@@ -215,7 +215,7 @@ fn redefine_cannot_publish_a_second_transfer_that_breaks_existing_ownership() {
     let full = s.doc.to_json();
     let join_index = s.doc.features.iter().position(|feature| feature.name == "Join").unwrap();
     for marker in [None, Some(join_index), Some(join_index + 1)] {
-        let mut s = Session::new(solvecraft_doc::Document::from_json(&full).unwrap());
+        let mut s = Session::new(solidcraft_doc::Document::from_json(&full).unwrap());
         s.doc_mut().marker = marker;
         s.refresh();
         let before = s.doc.to_json();
@@ -225,7 +225,7 @@ fn redefine_cannot_publish_a_second_transfer_that_breaks_existing_ownership() {
         assert_eq!(s.doc.to_json(), before);
         assert_eq!(s.pending_moves, pending);
     }
-    let reopened = Session::new(solvecraft_doc::Document::from_json(&full).unwrap());
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&full).unwrap());
     assert_eq!(reopened.world_state().body("Base").unwrap().component, reopened.doc.find_component("Original").unwrap());
     assert!(reopened.doc.features.iter().all(|feature| reopened.model.result(feature.id).is_some_and(|result| result.error.is_none())));
 }

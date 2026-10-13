@@ -3,10 +3,10 @@
 //! They are reference geometry: drawn and usable as paths, not part of profiles or the solver.
 
 use serde::{Deserialize, Serialize};
-use solvecraft_geom::Vec3;
+use solidcraft_geom::Vec3;
 
 use crate::link::{Link, LinkGeom, LinkKind, LinkSource};
-use crate::model::{Result, Sketch, SketchError};
+use crate::model::{Result, Sketch, SketchError, in_range3};
 
 /// Most points one wire may have.
 pub const MAX_WIRE_POINTS: usize = 100_000;
@@ -97,7 +97,7 @@ fn clean(w: &[Vec3]) -> Option<Vec<Vec3>> {
     }
     let mut out: Vec<Vec3> = Vec::new();
     for p in w {
-        if !(p.is_finite() && p.x.abs() < 1e9 && p.y.abs() < 1e9 && p.z.abs() < 1e9) {
+        if !in_range3(*p) {
             return None;
         }
         if out.last().is_none_or(|l| l.dist(*p) > 1e-9) {
@@ -118,14 +118,14 @@ fn drawn_polyline(fit: &[Vec3]) -> Result<Vec<Vec3>> {
     if fit.is_empty() || fit.len() > MAX_FIT_POINTS {
         return Err(SketchError::Invalid(format!("a 3D curve needs 1 to {MAX_FIT_POINTS} points")));
     }
-    if fit.iter().any(|p| !(p.is_finite() && p.x.abs() < 1e9 && p.y.abs() < 1e9 && p.z.abs() < 1e9)) {
+    if fit.iter().any(|p| !in_range3(*p)) {
         return Err(SketchError::Invalid("3D point out of range".into()));
     }
     if fit.windows(2).any(|w| w[0].dist(w[1]) < 1e-9) {
         return Err(SketchError::Invalid("the points of a 3D curve must differ".into()));
     }
     let pts = fit_polyline(fit);
-    if pts.iter().any(|p| !(p.is_finite() && p.x.abs() < 1e9 && p.y.abs() < 1e9 && p.z.abs() < 1e9)) {
+    if pts.iter().any(|p| !in_range3(*p)) {
         return Err(SketchError::Invalid("3D spline samples out of range".into()));
     }
     Ok(pts)
@@ -163,7 +163,7 @@ impl Sketch {
                 || w.pts.len() > MAX_WIRE_POINTS
                 || w.fit.len() > MAX_FIT_POINTS
                 || (w.pts.len() == 1 && w.fit.len() != 1)
-                || w.pts.iter().chain(&w.fit).any(|p| !(p.is_finite() && p.x.abs() < 1e9 && p.y.abs() < 1e9 && p.z.abs() < 1e9))
+                || w.pts.iter().chain(&w.fit).any(|p| !in_range3(*p))
             {
                 return Err(SketchError::Invalid("3D curve arrays, ids or point bounds are invalid".into()));
             }
@@ -241,7 +241,7 @@ impl Sketch {
     /// Move a fit point of a drawn 3D curve, and every other drawn point at the same place
     /// (curves drawn end to end stay joined). Returns how many points moved.
     pub fn move_drawn_point(&mut self, wire: &str, index: usize, to: Vec3) -> Result<usize> {
-        if !(to.is_finite() && to.x.abs() < 1e9 && to.y.abs() < 1e9 && to.z.abs() < 1e9) {
+        if !in_range3(to) {
             return Err(SketchError::Invalid("3D point out of range".into()));
         }
         let w = self.wire_index(wire).ok_or_else(|| SketchError::Unknown(wire.into()))?;

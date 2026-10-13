@@ -3,14 +3,17 @@
 //! blend's radius rolls along the edge touching both sides; its centre traces the spine and its
 //! contacts the curves where the blend meets each side. The blend face is a rational B-spline
 //! through the circular cross-sections (exact arcs at the samples), the side faces are trimmed
-//! back to the contact curves, and seams that met the edge are shortened to the contacts.
+//! back to the contact curves, and seams that met the edge (lines, or arcs of an end face) are
+//! shortened to the contacts.
 
 use std::collections::HashMap;
 
-use solvecraft_geom::Vec3;
+use solidcraft_geom::Vec3;
 use truck_modeling::{self as mt, builder};
 
+use crate::blend::too_large;
 use crate::body::{Solid, from_p3, p3};
+use crate::record::Rebuild;
 use crate::{KernelError, Result};
 
 fn unsupported(msg: &str) -> KernelError {
@@ -176,14 +179,47 @@ fn project(f: &mt::Face, p: Vec3, hint: Option<(f64, f64)>) -> Option<(Vec3, Vec
     Some((q, Vec3::new(n.x, n.y, n.z).normalized()?, uv))
 }
 
+/// Whether `uv` lies within the parameters of the face's surface (unbounded directions pass).
+fn in_range(f: &mt::Face, uv: (f64, f64)) -> bool {
+    use mt::ParametricSurface;
+    use std::ops::Bound;
+    let inside = |range: (Bound<f64>, Bound<f64>), x: f64| {
+        let slack = |a: f64, b: f64| (b - a).abs() * 1e-6 + 1e-9;
+        match range {
+            (Bound::Included(a) | Bound::Excluded(a), Bound::Included(b) | Bound::Excluded(b)) => x >= a - slack(a, b) && x <= b + slack(a, b),
+            (Bound::Included(a) | Bound::Excluded(a), Bound::Unbounded) => x >= a - 1e-9,
+            (Bound::Unbounded, Bound::Included(b) | Bound::Excluded(b)) => x <= b + 1e-9,
+            (Bound::Unbounded, Bound::Unbounded) => true,
+        }
+    };
+    let (ru, rv) = f.oriented_surface().parameter_range();
+    uv.0.is_finite() && uv.1.is_finite() && inside(ru, uv.0) && inside(rv, uv.1)
+}
+
 /// Solve for the ball touching both sides near `p`. `extra` adds a third condition (a plane the
 /// side-k contact must lie in); without it the centre stays in the plane through `p` square to
 /// `t`. `sigma` is +1 when the ball sits outside the material (concave edge), −1 inside.
 #[allow(clippy::too_many_arguments)]
 fn solve(f1: &[&mt::Face], f2: &[&mt::Face], p: Vec3, t: Vec3, r: f64, sigma: f64, extra: Option<(usize, Vec3, Vec3)>, tol: f64) -> Option<Section> {
-    // The nearest face of a side (several faces on one smooth surface group).
+    // The nearest face of a side (several faces on one smooth surface group). Each face's
+    // search starts from its last answer: the centre moves little between iterations. An
+    // answer outside the surface's parameters, or farther than that last point (the search
+    // ran away or settled on the far side), is searched again cold.
+    let last = std::cell::RefCell::new(HashMap::<mt::FaceID, ((f64, f64), Vec3)>::new());
     let near = |fs: &[&mt::Face], c: Vec3| -> Option<(Vec3, Vec3)> {
-        fs.iter().filter_map(|f| project(f, c, None).map(|(q, n, _)| (q, n))).min_by(|a, b| a.0.dist(c).total_cmp(&b.0.dist(c)))
+        fs.iter()
+            .filter_map(|f| {
+                let prev = last.borrow().get(&f.id()).copied();
+                let warm =
+                    prev.and_then(|(uv, q)| project(f, c, Some(uv)).filter(|(x, _, uv)| in_range(f, *uv) && x.dist(c) <= q.dist(c) + tol * 1e-3));
+                let (q, n, uv) = match warm {
+                    Some(x) => x,
+                    None => project(f, c, None)?,
+                };
+                last.borrow_mut().insert(f.id(), (uv, q));
+                Some((q, n))
+            })
+            .min_by(|a, b| a.0.dist(c).total_cmp(&b.0.dist(c)))
     };
     let (q1, n1) = near(f1, p)?;
     let (q2, n2) = near(f2, p)?;
@@ -238,12 +274,57 @@ fn section_controls(s: &Section, round: bool) -> Option<[mt::Vector4; 3]> {
     Some([h(s.q1, 1.0), h(m, half), h(s.q2, 1.0)])
 }
 
-/// Blend the closed chain of edges (ids in any order) with radius `r`.
-pub(crate) fn curve_blend(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, round: bool) -> Result<Solid> {
+/// A curved seam (an arc of an end face) shortened to the blend's contacts: the part of its
+/// curve between the new ends `a` and `b` (`None` keeps that end), which must lie on it, in
+/// order, short of each other.
+fn trim_curved_seam(seam: &mt::Edge, a: Option<mt::Vertex>, b: Option<mt::Vertex>, size: f64) -> Result<mt::Edge> {
+    // A closed seam (a full circle starting and ending at one vertex) has no "between": which
+    // end a contact replaces, and which way round the kept piece runs, are both ambiguous.
+    if seam.front() == seam.back() {
+        return Err(unsupported("a closed curved edge where the blend ends"));
+    }
+    use mt::{BoundedCurve, Cut, SearchNearestParameter};
+    let mut curve = seam.curve();
+    let (lo, hi) = curve.range_tuple();
+    let at = |v: &Option<mt::Vertex>, end: f64| -> Result<f64> {
+        let Some(v) = v else { return Ok(end) };
+        // Start from the nearest of a few samples: from the far end of a long arc
+        // the search can settle on the opposite side of the circle.
+        let q = from_p3(v.point());
+        let hint = (0..=32)
+            .map(|i| lo + (hi - lo) * i as f64 / 32.0)
+            .min_by(|x, y| {
+                let d = |t: f64| from_p3(mt::ParametricCurve::subs(&curve, t)).dist(q);
+                d(*x).total_cmp(&d(*y))
+            })
+            .unwrap_or(end);
+        let t = curve.search_nearest_parameter(v.point(), hint, 100).ok_or_else(|| unsupported("the blend is larger than the neighbouring faces"))?;
+        if !(t.is_finite() && from_p3(mt::ParametricCurve::subs(&curve, t)).dist(from_p3(v.point())) <= size * 1e-5) {
+            return Err(too_large("the blend is larger than the neighbouring faces"));
+        }
+        Ok(t)
+    };
+    let (ta, tb) = (at(&a, lo)?, at(&b, hi)?);
+    let margin = (hi - lo) * 1e-9;
+    if ta < lo - margin || tb > hi + margin || tb - ta < (hi - lo) * 1e-6 {
+        return Err(too_large("the blend is larger than the neighbouring faces"));
+    }
+    if tb < hi {
+        let _ = curve.cut(tb);
+    }
+    let piece = if ta > lo { curve.cut(ta) } else { curve };
+    let a = a.unwrap_or_else(|| seam.front().clone());
+    let b = b.unwrap_or_else(|| seam.back().clone());
+    mt::Edge::try_new(&a, &b, piece).map_err(|e| KernelError::Failed(format!("curve blend: seam: {e}")))
+}
+
+/// Blend the closed chain of edges (ids in any order) with radius `r`; with what it built from
+/// `solid` (each blend face in place of its chain edge).
+pub(crate) fn curve_blend(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, round: bool) -> Result<(Solid, Rebuild)> {
     curve_blend_with_limit(solid, ids, size, r, round, MAX_SAMPLES)
 }
 
-fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, round: bool, max_samples: usize) -> Result<Solid> {
+fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, round: bool, max_samples: usize) -> Result<(Solid, Rebuild)> {
     if !(size.is_finite() && size > 0.0 && r.is_finite() && r > 0.0) {
         return Err(KernelError::Invalid("curve blend size and radius must be finite and positive".into()));
     }
@@ -598,7 +679,8 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
         let mut seam_subst: HashMap<mt::EdgeID, mt::Edge> = HashMap::new();
         for (id, (seam, a, b)) in ends {
             if !matches!(seam.curve(), mt::Curve::Line(_)) {
-                return Err(unsupported("a curved edge where the blend ends"));
+                seam_subst.insert(id, trim_curved_seam(&seam, a, b, size)?);
+                continue;
             }
             // The new ends must stay on the seam, in order, short of each other.
             let (p0, p1) = (from_p3(seam.front().point()), from_p3(seam.back().point()));
@@ -610,13 +692,15 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
             let (ta, oa) = a.as_ref().map(at).unwrap_or((0.0, 0.0));
             let (tb, ob) = b.as_ref().map(at).unwrap_or((1.0, 0.0));
             if oa > size * 1e-5 || ob > size * 1e-5 || ta < -1e-9 || tb > 1.0 + 1e-9 || tb - ta < 1e-6 {
-                return Err(unsupported("the blend is larger than the neighbouring faces"));
+                return Err(too_large("the blend is larger than the neighbouring faces"));
             }
             let a = a.unwrap_or_else(|| seam.front().clone());
             let b = b.unwrap_or_else(|| seam.back().clone());
             seam_subst.insert(id, builder::line(&a, &b));
         }
         let mut out: Vec<mt::Face> = Vec::new();
+        let mut rec = Rebuild::default();
+        rec.pieces(&seam_subst);
         for (fi, f) in faces.iter().enumerate() {
             let corners: Vec<usize> = end_faces.iter().filter(|(_, g)| *g == fi).map(|(k, _)| *k).collect();
             if !corners.is_empty() {
@@ -655,7 +739,9 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
                     }
                     wires.push(mt::Wire::from(es));
                 }
-                out.push(crate::heal::absolute_face(f, wires).ok_or_else(|| fail("an end face could not be rebuilt"))?);
+                let rebuilt = crate::heal::absolute_face(f, wires).ok_or_else(|| fail("an end face could not be rebuilt"))?;
+                rec.face(&rebuilt, f);
+                out.push(rebuilt);
                 continue;
             }
             let on1 = side1.contains(&fi);
@@ -682,7 +768,9 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
                 }
                 wires.push(mt::Wire::from(es));
             }
-            out.push(crate::heal::absolute_face(f, wires).ok_or_else(|| fail("a side face could not be rebuilt"))?);
+            let rebuilt = crate::heal::absolute_face(f, wires).ok_or_else(|| fail("a side face could not be rebuilt"))?;
+            rec.face(&rebuilt, f);
+            out.push(rebuilt);
         }
         // Blend faces: each runs its side-1 contact the other way from side 1's face.
         for (k, bf) in blends.iter().enumerate() {
@@ -706,13 +794,14 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
                 vec![e1.clone(), ak1.clone(), e2.inverse(), ak.inverse()].into()
             };
             let face = mt::Face::try_new(vec![wire], bf.clone()).map_err(|e| fail(&e.to_string()))?;
+            rec.blend(&face, [chain_e.id()]);
             out.push(face);
         }
         let mut shells = solid.boundaries().clone();
         if let Some(sh) = shells.get_mut(si) {
             *sh = out.into();
         }
-        Solid::try_new(shells).map_err(|e| fail(&format!("invalid solid: {e}")))
+        Ok((Solid::try_new(shells).map_err(|e| fail(&format!("invalid solid: {e}")))?, rec))
     })
 }
 

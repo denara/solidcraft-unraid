@@ -1,5 +1,5 @@
 use serde_json::json;
-use solvecraft_engine::Session;
+use solidcraft_engine::Session;
 
 use super::*;
 use crate::Services;
@@ -273,7 +273,7 @@ fn joint_origins_follow_their_component() {
     let at = |app: &SolveApp| {
         let v = origins_world(&app.session);
         let (_, m) = v.iter().find(|(n, _)| n == "Top of B").unwrap();
-        solvecraft_engine::doc::apply_point(m, Vec3::ZERO)
+        solidcraft_engine::doc::apply_point(m, Vec3::ZERO)
     };
     assert!(at(&app).dist(Vec3::new(40.0, 10.0, 10.0)) < 1e-6, "{:?}", at(&app));
     let b = occ(&app, "B");

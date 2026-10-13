@@ -1,14 +1,14 @@
 # Kernel robustness
 
-Real users hit edge cases the Fusion oracle (docs/oracle.md) never sees: faces that coincide
+Real users hit edge cases the reference tests (docs/oracle.md) never see: faces that coincide
 by accident, tangencies, seams lying where another body cuts, walls thinner than a shell. The
 robustness runs build random but realistic designs and check every step.
 
 ## How it runs
 
 ```
-solvecraft-cli fuzz --from 0 --count 1000 --jobs 8 --timeout 90 --out runs/ --report report.md
-solvecraft-cli fuzz-one <seed> --minimise      # one design, cut down to the steps that matter
+solidcraft-cli fuzz --from 0 --count 1000 --jobs 8 --timeout 90 --out runs/ --report report.md
+solidcraft-cli fuzz-one <seed> --minimise      # one design, cut down to the steps that matter
 ```
 
 `--count` seeds are run starting at `--from`. A range that exceeds `u64::MAX` is
@@ -35,6 +35,30 @@ rejected before any jobs or output directories are created. The maximum seed
   message says "not supported".
 - `cargo test` runs a fixed set of seeds that must stay clean
   (`crates/engine/src/tests/robustness.rs`), next to the minimised cases fixed so far.
+
+## Successful Boolean retries
+
+When an accepted Boolean result needs a numerical retry, the feature shows a
+warning in the timeline. `timeline.inspect` and `doc.inspect` expose its
+`boolean_diagnostics`, including the strategy and the applied translation,
+rotation, face offset and tessellation tolerance in millimetres/radians.
+
+A common shift of both operands is reversed on the result. Coincident-face
+separation and bore offsets describe temporary working geometry; they are not
+claims about the final model's error. A tool nudge changes the relative operand
+placement and reports both its translation magnitude and rotation angle.
+Exact planar and piecewise fallbacks report zero displacement. The existing
+volume and spatial acceptance checks still apply to all results.
+
+Reports belong to the evaluated feature and survive cached rebuilds and
+undo/redo. Cold reopening regenerates them from the embedded design. Failed or
+discarded retry branches do not contribute successful-retry events. Reports
+are capped at 1024 events per feature and explicitly identify truncation.
+
+Fuzz JSON and the text report count successful retry events by strategy for
+designs and Boolean identity checks separately, including nested operations.
+These are event counts, so a single Boolean or seed can contribute several.
+Truncated reports are counted separately rather than implying complete totals.
 
 ## Results
 

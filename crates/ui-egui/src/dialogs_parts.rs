@@ -5,7 +5,7 @@
 
 use egui::{RichText, vec2};
 use serde_json::{Value, json};
-use solvecraft_engine::{Sel, Session};
+use solidcraft_engine::{Sel, Session};
 
 use crate::SolveApp;
 use crate::dialogs::{Kind, combo, row_label};
@@ -145,7 +145,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Pt, inputs: &[SelInpu
     ui.end_row();
     if let Some(ls) = &f.lengths {
         let mut labels = vec!["Default".to_string()];
-        labels.extend(ls.iter().map(|l| format!("{l} mm")));
+        labels.extend(ls.iter().map(|l| crate::prefs::show_mm(app, *l, 1)));
         let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
         let mut i = k.length.map_or(0, |x| x + 1);
         row_label(ui, "Length");
@@ -187,7 +187,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Pt, inputs: &[SelInpu
     {
         for (key, v) in o.iter().filter(|(key, _)| key.as_str() != "size") {
             row_label(ui, &key.replace('_', " "));
-            ui.label(RichText::new(v.as_f64().map(|x| format!("{x} mm")).unwrap_or_else(|| v.to_string())).color(t.text_dim));
+            ui.label(RichText::new(v.as_f64().map(|x| crate::prefs::show_mm(app, x, 1)).unwrap_or_else(|| v.to_string())).color(t.text_dim));
             ui.end_row();
         }
     }
@@ -207,14 +207,14 @@ pub fn commands(app: &SolveApp, k: &Pt, inputs: &[SelInput]) -> Result<Vec<(Stri
     };
     let p = insert_params(&lib, k, inputs.first().and_then(|i| i.items.first()))?;
     // The toolbar's command when the engine has it (same parameters).
-    let id = if solvecraft_engine::find_command("parts.fastener").is_some() { "parts.fastener" } else { "parts.insert" };
+    let id = if solidcraft_engine::find_command("parts.fastener").is_some() { "parts.fastener" } else { "parts.insert" };
     Ok(vec![(id.into(), p)])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use solvecraft_engine::geom::Vec3;
+    use solidcraft_engine::geom::Vec3;
 
     fn lib() -> Vec<Family> {
         families(&json!({"families": [

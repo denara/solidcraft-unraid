@@ -70,7 +70,7 @@ impl Config {
         }
         Ok(Self {
             listen: env("SOLVECRAFT_LISTEN", "0.0.0.0:8080"),
-            cli: env("SOLVECRAFT_CLI", "solvecraft-cli"),
+            cli: env("SOLVECRAFT_CLI", "solidcraft-cli"),
             web: PathBuf::from(env("SOLVECRAFT_WEB_DIR", "/opt/solvecraft/web")),
             files: fs::canonicalize(data.join("files")).map_err(|e| e.to_string())?,
             token,

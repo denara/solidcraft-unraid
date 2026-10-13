@@ -1,5 +1,5 @@
 [package]
-name = "solvecraft-ui-egui"
+name = "solidcraft-ui-egui"
 description = "SolidCraft user interface (egui + wgpu): the swappable front end"
 version.workspace = true
 edition.workspace = true
@@ -9,7 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-solvecraft-engine = { workspace = true }
+solidcraft-engine = { workspace = true }
 egui = { workspace = true }
 egui-wgpu = { workspace = true }
 serde = { workspace = true }

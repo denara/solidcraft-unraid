@@ -10,8 +10,8 @@
 //! without moved components).
 
 use serde_json::{Map, Value};
-use solvecraft_doc::{Mat, apply_point, apply_vector, is_identity, map_point_expr, mat_inverse};
-use solvecraft_geom::Vec3;
+use solidcraft_doc::{Mat, apply_point, apply_vector, is_identity, map_point_expr, mat_inverse};
+use solidcraft_geom::Vec3;
 
 use crate::Session;
 
@@ -337,14 +337,14 @@ pub fn to_local(s: &Session, id: &str, params: &Value) -> Option<Value> {
         // component is active. Body-relative picks still use the picked body's frame.
         let mut context = s.scratch();
         context.active_component = feature.component;
-        if let solvecraft_doc::FeatureKind::Emboss { face: Some(face), .. } = &feature.kind {
+        if let solidcraft_doc::FeatureKind::Emboss { face: Some(face), .. } = &feature.kind {
             context.active_occurrence_path = (!face.author_path.is_empty()).then(|| face.author_path.clone());
         }
         let mut inner = to_local(&context, cmd, params.get("params")?)?;
         // An untouched explicit axis is displayed in world coordinates by Edit
         // Feature. Keep its exact saved values instead of an affine round trip.
         if cmd == "solid.revolve"
-            && let solvecraft_doc::FeatureKind::Revolve { axis: solvecraft_doc::AxisRef::Line { origin, dir }, .. } = &feature.kind
+            && let solidcraft_doc::FeatureKind::Revolve { axis: solidcraft_doc::AxisRef::Line { origin, dir }, .. } = &feature.kind
         {
             let frame = context.active_component_frame();
             let displayed = serde_json::json!({"origin":pt(apply_point(&frame,*origin)),"dir":pt(apply_vector(&frame,*dir))});
@@ -353,8 +353,8 @@ pub fn to_local(s: &Session, id: &str, params: &Value) -> Option<Value> {
             }
         }
         let points = match (&feature.kind, cmd) {
-            (solvecraft_doc::FeatureKind::Revolve { to, .. }, "solid.revolve") => [("to", *to), ("from", None)],
-            (solvecraft_doc::FeatureKind::Extrude { extent, .. }, "solid.extrude") => [("to", extent.to), ("from", extent.from)],
+            (solidcraft_doc::FeatureKind::Revolve { to, .. }, "solid.revolve") => [("to", *to), ("from", None)],
+            (solidcraft_doc::FeatureKind::Extrude { extent, .. }, "solid.extrude") => [("to", extent.to), ("from", extent.from)],
             _ => [("to", None), ("from", None)],
         };
         for (key, point) in points {
@@ -383,7 +383,7 @@ pub fn to_local(s: &Session, id: &str, params: &Value) -> Option<Value> {
         let key = params.get("sketch").and_then(|value| value.as_str().map(str::to_string).or_else(|| value.as_u64().map(|id| id.to_string())))?;
         let feature = s.doc.find_feature(&key)?;
         let path = crate::cmd::author_path_for_rebind(s, feature, params, id).ok()?;
-        let frame = solvecraft_doc::EmbossFace::component_frame(&s.placed_document(), feature.component, &path).ok()?;
+        let frame = solidcraft_doc::EmbossFace::component_frame(&s.placed_document(), feature.component, &path).ok()?;
         command_frames.active = frame;
         command_frames.sketch = frame;
     }

@@ -397,9 +397,13 @@ impl Loop2 {
     pub fn reversed(&self) -> Loop2 {
         Loop2 { segs: self.segs.iter().rev().map(Seg2::reversed).collect() }
     }
+    /// Whether the loop runs counter-clockwise ([`Loop2::ccw`] keeps it as it is).
+    pub fn is_ccw(&self) -> bool {
+        self.signed_area() >= 0.0
+    }
     /// Counter-clockwise copy.
     pub fn ccw(&self) -> Loop2 {
-        if self.signed_area() < 0.0 { self.reversed() } else { self.clone() }
+        if self.is_ccw() { self.clone() } else { self.reversed() }
     }
     pub fn polyline(&self, tol: f64) -> Vec<Vec2> {
         let mut out = Vec::new();
@@ -523,11 +527,23 @@ impl Region2 {
         ys.sort_by(f64::total_cmp);
         ys.dedup_by(|a, b| (*a - *b).abs() < 1e-12);
         let x_at = |e: &(Vec2, Vec2), y: f64| e.0.x + (y - e.0.y) / (e.1.y - e.0.y) * (e.1.x - e.0.x);
+        // Sweep upward: an edge joins the slabs once its lower end is passed and leaves after
+        // its upper end, so each slab sorts only the edges crossing it (a finely sampled ring
+        // has hundreds of slabs and edges, but four edges in each slab).
+        edges.sort_by(|a, b| a.0.y.total_cmp(&b.0.y));
+        let mut next = 0;
+        let mut span: Vec<&(Vec2, Vec2)> = Vec::new();
         let mut out = Vec::new();
         for w in ys.windows(2) {
             let (y0, y1) = (w[0], w[1]);
             let ym = (y0 + y1) * 0.5;
-            let mut span: Vec<&(Vec2, Vec2)> = edges.iter().filter(|e| e.0.y <= ym && e.1.y >= ym).collect();
+            while let Some(e) = edges.get(next)
+                && e.0.y <= ym
+            {
+                span.push(e);
+                next += 1;
+            }
+            span.retain(|e| e.1.y >= ym);
             span.sort_by(|a, b| x_at(a, ym).total_cmp(&x_at(b, ym)));
             for pair in span.chunks(2) {
                 let [l, r] = pair else { continue };
@@ -623,6 +639,57 @@ mod tests {
                 let on_curve = s.point_at(k as f64 / 100.0);
                 assert!(s.point_at(s.closest_param(on_curve)).dist(on_curve) < 1e-9);
             }
+        }
+    }
+
+    /// The sweep visits only the edges crossing each slab; it must give the triangles that
+    /// testing every edge against every slab gives, for a finely sampled ring too (#164).
+    #[test]
+    fn triangulation_sweep_matches_every_edge_against_every_slab() {
+        fn every_edge(r: &Region2, tol: f64) -> Vec<[Vec2; 3]> {
+            let mut edges = Vec::new();
+            for l in std::iter::once(&r.outer).chain(&r.holes) {
+                let pl = l.polyline(tol);
+                for i in 0..pl.len() {
+                    let (a, b) = (pl[i], pl[(i + 1) % pl.len()]);
+                    if (a.y - b.y).abs() > 1e-12 {
+                        edges.push(if a.y < b.y { (a, b) } else { (b, a) });
+                    }
+                }
+            }
+            let mut ys: Vec<f64> = edges.iter().flat_map(|(a, b): &(Vec2, Vec2)| [a.y, b.y]).collect();
+            ys.sort_by(f64::total_cmp);
+            ys.dedup_by(|a, b| (*a - *b).abs() < 1e-12);
+            let x_at = |e: &(Vec2, Vec2), y: f64| e.0.x + (y - e.0.y) / (e.1.y - e.0.y) * (e.1.x - e.0.x);
+            let mut out = Vec::new();
+            for w in ys.windows(2) {
+                let ym = (w[0] + w[1]) * 0.5;
+                let mut span: Vec<_> = edges.iter().filter(|e| e.0.y <= ym && e.1.y >= ym).collect();
+                span.sort_by(|a, b| x_at(a, ym).total_cmp(&x_at(b, ym)));
+                for pair in span.chunks(2) {
+                    let [l, r] = pair else { continue };
+                    let (a, b) = (Vec2::new(x_at(l, w[0]), w[0]), Vec2::new(x_at(r, w[0]), w[0]));
+                    let (c, d) = (Vec2::new(x_at(r, w[1]), w[1]), Vec2::new(x_at(l, w[1]), w[1]));
+                    out.extend([[a, b, c], [a, c, d]]);
+                }
+            }
+            out
+        }
+        let comb = Loop2::polygon(&[
+            Vec2::new(0.0, 0.0),
+            Vec2::new(9.0, 0.0),
+            Vec2::new(9.0, 6.0),
+            Vec2::new(7.0, 2.0),
+            Vec2::new(5.0, 7.0),
+            Vec2::new(3.0, 2.5),
+            Vec2::new(1.0, 6.0),
+        ]);
+        let ring = Region2 { outer: Loop2::circle(Vec2::ZERO, 45.0), holes: vec![Loop2::circle(Vec2::ZERO, 40.0).reversed()] };
+        let regions = [Region2 { outer: comb, holes: vec![Loop2::circle(Vec2::new(4.5, 1.2), 0.6).reversed()] }, ring];
+        for (r, tol) in regions.iter().zip([1e-3, 1e-4]) {
+            let tris = r.triangulate(tol);
+            assert!(tris.len() > 100);
+            assert_eq!(tris, every_edge(r, tol));
         }
     }
 

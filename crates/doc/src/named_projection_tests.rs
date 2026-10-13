@@ -1,11 +1,11 @@
 use crate::{Document, ModelBody, ModelState};
-use solvecraft_geom::{Plane, Vec3};
-use solvecraft_sketch::{LinkKind, LinkSource, Sketch};
+use solidcraft_geom::{Plane, Vec3};
+use solidcraft_sketch::{LinkKind, LinkSource, Sketch};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 fn named_box(name: &str, width: f64, height: f64) -> ModelBody {
-    let body = solvecraft_kernel::box_solid(Vec3::ZERO, Vec3::new(width, width, height)).unwrap();
+    let body = solidcraft_kernel::box_solid(Vec3::ZERO, Vec3::new(width, width, height)).unwrap();
     let mut names = vec!["unrelated".to_string(); body.faces(0.01).unwrap().len()];
     let top = body.faces(0.01).unwrap().into_iter().find(|face| face.plane_normal.is_some_and(|normal| normal.z > 0.99)).unwrap().index;
     names[top] = "shared:top".into();

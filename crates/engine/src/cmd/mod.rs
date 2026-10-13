@@ -1,6 +1,6 @@
-//! The command registry. Ids are SolveCraft's own dotted ids (`solid.extrude`,
+//! The command registry. Ids are SolidCraft's own dotted ids (`solid.extrude`,
 //! `sketch.rectangle.two_point`); the toolbar placement (`tab`, `panel`) follows the familiar
-//! Design workspace layout. Ids used before the rename still resolve (`legacy_ids`).
+//! Design workspace layout.
 
 /// The params-doc note of every command that adds sketch geometry (see `sketch::created`).
 macro_rules! created_doc {
@@ -16,6 +16,7 @@ mod component_clone;
 mod component_clone_assembly;
 mod construct;
 mod delete;
+mod diagnostics;
 mod edit;
 mod face;
 mod features;
@@ -26,6 +27,7 @@ mod file;
 mod inspect;
 pub(crate) mod joints;
 mod measure_sel;
+mod mesh;
 pub(crate) mod motion;
 mod parts;
 mod section;
@@ -56,6 +58,10 @@ use serde_json::Value;
 use crate::{Result, Session};
 
 pub type Run = fn(&mut Session, &Value) -> Result<Value>;
+/// A command's form for one frame of an interactive gesture: its result and the sketch it
+/// changed, for [`Session::execute`] to show without evaluating the rest of the model (`None`:
+/// evaluate as usual).
+pub type LiveRun = fn(&mut Session, &Value) -> Result<(Value, Option<crate::LiveEdit>)>;
 pub type Enabled = fn(&Session) -> std::result::Result<(), String>;
 
 pub struct CommandSpec {
@@ -73,11 +79,40 @@ pub struct CommandSpec {
     pub enabled: Enabled,
     pub run: Run,
     pub undoable: bool,
+    /// What runs instead of `run` when the command is given `live: true` (a frame of an
+    /// interactive gesture, see [`Session::execute`]).
+    pub live: Option<LiveRun>,
+    /// Reads the evaluated model (the default). A command that reads only the document and the
+    /// session's history runs on a model left stale by a live gesture without evaluating it first.
+    pub reads_model: bool,
 }
 
 impl CommandSpec {
     pub const fn new(id: &'static str, label: &'static str, run: Run) -> Self {
-        CommandSpec { id, label, tab: "", panel: "", icon: "", shortcut: None, params: "", enabled: always, run, undoable: true }
+        CommandSpec {
+            id,
+            label,
+            tab: "",
+            panel: "",
+            icon: "",
+            shortcut: None,
+            params: "",
+            enabled: always,
+            run,
+            undoable: true,
+            live: None,
+            reads_model: true,
+        }
+    }
+    /// Takes `live: true`, run by `run`.
+    pub const fn live(mut self, run: LiveRun) -> Self {
+        self.live = Some(run);
+        self
+    }
+    /// Reads only the document (and history), never the evaluated model.
+    pub const fn doc_only(mut self) -> Self {
+        self.reads_model = false;
+        self
     }
     pub const fn at(mut self, tab: &'static str, panel: &'static str) -> Self {
         self.tab = tab;
@@ -103,6 +138,12 @@ impl CommandSpec {
     pub const fn noundo(mut self) -> Self {
         self.undoable = false;
         self
+    }
+    /// Run inside another command: when it is enabled, its `run` (the caller's command owns the
+    /// undo step and the evaluation).
+    pub(crate) fn run_nested(&self, s: &mut Session, p: &Value) -> Result<Value> {
+        (self.enabled)(s).map_err(|why| crate::EngineError::Disabled(self.id.to_string(), why))?;
+        (self.run)(s, p)
     }
     pub fn info(&self, s: &Session) -> CommandInfo {
         let e = (self.enabled)(s);
@@ -157,6 +198,7 @@ pub fn command_specs() -> Vec<&'static CommandSpec> {
     v.extend(sketch_project::COMMANDS.iter());
     v.extend(features::COMMANDS.iter());
     v.extend(features_more::COMMANDS.iter());
+    v.extend(mesh::COMMANDS.iter());
     v.extend(construct::COMMANDS.iter());
     v.extend(sheet::COMMANDS.iter());
     v.extend(plastic::COMMANDS.iter());
@@ -173,12 +215,11 @@ pub fn command_specs() -> Vec<&'static CommandSpec> {
     v.extend(file::COMMANDS.iter());
     v.extend(inspect::COMMANDS.iter());
     v.extend(section::COMMANDS.iter());
+    v.extend(diagnostics::COMMANDS.iter());
     v
 }
 
 pub fn find_command(id: &str) -> Option<&'static CommandSpec> {
     let all = command_specs();
-    // Ids from before the rename still find their command.
-    let id = crate::legacy_ids::current_id(id);
     all.iter().find(|c| c.id == id).or_else(|| all.iter().find(|c| c.id.eq_ignore_ascii_case(id))).copied()
 }

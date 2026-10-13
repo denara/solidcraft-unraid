@@ -26,4 +26,13 @@ Keys handled by the window itself:
 | F6 | fit the view to the model |
 | Esc | cancel the running command, or clear the selection |
 
+Mouse and touch:
+
+| Action | Result |
+|---|---|
+| Click | select (Shift or Ctrl adds) |
+| Click again on the same spot | select the next thing under the cursor (click cycling) |
+| Hold the left button still (long-press on touch), or right-click › Select Other… | list everything under the cursor to pick from |
+| Double-click a sketch curve or edge | select its chain or tangent loop |
+
 Help › Keyboard Shortcuts in the app lists the current bindings, including any you changed.

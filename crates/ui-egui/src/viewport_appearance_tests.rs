@@ -1,7 +1,7 @@
 use super::build_scene;
 use crate::{Services, SolveApp};
 use serde_json::json;
-use solvecraft_engine::{Session, doc, geom::Vec3, kernel};
+use solidcraft_engine::{Session, doc, geom::Vec3, kernel};
 
 #[test]
 fn placed_step_body_uses_imported_opacity_until_a_design_look_overrides_it() {
@@ -24,7 +24,7 @@ fn placed_step_body_uses_imported_opacity_until_a_design_look_overrides_it() {
     app.ui.ground_shadow = false;
     app.ui.show_origin = false;
     let placed = app.session.world_state().bodies.iter().find(|b| b.name != source).unwrap().name.clone();
-    app.session.selection = vec![solvecraft_engine::Sel::Body { name: placed }];
+    app.session.selection = vec![solidcraft_engine::Sel::Body { name: placed }];
     app.start("appearance.assign");
     let crate::dialogs::Kind::Appearance(appearance) = &app.dialog.as_ref().unwrap().kind else { panic!("appearance dialog") };
     assert!((appearance.opacity - 0.4).abs() < 1e-6);

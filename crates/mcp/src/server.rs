@@ -4,7 +4,7 @@ use std::io::{BufRead, Write};
 
 use serde_json::{Value, json};
 /// Longest accepted request line, shared with the control server.
-use solvecraft_engine::MAX_LINE;
+use solidcraft_engine::MAX_LINE;
 
 use crate::backend::Backend;
 use crate::tools::{call_tool, check_arguments, tool_definitions};
@@ -133,7 +133,7 @@ impl Server {
                 Ok(json!({
                     "protocolVersion": version,
                     "capabilities": {"tools": {"listChanged": false}, "resources": {"listChanged": false}},
-                    "serverInfo": {"name": "solvecraft", "title": "SolidCraft", "version": env!("CARGO_PKG_VERSION")},
+                    "serverInfo": {"name": "solidcraft", "title": "SolidCraft", "version": env!("CARGO_PKG_VERSION")},
                     "instructions": format!("{INSTRUCTIONS} Backend: {}.", self.backend.describe()),
                 }))
             }
@@ -149,16 +149,18 @@ impl Server {
                 Ok(call_tool(self.backend.as_mut(), name, &args))
             }
             "resources/list" => Ok(json!({"resources": [
-                {"uri": "solvecraft://design", "name": "Active design", "description": "document.inspect with measurements", "mimeType": "application/json"},
-                {"uri": "solvecraft://commands", "name": "Command catalog", "description": "every command with its parameter docs", "mimeType": "application/json"},
+                {"uri": "solidcraft://design", "name": "Active design", "description": "document.inspect with measurements", "mimeType": "application/json"},
+                {"uri": "solidcraft://commands", "name": "Command catalog", "description": "every command with its parameter docs", "mimeType": "application/json"},
             ]})),
             "resources/templates/list" => Ok(json!({"resourceTemplates": []})),
             "prompts/list" => Ok(json!({"prompts": []})),
             "resources/read" => {
                 let uri = params.get("uri").and_then(Value::as_str).unwrap_or("");
                 let v = match uri {
-                    "solvecraft://design" => self.backend.call("document.inspect", json!({"measure": true})),
-                    "solvecraft://commands" => self.backend.call("engine.commands", json!({})),
+                    // The solvecraft:// URIs are what earlier releases listed (compatibility shim,
+                    // docs/compatibility.md); clients that saved them still read the resource.
+                    "solidcraft://design" | "solvecraft://design" => self.backend.call("document.inspect", json!({"measure": true})),
+                    "solidcraft://commands" | "solvecraft://commands" => self.backend.call("engine.commands", json!({})),
                     _ => return Err((RESOURCE_NOT_FOUND, format!("unknown resource `{uri}`"))),
                 }
                 .map_err(|e| (INTERNAL_ERROR, e))?;

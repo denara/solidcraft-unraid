@@ -1,12 +1,12 @@
 //! Regression tests: editing a sketch from the Browser or timeline can always be left again.
 
 use crate::{Services, SolveApp};
-use solvecraft_engine::Session;
-use solvecraft_engine::doc::FeatureKind;
+use solidcraft_engine::Session;
+use solidcraft_engine::doc::FeatureKind;
 
 fn sample_app() -> SolveApp {
     let mut s = Session::default();
-    s.run_script(&solvecraft_engine::sample::script()).unwrap();
+    s.run_script(&solidcraft_engine::sample::script()).unwrap();
     SolveApp::new(s, Services::default())
 }
 

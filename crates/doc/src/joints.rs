@@ -13,7 +13,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
-use solvecraft_geom::Vec3;
+use solidcraft_geom::Vec3;
 
 use crate::{DocError, Document, IDENTITY, Mat, ModelState, Result, apply_point, apply_vector, mat_inverse, mat_mul};
 
@@ -273,9 +273,9 @@ pub fn resolve_origin(doc: &Document, st: &ModelState, o: &JointOrigin) -> Resul
             let comp = component_of(doc, o.occurrence)?;
             let cyl = component_bodies(doc, st, comp)
                 .into_iter()
-                .filter_map(|b| solvecraft_kernel::cylinder_face_at(&b.body, *pick))
+                .filter_map(|b| solidcraft_kernel::cylinder_face_at(&b.body, *pick))
                 .min_by(|a, b| {
-                    let off = |c: &solvecraft_kernel::CylinderFace| {
+                    let off = |c: &solidcraft_kernel::CylinderFace| {
                         let v = *pick - c.axis_point;
                         ((v - c.axis * v.dot(c.axis)).len() - c.radius).abs()
                     };

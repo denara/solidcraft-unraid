@@ -20,7 +20,7 @@ pub(super) trait SP<S>:
 }
 impl<S, F> SP<S> for F where F: Fn(&S, Point3, Option<(f64, f64)>) -> Option<(f64, f64)> + Parallelizable {}
 
-/// SolveCraft: a parameter inside the surface's bounded, non-periodic ranges.
+/// SolidCraft: a parameter inside the surface's bounded, non-periodic ranges.
 fn in_domain<S: ParametricSurface>(surface: &S, (u, v): (f64, f64)) -> bool {
     let ok = |x: f64, range: Option<(f64, f64)>, period: Option<f64>| {
         x.is_finite()
@@ -36,7 +36,7 @@ fn in_domain<S: ParametricSurface>(surface: &S, (u, v): (f64, f64)) -> bool {
     ok(u, ur, surface.u_period()) && ok(v, vr, surface.v_period())
 }
 
-/// SolveCraft: the parameter clamped into the surface's bounded, non-periodic ranges.
+/// SolidCraft: the parameter clamped into the surface's bounded, non-periodic ranges.
 fn clamped<S: ParametricSurface>(surface: &S, (u, v): (f64, f64)) -> (f64, f64) {
     let c = |x: f64, range: Option<(f64, f64)>, period: Option<f64>| match (range, period) {
         (Some((a, b)), None) => x.clamp(a.min(b), a.max(b)),
@@ -46,7 +46,7 @@ fn clamped<S: ParametricSurface>(surface: &S, (u, v): (f64, f64)) -> (f64, f64) 
     (c(u, ur, surface.u_period()), c(v, vr, surface.v_period()))
 }
 
-/// SolveCraft: a nearest-parameter search can run off a B-spline's domain and extrapolate to
+/// SolidCraft: a nearest-parameter search can run off a B-spline's domain and extrapolate to
 /// thousands of parameter units (meshing that grid never finishes). Outside the nominal domain
 /// keep the result only if it is really closer to the point than the clamped one (planes report
 /// a nominal unit range but extend for ever).
@@ -91,7 +91,7 @@ where
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) fn shell_tessellation<'a, C, S>(
     shell: &Shell<Point3, C, S>,
-    tol: f64,
+    tol: Deflection,
     sp: impl SP<S>,
 ) -> MeshedShell
 where
@@ -104,18 +104,28 @@ where
         .map(|v| (v.id(), v.mapped(Point3::clone)))
         .collect();
     let eset: HashMap<_, _> = shell.edge_par_iter().map(move |e| (e.id(), e)).collect();
+    // SolidCraft: the polylines first, so that the edges of a face crowded by the angle bound
+    // can be divided again before any face is meshed.
+    let mut polys: HashMap<_, _> = eset
+        .par_iter()
+        .map(|(id, edge)| {
+            let curve = edge.curve();
+            (*id, (bounded_polyline(&curve, curve.range_tuple(), tol), 0))
+        })
+        .collect();
+    relax_crowded_faces(shell, &mut polys, tol);
     let edge_map: HashMap<_, _> = eset
         .into_par_iter()
         .map(move |(id, edge)| {
             let v0 = vmap.get(&edge.absolute_front().id()).unwrap();
             let v1 = vmap.get(&edge.absolute_back().id()).unwrap();
-            let curve = edge.curve();
-            let poly = bounded_polyline(&curve, curve.range_tuple(), tol);
-            (id, Edge::new_unchecked(v0, v1, poly))
+            let (poly, level) = polys.get(&id).unwrap().clone();
+            (id, (Edge::new_unchecked(v0, v1, poly), level))
         })
         .collect();
+    let edge_map = &edge_map;
     let create_edge = |edge: &Edge<Point3, C>| -> Edge<_, _> {
-        let new_edge = edge_map.get(&edge.id()).unwrap();
+        let (new_edge, _) = edge_map.get(&edge.id()).unwrap();
         match edge.orientation() {
             true => new_edge.clone(),
             false => new_edge.inverse(),
@@ -129,16 +139,83 @@ where
             .iter()
             .map(create_boundary)
             .collect();
-        shell_create_polygon(&face.surface(), wires, face.orientation(), tol, &sp, cap)
+        // SolidCraft: a face is divided like the coarsest of its edges.
+        let level = face
+            .absolute_boundaries()
+            .iter()
+            .flat_map(Wire::edge_iter)
+            .filter_map(|edge| edge_map.get(&edge.id()).map(|(_, level)| *level))
+            .max()
+            .unwrap_or(0);
+        shell_create_polygon(
+            &face.surface(),
+            wires,
+            face.orientation(),
+            tol.relaxed(level),
+            &sp,
+            cap,
+        )
     };
     shell.face_par_iter().map(create_face).collect()
+}
+
+/// SolidCraft: bounded work for the angle bound. A face bounded by more than
+/// `Deflection::MAX_ANGLE_BOUNDARY` segments has its curved edges divided again at twice the
+/// angle, as often as it takes, down to the chord tolerance alone (a plate with a thousand
+/// small holes is not worth a hundred times the work to draw each hole round). `polys` holds
+/// each edge's polyline and how often its angle was doubled. Every edge still has one
+/// polyline for both its faces, and the outcome does not depend on the order of the faces.
+fn relax_crowded_faces<C, S>(
+    shell: &Shell<Point3, C, S>,
+    polys: &mut HashMap<EdgeID<C>, (PolylineCurve, u8)>,
+    tol: Deflection,
+) where
+    C: PolylineableCurve,
+{
+    if !tol.angular() {
+        return;
+    }
+    let faces: Vec<Vec<Edge<Point3, C>>> = shell
+        .face_iter()
+        .map(|face| {
+            let wires = face.absolute_boundaries();
+            wires.iter().flat_map(Wire::edge_iter).cloned().collect()
+        })
+        .collect();
+    for level in 1..=Deflection::MAX_RELAX {
+        let segments = |edge: &Edge<Point3, C>| match polys.get(&edge.id()) {
+            // Straight at the full angle: nothing to relax, and no say in how its faces are divided.
+            Some((poly, 0)) if poly.len() <= 2 => (1, false),
+            Some((poly, done)) => (poly.len().saturating_sub(1), *done < level),
+            None => (0, false),
+        };
+        let crowded: Vec<&Edge<Point3, C>> = faces
+            .iter()
+            .filter(|edges| {
+                edges.iter().map(|edge| segments(edge).0).sum::<usize>()
+                    > Deflection::MAX_ANGLE_BOUNDARY
+            })
+            .flatten()
+            .filter(|edge| segments(edge).1)
+            .collect();
+        if crowded.is_empty() {
+            break;
+        }
+        let relaxed = tol.relaxed(level);
+        for edge in crowded {
+            if let Some(slot) = polys.get_mut(&edge.id()).filter(|(_, done)| *done < level) {
+                let curve = edge.curve();
+                *slot = (bounded_polyline(&curve, curve.range_tuple(), relaxed), level);
+            }
+        }
+    }
 }
 
 /// Tessellates faces
 #[cfg(any(target_arch = "wasm32", test))]
 pub(super) fn shell_tessellation_single_thread<'a, C, S>(
     shell: &'a Shell<Point3, C, S>,
-    tol: f64,
+    tol: Deflection,
     sp: impl SP<S>,
 ) -> MeshedShell
 where
@@ -148,6 +225,16 @@ where
     use truck_base::entry_map::FxEntryMap as EntryMap;
     use truck_topology::Vertex as TVertex;
     let cap = face_cap(shell.len());
+    // SolidCraft: the polylines first (see `shell_tessellation`).
+    let mut polys: HashMap<_, _> = shell
+        .edge_iter()
+        .map(|edge| {
+            let curve = edge.curve();
+            (edge.id(), (bounded_polyline(&curve, curve.range_tuple(), tol), 0))
+        })
+        .collect();
+    relax_crowded_faces(shell, &mut polys, tol);
+    let polys = &polys;
     let mut vmap = EntryMap::new(
         move |v: &TVertex<Point3>| v.id(),
         move |v| v.mapped(Point3::clone),
@@ -159,8 +246,7 @@ where
             let v0 = vmap.entry_or_insert(vf).clone();
             let vb = edge.absolute_back();
             let v1 = vmap.entry_or_insert(vb).clone();
-            let curve = edge.curve();
-            let poly = bounded_polyline(&curve, curve.range_tuple(), tol);
+            let (poly, _) = polys.get(&edge.id()).unwrap().clone();
             Edge::new_unchecked(&v0, &v1, poly)
         },
     );
@@ -180,7 +266,21 @@ where
             .iter()
             .map(&mut create_boundary)
             .collect();
-        shell_create_polygon(&face.surface(), wires, face.orientation(), tol, &sp, cap)
+        let level = face
+            .absolute_boundaries()
+            .iter()
+            .flat_map(Wire::edge_iter)
+            .filter_map(|edge| polys.get(&edge.id()).map(|(_, level)| *level))
+            .max()
+            .unwrap_or(0);
+        shell_create_polygon(
+            &face.surface(),
+            wires,
+            face.orientation(),
+            tol.relaxed(level),
+            &sp,
+            cap,
+        )
     };
     shell.face_iter().map(create_face).collect()
 }
@@ -197,6 +297,7 @@ where
 {
     let vertices = shell.vertices.clone();
     let cap = face_cap(shell.faces.len());
+    let tol = Deflection::chord(tol);
     let tessellate_edge = |edge: &CompressedEdge<C>| {
         let curve = &edge.curve;
         CompressedEdge {
@@ -245,7 +346,7 @@ fn shell_create_polygon<S: PreMeshableSurface>(
     surface: &S,
     wires: Vec<Wire<Point3, PolylineCurve>>,
     orientation: bool,
-    tol: f64,
+    tol: Deflection,
     sp: impl SP<S>,
     cap: usize,
 ) -> Face<Point3, PolylineCurve, Option<PolygonMesh>> {
@@ -260,7 +361,7 @@ fn shell_create_polygon<S: PreMeshableSurface>(
         let boundary = PolyBoundary::new(preboundary?, &surface, tol);
         Some(trimming_tessellation(surface, &boundary, tol, cap))
     })();
-    // SolveCraft: faces with seam edges (a loop running along an edge both ways, as STEP
+    // SolidCraft: faces with seam edges (a loop running along an edge both ways, as STEP
     // writes cylinders) are valid here; `debug_new` asserts simple loops in debug builds.
     let mut new_face = Face::new_unchecked(wires, polygon);
     if !orientation {
@@ -344,8 +445,10 @@ fn get_mindiff(u: f64, u0: f64, up: f64) -> f64 {
     (-2..=2).map(closure).min_by(abs_diff(u0)).unwrap()
 }
 
+/// SolidCraft: the second field holds each loop's parameter box, so `include` skips loops that
+/// cannot hold the point (a face with hundreds of holes meshed in quadratic time).
 #[derive(Debug, Default, Clone)]
-struct PolyBoundary(Vec<Vec<Point2>>);
+struct PolyBoundary(Vec<Vec<Point2>>, Vec<BoundingBox<Point2>>);
 
 fn normalize_range(curve: &mut Vec<Point2>, compidx: usize, (u0, u1): (f64, f64)) {
     let p = curve[0];
@@ -380,7 +483,18 @@ fn loop_orientation(curve: &[Point2]) -> bool {
 }
 
 impl PolyBoundary {
-    fn new(pieces: Vec<PolyBoundaryPiece>, surface: &impl PreMeshableSurface, tol: f64) -> Self {
+    fn new(pieces: Vec<PolyBoundaryPiece>, surface: &impl PreMeshableSurface, tol: Deflection) -> Self {
+        Self::with_steps(pieces, surface, tol, None)
+    }
+    // SolidCraft: only the disposable preview supplies fixed seam subdivisions.
+    fn with_steps<S: PreMeshableSurface>(pieces: Vec<PolyBoundaryPiece>, surface: &S, tol: Deflection, steps: Option<usize>) -> Self {
+        let polyline_on_surface = |surface: &S, p: Point2, q: Point2, tol| {
+            if let Some(n) = steps {
+                (0..=n).map(|i| p + (q - p) * (i as f64 / n as f64)).collect()
+            } else {
+                polyline_on_surface(surface, p, q, tol)
+            }
+        };
         let (mut closed, mut open) = (Vec::new(), Vec::new());
         pieces.into_iter().for_each(|PolyBoundaryPiece(mut vec)| {
             match vec[0].distance(vec[vec.len() - 1]) < 1.0e-3 {
@@ -485,16 +599,26 @@ impl PolyBoundary {
                 closed.push(connect_edges([vec0, vec1, vec2, vec3]));
             }
         }
-        Self(closed)
+        let boxes = closed.iter().map(|curve| curve.iter().collect()).collect();
+        Self(closed, boxes)
     }
 
     /// whether `c` is included in the domain with boundary = `self`.
     fn include(&self, c: Point2) -> bool {
         let t = 2.0 * std::f64::consts::PI * HashGen::hash1(c);
         let r = Vector2::new(f64::cos(t), f64::sin(t));
+        // SolidCraft: a closed loop whose box is clear of `c` winds zero times around it, and
+        // no crossing with it lies within the tolerance of `c`: it changes nothing here.
+        let margin = 2.0 * TOLERANCE;
+        let near = |bdb: &BoundingBox<Point2>| {
+            let (min, max) = (bdb.min(), bdb.max());
+            !(c.x < min.x - margin || c.x > max.x + margin || c.y < min.y - margin || c.y > max.y + margin)
+        };
         self.0
             .iter()
-            .flat_map(|vec| vec.iter().circular_tuple_windows())
+            .zip(&self.1)
+            .filter(|(_, bdb)| near(bdb))
+            .flat_map(|(vec, _)| vec.iter().circular_tuple_windows())
             .try_fold(0_i32, move |counter, (p0, p1)| {
                 let a = p0 - c;
                 let b = p1 - c;
@@ -565,11 +689,42 @@ fn spade_round(x: f64) -> f64 {
 }
 
 /// Tessellates one surface trimmed by polyline.
-fn trimming_tessellation<S>(surface: &S, polyboundary: &PolyBoundary, tol: f64, cap: usize) -> PolygonMesh
+fn trimming_tessellation<S>(surface: &S, polyboundary: &PolyBoundary, tol: Deflection, cap: usize) -> PolygonMesh
 where S: PreMeshableSurface {
+    trimming_with_steps(surface, polyboundary, tol, cap, None)
+}
+
+/// Fixed-size SolidCraft preview path; regular tessellation retains its adaptive policy.
+pub(super) fn preview_face<S: RobustMeshableSurface>(surface: &S, loops: &[Vec<Point3>], steps: usize) -> Option<PolygonMesh> {
+    if !(1..=16).contains(&steps) || loops.is_empty()
+        || loops.iter().any(|w| w.len() < 3)
+        || loops.iter().map(Vec::len).sum::<usize>() > 4096 {
+        return None;
+    }
+    let search = |surface: &S, point, hint| {
+        surface.search_parameter(point, hint, 16)
+            .or_else(|| surface.search_parameter(point, None, 16))
+            .or_else(|| surface.search_nearest_parameter(point, hint, 16).map(|uv| sane(surface, point, uv)))
+            .or_else(|| surface.search_nearest_parameter(point, None, 16).map(|uv| sane(surface, point, uv)))
+    };
+    let pieces = loops.iter().map(|w| {
+        PolyBoundaryPiece::try_new(surface, std::iter::once(PolylineCurve(w.clone())), search)
+    }).collect::<Option<Vec<_>>>()?;
+    let boundary = PolyBoundary::with_steps(pieces, surface, Deflection::chord(1e-3), Some(steps));
+    // Projection can duplicate points at singularities; periodic seams add at most
+    // eight fixed polylines. Reject non-finite parameters before spade sees them.
+    if boundary.0.iter().map(Vec::len).sum::<usize>() > 8192 + 8 * (steps + 1)
+        || boundary.0.iter().flatten().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
+        return None;
+    }
+    Some(trimming_with_steps(surface, &boundary, Deflection::chord(1e-3), (steps + 1).pow(2), Some(steps)))
+}
+
+// SolidCraft: the normal entry point supplies None, preserving adaptive meshing.
+fn trimming_with_steps<S: PreMeshableSurface>(surface: &S, polyboundary: &PolyBoundary, tol: Deflection, cap: usize, steps: Option<usize>) -> PolygonMesh {
     let mut triangulation = Cdt::new();
     polyboundary.insert_to(&mut triangulation);
-    insert_surface(&mut triangulation, surface, polyboundary, tol, cap);
+    insert_surface(&mut triangulation, surface, polyboundary, tol, cap, steps);
     let mut mesh = triangulation_into_polymesh(
         triangulation.vertices(),
         triangulation.inner_faces(),
@@ -585,16 +740,23 @@ fn insert_surface(
     triangulation: &mut Cdt,
     surface: impl PreMeshableSurface,
     polyline: &PolyBoundary,
-    tol: f64,
+    tol: Deflection,
     cap: usize,
+    steps: Option<usize>,
 ) {
     let bdb: BoundingBox<Point2> = polyline.0.iter().flatten().collect();
     let range = ((bdb.min()[0], bdb.max()[0]), (bdb.min()[1], bdb.max()[1]));
     if !(range.0 .0.is_finite() && range.0 .1.is_finite() && range.1 .0.is_finite() && range.1 .1.is_finite()) {
         return;
     }
-    let (udiv, vdiv) = bounded_surface_division(&surface, range, tol, cap);
-    let (udiv, vdiv) = balanced_grid(&surface, udiv, vdiv, cap);
+    // SolidCraft: fixed preview grids skip both adaptive division and balancing.
+    let (udiv, vdiv) = if let Some(n) = steps {
+        let division = |(a, b): (f64, f64)| (0..=n).map(|i| a * (1. - i as f64 / n as f64) + b * (i as f64 / n as f64)).collect();
+        (division(range.0), division(range.1))
+    } else {
+        let (u, v) = bounded_surface_division(&surface, range, tol, cap);
+        balanced_grid(&surface, u, v, cap)
+    };
     let insert_res: Vec<Vec<Option<_>>> = udiv
         .into_iter()
         .map(|u| {
@@ -630,22 +792,24 @@ fn insert_surface(
     });
 }
 
-/// SolveCraft: most grid points a face gets (keeps hostile or huge faces bounded).
+/// SolidCraft: most grid points a face gets (keeps hostile or huge faces bounded).
 pub(super) const MAX_GRID: usize = 150_000;
-/// SolveCraft: grid points shared by all faces of one shell; many faces get fewer each.
+/// SolidCraft: grid points shared by all faces of one shell; many faces get fewer each.
 pub(super) const SHELL_GRID_BUDGET: usize = 10_000_000;
-/// SolveCraft: most points on one edge's polyline.
+/// SolidCraft: most points on one edge's polyline.
 const MAX_EDGE_POINTS: usize = 20_000;
 
-/// SolveCraft: the grid budget of each face of a shell with `faces` faces.
+/// SolidCraft: the grid budget of each face of a shell with `faces` faces.
 pub(super) fn face_cap(faces: usize) -> usize {
     (SHELL_GRID_BUDGET / faces.max(1)).clamp(2_000, MAX_GRID)
 }
 
-/// SolveCraft: truck's curve division, bounded: at most `MAX_EDGE_POINTS` points and a
+/// SolidCraft: truck's curve division, bounded: at most `MAX_EDGE_POINTS` points and a
 /// bisection depth of 24; a midpoint that does not evaluate (NaN) counts as flat (truck's
-/// version recursed on it 100 levels deep, which never finishes).
-fn bounded_polyline<C: PolylineableCurve>(curve: &C, range: (f64, f64), tol: f64) -> PolylineCurve {
+/// version recursed on it 100 levels deep, which never finishes). A piece within the chord
+/// tolerance is still halved while it turns more than the deflection's angle.
+fn bounded_polyline<C: PolylineableCurve>(curve: &C, range: (f64, f64), d: Deflection) -> PolylineCurve {
+    let (tol, turn2) = (d.chord, d.turn2());
     let mut out = vec![curve.subs(range.0)];
     let mut stack: Vec<(f64, f64, usize)> = vec![(range.0, range.1, 0)];
     while let Some((a, b, depth)) = stack.pop() {
@@ -656,6 +820,7 @@ fn bounded_polyline<C: PolylineableCurve>(curve: &C, range: (f64, f64), tol: f64
         let tm = 0.5 * (a + b);
         let dm = curve.subs(tm).distance2(pa.midpoint(pb));
         let flat = !(d2 >= tol * tol || dm >= tol * tol);
+        let flat = flat && !d.turns(turn2, d2.max(dm), pa.distance2(pb));
         if flat || depth >= 24 || out.len() + stack.len() >= MAX_EDGE_POINTS {
             out.push(pb);
         } else {
@@ -667,13 +832,18 @@ fn bounded_polyline<C: PolylineableCurve>(curve: &C, range: (f64, f64), tol: f64
     PolylineCurve(out)
 }
 
-/// SolveCraft: truck's surface division, bounded: stops refining when the grid would exceed
-/// `cap` points or after 24 rounds; cells that do not evaluate (NaN) are not refined.
-fn bounded_surface_division<S: PreMeshableSurface>(surface: &S, (ur, vr): ((f64, f64), (f64, f64)), tol: f64, cap: usize) -> (Vec<f64>, Vec<f64>) {
+/// SolidCraft: truck's surface division, bounded: stops refining when the grid would exceed
+/// `cap` points or after 24 rounds; cells that do not evaluate (NaN) are not refined. A
+/// direction within the chord tolerance is still halved where a cell turns more than the
+/// deflection's angle along it, while the grid stays within `Deflection::MAX_ANGLE_GRID`.
+fn bounded_surface_division<S: PreMeshableSurface>(surface: &S, (ur, vr): ((f64, f64), (f64, f64)), d: Deflection, cap: usize) -> (Vec<f64>, Vec<f64>) {
+    let (tol, turn2) = (d.chord, d.turn2());
     let (mut udiv, mut vdiv) = (vec![ur.0, ur.1], vec![vr.0, vr.1]);
     for _ in 0..24 {
         let mut fu = vec![false; udiv.len() - 1];
         let mut fv = vec![false; vdiv.len() - 1];
+        // What the angle alone asks for.
+        let (mut au, mut av) = (fu.clone(), fv.clone());
         for (i, u) in udiv.windows(2).enumerate() {
             for (j, v) in vdiv.windows(2).enumerate() {
                 if fu[i] && fv[j] {
@@ -690,10 +860,12 @@ fn bounded_surface_division<S: PreMeshableSurface>(surface: &S, (ur, vr): ((f64,
                 let far = p0.distance2(pt) > tol * tol;
                 // Which direction bends: refine only that one (a cylinder needs no division
                 // along its rulings).
-                let alu = surface.subs(u[0], v0).to_vec() * (1.0 - p) + surface.subs(u[1], v0).to_vec() * p;
-                let alv = surface.subs(u0, v[0]).to_vec() * (1.0 - q) + surface.subs(u0, v[1]).to_vec() * q;
-                let bend_u = p0.distance2(Point3::from_vec(alu)) > tol * tol;
-                let bend_v = p0.distance2(Point3::from_vec(alv)) > tol * tol;
+                let (su, sv) = ([surface.subs(u[0], v0), surface.subs(u[1], v0)], [surface.subs(u0, v[0]), surface.subs(u0, v[1])]);
+                let alu = su[0].to_vec() * (1.0 - p) + su[1].to_vec() * p;
+                let alv = sv[0].to_vec() * (1.0 - q) + sv[1].to_vec() * q;
+                let (du, dv) = (p0.distance2(Point3::from_vec(alu)), p0.distance2(Point3::from_vec(alv)));
+                let bend_u = du > tol * tol;
+                let bend_v = dv > tol * tol;
                 if bend_u || bend_v {
                     fu[i] |= bend_u;
                     fv[j] |= bend_v;
@@ -701,8 +873,20 @@ fn bounded_surface_division<S: PreMeshableSurface>(surface: &S, (ur, vr): ((f64,
                     fu[i] = true;
                     fv[j] = true;
                 }
+                au[i] |= d.turns(turn2, du, su[0].distance2(su[1]));
+                av[j] |= d.turns(turn2, dv, sv[0].distance2(sv[1]));
             }
         }
+        let count = |f: &[bool], a: &[bool]| f.iter().zip(a).filter(|(f, a)| **f || **a).count();
+        let (nu, nv) = (udiv.len() + count(&fu, &au), vdiv.len() + count(&fv, &av));
+        // The angle refines only while the grid stays small: past that the chord tolerance alone.
+        let turning = turn2.is_finite() && nu.saturating_mul(nv) <= cap.min(Deflection::MAX_ANGLE_GRID);
+        if !turning {
+            au.fill(false);
+            av.fill(false);
+        }
+        fu.iter_mut().zip(&au).for_each(|(f, a)| *f |= *a);
+        fv.iter_mut().zip(&av).for_each(|(f, a)| *f |= *a);
         let nu = udiv.len() + fu.iter().filter(|x| **x).count();
         let nv = vdiv.len() + fv.iter().filter(|x| **x).count();
         if nu == udiv.len() && nv == vdiv.len() {
@@ -727,7 +911,7 @@ fn bounded_surface_division<S: PreMeshableSurface>(surface: &S, (ur, vr): ((f64,
     (udiv, vdiv)
 }
 
-/// SolveCraft: refine the parameter grid so its cells are not much longer in one direction than
+/// SolidCraft: refine the parameter grid so its cells are not much longer in one direction than
 /// the other. A ruled surface (cylinder, cone) needs no division along its rulings, and the
 /// triangles that then join a trimming loop to the far ends of the grid cut through the
 /// surface (a cylinder with a hole lost volume this way).
@@ -836,13 +1020,40 @@ fn polyline_on_surface(
     surface: impl PreMeshableSurface,
     p: Point2,
     q: Point2,
-    tol: f64,
+    tol: Deflection,
 ) -> Vec<Point2> {
     use truck_geometry::prelude::*;
     let line = Line(p, q);
     let pcurve = PCurve::new(line, surface);
-    let (vec, _) = pcurve.parameter_division(pcurve.range_tuple(), tol);
+    let (vec, _) = pcurve.parameter_division(pcurve.range_tuple(), tol.chord);
+    let vec = halved_while_turning(|t| pcurve.subs(t), vec, tol);
     vec.into_iter().map(|t| line.subs(t)).collect()
+}
+
+/// SolidCraft: `params` with every interval halved while the curve turns more over it than the
+/// deflection's angle (at most 12 times each, and `MAX_EDGE_POINTS` in all). Unchanged without
+/// an angle.
+fn halved_while_turning(curve: impl Fn(f64) -> Point3, params: Vec<f64>, d: Deflection) -> Vec<f64> {
+    let turn2 = d.turn2();
+    if !turn2.is_finite() || params.len() < 2 {
+        return params;
+    }
+    let mut out = vec![params[0]];
+    for w in params.windows(2) {
+        let mut stack: Vec<(f64, f64, usize)> = vec![(w[0], w[1], 0)];
+        while let Some((a, b, depth)) = stack.pop() {
+            let (pa, pb, tm) = (curve(a), curve(b), 0.5 * (a + b));
+            let sag2 = curve(tm).distance2(pa.midpoint(pb));
+            let split = d.turns(turn2, sag2, pa.distance2(pb));
+            if split && depth < 12 && out.len() + stack.len() < MAX_EDGE_POINTS {
+                stack.push((tm, b, depth + 1));
+                stack.push((a, tm, depth + 1));
+            } else {
+                out.push(b);
+            }
+        }
+    }
+    out
 }
 
 #[test]
@@ -860,13 +1071,13 @@ fn par_bench() {
 
     let instant = Instant::now();
     (0..100).for_each(|_| {
-        let _shell = shell_tessellation(&shell, 0.01, by_search_parameter);
+        let _shell = shell_tessellation(&shell, Deflection::chord(0.01), by_search_parameter);
     });
     println!("{}ms", instant.elapsed().as_millis());
 
     let instant = Instant::now();
     (0..100).for_each(|_| {
-        let _shell = shell_tessellation_single_thread(&shell, 0.01, by_search_parameter);
+        let _shell = shell_tessellation_single_thread(&shell, Deflection::chord(0.01), by_search_parameter);
     });
     println!("{}ms", instant.elapsed().as_millis());
 }

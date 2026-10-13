@@ -9,14 +9,14 @@ toolbar, palette, scripts and control channel use, and never opens a dialog.
 
 ```sh
 # Headless: an in-process design session, no window (CPU renders for screenshots).
-solvecraft-cli mcp
+solidcraft-cli mcp
 
 # Headless, starting from a design file or a command script.
-solvecraft-cli mcp --in part.solvecraft
+solidcraft-cli mcp --in part.solidcraft
 
 # Bridged to the running app, so you can watch the agent model:
-solvecraft --control 7878 &
-solvecraft-cli mcp --connect 127.0.0.1:7878
+solidcraft --control 7878 &
+solidcraft-cli mcp --connect 127.0.0.1:7878
 ```
 
 stdout carries only protocol messages; errors go to stderr. Bridged screenshots are written to a
@@ -24,12 +24,13 @@ temporary file by the app and read back by the server, so both must run on the s
 
 ### Client configuration
 
-Claude Code (project `.mcp.json`, or `claude mcp add solvecraft -- solvecraft-cli mcp`):
+Claude Code (project `.mcp.json`, or `claude mcp add solidcraft -- solidcraft-cli mcp`; a setup
+added under the previous name keeps working, see the [compatibility notes](https://github.com/bherbruck/solidcraft/blob/main/docs/compatibility.md#mcp)):
 
 ```json
 {
   "mcpServers": {
-    "solvecraft": { "command": "solvecraft-cli", "args": ["mcp"] }
+    "solidcraft": { "command": "solidcraft-cli", "args": ["mcp"] }
   }
 }
 ```
@@ -39,7 +40,7 @@ Claude Desktop (`claude_desktop_config.json`), bridged to a running app:
 ```json
 {
   "mcpServers": {
-    "solvecraft": { "command": "/path/to/solvecraft-cli", "args": ["mcp", "--connect", "127.0.0.1:7878"] }
+    "solidcraft": { "command": "/path/to/solidcraft-cli", "args": ["mcp", "--connect", "127.0.0.1:7878"] }
   }
 }
 ```
@@ -48,8 +49,8 @@ Claude Desktop (`claude_desktop_config.json`), bridged to a running app:
 
 | Tool | Arguments | What it does |
 |---|---|---|
-| `list_commands` | `filter?` | The command catalog: id, label, tab/panel, shortcut, parameter docs, enabled now. |
-| `execute` | `command`, `params?` | Run any command with JSON parameters (`list_commands` shows them). Failures leave the design unchanged. |
+| `list_commands` | `filter?` | The command catalog: id, label, tab/panel, shortcut, parameter docs, enabled now. `filter` matches id, label, tab and panel. |
+| `execute` | `command`, `params?` | Run any command with JSON parameters (`list_commands` shows them). Failures leave the design unchanged. A feature command replies with the feature (`feature`, `name`), every body (`bodies`) and the bodies it created (`created_bodies`). |
 | `batch` | `commands: [{command, params}]`, `rollback?` (default true) | Run steps in order, stop at the first error and undo the completed steps. The reply names the failing step (`failed.index`, `failed.command`, `failed.error`) and every result before it. |
 | `inspect_design` | `measure?` (default true), `sketches?` (default true) | Parameters, timeline (type, suppressed, rolled back, error, warning, timing), bodies (volume, area, centre of mass, bbox, face/edge/vertex counts, visible), sketches (curves, points, constraints, profiles, DOF, solve status, visible), selection, undo depth. Hide helper sketches, bodies or construction planes with `execute` `browser.visibility` (`{items, visible}` or `{folder, visible}`). |
 | `measure` | `body?` | Volume (mm³), area (mm²), centre of mass, bbox and topology counts per body, with totals. |
@@ -58,8 +59,9 @@ Claude Desktop (`claude_desktop_config.json`), bridged to a running app:
 | `screenshot` | `view?` (iso, top, front, back, bottom, left, right, home, fit), `path?`, `width?`, `height?`, `source?` (window, model) | A PNG image content block. Headless: CPU render fitted to the model. Bridged: the app window (default) or a model render with the app's camera. |
 | `export` | `path`, `format?` (step, 3mf, stl, stla, obj), `bodies?` | STEP, 3MF or mesh export. |
 | `undo`, `redo` | — | Undo / redo one change. |
+| `crash_reports` | `id?`, `limit?` | The crash reports on this computer, newest first; with `id`, the whole report (backtrace, command, recent commands, `design_path`/`replay_path`). See [crash-reports.md](crash-reports.md). |
 | `new_design` | `name?` | Start an empty design. |
-| `open` | `path` | Open a `.solvecraft` design, a STEP file (`.step`/`.stp`) as a new design holding its bodies (an Import base feature), or a 3MF/STL file as mesh bodies. |
+| `open` | `path` | Open a `.solidcraft` design, a STEP file (`.step`/`.stp`) as a new design holding its bodies (an Import base feature), or a 3MF/STL file as mesh bodies. |
 | `save` | `path?` | Save the design (to its current file without `path`). |
 
 To change a feature after it is made, read its definition with `execute` `timeline.inspect`
@@ -67,7 +69,7 @@ To change a feature after it is made, read its definition with `execute` `timeli
 `{"extent": {"distance": "30"}}`). The fields per feature type are listed in the book's
 *Solid features* chapter.
 
-Resources: `solvecraft://design` (inspect JSON with measurements) and `solvecraft://commands`
+Resources: `solidcraft://design` (inspect JSON with measurements) and `solidcraft://commands`
 (the catalog).
 
 Errors: an unknown tool or arguments that don't match the tool's schema are JSON-RPC
@@ -82,8 +84,8 @@ the batch added to the undo history.)
 
 ## Demo: an enclosure built over MCP
 
-`examples/demo/enclosure_mcp.py` is a small MCP client. It drives a running app (`solvecraft
---control PORT`) through `solvecraft-cli mcp --connect` and builds an electronics enclosure one
+`examples/demo/enclosure_mcp.py` is a small MCP client. It drives a running app (`solidcraft
+--control PORT`) through `solidcraft-cli mcp --connect` and builds an electronics enclosure one
 `execute` call at a time (`enclosure_steps.json`): a rounded box, shelled open at the top, a
 USB port cut through a side wall, four screw bosses, and then a change of the `width`
 parameter that the timeline rebuilds. `examples/demo/record.sh` records the run with ffmpeg,

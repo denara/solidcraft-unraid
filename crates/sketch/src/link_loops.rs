@@ -2,7 +2,7 @@
 //! Endpoint walks exclude support centres. Crossings/touches refuse before nesting.
 use super::{LCurve, curve_points};
 use crate::{Shape, intersections};
-use solvecraft_geom::Vec2;
+use solidcraft_geom::Vec2;
 use std::f64::consts::TAU;
 
 struct Boundary {

@@ -192,3 +192,138 @@ fn rolling_ball_refinement_cap_returns_an_error_and_preserves_input() {
     assert_eq!(crate::step_export(&[&body], "unchanged").unwrap(), before);
     assert_eq!(crate::step_export(&[&Body::new(solid.clone()).unwrap()], "unchanged").unwrap(), input_before);
 }
+
+/// Plan-view construction of a round between two overlapping circles (a concave vertical edge
+/// where two Z cylinders meet): the ball centre `f`, the circle and fillet arc angles, and the
+/// area the round fills in, all independent of the kernel.
+struct Gap {
+    /// Points along the round's arc in plan, contacts included.
+    arc: Vec<Vec3>,
+    /// Arc angles on circle 1, circle 2 and the fillet between the corner and the contacts.
+    angles: [f64; 3],
+    area: f64,
+}
+
+fn gap(c1: Vec3, r1: f64, c2: Vec3, r2: f64, corner: Vec3, r: f64) -> Gap {
+    // The ball centre is r from both circles, on the corner's side of the centre line.
+    let (a, b) = (r1 + r, r2 + r);
+    let d = c1.dist(c2);
+    let u = (c2 - c1) * (1.0 / d);
+    let along = (a * a - b * b + d * d) / (2.0 * d);
+    let mut side = Vec3::new(-u.y, u.x, 0.0);
+    if (corner - c1).dot(side) < 0.0 {
+        side = side * -1.0;
+    }
+    let f = c1 + u * along + side * (a * a - along * along).sqrt();
+    let (t1, t2) = (c1 + (f - c1) * (r1 / a), c2 + (f - c2) * (r2 / b));
+    let angle = |c: Vec3, p: Vec3, q: Vec3| (p - c).normalized().unwrap().dot((q - c).normalized().unwrap()).clamp(-1.0, 1.0).acos();
+    let angles = [angle(c1, t1, corner), angle(c2, corner, t2), angle(f, t2, t1)];
+    // Shoelace over the three short arcs: circle 1 to the corner, circle 2 on, fillet back.
+    let mut ring = Vec::new();
+    for (c, p, q) in [(c1, t1, corner), (c2, corner, t2), (f, t2, t1)] {
+        let (p0, q0) = (p - c, q - c);
+        let (a0, a1) = (p0.y.atan2(p0.x), q0.y.atan2(q0.x));
+        let mut sweep = a1 - a0;
+        while sweep > std::f64::consts::PI {
+            sweep -= std::f64::consts::TAU;
+        }
+        while sweep < -std::f64::consts::PI {
+            sweep += std::f64::consts::TAU;
+        }
+        let rr = p0.len();
+        for i in 0..20_000 {
+            let t = a0 + sweep * i as f64 / 20_000.0;
+            ring.push(c + Vec3::new(t.cos(), t.sin(), 0.0) * rr);
+        }
+    }
+    let area = ring.iter().zip(ring.iter().cycle().skip(1)).map(|(p, q)| p.x * q.y - q.x * p.y).sum::<f64>().abs() * 0.5;
+    let (p, q) = ((t1 - f).normalized().unwrap(), (t2 - f).normalized().unwrap());
+    let arc = (0..=8).map(|i| angles[2] * i as f64 / 8.0).map(|t| f + (p * ((angles[2] - t).sin()) + q * t.sin()) * (r / angles[2].sin())).collect();
+    Gap { arc, angles, area }
+}
+
+#[test]
+fn rolling_ball_along_a_straight_edge_between_cylinders_trims_curved_end_seams() {
+    // Two Z cylinders crossing square to each other: the vertical lines where they meet are
+    // concave edges between two curved faces, and the blend ends on the planar caps, where the
+    // seams are arcs.
+    let (r1, r2, h, r) = (17.0, 9.5, 10.0, 6.0);
+    let (c1, c2) = (Vec3::ZERO, Vec3::new(r1, r2, 0.0));
+    let a = cylinder(c1, Vec3::Z, r1, h).unwrap();
+    let b = cylinder(c2, Vec3::Z, r2, h).unwrap();
+    let body = boolean(&a, &b, BoolOp::Union).unwrap().unwrap();
+    // The corner: one of the two points where the circles cross.
+    let d = c1.dist(c2);
+    let u = (c2 - c1) * (1.0 / d);
+    let along = (r1 * r1 - r2 * r2 + d * d) / (2.0 * d);
+    let corner = c1 + u * along + Vec3::new(-u.y, u.x, 0.0) * (r1 * r1 - along * along).sqrt();
+    let g = gap(c1, r1, c2, r2, corner, r);
+    let blend = fillet(&body, &[corner + Vec3::Z * (h / 2.0)], r).unwrap();
+    assert!(blend.validity().is_empty(), "{:?}", blend.validity());
+    // One blend face; the edge is replaced by two contact lines and two end arcs.
+    let (before, after) = (crate::measure(&body).unwrap(), crate::measure(&blend).unwrap());
+    assert_eq!((after.faces, after.edges, after.vertices), (before.faces + 1, before.edges + 3, before.vertices + 2), "{before:?} -> {after:?}");
+    // The round fills the gap over the full height. The caps gain it twice; the walls lose
+    // their arcs to the contacts and gain the round.
+    let (m0, m1) = (body.tessellate_with(0.0005, true).unwrap().measure(), blend.tessellate_with(0.0005, true).unwrap().measure());
+    let volume = h * g.area;
+    assert!((m1.volume - m0.volume - volume).abs() < volume * 3e-3, "added volume {} vs {volume}", m1.volume - m0.volume);
+    let [a1, a2, af] = g.angles;
+    let area = 2.0 * g.area + h * (r * af - r1 * a1 - r2 * a2);
+    assert!((m1.area - m0.area - area).abs() < area.abs() * 3e-3, "added area {} vs {area}", m1.area - m0.area);
+    // The round is the analytic arc at every height, from contact to contact.
+    let surfaces: Vec<_> = blend.solid.face_iter().map(|f| f.oriented_surface()).filter(|s| matches!(s, mt::Surface::NurbsSurface(_))).collect();
+    let mut worst: f64 = 0.0;
+    for z in [0.0, 0.25, 0.5, 0.75, 1.0] {
+        for p in &g.arc {
+            worst = worst.max(nearest_blend(&surfaces, *p + Vec3::Z * (h * z)).0);
+        }
+    }
+    assert!(worst < 1e-3, "blend surface is {worst} mm off the analytic round");
+}
+
+#[test]
+fn closed_curved_seam_is_not_supported() {
+    // A closed seam (one edge starting and ending at the same vertex, as a full cap circle can
+    // be in imported geometry) has no "between" two contacts, so trimming it is refused rather
+    // than guessed.
+    let body = cylinder(Vec3::ZERO, Vec3::Z, 10.0, 5.0).unwrap();
+    let arc = body.solid.edge_iter().find(|e| !matches!(e.curve(), mt::Curve::Line(_))).expect("a cap arc");
+    let circle = mt::Edge::new_unchecked(arc.front(), arc.front(), arc.curve());
+    assert_eq!(circle.front(), circle.back());
+    // Contacts on the circle itself: a third and two thirds of the way round.
+    let (lo, hi) = circle.curve().range_tuple();
+    let on = |f: f64| mt::Vertex::new(circle.curve().subs(lo + (hi - lo) * f));
+    for (a, b) in [(Some(on(1.0 / 3.0)), None), (None, Some(on(2.0 / 3.0))), (Some(on(1.0 / 3.0)), Some(on(2.0 / 3.0))), (None, None)] {
+        let err = trim_curved_seam(&circle, a, b, 20.0).unwrap_err();
+        assert!(err.to_string().contains("not supported yet: a closed curved edge"), "{err}");
+    }
+}
+
+#[test]
+fn rolling_ball_past_the_end_seam_is_too_large_and_reduces() {
+    // The crossing cylinders of the test above with the small one's centre inside the large
+    // one: a round of 3 would reach past the end of the cap arc it trims, so it is too large
+    // (a smaller one fits), and the largest that fits is the analytic round over the full height
+    // (checked on its surface: its added volume is too small beside the body's to measure).
+    let (r1, r2, d, h) = (17.0, 9.5, 12.0, 10.0);
+    let (c1, c2) = (Vec3::ZERO, Vec3::new(d, 0.0, 0.0));
+    let body = boolean(&cylinder(c1, Vec3::Z, r1, h).unwrap(), &cylinder(c2, Vec3::Z, r2, h).unwrap(), BoolOp::Union).unwrap().unwrap();
+    let along = (r1 * r1 - r2 * r2 + d * d) / (2.0 * d);
+    let corner = Vec3::new(along, (r1 * r1 - along * along).sqrt(), 0.0);
+    let at = [corner + Vec3::Z * (h / 2.0)];
+    let e = fillet(&body, &at, 3.0).unwrap_err();
+    assert!(matches!(e, KernelError::TooLarge(_)), "{e}");
+    let (r, blend) = crate::fillet_max(&body, &at, 3.0).unwrap();
+    assert!(r > 1.5 && r < 3.0, "{r}");
+    assert!(blend.validity().is_empty(), "{:?}", blend.validity());
+    let g = gap(c1, r1, c2, r2, corner, r);
+    let surfaces: Vec<_> = blend.solid.face_iter().map(|f| f.oriented_surface()).filter(|s| matches!(s, mt::Surface::NurbsSurface(_))).collect();
+    let mut worst: f64 = 0.0;
+    for z in [0.0, 0.25, 0.5, 0.75, 1.0] {
+        for p in &g.arc {
+            worst = worst.max(nearest_blend(&surfaces, *p + Vec3::Z * (h * z)).0);
+        }
+    }
+    assert!(worst < 1e-3, "blend surface is {worst} mm off the analytic round at r {r}");
+}

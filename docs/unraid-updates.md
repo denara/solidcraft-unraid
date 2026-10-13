@@ -245,3 +245,61 @@ Later upstream movement was observed at `db0a2a0`; it was deliberately not mixed
 into this gateway-only addition. The validated CAD baseline remains `07e263d`.
 Unraid/nginx/DNS were not modified. Install the logging addition through Unraid's
 normal container update action with the existing settings, data and token.
+
+## 2026-10-13: upstream 913583b (SolidCraft 0.7.0)
+
+Advanced the validated CAD snapshot from `07e263d7e95cac9a6851e48bffcb79f302aabfb8`
+to the single selected upstream commit `913583bfeebb67eea406b40c9bc282bbf27726c7`
+(PR #463, confirmed merged). The 191 upstream commits include native/container storage,
+format 14-16 migrations and exact topology naming, new sheet/surface/text features,
+geometry fixes, richer feature replies, UI/navigation and the completed SolidCraft rename.
+Upstream application version 0.7.0 is inherited; this is not a new fork application release.
+
+Integrated directly into `codex/unraid-mcp-web`, synchronized with its origin counterpart;
+origin/main was already an ancestor. Conflicts in agent instructions, attribution, Cargo.lock,
+shipped notices and the license roots retained both the upstream work and deployment rules.
+Gateway dependency versions were retained, with no unrelated dependency upgrade. License
+notices were regenerated with the HTTP server included. Original openly licensed assets
+and analytic/external-tool reference fixtures retain attribution; no prohibited CAD source
+was read, linked or used in the build.
+
+Docker now builds the upstream `solidcraft-cli`/`solidcraft-web` packages and ships the
+legacy `solvecraft-cli` alias. The unchanged gateway, environment variables, mounts, token,
+limits and HTTP endpoint remain compatible. Font file parameters in sketch.text are confined
+to the shared files directory, without environment/home expansion. Shared desktop crash
+reports are blocked through both direct tools and execute/batch; their tool is omitted from
+the network catalog. Requests without arguments pass through the same safety checks.
+Two upstream Clippy findings were corrected without changing behavior: a solver boolean
+and an HID descriptor match guard. Their selected regressions passed.
+
+Validation used only relevant tests, not the entire suite:
+
+- Formatting, warning-free workspace Clippy/all targets, 42 attributed assets, shipped
+  licenses, dependency layers and ten-target WebAssembly compatibility passed.
+- 125 selected tests passed: gateway (13), stdio MCP (13), design storage (19), document
+  migrations (24), solver (10), native geometry envelope (5), XZ frames (2), naming history
+  (8), preferences/legacy keys (15), CLI/catalog/legacy alias/MCP connection (11), HID parser (5).
+  Five existing upstream tests in the selected MCP/storage modules remain explicitly ignored.
+- Linux amd64 native CLI/server and independent WASM browser release builds passed.
+- A fresh isolated four-slot candidate passed sketch/extrusion (24000 mm3), PNG/STEP,
+  authentication, origin/path rejection, independent sessions and restart persistence.
+  Extended smoke tests rejected shared crash/recovery access, omitted arguments and escaping
+  font requests. Actual log checks passed category/timestamp/icons, capacity/release,
+  secret/session-header exclusion and silence during ordinary requests.
+- Official MCP SDK 1.32.1 opened copied public 0.2.1 and 0.3.2 designs (24000 mm3), exported
+  STEP, saved/reopened the new container format, built/rendered 4000 mm3 and deleted its
+  session. Uploaded confined Liberation Sans text extruded successfully (27.1114 mm3).
+- The actual browser sample visibly rendered at 0.7.0, independently of MCP models. The
+  compatibility CLI alias reported 0.7.0. Evidence stays in ignored target/unraid-update-913583b.
+
+Image: `solvecraft-unraid:upstream-913583b` (Linux amd64).
+Image ID: `sha256:660d743da7fe150aded0b80301395c5d8008741ab64e3fc46532ca786a209305`.
+Archive: `target/solidcraft-unraid-upstream-913583b.tar` (85,583,872 bytes).
+SHA256: `b0ebf645b25a55a3c56dada2c717919608d493e2873f0c897caa596abbe67b11`.
+The export manifest names the expected image tag.
+
+Publication and local runtime replacement are verified separately below. The canonical
+Unraid template/icon have not changed. Existing files remain readable, but designs saved
+with the new SolidCraft format/container are not readable by old application builds.
+Retain a data backup for rollback; browser storage is separate from the server volume.
+No Unraid/nginx/DNS installation or application release/version bump/tag is performed.

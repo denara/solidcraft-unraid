@@ -1,0 +1,18 @@
+{
+ "description": "A 100 x 100 x 30 block, a recess 88 x 88 x 12 deep from the top (z 18..30), then one cut from the bottom whose profile is the ring between a 95 x 95 and a 68 x 68 rectangle, 17.5 deep. A 0.5 mm floor (z 17.5..18) is left joining the outer wall to the 68 x 68 x 18 inner block, but the cut gave two bodies, the inner block and a rest 3411.9 mm3 short (#545). Cutting the ring before the recess gives the right part. Result: one body, 100*100*30 - 88*88*12 - (95^2 - 68^2)*17.5 = 130054.5 mm3.",
+ "commands": [
+  {"command": "sketch.create", "params": {"plane": "XY", "offset": 0, "name": "Block"}},
+  {"command": "sketch.rectangle.two_point", "params": {"p0": [0, 0], "p1": [100.0, 100.0]}},
+  {"command": "sketch.finish", "params": {}},
+  {"command": "solid.extrude", "params": {"sketch": "Block", "distance": 30, "body_name": "Frame"}},
+  {"command": "sketch.create", "params": {"plane": "XY", "offset": 30, "name": "Recess"}},
+  {"command": "sketch.rectangle.two_point", "params": {"p0": [6.0, 6.0], "p1": [94.0, 94.0]}},
+  {"command": "sketch.finish", "params": {}},
+  {"command": "solid.extrude", "params": {"sketch": "Recess", "distance": -12, "operation": "cut", "targets": ["Frame"]}},
+  {"command": "sketch.create", "params": {"plane": "XY", "offset": 0, "name": "Ring"}},
+  {"command": "sketch.rectangle.two_point", "params": {"p0": [2.5, 2.5], "p1": [97.5, 97.5]}},
+  {"command": "sketch.rectangle.two_point", "params": {"p0": [16.0, 16.0], "p1": [84.0, 84.0]}},
+  {"command": "sketch.finish", "params": {}},
+  {"command": "solid.extrude", "params": {"sketch": "Ring", "distance": 17.5, "operation": "cut", "targets": ["Frame"], "profiles": [{"point": [9.25, 50.0]}]}}
+ ]
+}

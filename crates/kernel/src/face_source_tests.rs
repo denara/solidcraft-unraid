@@ -1,5 +1,5 @@
 use crate::{FaceSource, extrude, transform_matrix};
-use solvecraft_geom::{Loop2, Plane, Region2, Seg2, Vec2, Vec3};
+use solidcraft_geom::{Loop2, Plane, Region2, Seg2, Vec2, Vec3};
 
 fn assert_exact_planes(body: &crate::Body) {
     let mesh = body.tessellate(0.001).unwrap();

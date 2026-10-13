@@ -53,9 +53,9 @@
     <control>pointing</control>
   </supports>
   <provides>
-    <binary>solvecraft</binary>
-    <binary>solvecraft-cli</binary>
-    <mediatype>application/x-solvecraft</mediatype>
+    <binary>solidcraft</binary>
+    <binary>solidcraft-cli</binary>
+    <mediatype>application/x-solidcraft</mediatype>
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>

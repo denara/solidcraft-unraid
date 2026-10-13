@@ -1,11 +1,31 @@
 use serde::{Deserialize, Serialize};
-use solvecraft_geom::{Seg2, Vec2};
+use solidcraft_geom::{Seg2, Vec2, Vec3};
+
+use crate::union_find::{find, union};
 
 /// Hard caps that keep hostile input from exhausting memory or time.
 pub const MAX_POINTS: usize = 20_000;
 pub const MAX_CONSTRAINTS: usize = 40_000;
 /// Curves need points, so this follows the point cap.
 pub const MAX_CURVES: usize = MAX_POINTS;
+
+/// Largest coordinate or dimension value (mm) a sketch accepts.
+pub(crate) const MAX_COORD: f64 = 1e9;
+
+/// A position a sketch accepts: finite and within [`MAX_COORD`].
+pub(crate) fn in_range(p: Vec2) -> bool {
+    p.is_finite() && p.x.abs() < MAX_COORD && p.y.abs() < MAX_COORD
+}
+
+/// [`in_range`] for a 3D position.
+pub(crate) fn in_range3(p: Vec3) -> bool {
+    p.is_finite() && p.x.abs() < MAX_COORD && p.y.abs() < MAX_COORD && p.z.abs() < MAX_COORD
+}
+
+/// A radius a sketch accepts: finite, positive and within [`MAX_COORD`].
+pub(crate) fn radius_in_range(r: f64) -> bool {
+    r.is_finite() && r > 1e-9 && r < MAX_COORD
+}
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum SketchError {
@@ -367,7 +387,8 @@ impl ConstraintKind {
     pub fn refers_to_point(&self, p: usize) -> bool {
         self.indices().0.contains(&p)
     }
-    fn indices(&self) -> (Vec<usize>, Vec<usize>) {
+    /// The points and the curves the constraint refers to.
+    pub fn indices(&self) -> (Vec<usize>, Vec<usize>) {
         use ConstraintKind::*;
         match *self {
             Coincident { p, q } | HorizontalPoints { p, q } | VerticalPoints { p, q } => (vec![p, q], vec![]),
@@ -607,7 +628,7 @@ impl Sketch {
     }
 
     fn check_pos(p: Vec2) -> Result<Vec2> {
-        if p.is_finite() && p.x.abs() < 1e9 && p.y.abs() < 1e9 { Ok(p) } else { Err(SketchError::Invalid(format!("point {:?}", [p.x, p.y]))) }
+        if in_range(p) { Ok(p) } else { Err(SketchError::Invalid(format!("point {:?}", [p.x, p.y]))) }
     }
 
     /// Add a free point (or reuse an existing one within `merge_tol` of `p` when `merge_tol > 0`).
@@ -679,7 +700,7 @@ impl Sketch {
     }
 
     pub fn add_circle(&mut self, center: Vec2, r: f64, c: Option<usize>, id: Option<&str>) -> Result<usize> {
-        if !(r.is_finite() && r > 1e-9 && r < 1e9) {
+        if !radius_in_range(r) {
             return Err(SketchError::Invalid(format!("radius {r}")));
         }
         let id = self.curve_id(id, "c")?;
@@ -703,7 +724,7 @@ impl Sketch {
     /// the circle through `p0`).
     pub fn add_arc(&mut self, center: Vec2, p0: Vec2, p1: Vec2, pts: [Option<usize>; 3], id: Option<&str>) -> Result<usize> {
         let r = center.dist(p0);
-        if !(r.is_finite() && r > 1e-9 && r < 1e9) {
+        if !radius_in_range(r) {
             return Err(SketchError::Invalid("degenerate arc".into()));
         }
         let p1 = center + (p1 - center).normalized().ok_or_else(|| SketchError::Invalid("degenerate arc".into()))? * r;
@@ -838,7 +859,7 @@ impl Sketch {
             _ => {}
         }
         if let Some(v) = k.value()
-            && (!v.is_finite() || v.abs() > 1e9 || (v < 0.0 && !k.is_angle()))
+            && (!v.is_finite() || v.abs() > MAX_COORD || (v < 0.0 && !k.is_angle()))
         {
             return Err(SketchError::Invalid(format!("dimension value {v}")));
         }
@@ -858,7 +879,7 @@ impl Sketch {
             || self.curves.iter().any(|c| c.fixed && c.kind.uses(i))
     }
 
-    /// [`Sketch::point_locked`] for every point at once.
+    /// [`Sketch::point_locked`] for every point at once: the points every solve keeps as they are.
     pub fn locked_points(&self) -> Vec<bool> {
         let mut out: Vec<bool> = self.points.iter().map(|p| p.fixed || p.link.is_some()).collect();
         let mut set = |i: usize| {
@@ -887,21 +908,9 @@ impl Sketch {
         }
         // Points made one by coincident constraints.
         let mut root: Vec<usize> = (0..self.points.len()).collect();
-        fn find(r: &mut [usize], mut i: usize) -> usize {
-            while let Some(&p) = r.get(i) {
-                if p == i {
-                    break;
-                }
-                i = p;
-            }
-            i
-        }
         for c in &self.constraints {
             if let ConstraintKind::Coincident { p, q } = c.kind {
-                let (a, b) = (find(&mut root, p), find(&mut root, q));
-                if let Some(x) = root.get_mut(a) {
-                    *x = b;
-                }
+                union(&mut root, p, q);
             }
         }
         let ends: Vec<Vec<usize>> =
@@ -1007,6 +1016,77 @@ impl Sketch {
         out
     }
 
+    /// Every point a constraint touches: its points and the points of its curves.
+    pub fn constraint_points(&self, k: &ConstraintKind) -> Vec<usize> {
+        let (mut pts, curves) = k.indices();
+        pts.extend(curves.into_iter().flat_map(|c| self.curves.get(c).map(|x| x.kind.point_ids()).unwrap_or_default()));
+        pts
+    }
+
+    /// What a solve holding `points` and the radii of `radii` moves with them, as the solver
+    /// couples its variables: (per point, per curve radius). The held points, and the free
+    /// points and free circle/ellipse radii joined to them through curves and driving
+    /// constraints without passing through a constant (a held, fixed or projected point or
+    /// radius couples nothing).
+    pub fn coupled(&self, points: &[usize], radii: &[usize]) -> (Vec<bool>, Vec<bool>) {
+        let (n, m) = (self.points.len(), self.curves.len());
+        // Nodes: points, then curve radii, then one node standing for everything held.
+        let held = n + m;
+        let mut root: Vec<usize> = (0..=held).collect();
+        let mut seed = vec![false; n + m];
+        for v in points.iter().copied().chain(radii.iter().map(|c| n.saturating_add(*c))) {
+            if let Some(s) = seed.get_mut(v) {
+                *s = true;
+            }
+        }
+        let locked = self.locked_points();
+        let free = |v: usize| {
+            if seed.get(v).copied().unwrap_or(true) {
+                return false;
+            }
+            match v.checked_sub(n) {
+                None => !locked.get(v).copied().unwrap_or(true),
+                Some(c) => self
+                    .curves
+                    .get(c)
+                    .is_some_and(|x| matches!(x.kind, CurveKind::Circle { .. } | CurveKind::Ellipse { .. }) && x.link.is_none() && !x.fixed),
+            }
+        };
+        let curve_nodes = |c: usize| {
+            let mut v = self.curves.get(c).map(|x| x.kind.point_ids()).unwrap_or_default();
+            v.push(n + c);
+            v
+        };
+        // What the solver's equations join (see `solve_with`): an arc's centre and ends, a
+        // periodic spline's first and last points, and each driving constraint's entities. A
+        // curve alone joins nothing (a circle's radius and centre move independently).
+        let own = self.curves.iter().filter_map(|x| match &x.kind {
+            CurveKind::Arc { c, a, b } => Some(vec![*c, *a, *b]),
+            CurveKind::Spline { pts, periodic: true, .. } => match (pts.first(), pts.last()) {
+                (Some(a), Some(b)) if a != b => Some(vec![*a, *b]),
+                _ => None,
+            },
+            _ => None,
+        });
+        let edges = own.chain(self.constraints.iter().filter(|c| !c.driven).map(|c| {
+            let (mut v, curves) = c.kind.indices();
+            v.extend(curves.into_iter().flat_map(curve_nodes));
+            v
+        }));
+        for e in edges {
+            let mut join = e.iter().copied().filter(|&v| free(v));
+            let first = if e.iter().any(|v| seed.get(*v).copied().unwrap_or(false)) { Some(held) } else { join.next() };
+            if let Some(first) = first {
+                for v in join {
+                    union(&mut root, first, v);
+                }
+            }
+        }
+        let r = find(&mut root, held);
+        let mut coupled = |v: usize| seed.get(v).copied().unwrap_or(false) || (free(v) && find(&mut root, v) == r);
+        ((0..n).map(&mut coupled).collect(), (n..n + m).map(&mut coupled).collect())
+    }
+
     /// Is curve `c` held in place: fixed or projected (linked).
     pub fn curve_locked(&self, c: usize) -> bool {
         self.curves.get(c).is_some_and(|c| c.fixed || c.link.is_some() || self.freeform_offsets.iter().any(|offset| offset.output == c.id))
@@ -1040,7 +1120,7 @@ impl Sketch {
                 _ => Vec::new(),
             },
             CurveKind::Circle { c, r } => match self.point(c) {
-                Some(c) => solvecraft_geom::Loop2::circle(c, r).segs,
+                Some(c) => solidcraft_geom::Loop2::circle(c, r).segs,
                 None => Vec::new(),
             },
             CurveKind::Arc { c, a, b } => match (self.point(c), self.point(a), self.point(b)) {
@@ -1087,10 +1167,10 @@ impl Sketch {
                     crate::curves::fit_beziers_mode(&p, *periodic).ok()?.into_iter().map(|[p0, p1, p2, p3]| Seg2::Cubic { p0, p1, p2, p3 }).collect(),
                 )
             }
-            CurveKind::Spline { pts, control: true, degree, .. } if (*degree as usize) <= solvecraft_geom::MAX_BEZIER_DEGREE => {
+            CurveKind::Spline { pts, control: true, degree, .. } if (*degree as usize) <= solidcraft_geom::MAX_BEZIER_DEGREE => {
                 let p: Vec<Vec2> = pts.iter().map(pt).collect::<Option<_>>()?;
                 let k = (*degree as usize).min(p.len().saturating_sub(1)).max(1);
-                Some(crate::curves::bspline_beziers(&p, k).iter().filter_map(|c| solvecraft_geom::bezier(c)).collect())
+                Some(crate::curves::bspline_beziers(&p, k).iter().filter_map(|c| solidcraft_geom::bezier(c)).collect())
             }
             _ => None,
         }
@@ -1139,7 +1219,7 @@ impl Sketch {
             CurveKind::Circle { .. } => "c",
             CurveKind::Arc { .. } => "a",
             CurveKind::Ellipse { m, c, r } => {
-                if m == c || !(r.is_finite() && *r > 1e-9 && *r < 1e9) {
+                if m == c || !radius_in_range(*r) {
                     return Err(SketchError::Invalid("degenerate ellipse".into()));
                 }
                 "e"

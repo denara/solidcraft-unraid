@@ -1,0 +1,366 @@
+{
+  "format": "solidcraft/13",
+  "name": "Untitled",
+  "units": "mm",
+  "params": [],
+  "features": [
+    {
+      "id": 1,
+      "name": "Base",
+      "suppressed": false,
+      "type": "sketch",
+      "plane": {
+        "type": "origin",
+        "name": "XY"
+      },
+      "sketch": {
+        "points": [
+          {
+            "id": "origin",
+            "pos": [
+              0.0,
+              0.0
+            ],
+            "fixed": true
+          },
+          {
+            "id": "p1",
+            "pos": [
+              0.0,
+              0.0
+            ],
+            "fixed": false
+          },
+          {
+            "id": "p2",
+            "pos": [
+              40.0,
+              0.0
+            ],
+            "fixed": false
+          },
+          {
+            "id": "p3",
+            "pos": [
+              40.0,
+              30.0
+            ],
+            "fixed": false
+          },
+          {
+            "id": "p4",
+            "pos": [
+              0.0,
+              30.0
+            ],
+            "fixed": false
+          }
+        ],
+        "curves": [
+          {
+            "id": "l1",
+            "type": "line",
+            "a": 1,
+            "b": 2,
+            "construction": false
+          },
+          {
+            "id": "l2",
+            "type": "line",
+            "a": 2,
+            "b": 3,
+            "construction": false
+          },
+          {
+            "id": "l3",
+            "type": "line",
+            "a": 3,
+            "b": 4,
+            "construction": false
+          },
+          {
+            "id": "l4",
+            "type": "line",
+            "a": 4,
+            "b": 1,
+            "construction": false
+          }
+        ],
+        "constraints": [
+          {
+            "id": "k1",
+            "type": "horizontal",
+            "l": 0
+          },
+          {
+            "id": "k2",
+            "type": "horizontal",
+            "l": 2
+          },
+          {
+            "id": "k3",
+            "type": "vertical",
+            "l": 1
+          },
+          {
+            "id": "k4",
+            "type": "vertical",
+            "l": 3
+          },
+          {
+            "id": "k5",
+            "type": "coincident",
+            "p": 0,
+            "q": 1
+          }
+        ],
+        "counters": {
+          "k": 5,
+          "l": 4,
+          "p": 4
+        }
+      }
+    },
+    {
+      "id": 2,
+      "name": "Block",
+      "suppressed": false,
+      "param_names": [
+        "d1"
+      ],
+      "type": "extrude",
+      "sketch": 1,
+      "profiles": {
+        "type": "all"
+      },
+      "extent": {
+        "distance": "10",
+        "direction": "positive"
+      },
+      "operation": "new_body"
+    },
+    {
+      "id": 3,
+      "name": "SlotSketch",
+      "suppressed": false,
+      "type": "sketch",
+      "plane": {
+        "type": "origin",
+        "name": "XY"
+      },
+      "sketch": {
+        "points": [
+          {
+            "id": "origin",
+            "pos": [
+              0.0,
+              0.0
+            ],
+            "fixed": true
+          },
+          {
+            "id": "p1",
+            "pos": [
+              -5.0,
+              12.0
+            ],
+            "fixed": false
+          },
+          {
+            "id": "p2",
+            "pos": [
+              45.0,
+              12.0
+            ],
+            "fixed": false
+          },
+          {
+            "id": "p3",
+            "pos": [
+              45.0,
+              18.0
+            ],
+            "fixed": false
+          },
+          {
+            "id": "p4",
+            "pos": [
+              -5.0,
+              18.0
+            ],
+            "fixed": false
+          }
+        ],
+        "curves": [
+          {
+            "id": "l1",
+            "type": "line",
+            "a": 1,
+            "b": 2,
+            "construction": false
+          },
+          {
+            "id": "l2",
+            "type": "line",
+            "a": 2,
+            "b": 3,
+            "construction": false
+          },
+          {
+            "id": "l3",
+            "type": "line",
+            "a": 3,
+            "b": 4,
+            "construction": false
+          },
+          {
+            "id": "l4",
+            "type": "line",
+            "a": 4,
+            "b": 1,
+            "construction": false
+          }
+        ],
+        "constraints": [
+          {
+            "id": "k1",
+            "type": "horizontal",
+            "l": 0
+          },
+          {
+            "id": "k2",
+            "type": "horizontal",
+            "l": 2
+          },
+          {
+            "id": "k3",
+            "type": "vertical",
+            "l": 1
+          },
+          {
+            "id": "k4",
+            "type": "vertical",
+            "l": 3
+          }
+        ],
+        "counters": {
+          "k": 4,
+          "l": 4,
+          "p": 4
+        }
+      }
+    },
+    {
+      "id": 4,
+      "name": "Slot",
+      "suppressed": false,
+      "param_names": [
+        "d2"
+      ],
+      "type": "extrude",
+      "sketch": 3,
+      "profiles": {
+        "type": "all"
+      },
+      "extent": {
+        "distance": "10",
+        "direction": "positive"
+      },
+      "operation": "cut"
+    },
+    {
+      "id": 5,
+      "name": "NearRound",
+      "suppressed": false,
+      "param_names": [
+        "d3"
+      ],
+      "edge_refs": [
+        {
+          "dir": [
+            -1.0,
+            0.0,
+            0.0
+          ],
+          "min": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "max": [
+            40.0,
+            12.000000000000002,
+            10.0
+          ]
+        }
+      ],
+      "edge_names": [
+        "F2:side:l1|F2:top"
+      ],
+      "type": "fillet",
+      "edges": [
+        [
+          20.0,
+          0.0,
+          10.0
+        ]
+      ],
+      "radius": "2",
+      "body": "Body1 (1)"
+    },
+    {
+      "id": 6,
+      "name": "FarBevel",
+      "suppressed": false,
+      "param_names": [
+        "d4"
+      ],
+      "edge_refs": [
+        {
+          "dir": [
+            1.0,
+            0.0,
+            0.0
+          ],
+          "min": [
+            0.0,
+            18.0,
+            0.0
+          ],
+          "max": [
+            40.0,
+            30.0,
+            10.0
+          ]
+        }
+      ],
+      "edge_names": [
+        "F2:side:l3|F2:top"
+      ],
+      "type": "chamfer",
+      "edges": [
+        [
+          20.0,
+          30.0,
+          10.0
+        ]
+      ],
+      "distance": "1.5",
+      "body": "Body1"
+    }
+  ],
+  "next_id": 7,
+  "appearances": {
+    "bodies": {
+      "Body1 (1)": {
+        "name": "Custom",
+        "color": [
+          204,
+          51,
+          51
+        ],
+        "opacity": 1.0
+      }
+    }
+  }
+}

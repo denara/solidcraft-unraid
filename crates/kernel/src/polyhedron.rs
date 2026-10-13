@@ -5,10 +5,12 @@
 
 use std::collections::HashMap;
 
-use solvecraft_geom::{Plane, Vec3};
+use solidcraft_geom::{Plane, Vec3};
 use truck_modeling::{self as mt, builder};
 
 use crate::body::{Body, Solid, from_p3, p3, v3};
+use crate::history::{EdgeOrigin, FaceOrigin, FaceProv, History};
+use crate::record;
 use crate::{KernelError, Result, guard};
 
 /// A half-space `n · x <= d` (n is the outward unit normal).
@@ -75,7 +77,13 @@ fn combinatorics(hs: &[HalfSpace]) -> Result<(Vec<Vec3>, Vec<(usize, Vec<usize>)
 
 /// The convex polyhedron bounded by the half-spaces.
 pub fn convex_polyhedron(hs: &[HalfSpace]) -> Result<Body> {
+    polyhedron(hs).map(|(b, _)| b)
+}
+
+/// [`convex_polyhedron`], with the half-space each of its faces lies on (in face order).
+fn polyhedron(hs: &[HalfSpace]) -> Result<(Body, Vec<usize>)> {
     let (verts, faces_idx) = combinatorics(hs)?;
+    let on: Vec<usize> = faces_idx.iter().map(|(hi, _)| *hi).collect();
     guard("polyhedron", || {
         let tv: Vec<mt::Vertex> = verts.iter().map(|v| builder::vertex(p3(*v))).collect();
         let mut edges: HashMap<(usize, usize), mt::Edge> = HashMap::new();
@@ -102,25 +110,27 @@ pub fn convex_polyhedron(hs: &[HalfSpace]) -> Result<Body> {
         }
         let shell: mt::Shell = faces.into();
         let solid = Solid::try_new(vec![shell]).map_err(|e| KernelError::Failed(format!("polyhedron: {e}")))?;
-        Body::new(solid)
+        Ok((Body::new(solid)?, on))
     })
 }
 
-/// The half-spaces of a convex body with only planar faces, or an error.
-pub fn planar_convex(b: &Body) -> Result<Vec<(HalfSpace, Vec3)>> {
+/// The half-spaces of a convex body with only planar faces, each with a point on it and the
+/// body's faces on its plane (in face order), or an error.
+pub fn planar_convex(b: &Body) -> Result<Vec<(HalfSpace, Vec3, Vec<usize>)>> {
     b.require_brep("this operation")?;
     let tol = (b.size() * 1e-3).max(1e-3);
     let faces = b.faces(tol)?;
-    let mut out: Vec<(HalfSpace, Vec3)> = Vec::new();
+    let mut out: Vec<(HalfSpace, Vec3, Vec<usize>)> = Vec::new();
     for f in &faces {
         let n = f.plane_normal.ok_or_else(|| KernelError::Failed("not supported yet: bodies with curved faces".into()))?;
         let d = n.dot(f.centroid);
-        if !out.iter().any(|(h, _)| h.n.dot(n) > 1.0 - 1e-9 && (h.d - d).abs() < tol) {
-            out.push((HalfSpace { n, d }, f.centroid));
+        match out.iter_mut().find(|(h, ..)| h.n.dot(n) > 1.0 - 1e-9 && (h.d - d).abs() < tol) {
+            Some((.., on)) => on.push(f.index),
+            None => out.push((HalfSpace { n, d }, f.centroid, vec![f.index])),
         }
     }
     let verts: Vec<Vec3> = b.solid.vertex_iter().map(|v| from_p3(v.point())).collect();
-    for (h, _) in &out {
+    for (h, ..) in &out {
         if verts.iter().any(|v| h.n.dot(*v) > h.d + tol) {
             return Err(KernelError::Failed("not supported yet: shell and draft of non-convex bodies".into()));
         }
@@ -128,9 +138,61 @@ pub fn planar_convex(b: &Body) -> Result<Vec<(HalfSpace, Vec3)>> {
     Ok(out)
 }
 
-/// Hollow a convex planar body: walls of `thickness` inside, faces near `open` removed.
+/// The faces of `b` on half-space `k`'s plane (`groups[k]`) as the face over them: moved, or
+/// merged when several.
+fn on_plane(under: &[usize]) -> FaceProv {
+    record::region(under.iter().map(|&face| FaceOrigin::Face { operand: 0, face }).collect(), false)
+}
+
+/// The edges of `b` between faces on two of its planes (`groups[k]`: its faces on plane `k`),
+/// by pair of planes (the lower first).
+fn plane_edges(b: &Body, groups: &[Vec<usize>]) -> HashMap<(usize, usize), Vec<usize>> {
+    let plane_of: HashMap<usize, usize> = groups.iter().enumerate().flat_map(|(k, g)| g.iter().map(move |f| (*f, k))).collect();
+    let mut out: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+    for (edge, fs) in crate::history::edge_faces(&b.solid).iter().enumerate() {
+        if let [p, q] = fs[..]
+            && let (Some(&x), Some(&y)) = (plane_of.get(&p), plane_of.get(&q))
+            && x != y
+        {
+            out.entry((x.min(y), x.max(y))).or_default().push(edge);
+        }
+    }
+    out
+}
+
+/// The history over `[b]` of a convex polyhedron `poly` whose face `j` lies on the plane of
+/// half-space `on[j]`, made from the faces `groups[k]` of `b` on half-space `k`'s plane: each
+/// face the faces under it, each edge along the edges of `b` between faces of its two planes,
+/// or new where they met nowhere.
+fn planes_history(poly: &Body, on: &[usize], groups: &[Vec<usize>], b: &Body) -> Option<History> {
+    let faces: Vec<FaceProv> = on.iter().map(|k| groups.get(*k).map(|under| on_plane(under))).collect::<Option<_>>()?;
+    let along = plane_edges(b, groups);
+    let mut h = record::from_faces(&poly.solid, 1, faces);
+    for e in &mut h.edges {
+        if let [x, y] = e.faces[..]
+            && let (Some(&kx), Some(&ky)) = (on.get(x), on.get(y))
+            && let Some(edges) = along.get(&(kx.min(ky), kx.max(ky)))
+        {
+            e.origins = edges.iter().map(|&edge| EdgeOrigin::Edge { operand: 0, edge }).collect();
+        }
+    }
+    Some(h)
+}
+
+/// The history over `[b]` of a cavity `poly` whose face `j` lies on half-space `on[j]`, moved
+/// in from the faces `groups[k]` of `b`: each face an offset of the faces it lines, each edge new.
+fn cavity_history(poly: &Body, on: &[usize], groups: &[Vec<usize>]) -> Option<History> {
+    let faces = on
+        .iter()
+        .map(|k| groups.get(*k).map(|under| record::generated(under.iter().map(|&face| FaceOrigin::Offset { operand: 0, face }).collect())))
+        .collect::<Option<_>>()?;
+    Some(record::from_faces(&poly.solid, 1, faces))
+}
+
+/// Hollow a convex planar body: walls of `thickness` inside, faces near `open` removed. The
+/// result's history is over `[b]`: the inner walls are offsets of the faces they line.
 pub fn shell(b: &Body, open: &[Vec3], thickness: f64) -> Result<Body> {
-    shell_impl(b, open, thickness)?.with_shell_planar_sources(b, thickness, open)
+    guard("shell", || shell_impl(b, open, thickness)?.with_shell_planar_sources(b, thickness, open))
 }
 
 fn shell_impl(b: &Body, open: &[Vec3], thickness: f64) -> Result<Body> {
@@ -145,16 +207,40 @@ fn shell_impl(b: &Body, open: &[Vec3], thickness: f64) -> Result<Body> {
     let size = b.size();
     let inner: Vec<HalfSpace> = hs
         .iter()
-        .map(|(h, c)| {
+        .map(|(h, c, _)| {
             let removed = open.iter().any(|p| (h.n.dot(*p) - h.d).abs() < size * 1e-4 + 1e-6 && p.dist(*c) < size * 2.0);
             if removed { HalfSpace { n: h.n, d: h.d + thickness + size * 0.05 } } else { HalfSpace { n: h.n, d: h.d - thickness } }
         })
         .collect();
-    if !hs.iter().zip(&inner).any(|((h, _), i)| i.d > h.d) {
+    if !hs.iter().zip(&inner).any(|((h, ..), i)| i.d > h.d) {
         return Err(KernelError::Invalid("select at least one face to remove".into()));
     }
-    let cavity = convex_polyhedron(&inner)?;
-    crate::ops::boolean(b, &cavity, crate::BoolOp::Cut)?.ok_or_else(|| KernelError::Failed("the shell removed everything".into()))
+    let (cavity, on) = polyhedron(&inner)?;
+    let groups: Vec<Vec<usize>> = hs.into_iter().map(|(.., under)| under).collect();
+    let walls = cavity_history(&cavity, &on, &groups);
+    let r = crate::ops::boolean(b, &cavity, crate::BoolOp::Cut)?.ok_or_else(|| KernelError::Failed("the shell removed everything".into()))?;
+    Ok(hollowed(r, b, walls))
+}
+
+/// `r`, `b` less a cavity whose history over `[b]` is `walls`, with its history over `[b]`.
+fn hollowed(r: Body, b: &Body, walls: Option<History>) -> Body {
+    let h = crate::boolean_record::of_pair(&r, &crate::boolean_record::kept(b, 0, 1), &walls);
+    r.with_checked_history(h, &record::counts(&[b]))
+}
+
+/// The history over `[b]` of a cavity `offset` made from `b` by moving its faces (whose history
+/// over `[b]` says so): each face an offset of the face it was moved from, each edge new.
+fn offsets(offset: &Body) -> Option<History> {
+    let h = offset.history()?;
+    let faces: Vec<FaceProv> = h
+        .faces
+        .iter()
+        .map(|f| match f.origins.as_slice() {
+            [FaceOrigin::Face { operand, face }] => Some(record::generated(vec![FaceOrigin::Offset { operand: *operand, face: *face }])),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    Some(record::from_faces(&offset.solid, h.operands, faces))
 }
 
 /// Tilt the faces near `faces` by `angle` about their line on the neutral plane, so that they
@@ -172,7 +258,7 @@ pub fn draft(b: &Body, faces: &[Vec3], neutral: &Plane, pull: Vec3, angle: f64) 
     let size = b.size();
     let mut out = Vec::new();
     let mut moved = 0;
-    for (h, c) in &hs {
+    for (h, c, _) in &hs {
         let chosen = faces.iter().any(|p| (h.n.dot(*p) - h.d).abs() < size * 1e-4 + 1e-6 && p.dist(*c) < size * 2.0);
         if !chosen {
             out.push(*h);
@@ -191,12 +277,16 @@ pub fn draft(b: &Body, faces: &[Vec3], neutral: &Plane, pull: Vec3, angle: f64) 
     if moved == 0 {
         return Err(KernelError::Invalid("no faces to draft".into()));
     }
-    convex_polyhedron(&out)
+    // Each half-space in place of the one it was made from: its faces moved (or as they were).
+    let (r, on) = polyhedron(&out)?;
+    let groups: Vec<Vec<usize>> = hs.into_iter().map(|(.., under)| under).collect();
+    let h = planes_history(&r, &on, &groups, b);
+    Ok(r.with_checked_history(h, &record::counts(&[b])))
 }
 
 /// Draft of a non-convex body: walls (planes, cylinders) next to caps square to `pull`.
 fn draft_walls(b: &Body, at: &[Vec3], neutral: &Plane, pull: Vec3, angle: f64) -> Result<Body> {
-    let healed = Body::new(crate::heal::heal_keep(b.deep_copy(), b.size(), b.split_keep()))?;
+    let healed = crate::boolean_record::healed(b)?;
     let size = healed.size();
     let mesh = healed.tessellate((size * 1e-3).max(1e-3))?;
     let mut chosen: Vec<usize> = Vec::new();
@@ -216,13 +306,22 @@ fn draft_walls(b: &Body, at: &[Vec3], neutral: &Plane, pull: Vec3, angle: f64) -
             _ => return Err(KernelError::Invalid(format!("no face at {:?}", [p.x, p.y, p.z]))),
         }
     }
-    crate::offset::draft_walls(&healed, &chosen, neutral, pull, angle)
+    Ok(record::after(crate::offset::draft_walls(&healed, &chosen, neutral, pull, angle)?, &healed, &record::counts(&[b])))
 }
 
 /// Round every edge of a convex body with planar faces by `r`: faces shrink, each edge becomes a
 /// cylinder and each corner a sphere patch (the body is the inner polyhedron grown by a ball).
+/// The result's history is over `[b]`: each cylinder in place of the edges of `b` between its
+/// two planes' faces, each corner patch in place of those round its corner.
 pub fn round_all_edges(b: &Body, r: f64) -> Result<Body> {
-    let hs: Vec<HalfSpace> = planar_convex(b)?.into_iter().map(|(h, _)| h).collect();
+    let planes = planar_convex(b)?;
+    let hs: Vec<HalfSpace> = planes.iter().map(|(h, ..)| *h).collect();
+    let groups: Vec<Vec<usize>> = planes.iter().map(|(.., under)| under.clone()).collect();
+    // The edges of `b` between faces on planes f and g.
+    let edges = plane_edges(b, &groups);
+    let along = |f: usize, g: usize| -> Vec<FaceOrigin> {
+        edges.get(&(f.min(g), f.max(g))).into_iter().flatten().map(|&edge| FaceOrigin::Edge { operand: 0, edge }).collect()
+    };
     let inner: Vec<HalfSpace> = hs.iter().map(|h| HalfSpace { n: h.n, d: h.d - r }).collect();
     let (q, faces) = combinatorics(&inner)?;
     if faces.len() != hs.len() {
@@ -269,6 +368,8 @@ pub fn round_all_edges(b: &Body, r: f64) -> Result<Body> {
             if f < g { e } else { e.inverse() }
         };
         let mut out: Vec<mt::Face> = Vec::new();
+        // What each face is made from (in `out`'s order).
+        let mut made: Vec<FaceProv> = Vec::new();
         // Planar faces.
         for (hi, lp) in &faces {
             let n = lp.len();
@@ -278,6 +379,7 @@ pub fn round_all_edges(b: &Body, r: f64) -> Result<Body> {
                 w.push(line(*hi, a, bb, &mut vert));
             }
             out.push(builder::try_attach_plane(&[w.into()]).map_err(|e| KernelError::Failed(format!("rounded face: {e}")))?);
+            made.push(on_plane(groups.get(*hi).map_or(&[], Vec::as_slice)));
         }
         use mt::{ParametricSurface3D, SearchNearestParameter};
         let orient = |mut surf: mt::Surface, at: Vec3, outward: Vec3| -> mt::Surface {
@@ -310,6 +412,7 @@ pub fn round_all_edges(b: &Body, r: f64) -> Result<Body> {
             let mid = (qa + qb) * 0.5 + out_dir * r;
             let surf = orient(swept.oriented_surface(), mid, out_dir);
             out.push(mt::Face::try_new(vec![w.into()], surf).map_err(|e| KernelError::Failed(format!("rounded edge: {e}")))?);
+            made.push(record::generated(along(f, g)));
         }
         // Corner sphere patches: the faces around each inner vertex, counter-clockwise.
         for (qi, c) in q.iter().enumerate() {
@@ -331,10 +434,18 @@ pub fn round_all_edges(b: &Body, r: f64) -> Result<Body> {
                 mt::Surface::RevolutedCurve(mt::Processor::new(mt::RevolutedCurve::by_revolution(meridian.oriented_curve(), p3(*c), v3(side))));
             let surf = orient(surf, *c + axis * r, axis);
             out.push(mt::Face::try_new(vec![w.into()], surf).map_err(|e| KernelError::Failed(format!("rounded corner: {e}")))?);
+            let mut corner: Vec<FaceOrigin> =
+                (0..k).filter_map(|i| Some((*around.get(i)?, *around.get((i + 1) % k)?))).flat_map(|(f, g)| along(f, g)).collect();
+            corner.sort();
+            corner.dedup();
+            made.push(record::generated(corner));
         }
         let shell: mt::Shell = out.into();
         let solid = Solid::try_new(vec![shell]).map_err(|e| KernelError::Failed(format!("rounded body: {e}")))?;
-        Body::new(solid)
+        let body = Body::new(solid)?;
+        // Every face from something of `b` (a blend between planes that met nowhere has none).
+        let history = made.iter().all(|f| !f.origins.is_empty()).then(|| record::from_faces(&body.solid, 1, made));
+        Ok(body.with_checked_history(history, &record::counts(&[b])))
     })
 }
 
@@ -345,12 +456,9 @@ fn shell_planar(b: &Body, open: &[Vec3], thickness: f64) -> Result<Body> {
     // Face paint and authored splits are construction boundaries. Retain their
     // eligibility veto through the temporary body used for the cavity Cut.
     // Paint indices stay in source order by avoiding healing in that case.
-    let solid = if b.paint().is_some_and(|paint| !paint.faces.is_empty()) {
-        b.deep_copy()
-    } else {
-        crate::heal::heal_keep(b.deep_copy(), b.size(), b.split_keep())
-    };
-    let healed = Body::new(solid)?.with_paint(b.paint().cloned()).with_split_lines(b.split_lines().cloned()).inherit_regularization_protection(b);
+    let healed =
+        if b.paint().is_some_and(|paint| !paint.faces.is_empty()) { crate::boolean_record::copied(b)? } else { crate::boolean_record::healed(b)? };
+    let healed = healed.with_paint(b.paint().cloned()).with_split_lines(b.split_lines().cloned()).inherit_regularization_protection(b);
     let size = healed.size();
     let mesh = healed.tessellate((size * 1e-3).max(1e-3))?;
     // Faces to open: the face of the triangle nearest each point.
@@ -372,22 +480,96 @@ fn shell_planar(b: &Body, open: &[Vec3], thickness: f64) -> Result<Body> {
     if opened.is_empty() {
         return Err(KernelError::Invalid("select at least one face to remove".into()));
     }
+    // A successful Boolean is not evidence that a tangential rim has wall thickness.
+    // Refuse only when the entire planar opening loses its rim. A single collapsed
+    // round can still end in a valid sharp edge (the tutorial plate, for example).
+    if let Some(r) = rim_without_thickness(&healed, &opened, thickness, true) {
+        return Err(unsupported_shell(&format!(
+            "the rim would have no thickness: an open face meets a round of radius {r:.4} mm tangentially, and the shell is {thickness:.4} mm thick (make the round smaller than the thickness)"
+        )));
+    }
     let margin = thickness + size * 0.05;
+    shell_opened(b, &healed, open, &opened, thickness, margin).map_err(|e| match rim_without_thickness(&healed, &opened, thickness, false) {
+        Some(r) => unsupported_shell(&format!(
+            "the rim would have no thickness: an open face meets a round of radius {r:.4} mm tangentially, and the shell is {thickness:.4} mm thick (make the round smaller than the thickness)"
+        )),
+        None => e,
+    })
+}
+
+/// The radius of a convex round (cylinder or torus) that meets an open face tangentially and
+/// is at least `thickness`: the cavity's wall then passes through the rim where the round meets
+/// the open face, leaving nothing between them.
+fn rim_without_thickness(b: &Body, opened: &[usize], thickness: f64, whole_rim: bool) -> Option<f64> {
+    use mt::{BoundedCurve, ParametricCurve};
+    let faces: Vec<&mt::Face> = b.solid.face_iter().take(if whole_rim { 4097 } else { usize::MAX }).collect();
+    let tol = (b.size() * 1e-7).max(1e-9) * 100.0;
+    // A distant shell can make the body's tolerance larger than this wall.
+    // Such a diagnostic candidate is not sufficient to refuse a valid opening.
+    if whole_rim && tol > thickness * 1e-3 {
+        return None;
+    }
+    opened.iter().filter_map(|fi| faces.get(*fi)).find_map(|open| {
+        let plane = crate::offset::surf_of(open, tol)?;
+        if whole_rim && (!matches!(plane, crate::offset::Surf::Plane { .. }) || faces.len() > 4096 || open.edge_iter().take(1025).count() > 1024) {
+            return None;
+        }
+        let radius = |edge: &mt::Edge| {
+            faces.iter().filter(|g| !std::ptr::eq(**g, *open)).find_map(|g| {
+                if !g.edge_iter().any(|e| e.id() == edge.id()) {
+                    return None;
+                }
+                let round = crate::offset::surf_of(g, tol)?;
+                let r = match round {
+                    crate::offset::Surf::Cylinder { r, convex: true, .. } | crate::offset::Surf::Torus { r, convex: true, .. } => r,
+                    _ => return None,
+                };
+                let c = edge.curve();
+                let (t0, t1) = c.range_tuple();
+                if !t0.is_finite() || !t1.is_finite() || t0 >= t1 {
+                    return None;
+                }
+                let parameter = t0 * 0.5 + t1 * 0.5;
+                if !parameter.is_finite() || parameter < t0 || parameter > t1 {
+                    return None;
+                }
+                let mid = from_p3(c.subs(parameter));
+                let tangent = plane.normal(mid)?.dot(round.normal(mid)?) > 1.0 - 1e-6;
+                (tangent && r >= thickness - tol).then_some(r)
+            })
+        };
+        if whole_rim {
+            let mut found = None;
+            for edge in open.edge_iter() {
+                found = Some(radius(&edge)?);
+            }
+            found
+        } else {
+            open.edge_iter().find_map(|edge| radius(&edge))
+        }
+    })
+}
+
+fn shell_opened(b: &Body, healed: &Body, open: &[Vec3], opened: &[usize], thickness: f64, margin: f64) -> Result<Body> {
+    let size = healed.size();
     // Open faces pushed out past the body: the simple way, unless a face tangent to an open
     // one (a fillet along its edge) can't follow; then every face moves in (tangencies keep)
     // and the opening is the open face's copy swept out through the body.
-    let cavity = match offset_planar(&healed, |fi, _| if opened.contains(&fi) { margin } else { -thickness }) {
+    let cavity = match offset_planar(healed, |fi, _| if opened.contains(&fi) { margin } else { -thickness }) {
         Ok(c) => c,
-        Err(e) => return shell_by_opening(&healed, &opened, thickness, margin).map_err(|_| e),
+        Err(e) => return shell_by_opening(healed, opened, thickness, margin).map_err(|_| e),
     };
-    let r = crate::ops::boolean(&healed, &cavity, crate::BoolOp::Cut);
+    let r = crate::ops::boolean(healed, &cavity, crate::BoolOp::Cut);
     if r.is_err()
-        && let Ok(x) = shell_by_opening(&healed, &opened, thickness, margin)
+        && let Ok(x) = shell_by_opening(healed, opened, thickness, margin)
     {
         return Ok(x);
     }
     match r {
-        Ok(Some(r)) => Ok(r),
+        Ok(Some(r)) => {
+            // Over `[healed]`, the cavity's faces offsets of the faces they line; then over `[b]`.
+            Ok(record::after(hollowed(r, healed, offsets(&cavity)), healed, &record::counts(&[b])))
+        }
         Ok(None) => Err(KernelError::Failed("the shell removed everything".into())),
         // Healing can leave faces the boolean dislikes (revolved patches): the body as it was,
         // its faces to open found again.
@@ -410,15 +592,17 @@ fn shell_planar(b: &Body, open: &[Vec3], thickness: f64) -> Result<Body> {
             }
             let opened = opened_raw;
             let cavity = offset_planar(b, |fi, _| if opened.contains(&fi) { margin } else { -thickness }).map_err(|_| e.clone())?;
-            crate::ops::boolean(b, &cavity, crate::BoolOp::Cut)
+            let r = crate::ops::boolean(b, &cavity, crate::BoolOp::Cut)
                 .map_err(|_| e)?
-                .ok_or_else(|| KernelError::Failed("the shell removed everything".into()))
+                .ok_or_else(|| KernelError::Failed("the shell removed everything".into()))?;
+            Ok(hollowed(r, b, offsets(&cavity)))
         }
     }
 }
 
 /// A shell made from the cavity with every face moved in by the thickness (open faces too),
-/// joined with each open face's moved copy swept out through the body.
+/// joined with each open face's moved copy swept out through the body. No history: the
+/// opening's walls, swept from the cavity's edges, come from nothing of `b`.
 fn shell_by_opening(b: &Body, opened: &[usize], thickness: f64, reach: f64) -> Result<Body> {
     let closed = offset_planar(b, |_, _| -thickness)?;
     let faces: Vec<mt::Face> = closed.solid.face_iter().cloned().collect();
@@ -437,7 +621,8 @@ fn shell_by_opening(b: &Body, opened: &[usize], thickness: f64, reach: f64) -> R
         let prism = Body::new(prism)?;
         cavity = crate::ops::boolean(&cavity, &prism, crate::BoolOp::Union)?.ok_or_else(|| KernelError::Failed("shell: opening".into()))?;
     }
-    crate::ops::boolean(b, &cavity, crate::BoolOp::Cut)?.ok_or_else(|| KernelError::Failed("the shell removed everything".into()))
+    let r = crate::ops::boolean(b, &cavity, crate::BoolOp::Cut)?.ok_or_else(|| KernelError::Failed("the shell removed everything".into()))?;
+    Ok(r.without_history())
 }
 
 fn unsupported_shell(m: &str) -> KernelError {
@@ -490,7 +675,7 @@ pub fn offset_faces(b: &Body, at: &[Vec3], distance: f64) -> Result<Body> {
     if !distance.is_finite() || distance.abs() > 1e6 {
         return Err(KernelError::Invalid("offset distance".into()));
     }
-    let healed = Body::new(crate::heal::heal_keep(b.deep_copy(), b.size(), b.split_keep()))?.with_split_lines(b.splits.clone());
+    let healed = crate::boolean_record::healed(b)?.with_split_lines(b.splits.clone());
     let size = healed.size();
     let mesh = healed.tessellate((size * 1e-3).max(1e-3))?;
     let mut chosen: Vec<usize> = Vec::new();
@@ -512,7 +697,7 @@ pub fn offset_faces(b: &Body, at: &[Vec3], distance: f64) -> Result<Body> {
     }
     let chosen = crate::offset::with_same_surface(&healed, &chosen);
     match offset_planar(&healed, |fi, _| if chosen.contains(&fi) { distance } else { 0.0 }) {
-        Ok(r) => Ok(r),
+        Ok(r) => Ok(record::after(r, &healed, &record::counts(&[b]))),
         // A piece of a split face (its neighbour stays): the piece swept along its normal
         // joins on (outward) or cuts in, with walls along the split lines.
         Err(e) if !healed.split_keep().is_empty() => press_pieces(&healed, &chosen, distance).map_err(|_| e),
@@ -520,6 +705,8 @@ pub fn offset_faces(b: &Body, at: &[Vec3], distance: f64) -> Result<Body> {
     }
 }
 
+/// No history: the walls along the split lines are swept from edges, and come from nothing of
+/// `b`.
 fn press_pieces(b: &Body, chosen: &[usize], distance: f64) -> Result<Body> {
     let faces: Vec<mt::Face> = b.solid.face_iter().cloned().collect();
     let mut cur = b.clone();
@@ -530,5 +717,21 @@ fn press_pieces(b: &Body, chosen: &[usize], distance: f64) -> Result<Body> {
         let op = if distance > 0.0 { crate::BoolOp::Union } else { crate::BoolOp::Cut };
         cur = crate::ops::boolean(&cur, &tool, op)?.ok_or_else(|| KernelError::Failed("offset: the piece moved off the body".into()))?;
     }
-    Ok(cur.with_split_lines(b.splits.clone()))
+    Ok(cur.with_split_lines(b.splits.clone()).without_history())
+}
+
+#[cfg(test)]
+mod rim_preflight_tests {
+    use super::*;
+
+    #[test]
+    fn a_distant_shell_does_not_turn_a_smaller_local_round_into_a_zero_rim() {
+        let block = crate::box_solid(Vec3::ZERO, Vec3::new(40.0, 30.0, 10.0)).unwrap();
+        let edges = [Vec3::new(20.0, 0.0, 0.0), Vec3::new(40.0, 15.0, 0.0), Vec3::new(20.0, 30.0, 0.0), Vec3::new(0.0, 15.0, 0.0)];
+        let rounded = crate::fillet(&block, &edges, 1.5).unwrap();
+        let distant = crate::box_solid(Vec3::new(1_000_000.0, 0.0, 0.0), Vec3::new(1_000_010.0, 10.0, 10.0)).unwrap();
+        let combined = crate::boolean(&rounded, &distant, crate::BoolOp::Union).unwrap().unwrap();
+        let faces: Vec<_> = (0..combined.solid.face_iter().count()).collect();
+        assert!(rim_without_thickness(&combined, &faces, 2.0, true).is_none());
+    }
 }

@@ -1,5 +1,5 @@
 use serde_json::{Value, json};
-use solvecraft_geom::Vec3;
+use solidcraft_geom::Vec3;
 
 use crate::Session;
 
@@ -130,7 +130,7 @@ fn motion_study_plays_and_exports() {
     // The B occurrence's origin moves by the slider value (it starts at 0 offset with value 0 at 10 mm… so 10 → −5).
     assert!((bx(&rows[1]) - bx(&rows[0]) + 3.75).abs() < 1e-6, "{e}");
     assert!(rows[4]["stopped_by_contact"].is_object());
-    let dir = std::env::temp_dir().join(format!("solvecraft-motion-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("solidcraft-motion-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let csv = dir.join("push.csv");
     run(&mut s, "motion.export", json!({"study": "Push", "samples": 3, "path": csv.to_string_lossy()}));

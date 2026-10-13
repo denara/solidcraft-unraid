@@ -4,15 +4,15 @@
 
 use std::sync::Arc;
 
-use solvecraft_geom::{Aabb3, Plane, Vec3};
-use solvecraft_render::{Camera, Rgb, Scene, SceneLine, SceneMesh};
-use solvecraft_sketch::Sketch;
+use solidcraft_geom::{Aabb3, Plane, Vec3};
+use solidcraft_render::{Camera, Rgb, Scene, SceneLine, SceneMesh};
+use solidcraft_sketch::Sketch;
 
 use crate::{Sel, Session};
 
 /// Colours (shared with the GPU viewport).
 pub mod colors {
-    use solvecraft_render::Rgb;
+    use solidcraft_render::Rgb;
     pub const BODY: Rgb = Rgb(176, 186, 198);
     pub const BODY_SELECTED: Rgb = Rgb(110, 170, 235);
     pub const EDGE: Rgb = Rgb(40, 44, 52);
@@ -36,7 +36,7 @@ pub mod colors {
     pub const BG_TOP: Rgb = Rgb(240, 243, 247);
     pub const BG_BOTTOM: Rgb = Rgb(203, 210, 221);
     /// What the section cap is tinted toward.
-    pub const SECTION_CAP: Rgb = solvecraft_render::SECTION_CAP;
+    pub const SECTION_CAP: Rgb = solidcraft_render::SECTION_CAP;
 }
 
 /// Bounds of everything visible.
@@ -143,7 +143,7 @@ pub fn sketch_lines_with_sampler(
 /// constrained individually).
 pub fn sketch_point_visible(sk: &Sketch, i: usize) -> bool {
     match sk.points.get(i).and_then(|p| p.link.as_deref()) {
-        Some(l) => sk.link(l).is_none_or(|l| l.kind != solvecraft_sketch::LinkKind::Text),
+        Some(l) => sk.link(l).is_none_or(|l| l.kind != solidcraft_sketch::LinkKind::Text),
         None => true,
     }
 }
@@ -261,7 +261,7 @@ pub fn scene_with_section_and_sketch_sampler(
 
 /// Where the plane through `o` with normal `n` cuts a mesh: one segment per crossed triangle,
 /// nudged a hair to the kept side (so the clip leaves them drawn).
-pub fn section_segments(m: &solvecraft_geom::Mesh, o: Vec3, n: Vec3) -> Vec<(Vec3, Vec3)> {
+pub fn section_segments(m: &solidcraft_geom::Mesh, o: Vec3, n: Vec3) -> Vec<(Vec3, Vec3)> {
     let eps = 1e-4 * (1.0 + m.bounds().diagonal());
     let mut out = Vec::new();
     for t in &m.triangles {
@@ -290,7 +290,7 @@ pub fn sketch_shown(s: &Session, id: u64) -> bool {
 
 /// Is a sketch used by a later feature?
 pub fn sketch_consumed(s: &Session, id: u64) -> bool {
-    use solvecraft_doc::FeatureKind;
+    use solidcraft_doc::FeatureKind;
     s.doc.features.iter().any(|f| matches!(f.kind, FeatureKind::Extrude { sketch, .. } | FeatureKind::Revolve { sketch, .. } if sketch == id))
 }
 
@@ -311,7 +311,7 @@ pub fn construction_planes(s: &Session) -> Vec<(u64, String, Plane)> {
     constructs(s)
         .into_iter()
         .filter_map(|(id, name, g)| match g {
-            solvecraft_doc::construct::ConstructGeom::Plane(p) => Some((id, name, p)),
+            solidcraft_doc::construct::ConstructGeom::Plane(p) => Some((id, name, p)),
             _ => None,
         })
         .collect()
@@ -322,7 +322,7 @@ pub fn construction_axes(s: &Session) -> Vec<(u64, String, Vec3, Vec3)> {
     constructs(s)
         .into_iter()
         .filter_map(|(id, name, g)| match g {
-            solvecraft_doc::construct::ConstructGeom::Axis { origin, dir } => Some((id, name, origin, dir)),
+            solidcraft_doc::construct::ConstructGeom::Axis { origin, dir } => Some((id, name, origin, dir)),
             _ => None,
         })
         .collect()
@@ -333,25 +333,25 @@ pub fn construction_points(s: &Session) -> Vec<(u64, String, Vec3)> {
     constructs(s)
         .into_iter()
         .filter_map(|(id, name, g)| match g {
-            solvecraft_doc::construct::ConstructGeom::Point(p) => Some((id, name, p)),
+            solidcraft_doc::construct::ConstructGeom::Point(p) => Some((id, name, p)),
             _ => None,
         })
         .collect()
 }
 
 /// Construction geometry of unsuppressed features, shown where its component is placed.
-fn constructs(s: &Session) -> Vec<(u64, String, solvecraft_doc::construct::ConstructGeom)> {
-    use solvecraft_doc::construct::ConstructGeom;
+fn constructs(s: &Session) -> Vec<(u64, String, solidcraft_doc::construct::ConstructGeom)> {
+    use solidcraft_doc::construct::ConstructGeom;
     let st = s.model.state();
     st.construct
         .iter()
         .filter_map(|c| {
             let f = s.doc.feature(c.feature).filter(|f| !f.suppressed)?;
             let m = s.doc.component_transform(f.component);
-            if solvecraft_doc::is_identity(&m) {
+            if solidcraft_doc::is_identity(&m) {
                 return Some((c.feature, c.name.clone(), c.geom.clone()));
             }
-            let (pt, v) = (|p: Vec3| solvecraft_doc::apply_point(&m, p), |d: Vec3| solvecraft_doc::apply_vector(&m, d));
+            let (pt, v) = (|p: Vec3| solidcraft_doc::apply_point(&m, p), |d: Vec3| solidcraft_doc::apply_vector(&m, d));
             let g = match &c.geom {
                 ConstructGeom::Plane(p) => ConstructGeom::Plane(Plane::new(pt(p.origin), v(p.x), v(p.y)).unwrap_or(*p)),
                 ConstructGeom::Axis { origin, dir } => ConstructGeom::Axis { origin: pt(*origin), dir: v(*dir) },
@@ -382,7 +382,7 @@ mod tests {
         assert!(sc.meshes.iter().any(|m| m.color == Rgb(220, 60, 40)));
         assert!(sc.meshes.iter().any(|m| m.face_colors.iter().any(|(_, c)| *c == Rgb(40, 170, 80))));
         // And the rendered picture has the green top.
-        let img = solvecraft_render::render(&sc, &cam, 200, 140);
+        let img = solidcraft_render::render(&sc, &cam, 200, 140);
         assert!(img.rgba.chunks(4).any(|p| p[1] > 120 && p[0] < 90 && p[2] < 110), "no green pixels");
     }
 
@@ -392,7 +392,7 @@ mod tests {
         let mut s = Session::default();
         s.execute("solid.sphere", &json!({"diameter": 20})).unwrap();
         let cam = home_camera(&s);
-        let img = solvecraft_render::render(&scene(&s, &cam), &cam, 400, 400);
+        let img = solidcraft_render::render(&scene(&s, &cam), &cam, 400, 400);
         let dark = img.rgba.chunks(4).filter(|p| p[0] < 70 && p[1] < 70 && p[2] < 75).count();
         assert!(dark > 40, "silhouette pixels: {dark}");
     }
@@ -403,11 +403,11 @@ mod tests {
         let mut s = Session::default();
         s.execute("solid.box", &json!({"length": 40, "width": 30, "height": 20})).unwrap();
         let cam = home_camera(&s);
-        let whole = solvecraft_render::render(&scene(&s, &cam), &cam, 200, 140).rgba;
+        let whole = solidcraft_render::render(&scene(&s, &cam), &cam, 200, 140).rgba;
         s.execute("inspect.section", &json!({"plane": {"origin": [0, 15, 0], "normal": [0, -1, 0]}})).unwrap();
         let sc = scene(&s, &cam);
         assert!(sc.clip.is_some());
-        let cut = solvecraft_render::render(&sc, &cam, 200, 140).rgba;
+        let cut = solidcraft_render::render(&sc, &cam, 200, 140).rgba;
         let changed = whole.chunks(4).zip(cut.chunks(4)).filter(|(a, b)| a != b).count();
         assert!(changed > 500, "{changed} pixels changed");
     }
@@ -429,7 +429,7 @@ mod tests {
             // A marker inside the body, behind the cut face.
             let red = Rgb(255, 0, 0);
             sc.lines.push(SceneLine { points: vec![Vec3::new(5.0, 25.0, 10.0), Vec3::new(35.0, 25.0, 10.0)], color: red, width: 3.0, on_top: false });
-            let img = solvecraft_render::render(&sc, &cam, 300, 220);
+            let img = solidcraft_render::render(&sc, &cam, 300, 220);
             let px = || img.rgba.chunks(4);
             let marker = px().filter(|p| p[0] > 200 && p[1] < 60 && p[2] < 60).count();
             assert_eq!(marker, 0, "fov {fov}: the inside shows through the cut face");

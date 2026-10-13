@@ -1,6 +1,6 @@
 use crate::scenario::Harness;
 use serde_json::{Value, json};
-use solvecraft_engine::doc::{AxisRef, FeatureKind};
+use solidcraft_engine::doc::{AxisRef, FeatureKind};
 
 fn make(h: Harness, axis: Value) -> Harness {
     make_params(h, axis, json!({}))
@@ -32,12 +32,12 @@ fn unchanged_all_profiles_retains_future_geometry_but_reselection_is_explicit() 
         }
         h.step(&json!({"widget":"OK"})).unwrap();
         let FeatureKind::Revolve { profiles, .. } = &h.app.session.doc.find_feature("Turn").unwrap().kind else { panic!("revolve") };
-        assert_eq!(matches!(profiles, solvecraft_engine::doc::ProfileSel::All), !reselect);
+        assert_eq!(matches!(profiles, solidcraft_engine::doc::ProfileSel::All), !reselect);
         h.app.run("sketch.edit", json!({"sketch":"Profile"})).unwrap();
         h.app.run("sketch.rectangle.two_point", json!({"p0":[20,0],"p1":[25,5]})).unwrap();
         h.app.run("sketch.finish", json!({})).unwrap();
         let state = h.app.session.world_state();
-        let volume: f64 = state.bodies.iter().map(|b| solvecraft_engine::doc::kernel::measure(&b.body).unwrap().volume).sum();
+        let volume: f64 = state.bodies.iter().map(|b| solidcraft_engine::doc::kernel::measure(&b.body).unwrap().volume).sum();
         let expected = if reselect { 490.873852 } else { 1374.446786 };
         assert!((volume - expected).abs() < 0.3, "{volume} != {expected}");
     }
@@ -53,24 +53,24 @@ fn to_object_noop_preserves_cut_targets_and_untargeted_body() {
     let state = h.app.session.world_state();
     // A quarter annulus separates the stock into inner and outer solids. Both are
     // results of cutting A; checking only the first named solid loses material.
-    let cut_volume = |state: &solvecraft_engine::doc::ModelState| -> f64 {
-        state.bodies.iter().filter(|b| b.name != "B").map(|b| solvecraft_engine::doc::kernel::measure(&b.body).unwrap().volume).sum()
+    let cut_volume = |state: &solidcraft_engine::doc::ModelState| -> f64 {
+        state.bodies.iter().filter(|b| b.name != "B").map(|b| solidcraft_engine::doc::kernel::measure(&b.body).unwrap().volume).sum()
     };
     let before_a = cut_volume(&state);
     let removed = 0.5 * (15.0f64.powi(2) - 10.0f64.powi(2)) * 5.0 * std::f64::consts::FRAC_PI_2;
     assert!((before_a - (2000.0 - removed)).abs() < 0.2, "cut results {:?}: {before_a}", state.bodies.iter().map(|b| &b.name).collect::<Vec<_>>());
     let in_cut_stock = |p| state.bodies.iter().filter(|b| b.name != "B").any(|b| b.body.contains(p));
-    assert!(in_cut_stock(solvecraft_engine::geom::Vec3::new(2.0, 2.0, 2.0)));
-    assert!(in_cut_stock(solvecraft_engine::geom::Vec3::new(18.0, 2.0, 18.0)));
-    assert!(!in_cut_stock(solvecraft_engine::geom::Vec3::new(9.0, 2.0, 9.0)));
-    assert!(state.body("B").unwrap().body.contains(solvecraft_engine::geom::Vec3::new(9.0, 2.0, 9.0)));
+    assert!(in_cut_stock(solidcraft_engine::geom::Vec3::new(2.0, 2.0, 2.0)));
+    assert!(in_cut_stock(solidcraft_engine::geom::Vec3::new(18.0, 2.0, 18.0)));
+    assert!(!in_cut_stock(solidcraft_engine::geom::Vec3::new(9.0, 2.0, 9.0)));
+    assert!(state.body("B").unwrap().body.contains(solidcraft_engine::geom::Vec3::new(9.0, 2.0, 9.0)));
     let before_bounds: Vec<_> = state.bodies.iter().map(|b| (b.name.clone(), b.mesh().bounds())).collect();
     let undo = h.app.session.undo.len();
     open(&mut h);
     h.step(&json!({"widget":"OK"})).unwrap();
     assert!(h.app.dialog.is_none());
     let state = h.app.session.world_state();
-    assert!((solvecraft_engine::doc::kernel::measure(&state.body("B").unwrap().body).unwrap().volume - 2000.0).abs() < 1e-7);
+    assert!((solidcraft_engine::doc::kernel::measure(&state.body("B").unwrap().body).unwrap().volume - 2000.0).abs() < 1e-7);
     assert!((cut_volume(&state) - before_a).abs() < 1e-7);
     assert_eq!(state.bodies.iter().map(|b| (b.name.clone(), b.mesh().bounds())).collect::<Vec<_>>(), before_bounds);
     assert_eq!(h.app.session.undo.len(), undo + 1);
@@ -116,7 +116,7 @@ fn second_active_occurrence_noop_preserves_definition_axis_target_and_instances(
     h.app.run("component.activate", json!({"component":owner["component"],"occurrence":second,"path":[second]})).unwrap();
     let original = serde_json::to_value(&h.app.session.doc.find_feature("Turn").unwrap().kind).unwrap();
     let frame = h.app.session.active_component_frame();
-    let expected_origin = solvecraft_engine::doc::apply_point(&frame, solvecraft_engine::geom::Vec3::ZERO);
+    let expected_origin = solidcraft_engine::doc::apply_point(&frame, solidcraft_engine::geom::Vec3::ZERO);
     let before: Vec<_> = h.app.session.world_state().bodies.iter().map(|b| (b.name.clone(), b.mesh().bounds())).collect();
     open(&mut h);
     let (origin, _) = crate::canvas::revolve_axis(&h.app, h.app.dialog.as_ref().unwrap()).unwrap();
@@ -154,7 +154,7 @@ fn actual_noop_editor_retains_all_revolve_axis_kinds_and_analytic_volume() {
         let bounds = body.mesh().bounds();
         let radii = if axis_value == json!("l4") { 25.0 } else { 225.0 - 100.0 };
         let expected = 0.5 * radii * 5.0 * std::f64::consts::FRAC_PI_2;
-        let volume = solvecraft_engine::doc::kernel::measure(&body.body).unwrap().volume;
+        let volume = solidcraft_engine::doc::kernel::measure(&body.body).unwrap().volume;
         assert!((volume - expected).abs() < 0.03, "{axis_value}: {volume}");
         open(&mut h);
         let commands = crate::dialogs::apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap();

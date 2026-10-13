@@ -1,6 +1,6 @@
 [
  {
-  "note": "User bug 1 (owner solvecraft-sketch): Create Sketch on a body face projects the face's loops as reference geometry (linked), with no big square of real lines, and the face stays pickable for Project."
+  "note": "User bug 1 (owner solidcraft-sketch): Create Sketch on a body face projects the face's loops as reference geometry (linked), with no big square of real lines, and the face stays pickable for Project."
  },
  {
   "start": "sketch.create"

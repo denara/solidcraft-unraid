@@ -2,7 +2,7 @@
 //! world land in the component's own frame (user bug #4).
 
 use serde_json::{Value, json};
-use solvecraft_geom::Vec3;
+use solidcraft_geom::Vec3;
 
 use crate::Session;
 
@@ -190,7 +190,7 @@ fn canvases_move_with_their_component() {
     let root = s.doc.canvases.iter().find(|c| c.name == "Root").unwrap();
     assert!(near(s.doc.canvas_plane(&vals, root).unwrap().origin, Vec3::ZERO));
     // The component survives a save and reopen.
-    let back = solvecraft_doc::Document::from_json(&s.doc.to_json()).unwrap();
+    let back = solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap();
     assert_eq!(back.canvases, s.doc.canvases);
 }
 

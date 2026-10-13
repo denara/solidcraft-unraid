@@ -6,7 +6,7 @@
 //! Shapes created by set operations cannot be output yet.
 //! Input will come further down the road.
 
-// SolveCraft: compiler warnings no longer fail the build.
+// SolidCraft: compiler warnings no longer fail the build.
 #![deny(clippy::all, rust_2018_idioms)]
 #![warn(
     missing_docs,

@@ -1,0 +1,12 @@
+{"description": "An 80 x 50 x 10 plate: a counterbored hole patterned 3 x 2, its top outline chamfered 1 mm.",
+ "commands": [
+  {"command": "parameters.change", "params": {"name": "thick", "expression": "10 mm"}},
+  {"command": "parameters.change", "params": {"name": "pitch", "expression": "25 mm"}},
+  {"command": "sketch.create", "params": {"plane": "XY", "name": "Plate"}},
+  {"command": "sketch.rectangle.two_point", "params": {"p0": [0, 0], "p1": [80, 50]}},
+  {"command": "sketch.finish", "params": {}},
+  {"command": "solid.extrude", "params": {"distance": "thick"}},
+  {"command": "solid.hole", "params": {"position": [15, 12, 10], "diameter": 5, "type": "counterbore", "cb_diameter": 9, "cb_depth": 3, "name": "Hole1"}},
+  {"command": "solid.pattern.rectangular", "params": {"features": ["Hole1"], "dir1": [1, 0, 0], "count1": 3, "spacing1": "pitch", "dir2": [0, 1, 0], "count2": 2, "spacing2": "pitch"}},
+  {"command": "solid.chamfer", "params": {"edges": [[40, 0, 10], [80, 25, 10], [40, 50, 10], [0, 25, 10]], "distance": 1}}
+ ]}

@@ -1,4 +1,4 @@
-//! Timings for large sketches (run with `cargo test -p solvecraft-engine --release sketch_perf -- --ignored --nocapture`;
+//! Timings for large sketches (run with `cargo test -p solidcraft-engine --release sketch_perf -- --ignored --nocapture`;
 //! numbers are recorded in docs/perf.md).
 
 use std::time::Instant;
@@ -19,8 +19,8 @@ fn big(n: usize) -> Session {
     let id = s.active_sketch.unwrap();
     let mut doc = (*s.doc).clone();
     let sk = doc.sketch_mut(id).unwrap();
-    use solvecraft_geom::Vec2;
-    use solvecraft_sketch::ConstraintKind::*;
+    use solidcraft_geom::Vec2;
+    use solidcraft_sketch::ConstraintKind::*;
     let side = (n as f64).sqrt().ceil() as usize;
     for k in 0..n {
         let (x, y) = ((k % side) as f64 * 30.0, (k / side) as f64 * 30.0);
@@ -54,10 +54,10 @@ fn sketch_perf() {
         let entities = sk.curves.len() + sk.points.len();
         let t = Instant::now();
         let mut k = sk.clone();
-        let rep = solvecraft_sketch::solve(&mut k);
+        let rep = solidcraft_sketch::solve(&mut k);
         let solve = ms(t);
         let t = Instant::now();
-        let prof = solvecraft_sketch::find_profiles(&k);
+        let prof = solidcraft_sketch::find_profiles(&k);
         let profiles = ms(t);
         let ss = s.model.state().sketch(id).unwrap().clone();
         let t = Instant::now();

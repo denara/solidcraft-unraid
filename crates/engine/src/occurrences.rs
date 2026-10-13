@@ -1,6 +1,6 @@
 //! Exact placement identity and session view/authoring state.
 use crate::{EngineError, Result, Sel, Session};
-use solvecraft_doc::{IDENTITY, Mat, mat_mul};
+use solidcraft_doc::{IDENTITY, Mat, mat_mul};
 
 #[derive(Clone, Debug)]
 pub struct OccurrenceBody {
@@ -33,7 +33,7 @@ pub(crate) struct VisibilityCache {
 
 impl Session {
     /// Document with uncaptured occurrence positions applied, without changing saved geometry.
-    pub fn placed_document(&self) -> std::borrow::Cow<'_, solvecraft_doc::Document> {
+    pub fn placed_document(&self) -> std::borrow::Cow<'_, solidcraft_doc::Document> {
         if self.pending_moves.is_empty() {
             return std::borrow::Cow::Borrowed(&self.doc);
         }

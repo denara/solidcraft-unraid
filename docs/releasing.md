@@ -6,12 +6,21 @@ GitHub Release. Publishing that verified draft is a separate operation. Pushing 
 pushing a tag does not start the release workflow. There is no automatic commit-message-based
 version bump and no patch release for every merge.
 
-## Compatibility names and deployment
+## Names and deployment
 
-SolidCraft is the product display name. Keep existing release asset filenames, including
-`SolveCraft-{version}-windows-x64.exe`, `SolveCraft.app` and `solvecraft-cli` archives, together
-with installed package IDs and settings paths. Do not rewrite published 0.2.0 or 0.2.1 assets,
-checksums, tags or historical release notes.
+Every release asset, binary, installer product name and package uses the SolidCraft name
+(`solidcraft-<version>-linux-<arch>.AppImage`, `SolidCraft-<version>-windows-x64.exe`,
+`solidcraft-cli` archives, …). The old name survives only in the shims listed in
+[compatibility.md](compatibility.md) (the Linux app ID, the legacy `.zsync` and `.flatpakrepo`
+copies, the deprecated old-name CLI alias); keep them until that document says they can go. Do not
+rewrite published assets, checksums, tags or historical release notes of earlier versions.
+
+The main installers (`.msi`, portable `.zip`, `.dmg`, `.AppImage`, `.deb`, `.rpm`, `.flatpak`, `.snap`) are
+also attached without the version in their names, for example `solidcraft-windows-x64.msi` and
+`solidcraft-linux-x86_64.AppImage`, and listed in `SHA256SUMS.txt`. The README's Download section
+links to `https://github.com/bherbruck/solidcraft/releases/latest/download/<name>`, which follows
+the release marked latest; nightlies never are. Keep these names stable: renaming one breaks the
+README links.
 
 Project Pages publishes the documentation, browser app and published-release Flatpak
 repository under `/solidcraft/`. Do not add a separate owner-site publisher or permanent
@@ -52,9 +61,10 @@ deployment. The stable Flatpak repository is not automatically updated with nigh
    Documentation-only changes normally wait for the next release. State the reason for the
    chosen bump in the release notes. Follow any version or release scope specified by the owner.
 2. Update `[workspace.package] version` in root `Cargo.toml`. Then run
-   `cargo metadata --format-version 1 --no-deps > /dev/null` to refresh workspace package
-   versions in `Cargo.lock`. Inspect the diff and keep unrelated dependency changes out.
-   SolidCraft does not currently implement the siblings' `cargo xtask version set` command.
+   `cargo update --workspace --offline` to refresh the workspace packages' versions in
+   `Cargo.lock` (it changes only our own crates, never dependency versions, and needs no
+   network). Inspect the diff: only `version = ` lines of workspace crates should change.
+   SolidCraft does not currently implement `cargo xtask version set`.
 3. Run `cargo xtask ci` and the packaging checks in `.github/workflows/packaging-lint.yml`.
    Commit the version files through the normal review flow and land them on `main`.
    Do not use `[skip ci]`. Record the exact commit SHA to release. If it changes, revalidate it.
@@ -134,6 +144,55 @@ Pages assembles the documentation, browser app, and Flatpak repository together.
 docs updates include the latest stable Flatpak release too. Verify the resulting Pages run,
 not only the dispatch job, so a release cannot erase the docs or app and docs updates cannot
 erase the package repository.
+
+## Snap package and Snap Store
+
+Every release and nightly attaches `solidcraft-<version>-linux-<arch>.snap` for x86_64 and
+aarch64 (`packaging/linux/snap-pack.sh`, manifest `packaging/linux/snap/snapcraft.yaml`). Like the
+Flatpak, it repackages the Linux job's tarball. The `snap` job installs it with `--dangerous`,
+starts the confined app on headless X11 and Wayland (`packaging/linux/snap-smoke.py`), models a
+box over the control channel and keeps the captured frames as the `snap-smoke-<arch>` artifact.
+
+The Snap Store steps run only when the `SNAPCRAFT_STORE_CREDENTIALS` repository secret exists;
+without it they are skipped and the `.snap` files are still attached to the release:
+
+- nightlies are uploaded to `latest/edge`;
+- release drafts (pushes to `release`) are uploaded to `latest/candidate`, after every package
+  built and the draft was staged;
+- publishing a non-prerelease GitHub release runs `snap-store.yml`, which promotes
+  `latest/candidate` to `latest/stable`. As with the Flatpak repository, a publication made with
+  `GITHUB_TOKEN` doesn't trigger it: then run `gh workflow run snap-store.yml`.
+
+To enable the Snap Store once (owner):
+
+1. Sign in at <https://snapcraft.io> with an Ubuntu One account and register the name at
+   <https://snapcraft.io/register-snap> (or `snapcraft login` then `snapcraft register solidcraft`).
+2. On a machine with snapcraft (`sudo snap install snapcraft --classic`), export upload-only
+   credentials for this snap:
+
+   ```sh
+   snapcraft export-login --snaps=solidcraft \
+     --channels=edge,candidate,stable \
+     --acls=package_access,package_push,package_update,package_release \
+     --expires=2027-10-01 solidcraft-store-credentials.txt
+   ```
+
+3. Store them as the repository secret and delete the file:
+
+   ```sh
+   gh secret set SNAPCRAFT_STORE_CREDENTIALS -R bherbruck/solidcraft < solidcraft-store-credentials.txt
+   rm solidcraft-store-credentials.txt
+   ```
+
+4. Optional: fill in the store listing at <https://snapcraft.io/solidcraft/listing> (the icon,
+   summary and description come from the snap; add screenshots and the category "Art and design").
+5. The next nightly fills `edge` and the next release fills `candidate`, then `stable` on
+   publication. To fill `stable` from an already published release right away, download its
+   `.snap` files and run `snapcraft upload --release=stable <file>` for each.
+
+Renew the credentials before `--expires` by repeating steps 2 and 3. The snap uses strict
+confinement and only plugs that connect automatically, apart from `removable-media`, which users
+connect with `sudo snap connect solidcraft:removable-media` (getting-started.md).
 
 ## Repository setup
 

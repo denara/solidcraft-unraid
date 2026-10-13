@@ -2,16 +2,16 @@ use super::{Tool, preview_curve};
 use crate::scenario::Harness;
 use crate::viewport::Proj;
 use serde_json::{Value, json};
-use solvecraft_engine::geom::{Plane, Vec2, Vec3};
-use solvecraft_engine::render::{Camera, Mat4};
-use solvecraft_engine::sketch::Sketch;
+use solidcraft_engine::geom::{Plane, Vec2, Vec3};
+use solidcraft_engine::render::{Camera, Mat4};
+use solidcraft_engine::sketch::Sketch;
 
 fn tool(command: &str, points: &[[f64; 2]]) -> Tool {
     let mut tool = Tool::for_command(command).unwrap();
     tool.pts = points.iter().map(|p| (Vec2::new(p[0], p[1]), None)).collect();
     tool
 }
-fn spans(sk: &Sketch) -> Vec<solvecraft_engine::geom::Seg2> {
+fn spans(sk: &Sketch) -> Vec<solidcraft_engine::geom::Seg2> {
     sk.exact_segs(0).unwrap_or_else(|| sk.segs(0))
 }
 fn projection(scale: f64) -> Proj {

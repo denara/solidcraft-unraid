@@ -4,8 +4,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use solvecraft_geom::{Mesh, Plane, Vec2, Vec3};
-use solvecraft_sketch::LinkSource;
+use solidcraft_geom::{Mesh, Plane, Vec2, Vec3};
+use solidcraft_sketch::LinkSource;
 
 use crate::eval::ModelState;
 
@@ -439,8 +439,8 @@ fn tri_dist(p: Vec3, t: &[Vec3; 3]) -> f64 {
 }
 
 /// Sample a fitted planar curve.
-fn link_polyline(g: &solvecraft_sketch::LinkGeom) -> Vec<Vec2> {
-    use solvecraft_sketch::LinkGeom;
+fn link_polyline(g: &solidcraft_sketch::LinkGeom) -> Vec<Vec2> {
+    use solidcraft_sketch::LinkGeom;
     match *g {
         LinkGeom::Line(a, b) => vec![a, b],
         LinkGeom::Circle(c, r) => (0..=96).map(|i| c + Vec2::from_angle(i as f64 / 96.0 * std::f64::consts::TAU) * r).collect(),
@@ -452,11 +452,11 @@ fn link_polyline(g: &solvecraft_sketch::LinkGeom) -> Vec<Vec2> {
             let r = c.dist(a);
             (0..=48).map(|i| c + Vec2::from_angle(s0 + sw * i as f64 / 48.0) * r).collect()
         }
-        LinkGeom::Conic { a, apex, b, rho } => (0..=32).map(|i| solvecraft_sketch::conic_point(a, apex, b, rho, i as f64 / 32.0)).collect(),
+        LinkGeom::Conic { a, apex, b, rho } => (0..=32).map(|i| solidcraft_sketch::conic_point(a, apex, b, rho, i as f64 / 32.0)).collect(),
         LinkGeom::Ellipse { c, major, minor } => {
-            (0..=96).map(|i| solvecraft_sketch::ellipse_point(c, major, minor, i as f64 / 96.0 * std::f64::consts::TAU)).collect()
+            (0..=96).map(|i| solidcraft_sketch::ellipse_point(c, major, minor, i as f64 / 96.0 * std::f64::consts::TAU)).collect()
         }
-        LinkGeom::Spline { ref pts, control, degree, periodic } => solvecraft_sketch::spline_polyline_mode(pts, control, degree, periodic),
+        LinkGeom::Spline { ref pts, control, degree, periodic } => solidcraft_sketch::spline_polyline_mode(pts, control, degree, periodic),
         LinkGeom::Point(_) => Vec::new(),
     }
 }

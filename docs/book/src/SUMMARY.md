@@ -25,8 +25,8 @@
 - [Persistent naming](dev/naming.md)
 - [Test harnesses](dev/testing.md)
 - [Control protocol](dev/control-protocol.md)
-- [Fusion oracle](dev/oracle.md)
-- [Command parity](dev/parity.md)
+- [Reference tests](dev/oracle.md)
+- [Features](dev/features.md)
 - [STEP import](dev/step-import.md)
 
 # Reference

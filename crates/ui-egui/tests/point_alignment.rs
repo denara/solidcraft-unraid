@@ -1,8 +1,8 @@
 //! Horizontal/Vertical accepts either one line or two distinct sketch points.
 
 use serde_json::json;
-use solvecraft_engine::sketch::ConstraintKind;
-use solvecraft_ui_egui::scenario::Harness;
+use solidcraft_engine::sketch::ConstraintKind;
+use solidcraft_ui_egui::scenario::Harness;
 
 #[test]
 fn horizontal_vertical_uses_preselected_line_and_preserves_rejection() {
@@ -42,7 +42,7 @@ fn horizontal_vertical_uses_preselected_line_and_preserves_rejection() {
 
 #[test]
 fn horizontal_vertical_leaves_ambiguous_preselection_to_pick_tool() {
-    use solvecraft_engine::Sel;
+    use solidcraft_engine::Sel;
     for selection in [
         vec![Sel::SketchPoint { id: "origin".into() }],
         vec![Sel::SketchPoint { id: "origin".into() }, Sel::SketchCurve { id: "c1".into() }],

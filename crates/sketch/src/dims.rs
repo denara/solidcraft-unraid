@@ -8,9 +8,10 @@
 //!
 //! [`Constraint::text`]: crate::Constraint::text
 
-use solvecraft_geom::Vec2;
+use solidcraft_geom::Vec2;
 
 use crate::model::{ConstraintKind, CurveKind, Sketch};
+use crate::union_find::{find, union};
 
 /// What a dimension measures, in a form that can be drawn.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -69,7 +70,7 @@ pub fn dim_frame(sk: &Sketch, k: &ConstraintKind) -> Option<DimFrame> {
             }
         }
         ArcSweep { c, .. } => match sk.segs(c).first()? {
-            solvecraft_geom::Seg2::Arc { center, start, sweep, .. } => {
+            solidcraft_geom::Seg2::Arc { center, start, sweep, .. } => {
                 DimFrame::Angular { vertex: *center, d0: Vec2::from_angle(*start), sweep: *sweep }
             }
             _ => return None,
@@ -95,7 +96,7 @@ pub fn dim_frame(sk: &Sketch, k: &ConstraintKind) -> Option<DimFrame> {
             DimFrame::Radial { center: sk.center(c)?, radius, diameter: matches!(k, Diameter { .. }) }
         }
         ArcLength { c, .. } => match sk.segs(c).first()? {
-            solvecraft_geom::Seg2::Arc { center, radius, start, sweep } => {
+            solidcraft_geom::Seg2::Arc { center, radius, start, sweep } => {
                 DimFrame::ArcLength { center: *center, radius: *radius, start: *start, sweep: *sweep }
             }
             _ => return None,
@@ -138,30 +139,14 @@ pub fn encode_text(f: &DimFrame, at: Vec2) -> Vec2 {
 pub fn chain_centres(sk: &Sketch) -> Vec<Vec2> {
     let n = sk.points.len();
     let mut parent: Vec<usize> = (0..n).collect();
-    fn root(p: &mut [usize], mut i: usize) -> usize {
-        while let Some(&q) = p.get(i) {
-            if q == i {
-                break;
-            }
-            let g = p.get(q).copied().unwrap_or(q);
-            if let Some(s) = p.get_mut(i) {
-                *s = g;
-            }
-            i = q;
-        }
-        i
-    }
     for c in &sk.curves {
         let ids = c.kind.point_ids();
         for w in ids.windows(2) {
-            let (a, b) = (root(&mut parent, w[0]), root(&mut parent, w[1]));
-            if let Some(s) = parent.get_mut(a) {
-                *s = b;
-            }
+            union(&mut parent, w[0], w[1]);
         }
     }
     let mut sum = vec![(Vec2::ZERO, 0usize); n];
-    let roots: Vec<usize> = (0..n).map(|i| root(&mut parent, i)).collect();
+    let roots: Vec<usize> = (0..n).map(|i| find(&mut parent, i)).collect();
     for (i, r) in roots.iter().enumerate() {
         if let (Some(s), Some(p)) = (sum.get_mut(*r), sk.points.get(i)) {
             s.0 += p.pos;

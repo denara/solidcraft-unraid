@@ -69,7 +69,7 @@ fn rows(app: &mut SolveApp) -> Vec<Row> {
     // Sketch dimension parameters: the sketch that owns each.
     let mut owner: std::collections::BTreeMap<String, String> = Default::default();
     for f in &app.session.doc.features {
-        if let solvecraft_engine::doc::FeatureKind::Sketch { sketch, .. } = &f.kind {
+        if let solidcraft_engine::doc::FeatureKind::Sketch { sketch, .. } = &f.kind {
             for c in &sketch.constraints {
                 if let Some(p) = &c.param {
                     owner.insert(p.clone(), f.name.clone());
@@ -502,7 +502,7 @@ mod tests {
         assert_eq!(word_before("1 + ", 4), (4, String::new()));
         assert_eq!(word_before("ü", 9), (0, "ü".to_string()));
         let ctx = egui::Context::default();
-        let mut app = SolveApp::new(solvecraft_engine::Session::default(), Default::default());
+        let mut app = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
         let _ = app.run("parameters.add", json!({"name": "width", "expression": "40 mm"}));
         publish(&mut app, &ctx);
         let s = suggestions(&ctx, "wi");

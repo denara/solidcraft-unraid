@@ -9,11 +9,12 @@
 use std::collections::HashMap;
 
 use mt::{BoundedCurve, InnerSpace, MetricSpace, ParametricCurve, ParametricSurface, ParametricSurface3D, SearchNearestParameter};
-use solvecraft_geom::{Plane, Seg2, Vec2, Vec3};
+use solidcraft_geom::{Plane, Seg2, Vec2, Vec3};
 use truck_meshalgo::tessellation::RobustMeshableShape;
 use truck_modeling as mt;
 
 use crate::body::{Body, from_p3, p3};
+use crate::record::Rebuild;
 use crate::{KernelError, Result, guard};
 
 /// What splits the faces.
@@ -457,8 +458,9 @@ fn inside(poly: &[(f64, f64)], q: (f64, f64)) -> bool {
 
 /// Split one face (index `fi` in `faces`) by one field; `faces` is updated (the face replaced
 /// by its pieces, boundary edges cut in every face).
-/// Returns how many lines split it and how many faces now stand in its place (at `fi`).
-fn split_one(faces: &mut Vec<mt::Face>, fi: usize, g: &Field, size: f64, new_edges: &mut Vec<mt::Edge>) -> Result<(usize, usize)> {
+/// Returns how many lines split it and how many faces now stand in its place (at `fi`). The
+/// pieces of cut edges are recorded in `rec`.
+fn split_one(faces: &mut Vec<mt::Face>, fi: usize, g: &Field, size: f64, new_edges: &mut Vec<mt::Edge>, rec: &mut Rebuild) -> Result<(usize, usize)> {
     let Some(face) = faces.get(fi).cloned() else { return Ok((0, 1)) };
     let chains = trace(&face, g, size)?;
     if chains.is_empty() {
@@ -659,6 +661,11 @@ fn split_one(faces: &mut Vec<mt::Face>, fi: usize, g: &Field, size: f64, new_edg
     if made == 0 {
         return Ok((0, 1));
     }
+    // In the order they were cut: a piece cut again is a piece of the edge it came from.
+    for (c, (a, b)) in &all_cuts {
+        rec.piece(a, c);
+        rec.piece(b, c);
+    }
     let count = pieces.len();
     // Neighbours take the cut edges.
     let rest: Vec<mt::Face> = faces.iter().enumerate().filter(|(k, _)| *k != fi).map(|(_, f)| recut(f, &all_cuts)).collect();
@@ -802,10 +809,14 @@ pub(crate) struct Imprint {
     origin: Vec<usize>,
     new_edges: Vec<mt::Edge>,
     made: HashMap<usize, usize>,
+    /// The faces and edges made from the body's (each face over the same region as the body
+    /// face it came from, or a piece of it; cut edges' pieces).
+    rec: Rebuild,
 }
 
 fn imprint(body: &Body, faces: &[usize], fields: &[Field], size: f64) -> Result<Imprint> {
-    let mut out = Imprint { shells: Vec::new(), origin: Vec::new(), new_edges: Vec::new(), made: HashMap::new() };
+    let mut out = Imprint { shells: Vec::new(), origin: Vec::new(), new_edges: Vec::new(), made: HashMap::new(), rec: Rebuild::default() };
+    let body_faces: Vec<&mt::Face> = body.solid.face_iter().collect();
     let mut base = 0;
     for sh in body.solid.boundaries() {
         let mut fs: Vec<mt::Face> = sh.face_iter().cloned().collect();
@@ -822,12 +833,17 @@ fn imprint(body: &Body, faces: &[usize], fields: &[Field], size: f64) -> Result<
                     continue;
                 }
                 let src = origin.get(k).copied().unwrap_or(0);
-                let (m, pieces) = split_one(&mut fs, k, g, size, &mut out.new_edges)?;
+                let (m, pieces) = split_one(&mut fs, k, g, size, &mut out.new_edges, &mut out.rec)?;
                 *out.made.entry(src).or_default() += m;
                 // The pieces stand at k..k + pieces; positions after shift.
                 target = target.iter().take(k).copied().chain(std::iter::repeat_n(true, pieces)).chain(target.iter().skip(k + 1).copied()).collect();
                 origin = origin.iter().take(k).copied().chain(std::iter::repeat_n(src, pieces)).chain(origin.iter().skip(k + 1).copied()).collect();
                 k += pieces;
+            }
+        }
+        for (f, src) in fs.iter().zip(&origin) {
+            if let Some(from) = body_faces.get(*src) {
+                out.rec.whole(f, from);
             }
         }
         out.shells.push(fs);
@@ -837,7 +853,8 @@ fn imprint(body: &Body, faces: &[usize], fields: &[Field], size: f64) -> Result<
 }
 
 /// Split the given faces (indices in `body`'s face order) where the tool meets them. The solid
-/// is unchanged. A listed face the tool misses is an error naming it.
+/// is unchanged. A listed face the tool misses is an error naming it. The result's history is
+/// over `[body]`: each piece of a split face is Split from it, every other face Kept.
 pub fn split_faces(body: &Body, faces: &[usize], tool: &SplitTool) -> Result<Body> {
     split_faces_with_map(body, faces, tool).map(|(b, _)| b)
 }
@@ -877,19 +894,18 @@ pub(crate) fn split_any(body: &Body, faces: &[usize], tool: &SplitTool) -> Resul
         }
         let shells = std::mem::take(&mut imp.shells);
         let solid = mt::Solid::new_unchecked(shells.into_iter().map(mt::Shell::from).collect());
-        Ok((
-            Body {
-                solid: std::sync::Arc::new(solid),
-                coarse_missing: None,
-                mesh: None,
-                color: body.color,
-                paint: None,
-                splits: body.splits.clone(),
-                face_sources: None,
-                regularization_protected: true,
-            },
-            imp,
-        ))
+        let split = Body {
+            solid: std::sync::Arc::new(solid),
+            coarse_missing: None,
+            mesh: None,
+            color: body.color,
+            paint: None,
+            splits: body.splits.clone(),
+            face_sources: None,
+            history: None,
+            regularization_protected: true,
+        };
+        Ok((crate::record::rebuilt_body(split, &[&body.solid], &imp.rec), imp))
     })
 }
 
@@ -978,7 +994,8 @@ fn components(faces: Vec<mt::Face>) -> Vec<Vec<mt::Face>> {
 /// Split a body into the parts on either side of a tool: a plane, or another face's surface
 /// (extended). Faces are divided where the tool meets them and every part is closed with the
 /// piece of the tool's surface inside the body; parts come in face order, those on the tool's
-/// back first. A body the tool misses comes back whole.
+/// back first. A body the tool misses comes back whole. Each part's history is over `[body]`:
+/// its faces the body's (or pieces of them), the section new.
 pub fn split_body(body: &Body, tool: &SplitTool) -> Result<Vec<Body>> {
     body.require_brep("split body")?;
     if body.solid.boundaries().len() != 1 {
@@ -1021,8 +1038,9 @@ pub fn split_body(body: &Body, tool: &SplitTool) -> Result<Vec<Body>> {
         let imp = imprint(body, &all, &fields, size)?;
         let new_edges = imp.new_edges;
         if imp.made.values().all(|m| *m == 0) || new_edges.is_empty() {
-            return Ok(vec![body.clone()]);
+            return Ok(vec![crate::boolean_record::operand(body, 0, &crate::record::counts(&[body]))]);
         }
+        let mut rec = imp.rec;
         let faces: Vec<mt::Face> = imp.shells.into_iter().flatten().collect();
         // The section: loops of the new edges on the tool surface, outer loops counter-clockwise
         // about its normal and holes inside them.
@@ -1127,6 +1145,10 @@ pub fn split_body(body: &Body, tool: &SplitTool) -> Result<Vec<Body>> {
                 front.push(f);
             }
         }
+        // The section is new: it comes from nothing of the body.
+        for f in &section {
+            rec.made(f, Vec::new());
+        }
         // The section closes the back side facing the tool's normal, the front side facing away.
         back.extend(section.iter().cloned());
         front.extend(section.iter().map(|f| f.inverse()));
@@ -1137,7 +1159,7 @@ pub fn split_body(body: &Body, tool: &SplitTool) -> Result<Vec<Body>> {
                 if shell.shell_condition() != mt::ShellCondition::Closed {
                     return Err(KernelError::Failed("a part of the split does not close".into()));
                 }
-                parts.push(Body::new(mt::Solid::new_unchecked(vec![shell]))?.with_color(body.color));
+                parts.push(crate::record::rebuilt(mt::Solid::new_unchecked(vec![shell]), &[&body.solid], &rec)?.with_color(body.color));
             }
         }
         Ok(parts)

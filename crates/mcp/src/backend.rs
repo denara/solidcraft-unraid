@@ -5,8 +5,8 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use solvecraft_engine::Session;
-use solvecraft_engine::render::{StandardView, render_png};
+use solidcraft_engine::Session;
+use solidcraft_engine::render::{StandardView, render_png};
 
 /// Something that answers control-channel methods: `engine.execute`, `engine.commands`,
 /// `document.inspect`, `ui.view`, `ui.render`, `ui.screenshot`.
@@ -20,8 +20,8 @@ pub trait Backend {
 /// Longest reply line accepted from the app.
 const MAX_REPLY: u64 = 64 << 20;
 
-/// A running SolveCraft app reached through its loopback control port
-/// (`solvecraft --control PORT`).
+/// A running SolidCraft app reached through its loopback control port
+/// (`solidcraft --control PORT`).
 pub struct Remote {
     addr: String,
     conn: Option<(BufReader<TcpStream>, TcpStream)>,
@@ -152,9 +152,9 @@ impl Backend for Headless {
             }
             "ui.render" => {
                 let (w, h) = (dim(&p, "width", 1280.0), dim(&p, "height", 800.0));
-                let mut cam = solvecraft_engine::view::home_camera(s);
+                let mut cam = solidcraft_engine::view::home_camera(s);
                 cam.set_view(self.view);
-                let scene = solvecraft_engine::view::scene(s, &cam);
+                let scene = solidcraft_engine::view::scene(s, &cam);
                 let png = render_png(&scene, &cam, w, h).ok_or("render failed")?;
                 let path = str_p("path").ok_or("missing `path`")?;
                 std::fs::write(path, &png).map_err(|e| format!("{path}: {e}"))?;

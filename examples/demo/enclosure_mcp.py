@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Build an electronics enclosure in a running SolveCraft over MCP, one command at a time.
+"""Build an electronics enclosure in a running SolidCraft over MCP, one command at a time.
 
-    solvecraft --control 7878 &
+    solidcraft --control 7878 &
     python3 examples/demo/enclosure_mcp.py --port 7878
 
-The script is a minimal MCP client: it starts `solvecraft-cli mcp --connect 127.0.0.1:PORT`
+The script is a minimal MCP client: it starts `solidcraft-cli mcp --connect 127.0.0.1:PORT`
 (stdio, JSON-RPC 2.0, one message per line), initializes, then sends one `execute` tool call
 per step of enclosure_steps.json, waiting `pause` seconds after each so the timeline can be
 watched growing. Camera moves (fit, home view, the closing orbit) go over the app's control
@@ -24,7 +24,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 class Mcp:
-    """A stdio MCP client for `solvecraft-cli mcp`."""
+    """A stdio MCP client for `solidcraft-cli mcp`."""
 
     def __init__(self, argv):
         self.p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
@@ -79,7 +79,7 @@ def control(port, method, params=None):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--port", type=int, default=7878, help="the app's --control port")
-    ap.add_argument("--cli", default="solvecraft-cli", help="path to solvecraft-cli")
+    ap.add_argument("--cli", default="solidcraft-cli", help="path to solidcraft-cli")
     ap.add_argument("--steps", default=os.path.join(HERE, "enclosure_steps.json"))
     ap.add_argument("--pause", type=float, default=2.5, help="seconds after each step (unless the step says)")
     ap.add_argument("--log", help="write a JSON line per step: {t, caption, command}")

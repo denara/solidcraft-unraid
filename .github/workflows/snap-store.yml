@@ -1,0 +1,40 @@
+# Publishing a GitHub release (not a prerelease) promotes the snaps that release.yml uploaded to
+# the Snap Store's candidate channel to stable, so `sudo snap install solidcraft` gets it.
+# Skipped until the owner adds the SNAPCRAFT_STORE_CREDENTIALS secret; see docs/releasing.md.
+name: Snap Store
+
+on:
+  release:
+    types: [released]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: snap-store
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - id: creds
+        name: Check for Snap Store credentials
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+        run: |
+          if [ -n "$SNAPCRAFT_STORE_CREDENTIALS" ]; then
+            echo "configured=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "No SNAPCRAFT_STORE_CREDENTIALS secret: nothing to promote."
+          fi
+      - name: Promote candidate to stable
+        if: steps.creds.outputs.configured == 'true'
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+        run: |
+          sudo snap install snapcraft --classic
+          snapcraft status solidcraft
+          snapcraft promote solidcraft --from-channel=latest/candidate --to-channel=latest/stable --yes
+          snapcraft status solidcraft

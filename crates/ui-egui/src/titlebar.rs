@@ -190,7 +190,7 @@ pub fn resize_zones(ui: &mut Ui) {
 mod tests {
     use super::*;
     use egui::{Event, Pos2, RawInput, ViewportId};
-    use solvecraft_engine::Session;
+    use solidcraft_engine::Session;
 
     /// A headless window `width` pt wide showing the application bar (as the title bar) and the
     /// resize zones.

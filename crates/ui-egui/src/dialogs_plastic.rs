@@ -2,11 +2,11 @@
 //! Plastic Rules and Assign Plastic Rule. Values left empty take the body's plastic rule.
 
 use serde_json::{Map, Value, json};
-use solvecraft_engine::Sel;
-use solvecraft_engine::doc::FeatureKind;
-use solvecraft_engine::doc::expr::Kind as ValueKind;
-use solvecraft_engine::doc::plastic::PlasticRule;
-use solvecraft_engine::geom::Vec3;
+use solidcraft_engine::Sel;
+use solidcraft_engine::doc::FeatureKind;
+use solidcraft_engine::doc::expr::Kind as ValueKind;
+use solidcraft_engine::doc::plastic::PlasticRule;
+use solidcraft_engine::geom::Vec3;
 
 use crate::SolveApp;
 use crate::dialogs::{Kind, combo, face_sel, field, row_label};

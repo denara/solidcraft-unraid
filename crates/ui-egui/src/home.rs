@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 
 use egui::{Color32, CornerRadius, RichText, Sense, Stroke, vec2};
-use solvecraft_engine::Session;
-use solvecraft_engine::render::{Camera, StandardView};
+use solidcraft_engine::Session;
+use solidcraft_engine::render::{Camera, StandardView};
 
 use crate::SolveApp;
 use crate::theme::Tokens;
@@ -61,15 +61,15 @@ impl HomeState {
 pub fn thumbnail(s: &Session) -> Option<egui::ColorImage> {
     let mut cam = Camera::default();
     cam.set_view(StandardView::Iso);
-    let b = solvecraft_engine::view::bounds(s);
+    let b = solidcraft_engine::view::bounds(s);
     if b.is_empty() {
         return None;
     }
     cam.fit(&b);
     // Fill the card: the fit leaves room for a whole window's margins.
     cam.distance *= 0.7;
-    let scene = solvecraft_engine::view::scene(s, &cam);
-    let c = solvecraft_engine::render::render(&scene, &cam, THUMB[0], THUMB[1]);
+    let scene = solidcraft_engine::view::scene(s, &cam);
+    let c = solidcraft_engine::render::render(&scene, &cam, THUMB[0], THUMB[1]);
     (c.rgba.len() == c.w * c.h * 4).then(|| egui::ColorImage::from_rgba_unmultiplied([c.w, c.h], &c.rgba))
 }
 
@@ -86,7 +86,7 @@ fn cache_path(key: &str) -> Option<std::path::PathBuf> {
         .or_else(|| std::env::var_os("XDG_CACHE_HOME"))
         .map(std::path::PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
-    Some(root.join("SolveCraft").join("thumbnails").join(format!("{:016x}.png", h.finish())))
+    Some(root.join("SolidCraft").join("thumbnails").join(format!("{:016x}.png", h.finish())))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -123,11 +123,11 @@ fn remember_at(s: &Session, #[cfg(not(target_arch = "wasm32"))] identity: Option
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(path) = identity.filter(|p| s.path.as_deref().and_then(cache_path).as_ref() == Some(p)) {
         let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_srgba_unmultiplied()).collect();
-        if let Some(bytes) = solvecraft_engine::render::png(THUMB[0], THUMB[1], rgba)
+        if let Some(bytes) = solidcraft_engine::render::png(THUMB[0], THUMB[1], rgba)
             && let Some(dir) = path.parent()
             && std::fs::create_dir_all(dir).is_ok()
         {
-            let _ = solvecraft_engine::io::write_atomic(&path, &bytes, false);
+            let _ = solidcraft_engine::io::write_atomic(&path, &bytes, false);
         }
     }
     Some(img)
@@ -173,7 +173,7 @@ fn make(key: &str) -> Made {
     }
     let mut s = Session::default();
     let built = match key.strip_prefix("sample:").and_then(|i| i.parse::<usize>().ok()) {
-        Some(i) => solvecraft_engine::sample::samples().get(i).is_some_and(|smp| {
+        Some(i) => solidcraft_engine::sample::samples().get(i).is_some_and(|smp| {
             let ok = s.run_script(&(smp.script)()).is_ok();
             s.doc_mut().name = smp.name.to_string();
             s.undo.clear();
@@ -315,7 +315,7 @@ pub fn open_sample(app: &mut SolveApp, i: usize) {
 }
 
 pub fn open_recent(app: &mut SolveApp, path: &str) {
-    if !solvecraft_engine::io::vfs::exists(path) {
+    if !solidcraft_engine::io::vfs::exists(path) {
         app.set_status(format!("{path} is no longer there"), true);
         return;
     }
@@ -327,7 +327,7 @@ pub fn open_recent(app: &mut SolveApp, path: &str) {
 pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
     poll(app, ui.ctx());
     let t = Tokens::get();
-    let samples = solvecraft_engine::sample::samples();
+    let samples = solidcraft_engine::sample::samples();
     // In the browser a picture blocks the page while it builds (no threads) and a kernel
     // failure there can't be caught: samples are built when they are opened.
     if !cfg!(target_arch = "wasm32") {
@@ -336,7 +336,7 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
         }
     }
     let recent = app.home.recent.clone();
-    for p in recent.iter().filter(|p| solvecraft_engine::io::vfs::exists(p)) {
+    for p in recent.iter().filter(|p| solidcraft_engine::io::vfs::exists(p)) {
         want(&mut app.home, p);
     }
     let mut action: Option<Box<dyn FnOnce(&mut SolveApp)>> = None;
@@ -393,8 +393,8 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
             ui.add_space(24.0);
             ui.horizontal_wrapped(|ui| {
                 ui.hyperlink_to("Documentation", crate::help::DOCS_URL);
-                ui.hyperlink_to("Report an Issue", "https://github.com/bherbruck/solvecraft/issues/new");
-                ui.hyperlink_to("What's new", "https://github.com/bherbruck/solvecraft/releases/latest");
+                ui.hyperlink_to("Report an Issue", "https://github.com/bherbruck/solidcraft/issues/new");
+                ui.hyperlink_to("What's new", "https://github.com/bherbruck/solidcraft/releases/latest");
                 if ui.link("Keyboard Shortcuts").clicked() {
                     app.keymap.open = true;
                     app.keymap.read_only = true;
@@ -412,7 +412,7 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
                     let Some(p) = recent.get(i) else { return };
                     let path = std::path::Path::new(p);
                     let name = path.file_stem().map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|| p.clone());
-                    let missing = !solvecraft_engine::io::vfs::exists(p);
+                    let missing = !solidcraft_engine::io::vfs::exists(p);
                     let mut sub = if missing {
                         "missing".to_string()
                     } else if p.starts_with("/opfs/") {
@@ -555,7 +555,7 @@ mod tests {
     #[test]
     fn cached_recent_uses_a_separate_png_without_reading_or_changing_design_json() {
         let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let path = std::env::temp_dir().join(format!("solvecraft-thumb-{}-{nonce}.solvecraft", std::process::id()));
+        let path = std::env::temp_dir().join(format!("solidcraft-thumb-{}-{nonce}.solidcraft", std::process::id()));
         // Deliberately invalid design: a cached recent must not parse/evaluate it.
         let bytes = b"{\"thumbnail_test\":true}";
         std::fs::write(&path, bytes).unwrap();
@@ -579,12 +579,12 @@ mod tests {
     fn recent_list_is_newest_first_and_bounded() {
         let mut h = HomeState::default();
         for i in 0..20 {
-            h.add_recent(&format!("/d/{i}.solvecraft"));
+            h.add_recent(&format!("/d/{i}.solidcraft"));
         }
-        h.add_recent("/d/5.solvecraft");
+        h.add_recent("/d/5.solidcraft");
         assert_eq!(h.recent.len(), MAX_RECENT);
-        assert_eq!(h.recent.first().map(String::as_str), Some("/d/5.solvecraft"));
-        assert_eq!(h.recent.iter().filter(|p| p.as_str() == "/d/5.solvecraft").count(), 1);
+        assert_eq!(h.recent.first().map(String::as_str), Some("/d/5.solidcraft"));
+        assert_eq!(h.recent.iter().filter(|p| p.as_str() == "/d/5.solidcraft").count(), 1);
     }
 
     /// Samples build in the background and make a picture; picking one opens its design.
@@ -604,5 +604,29 @@ mod tests {
         assert!(!app.home.open);
         assert_eq!(app.session.doc.name, "Sample Plate");
         assert!(!app.session.is_dirty());
+    }
+
+    /// The gear, Ctrl+, and Home's own links open Preferences over Home, not after leaving it.
+    #[test]
+    fn preferences_and_shortcuts_open_over_home() {
+        let mut h = crate::scenario::Harness::new();
+        let rev = h.app.session.revision;
+        h.app.home.show(rev);
+        h.frames(2);
+        assert!(h.app.home.open);
+        let gear = crate::scenario::handle_at("titlebar:preferences").unwrap();
+        h.call("ui.click", serde_json::json!({"x": gear.x, "y": gear.y}));
+        assert!(h.app.prefs_window.open && h.app.home.open);
+        let shown = |h: &crate::scenario::Harness| {
+            h.ctx.memory(|m| m.areas().visible_last_frame(&egui::LayerId::new(egui::Order::Middle, egui::Id::new("sc_prefs"))))
+        };
+        assert!(shown(&h), "the Preferences window must be drawn on Home");
+        h.call("ui.prefs", serde_json::json!({"button": "cancel"}));
+        assert!(!shown(&h));
+
+        // Home › Keyboard Shortcuts opens the same window at its page.
+        h.app.keymap.open = true;
+        h.frames(2);
+        assert!(shown(&h) && h.app.prefs_window.section == crate::prefs::PAGE_SHORTCUTS && h.app.home.open);
     }
 }

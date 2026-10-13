@@ -3,10 +3,10 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use solvecraft_engine::doc::ModelState;
-use solvecraft_engine::geom::{Loop2, Plane, Region2, Vec2, Vec3};
-use solvecraft_engine::render::{PixelCurveView, SampledPath, SamplingBudget, SamplingQuality, sample_segment, sample_segment_unclipped};
-use solvecraft_engine::sketch::Sketch;
+use solidcraft_engine::doc::ModelState;
+use solidcraft_engine::geom::{Loop2, Plane, Region2, Vec2, Vec3};
+use solidcraft_engine::render::{PixelCurveView, SampledPath, SamplingBudget, SamplingQuality, sample_segment, sample_segment_unclipped};
+use solidcraft_engine::sketch::Sketch;
 
 use crate::SolveApp;
 use crate::viewport::Proj;
@@ -114,23 +114,26 @@ pub fn region_triangles(region: &Region2, plane: &Plane, proj: &Proj, ppp: f32) 
     display_region(region, plane, proj, ppp).map_or_else(Vec::new, |display| fill_triangles(&display, &mut 65_536))
 }
 
-/// Bound the slab triangulator's allocation before calling it. Every slab can emit
-/// at most one triangle per edge; complex fills are omitted rather than cut into holes.
+/// Bound the slab triangulator's allocation before calling it. Every slab emits one
+/// triangle per edge crossing it; complex fills are omitted rather than cut into holes.
 pub fn fill_triangles(display: &Region2, budget: &mut usize) -> Vec<[Vec2; 3]> {
-    let mut heights = Vec::new();
-    let mut edges = 0usize;
+    let mut spans = Vec::new();
     for loop_ in std::iter::once(&display.outer).chain(&display.holes) {
         for segment in &loop_.segs {
             let (a, b) = (segment.start(), segment.end());
             if (a.y - b.y).abs() > 1e-12 {
-                edges += 1;
-                heights.extend([a.y, b.y]);
+                spans.push((a.y.min(b.y), a.y.max(b.y)));
             }
         }
     }
+    let mut heights: Vec<f64> = spans.iter().flat_map(|&(lo, hi)| [lo, hi]).collect();
     heights.sort_by(f64::total_cmp);
     heights.dedup_by(|a, b| (*a - *b).abs() < 1e-12);
-    if edges.saturating_mul(heights.len().saturating_sub(1)) > *budget {
+    // An edge crosses the slabs between its end heights. Counting every edge in every slab
+    // overestimated a zoomed-in ring a hundredfold and dropped its hover fill (#164).
+    let slab = |y: f64| heights.partition_point(|h| *h < y - 1e-12);
+    let crossings = spans.iter().fold(0usize, |n, &(lo, hi)| n.saturating_add(slab(hi).saturating_sub(slab(lo))));
+    if crossings > *budget {
         return Vec::new();
     }
     let triangles = display.triangulate(1.0);

@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use solvecraft_geom::{Mesh, Vec3};
+use solidcraft_geom::{Mesh, Vec3};
 
 use crate::body::Body;
 use crate::{KernelError, Result};
@@ -109,6 +109,7 @@ pub fn mesh_body(positions: &[Vec3], triangles: &[[u32; 3]]) -> Result<Body> {
         paint: None,
         splits: None,
         face_sources: None,
+        history: None,
         regularization_protected: false,
     })
 }
@@ -202,6 +203,7 @@ impl Body {
             paint: self.paint.clone(),
             splits: self.splits.clone(),
             face_sources: None,
+            history: None,
             regularization_protected: self.regularization_protected,
         })
     }

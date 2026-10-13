@@ -1,0 +1,29 @@
+# cargo-nextest settings for CI (`cargo xtask test` does not use nextest).
+# PR runs build the tests once and run them in 4 shards (.github/workflows/ci.yml).
+
+[profile.ci]
+# Heavy tests (one to four minutes each on a CI runner) that pull requests skip. They run on
+# every push to main and nightly (`--ignore-default-filter`), and in `cargo xtask test`.
+# Keep this list in sync with docs/book/src/dev/testing.md and CONTRIBUTING.md.
+default-filter = """
+not (
+    (package(solidcraft-engine) & (
+        test(=tests::hostile_params_never_panic)
+        | test(/^tests::robustness::/)
+        | test(=pattern_suppress_tests::enclosure_arc_extinction_keeps_a_real_sharp_inner_lip_after_resize_and_reopen)
+        | test(=pattern_suppress_tests::enclosure_datums_follow_wall_height_and_board_depth_with_material_proofs)
+        | test(=cmd::plastic::tests::enclosure_snap_fit_follows_resized_front_wall)
+    ))
+    | (package(solidcraft-kernel) & test(=tests::boolean_identity_on_tangent_primitives))
+    | (package(solidcraft-ui-egui) & binary(scenarios) & test(=acceptance_sensor_enclosure))
+)
+"""
+fail-fast = false
+# Every test's time in the log, so the slow ones are easy to find.
+status-level = "pass"
+final-status-level = "slow"
+failure-output = "immediate-final"
+slow-timeout = { period = "60s" }
+
+[profile.ci.junit]
+path = "junit.xml"

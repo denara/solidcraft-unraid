@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-"""Demo v2/v3: build an electronics enclosure in a running SolveCraft the way a person would,
+"""Demo v2/v3: build an electronics enclosure in a running SolidCraft the way a person would,
 with the parametric steps sent over MCP.
 
---story v3 (default): one standoff placed from the parameters and patterned 2 x 2 in the
+--story pi (default, the 0.6 README demo): a case for a Raspberry Pi 4, from a sketch dimensioned
+with the board's parameters to standoffs patterned on its mounting holes, port cut-outs, vent
+slots, a colour and a height change in the Parameters dialog. Camera moves orbit about the
+model under the pointer.
+--story v3: one standoff placed from the parameters and patterned 2 x 2 in the
 Rectangular Pattern dialog, then width and wall changed in the Parameters dialog.
 --story v2: four standoffs from one sketch, then the width changed over MCP.
 
-    solvecraft --control 7878 &
-    python3 examples/demo/enclosure_ui_mcp.py --port 7878 --cli solvecraft-cli [--story v2|v3]
+    solidcraft --control 7878 &
+    python3 examples/demo/enclosure_ui_mcp.py --port 7878 --cli solidcraft-cli [--story v2|v3]
 
 Modelling steps go through the app's UI over its control channel: the pointer glides to a
 toolbar button and clicks it (the real dialog opens), glides to the face or point it picks and
@@ -15,7 +19,7 @@ clicks, and values are typed into the dialog, as by hand. The port and boss sket
 directly to the enclosure's side face and inner floor, as in the original demo.
 The camera follows like a user's would (Look At on a new sketch, back out to a 3/4 view on
 Finish Sketch, a little orbit between features). The parameters and the dimensions that use them
-are MCP `execute` calls through `solvecraft-cli mcp --connect` (enclosure_mcp.py's client).
+are MCP `execute` calls through `solidcraft-cli mcp --connect` (enclosure_mcp.py's client).
 
 --log writes one JSON line per caption and per pointer event, which record.sh turns into burnt-in
 captions and a drawn cursor (the app gets synthetic pointer events, so the screen's own pointer
@@ -147,10 +151,14 @@ class Demo:
             self.ui("ui.scroll", {"x": vp[0] + vp[2] / 2, "y": vp[1] + vp[3] / 2, "delta": -250})
             self.settle_camera()
 
-    def orbit(self, dx, dy=0, steps=40):
-        """A right-button drag in the viewport, as a user orbits."""
+    def orbit(self, dx, dy=0, steps=40, around=None):
+        """A right-button drag in the viewport, as a user orbits. With `around` (a world point)
+        the drag starts over it: with the Orbit around cursor preference, the model turns about
+        that point and stays in frame."""
         vp = self.ui("ui.inspect").get("viewport") or [250, 126, 1350, 800]
         cx, cy = vp[0] + vp[2] * 0.62, vp[1] + vp[3] * 0.55
+        if around is not None:
+            cx, cy = self.ui("ui.worldToScreen", {"points": [around]})[0]
         self.glide((cx, cy), 0.25)
         self.mark(drag_start=[cx, cy])
         self.ui("ui.drag", {"x0": cx, "y0": cy, "x1": cx + dx, "y1": cy + dy, "button": "right", "steps": steps})
@@ -395,12 +403,241 @@ def run_v3(d):
     d.wait(1.5)
 
 
+def sketch_dimension(d, line_at, place_at, value):
+    """Sketch Dimension (D) in the real tool: pick a line, place the value, type an expression."""
+    d.key("D")
+    d.click(d.at(sketch=line_at), settle=0.15)
+    d.click(d.at(sketch=place_at), dur=0.3, settle=0.3)
+    d.ui("ui.key", {"key": "A", "cmd": True})
+    d.type(value)
+
+
+def swatch(d, row, col):
+    """A library swatch of the open Appearance dialog (laid out under its Library row)."""
+    lib = d.at(handle="dialog:Library")
+    return (lib[0] - 47 + 34 * col, lib[1] + 62 + 34 * row)
+
+
+def sketch_curves(d):
+    """The active sketch's own curves (not projected, not construction)."""
+    sk = json.loads(d.mcp.tool("execute", {"command": "sketch.inspect", "params": {}}))
+    sk = sk.get("result", sk)
+    return [c for c in sk["curves"] if not c.get("fixed") and not c.get("construction")]
+
+
+def rectangle(d, centre, half):
+    """A centre rectangle drawn on the active sketch's face with world-space picks (`half` is
+    the corner's offset from `centre`); returns its four sides' ids."""
+    before = {c["id"] for c in sketch_curves(d)}
+    d.tool("sketch.rectangle.center")
+    d.click(d.at(world=centre), settle=0.15)
+    d.click(d.at(world=[c + h for c, h in zip(centre, half)]), dur=0.35, settle=0.2)
+    d.key("Escape")
+    sides = [c["id"] for c in sketch_curves(d) if c["id"] not in before and c["type"] == "line"]
+    if len(sides) != 4:
+        raise RuntimeError(f"the rectangle at {centre} did not draw four sides: {sides}")
+    return sides
+
+
+def extrude(d, loops, distance, operation="cut"):
+    """Extrude the last sketch's profiles bounded by these curve loops. Over MCP, by curves:
+    the profiles are found again on every rebuild, whatever a parameter does to the face."""
+    d.execute("solid.extrude", {"profiles": [{"curves": loop} for loop in loops], "distance": distance, "operation": operation})
+    d.wait(0.5)
+
+
+def pattern(d, feature, rows):
+    """Rectangular Pattern of one feature in the real dialog. `rows` is [(edge world point,
+    quantity, spacing), …] for Direction and Direction 2."""
+    d.tool("solid.pattern.rectangular", panel="panel:SOLID:CREATE")
+    d.click(d.at(handle="dialog:Object Type"), settle=0.25)
+    d.click(d.at(handle="dialog:Object Type:Features"), settle=0.25)
+    d.click(d.at(handle=feature), settle=0.25)
+    for n, (edge, quantity, spacing) in enumerate(rows):
+        suffix = "" if n == 0 else " 2"
+        d.click(d.at(handle=f"dialog:Direction{suffix}"), settle=0.15)
+        d.click(d.at(world=edge), settle=0.2)
+        select_all_and_type(d, d.at(handle=f"dialog:Quantity{suffix}"), str(quantity), enter=False)
+        select_all_and_type(d, d.at(handle=f"dialog:Spacing{suffix}"), spacing, enter=False)
+    d.wait(0.5)
+    d.click(d.at(handle="dialog:OK"), settle=0.4)
+
+
+def last_feature(d):
+    return d.ui("ui.handles", {"prefix": "timeline:"})[-1]["name"]
+
+
+# Raspberry Pi 4 / 5 board: 85 x 56 mm, M2.5 holes on a 58 x 49 mm rectangle, 3.5 mm in from
+# one short edge and both long edges. The case is centred on the board with 3 mm clearance.
+HOLE = (-(85 / 2 - 3.5), -(56 / 2 - 3.5))
+
+
+def run_pi(d):
+    """pi (the 0.6 README demo): a case for a Raspberry Pi 4. A sketch dimensioned from the
+    board's parameters, extrude, fillets and shell, one standoff with its M2.5 hole patterned on
+    the board's 58 x 49 mm hole rectangle, port cut-outs on a side and an end, a row of vent
+    slots, a colour, then the height changed in the Parameters dialog."""
+    d.caption("A case for a Raspberry Pi 4")
+    for name, expr in [("board_w", "85 mm"), ("board_d", "56 mm"), ("wall", "2 mm"), ("height", "24 mm")]:
+        d.execute("parameters.change", {"name": name, "expression": expr})
+    d.wait(0.3)
+    W, D, H = 47.5, 33.0, 24.0
+
+    d.caption("Sketch and dimension")
+    d.tool("sketch.create")
+    d.click(d.at(plane="XY"), settle=0.8)
+    d.settle_camera()
+    d.tool("sketch.rectangle.center")
+    d.click(d.at(sketch=[0, 0]), settle=0.15)
+    d.click(d.at(sketch=[W, D]), dur=0.45, settle=0.2)
+    d.key("Escape")
+    sketch_dimension(d, [0, D], [0, D + 8], "board_w + 10 mm")
+    sketch_dimension(d, [-W, 0], [-W - 8, 0], "board_d + 10 mm")
+    d.key("Escape")
+    d.wait(0.6)
+
+    d.caption("Extrude to height")
+    d.tool("sketch.finish")
+    d.ui("ui.set", {"showOrigin": False})
+    d.view("home", 0.5)
+    # Home frames the flat sketch: step back to leave room for the walls.
+    vp = d.ui("ui.inspect")["viewport"]
+    d.ui("ui.scroll", {"x": vp[0] + vp[2] / 2, "y": vp[1] + vp[3] / 2, "delta": -250})
+    d.settle_camera()
+    d.tool("solid.extrude")
+    d.wait(0.2)
+    d.type("height")
+
+    d.caption("Round the corners")
+    d.tool("solid.fillet")
+    for p in ([W, -D, H / 2], [-W, -D, H / 2]):
+        d.click(d.at(world=p), settle=0.15)
+    d.orbit(-260, 20, around=[0, 0, H / 2])
+    for p in ([W, D, H / 2], [-W, D, H / 2]):
+        d.click(d.at(world=p), settle=0.2)
+    d.type("5")
+    d.view("home", 0.4)
+
+    d.caption("Shell it, open on top")
+    d.tool("solid.shell", panel="panel:SOLID:MODIFY")
+    d.click(d.at(world=[0, 0, H]), settle=0.3)
+    d.type("wall")
+
+    d.caption("A standoff with an M2.5 hole")
+    hx, hy = HOLE
+    d.tool("sketch.create")
+    d.click(d.at(world=[-5, 18, 2]), settle=0.9)
+    d.settle_camera()
+    # Zoom in on the hole (zoom goes to the pointer) so the 2.5 mm circle is drawn at a size.
+    at = d.at(world=[hx, hy, 2])
+    d.glide(at, 0.3)
+    for _ in range(3):
+        d.ui("ui.scroll", {"x": at[0], "y": at[1], "delta": 250})
+        d.settle_camera()
+    d.tool("sketch.circle.center")
+    d.click(d.at(world=[hx, hy, 2]), dur=0.3, settle=0.1)
+    d.click(d.at(world=[hx + 3, hy, 2]), dur=0.2, settle=0.15)
+    d.key("Escape")
+    d.tool("sketch.circle.center")
+    d.click(d.at(world=[hx, hy, 2]), dur=0.2, settle=0.1)
+    d.click(d.at(world=[hx + 1.25, hy, 2]), dur=0.2, settle=0.15)
+    d.key("Escape")
+    circles = sorted((c for c in sketch_curves(d) if c["type"] == "circle"), key=lambda c: -c.get("radius", 0))
+    if len(circles) != 2:
+        raise RuntimeError(f"expected two circles in the standoff sketch: {circles}")
+    outer, inner = circles[0]["id"], circles[1]["id"]
+    try:
+        d.execute("sketch.constraint.coincident", {"a": f"{inner}.center", "b": f"{outer}.center"})
+    except RuntimeError:
+        pass  # the second click already snapped to the first centre
+    d.execute("sketch.dimension", {"entities": ["origin", f"{outer}.center"], "type": "horizontal", "value": "board_w / 2 - 3.5 mm"})
+    d.execute("sketch.dimension", {"entities": ["origin", f"{outer}.center"], "type": "vertical", "value": "board_d / 2 - 3.5 mm"})
+    d.execute("sketch.dimension", {"entities": [outer], "type": "diameter", "value": "6 mm"})
+    d.execute("sketch.dimension", {"entities": [inner], "type": "diameter", "value": "2.5 mm"})
+    d.wait(0.5)
+    d.tool("sketch.finish")
+    d.view("home", 0.4)
+    extrude(d, [[outer]], "4 mm", "join")
+    standoff = last_feature(d)
+
+    d.caption("Pattern it on 58 × 49 mm")
+    # Directions from the bottom edges, which a height change leaves where they are.
+    pattern(d, standoff, [([0, -D, 0], 2, "58 mm"), ([W, 0, 0], 2, "49 mm")])
+    d.orbit(-60, 35, around=[0, 0, 4])
+
+    d.caption("Cut the side ports")
+    d.view("home", 0.4)
+    d.tool("sketch.create")
+    d.click(d.at(world=[10, -D, 16]), settle=0.9)
+    d.settle_camera()
+    ports = [(-31.3, 5, 2), (-16.5, 4, 2), (-3, 4, 2)]  # USB-C, 2x micro-HDMI: centre x, half w, half h
+    loops = [rectangle(d, [x, -D, 9.5], [hw, 0, hh]) for x, hw, hh in ports]
+    d.tool("sketch.finish")
+    d.view("home", 0.4)
+    extrude(d, loops, "-wall")
+
+    d.caption("Open the end for USB and Ethernet")
+    d.tool("sketch.create")
+    d.click(d.at(world=[W, 0, 4]), settle=0.9)
+    d.settle_camera()
+    loop = rectangle(d, [W, 0, 15], [0, 25, 7])
+    d.tool("sketch.finish")
+    d.view("home", 0.4)
+    extrude(d, [loop], "-wall")
+
+    d.caption("Vent slots in the floor")
+    d.tool("sketch.create")
+    d.click(d.at(world=[-5, 18, 2]), settle=0.9)
+    d.settle_camera()
+    loop = rectangle(d, [-8, -14, 2], [14, 1.5, 0])
+    d.tool("sketch.finish")
+    d.view("home", 0.4)
+    extrude(d, [loop], "-wall")
+    pattern(d, last_feature(d), [([W, 0, 0], 5, "7 mm")])
+
+    d.caption("Give it a colour")
+    d.key("A")
+    d.wait(0.3)
+    d.drag(swatch(d, 1, 5), d.at(world=[0, -D, 18]), steps=30)
+    # The dialog adds a note under the swatches: let it lay out before finding OK.
+    d.glide((1500, 700), 0.3)
+    d.settle_camera()
+    d.click(d.at(handle="dialog:OK"), settle=0.4)
+    if "Appearance" in (d.ui("ui.inspect").get("dialog") or ""):
+        raise RuntimeError("the Appearance dialog did not close")
+
+    d.caption("Change a parameter: height 24 → 32 mm")
+    d.tool("parameters.change", panel="panel:SOLID:CONFIGURE")
+    d.wait(0.3)
+    vp = d.ui("ui.inspect").get("viewport") or [250, 126, 1350, 800]
+    d.drag((vp[0] + vp[2] * 0.55, vp[1] + vp[3] * 0.7), (vp[0] + vp[2] * 0.55 + 260, vp[1] + vp[3] * 0.7 - 60), button="middle", steps=25)
+    select_all_and_type(d, d.at(handle="param:height"), "32 mm")
+    d.wait(1.5)
+    d.click(d.at(handle="params:close"), settle=0.4)
+
+    d.caption("")
+    d.view("home", 0.5)
+    vp = d.ui("ui.inspect")["viewport"]
+    d.ui("ui.scroll", {"x": vp[0] + vp[2] / 2, "y": vp[1] + vp[3] / 2, "delta": 120})
+    d.settle_camera()
+    # Swing round to the far side and back to the three-quarter view of the ports.
+    # Off the model after each drag, so no face is left highlighted under the pointer.
+    away = (vp[0] + vp[2] - 120, vp[1] + vp[3] - 90)
+    d.orbit(260, -10, steps=110, around=[0, 0, 10])
+    d.glide(away, 0.3)
+    d.settle_camera()
+    d.orbit(-260, 10, steps=110, around=[0, 0, 10])
+    d.glide(away, 0.3)
+    d.settle_camera()
+    d.wait(1.0)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--port", type=int, default=7878, help="the app's --control port")
-    ap.add_argument("--cli", default="solvecraft-cli", help="path to solvecraft-cli")
+    ap.add_argument("--cli", default="solidcraft-cli", help="path to solidcraft-cli")
     ap.add_argument("--log", help="write a JSON line per caption and pointer event")
-    ap.add_argument("--story", choices=["v2", "v3"], default="v3", help="v2: standoffs from one sketch, width over MCP; v3: one standoff patterned, Parameters dialog")
+    ap.add_argument("--story", choices=["v2", "v3", "pi"], default="pi", help="v2: standoffs from one sketch, width over MCP; v3: one standoff patterned, Parameters dialog; pi: the 0.6 README demo, a Raspberry Pi 4 case")
     ap.add_argument("--until", type=int, default=10**6, help="stop before step N (trying the script out)")
     ap.add_argument("--speed", type=float, default=0.55, help="scale the pauses (2 = twice as long)")
     ap.add_argument("--save", help="save the completed healthy enclosure and measured proof")
@@ -412,7 +649,8 @@ def main():
     mcp.send("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "enclosure-demo-v2", "version": "2"}})
     mcp.send("notifications/initialized", notify=True)
     d = Demo(a.port, mcp, open(a.log, "w") if a.log else None, a.speed, a.minimum_caption)
-    d.ui("ui.prefs", {"language": "en", "theme": "dark", "ui_scale": 1, "nav": "fusion", "button": "apply"})
+    # The pi story's camera moves orbit about the point under the pointer (Preferences > Navigation).
+    d.ui("ui.prefs", {"language": "en", "theme": "dark", "ui_scale": 1, "nav": "fusion", "orbit_cursor": a.story == "pi", "button": "apply"})
     d.ui("ui.resize", {"width": 1920, "height": 1080})
     d.ui("ui.home", {"open": False})
     d.ui("ui.documents", {"action": "new"})
@@ -422,10 +660,26 @@ def main():
     d.stop = a.until - 1
     t0 = time.time()
     try:
-        run_v3(d) if a.story == "v3" else run_v2(d)
+        {"v2": run_v2, "v3": run_v3, "pi": run_pi}[a.story](d)
     except StopIteration:
         pass
-    if a.save and a.until == 10**6:
+    if a.story == "pi" and a.until == 10**6:
+        # Check the finished case without changing what is on screen.
+        d.settle_camera()
+        design = d.ui("document.inspect", {"measure": True})
+        bodies = design.get("bodies", [])
+        if len(bodies) != 1 or any(f.get("error") or f.get("warning") for f in design.get("timeline", [])):
+            raise RuntimeError(f"the finished case is unhealthy: {design}")
+        box = bodies[0].get("bbox", {})
+        want = {"min": [-47.5, -33, 0], "max": [47.5, 33, 32]}
+        if any(abs(v - w) > 1e-5 for side in want for v, w in zip(box.get(side, []), want[side])):
+            raise RuntimeError(f"the case did not rebuild to 95 x 66 x 32 mm: {box}")
+        if a.save:
+            # The finished case, as built through the UI (tests/action_matrix uses it).
+            d.execute("file.save_as", {"path": a.save, "format": "json"})
+            with open(a.save + ".measure.json", "w") as proof:
+                json.dump(design, proof, indent=2)
+    elif a.save and a.until == 10**6:
         # Keep this health/save/reopen proof in the raw take, outside public playback.
         d.mark(private_start=True)
         d.settle_camera()
@@ -440,7 +694,7 @@ def main():
         for name, expected in [("width", 100), ("wall", 3 if a.story == "v3" else 2)]:
             if values.get(name) != expected:
                 raise RuntimeError(f"the final {name} parameter is not {expected}: {design}")
-        d.execute("file.save_as", {"path": a.save})
+        d.execute("file.save_as", {"path": a.save, "format": "json"})
         saved = json.load(open(a.save))
         fillets = [f for f in saved["features"] if f.get("type") == "fillet"]
         if len(fillets) != 1 or len(fillets[0].get("edges", [])) != 4:

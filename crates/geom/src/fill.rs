@@ -1,0 +1,742 @@
+//! Filling a closed loop of curves with one surface: a non-rational bicubic B-spline height
+//! field over the loop's best-fit plane, fitted to the loop by least squares with a smoothness
+//! term. A loop that cannot be seen as the boundary of a height field over that plane (it
+//! crosses itself, folds back or runs along the plane's normal when seen along that normal) is
+//! refused, never filled with wrong geometry.
+//!
+//! References: Piegl & Tiller, *The NURBS Book* (2nd ed.) — §9.4.1 and §9.4.3 (least squares
+//! approximation: minimise the sum of squared residuals, eq. 9.62, through the normal
+//! equations, eq. 9.65), §3.4 (tensor product B-spline surfaces), §3.3 (derivative of a
+//! B-spline curve, eq. 3.4: control values at the knot averages reproduce a linear function),
+//! A2.1 (span search).
+
+use crate::Vec3;
+use crate::bspline::{HPoint, NurbsSurface, Side, SplineError, SplineResult, find_span, invalid, local_basis_array};
+
+/// Most loop points a fill takes.
+pub const MAX_LOOP_POINTS: usize = 8192;
+/// Most spans of the height field in each direction.
+pub const MAX_FILL_SPANS: usize = 32;
+/// Fewest spans of the height field in each direction (the first fit tried).
+const MIN_FILL_SPANS: usize = 4;
+/// The smoothness energy's terms: `(order in u, order in v, weight)` of `∫∫ (∂ h)²`.
+const ENERGY: [(usize, usize, f64); 3] = [(2, 0, 1.0), (1, 1, 2.0), (0, 2, 1.0)];
+/// Four-point Gauss–Legendre nodes and weights on `[−1, 1]` (exact to degree 7).
+const GAUSS4: [(f64, f64); 4] = [
+    (-0.861_136_311_594_052_6, 0.347_854_845_137_453_8),
+    (-0.339_981_043_584_856_3, 0.652_145_154_862_546_2),
+    (0.339_981_043_584_856_3, 0.652_145_154_862_546_2),
+    (0.861_136_311_594_052_6, 0.347_854_845_137_453_8),
+];
+/// The smoothness term's weight per fitted point (see [`fill_loop`]).
+const SMOOTHNESS: f64 = 1e-7;
+/// A loop step shorter than this fraction of its length in space, seen along the normal, runs
+/// along the normal (steeper than about 87° from the plane).
+const MIN_STEP_SLOPE: f64 = 0.05;
+/// Consecutive steps closer to reversed than this cosine fold the loop back on itself.
+const FOLD_COS: f64 = -0.999;
+
+/// A loop's fill: the surface (`S(u, v) = o + u·x + v·y + h(u, v)·n` over the plane with normal
+/// `n`, so `∂S/∂u × ∂S/∂v` points along `n`), the plane's frame, whether the loop runs counter-
+/// clockwise about it, the largest distance from a sampled loop point to the surface along `n`,
+/// and how many points of the loop were evaluated.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LoopFill {
+    pub surface: NurbsSurface,
+    /// The plane's origin and its axes `x`, `y` (the surface's parameter directions).
+    pub origin: Vec3,
+    pub axes: [Vec3; 2],
+    pub normal: Vec3,
+    pub counter_clockwise: bool,
+    pub deviation: f64,
+    pub evaluations: usize,
+}
+
+/// Fill the closed loop of `sides` curves (side `k` given by `point(k, t)`, `t` from 0 at its
+/// start to 1 at its end, which is where side `k+1` starts) with one surface passing within
+/// `tol` of the loop.
+///
+/// - Sampling: each side at `t = i/s` (fitted) and halfway between (checked), `s` from 16
+///   doubling while the fit needs denser points, at most [`MAX_LOOP_POINTS`] points in all. The
+///   sample parameters are the same run either way, so the fill does not depend on where the
+///   loop starts or which way it runs.
+/// - The plane: through the fitted points' centroid, normal by Newell's method, turned so that
+///   its largest component is positive; its first axis points to the fitted point farthest from
+///   the centroid in the plane (the highest of points as far). So the plane and its axes, and with them the grid and the fill,
+///   move with the loop (a reflected axis gives the same grid).
+/// - Refused ("not supported yet"): a loop that, seen along the normal, has a step much shorter
+///   than in space (it runs along the normal), turns straight back, or crosses or touches
+///   itself; such a loop does not bound a height field over the plane.
+/// - The height field: a bicubic B-spline with uniform knots over the projected loop's box
+///   (widened by 1%); its control points sit at the knot averages in the plane, so its surface
+///   parameters are plane coordinates, and their heights are the unknowns. The heights minimise
+///   `Σ (h(uₖ, vₖ) − hₖ)² + λ·A · ∫∫ h_uu² + 2·h_uv² + h_vv²` over the fitted points — least
+///   squares (eq. 9.62, normal equations eq. 9.65) plus the thin-plate bending energy over the
+///   box, `A` the area of one grid cell (so each cell's energy counts like a squared second
+///   difference of heights, and the balance is the same at any size). The energy decides the
+///   inside, where there are no points; it is zero only for planes, so a plane through the
+///   loop is reproduced exactly, and any other rim gets the least-bending surface on it, which
+///   is free to turn at the rim (it is not the surface that made the rim). It does not depend
+///   on the grid's directions. `λ = 10⁻⁷ ·` (fitted points) `/` (control points): just enough
+///   to fix the inside, small enough not to pull the surface off the loop.
+/// - Grids of 4, 8, 16, 32 spans across the box's longer side are tried, with as many across
+///   the shorter side as keep the cells about square; a grid whose cells are under twice the
+///   fitted points' largest step in a direction (cells between points would be left to the
+///   energy alone) waits for denser sampling. The first grid within `tol` of every sampled
+///   point (measured along the normal, which bounds the distance) is the fill; otherwise the
+///   sampling doubles, and when that runs out, "not supported yet" with the closest deviation
+///   reached.
+pub fn fill_loop(sides: usize, point: &mut dyn FnMut(usize, f64) -> Option<Vec3>, tol: f64) -> SplineResult<LoopFill> {
+    if sides == 0 || sides.saturating_mul(16) > MAX_LOOP_POINTS / 2 {
+        return Err(SplineError::TooLarge(format!("a loop of {sides} sides (at most {})", MAX_LOOP_POINTS / 32)));
+    }
+    if !(tol.is_finite() && tol > 0.0) {
+        return invalid("the fill tolerance must be positive");
+    }
+    let mut evaluations = 0usize;
+    let mut eval = |k: usize, t: f64| -> SplineResult<Vec3> {
+        evaluations += 1;
+        point(k, t).filter(|p| p.is_finite()).ok_or_else(|| SplineError::Invalid(format!("side {k} has no finite point at {t}")))
+    };
+    let mut per = 16usize;
+    // Fitted points: side by side, per side at i/per (i < per).
+    let mut fit: Vec<Vec3> = Vec::with_capacity(sides * per);
+    for k in 0..sides {
+        for i in 0..per {
+            fit.push(eval(k, i as f64 / per as f64)?);
+        }
+    }
+    let mut deviation = f64::INFINITY;
+    loop {
+        let mut check = Vec::with_capacity(fit.len());
+        for k in 0..sides {
+            for i in 0..per {
+                check.push(eval(k, (i as f64 + 0.5) / per as f64)?);
+            }
+        }
+        // The loop in order: fitted and checked points alternating.
+        let all: Vec<Vec3> = fit.iter().zip(&check).flat_map(|(a, b)| [*a, *b]).collect();
+        match fit_once(&fit, &all, tol)? {
+            Fit::Done(mut fill) => {
+                fill.evaluations = evaluations;
+                return Ok(*fill);
+            }
+            Fit::Denser(dev) => deviation = deviation.min(dev),
+            Fit::Exhausted(dev) => {
+                deviation = deviation.min(dev);
+                break;
+            }
+        }
+        if all.len() * 2 > MAX_LOOP_POINTS {
+            break;
+        }
+        fit = all;
+        per *= 2;
+    }
+    Err(SplineError::Unsupported(format!("filling a loop this wavy with one surface (it stays {deviation:e} off the loop, tolerance {tol:e})")))
+}
+
+/// What one round of [`fill_loop`] gave.
+enum Fit {
+    Done(Box<LoopFill>),
+    /// Within tolerance only with cells finer than the points allow: sample denser.
+    Denser(f64),
+    /// The finest grid tried is not within tolerance.
+    Exhausted(f64),
+}
+
+/// One round of [`fill_loop`]: fit the points `fit`, check every point of `all` (the loop in
+/// order, `fit` among them).
+fn fit_once(fit: &[Vec3], all: &[Vec3], tol: f64) -> SplineResult<Fit> {
+    let m = fit.len();
+    let o = fit.iter().fold(Vec3::ZERO, |a, p| a + *p) / m as f64;
+    let at = |k: usize| fit.get(k % m).copied().unwrap_or(Vec3::ZERO);
+    let area = (0..m).fold(Vec3::ZERO, |a, k| a + (at(k) - o).cross(at(k + 1) - o));
+    let Some(normal) = area.normalized() else { return invalid("the loop encloses no area") };
+    let largest = [normal.x, normal.y, normal.z].into_iter().fold(0.0f64, |a, c| if c.abs() > a.abs() { c } else { a });
+    let counter_clockwise = largest > 0.0;
+    let n = if counter_clockwise { normal } else { normal * -1.0 };
+    // The first axis towards the fitted point farthest from the centroid in the plane: the axes,
+    // the grid and so the fill move with the loop.
+    let flat = |p: &Vec3| {
+        let d = *p - o;
+        d - n * d.dot(n)
+    };
+    // Points as far as each other (within rounding) are told apart by their height, and points
+    // alike in both by their coordinates: the same point is chosen however the loop is given,
+    // and as the loop moves, but for ties its symmetry makes.
+    let key = |p: &Vec3| (flat(p).len(), (*p - o).dot(n));
+    let reach = fit.iter().map(|p| key(p).0).fold(0.0, f64::max);
+    let near = 1e-9 * reach;
+    let far = fit.iter().fold(None::<&Vec3>, |best, p| match best {
+        None => Some(p),
+        Some(b) => {
+            let ((db, hb), (dp, hp)) = (key(b), key(p));
+            let better = if (dp - db).abs() > near {
+                dp > db
+            } else if (hp - hb).abs() > near {
+                hp > hb
+            } else {
+                (p.x, p.y, p.z) > (b.x, b.y, b.z)
+            };
+            Some(if better { p } else { b })
+        }
+    });
+    let far = far.map(flat).unwrap_or(Vec3::ZERO);
+    let x = far.normalized().ok_or_else(|| SplineError::Invalid("the loop has no extent in its plane".into()))?;
+    let y = n.cross(x);
+    let project = |pts: &[Vec3]| -> (Vec<[f64; 2]>, Vec<f64>) {
+        (pts.iter().map(|p| [(*p - o).dot(x), (*p - o).dot(y)]).collect(), pts.iter().map(|p| (*p - o).dot(n)).collect())
+    };
+    let (uv, h) = project(all);
+    check_projectable(all, &uv)?;
+    let (fuv, fh) = project(fit);
+    let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+    for q in &uv {
+        for d in 0..2 {
+            lo[d] = lo[d].min(q[d]);
+            hi[d] = hi[d].max(q[d]);
+        }
+    }
+    for d in 0..2 {
+        let pad = 0.01 * (hi[d] - lo[d]);
+        lo[d] -= pad;
+        hi[d] += pad;
+    }
+    if !(lo[0] < hi[0] && lo[1] < hi[1] && (hi[0] - lo[0]).is_finite() && (hi[1] - lo[1]).is_finite()) {
+        return invalid("the loop's extent is not finite");
+    }
+    // Spans per direction: `level` across the longer side of the box, as many across the
+    // shorter as keep the cells about square (at least one). A grid finer than the fitted
+    // points can hold in a direction (cells under twice their largest step along it) is tried
+    // only after denser sampling; the coarsest is always tried.
+    let extent = [hi[0] - lo[0], hi[1] - lo[1]];
+    let mut step = [0.0f64; 2];
+    for k in 0..m {
+        let (p, q) = (fuv.get(k).copied().unwrap_or([0.0; 2]), fuv.get((k + 1) % m).copied().unwrap_or([0.0; 2]));
+        for d in 0..2 {
+            step[d] = step[d].max((q[d] - p[d]).abs());
+        }
+    }
+    let longer = extent[0].max(extent[1]);
+    let mut deviation = f64::INFINITY;
+    let mut level = MIN_FILL_SPANS;
+    while level <= MAX_FILL_SPANS {
+        let spans = [0, 1].map(|d| ((extent[d] / longer * level as f64).ceil() as usize).clamp(1, level));
+        let holds = (0..2).all(|d| extent[d] / spans[d] as f64 >= 2.0 * step[d]);
+        if !holds && level > MIN_FILL_SPANS {
+            return Ok(Fit::Denser(deviation));
+        }
+        let grid = Grid::new(spans, lo, hi);
+        let heights = grid.fit(&fuv, &fh)?;
+        let dev = uv.iter().zip(&h).map(|(q, hk)| (grid.height(&heights, *q) - hk).abs()).fold(0.0, f64::max);
+        if !dev.is_finite() {
+            return invalid("the fit is not finite");
+        }
+        deviation = deviation.min(dev);
+        if dev <= tol && holds {
+            let surface = grid.surface(&heights, o, x, y, n)?;
+            let fill = LoopFill { surface, origin: o, axes: [x, y], normal: n, counter_clockwise, deviation: dev, evaluations: 0 };
+            return Ok(Fit::Done(Box::new(fill)));
+        }
+        if !holds {
+            return Ok(Fit::Denser(deviation));
+        }
+        level *= 2;
+    }
+    Ok(Fit::Exhausted(deviation))
+}
+
+/// Refuse a loop that does not bound a height field over its plane (see [`fill_loop`]).
+fn check_projectable(points: &[Vec3], uv: &[[f64; 2]]) -> SplineResult<()> {
+    let m = uv.len();
+    let q = |k: usize| uv.get(k % m).copied().unwrap_or([0.0; 2]);
+    let p = |k: usize| points.get(k % m).copied().unwrap_or(Vec3::ZERO);
+    let step = |k: usize| {
+        let (a, b) = (q(k), q(k + 1));
+        [b[0] - a[0], b[1] - a[1]]
+    };
+    for k in 0..m {
+        let d = step(k);
+        let flat = d[0].hypot(d[1]);
+        let space = p(k).dist(p(k + 1));
+        if space > 0.0 && flat < MIN_STEP_SLOPE * space {
+            return Err(SplineError::Unsupported("filling a loop that runs along its plane's normal".into()));
+        }
+        let e = step(k + 1);
+        let fe = e[0].hypot(e[1]);
+        if flat > 0.0 && fe > 0.0 && (d[0] * e[0] + d[1] * e[1]) < FOLD_COS * flat * fe {
+            return Err(SplineError::Unsupported("filling a loop that folds back on itself".into()));
+        }
+    }
+    // Non-adjacent segments must not meet: a sweep over the segments' u extents.
+    let mut segs: Vec<(f64, f64, usize)> = (0..m)
+        .map(|k| {
+            let (a, b) = (q(k), q(k + 1));
+            (a[0].min(b[0]), a[0].max(b[0]), k)
+        })
+        .collect();
+    segs.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for (i, &(_, hi, k)) in segs.iter().enumerate() {
+        for &(lo2, _, l) in segs.get(i + 1..).into_iter().flatten() {
+            if lo2 > hi {
+                break;
+            }
+            let adjacent = (k + 1) % m == l || (l + 1) % m == k;
+            if !adjacent && segments_meet(q(k), q(k + 1), q(l), q(l + 1)) {
+                return Err(SplineError::Unsupported("filling a loop that crosses itself seen along its plane's normal".into()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether the closed segments `ab` and `cd` share a point.
+fn segments_meet(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> bool {
+    let orient = |p: [f64; 2], q: [f64; 2], r: [f64; 2]| (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
+    let within =
+        |p: [f64; 2], q: [f64; 2], r: [f64; 2]| r[0] >= p[0].min(q[0]) && r[0] <= p[0].max(q[0]) && r[1] >= p[1].min(q[1]) && r[1] <= p[1].max(q[1]);
+    let (d1, d2, d3, d4) = (orient(c, d, a), orient(c, d, b), orient(a, b, c), orient(a, b, d));
+    if ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0)) && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0)) {
+        return true;
+    }
+    (d1 == 0.0 && within(c, d, a)) || (d2 == 0.0 && within(c, d, b)) || (d3 == 0.0 && within(a, b, c)) || (d4 == 0.0 && within(a, b, d))
+}
+
+/// A bicubic height field's grid: uniform clamped knots over `[lo, hi]` in each direction,
+/// `count` control points along each.
+struct Grid {
+    knots: [Vec<f64>; 2],
+    count: [usize; 2],
+}
+
+impl LoopFill {
+    /// The surface's point over (or under) `p`, along the normal.
+    pub fn point_over(&self, p: Vec3) -> SplineResult<Vec3> {
+        let d = p - self.origin;
+        let [x, y] = self.axes;
+        self.surface.eval(d.dot(x), d.dot(y))
+    }
+}
+
+impl Grid {
+    fn new(spans: [usize; 2], lo: [f64; 2], hi: [f64; 2]) -> Grid {
+        let knots = [0, 1].map(|d| {
+            let (a, b, s) = (lo[d], hi[d], spans[d]);
+            let mut k = vec![a; 4];
+            k.extend((1..s).map(|i| a + (b - a) * i as f64 / s as f64));
+            k.extend([b; 4]);
+            k
+        });
+        Grid { knots, count: spans.map(|s| s + 3) }
+    }
+
+    /// The length of one span in direction `d`.
+    fn cell(&self, d: usize) -> f64 {
+        let (Some(k), Some(&c)) = (self.knots.get(d), self.count.get(d)) else { return 0.0 };
+        (k.last().copied().unwrap_or(0.0) - k.first().copied().unwrap_or(0.0)) / (c - 3) as f64
+    }
+
+    /// The knot average `(kᵢ₊₁ + kᵢ₊₂ + kᵢ₊₃)/3` of control point `i` in direction `d`.
+    fn average(&self, d: usize, i: usize) -> f64 {
+        self.knots.get(d).map_or(0.0, |k| (1..=3).map(|t| k.get(i + t).copied().unwrap_or(0.0)).sum::<f64>() / 3.0)
+    }
+
+    /// The four non-zero basis functions' `r`-th derivatives and the first index, at `x` in
+    /// direction `d`.
+    fn basis_derivative(&self, d: usize, x: f64, r: usize) -> Option<(usize, [f64; 4])> {
+        let kn = self.knots.get(d)?;
+        let x = x.clamp(*kn.first()?, *kn.last()?);
+        let span = find_span(kn, 3, *self.count.get(d)?, x)?;
+        let side = if x >= *kn.last()? { Side::Left } else { Side::Right };
+        let first = span.checked_sub(3)?;
+        let mut out = [0.0; 4];
+        for (a, o) in out.iter_mut().enumerate() {
+            *o = kn.get(first + a..first + a + 5).map_or(0.0, |l| local_basis_array(l, x, side, r).get(r).copied().unwrap_or(0.0));
+        }
+        Some((first, out))
+    }
+
+    /// The height at `q` of the net `heights` (i fastest).
+    fn height(&self, heights: &[f64], q: [f64; 2]) -> f64 {
+        let (Some((i0, bu)), Some((j0, bv))) = (self.basis_derivative(0, q[0], 0), self.basis_derivative(1, q[1], 0)) else { return f64::NAN };
+        let mut s = 0.0;
+        for (b, wv) in bv.iter().enumerate() {
+            for (a, wu) in bu.iter().enumerate() {
+                s += wu * wv * heights.get((j0 + b) * self.count[0] + i0 + a).copied().unwrap_or(f64::NAN);
+            }
+        }
+        s
+    }
+
+    /// The control heights fitting the points (see [`fill_loop`]): the normal equations, banded
+    /// (unknowns i fastest, so coupled unknowns are at most `3·count[0] + 3` apart), solved by
+    /// Cholesky factorisation.
+    fn fit(&self, uv: &[[f64; 2]], h: &[f64]) -> SplineResult<Vec<f64>> {
+        let [cu, cv] = self.count;
+        let n = cu * cv;
+        let mut band = Band::new(n, 3 * cu + 3);
+        let mut rhs = vec![0.0; n];
+        let mut fitted = 0usize;
+        for (q, hk) in uv.iter().zip(h) {
+            let (Some((i0, bu)), Some((j0, bv))) = (self.basis_derivative(0, q[0], 0), self.basis_derivative(1, q[1], 0)) else {
+                return invalid("a loop point is off the grid");
+            };
+            let mut terms = [(0usize, 0.0f64); 16];
+            for (t, slot) in terms.iter_mut().enumerate() {
+                let (a, b) = (t % 4, t / 4);
+                *slot = ((j0 + b) * cu + i0 + a, bu.get(a).copied().unwrap_or(0.0) * bv.get(b).copied().unwrap_or(0.0));
+            }
+            for &(r, wr) in &terms {
+                if let Some(slot) = rhs.get_mut(r) {
+                    *slot += wr * hk;
+                }
+                for &(s, ws) in &terms {
+                    band.add(r, s, wr * ws);
+                }
+            }
+            fitted += 1;
+        }
+        // The thin-plate energy ∫∫ h_uu² + 2·h_uv² + h_vv² over the grid's box, times the area of
+        // one cell: per cell that is the squared second difference of the heights, so it weighs
+        // against the data term (squared heights) alike at any size. Each term is a product of
+        // one-direction Gram matrices of the basis functions' derivatives.
+        let lambda = SMOOTHNESS * fitted as f64 / n as f64 * self.cell(0) * self.cell(1);
+        let gram = |d: usize, r: usize| -> Vec<f64> {
+            let c = self.count.get(d).copied().unwrap_or(0);
+            let mut g = vec![0.0; c * c];
+            let Some(k) = self.knots.get(d) else { return g };
+            for w in k.windows(2) {
+                let &[a, b] = w else { continue };
+                if !(b > a) {
+                    continue;
+                }
+                for (gx, gw) in GAUSS4 {
+                    let x = 0.5 * (a + b) + 0.5 * (b - a) * gx;
+                    let Some((first, vals)) = self.basis_derivative(d, x, r) else { continue };
+                    for (i, vi) in vals.iter().enumerate() {
+                        for (j, vj) in vals.iter().enumerate() {
+                            if let Some(slot) = g.get_mut((first + i) * c + first + j) {
+                                *slot += 0.5 * (b - a) * gw * vi * vj;
+                            }
+                        }
+                    }
+                }
+            }
+            g
+        };
+        let grams: [[Vec<f64>; 3]; 2] = [0, 1].map(|d| [0, 1, 2].map(|r| gram(d, r)));
+        let g = |d: usize, r: usize, i: usize, k: usize| {
+            let c = self.count.get(d).copied().unwrap_or(0);
+            grams.get(d).and_then(|m| m.get(r)).and_then(|m| m.get(i * c + k)).copied().unwrap_or(0.0)
+        };
+        for j in 0..cv {
+            for i in 0..cu {
+                let r = j * cu + i;
+                for l in j.saturating_sub(3)..(j + 4).min(cv) {
+                    for k in i.saturating_sub(3)..(i + 4).min(cu) {
+                        let e: f64 = ENERGY.iter().map(|&(ru, rv, w)| w * g(0, ru, i, k) * g(1, rv, j, l)).sum();
+                        band.add(r, l * cu + k, lambda * e);
+                    }
+                }
+            }
+        }
+        band.solve(rhs)
+    }
+
+    /// The surface of the net `heights` over the plane `o`, `x`, `y`, `n`: control point `(i, j)`
+    /// at the knot averages `(ξᵢ, ηⱼ)` in the plane, `heights[j·count[0] + i]` along `n`.
+    fn surface(&self, heights: &[f64], o: Vec3, x: Vec3, y: Vec3, n: Vec3) -> SplineResult<NurbsSurface> {
+        let [cu, cv] = self.count;
+        let mut ctrl = Vec::with_capacity(cu * cv);
+        for j in 0..cv {
+            for i in 0..cu {
+                let hij = heights.get(j * cu + i).copied().unwrap_or(f64::NAN);
+                ctrl.push(HPoint::weighted(o + x * self.average(0, i) + y * self.average(1, j) + n * hij, 1.0));
+            }
+        }
+        NurbsSurface::from_homogeneous([3, 3], self.knots.clone(), ctrl)
+    }
+}
+
+/// A symmetric banded matrix: the upper band, row `r` holding columns `r ..= r + bw`.
+struct Band {
+    n: usize,
+    bw: usize,
+    a: Vec<f64>,
+}
+
+impl Band {
+    fn new(n: usize, bw: usize) -> Band {
+        Band { n, bw, a: vec![0.0; n * (bw + 1)] }
+    }
+    fn index(&self, r: usize, s: usize) -> Option<usize> {
+        let (r, s) = if r <= s { (r, s) } else { (s, r) };
+        (s - r <= self.bw && s < self.n).then_some(r * (self.bw + 1) + (s - r))
+    }
+    fn get(&self, r: usize, s: usize) -> f64 {
+        self.index(r, s).and_then(|i| self.a.get(i)).copied().unwrap_or(0.0)
+    }
+    fn set(&mut self, r: usize, s: usize, v: f64) {
+        if let Some(x) = self.index(r, s).and_then(|i| self.a.get_mut(i)) {
+            *x = v;
+        }
+    }
+    /// Add `v` at `(r, s)` with `r ≤ s` (the lower half is the same by symmetry: callers adding
+    /// a full outer product reach each stored entry once through `r ≤ s`).
+    fn add(&mut self, r: usize, s: usize, v: f64) {
+        if r <= s
+            && let Some(x) = self.index(r, s).and_then(|i| self.a.get_mut(i))
+        {
+            *x += v;
+        }
+    }
+    /// Solve `A·x = b` by banded Cholesky factorisation `A = Uᵀ·U`; an error when `A` is not
+    /// positive definite.
+    fn solve(mut self, mut b: Vec<f64>) -> SplineResult<Vec<f64>> {
+        let (n, bw) = (self.n, self.bw);
+        for r in 0..n {
+            let mut d = self.get(r, r);
+            for k in r.saturating_sub(bw)..r {
+                let u = self.get(k, r);
+                d -= u * u;
+            }
+            if !(d > 0.0) {
+                return invalid("the fit's equations are singular");
+            }
+            let d = d.sqrt();
+            self.set(r, r, d);
+            for s in r + 1..(r + bw + 1).min(n) {
+                let mut v = self.get(r, s);
+                for k in s.saturating_sub(bw)..r {
+                    v -= self.get(k, r) * self.get(k, s);
+                }
+                self.set(r, s, v / d);
+            }
+        }
+        // Uᵀ·y = b, then U·x = y.
+        for r in 0..n {
+            let mut v = b.get(r).copied().unwrap_or(0.0);
+            for k in r.saturating_sub(bw)..r {
+                v -= self.get(k, r) * b.get(k).copied().unwrap_or(0.0);
+            }
+            if let Some(x) = b.get_mut(r) {
+                *x = v / self.get(r, r);
+            }
+        }
+        for r in (0..n).rev() {
+            let mut v = b.get(r).copied().unwrap_or(0.0);
+            for s in r + 1..(r + bw + 1).min(n) {
+                v -= self.get(r, s) * b.get(s).copied().unwrap_or(0.0);
+            }
+            if let Some(x) = b.get_mut(r) {
+                *x = v / self.get(r, r);
+            }
+        }
+        if b.iter().any(|x| !x.is_finite()) {
+            return invalid("the fit is not finite");
+        }
+        Ok(b)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The closed polygon through `corners` in space, side `k` from corner `k` to `k+1`.
+    fn polygon3(corners: &[Vec3]) -> impl FnMut(usize, f64) -> Option<Vec3> + '_ {
+        move |k, t| {
+            let n = corners.len();
+            Some(corners.get(k)?.lerp(*corners.get((k + 1) % n)?, t))
+        }
+    }
+
+    /// The polygon `corners` in the plane, lifted by `z(x, y)` all along.
+    fn lifted<'a>(corners: &'a [[f64; 2]], z: &'a dyn Fn(f64, f64) -> f64) -> impl FnMut(usize, f64) -> Option<Vec3> + 'a {
+        move |k, t| {
+            let n = corners.len();
+            let (a, b) = (corners.get(k)?, corners.get((k + 1) % n)?);
+            let (x, y) = (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t);
+            Some(Vec3::new(x, y, z(x, y)))
+        }
+    }
+
+    fn ring(n: usize, r: f64) -> Vec<[f64; 2]> {
+        (0..n).map(|k| k as f64 * std::f64::consts::TAU / n as f64).map(|a| [r * a.cos(), r * a.sin()]).collect()
+    }
+
+    /// The farthest the surface is from `z` over the polygon's inside (sampled on a grid).
+    fn off_inside(f: &LoopFill, corners: &[[f64; 2]], z: &dyn Fn(f64, f64) -> f64) -> f64 {
+        let inside = |x: f64, y: f64| {
+            let n = corners.len();
+            let mut w = false;
+            for k in 0..n {
+                let (a, b) = (corners[k], corners[(k + 1) % n]);
+                if (a[1] > y) != (b[1] > y) && x < a[0] + (y - a[1]) / (b[1] - a[1]) * (b[0] - a[0]) {
+                    w = !w;
+                }
+            }
+            w
+        };
+        let s = &f.surface;
+        let [du, dv] = s.domain();
+        let mut worst = 0.0f64;
+        for i in 0..=40 {
+            for j in 0..=40 {
+                let (u, v) = ((du[0] + (du[1] - du[0]) * i as f64 / 40.0).min(du[1]), (dv[0] + (dv[1] - dv[0]) * j as f64 / 40.0).min(dv[1]));
+                let p = s.eval(u, v).unwrap();
+                if inside(p.x, p.y) {
+                    worst = worst.max((p.z - z(p.x, p.y)).abs());
+                }
+            }
+        }
+        worst
+    }
+
+    #[test]
+    fn planes_are_reproduced_and_rims_of_quadrics_are_filled_closely() {
+        // A tilted plane over a hexagon: the smoothness energy vanishes on it, so the fill is it.
+        let hex = ring(6, 10.0);
+        let plane = |x: f64, y: f64| 0.3 * x - 0.2 * y + 1.0;
+        let f = fill_loop(6, &mut lifted(&hex, &plane), 1e-6).unwrap();
+        let inside = off_inside(&f, &hex, &plane);
+        eprintln!("plane: deviation {:e}, inside off by {inside:e}, {} evaluations", f.deviation, f.evaluations);
+        assert!(f.deviation <= 1e-6 && inside < 1e-9);
+        // A saddle and a dome: the least-bending fill through the rim is not the quadric (only
+        // planes are reproduced), but stays near it (the plate is free to turn at the rim).
+        let saddle = |x: f64, y: f64| 0.05 * x * y;
+        let dome = |x: f64, y: f64| 3.0 - 0.02 * (x * x + y * y);
+        for (name, z, bound) in [("saddle", &saddle as &dyn Fn(f64, f64) -> f64, 0.1), ("dome", &dome, 1.0)] {
+            let f = fill_loop(6, &mut lifted(&hex, z), 2e-5).unwrap();
+            let inside = off_inside(&f, &hex, z);
+            eprintln!("{name}: deviation {:e}, inside off by {inside:e}", f.deviation);
+            assert!(f.deviation <= 2e-5 && inside < bound, "{name}: {inside}");
+        }
+    }
+
+    #[test]
+    fn concave_loops_fill_and_the_result_does_not_depend_on_where_the_loop_starts() {
+        // A dart, an arrow-head pentagon and a plus, on a cylinder.
+        let z = |x: f64, _: f64| 50.0 - (1600.0 - x * x).sqrt();
+        let dart = vec![[0.0, 0.0], [20.0, -10.0], [8.0, 0.0], [20.0, 10.0]];
+        let arrow = vec![[0.0, 0.0], [10.0, -8.0], [10.0, -3.0], [20.0, 0.0], [10.0, 3.0]];
+        let plus = vec![
+            [-3.0, -9.0],
+            [3.0, -9.0],
+            [3.0, -3.0],
+            [9.0, -3.0],
+            [9.0, 3.0],
+            [3.0, 3.0],
+            [3.0, 9.0],
+            [-3.0, 9.0],
+            [-3.0, 3.0],
+            [-9.0, 3.0],
+            [-9.0, -3.0],
+            [-3.0, -3.0],
+        ];
+        let flat_corner = vec![[-10.0, -10.0], [0.0, -10.0], [10.0, -10.0], [10.0, 10.0], [-10.0, 10.0]];
+        for (name, c) in [("dart", dart), ("arrow", arrow), ("plus", plus), ("flat corner", flat_corner)] {
+            let n = c.len();
+            let f = fill_loop(n, &mut lifted(&c, &z), 1e-4).unwrap();
+            let inside = off_inside(&f, &c, &z);
+            eprintln!("{name}: deviation {:e}, inside off the cylinder by {inside:e}, {} evaluations", f.deviation, f.evaluations);
+            // The least-bending fill, not the cylinder: within a few tenths of a millimetre of it.
+            assert!(f.deviation <= 1e-4 && inside < 0.2, "{name}: {inside}");
+            // The same loop from another corner and the other way round.
+            let mut back = c.clone();
+            back.rotate_left(2);
+            back.reverse();
+            let g = fill_loop(n, &mut lifted(&back, &z), 1e-4).unwrap();
+            assert_ne!(f.counter_clockwise, g.counter_clockwise);
+            for (x, y) in [(4.0, 0.0), (6.0, 1.0), (5.0, -1.0)] {
+                let p = Vec3::new(x, y, z(x, y));
+                let gap = f.point_over(p).unwrap().dist(g.point_over(p).unwrap());
+                assert!(gap < 1e-7, "{name}: {gap}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_fill_is_the_same_at_any_size_and_place() {
+        // The arrow on the cylinder, scaled by 100 and by 1/100, turned and moved: the same fill,
+        // scaled and moved alike.
+        let z = |x: f64, _: f64| 50.0 - (1600.0 - x * x).sqrt();
+        let arrow = [[0.0, 0.0], [10.0, -8.0], [10.0, -3.0], [20.0, 0.0], [10.0, 3.0]];
+        let f = fill_loop(5, &mut lifted(&arrow, &z), 1e-4).unwrap();
+        let axis = Vec3::new(1.0, -2.0, 0.5).normalized().unwrap();
+        let shift = Vec3::new(30.0, -12.0, 7.0);
+        for scale in [100.0, 0.01] {
+            let place = |p: Vec3| {
+                // Scaled, turned by 0.9 about `axis` (Rodrigues), moved.
+                let p = p * scale;
+                let (c, s) = (0.9f64.cos(), 0.9f64.sin());
+                p * c + axis.cross(p) * s + axis * (axis.dot(p) * (1.0 - c)) + shift * scale
+            };
+            let mut moved = |k: usize, t: f64| lifted(&arrow, &z)(k, t).map(place);
+            let g = fill_loop(5, &mut moved, 1e-4 * scale).unwrap();
+            let mut worst = 0.0f64;
+            for (x, y) in [(4.0, 0.0), (6.0, 1.0), (5.0, -1.0), (9.0, -2.0), (12.0, 0.5)] {
+                let p = Vec3::new(x, y, z(x, y));
+                worst = worst.max(g.point_over(place(p)).unwrap().dist(place(f.point_over(p).unwrap())) / scale);
+            }
+            eprintln!("arrow scaled by {scale}, turned and moved: {} evaluations, surfaces apart by {worst:e} (relative)", g.evaluations);
+            assert!(worst < 1e-7, "scale {scale}: {worst}");
+        }
+    }
+
+    #[test]
+    fn a_long_narrow_slot_fills() {
+        // A 200 × 1 mm slot on a cylinder of radius 300 running along it.
+        let z = |x: f64, _: f64| 300.0 - (90_000.0 - (x - 100.0) * (x - 100.0)).sqrt();
+        let slot = [[0.0, 0.0], [200.0, 0.0], [200.0, 1.0], [0.0, 1.0]];
+        let f = fill_loop(4, &mut lifted(&slot, &z), 2e-4).unwrap();
+        let inside = off_inside(&f, &slot, &z);
+        eprintln!("slot: deviation {:e}, inside off the cylinder by {inside:e}, {} evaluations", f.deviation, f.evaluations);
+        assert!(f.deviation <= 2e-4 && inside < 1e-2);
+    }
+
+    #[test]
+    fn loops_that_do_not_bound_a_height_field_are_refused() {
+        let unsupported = |r: SplineResult<LoopFill>| matches!(r, Err(SplineError::Unsupported(_)));
+        let flat = |_: f64, _: f64| 0.0;
+        // A figure eight (lobes of different sizes).
+        let eight = [[0.0, 0.0], [10.0, 10.0], [10.0, 0.0], [0.0, 6.0]];
+        assert!(unsupported(fill_loop(4, &mut lifted(&eight, &flat), 1e-4)));
+        // A loop with a vertical spike in it (up along the normal and down again).
+        let spike = [
+            Vec3::ZERO,
+            Vec3::new(10.0, 0.0, 0.0),
+            Vec3::new(10.0, 10.0, 0.0),
+            Vec3::new(5.0, 10.0, 0.0),
+            Vec3::new(5.0, 10.0, 3.0),
+            Vec3::new(5.0, 10.0, 0.0),
+            Vec3::new(0.0, 10.0, 0.0),
+        ];
+        assert!(unsupported(fill_loop(7, &mut polygon3(&spike), 1e-4)));
+        // A loop that runs back over itself.
+        let back = [[0.0, 0.0], [10.0, 0.0], [4.0, 0.0], [10.0, 10.0], [0.0, 10.0]];
+        assert!(unsupported(fill_loop(5, &mut lifted(&back, &flat), 1e-4)));
+        // A loop too wavy for one surface.
+        let wavy = |x: f64, y: f64| (x * 9.0).sin() * (y * 7.0).cos();
+        assert!(unsupported(fill_loop(64, &mut lifted(&ring(64, 10.0), &wavy), 1e-6)));
+    }
+
+    #[test]
+    fn hostile_loops_are_refused() {
+        let flat = |_: f64, _: f64| 0.0;
+        let five = ring(5, 10.0);
+        assert!(fill_loop(0, &mut lifted(&five, &flat), 1e-4).is_err());
+        assert!(fill_loop(5, &mut |_, _| Some(Vec3::X), 1e-4).is_err(), "no area");
+        assert!(fill_loop(5, &mut |_, _| None, 1e-4).is_err());
+        assert!(fill_loop(5, &mut |k, t| Some(Vec3::new(k as f64, t, f64::NAN)), 1e-4).is_err());
+        assert!(fill_loop(5, &mut lifted(&five, &flat), 0.0).is_err() && fill_loop(5, &mut lifted(&five, &flat), f64::NAN).is_err());
+        assert!(fill_loop(10_000, &mut lifted(&five, &flat), 1e-4).is_err());
+        let huge = |x: f64, y: f64| (x * y) * 1e300;
+        let _ = fill_loop(5, &mut lifted(&five, &huge), 1e-4);
+        let tiny: Vec<[f64; 2]> = five.iter().map(|p| [p[0] * 1e-300, p[1] * 1e-300]).collect();
+        let _ = fill_loop(5, &mut lifted(&tiny, &flat), 1e-4);
+        let big: Vec<[f64; 2]> = five.iter().map(|p| [p[0] * 1e300, p[1] * 1e300]).collect();
+        let _ = fill_loop(5, &mut lifted(&big, &flat), 1e-4);
+    }
+}

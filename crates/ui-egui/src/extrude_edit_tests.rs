@@ -1,7 +1,7 @@
 //! Exercise the actual feature editor, including frames rendered before OK.
 use crate::scenario::Harness;
 use serde_json::{Value, json};
-use solvecraft_engine::doc::{Extent, FeatureKind};
+use solidcraft_engine::doc::{Extent, FeatureKind};
 
 fn make(params: Value) -> Harness {
     make_in(Harness::new(), params)
@@ -31,12 +31,12 @@ fn unchanged_all_profiles_includes_profiles_added_after_edit() {
     open(&mut h);
     h.step(&json!({"widget":"OK"})).unwrap();
     let FeatureKind::Extrude { profiles, .. } = &h.app.session.doc.find_feature("Depth").unwrap().kind else { panic!("extrude") };
-    assert!(matches!(profiles, solvecraft_engine::doc::ProfileSel::All));
+    assert!(matches!(profiles, solidcraft_engine::doc::ProfileSel::All));
     h.app.run("sketch.edit", json!({"sketch":"Base"})).unwrap();
     h.app.run("sketch.rectangle.two_point", json!({"p0":[20,0],"p1":[25,5]})).unwrap();
     h.app.run("sketch.finish", json!({})).unwrap();
     let state = h.app.session.world_state();
-    let volume: f64 = state.bodies.iter().map(|b| solvecraft_engine::doc::kernel::measure(&b.body).unwrap().volume).sum();
+    let volume: f64 = state.bodies.iter().map(|b| solidcraft_engine::doc::kernel::measure(&b.body).unwrap().volume).sum();
     assert!((volume - 1250.0).abs() < 1e-7, "{volume}");
 }
 
@@ -71,7 +71,7 @@ fn negative_edit_keeps_downstream_distance_reference_positive() {
     h.app.run("solid.box", json!({"length":10,"width":10,"height":"d1","corner":[30,0,0],"body_name":"Dependent"})).unwrap();
     open(&mut h);
     h.step(&json!({"widget":"OK"})).unwrap();
-    assert_eq!(h.app.session.doc.eval("d1", solvecraft_engine::doc::expr::Kind::Length).unwrap(), 10.0);
+    assert_eq!(h.app.session.doc.eval("d1", solidcraft_engine::doc::expr::Kind::Length).unwrap(), 10.0);
     assert_eq!(h.app.session.world_state().body("Dependent").unwrap().mesh().bounds().max.z, 10.0);
 }
 
@@ -149,7 +149,7 @@ fn referenced_offset_recomputes_after_edit_and_save_reopen() {
     assert_eq!(extent(&h).to_offset.as_deref(), Some("clearance"));
     h.app.run("parameters.change", json!({"name":"clearance","expression":"6 mm"})).unwrap();
     assert_eq!(h.app.session.world_state().body("Main").unwrap().mesh().bounds().max.z, 21.0);
-    let path = h.dir.join("extent.solvecraft");
+    let path = h.dir.join("extent.solidcraft");
     h.app.run("file.save", json!({"path":path})).unwrap();
     h.app.run("doc.open", json!({"path":path})).unwrap();
     assert_eq!(extent(&h).to_offset.as_deref(), Some("clearance"));
@@ -174,8 +174,8 @@ fn explicit_reverse_keeps_original_expression_and_parameter_sign() {
     h.step(&json!({"widget":"Reverse Direction"})).unwrap();
     h.step(&json!({"widget":"OK"})).unwrap();
     assert_eq!(extent(&h).distance, "10");
-    assert_eq!(extent(&h).direction, solvecraft_engine::doc::Direction::Negative);
-    assert_eq!(h.app.session.doc.eval("d1", solvecraft_engine::doc::expr::Kind::Length).unwrap(), 10.0);
+    assert_eq!(extent(&h).direction, solidcraft_engine::doc::Direction::Negative);
+    assert_eq!(h.app.session.doc.eval("d1", solidcraft_engine::doc::expr::Kind::Length).unwrap(), 10.0);
     assert_eq!(h.app.session.world_state().body("Main").unwrap().mesh().bounds().min.z, -10.0);
 }
 
@@ -191,7 +191,7 @@ fn failed_edit_and_cancel_keep_full_history_and_existing_redo() {
     let redo = h.app.session.redo.len();
     assert_eq!(undo, 199);
     assert_eq!(redo, 1);
-    h.app.session.selection = vec![solvecraft_engine::Sel::Body { name: "Main".into() }];
+    h.app.session.selection = vec![solidcraft_engine::Sel::Body { name: "Main".into() }];
     let selection = h.app.session.selection.clone();
     let original = serde_json::to_value(&*h.app.session.doc).unwrap();
     open(&mut h);
@@ -225,7 +225,7 @@ fn tapered_from_and_signed_to_have_correct_start_volume_and_preview_parity() {
         let bounds = body.mesh().bounds();
         assert!((bounds.min.z - lo).abs() < 1e-8 && (bounds.max.z - hi).abs() < 1e-8, "{params}: {bounds:?}");
         let expected = 10.0 * (100.0 + 120.0 + 144.0) / 3.0;
-        let volume = solvecraft_engine::doc::kernel::measure(&body.body).unwrap().volume;
+        let volume = solidcraft_engine::doc::kernel::measure(&body.body).unwrap().volume;
         assert!((volume - expected).abs() < 1e-5, "{params}: volume{volume} expected{expected}");
         let original = extent(&h);
         open(&mut h);

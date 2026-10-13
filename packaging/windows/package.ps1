@@ -1,15 +1,16 @@
 <#
 .SYNOPSIS
-  Build and package SolveCraft for Windows.
+  Build and package SolidCraft for Windows.
 
 .DESCRIPTION
   Produces, in $env:DIST (default: dist/release):
-    solvecraft-<version>-windows-<arch>.msi            per-machine installer (WiX v5)
-    solvecraft-<version>-windows-<arch>-portable.zip   solvecraft.exe + solvecraft-cli.exe + licences
-    SolveCraft-<version>-windows-<arch>.exe            the app alone (x64 only: a plain download)
+    solidcraft-<version>-windows-<arch>.msi            per-machine installer (WiX v5)
+    solidcraft-<version>-windows-<arch>-portable.zip   solidcraft.exe + solidcraft-cli.exe + licences
+                                                       (+ the solvecraft-cli.exe compatibility alias)
+    SolidCraft-<version>-windows-<arch>.exe            the app alone (x64 only: a plain download)
 
   The binaries link the C runtime statically (+crt-static), so nothing else needs installing.
-  The icon comes from $env:SOLVECRAFT_ICONS (solvecraft.ico, made by `solvecraft-cli icon`), or
+  The icon comes from $env:SOLIDCRAFT_ICONS (solidcraft.ico, made by `solidcraft-cli icon`), or
   is drawn by the CLI just built when this machine can run it. Nothing is signed.
 
   Needs: Rust (MSVC toolchain + the target) and WiX v5:
@@ -36,7 +37,7 @@ function Invoke-Native([string] $What, [scriptblock] $Block) {
 }
 
 # The version lives in one place: [workspace.package] version in the root Cargo.toml.
-$Version = $env:SOLVECRAFT_VERSION
+$Version = $env:SOLIDCRAFT_VERSION
 if (-not $Version) {
   $inPkg = $false
   foreach ($line in Get-Content (Join-Path $Root 'Cargo.toml')) {
@@ -60,7 +61,7 @@ if (-not $SkipBuild) {
   # proc-macros are unaffected.
   $flagVar = 'CARGO_TARGET_' + ($Target.ToUpper() -replace '-', '_') + '_RUSTFLAGS'
   [Environment]::SetEnvironmentVariable($flagVar, '-C target-feature=+crt-static')
-  Invoke-Native "cargo build ($Target)" { cargo build --release --locked -p solvecraft -p solvecraft-cli --target $Target }
+  Invoke-Native "cargo build ($Target)" { cargo build --release --locked -p solidcraft -p solidcraft-cli --target $Target }
 }
 $Bin = Join-Path $TargetDir "$Target\release"
 
@@ -72,33 +73,35 @@ function Get-PeHeader([string] $Path) {
   return @{ Machine = [BitConverter]::ToUInt16($bytes, $pe + 4); Subsystem = [BitConverter]::ToUInt16($bytes, $pe + 0x5C) }
 }
 $Machine = switch ($Arch) { 'x64' { 0x8664 } 'x86' { 0x14C } 'arm64' { 0xAA64 } }
-foreach ($check in @(@('solvecraft.exe', 2), @('solvecraft-cli.exe', 3))) {
+# solvecraft-cli.exe: the old CLI name, forwarding to solidcraft-cli.exe (compatibility shim,
+# docs/compatibility.md). Built by `-p solidcraft-cli` with the CLI.
+foreach ($check in @(@('solidcraft.exe', 2), @('solidcraft-cli.exe', 3), @('solvecraft-cli.exe', 3))) {
   $h = Get-PeHeader (Join-Path $Bin $check[0])
   if ($h.Machine -ne $Machine) { throw "$($check[0]) is for machine 0x$('{0:X}' -f $h.Machine), expected 0x$('{0:X}' -f $Machine) ($Arch)" }
   if ($h.Subsystem -ne $check[1]) { throw "$($check[0]) has PE subsystem $($h.Subsystem), expected $($check[1])" }
   Write-Output "ok $($check[0]): $Arch, PE subsystem $($h.Subsystem)"
 }
 $Stage = Join-Path $TargetDir "windows-package\$Arch"
-& (Join-Path $PSScriptRoot 'check-icon.ps1') -Path (Join-Path $Bin 'solvecraft.exe')
+& (Join-Path $PSScriptRoot 'check-icon.ps1') -Path (Join-Path $Bin 'solidcraft.exe')
 Remove-Item -Recurse -Force $Stage -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Stage | Out-Null
-Copy-Item (Join-Path $Bin 'solvecraft.exe'), (Join-Path $Bin 'solvecraft-cli.exe') $Stage
+Copy-Item (Join-Path $Bin 'solidcraft.exe'), (Join-Path $Bin 'solidcraft-cli.exe'), (Join-Path $Bin 'solvecraft-cli.exe') $Stage
 foreach ($f in 'LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE', 'THIRD-PARTY-LICENSES.txt') { Copy-Item (Join-Path $Root $f) $Stage }
 
 $HostArch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
 $CanRun = ($Arch -ne 'arm64' -or $HostArch -eq 'arm64')
-$Icon = if ($env:SOLVECRAFT_ICONS) { Join-Path $env:SOLVECRAFT_ICONS 'solvecraft.ico' } else { Join-Path $Stage 'solvecraft.ico' }
+$Icon = if ($env:SOLIDCRAFT_ICONS) { Join-Path $env:SOLIDCRAFT_ICONS 'solidcraft.ico' } else { Join-Path $Stage 'solidcraft.ico' }
 if (-not (Test-Path $Icon)) {
-  if (-not $CanRun) { throw "no icon: set SOLVECRAFT_ICONS to a folder with solvecraft.ico (an $Arch CLI can't run on this $HostArch machine)" }
-  Invoke-Native 'draw the icon' { & (Join-Path $Stage 'solvecraft-cli.exe') icon --out $Icon }
+  if (-not $CanRun) { throw "no icon: set SOLIDCRAFT_ICONS to a folder with solidcraft.ico (an $Arch CLI can't run on this $HostArch machine)" }
+  Invoke-Native 'draw the icon' { & (Join-Path $Stage 'solidcraft-cli.exe') icon --out $Icon }
 }
 
 # ---- MSI ---------------------------------------------------------------------------------------
-$Msi = Join-Path $Dist "solvecraft-$Version-windows-$Arch.msi"
+$Msi = Join-Path $Dist "solidcraft-$Version-windows-$Arch.msi"
 Invoke-Native 'wix build' {
-  wix build (Join-Path $PSScriptRoot 'solvecraft.wxs') -arch $Arch `
+  wix build (Join-Path $PSScriptRoot 'solidcraft.wxs') -arch $Arch `
     -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext `
-    -culture en-US -loc (Join-Path $PSScriptRoot 'solvecraft.en-us.wxl') `
+    -culture en-US -loc (Join-Path $PSScriptRoot 'solidcraft.en-us.wxl') `
     -d "Version=$MsiVersion" -d "DisplayVersion=$Version" -d "BinDir=$Stage" -d "IconPath=$Icon" `
     -o $Msi
 }
@@ -109,26 +112,26 @@ Invoke-Native 'MSI shortcut icon validation (ICE50)' {
 Remove-Item -Force -ErrorAction SilentlyContinue ([IO.Path]::ChangeExtension($Msi, '.wixpdb'))
 
 # ---- portable zip ------------------------------------------------------------------------------
-$Portable = Join-Path $TargetDir "windows-package\solvecraft-$Version-windows-$Arch-portable"
+$Portable = Join-Path $TargetDir "windows-package\solidcraft-$Version-windows-$Arch-portable"
 Remove-Item -Recurse -Force $Portable -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Portable | Out-Null
 Copy-Item (Join-Path $Stage '*.exe') $Portable
 foreach ($f in 'README.md', 'LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE', 'THIRD-PARTY-LICENSES.txt') { Copy-Item (Join-Path $Root $f) $Portable }
-$Zip = Join-Path $Dist "solvecraft-$Version-windows-$Arch-portable.zip"
+$Zip = Join-Path $Dist "solidcraft-$Version-windows-$Arch-portable.zip"
 Remove-Item -Force $Zip -ErrorAction SilentlyContinue
 Compress-Archive -Path $Portable -DestinationPath $Zip
 
 # ---- the app as a plain download (x64) ---------------------------------------------------------
 $Outputs = @($Msi, $Zip)
 if ($Arch -eq 'x64') {
-  $Exe = Join-Path $Dist "SolveCraft-$Version-windows-$Arch.exe"
-  Copy-Item (Join-Path $Stage 'solvecraft.exe') $Exe
+  $Exe = Join-Path $Dist "SolidCraft-$Version-windows-$Arch.exe"
+  Copy-Item (Join-Path $Stage 'solidcraft.exe') $Exe
   $Outputs += $Exe
 }
 
 if ($CanRun) {
-  Invoke-Native 'solvecraft-cli --version' { & (Join-Path $Stage 'solvecraft-cli.exe') --version }
+  Invoke-Native 'solidcraft-cli --version' { & (Join-Path $Stage 'solidcraft-cli.exe') --version }
 } else {
-  Write-Output "skipping solvecraft-cli --version: an $Arch build doesn't run on this $HostArch machine"
+  Write-Output "skipping solidcraft-cli --version: an $Arch build doesn't run on this $HostArch machine"
 }
 Get-Item $Outputs | Format-Table Name, Length

@@ -1,6 +1,6 @@
 use crate::scenario::Harness;
 use serde_json::json;
-use solvecraft_engine::{
+use solidcraft_engine::{
     Sel,
     doc::{FaceAttachmentStatus, FeatureKind, PlaneRef},
 };

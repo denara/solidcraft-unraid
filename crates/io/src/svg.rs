@@ -5,7 +5,7 @@
 
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
-use solvecraft_geom::Vec2;
+use solidcraft_geom::Vec2;
 
 use crate::sketch2d::{Geom2, MAX_DRAWING_BYTES, MAX_ENTITIES};
 use crate::{IoError, Result};

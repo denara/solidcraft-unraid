@@ -52,8 +52,10 @@ jobs:
           }
       - name: XML, desktop entry, AppStream, Flatpak manifest
         run: |
-          xmllint --noout packaging/windows/solvecraft.wxs packaging/windows/solvecraft.en-us.wxl packaging/macos/*.plist* packaging/linux/*.xml*
+          xmllint --noout packaging/windows/solidcraft.wxs packaging/windows/solidcraft.en-us.wxl packaging/macos/*.plist* packaging/linux/*.xml*
           desktop-file-validate packaging/linux/ai.storyteller.solvecraft.desktop
           sed -e 's/@VERSION@/0.0.0/' -e 's/@DATE@/2026-01-01/' packaging/linux/ai.storyteller.solvecraft.metainfo.xml.in >"$RUNNER_TEMP/ai.storyteller.solvecraft.metainfo.xml"
           appstreamcli validate --no-net --explain "$RUNNER_TEMP/ai.storyteller.solvecraft.metainfo.xml"
-          python3 -c "import yaml; m = yaml.safe_load(open('packaging/linux/flatpak/ai.storyteller.solvecraft.bundle.yml')); assert m['id'] == 'ai.storyteller.solvecraft' and m['command'] == 'solvecraft'"
+          python3 -c "import yaml; m = yaml.safe_load(open('packaging/linux/flatpak/ai.storyteller.solvecraft.bundle.yml')); assert m['id'] == 'ai.storyteller.solvecraft' and m['command'] == 'solidcraft'"
+          python3 -c "import yaml; m = yaml.safe_load(open('packaging/linux/snap/snapcraft.yaml')); assert m['name'] == 'solidcraft' and m['confinement'] == 'strict' and m['apps']['solidcraft']['command'] == 'usr/bin/solidcraft'"
+          python3 -m py_compile packaging/linux/snap-smoke.py

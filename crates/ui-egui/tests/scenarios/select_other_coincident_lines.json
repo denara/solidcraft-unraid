@@ -1,0 +1,17 @@
+[
+  {"note": "Two lines drawn on top of each other: holding the button still lists both, and the one underneath can be picked."},
+  {"start": "sketch.create"},
+  {"click": {"plane": "XY"}},
+  {"call": "ui.set", "params": {"showOrigin": false}},
+  {"call": "engine.execute", "params": {"command": "sketch.line", "params": {"points": [[0, 10], [20, 10]], "infer": false, "connect": false}}},
+  {"call": "engine.execute", "params": {"command": "sketch.line", "params": {"points": [[0, 10], [20, 10]], "infer": false, "connect": false}}},
+  {"hold": {"sketch": [10, 10]}},
+  {"expect": {"selection": 0, "sketching": true}},
+  {"move": {"handle": "select_other:1"}},
+  {"click": {"handle": "select_other:1"}},
+  {"expect": {"selection": 1}},
+  {"call": "ui.selectOther", "params": {"pick": 0}, "fail": true},
+  {"note": "Click cycling: a second deliberate click on the same spot selects the next line."},
+  {"click": {"sketch": [10, 10]}},
+  {"expect": {"selection": 1}}
+]

@@ -223,11 +223,20 @@ impl FeatureKind {
                 v.push(("Catch length", catch_length, L));
             }
             FeatureKind::SheetContour { distance, .. } => v.push(("Distance", distance, L)),
-            FeatureKind::SheetFlange { height, angle, radius, .. } => {
+            FeatureKind::SheetFlange { edges, height, angle, radius, .. } => {
                 v.push(("Height", height, L));
                 v.push(("Angle", angle, A));
                 if let Some(r) = radius {
                     v.push(("Bend radius", r, L));
+                }
+                // The edges' own values come last, so the inputs above keep their names.
+                for e in edges {
+                    if let Some(a) = &mut e.angle {
+                        v.push(("Edge angle", a, A));
+                    }
+                    if let Some(h) = &mut e.height {
+                        v.push(("Edge height", h, L));
+                    }
                 }
             }
             FeatureKind::SheetFold { angle, radius, .. } => {
@@ -259,6 +268,7 @@ impl FeatureKind {
             }
             FeatureKind::ReplaceFace { target, .. } => plane_inputs_mut(target, &mut v),
             FeatureKind::Stitch { tolerance, .. } => v.push(("Tolerance", tolerance, L)),
+            FeatureKind::MeshConvert { tolerance, .. } => v.push(("Tolerance", tolerance, L)),
             FeatureKind::Thicken { thickness, .. } => v.push(("Thickness", thickness, L)),
             FeatureKind::SurfaceTrim { plane, .. } => plane_inputs_mut(plane, &mut v),
             FeatureKind::SurfaceExtend { distance, .. } => v.push(("Distance", distance, L)),

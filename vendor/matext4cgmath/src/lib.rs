@@ -1,6 +1,6 @@
 //! Unofficial third-party cgmath extensions for calculate eigenvalues, operator norms and Iwasawa decomposition.
 
-// SolveCraft: compiler warnings no longer fail the build.
+// SolidCraft: compiler warnings no longer fail the build.
 #![deny(clippy::all, rust_2018_idioms)]
 #![warn(
     missing_docs,

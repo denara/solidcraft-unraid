@@ -6,15 +6,17 @@ This fork adds deployment packaging and an HTTP adapter. The modelling engine an
 existing stdio MCP server retain their behaviour. The first target is Linux x86_64 (AMD/Intel),
 tested locally using Docker Desktop Linux containers, then deployable on Unraid.
 Upstream renamed the displayed product from SolveCraft to SolidCraft. Technical names
-(`solvecraft-cli`, `.solvecraft`, environment variables and this fork's image name) stay
-compatible. Hostnames and deployment paths below are examples: substitute your own
+use upstream compatibility shims: `solvecraft-cli` remains a CLI alias and existing
+`.solvecraft` files still open. The gateway binary, container environment variables,
+persistent volume paths and image names retain their existing identifiers. New documents
+use upstream's current container/format marker and cannot be opened by older builds. Hostnames and deployment paths below are examples: substitute your own
 values locally, outside Git. `.env` and `target/` are ignored by Git and Docker builds.
 The fork is hosted at [denara/solidcraft-unraid](https://github.com/denara/solidcraft-unraid).
 The public Unraid template names a new container `SolidCraft`; the existing local Compose service,
 image tags, command names, data format and environment variables retain compatibility.
 The first prototype used upstream commit `af536a7`. The current validated snapshot is
-`07e263d7e95cac9a6851e48bffcb79f302aabfb8`, packaged as
-`solvecraft-unraid:upstream-07e263d`. See [update records](unraid-updates.md) for checks,
+`913583bfeebb67eea406b40c9bc282bbf27726c7`, packaged as
+`solvecraft-unraid:upstream-913583b`. See [update records](unraid-updates.md) for checks,
 the transferable image archive and installation instructions for this update.
 
 For future requested updates, use the repository skill
@@ -148,7 +150,7 @@ after 30 minutes, and container restarts end all sessions. Start a new MCP sessi
 Build on the development computer, not on Unraid:
 
 ```sh
-docker save -o solvecraft-unraid-upstream-07e263d.tar solvecraft-unraid:upstream-07e263d
+docker save -o solvecraft-unraid-upstream-07e263d.tar solvecraft-unraid:upstream-913583b
 ```
 
 Transfer that archive to Unraid and load it from the Unraid terminal:
@@ -169,7 +171,7 @@ docker run -d --name solidcraft --init --restart unless-stopped \
   --read-only --tmpfs /tmp:rw,nosuid,nodev,size=256m,mode=1777 \
   --cap-drop ALL --security-opt no-new-privileges:true \
   --memory 4g --cpus 4 --pids-limit 128 \
-  solvecraft-unraid:upstream-07e263d
+  solvecraft-unraid:upstream-913583b
 ```
 
 This installs the already built image; it does not compile anything on Unraid. For a
@@ -179,7 +181,7 @@ fixed IP on an existing custom network, replace `-p 8781:8080` with
 Install the supplied `packaging/unraid/solvecraft.xml` as a user template (under
 `/boot/config/plugins/dockerMan/templates-user/`), then select it in **Docker → Add
 Container**. For this offline archive path, change the template's Repository field from
-the registry reference to `solvecraft-unraid:upstream-07e263d`, the locally loaded image.
+the registry reference to `solvecraft-unraid:upstream-913583b`, the locally loaded image.
 Offline installations need a new image archive for subsequent updates. For direct registry
 installation, keep `ghcr.io/denara/solidcraft-unraid:latest` instead.
 
@@ -265,3 +267,8 @@ WebAssembly. Container deployment does not add a CAD command or change engine be
 References: [MCP transport](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports),
 [Unraid container configuration](https://docs.unraid.net/unraid-os/using-unraid-to/run-docker-containers/managing-and-customizing-containers/),
 [OpenAI MCP configuration](https://learn.chatgpt.com/docs/extend/mcp).
+
+Network clients may upload font files beneath /data/files and name them in sketch.text;
+font file paths are confined there, while the built-in Liberation Sans family still works.
+Shared desktop crash-report tools and diagnostics.crash commands are unavailable through
+the gateway, like desktop recovery, to avoid disclosing another session's diagnostics.

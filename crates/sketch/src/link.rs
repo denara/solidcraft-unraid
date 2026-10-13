@@ -7,9 +7,9 @@
 //! constants; they still bound profiles and take constraints and dimensions like any curve.
 
 use serde::{Deserialize, Serialize};
-use solvecraft_geom::{Vec2, Vec3};
+use solidcraft_geom::{Vec2, Vec3};
 
-use crate::model::{Curve, CurveKind, Result, Sketch, SketchError};
+use crate::model::{Curve, CurveKind, Result, Sketch, SketchError, in_range, radius_in_range};
 
 /// Points of one link closer than this are merged into one point.
 const MERGE_TOL: f64 = 1e-7;
@@ -55,6 +55,9 @@ pub enum LinkSource {
     Origin,
     /// An origin axis (`X`, `Y`, `Z`).
     Axis { name: String },
+    /// One of the sketch's own axes (`x` or `y`): the line through the sketch origin along it,
+    /// whatever plane the sketch is on (see [`sketch_axis_geom`]).
+    SketchAxis { name: String },
     /// An origin plane (`XY`, `XZ`, `YZ`) or a construction plane (by name): its trace on the
     /// sketch plane.
     Plane { name: String },
@@ -68,13 +71,16 @@ pub enum LinkSource {
     Iso { body: String, at: Vec3, dir: String },
     /// The outline of a body spun about an axis (world line), laid into the sketch plane.
     Spun { body: String, origin: Vec3, dir: Vec3 },
-    /// Text: baseline start `at` (sketch coordinates), capital height and angle (radians).
+    /// Text: baseline start `at` (sketch coordinates), capital height and angle (radians), in
+    /// `font` (a font file path or an installed family name; none: the built-in font).
     Text {
         text: String,
         at: Vec2,
         height: f64,
         #[serde(default)]
         angle: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        font: Option<String>,
     },
 }
 
@@ -90,6 +96,7 @@ impl LinkSource {
             LinkSource::SketchPoint { point, .. } => format!("sketch point {point}"),
             LinkSource::Origin => "origin".into(),
             LinkSource::Axis { name } => format!("{name} axis"),
+            LinkSource::SketchAxis { name } => format!("sketch {name} axis"),
             LinkSource::Plane { name } => format!("{name} plane"),
             LinkSource::OnSurface { curve, .. } => format!("{curve} on a face"),
             LinkSource::Intersection { a, b } => format!("intersection of {} and {}", a.describe(), b.describe()),
@@ -98,6 +105,19 @@ impl LinkSource {
             LinkSource::Text { text, .. } => format!("text \"{}\"", text.chars().take(20).collect::<String>()),
         }
     }
+}
+
+/// Half length of the line a sketch axis link produces.
+pub const SKETCH_AXIS_HALF: f64 = 100.0;
+
+/// The geometry of sketch axis `name` (`x` or `y`, sketch coordinates); `None` for any other name.
+pub fn sketch_axis_geom(name: &str) -> Option<LinkGeom> {
+    let u = match name {
+        "x" => Vec2::X,
+        "y" => Vec2::Y,
+        _ => return None,
+    };
+    Some(LinkGeom::Line(Vec2::ZERO - u * SKETCH_AXIS_HALF, u * SKETCH_AXIS_HALF))
 }
 
 /// One link and its state.
@@ -154,16 +174,14 @@ pub enum LinkGeom {
 
 impl LinkGeom {
     fn finite(&self) -> bool {
-        let ok = |p: &Vec2| p.is_finite() && p.x.abs() < 1e9 && p.y.abs() < 1e9;
+        let ok = |p: &Vec2| in_range(*p);
         match self {
             LinkGeom::Point(p) => ok(p),
             LinkGeom::Line(a, b) => ok(a) && ok(b) && a.dist(*b) > MERGE_TOL,
-            LinkGeom::Circle(c, r) => ok(c) && r.is_finite() && *r > 1e-9 && *r < 1e9,
+            LinkGeom::Circle(c, r) => ok(c) && radius_in_range(*r),
             LinkGeom::Arc { c, a, b } => ok(c) && ok(a) && ok(b) && c.dist(*a) > 1e-9 && a.dist(*b) > MERGE_TOL,
             LinkGeom::Conic { a, apex, b, rho } => ok(a) && ok(apex) && ok(b) && a.dist(*b) > MERGE_TOL && *rho > 1e-6 && *rho < 1.0 - 1e-6,
-            LinkGeom::Ellipse { c, major, minor } => {
-                ok(c) && ok(major) && c.dist(*major) > 1e-9 && minor.is_finite() && *minor > 1e-9 && *minor < 1e9
-            }
+            LinkGeom::Ellipse { c, major, minor } => ok(c) && ok(major) && c.dist(*major) > 1e-9 && radius_in_range(*minor),
             LinkGeom::Spline { pts, control, degree, periodic } => {
                 (!*periodic || (!*control && *degree == 3 && crate::periodic_beziers(pts).is_ok()))
                     && (2..=crate::curves::MAX_SPLINE_POINTS).contains(&pts.len())
@@ -417,6 +435,34 @@ impl Sketch {
     /// Is the curve's link lost (its reference no longer found)?
     pub fn is_lost_curve(&self, ci: usize) -> bool {
         self.curves.get(ci).and_then(|c| c.link.as_deref()).and_then(|l| self.link(l)).is_some_and(|l| l.lost)
+    }
+
+    /// The line of sketch axis `name` (`x` or `y`) when the sketch already has one (see
+    /// [`Sketch::sketch_axis_line`]).
+    pub fn sketch_axis_curve(&self, name: &str) -> Option<usize> {
+        self.links
+            .iter()
+            .filter(|l| matches!(&l.source, LinkSource::SketchAxis { name: n } if n == name))
+            .find_map(|l| self.link_curves(&l.id).into_iter().find(|c| matches!(self.curves.get(*c).map(|c| &c.kind), Some(CurveKind::Line { .. }))))
+    }
+
+    /// The line of sketch axis `name` (`x` or `y`) that constraints can refer to: a linked
+    /// construction line on the axis (it stays there and is left out of profiles), shared by
+    /// every reference to that axis and added on first use. `None` when `name` is not a sketch
+    /// axis.
+    pub fn sketch_axis_line(&mut self, name: &str) -> Result<Option<usize>> {
+        let Some(geom) = sketch_axis_geom(name) else { return Ok(None) };
+        if let Some(c) = self.sketch_axis_curve(name) {
+            return Ok(Some(c));
+        }
+        let id = self.add_link(LinkKind::Project, LinkSource::SketchAxis { name: name.into() }, &[geom])?;
+        let curves = self.link_curves(&id);
+        for c in &curves {
+            if let Some(cu) = self.curves.get_mut(*c) {
+                cu.construction = true;
+            }
+        }
+        curves.first().copied().map(Some).ok_or_else(|| SketchError::Invalid(format!("sketch {name} axis")))
     }
 
     /// Add linked geometry. Returns the link id; the new curve and point ids are

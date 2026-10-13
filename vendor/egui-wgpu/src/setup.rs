@@ -272,6 +272,10 @@ impl WgpuSetupCreateNew {
                         max_texture_dimension_2d: 8192,
                         ..base_limits
                     },
+                    // SolidCraft: without it only the sample counts WebGPU guarantees (1x, 4x)
+                    // are allowed, even where the adapter supports 2x and 8x.
+                    required_features: adapter.features()
+                        & wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
                     ..Default::default()
                 }
             }),

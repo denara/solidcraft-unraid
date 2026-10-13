@@ -9,12 +9,12 @@ use std::cell::RefCell;
 
 use egui::{Pos2, Rect, Shape, Stroke, vec2};
 use serde_json::{Value, json};
-use solvecraft_engine::geom::{Vec2, Vec3};
+use solidcraft_engine::geom::{Vec2, Vec3};
 
 use crate::SolveApp;
 use crate::theme::Tokens;
 use crate::tools::Tool;
-use crate::viewport::{Hit, Proj, pick};
+use crate::viewport::{Hit, Proj, pick_3d};
 
 thread_local! {
     /// Points of the curve being drawn in 3D (with the tool they belong to).
@@ -38,6 +38,11 @@ pub fn active(app: &SolveApp) -> bool {
 
 fn takes(cmd: &str) -> bool {
     matches!(cmd, "sketch.line" | "sketch.spline.fit_point" | "sketch.point")
+}
+
+/// Only 3D point-placing tools broaden sketch-point picking; ordinary selection stays local.
+pub fn drawing(app: &SolveApp) -> bool {
+    active(app) && app.tool.as_ref().is_some_and(|tool| takes(tool.cmd))
 }
 
 /// Points drawn in 3D: (wire id, fit index, point).
@@ -69,9 +74,13 @@ pub fn point_at(app: &SolveApp, proj: &Proj, pos: Pos2) -> Option<(Vec3, &'stati
     let st = app.session.world_state();
     let ss = app.session.active_sketch.and_then(|s| st.sketch(s))?;
     let (o, d) = proj.ray(pos);
-    for h in pick(app, proj, pos) {
+    for h in pick_3d(app, proj, pos) {
         match h {
-            Hit::SketchPoint { at, .. } => return Some((ss.plane.to_world(at), "Pt")),
+            Hit::SketchPoint { sketch, at, .. } => {
+                if let Some(source) = st.sketch(sketch) {
+                    return Some((source.plane.to_world(at), "Pt"));
+                }
+            }
             Hit::Vertex { point, .. } => return Some((point, "Vertex")),
             Hit::Edge { body, index, .. } => {
                 let ws = app.session.world_state();
@@ -205,7 +214,7 @@ pub fn preview(app: &SolveApp, t: &Tool, painter: &egui::Painter, proj: &Proj) -
         painter.text(
             s + vec2(10.0, 10.0),
             egui::Align2::LEFT_TOP,
-            format!("{:.2}, {:.2}, {:.2}", h.x, h.y, h.z),
+            format!("{}, {}, {}", crate::prefs::show_mm(app, h.x, 1), crate::prefs::show_mm(app, h.y, 1), crate::prefs::show_mm(app, h.z, 1)),
             egui::FontId::proportional(11.0),
             tk.text_dim,
         );
@@ -215,7 +224,7 @@ pub fn preview(app: &SolveApp, t: &Tool, painter: &egui::Painter, proj: &Proj) -
         if let Some((h, _)) = hover {
             w.push(h);
         }
-        let poly: Vec<Pos2> = solvecraft_engine::sketch::fit_polyline(&w).into_iter().filter_map(|p| proj.to_screen(p)).collect();
+        let poly: Vec<Pos2> = solidcraft_engine::sketch::fit_polyline(&w).into_iter().filter_map(|p| proj.to_screen(p)).collect();
         painter.add(Shape::line(poly, stroke));
     } else {
         painter.add(Shape::line(all, stroke));
@@ -265,7 +274,12 @@ pub fn click(app: &mut SolveApp, proj: &Proj, pos: Pos2) -> bool {
     TRIAD.with(|t| *t.borrow_mut() = hit.as_ref().map(|(w, i, _)| (w.clone(), *i)));
     if let Some((w, _, p)) = hit {
         app.set_status(
-            format!("{w} at {:.2}, {:.2}, {:.2}: drag an arrow (X, Y, Z) or the square (in the sketch plane); Delete removes it", p.x, p.y, p.z),
+            format!(
+                "{w} at {}, {}, {}: drag an arrow (X, Y, Z) or the square (in the sketch plane); Delete removes it",
+                crate::prefs::show_mm(app, p.x, 1),
+                crate::prefs::show_mm(app, p.y, 1),
+                crate::prefs::show_mm(app, p.z, 1)
+            ),
             false,
         );
         return true;

@@ -5,7 +5,7 @@ use crate::{DocError, ProfileSel, Result, SolvedSketch, WholeProfileBoundary};
 
 const MAX_SELECTIONS: usize = 128;
 
-fn whole_boundary(profile: &solvecraft_sketch::Profile) -> Option<WholeProfileBoundary> {
+fn whole_boundary(profile: &solidcraft_sketch::Profile) -> Option<WholeProfileBoundary> {
     let (outer, holes) = profile.whole_curve_boundaries()?;
     Some(WholeProfileBoundary { outer, holes })
 }
@@ -117,10 +117,10 @@ pub fn profile_selection_indices(ss: &SolvedSketch, selection: &ProfileSel) -> R
                     if curves.iter().collect::<BTreeSet<_>>().len() != curves.len()
                         && !ss.profiles.iter().any(|profile| same_ids(curves, &profile.outer_curves))
                     {
-                        return Err(crate::curve_pick_error(solvecraft_sketch::CurvePick::Missing, curves, &ss.name));
+                        return Err(crate::curve_pick_error(solidcraft_sketch::CurvePick::Missing, curves, &ss.name));
                     }
                     indices.push(
-                        solvecraft_sketch::profile_by_curves(&ss.profiles, curves)
+                        solidcraft_sketch::profile_by_curves(&ss.profiles, curves)
                             .map_err(|error| crate::curve_pick_error(error, curves, &ss.name))?,
                     );
                 }
@@ -230,8 +230,8 @@ pub fn capture_profile_selection(ss: &SolvedSketch, indices: &[usize]) -> Result
 mod tests {
     #![allow(clippy::unwrap_used, clippy::panic)]
     use super::*;
-    use solvecraft_geom::{Plane, Vec2};
-    use solvecraft_sketch::{Sketch, find_profiles, solve};
+    use solidcraft_geom::{Plane, Vec2};
+    use solidcraft_sketch::{Sketch, find_profiles, solve};
 
     fn rounded_source(sketch: &mut Sketch, radius: f64) -> Vec<(String, bool)> {
         let endpoints = [
@@ -328,13 +328,13 @@ mod tests {
             )
             .unwrap();
         model.evaluate(&document);
-        let volume = solvecraft_kernel::measure(&model.state().bodies[0].body).unwrap().volume;
+        let volume = solidcraft_kernel::measure(&model.state().bodies[0].body).unwrap().volume;
         assert!((volume - 2. * 73.2 * 63.2).abs() < 1e-6, "{volume}");
         let reopened = crate::Document::from_json(&document.to_json()).unwrap();
         assert_eq!(reopened, document);
         let mut cold = crate::Model::new();
         cold.evaluate(&reopened);
-        assert!((solvecraft_kernel::measure(&cold.state().bodies[0].body).unwrap().volume - volume).abs() < 1e-6);
+        assert!((solidcraft_kernel::measure(&cold.state().bodies[0].body).unwrap().volume - volume).abs() < 1e-6);
         let crate::FeatureKind::Sketch { sketch, .. } = &mut document.features[0].kind else { panic!("sketch") };
         set_source_radius(sketch, 2.);
         model.evaluate(&document);
@@ -345,7 +345,7 @@ mod tests {
         assert_eq!(active, original_roles);
         let rounded_area = 75.2 * 65.2 - (4. - std::f64::consts::PI) * 0.6 * 0.6;
         assert!((crate::select_profiles(solved, &selection).unwrap()[0].area() - rounded_area).abs() < 1e-7);
-        let volume = solvecraft_kernel::measure(&model.state().bodies[0].body).unwrap().volume;
+        let volume = solidcraft_kernel::measure(&model.state().bodies[0].body).unwrap().volume;
         // Kernel volume integrates the curved display mesh; the analytic region above
         // checks the exact rounded geometry independently of that tessellation.
         assert!((volume - 2. * rounded_area).abs() < 0.002, "{volume}");
@@ -359,7 +359,7 @@ mod tests {
         );
         let reopened = crate::Document::from_json(&document.to_json()).unwrap();
         cold.evaluate(&reopened);
-        assert!((solvecraft_kernel::measure(&cold.state().bodies[0].body).unwrap().volume - volume).abs() < 1e-5);
+        assert!((solidcraft_kernel::measure(&cold.state().bodies[0].body).unwrap().volume - volume).abs() < 1e-5);
     }
 
     #[test]
@@ -387,7 +387,7 @@ mod tests {
     fn periodic_offset_ring_whole_source_survives_adaptive_spans_and_reopen() {
         let mut sketch = Sketch::new();
         let major = sketch.add_point(Vec2::new(10., 0.), None).unwrap();
-        let ellipse = sketch.add_curve(solvecraft_sketch::CurveKind::Ellipse { c: 0, m: major, r: 5. }, None).unwrap();
+        let ellipse = sketch.add_curve(solidcraft_sketch::CurveKind::Ellipse { c: 0, m: major, r: 5. }, None).unwrap();
         let first = sketch.add_freeform_offset(ellipse, true, -1.).unwrap();
         sketch.add_freeform_offset(first, true, -0.5).unwrap();
         let mut document = crate::Document::new("periodic offset ring multiset");
@@ -453,7 +453,7 @@ mod tests {
             )
             .unwrap();
         model.evaluate(&document);
-        let initial_volume = solvecraft_kernel::measure(&model.state().bodies[0].body).unwrap().volume;
+        let initial_volume = solidcraft_kernel::measure(&model.state().bodies[0].body).unwrap().volume;
         // Kernel measurement integrates the curved mesh. Scale the established
         // periodic-ring tolerance (0.05 mm³ at height3) to this height2 extrusion.
         // Exact profile identity and cold/warm equality below remain strict.
@@ -481,7 +481,7 @@ mod tests {
         assert!(updated_region.contains(ring_point));
         assert!(!updated_region.contains(source_point + normal * 0.5));
         assert!(!updated_region.contains(source_point + normal * 1.75));
-        let updated_volume = solvecraft_kernel::measure(&updated_state.bodies[0].body).unwrap().volume;
+        let updated_volume = solidcraft_kernel::measure(&updated_state.bodies[0].body).unwrap().volume;
         assert!(updated_volume > initial_volume);
         assert!(
             (updated_volume - 2. * updated_region.area()).abs() < volume_tolerance,
@@ -491,7 +491,7 @@ mod tests {
         let reopened_document = crate::Document::from_json(&document.to_json()).unwrap();
         cold.evaluate(&reopened_document);
         assert!(cold.results.iter().all(|result| result.error.is_none()));
-        assert!((solvecraft_kernel::measure(&cold.state().bodies[0].body).unwrap().volume - updated_volume).abs() < 1e-6);
+        assert!((solidcraft_kernel::measure(&cold.state().bodies[0].body).unwrap().volume - updated_volume).abs() < 1e-6);
 
         // A new hole is a semantic boundary change, not the old ring. Whole-source
         // identities include holes and must not silently absorb the new material cutout.

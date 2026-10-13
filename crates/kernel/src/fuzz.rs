@@ -1,9 +1,9 @@
-//! Robustness checks on random inputs (`solvecraft-cli fuzz`, docs/robustness.md): a small
+//! Robustness checks on random inputs (`solidcraft-cli fuzz`, docs/robustness.md): a small
 //! seeded random generator, and the boolean volume identity on random pairs of primitives
 //! placed on a coarse grid, so coincident faces and tangencies come up often.
 
 use serde::Serialize;
-use solvecraft_geom::Vec3;
+use solidcraft_geom::Vec3;
 
 use crate::{Body, BoolOp, boolean, box_solid, cylinder, measure, sphere, torus};
 
@@ -99,6 +99,8 @@ pub struct BoolCase {
     /// "ok", or the kind of failure: "error", "invalid", "identity".
     pub outcome: String,
     pub detail: String,
+    pub boolean_fallbacks: std::collections::BTreeMap<crate::BooleanStrategy, usize>,
+    pub boolean_reports_truncated: bool,
 }
 
 fn vol(b: &Option<Body>) -> crate::Result<f64> {
@@ -118,7 +120,15 @@ pub fn boolean_shapes(seed: u64) -> (Shape, Shape) {
 /// V(A∪B) + V(A∩B) = V(A) + V(B) and V(A−B) = V(A) − V(A∩B), within 0.2 %.
 pub fn boolean_case(seed: u64) -> BoolCase {
     let (a, b) = boolean_shapes(seed);
-    let mut case = BoolCase { seed, a: a.clone(), b: b.clone(), outcome: "ok".into(), detail: String::new() };
+    let mut case = BoolCase {
+        seed,
+        a: a.clone(),
+        b: b.clone(),
+        outcome: "ok".into(),
+        detail: String::new(),
+        boolean_fallbacks: Default::default(),
+        boolean_reports_truncated: false,
+    };
     let fail = |c: &mut BoolCase, kind: &str, d: String| {
         c.outcome = kind.into();
         c.detail = d;
@@ -129,7 +139,12 @@ pub fn boolean_case(seed: u64) -> BoolCase {
     };
     let mut res = Vec::new();
     for op in [BoolOp::Union, BoolOp::Intersect, BoolOp::Cut] {
-        match boolean(&ba, &bb, op) {
+        let (result, diagnostics) = crate::capture_boolean_diagnostics(|| boolean(&ba, &bb, op));
+        case.boolean_reports_truncated |= diagnostics.truncated;
+        for event in diagnostics.events {
+            *case.boolean_fallbacks.entry(event.strategy).or_default() += 1;
+        }
+        match result {
             Ok(x) => {
                 if let Some(body) = &x {
                     let bad = body.validity();

@@ -1,6 +1,7 @@
 #![allow(clippy::many_single_char_names)]
 
 use super::faces_classification::FacesClassification;
+use super::history::Lineage;
 use super::loops_store::*;
 use rustc_hash::FxHashMap as HashMap;
 use std::ops::Deref;
@@ -20,7 +21,7 @@ where
 {
     let surface = face.surface();
     let pt = wire.front_vertex().unwrap().point();
-    // SolveCraft: intersection-curve points lie on the surface only within the tolerance; fall
+    // SolidCraft: intersection-curve points lie on the surface only within the tolerance; fall
     // back to the nearest parameter when the exact search fails.
     let p: Point2 = surface
         .search_parameter(pt, None, 100)
@@ -86,7 +87,7 @@ where
     }
     negative_wires.into_iter().try_for_each(|chunk| {
         let pt = chunk.poly.front();
-        // SolveCraft: the innermost piece that holds the loop (nested intersection loops, such
+        // SolidCraft: the innermost piece that holds the loop (nested intersection loops, such
         // as both walls of a tube crossing one face), never the loop's own twin.
         let hole = -chunk.poly.area();
         let op = crate::tr!(
@@ -128,6 +129,7 @@ pub fn divide_faces<C, S>(
     shell: &Shell<Point3, C, S>,
     loops_store: &LoopsStore<Point3, C>,
     tol: f64,
+    lineage: &mut Lineage<C, S>,
 ) -> Option<FacesClassification<Point3, C, S>>
 where
     C: BoundedCurve<Point = Point3> + ParameterDivision1D<Point = Point3>,
@@ -145,8 +147,10 @@ where
                 res.push(face.clone(), ShapesOpStatus::Unknown);
             } else {
                 let vec = crate::tr!(divide_one_face(face, loops, tol), "divide one face");
-                vec.into_iter()
-                    .for_each(|(face, status)| res.push(face, status));
+                vec.into_iter().for_each(|(piece, status)| {
+                    lineage.face_piece(face.id(), piece.id());
+                    res.push(piece, status)
+                });
             }
             Some(())
         })?;

@@ -8,7 +8,7 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
             let mut made = Vec::new();
             if let Some(sk) = sketch {
                 let ss = st.sketch(*sk).ok_or_else(|| DocError::Unknown(format!("sketch {sk} (it must come earlier in the timeline)")))?;
-                let regions = solvecraft_sketch::merge_regions(&select_profiles(ss, profiles)?);
+                let regions = solidcraft_sketch::merge_regions(&select_profiles(ss, profiles)?);
                 for r in &regions {
                     made.push(kernel::patch_region(&ss.plane, r)?);
                 }

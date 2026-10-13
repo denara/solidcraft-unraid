@@ -2,22 +2,21 @@
 
 SolidCraft is a clean-room, open-source, pure-Rust parametric 3D CAD application:
 sketches with a constraint solver, a parametric timeline of features, a B-rep
-kernel, and a desktop UI that agents can drive. Siblings with the same conventions live next to
-it in `storytold/`: `cadcraft` (AutoCAD-style, the closest relative), `photocraft`, `vectorcraft`,
-`gridcraft`, `designcraft`, `wordcraft`, `deckcraft`, `soundcraft`. Repos don't share code; when
-code is adapted from a sibling (MIT OR Apache-2.0) it is noted in ATTRIBUTION.md.
+kernel, and a desktop UI that agents can drive. Projects published by
+[storytold](https://github.com/storytold) can serve as references for implementation conventions.
+Any code adapted from other projects (MIT OR Apache-2.0) is noted in ATTRIBUTION.md.
 
-## Product name and compatibility
-SolidCraft is the displayed product name; `solidcraft` is the repository name. Keep existing
-`solvecraft` crate/binary names, `.solvecraft` files, format markers, environment variables,
-settings/recovery paths and package IDs compatible. Published SolveCraft release artifacts
-and attribution records keep their historical names. Public docs/web/Flatpak deployments
-use project Pages `/solidcraft/`; do not add permanent old-name Pages aliases. See README's
-compatibility notes.
+## Product name
+SolidCraft everywhere: crates `solidcraft-*`, binaries `solidcraft` and `solidcraft-cli`,
+`.solidcraft` designs, the `solidcraft/N` format tag, `SOLIDCRAFT_*` environment variables,
+settings and recovery folders, the MCP server name, docs, CI and packaging. Container gateway, environment variables, volume paths and compatibility aliases retain their existing SolveCraft names. The upstream old name
+survives only in the explicit compatibility shims listed in `docs/compatibility.md`; don't add
+new uses of it anywhere else. Public docs/web/Flatpak deployments use project Pages
+`/solidcraft/`; do not add permanent old-name Pages aliases.
 
 ## Container prototype baseline
 The first Unraid prototype used upstream commit `af536a7`. The current validated
-container baseline is `07e263d7e95cac9a6851e48bffcb79f302aabfb8`.
+container baseline is `913583bfeebb67eea406b40c9bc282bbf27726c7`.
 Keep later upstream CAD/UI feature updates separate from this deployment addition;
 advance the baseline only as a separate, validated update. See [update records](docs/unraid-updates.md).
 
@@ -47,11 +46,10 @@ file/origin, persistence and web checks pass. Keep `latest` on a passing build a
 commit-specific tags. Verify anonymous pulls before claiming public availability.
 This is container packaging, not an upstream application release or an Unraid deployment.
 
+
 ## Start every session here
 1. Read `plan/STATUS.md` (current milestone, next task), then the task in `plan/execution-plan.md`
-   and the relevant `plan/architecture.md` section. Behaviour reference: `plan/fusion/`
-   (`menu-tree.json` is Fusion's toolbar dump; `oracle/*/` are parts built in Fusion with their
-   recipes and measurements).
+   and the relevant `plan/architecture.md` section.
 2. Kernel and library decisions: `plan/adr/0001-geometry-kernel.md` (what we may depend on, what
    is rejected for licence reasons).
 3. Follow the autonomous operation protocol (`plan/execution-plan.md` §6). Don't stop to ask
@@ -68,29 +66,38 @@ People trust SolidCraft with their designs; a crash loses their work. **This out
 - **Input-derived numbers are hostile** (command parameters, design files, control-channel
   input): `get()` not `[i]`, finite checks, caps on sizes and loop counts.
 - **Third-party kernel calls are guarded:** everything that calls `truck` goes through
-  `solvecraft_kernel::guard`, which turns a panic into `KernelError::Internal`.
+  `solidcraft_kernel::guard`, which turns a panic into `KernelError::Internal`.
 - **Last-resort guard:** `Session::execute` runs every command under `catch_unwind`; an escaped
   panic restores the design and reports `EngineError::Internal`.
-- **Prove it:** every crash fix lands with a regression test (see `hostile_params_never_panic`).
+- **Crash reports:** the desktop app writes every panic and every unclean exit to a local crash folder,
+  with the design and the commands that reproduce it (`solidcraft_engine::crash`, docs/crash-reports.md).
+  When someone says the app crashed, look there first: `solidcraft-cli crashes`, `crashes show <id>`,
+  `crashes replay <id>` (or the `diagnostics.crash_reports` command / MCP `crash_reports` tool).
+- **Prove it:** every crash fix lands with a regression test (see `hostile_params_never_panic`); a
+  crash report's `design.solidcraft` + `replay.json` is the test's starting point.
 - Every production crate root carries
   `#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]`.
 
 ## Non-negotiables
 - **Private deployment configuration stays local.** Commit only generic example hostnames,
-  network addresses and filesystem paths. Keep actual deployment values and credentials in
-  ignored `.env` files or `target/`; exclude them from container build contexts as well.
-- **Clean-room.** Fusion may be *observed* black-box (its UI, its toolbar dump, parts built in it
-  and their measurements, kept under `plan/fusion/`, never committed). Never copy Autodesk icons,
-  artwork, help text, tooltips, templates or materials, and never commit files produced by
-  Fusion. Command ids and command names are used as identifiers only (`xtask/data/fusion-catalog.tsv`
-  holds ids and names, nothing else). File formats come from public specifications. **Never read,
-  copy or link GPL/LGPL/AGPL code**: OpenCASCADE, FreeCAD (incl. planegcs), SolveSpace,
-  CadQuery/OCP, LibreCAD, QCAD — don't even read their sources. The sketch solver and the blend
+  addresses and filesystem paths. Actual deployment values, credentials and private designs stay
+  in ignored local configuration or target; exclude them from container build contexts.
+- **Independent.** SolidCraft is independent. Behaviour is designed from public documentation,
+  general CAD conventions and user feedback. Reference tests use analytic values and open-source
+  tools. Never copy another product's code, icons, artwork, help text, tooltips, templates or
+  materials. File formats come from public specifications.
+- **No commercial CAD products.** Agents must not drive, script, automate or extract data from
+  commercial CAD products (Fusion, SolidWorks, Onshape, …) for this project: no test data,
+  measurements, command lists, ids or files produced with them.
+- **Never read, copy or link GPL/LGPL/AGPL code**: OpenCASCADE, FreeCAD (incl. planegcs),
+  SolveSpace, CadQuery/OCP, LibreCAD, QCAD — don't even read their sources. (`tools/freecad-oracle/`
+  runs FreeCAD as a separate program through its public scripting API to compute reference values;
+  nothing from FreeCAD is linked, vendored or shipped.) The sketch solver and the blend
   operations are our own.
-- **Assets — absolutely essential.** SolidCraft contains **no Autodesk iconography, images,
-  fonts or artwork — ever.** Every icon is drawn in code (`crates/ui-egui/src/icons.rs`). Any
-  file asset must be original or openly licensed and **must have a row in ATTRIBUTION.md**
-  (`cargo xtask assets` enforces it). Screenshots of Autodesk software are never committed.
+- **Assets — absolutely essential.** SolidCraft contains **no iconography, images, fonts or
+  artwork from commercial CAD products — ever.** Every icon is drawn in code
+  (`crates/ui-egui/src/icons.rs`). Any file asset must be original or openly licensed and **must have a row in ATTRIBUTION.md**
+  (`cargo xtask assets` enforces it). Screenshots of commercial CAD software are never committed.
   Breaking this rule is the most serious mistake you can make in this repo.
 - **Everything is a command.** User-visible behaviour = a command in `crates/engine/src/cmd/*`
   (`CommandSpec`: id = our own dotted, lower-case id `<area>.<thing>[.<variant>]` such as
@@ -135,8 +142,7 @@ People trust SolidCraft with their designs; a crash loses their work. **This out
   recording; do not commit generated screenshots or videos just to provide review evidence.
 - Throughout the work and before handoff, check current upstream commits and the relevant
   PR's merge status. Keep your branch current with upstream merges, resolve conflicts without
-  discarding others' work, and re-run validation when integration changes the result. Use
-  the fork-specific fetch/merge workflow above before pushing; never force-push. Report the checked
+  discarding others' work, and re-run validation when integration changes the result. Use the fork-specific fetch/merge workflow above before pushing; never force-push. Report the checked
   upstream/PR state, any conflicts resolved and the validation performed. If a PR remains open,
   keep monitoring it while the task is active and make its pending status clear at handoff;
   do not claim it merged without checking.
@@ -151,21 +157,22 @@ version bumps solely from commit prefixes, overwrite published versions, or push
 before the draft is verified.
 
 ## Running and looking at the app
-- `cargo run --release -p solvecraft -- --sample --control PORT` (sample design + control channel).
+- `cargo run --release -p solidcraft -- --sample --control PORT` (sample design + control channel).
   Pick a free port. Without a display, run it under `Xvfb :99` with `DISPLAY=:99`.
 - Drive it with JSON lines on `127.0.0.1:PORT` (see `docs/control-protocol.md`):
   - `{"id":1,"method":"engine.execute","params":{"command":"solid.extrude","params":{"distance":20}}}`
   - `{"id":2,"method":"ui.start","params":{"command":"sketch.create"}}` then `ui.click {x, y}`
   - `{"id":3,"method":"ui.screenshot","params":{"path":"/tmp/shot.png"}}` then read the PNG.
 - **For UI work, look at the result** (screenshot, read the PNG). Without a window use
-  `ui.render` or `solvecraft-cli snapshot`.
-- Headless: `solvecraft-cli run script.json --out part.step`, `solvecraft-cli eval design.solvecraft`,
-  `solvecraft-cli snapshot script.json --out shot.png`, `solvecraft-cli commands`.
-- Fusion oracle: `cargo xtask oracle` replays `plan/fusion/oracle/*/recipe.json` and compares
-  with Fusion's `measure.json` (writes `docs/oracle.md`).
-- Build with `CARGO_TARGET_DIR=<repo>/target`. Windows: `cargo xwin build --release --target x86_64-pc-windows-msvc -p solvecraft`.
+  `ui.render` or `solidcraft-cli snapshot`.
+- Headless: `solidcraft-cli run script.json --out part.step`, `solidcraft-cli eval design.solidcraft`,
+  `solidcraft-cli snapshot script.json --out shot.png`, `solidcraft-cli commands`.
+- Reference tests: `cargo xtask oracle` replays `tests/oracle/*/recipe.json` and compares with
+  each case's `expected.json` (analytic or FreeCAD values; writes `docs/oracle.md`). Expected
+  values never come from a commercial CAD product.
+- Build with `CARGO_TARGET_DIR=<repo>/target`. Windows: `cargo xwin build --release --target x86_64-pc-windows-msvc -p solidcraft`.
 
 ## Roadmap
-`ROADMAP.md` (committed) tracks status, milestones, parity and estimates. Update it whenever a
-milestone task lands. `cargo xtask parity` recomputes command parity in `docs/parity.md`;
-`cargo xtask oracle` recomputes `docs/oracle.md`.
+`ROADMAP.md` (committed) tracks status, milestones and estimates. Update it whenever a
+milestone task lands. `cargo xtask features` regenerates `docs/features.md` (SolidCraft's
+commands by area, from the registry) when commands are added or renamed.

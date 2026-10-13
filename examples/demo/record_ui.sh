@@ -1,21 +1,26 @@
 #!/bin/bash
-# record_ui.sh DISPLAY PORT OUTDIR [STORY] [PLAYBACK_RATE]: record enclosure_ui_mcp.py --story STORY (v2 or v3,
-# default v3) driving the app on X display DISPLAY (1920x1080, started with --control PORT) to
+# record_ui.sh DISPLAY PORT OUTDIR [STORY] [PLAYBACK_RATE]: record enclosure_ui_mcp.py --story STORY (v2, v3
+# or pi, default pi) driving the app on X display DISPLAY (1920x1080, started with --control PORT) to
 # OUTDIR/enclosure-demo-STORY.mp4 (H.264) and .gif, with captions and a drawn pointer (the app
 # gets synthetic pointer events, so the screen's own pointer never moves). Needs ffmpeg with
 # x11grab and libass.
 # PLAYBACK_RATE defaults to 1; label accelerated previews with their rate when publishing.
-# SOLVECRAFT_DEMO_NAME overrides the filename stem; PAUSE scales UI pauses, CAPTION is the
+# SOLIDCRAFT_DEMO_NAME overrides the filename stem; PAUSE scales UI pauses, CAPTION is the
 # minimum real-time caption duration, and HOLD keeps the live completed model on screen.
-# For a readable 4x preview use SOLVECRAFT_DEMO_CAPTION=4 and SOLVECRAFT_DEMO_HOLD=8.
+# For a readable 4x preview use SOLIDCRAFT_DEMO_CAPTION=4 and SOLIDCRAFT_DEMO_HOLD=8.
+# SOLIDCRAFT_DEMO_GIF_WIDTH and SOLIDCRAFT_DEMO_GIF_FPS size the README GIF (default 800 px, 10 fps).
+# The README demo (0.6): SOLIDCRAFT_DEMO_NAME=demo-0.6 SOLIDCRAFT_DEMO_PAUSE=0.4 SOLIDCRAFT_DEMO_CAPTION=7
+#   SOLIDCRAFT_DEMO_HOLD=8 record_ui.sh :74 7974 OUT pi 6
 set -e
-DISP=${1:-:0}; PORT=${2:-7878}; OUT=$(cd "${3:-.}" && pwd); STORY=${4:-v3}; RATE=${5:-1}
+DISP=${1:-:0}; PORT=${2:-7878}; OUT=$(cd "${3:-.}" && pwd); STORY=${4:-pi}; RATE=${5:-1}
 HERE=$(cd "$(dirname "$0")" && pwd)
-CLI=${SOLVECRAFT_CLI:-solvecraft-cli}
-NAME=${SOLVECRAFT_DEMO_NAME:-enclosure-demo-$STORY}
-PAUSE=${SOLVECRAFT_DEMO_PAUSE:-0.55}
-CAPTION=${SOLVECRAFT_DEMO_CAPTION:-1.4}
-HOLD=${SOLVECRAFT_DEMO_HOLD:-1}
+CLI=${SOLIDCRAFT_CLI:-solidcraft-cli}
+NAME=${SOLIDCRAFT_DEMO_NAME:-enclosure-demo-$STORY}
+PAUSE=${SOLIDCRAFT_DEMO_PAUSE:-0.55}
+CAPTION=${SOLIDCRAFT_DEMO_CAPTION:-1.4}
+HOLD=${SOLIDCRAFT_DEMO_HOLD:-1}
+GIF_WIDTH=${SOLIDCRAFT_DEMO_GIF_WIDTH:-800}
+GIF_FPS=${SOLIDCRAFT_DEMO_GIF_FPS:-10}
 python3 -c 'import math,sys; r=float(sys.argv[1]); assert math.isfinite(r) and 0<r<=16' "$RATE"
 # Frame the actual app at capture resolution before the first recorded blank viewport.
 python3 - "$HERE" "$PORT" <<'PY'
@@ -38,7 +43,7 @@ FF=$!
 # Waiting lets ffmpeg write the MP4 index so the failed take remains inspectable.
 trap 'kill -INT $FF 2>/dev/null || true; wait $FF 2>/dev/null || true' EXIT
 sleep 1
-python3 "$HERE/enclosure_ui_mcp.py" --port "$PORT" --cli "$CLI" --story "$STORY" --speed "$PAUSE" --minimum-caption "$CAPTION" --log "$OUT/steps.log" --save "$OUT/enclosure-$STORY.solvecraft"
+python3 "$HERE/enclosure_ui_mcp.py" --port "$PORT" --cli "$CLI" --story "$STORY" --speed "$PAUSE" --minimum-caption "$CAPTION" --log "$OUT/steps.log" --save "$OUT/enclosure-$STORY.solidcraft"
 sleep "$HOLD"
 kill -INT $FF; wait $FF || true
 START=$(grep -o "start: [0-9.]*" "$OUT/ffmpeg.log" | head -1 | cut -d" " -f2)
@@ -77,6 +82,6 @@ PY
 ffmpeg -loglevel error -y -i "$OUT/real-time.mp4" -vf "$(cat "$OUT/public.filter")" -an \
   -c:v libx264 -preset slow -crf 20 -pix_fmt yuv420p -movflags +faststart "$OUT/$NAME.mp4"
 ffmpeg -loglevel error -y -i "$OUT/$NAME.mp4" \
-  -vf "fps=8,scale=720:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=80:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4" \
+  -vf "fps=$GIF_FPS,scale=$GIF_WIDTH:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=96:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle" \
   "$OUT/$NAME.gif"
 ls -la "$OUT/$NAME.mp4" "$OUT/$NAME.gif"

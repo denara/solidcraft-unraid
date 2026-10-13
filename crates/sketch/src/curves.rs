@@ -4,7 +4,7 @@
 
 use std::f64::consts::TAU;
 
-use solvecraft_geom::Vec2;
+use solidcraft_geom::Vec2;
 
 /// Polyline samples per spline span / conic / ellipse quarter.
 const SPAN_SAMPLES: usize = 24;

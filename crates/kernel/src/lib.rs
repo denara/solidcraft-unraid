@@ -1,6 +1,6 @@
 //! The B-rep kernel boundary.
 //!
-//! Everything SolveCraft does with solids goes through this crate: building bodies from planar
+//! Everything SolidCraft does with solids goes through this crate: building bodies from planar
 //! regions (extrude, revolve) and primitives, booleans, fillets and chamfers, tessellation,
 //! measurement and STEP export and import. The implementation uses the `truck` crates (Apache-2.0; see
 //! `plan/adr/0001-geometry-kernel.md`) plus our own local operations (edge fillets and
@@ -16,6 +16,8 @@ mod blend;
 mod blend_corner;
 mod blend_variable;
 mod body;
+mod boolean_diagnostics;
+mod boolean_record;
 mod bore_guard;
 mod build;
 mod coplanar;
@@ -24,26 +26,38 @@ mod delete_face;
 mod emboss;
 #[cfg(test)]
 mod face_source_tests;
+mod fill;
 mod freeform;
 pub mod fuzz;
 mod heal;
 mod helix;
+pub mod history;
 mod iges_in;
 mod iges_out;
+#[cfg(test)]
+mod intersection_curve_tests;
 mod lip;
 mod loopblend;
 mod measure;
+mod mesh_convert;
 mod meshbody;
+#[cfg(test)]
+mod modify_history_tests;
+mod native;
+mod numbered;
 mod offset;
 mod ops;
+mod plane_fit;
 mod polybool;
 mod polyhedron;
 mod prism;
 mod prism_curve;
 mod prism_measure;
 pub mod provenance;
+mod record;
 mod sew;
 mod smooth_edges;
+mod spline_conv;
 mod splitface;
 mod step;
 mod step_in;
@@ -54,11 +68,13 @@ mod sweep_path;
 #[cfg(test)]
 mod thread_tests;
 mod topo;
+mod tspline;
 
-pub use blend::{ChamferSide, chamfer, chamfer_sides, fillet};
+pub use blend::{ChamferSide, chamfer, chamfer_sides, fillet, fillet_max};
 pub use blend_corner::fillet_radii;
 pub use blend_variable::{fillet_chord, fillet_variable, fillet_variable_points};
-pub use body::{Body, CapSignature, EdgeInfo, FaceInfo, FacePaint, FaceSource, Paint};
+pub use body::{Body, CapSignature, DISPLAY_ANGLE, EdgeInfo, FaceInfo, FacePaint, FaceSource, Paint};
+pub use boolean_diagnostics::{BooleanDiagnostics, BooleanFallback, BooleanStrategy, capture_boolean_diagnostics};
 pub use build::{PathSeg, box_solid, canonical_revolve_axis, cylinder, extrude, extrude_tapered, loft, revolve, sphere, sweep, torus};
 pub use delete_face::delete_faces;
 pub use emboss::{cylinder_emboss_anchor, emboss_cylinder, emboss_cylinder_at, has_cylinder_emboss_wall, infer_cylinder_emboss};
@@ -67,9 +83,11 @@ pub use iges_in::{MAX_IGES_BYTES, iges_import, iges_to_step};
 pub use iges_out::iges_export_bodies;
 pub use lip::raise_band;
 pub use measure::{BodyMeasure, measure};
+pub use mesh_convert::convert_prismatic_mesh;
 pub use meshbody::{MAX_TRIANGLES, mesh_body};
+pub use native::{decode_native_body, encode_native_body, native_preview_mesh};
 pub use offset::with_same_surface;
-pub use ops::{BoolOp, boolean, can_join_touching_faces, split_by_plane, transform, transform_matrix};
+pub use ops::{BoolOp, boolean, can_join_touching_faces, split_by_plane, transform, transform_matrix, union_apart};
 pub use polybool::{faceted_boolean, planar_boolean};
 pub use polyhedron::{HalfSpace, convex_polyhedron, draft, offset_faces, shell};
 pub use prism::{extrude_planar_regions, planar_regions_boolean};
@@ -84,6 +102,7 @@ pub use surfaces::{copy_faces, extend, patch_edges, patch_region, stitch, thicke
 pub use sweep_path::sweep_path;
 pub use topo::{CylinderFace, cylinder_face_at};
 pub use topo::{TopoCounts, merged_topology, seam_flags};
+pub use tspline::tspline_sheet;
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum KernelError {
@@ -91,6 +110,10 @@ pub enum KernelError {
     Invalid(String),
     #[error("the operation failed: {0}")]
     Failed(String),
+    /// A blend or other size too large for the geometry around it (a smaller size may work);
+    /// shown like any feature that isn't supported yet.
+    #[error("the operation failed: not supported yet: {0}")]
+    TooLarge(String),
     /// The third-party kernel panicked; the model is unchanged.
     #[error("kernel internal error: {0}")]
     Internal(String),
@@ -98,9 +121,29 @@ pub enum KernelError {
 
 pub type Result<T> = std::result::Result<T, KernelError>;
 
+thread_local! {
+    static GUARDED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Is this thread inside [`guard`]? (A panic now will be caught and turned into an error; the
+/// engine's crash reports mark it recovered.)
+pub fn guarded() -> bool {
+    GUARDED.with(std::cell::Cell::get) > 0
+}
+
 /// Run third-party kernel code, converting a panic into an error.
 pub fn guard<T>(what: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+    struct Depth;
+    impl Drop for Depth {
+        fn drop(&mut self) {
+            GUARDED.with(|g| g.set(g.get().saturating_sub(1)));
+        }
+    }
+    GUARDED.with(|g| g.set(g.get() + 1));
+    let depth = Depth;
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    drop(depth);
+    match r {
         Ok(r) => r,
         Err(p) => {
             let msg = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_default();

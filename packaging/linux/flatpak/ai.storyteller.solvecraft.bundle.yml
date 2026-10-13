@@ -1,17 +1,19 @@
 # Flatpak manifest for the single-file bundle attached to every GitHub release
-# (solvecraft-<version>-linux-<arch>.flatpak). Build it with packaging/linux/flatpak-bundle.sh.
+# (solidcraft-<version>-linux-<arch>.flatpak). Build it with packaging/linux/flatpak-bundle.sh.
 # Adapted from PhotoCraft's (storytold/photocraft, Apache-2.0; see ATTRIBUTION.md).
 #
-# It repackages the release's own Linux tarball (solvecraft-<version>-linux-<arch>.tar.gz, built
+# It repackages the release's own Linux tarball (solidcraft-<version>-linux-<arch>.tar.gz, built
 # on Ubuntu 22.04 by package.sh) instead of compiling Rust inside flatpak-builder: no network
 # during the build, and the same binaries as the AppImage/deb/rpm. The binaries need glibc >= 2.35
 # and load X11, Wayland, xkbcommon and Vulkan at runtime; the freedesktop runtime has all of
 # them, and the GPU driver comes from its org.freedesktop.Platform.GL extension.
+# Compatibility shim, see docs/compatibility.md: the Flatpak app id keeps its pre-rename value.
+# A new id would be a different app to Flatpak, and existing installs would stop updating.
 id: ai.storyteller.solvecraft
 runtime: org.freedesktop.Platform
 runtime-version: '26.08'
 sdk: org.freedesktop.Sdk
-command: solvecraft
+command: solidcraft
 finish-args:
   # Display: Wayland first; X11 only when no Wayland compositor is running.
   - --socket=wayland
@@ -28,16 +30,18 @@ finish-args:
   # the sandbox; `flatpak override --user --share=network ai.storyteller.solvecraft` exposes it to
   # host agents) and home/host filesystem access.
 modules:
-  - name: solvecraft
+  - name: solidcraft
     buildsystem: simple
     build-commands:
-      - install -Dm755 bin/solvecraft /app/bin/solvecraft
+      - install -Dm755 bin/solidcraft /app/bin/solidcraft
+      - install -Dm755 bin/solidcraft-cli /app/bin/solidcraft-cli
+      # The old CLI name, forwarding to solidcraft-cli (compatibility shim, docs/compatibility.md).
       - install -Dm755 bin/solvecraft-cli /app/bin/solvecraft-cli
       - install -Dm644 share/applications/ai.storyteller.solvecraft.desktop /app/share/applications/ai.storyteller.solvecraft.desktop
       - install -Dm644 share/mime/packages/ai.storyteller.solvecraft.xml /app/share/mime/packages/ai.storyteller.solvecraft.xml
       # Already has the release's version and date substituted by package.sh.
       - install -Dm644 share/metainfo/ai.storyteller.solvecraft.metainfo.xml /app/share/metainfo/ai.storyteller.solvecraft.metainfo.xml
-      - mkdir -p /app/share/icons /app/share/doc && cp -R share/icons/hicolor /app/share/icons/ && cp -R share/doc/solvecraft /app/share/doc/
+      - mkdir -p /app/share/icons /app/share/doc && cp -R share/icons/hicolor /app/share/icons/ && cp -R share/doc/solidcraft /app/share/doc/
     sources:
       - type: dir
         path: stage

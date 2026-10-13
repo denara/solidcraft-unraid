@@ -2,10 +2,10 @@
 //! the flat pattern (outline, bend lines, bend table) and its DXF export.
 
 use serde_json::{Value, json};
-use solvecraft_doc::FeatureKind;
-use solvecraft_doc::expr::Kind;
-use solvecraft_doc::sheet::{SheetBody, SheetRule};
-use solvecraft_geom::{Vec2, Vec3};
+use solidcraft_doc::expr::Kind;
+use solidcraft_doc::sheet::{SheetBody, SheetRule};
+use solidcraft_doc::{FeatureKind, FlangeEdge};
+use solidcraft_geom::{Vec2, Vec3};
 
 use super::CommandSpec;
 use super::features::{add_feature, check_expr, feature_sketch, profiles, sketch_id};
@@ -15,8 +15,9 @@ use crate::{EngineError, Result, Session};
 pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("sheet.flange", "Flange", flange).at("SHEET METAL", "CREATE").icon("flange").params(
         "base: sketch + profiles? (rule?, flip?) | contour: sketch + curves (open chain of lines) + distance (rule?, flip?, reverse?) | \
-         edge: edges: [[x,y,z] on top/bottom edges] + height (to the outer face), angle? (default 90 deg), radius? (default: rule), \
-         position?: inside|outside|middle, flip?, body?; type?: base|edge|contour (default from the inputs)",
+         edge: edges: [[x,y,z] on top/bottom edges, or {point: [x,y,z], angle?, height?} for an edge with its own angle and height] + \
+         height (to the outer face), angle? (default 90 deg), radius? (default: rule), \
+         position?: inside|outside|middle, flip?, body?; type?: base|edge|contour (default from the inputs); name?, body_name? (the new body)",
     ),
     CommandSpec::new("sheet.hem", "Hem", hem)
         .at("SHEET METAL", "CREATE")
@@ -34,9 +35,12 @@ pub static COMMANDS: &[CommandSpec] = &[
         .icon("convert_sheet")
         .params("body; face: [x,y,z] on its large flat face (a plate of even thickness); rule?"),
     CommandSpec::new("sheet.manage_rules", "Sheet Metal Rules", rules).at("SHEET METAL", "MODIFY").icon("sheet_rules").params(
-        "name (new or existing); thickness?, k_factor?, bend_radius?, relief_width?, relief_depth?, corner_relief?, hem_gap?, gap? (expressions; `Thickness` is the rule's); active?: bool; delete?: bool",
+        "name (new or existing); thickness?, k_factor?, bend_radius?, relief_width?, relief_depth?, corner_relief?, hem_gap?, gap? (expressions; `Thickness` is the rule's; \
+         gap: between flanges that meet at a corner, whose ends are closed toward each other at any angle); \
+         corner_relief_shape?: notch|round|rectangular (what is cut where two bends meet at a corner of the base, `corner_relief` across; default notch); \
+         active?: bool; delete?: bool",
     ),
-    CommandSpec::new("sheet.rules", "List Sheet Metal Rules", list_rules).noundo().params("→ rules with their expressions and values, and the active one"),
+    CommandSpec::new("sheet.rules", "List Sheet Metal Rules", list_rules).noundo().doc_only().params("→ rules with their expressions and values, and the active one"),
     CommandSpec::new("sheet.flat_pattern", "Create Flat Pattern", flat_pattern)
         .at("SHEET METAL", "CREATE")
         .icon("flat")
@@ -58,6 +62,39 @@ fn points(p: &Value, k: &str, cmd: &str) -> Result<Vec<Vec3>> {
     a.iter()
         .map(|v| vec3(v).or_else(|| v.get("point").and_then(vec3)).ok_or_else(|| bad(cmd, format!("`{k}` must contain [x, y, z] points"))))
         .collect()
+}
+
+/// The `edges` of an edge flange: points `[x, y, z]` on sheet edges, or `{point, angle?, height?}`
+/// for an edge with its own angle and height (expressions, checked like the feature's).
+fn flange_edges(s: &Session, p: &Value, cmd: &str) -> Result<Vec<FlangeEdge>> {
+    const KEYS: [&str; 3] = ["point", "angle", "height"];
+    let list = "`edges` must list points [x, y, z] on sheet edges, or {point, angle?, height?}";
+    let a = p.get("edges").and_then(Value::as_array).ok_or_else(|| bad(cmd, list))?;
+    if a.is_empty() || a.len() > 1000 {
+        return Err(bad(cmd, "`edges` must list 1…1000 points"));
+    }
+    let mut edges = Vec::with_capacity(a.len());
+    for (i, v) in a.iter().enumerate() {
+        // A bare point, as before: [x, y, z] or {x, y, z}.
+        let Some(o) = v.as_object().filter(|o| KEYS.iter().any(|k| o.contains_key(*k))) else {
+            edges.push(FlangeEdge::at(vec3(v).ok_or_else(|| bad(cmd, format!("edges[{i}]: {list}")))?));
+            continue;
+        };
+        if let Some(k) = o.keys().find(|k| !KEYS.contains(&k.as_str())) {
+            return Err(bad(cmd, format!("edges[{i}]: unknown key `{k}` (an edge takes point, angle and height)")));
+        }
+        let point = o.get("point").and_then(vec3).ok_or_else(|| bad(cmd, format!("edges[{i}]: `point` must be [x, y, z]")))?;
+        let own = |k: &str, kind: Kind| -> Result<Option<String>> {
+            if o.get(k).is_none_or(Value::is_null) {
+                return Ok(None);
+            }
+            let e = expr(v, k).ok_or_else(|| bad(cmd, format!("edges[{i}]: `{k}` must be a number or an expression")))?;
+            check_expr(s, &e, kind, cmd, &format!("edges[{i}].{k}"))?;
+            Ok(Some(e))
+        };
+        edges.push(FlangeEdge { point, angle: own("angle", Kind::Angle)?, height: own("height", Kind::Length)? });
+    }
+    Ok(edges)
 }
 
 fn rule_param(s: &Session, p: &Value, cmd: &str) -> Result<Option<String>> {
@@ -105,7 +142,7 @@ fn flange(s: &mut Session, p: &Value) -> Result<Value> {
             )
         }
         "edge" => {
-            let edges = points(p, "edges", cmd)?;
+            let edges = flange_edges(s, p, cmd)?;
             let height = req_expr(cmd, p, "height")?;
             check_expr(s, &height, Kind::Length, cmd, "height")?;
             let angle = expr(p, "angle").unwrap_or_else(|| "90 deg".into());
@@ -157,7 +194,7 @@ fn fold(s: &mut Session, p: &Value) -> Result<Value> {
             let ss = st.sketch(sk).ok_or_else(|| bad(cmd, "no such sketch"))?;
             let ci = ss.sketch.curve_index(&c).ok_or_else(|| bad(cmd, format!("no curve `{c}` in the sketch")))?;
             let (a, b) = match ss.sketch.segs(ci).as_slice() {
-                [solvecraft_geom::Seg2::Line { a, b }] => (ss.plane.to_world(*a), ss.plane.to_world(*b)),
+                [solidcraft_geom::Seg2::Line { a, b }] => (ss.plane.to_world(*a), ss.plane.to_world(*b)),
                 _ => return Err(bad(cmd, "the fold line must be a sketch line")),
             };
             (Some(sk), Some(c), a, b)
@@ -233,6 +270,10 @@ fn rules(s: &mut Session, p: &Value) -> Result<Value> {
         if let Some(e) = expr(p, k) {
             *slot = e;
         }
+    }
+    if let Some(shape) = p.get("corner_relief_shape").filter(|v| !v.is_null()) {
+        let shape = shape.as_str().and_then(solidcraft_doc::sheet::ReliefShape::parse);
+        rule.corner_relief_shape = shape.ok_or_else(|| bad(cmd, "`corner_relief_shape` must be notch, round or rectangular"))?.name().into();
     }
     let (vals, _) = s.doc.param_values();
     let values = s.doc.rule_values(&vals, &rule).map_err(|e| bad(cmd, e.to_string()))?;
@@ -323,7 +364,7 @@ fn flat_pattern(s: &mut Session, p: &Value) -> Result<Value> {
 pub fn flat_dxf(sh: &SheetBody) -> Result<String> {
     let regions = sh.flat_regions()?;
     let pockets = sh.machining()?;
-    let pocket_layer = |p: &solvecraft_doc::sheet::SheetPocket| {
+    let pocket_layer = |p: &solidcraft_doc::sheet::SheetPocket| {
         let side = if p.z0 == 0.0 {
             "BOTTOM"
         } else if p.z1 == sh.t {
@@ -384,9 +425,9 @@ pub fn flat_dxf(sh: &SheetBody) -> Result<String> {
     for (h, layer) in loops {
         // A circle is often represented by two semicircles. Keep the whole analytic
         // boundary as one CIRCLE rather than approximating outer boundaries with chords.
-        if let Some(solvecraft_geom::Seg2::Arc { center, radius, sweep, .. }) = h.segs.first() {
-            let total: f64 = h.segs.iter().filter_map(|s| if let solvecraft_geom::Seg2::Arc { sweep, .. } = s { Some(*sweep) } else { None }).sum();
-            let circular = h.segs.iter().all(|s| matches!(s, solvecraft_geom::Seg2::Arc { center: c, radius: r, sweep: a, .. } if c.dist(*center) < 1e-9 && (*r-*radius).abs() < 1e-9 && a.signum() == sweep.signum()));
+        if let Some(solidcraft_geom::Seg2::Arc { center, radius, sweep, .. }) = h.segs.first() {
+            let total: f64 = h.segs.iter().filter_map(|s| if let solidcraft_geom::Seg2::Arc { sweep, .. } = s { Some(*sweep) } else { None }).sum();
+            let circular = h.segs.iter().all(|s| matches!(s, solidcraft_geom::Seg2::Arc { center: c, radius: r, sweep: a, .. } if c.dist(*center) < 1e-9 && (*r-*radius).abs() < 1e-9 && a.signum() == sweep.signum()));
             if circular && (total.abs() - std::f64::consts::TAU).abs() < 1e-9 {
                 w(0, "CIRCLE");
                 w(8, &layer);
@@ -398,7 +439,7 @@ pub fn flat_dxf(sh: &SheetBody) -> Result<String> {
         }
         for seg in &h.segs {
             match *seg {
-                solvecraft_geom::Seg2::Arc { center, radius, start, sweep } => {
+                solidcraft_geom::Seg2::Arc { center, radius, start, sweep } => {
                     if (sweep.abs() - std::f64::consts::TAU).abs() < 1e-9 {
                         w(0, "CIRCLE");
                         w(8, &layer);
@@ -438,7 +479,7 @@ fn export_dxf(s: &mut Session, p: &Value) -> Result<Value> {
     let sh = sheet_of(s, p, cmd)?;
     let text = flat_dxf(&sh)?;
     if let Some(path) = str_(p, "path").filter(|x| !x.trim().is_empty()) {
-        solvecraft_io::vfs::write(path, text.as_bytes()).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+        solidcraft_io::vfs::write(path, text.as_bytes()).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
         return Ok(json!({"path": path, "bends": sh.bends().len()}));
     }
     Ok(json!({"dxf": text, "bends": sh.bends().len()}))
@@ -482,7 +523,7 @@ fn export_bend_table(s: &mut Session, p: &Value) -> Result<Value> {
         csv
     };
     if let Some(path) = str_(p, "path").filter(|x| !x.trim().is_empty()) {
-        solvecraft_io::vfs::write(path, text.as_bytes()).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+        solidcraft_io::vfs::write(path, text.as_bytes()).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
         return Ok(json!({"path": path, "format": format, "bends": sh.bends().len()}));
     }
     Ok(json!({"format": format, "text": text, "bends": sh.bends().len()}))

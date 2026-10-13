@@ -18,20 +18,20 @@ COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p solvecraft-cli -p solvecraft-server \
+    cargo build --release --locked -p solidcraft-cli -p solvecraft-server \
     && mkdir -p /out \
-    && cp target/release/solvecraft-cli target/release/solvecraft-server /out/
+    && cp target/release/solidcraft-cli target/release/solvecraft-cli target/release/solvecraft-server /out/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
-    cd apps/solvecraft-web && trunk build --release --locked --public-url /
+    cd apps/solidcraft-web && trunk build --release --locked --public-url /
 
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /data /opt/solvecraft/web \
     && chown 99:100 /data
-COPY --from=build /out/solvecraft-cli /out/solvecraft-server /usr/local/bin/
+COPY --from=build /out/solidcraft-cli /out/solvecraft-cli /out/solvecraft-server /usr/local/bin/
 COPY --from=build /src/dist/web/ /opt/solvecraft/web/
 COPY LICENSE-MIT LICENSE-APACHE NOTICE THIRD-PARTY-LICENSES.txt /opt/solvecraft/
 ENV SOLVECRAFT_LISTEN=0.0.0.0:8080 SOLVECRAFT_DATA_DIR=/data SOLVECRAFT_WEB_DIR=/opt/solvecraft/web

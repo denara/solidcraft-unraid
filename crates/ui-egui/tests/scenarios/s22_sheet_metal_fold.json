@@ -1,6 +1,6 @@
 [
  {
-  "note": "Target: sheet metal plate folded along a sketch line (sheet.fold, solvecraft-params; dialog by solvecraft-dialogs). Adjust the dialog steps when it lands."
+  "note": "Target: sheet metal plate folded along a sketch line (sheet.fold, solidcraft-params; dialog by solidcraft-dialogs). Adjust the dialog steps when it lands."
  },
  {
   "call": "ui.set",
@@ -81,16 +81,7 @@
   }
  },
  {
-  "note": "The sheet flange face is uncertified; choose the displayed fixed-plane option explicitly before drawing the fold line."
- },
- {
-  "expect": {
-   "sketching": false,
-   "dialog": "this face has no exact planar source"
-  }
- },
- {
-  "widget": "Use fixed plane"
+  "note": "A flat face of a sheet attaches the sketch to its panel (by name), in the flat pattern's coordinates."
  },
  {
   "expect": {

@@ -33,7 +33,9 @@ impl Catalog {
 
 static ENGLISH: Catalog = Catalog::new("en", "English", include_str!("locales/en.json"));
 static JAPANESE: Catalog = Catalog::new("ja", "日本語", include_str!("locales/ja.json"));
-pub const LOCALES: &[&Catalog] = &[&ENGLISH, &JAPANESE];
+static GERMAN: Catalog = Catalog::new("de", "Deutsch", include_str!("locales/de.json"));
+static KOREAN: Catalog = Catalog::new("ko", "한국어", include_str!("locales/ko.json"));
+pub const LOCALES: &[&Catalog] = &[&ENGLISH, &JAPANESE, &GERMAN, &KOREAN];
 
 pub fn is_supported(id: &str) -> bool {
     LOCALES.iter().any(|catalog| catalog.id == id)
@@ -227,6 +229,28 @@ mod tests {
         assert_eq!(Locale(&PARTIAL).text("ui.extrude"), "Extrude");
     }
 
+    /// `label()`'s id fallback (an argument that matches no other entry's English text is
+    /// looked up as an id directly) is how the Sketch Palette reaches `ui.palette_profile` and
+    /// `ui.palette_points` without colliding with "Profile" / "Points" elsewhere (see the
+    /// comment on `sketch_palette::TOGGLES`). Prove it resolves to each locale's own
+    /// translation, not merely to something: a broken id would fall back to the English catalog
+    /// silently (`Locale::text`'s own fallback chain), so a test that only checks "resolves to a
+    /// non-empty string" would not catch that.
+    #[test]
+    fn id_labels_resolve_to_their_own_translation_not_an_english_fallback() {
+        for (lang, profile, points) in [("de", "Profil", "Punkte"), ("ja", "プロファイル", "点"), ("ko", "프로파일", "점")] {
+            let locale = Locale::for_language(lang);
+            assert_eq!(locale.label("ui.palette_profile"), profile, "{lang}");
+            assert_eq!(locale.label("ui.palette_points"), points, "{lang}");
+        }
+        // The literal English text "Profile" / "Points" must keep naming the pre-existing,
+        // unrelated entries (the SelInput row labels in dialogs.rs, and "Show Profile" /
+        // "Hide Profile" in context_menu.rs), not the palette's own ids: that separation is the
+        // entire reason these two rows pass an id instead of their English text.
+        assert_eq!(Locale::for_language("de").label("Profile"), Locale::for_language("de").text("ui.profile"));
+        assert_eq!(Locale::for_language("de").label("Points"), Locale::for_language("de").text("ui.points"));
+    }
+
     #[test]
     fn templates_allow_reordering_and_literal_braces_in_values() {
         assert_eq!(interpolate("{second} then {first}", &[("first", "{second}"), ("second", "B")]), "B then {second}");
@@ -247,6 +271,27 @@ mod tests {
         assert_eq!(ja.dynamic("4 degrees of freedom"), "自由度 4");
         assert_eq!(ja.dynamic("Sketch of bracket"), "Sketch of bracket");
         assert_eq!(Locale::for_language("en").dynamic("Sketch1"), "Sketch1");
+    }
+
+    #[test]
+    fn korean_catalog_translates_keys_labels_and_browser_patterns() {
+        let ko = Locale::for_language("ko");
+        assert_eq!(ko.name(), "한국어");
+        assert!(is_supported("ko"));
+        assert_eq!(ko.text("ui.preferences"), "환경 설정");
+        assert_eq!(ko.label("Extrude"), "돌출");
+        assert_eq!(ko.label("CREATE SKETCH"), "스케치 만들기");
+        assert_eq!(ko.label("NonExistentKey"), "NonExistentKey");
+        assert_eq!(ko.format("document.save_changes", &[("name", "My {design}")]), "My {design}의 변경 사항을 저장하시겠습니까?");
+        assert_eq!(ko.format("dialog.selected_count", &[("count", "2")]), "↖ 2개 선택됨");
+        assert_eq!(ko.dynamic("Sketch1"), "스케치1");
+        assert_eq!(ko.dynamic("Body2"), "바디2");
+        assert_eq!(ko.dynamic("Component12"), "컴포넌트12");
+        assert_eq!(ko.dynamic("Units: mm"), "단위: mm");
+        assert_eq!(ko.dynamic("Precision: 3"), "정밀도: 3");
+        assert_eq!(ko.dynamic("Parameters (5)"), "매개변수 (5)");
+        assert_eq!(ko.dynamic("4 degrees of freedom"), "자유도 4개");
+        assert_eq!(ko.dynamic("Sketch of bracket"), "Sketch of bracket");
     }
 
     #[test]

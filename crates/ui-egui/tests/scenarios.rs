@@ -1,10 +1,10 @@
-//! User scenarios in the real UI, headless (see `solvecraft_ui_egui::scenario`). Each JSON file
+//! User scenarios in the real UI, headless (see `solidcraft_ui_egui::scenario`). Each JSON file
 //! under `tests/scenarios/` is one workflow done with clicks, keys and drags, and one test here:
 //! `build.rs` makes a test per file, named after it. A scenario waiting for a fix starts with a
 //! `{"pending": "why"}` step (its test is ignored with that reason). Adding a scenario is adding
 //! its file.
 
-use solvecraft_ui_egui::scenario::Harness;
+use solidcraft_ui_egui::scenario::Harness;
 
 fn run(name: &str) {
     let path = format!("{}/tests/scenarios/{name}.json", env!("CARGO_MANIFEST_DIR"));
@@ -18,12 +18,12 @@ fn run(name: &str) {
 
 include!(concat!(env!("OUT_DIR"), "/scenario_tests.rs"));
 
-/// A scenario file named by `SOLVECRAFT_SCENARIO_FILE` (for trying one out):
-/// `SOLVECRAFT_SCENARIO_FILE=x.json cargo test --test scenarios adhoc -- --ignored --nocapture`.
+/// A scenario file named by `SOLIDCRAFT_SCENARIO_FILE` (for trying one out):
+/// `SOLIDCRAFT_SCENARIO_FILE=x.json cargo test --test scenarios adhoc -- --ignored --nocapture`.
 #[test]
 #[ignore]
 fn adhoc() {
-    let Ok(path) = std::env::var("SOLVECRAFT_SCENARIO_FILE") else { return };
+    let Ok(path) = solidcraft_engine::geom::env::var("SCENARIO_FILE").ok_or(()) else { return };
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
     let steps: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{path}: {e}"));
     let mut h = Harness::new();
@@ -62,7 +62,7 @@ fn angle_dimension_both_interactive_workflows() {
         ]))
         .unwrap();
         let sk = &h.app.session.model.state().sketches[0].sketch;
-        assert!(sk.constraints.iter().any(|c| matches!(c.kind, solvecraft_engine::sketch::ConstraintKind::Angle { .. })));
+        assert!(sk.constraints.iter().any(|c| matches!(c.kind, solidcraft_engine::sketch::ConstraintKind::Angle { .. })));
     }
 }
 
@@ -70,7 +70,7 @@ fn angle_dimension_both_interactive_workflows() {
 fn home_tab_and_file_recent_open_designs() {
     use serde_json::json;
     let mut h = Harness::new();
-    let path = h.dir.join("recent.solvecraft").to_string_lossy().into_owned();
+    let path = h.dir.join("recent.solidcraft").to_string_lossy().into_owned();
     h.run(&json!([
         {"call":"engine.execute","params":{"command":"solid.box","params":{"length":10,"width":10,"height":10}}},
         {"call":"engine.execute","params":{"command":"file.save_as","params":{"path":path}}},
@@ -118,8 +118,15 @@ fn narrow_toolbar_reaches_collapsed_commands() {
     use serde_json::json;
     let mut h = Harness::new();
     h.run(&json!([
+        // Too narrow for every button: the last panels collapse into their drop-down.
         {"call":"ui.resize","params":{"width":640,"height":800}},
-        {"expect":{"shown_handles":["toolbar:overflow"]}},
+        {"expect":{"shown_handles":["collapsed:SOLID:CONSTRUCT"],"hidden_handles":["button:construct.plane.offset"]}},
+        {"click":{"handle":"collapsed:SOLID:CONSTRUCT"}},
+        {"expect":{"shown_handles":["dropdown:construct.plane.offset"]}},
+        {"key":"Escape"},
+        // Narrower: they go into the » menu.
+        {"call":"ui.resize","params":{"width":480,"height":800}},
+        {"expect":{"shown_handles":["toolbar:overflow"],"hidden_handles":["collapsed:SOLID:CONSTRUCT"]}},
         {"click":{"handle":"toolbar:overflow"}},
         {"widget":"CONSTRUCT"},
         {"expect":{"shown_handles":["toolbar:construct.plane.offset"]}},

@@ -28,8 +28,8 @@ fn main() {
     let dirty = git(&["status", "--porcelain", "--untracked-files=no"]).is_some();
     let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
     let (y, m, d) = civil(secs.div_euclid(86_400));
-    println!("cargo:rustc-env=SOLVECRAFT_COMMIT={commit}{}", if dirty { "+" } else { "" });
-    println!("cargo:rustc-env=SOLVECRAFT_BUILD_DATE={y:04}-{m:02}-{d:02}");
+    println!("cargo:rustc-env=SOLIDCRAFT_COMMIT={commit}{}", if dirty { "+" } else { "" });
+    println!("cargo:rustc-env=SOLIDCRAFT_BUILD_DATE={y:04}-{m:02}-{d:02}");
     // A new commit in this checkout (or worktree) restamps the build.
     if let Some(dir) = git(&["rev-parse", "--git-dir"]) {
         println!("cargo:rerun-if-changed={dir}/logs/HEAD");

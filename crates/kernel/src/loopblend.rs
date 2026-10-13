@@ -7,10 +7,12 @@
 
 use std::collections::HashMap;
 
-use solvecraft_geom::Vec3;
+use solidcraft_geom::Vec3;
 use truck_modeling::{self as mt, builder};
 
+use crate::blend::too_large;
 use crate::body::{Solid, from_p3, p3, v3};
+use crate::record::Rebuild;
 use crate::{KernelError, Result};
 
 fn unsupported(msg: &str) -> KernelError {
@@ -96,6 +98,22 @@ fn seg_of(e: &mt::Edge, tol: f64) -> Option<Seg> {
     Some(Seg::Arc { a, c: centre, axis, angle, mid: m })
 }
 
+/// Whether an edge is a straight segment: a line, or a curve whose points all lie on the chord
+/// (the contact lines of a rolling-ball blend between parallel walls are such curves).
+fn is_straight(e: &mt::Edge, tol: f64) -> bool {
+    use mt::{BoundedCurve, ParametricCurve};
+    if matches!(e.curve(), mt::Curve::Line(_)) {
+        return true;
+    }
+    let (a, b) = (from_p3(e.absolute_front().point()), from_p3(e.absolute_back().point()));
+    if a.dist(b) < tol {
+        return false;
+    }
+    let c = e.curve();
+    let (t0, t1) = c.range_tuple();
+    (0..=16).all(|k| from_p3(c.subs(t0 + (t1 - t0) * k as f64 / 16.0)).dist_to_segment(a, b) < tol)
+}
+
 /// `p` turned about the line (c, axis) by `ang`.
 fn turn(p: Vec3, c: Vec3, axis: Vec3, ang: f64) -> Vec3 {
     let k = axis.normalized().unwrap_or(Vec3::Z);
@@ -141,8 +159,9 @@ fn face_normal(f: &mt::Face, p: Vec3) -> Option<Vec3> {
 }
 
 /// Blend the loop of `edges` (by id) if it is a whole smooth boundary loop of a planar face with
-/// perpendicular walls. `None` when the edges are not such a loop.
-pub(crate) fn loop_blend(solid: &Solid, edge_ids: &[mt::EdgeID], size: f64, r: f64, round: bool) -> Option<Result<Solid>> {
+/// perpendicular walls, with what it built from `solid` (each blend face in place of its loop
+/// edge). `None` when the edges are not such a loop.
+pub(crate) fn loop_blend(solid: &Solid, edge_ids: &[mt::EdgeID], size: f64, r: f64, round: bool) -> Option<Result<(Solid, Rebuild)>> {
     let tol = (size * 1e-6).max(1e-7);
     for (si, shell) in solid.boundaries().iter().enumerate() {
         let faces: Vec<&mt::Face> = shell.face_iter().collect();
@@ -184,7 +203,7 @@ fn build(
     r: f64,
     round: bool,
     run: Option<(usize, usize)>,
-) -> Result<Solid> {
+) -> Result<(Solid, Rebuild)> {
     let f = faces.get(fi).ok_or_else(|| KernelError::Failed("face".into()))?;
     let wire = f.boundaries().get(wi).cloned().ok_or_else(|| KernelError::Failed("loop".into()))?;
     let all_edges: Vec<mt::Edge> = wire.edge_iter().cloned().collect();
@@ -338,7 +357,7 @@ fn build(
         }
         let p = joint_point(i).ok_or_else(|| unsupported("degenerate loop joint"))?;
         if !crate::blend::extension_fits(f, p, *q, size * 1e-7) {
-            return Err(unsupported("the blend is larger than the neighbouring faces"));
+            return Err(too_large("the blend is larger than the neighbouring faces"));
         }
     }
     // The offset arcs must not turn inside out; an arc of exactly the blend's radius shrinks
@@ -353,12 +372,12 @@ fn build(
                     *x = true;
                 }
             } else if toward && a.dist(c) <= r + tol {
-                return Err(unsupported("the blend is larger than a corner radius"));
+                return Err(too_large("the blend is larger than a corner radius"));
             }
         }
     }
     if collapsed.iter().all(|x| *x) {
-        return Err(unsupported("the blend is larger than a corner radius"));
+        return Err(too_large("the blend is larger than a corner radius"));
     }
     let mut va: Vec<mt::Vertex> = pa.iter().map(|p| builder::vertex(p3(*p))).collect();
     // A collapsed piece starts and ends at one vertex.
@@ -370,7 +389,40 @@ fn build(
             *slot = v;
         }
     }
-    let vb: Vec<mt::Vertex> = pb.iter().map(|p| builder::vertex(p3(*p))).collect();
+    // Model vertices at the joints (the second half of a circle starts at none).
+    let mut joint_vertex: Vec<Option<mt::Vertex>> = (0..k)
+        .map(|i| if i == 0 || owner.get(i) != owner.get(i - 1) { owner.get(i).and_then(|o| edges.get(*o)).map(|e| e.front().clone()) } else { None })
+        .collect();
+    if open {
+        joint_vertex.push(edges.last().map(|e| e.back().clone()));
+    }
+    let loop_ids: Vec<mt::EdgeID> = edges.iter().map(|e| e.id()).collect();
+    let on_face = |e: &mt::Edge| f.edge_iter().any(|x| x.id() == e.id());
+    // A blend as tall as its walls uses them up: each wall seam ends exactly where the
+    // wall-side rail would, at a vertex of the walls' far boundary, which becomes the rail.
+    let wall_end: Vec<Option<mt::Vertex>> = joint_vertex
+        .iter()
+        .zip(&pb)
+        .map(|(v, target)| {
+            let v = v.as_ref()?;
+            faces.iter().flat_map(|g| g.edge_iter()).find_map(|e| {
+                if loop_ids.contains(&e.id()) || on_face(&e) || !(e.front() == v || e.back() == v) || !matches!(e.curve(), mt::Curve::Line(_)) {
+                    return None;
+                }
+                let other = if e.front() == v { e.back().clone() } else { e.front().clone() };
+                (from_p3(other.point()).dist(*target) <= tol * 10.0).then_some(other)
+            })
+        })
+        .collect();
+    let used_up = wall_end.iter().filter(|x| x.is_some()).count();
+    if used_up > 0 && (used_up != nj || open) {
+        return Err(unsupported("the blend uses up only part of the walls"));
+    }
+    let walls_used_up = used_up > 0;
+    let vb: Vec<mt::Vertex> = match walls_used_up {
+        true => wall_end.into_iter().flatten().collect(),
+        false => pb.iter().map(|p| builder::vertex(p3(*p))).collect(),
+    };
     let centre = |i: usize| centres.get(i).copied().unwrap_or_default();
     let profile_mid = |i: usize| {
         let (Some(p), c) = (joint_point(i), centre(i)) else { return Vec3::ZERO };
@@ -440,21 +492,34 @@ fn build(
     if face_rails.iter().zip(&collapsed).any(|(r, c)| r.is_none() && !c) {
         return Err(KernelError::Failed("rail".into()));
     }
-    let wall_rails: Vec<mt::Edge> =
-        (0..k).map(|i| rail(&vb, i, &wall_off)).collect::<Option<_>>().ok_or_else(|| KernelError::Failed("rail".into()))?;
+    let wall_rails: Vec<mt::Edge> = if walls_used_up {
+        // Each piece's wall rail is the wall's far edge between the joints, where the offset
+        // rail lies (checked at the piece's middle).
+        (0..k)
+            .map(|i| -> Result<mt::Edge> {
+                let (Some(a), Some(b), Some(s), Some(wf)) = (vb.get(i), vb.get(nxt(i)), segs.get(i), walls.get(i)) else {
+                    return Err(KernelError::Failed("rail".into()));
+                };
+                let mid = match *s {
+                    Seg::Line { a, b } => (a + b) * 0.5,
+                    Seg::Arc { mid, .. } => mid,
+                };
+                let want = wall_off(mid, s);
+                let g = faces.get(*wf).ok_or_else(|| KernelError::Failed("wall".into()))?;
+                g.edge_iter()
+                    .find(|e| (e.front() == a && e.back() == b) || (e.front() == b && e.back() == a))
+                    .filter(|e| crate::blend::edge_mid(e).is_some_and(|m| m.dist(want) <= tol * 10.0))
+                    .map(|e| if e.front() == a { e.clone() } else { e.inverse() })
+                    .ok_or_else(|| unsupported("the blend uses up walls whose far edge is not where the blend ends"))
+            })
+            .collect::<Result<_>>()?
+    } else {
+        (0..k).map(|i| rail(&vb, i, &wall_off)).collect::<Option<_>>().ok_or_else(|| KernelError::Failed("rail".into()))?
+    };
     // Seams between neighbouring walls at the joints get shorter.
-    // Model vertices at the joints (the second half of a circle starts at none).
-    let mut joint_vertex: Vec<Option<mt::Vertex>> = (0..k)
-        .map(|i| if i == 0 || owner.get(i) != owner.get(i - 1) { owner.get(i).and_then(|o| edges.get(*o)).map(|e| e.front().clone()) } else { None })
-        .collect();
-    if open {
-        joint_vertex.push(edges.last().map(|e| e.back().clone()));
-    }
     // At a run's ends the face's next loop edges stop at the face-side point.
-    let on_face = |e: &mt::Edge| f.edge_iter().any(|x| x.id() == e.id());
     let mut seam_subst: HashMap<mt::EdgeID, mt::Edge> = HashMap::new();
     let mut seam_ends: HashMap<mt::EdgeID, (mt::Edge, Option<mt::Vertex>, Option<mt::Vertex>)> = HashMap::new();
-    let loop_ids: Vec<mt::EdgeID> = edges.iter().map(|e| e.id()).collect();
     for (i, v) in joint_vertex.iter().enumerate() {
         let Some(v) = v else { continue };
         for g in faces {
@@ -470,15 +535,19 @@ fn build(
                 }
                 let (fa, fb) = (e.absolute_front().clone(), e.absolute_back().clone());
                 let other = if &fa == v { &fb } else { &fa };
-                if !matches!(e.curve(), mt::Curve::Line(_)) {
+                if !is_straight(&e, (size * 1e-5).max(1e-6)) {
                     return Err(unsupported("the wall seams must be straight"));
                 }
                 let face_side = on_face(&e);
+                // A used-up wall goes, seams and all.
+                if walls_used_up && !face_side {
+                    continue;
+                }
                 let target = if face_side { pa.get(i) } else { pb.get(i) }.copied().unwrap_or_default();
                 let along = (from_p3(other.point()) - from_p3(v.point())).dot(target - from_p3(v.point()));
                 let reach = (target - from_p3(v.point())).len2();
                 if along <= reach + tol {
-                    return Err(unsupported(if face_side { "the blend is longer than the next edge" } else { "the blend is taller than the walls" }));
+                    return Err(too_large(if face_side { "the blend is longer than the next edge" } else { "the blend is taller than the walls" }));
                 }
                 let nb = if face_side { va.get(i) } else { vb.get(i) }.ok_or_else(|| KernelError::Failed("joint".into()))?;
                 let slot = seam_ends.entry(e.id()).or_insert_with(|| (e.absolute_clone(), None, None));
@@ -494,7 +563,7 @@ fn build(
         let a = a.unwrap_or_else(|| e.absolute_front().clone());
         let b = b.unwrap_or_else(|| e.absolute_back().clone());
         if from_p3(a.point()).dist(from_p3(b.point())) < tol * 10.0 {
-            return Err(unsupported("the blend is longer than the next edge"));
+            return Err(too_large("the blend is longer than the next edge"));
         }
         seam_subst.insert(id, builder::line(&a, &b));
     }
@@ -550,17 +619,24 @@ fn build(
         crate::heal::absolute_face(g, wires).ok_or_else(|| KernelError::Failed("loop blend: a face could not be rebuilt".into()))
     };
     let mut out: Vec<mt::Face> = Vec::new();
+    let mut rec = Rebuild::default();
+    rec.pieces(&seam_subst);
     for (gi, g) in faces.iter().enumerate() {
-        if gi == fi {
-            out.push(rebuild(g, &face_rails)?);
+        let rebuilt = if gi == fi {
+            rebuild(g, &face_rails)?
         } else if walls.contains(&gi) {
+            if walls_used_up {
+                continue;
+            }
             let wr: Vec<Option<mt::Edge>> = wall_rails.iter().cloned().map(Some).collect();
-            out.push(rebuild(g, &wr)?);
+            rebuild(g, &wr)?
         } else if g.edge_iter().any(|e| seam_subst.contains_key(&e.id())) {
-            out.push(rebuild(g, &[])?);
+            rebuild(g, &[])?
         } else {
-            out.push((*g).clone());
-        }
+            (*g).clone()
+        };
+        rec.face(&rebuilt, g);
+        out.push(rebuilt);
     }
     // Blend faces.
     use mt::{ParametricSurface3D, SearchNearestParameter};
@@ -612,11 +688,14 @@ fn build(
             None => vec![pr.clone(), wr.clone(), pr_next.inverse()].into(),
         };
         let face = mt::Face::try_new(vec![w.clone()], surf.clone()).map_err(|e| KernelError::Failed(format!("blend face: {e}")))?;
+        // In place of the loop edge this piece runs along (a full circle's two halves both).
+        rec.blend(&face, owner.get(i).and_then(|o| edges.get(*o)).map(|e| e.id()));
         out.push(face);
     }
     let mut shells = solid.boundaries().clone();
     if let Some(sh) = shells.get_mut(si) {
         *sh = out.into();
     }
-    Solid::try_new(shells).map_err(|e| KernelError::Failed(format!("loop blend produced an invalid solid: {e}")))
+    let solid = Solid::try_new(shells).map_err(|e| KernelError::Failed(format!("loop blend produced an invalid solid: {e}")))?;
+    Ok((solid, rec))
 }

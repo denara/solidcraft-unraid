@@ -3,13 +3,19 @@
 
 use std::collections::BTreeMap;
 
-use solvecraft_geom::{Mesh, Plane, Vec3};
+use solidcraft_geom::{Mesh, Plane, Vec3};
 
 use crate::{DocError, Result};
 
 type Key = (i64, i64, i64);
 
+/// Boundary of the picked face as drawn: a closed surface cut into pieces (a cylinder or a
+/// round's torus in halves) projects as the whole patch, since its seams are hidden.
 pub(super) fn face_edges(mesh: &Mesh, face: u32, plane: &Plane) -> Result<Vec<usize>> {
+    let patch = mesh.surface_patch(face as usize);
+    if patch.len() > 1 {
+        return family_edges(mesh, &patch.into_iter().collect(), plane);
+    }
     let edges = mesh.face_edges(face).into_iter().filter(|e| !mesh.seams.get(*e).copied().unwrap_or(false)).collect();
     boundary_edges(mesh, edges, plane)
 }
@@ -54,7 +60,7 @@ fn boundary_edges(mesh: &Mesh, mut edges: Vec<usize>, plane: &Plane) -> Result<V
     if edges.iter().any(|e| !mesh.edges.get(*e).is_some_and(|p| p.len() >= 2 && p.iter().all(|p| p.is_finite()))) {
         return Err(DocError::Invalid("face projection has an invalid boundary edge".into()));
     }
-    if edges.len() > solvecraft_sketch::MAX_LINK_ENTITIES {
+    if edges.len() > solidcraft_sketch::MAX_LINK_ENTITIES {
         return Err(DocError::Invalid("face projection exceeds the boundary edge limit".into()));
     }
     let geometry_key = |e: usize| {
@@ -191,17 +197,17 @@ mod tests {
         let edges = family_edges(&mesh, &[0, 1].into_iter().collect(), &Plane::XY).unwrap();
         assert_eq!(edges.len(), 8);
         let geom: Vec<_> = edges.iter().flat_map(|edge| super::super::fit_world(&Plane::XY, &mesh.edges[*edge])).collect();
-        let mut sk = solvecraft_sketch::Sketch::new();
+        let mut sk = solidcraft_sketch::Sketch::new();
         let link = sk
-            .add_link(solvecraft_sketch::LinkKind::Project, solvecraft_sketch::LinkSource::Face { body: "ambiguous".into(), at: Vec3::ZERO }, &geom)
+            .add_link(solidcraft_sketch::LinkKind::Project, solidcraft_sketch::LinkSource::Face { body: "ambiguous".into(), at: Vec3::ZERO }, &geom)
             .unwrap();
         assert!(sk.update_link(&link, &geom).is_err());
     }
 
     #[test]
     fn family_line_normalization_preserves_corners_arcs_branches_and_retracing() {
-        use solvecraft_geom::Vec2;
-        use solvecraft_sketch::LinkGeom;
+        use solidcraft_geom::Vec2;
+        use solidcraft_sketch::LinkGeom;
         let line = |a, b| LinkGeom::Line(Vec2::new(a, 0.), Vec2::new(b, 0.));
         assert_eq!(super::super::merge_family_lines(vec![line(0., 1.), line(2., 1.)]).unwrap(), vec![line(0., 2.)]);
         for geometry in [
@@ -265,8 +271,8 @@ mod tests {
                 let normalized: Vec<_> = expected
                     .iter()
                     .map(|g| {
-                        let solvecraft_sketch::LinkGeom::Line(a, b) = g[0] else { panic!("line") };
-                        if a.x > b.x || a.y > b.y { vec![solvecraft_sketch::LinkGeom::Line(b, a)] } else { g.clone() }
+                        let solidcraft_sketch::LinkGeom::Line(a, b) = g[0] else { panic!("line") };
+                        if a.x > b.x || a.y > b.y { vec![solidcraft_sketch::LinkGeom::Line(b, a)] } else { g.clone() }
                     })
                     .collect();
                 assert_eq!(actual, normalized);
@@ -282,8 +288,8 @@ mod tests {
 
     #[test]
     fn rounded_boundary_arc_sweeps_survive_individual_edge_reversal() {
-        use solvecraft_geom::{Seg2, Vec2};
-        use solvecraft_sketch::LinkGeom;
+        use solidcraft_geom::{Seg2, Vec2};
+        use solidcraft_sketch::LinkGeom;
         let mut mesh = Mesh::default();
         for (extent, radius) in [(10.0, 3.0), (8.0, 1.0)] {
             for k in 0..4 {

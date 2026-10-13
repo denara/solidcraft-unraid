@@ -1,7 +1,7 @@
 //! Certificates are producer identities, never a nearest-surface selection.
 use crate::{DocError, Document, FeatureKind, ModelBody, Result, SolvedSketch};
 use serde::{Deserialize, Serialize};
-use solvecraft_geom::Seg2;
+use solidcraft_geom::Seg2;
 
 fn valid_signature(outer: &[String], holes: &[Vec<String>]) -> bool {
     let valid = |ids: &[String]| {
@@ -68,12 +68,12 @@ pub(crate) fn cap_key(outer: &[String], holes: &[Vec<String>]) -> String {
     }
     format!("{:x}", hash.finalize())
 }
-pub(crate) fn exact_region_signature(sketch: &SolvedSketch, region: &solvecraft_geom::Region2) -> Option<solvecraft_kernel::CapSignature> {
+fn exact_region_signature(curves: &ExactSketchCurves, region: &solidcraft_geom::Region2) -> Option<solidcraft_kernel::CapSignature> {
     if region.outer.segs.len() + region.holes.iter().map(|hole| hole.segs.len()).sum::<usize>() > 4096 || region.holes.len() > 128 {
         return None;
     }
-    let signature = |outline: &solvecraft_geom::Loop2| {
-        let mut ids = outline.segs.iter().map(|segment| exact_sketch_curve(sketch, segment)).collect::<Option<Vec<_>>>()?;
+    let signature = |outline: &solidcraft_geom::Loop2| {
+        let mut ids = outline.segs.iter().map(|segment| curves.find(segment)).collect::<Option<Vec<_>>>()?;
         ids.sort();
         ids.dedup();
         Some(ids)
@@ -85,9 +85,9 @@ pub(crate) fn exact_region_signature(sketch: &SolvedSketch, region: &solvecraft_
 }
 
 /// Charge all source-curve comparisons before matching; over-budget tools stay usable but uncertified.
-type CapBindings = Vec<Vec<Option<solvecraft_kernel::CapSignature>>>;
-pub(crate) fn extrude_cap_bindings(sketch: &SolvedSketch, bodies: &[solvecraft_kernel::Body], budget: usize) -> Option<CapBindings> {
-    use solvecraft_kernel::FaceSource;
+type CapBindings = Vec<Vec<Option<solidcraft_kernel::CapSignature>>>;
+pub(crate) fn extrude_cap_bindings(sketch: &SolvedSketch, bodies: &[solidcraft_kernel::Body], budget: usize) -> Option<CapBindings> {
+    use solidcraft_kernel::FaceSource;
     if sketch.sketch.curves.len() > 2000 {
         return None;
     }
@@ -112,16 +112,17 @@ pub(crate) fn extrude_cap_bindings(sketch: &SolvedSketch, bodies: &[solvecraft_k
             }
         }
     }
+    let curves = ExactSketchCurves::new(sketch);
     let mut counts = std::collections::BTreeMap::new();
     let mut bindings = Vec::with_capacity(bodies.len());
     for body in bodies {
-        let mut cached: Option<(&solvecraft_geom::Region2, Option<solvecraft_kernel::CapSignature>)> = None;
+        let mut cached: Option<(&solidcraft_geom::Region2, Option<solidcraft_kernel::CapSignature>)> = None;
         let mut values = Vec::new();
         for source in body.face_sources().into_iter().flatten() {
             let signature = if let Some(FaceSource::ExtrudeCap { region, high, .. }) = source {
                 let signature = match &cached {
                     Some((previous, signature)) if *previous == region => signature.clone(),
-                    _ => exact_region_signature(sketch, region),
+                    _ => exact_region_signature(&curves, region),
                 };
                 cached = Some((region, signature.clone()));
                 if let Some((outer, holes)) = &signature {
@@ -150,11 +151,34 @@ pub(crate) fn extrude_cap_bindings(sketch: &SolvedSketch, bodies: &[solvecraft_k
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FaceCertificate {
-    Box { axis: u8, high: bool },
-    ExtrudeCap { sketch: u64, high: bool, outer: Vec<String>, holes: Vec<Vec<String>> },
-    ExtrudeSide { sketch: u64, curve: String },
-    Imported { payload_sha256: String, item: u64, face: u64 },
-    ShellPlanar { source_producer: u64, source: Box<FaceCertificate>, inner: bool },
+    Box {
+        axis: u8,
+        high: bool,
+    },
+    /// A cylinder primitive's cap: `high` is its `top` (the far end), else its `bottom`.
+    CylinderCap {
+        high: bool,
+    },
+    ExtrudeCap {
+        sketch: u64,
+        high: bool,
+        outer: Vec<String>,
+        holes: Vec<Vec<String>>,
+    },
+    ExtrudeSide {
+        sketch: u64,
+        curve: String,
+    },
+    Imported {
+        payload_sha256: String,
+        item: u64,
+        face: u64,
+    },
+    ShellPlanar {
+        source_producer: u64,
+        source: Box<FaceCertificate>,
+        inner: bool,
+    },
 }
 
 impl FaceCertificate {
@@ -176,6 +200,7 @@ impl FaceCertificate {
     pub fn validate(&self) -> Result<()> {
         let valid = match self {
             Self::Box { axis, .. } => *axis <= 2,
+            Self::CylinderCap { .. } => true,
             Self::ExtrudeCap { sketch, outer, holes, .. } => *sketch != 0 && valid_signature(outer, holes),
             Self::ExtrudeSide { sketch, curve } => *sketch != 0 && !curve.is_empty() && curve.len() <= 128,
             Self::Imported { payload_sha256, item, face } => {
@@ -203,6 +228,11 @@ pub(crate) fn validate_certificate_json(value: &serde_json::Value) -> Result<()>
             fields.len() == 3
                 && fields.keys().all(|key| ["kind", "axis", "high"].contains(&key.as_str()))
                 && fields.get("axis").and_then(serde_json::Value::as_u64).is_some_and(|axis| axis <= 2)
+                && fields.get("high").and_then(serde_json::Value::as_bool).is_some()
+        }
+        Some("cylinder_cap") => {
+            fields.len() == 2
+                && fields.keys().all(|key| ["kind", "high"].contains(&key.as_str()))
                 && fields.get("high").and_then(serde_json::Value::as_bool).is_some()
         }
         Some("extrude_cap") => {
@@ -251,6 +281,7 @@ pub(crate) fn shell_certificate_role(source: &FaceCertificate, inner: bool) -> R
             let axis = ["x", "y", "z"].get(*axis as usize).ok_or_else(|| DocError::Invalid("invalid shell source axis".into()))?;
             format!("box:{}{axis}", if *high { "+" } else { "-" })
         }
+        FaceCertificate::CylinderCap { high } => format!("cylinder:{}", cylinder_cap_role(*high)),
         FaceCertificate::ExtrudeSide { curve, .. } => format!("side:{curve}"),
         FaceCertificate::ExtrudeCap { high, outer, holes, .. } => format!("cap:{}:{}", if *high { "high" } else { "low" }, cap_key(outer, holes)),
         FaceCertificate::Imported { payload_sha256, item, face } => format!("import:{payload_sha256}:{item}:{face}"),
@@ -259,10 +290,16 @@ pub(crate) fn shell_certificate_role(source: &FaceCertificate, inner: bool) -> R
     Ok(format!("shell:{}:{role}", if inner { "inner" } else { "outer" }))
 }
 
-pub(crate) fn flat_source_certificate(source: &solvecraft_kernel::FaceSource) -> Option<(u64, FaceCertificate)> {
-    use solvecraft_kernel::FaceSource;
+/// A cylinder cap's role, as the cylinder's face names call it.
+pub(crate) fn cylinder_cap_role(high: bool) -> &'static str {
+    if high { "top" } else { "bottom" }
+}
+
+pub(crate) fn flat_source_certificate(source: &solidcraft_kernel::FaceSource) -> Option<(u64, FaceCertificate)> {
+    use solidcraft_kernel::FaceSource;
     match source {
         FaceSource::Box { producer: Some(producer), axis, high, .. } => Some((*producer, FaceCertificate::Box { axis: *axis, high: *high })),
+        FaceSource::CylinderCap { producer, high, .. } => Some((*producer, FaceCertificate::CylinderCap { high: *high })),
         FaceSource::CertifiedExtrudeSide { producer, sketch, curve, .. } => {
             Some((*producer, FaceCertificate::ExtrudeSide { sketch: *sketch, curve: curve.clone() }))
         }
@@ -276,11 +313,14 @@ pub(crate) fn flat_source_certificate(source: &solvecraft_kernel::FaceSource) ->
     }
 }
 
-pub(crate) fn flat_source_matches(certificate: &FaceCertificate, source: &solvecraft_kernel::FaceSource, producer: u64) -> bool {
-    use solvecraft_kernel::FaceSource;
+pub(crate) fn flat_source_matches(certificate: &FaceCertificate, source: &solidcraft_kernel::FaceSource, producer: u64) -> bool {
+    use solidcraft_kernel::FaceSource;
     match (certificate, source) {
         (FaceCertificate::Box { axis, high }, FaceSource::Box { producer: Some(current), axis: current_axis, high: current_high, .. }) => {
             producer == *current && axis == current_axis && high == current_high
+        }
+        (FaceCertificate::CylinderCap { high }, FaceSource::CylinderCap { producer: current, high: current_high, .. }) => {
+            producer == *current && high == current_high
         }
         (
             FaceCertificate::ExtrudeSide { sketch, curve },
@@ -307,36 +347,68 @@ pub(crate) fn flat_source_matches(certificate: &FaceCertificate, source: &solvec
 
 /// Match a generated segment to one exact analytic sketch curve. Coincident
 /// candidates are ambiguous and never resolved by distance or candidate order.
-pub(crate) fn exact_sketch_curve(sketch: &SolvedSketch, generated: &Seg2) -> Option<String> {
-    if sketch.sketch.curves.len() > 2000 {
-        return None;
-    }
-    let mut found = None;
-    for (index, curve) in sketch.sketch.curves.iter().enumerate() {
-        if curve.construction
-            || !matches!(
-                curve.kind,
-                solvecraft_sketch::CurveKind::Line { .. } | solvecraft_sketch::CurveKind::Arc { .. } | solvecraft_sketch::CurveKind::Circle { .. }
-            )
-        {
-            continue;
+pub(crate) struct ExactSketchCurves<'a> {
+    /// Each analytic curve's id, whether it is projected (linked) reference geometry, and its
+    /// segments.
+    segments: Vec<(&'a str, bool, Vec<Seg2>)>,
+}
+
+impl<'a> ExactSketchCurves<'a> {
+    /// Prepare only bounded analytic curves, once per certification pass. Point lookup
+    /// and segment allocation must not be repeated for every generated face.
+    pub(crate) fn new(sketch: &'a SolvedSketch) -> Self {
+        let mut segments = Vec::new();
+        if sketch.sketch.curves.len() > 2000 {
+            return Self { segments };
         }
-        let matches = if let solvecraft_sketch::CurveKind::Circle { c, r } = curve.kind {
-            sketch
-                .sketch
-                .point(c)
-                .is_some_and(|center| exact_segment_contains(&Seg2::Arc { center, radius: r, start: 0., sweep: std::f64::consts::TAU }, generated))
-        } else {
-            sketch.sketch.segs(index).iter().any(|original| exact_segment_contains(original, generated))
-        };
-        if matches {
-            if found.is_some() {
-                return None;
+        for (index, curve) in sketch.sketch.curves.iter().enumerate() {
+            if curve.construction
+                || !matches!(
+                    curve.kind,
+                    solidcraft_sketch::CurveKind::Line { .. }
+                        | solidcraft_sketch::CurveKind::Arc { .. }
+                        | solidcraft_sketch::CurveKind::Circle { .. }
+                )
+            {
+                continue;
             }
-            found = Some(curve.id.clone());
+            let originals = if let solidcraft_sketch::CurveKind::Circle { c, r } = curve.kind {
+                sketch
+                    .sketch
+                    .point(c)
+                    .map(|center| vec![Seg2::Arc { center, radius: r, start: 0., sweep: std::f64::consts::TAU }])
+                    .unwrap_or_default()
+            } else {
+                sketch.sketch.segs(index)
+            };
+            segments.push((curve.id.as_str(), curve.link.is_some(), originals));
+        }
+        Self { segments }
+    }
+
+    /// The one sketch curve a generated segment lies on. A curve drawn over projected
+    /// reference geometry (a profile traced over a face's live boundary) is that segment's
+    /// source: the projection only marks where it was drawn. Two drawn curves, or two
+    /// projections, over the same segment stay ambiguous.
+    pub(crate) fn find(&self, generated: &Seg2) -> Option<String> {
+        let mut drawn = None;
+        let mut projected = None;
+        for (id, linked, originals) in &self.segments {
+            if originals.iter().any(|original| exact_segment_contains(original, generated)) {
+                let slot = if *linked { &mut projected } else { &mut drawn };
+                if slot.is_some() {
+                    *slot = Some(None);
+                } else {
+                    *slot = Some(Some(*id));
+                }
+            }
+        }
+        match (drawn, projected) {
+            (Some(id), _) => id.map(str::to_owned),
+            (None, Some(id)) => id.map(str::to_owned),
+            (None, None) => None,
         }
     }
-    found
 }
 
 fn exact_segment_contains(original: &Seg2, generated: &Seg2) -> bool {
@@ -344,7 +416,7 @@ fn exact_segment_contains(original: &Seg2, generated: &Seg2) -> bool {
         (Seg2::Line { a, b }, Seg2::Line { a: c, b: d }) => {
             let direction = *b - *a;
             let scale = direction.len().max((*d - *c).len()).max(1.);
-            let interval = |point: solvecraft_geom::Vec2| {
+            let interval = |point: solidcraft_geom::Vec2| {
                 let t = (point - *a).dot(direction) / direction.len2();
                 (-1e-10..=1. + 1e-10).contains(&t)
             };
@@ -380,18 +452,19 @@ fn exact_segment_contains(original: &Seg2, generated: &Seg2) -> bool {
 }
 
 impl Document {
-    pub fn configuration_face_target(&self, body: &ModelBody, index: usize, point: solvecraft_geom::Vec3) -> Result<crate::config::ConfigFaceTarget> {
+    pub fn configuration_face_target(&self, body: &ModelBody, index: usize, point: solidcraft_geom::Vec3) -> Result<crate::config::ConfigFaceTarget> {
         let names = crate::naming::face_names(body);
         let mut name = names
             .get(index)
             .map(|name| crate::naming::strip_piece(name).to_string())
             .ok_or_else(|| DocError::Unknown("face source name missing".into()))?;
         let origin = match body.body.face_sources().and_then(|sources| sources.get(index)).and_then(Option::as_ref) {
-            Some(solvecraft_kernel::FaceSource::Imported { producer: Some(producer), .. })
-            | Some(solvecraft_kernel::FaceSource::CertifiedExtrudeSide { producer, .. })
-            | Some(solvecraft_kernel::FaceSource::CertifiedExtrudeCap { producer, .. })
-            | Some(solvecraft_kernel::FaceSource::ShellPlanar { producer: Some(producer), .. })
-            | Some(solvecraft_kernel::FaceSource::Box { producer: Some(producer), .. }) => *producer,
+            Some(solidcraft_kernel::FaceSource::Imported { producer: Some(producer), .. })
+            | Some(solidcraft_kernel::FaceSource::CertifiedExtrudeSide { producer, .. })
+            | Some(solidcraft_kernel::FaceSource::CertifiedExtrudeCap { producer, .. })
+            | Some(solidcraft_kernel::FaceSource::ShellPlanar { producer: Some(producer), .. })
+            | Some(solidcraft_kernel::FaceSource::Box { producer: Some(producer), .. })
+            | Some(solidcraft_kernel::FaceSource::CylinderCap { producer, .. }) => *producer,
             _ => name
                 .strip_prefix('F')
                 .and_then(|name| name.split_once(':'))
@@ -419,7 +492,7 @@ impl Document {
         let Some(source) = body.body.face_sources().and_then(|sources| sources.get(index)).and_then(Option::as_ref) else {
             return Ok(None);
         };
-        if let solvecraft_kernel::FaceSource::ShellPlanar { producer: Some(producer), source, inner, .. } = source {
+        if let solidcraft_kernel::FaceSource::ShellPlanar { producer: Some(producer), source, inner, .. } = source {
             if !self.feature(*producer).is_some_and(|feature| matches!(feature.kind, FeatureKind::Shell { .. })) {
                 return Err(DocError::Invalid("shell source producer missing".into()));
             }
@@ -432,7 +505,7 @@ impl Document {
             certificate.validate()?;
             return Ok(Some(certificate));
         }
-        if let solvecraft_kernel::FaceSource::Imported { item, face, payload_sha256: Some(digest), producer: Some(producer) } = source {
+        if let solidcraft_kernel::FaceSource::Imported { item, face, payload_sha256: Some(digest), producer: Some(producer) } = source {
             if !self.feature(*producer).is_some_and(|feature| matches!(feature.kind, FeatureKind::Import { .. })) {
                 return Err(DocError::Invalid("import source producer missing".into()));
             }
@@ -441,7 +514,7 @@ impl Document {
             return Ok(Some(certificate));
         }
         let certificate = match source {
-            solvecraft_kernel::FaceSource::CertifiedExtrudeSide { producer, sketch, curve, .. } => {
+            solidcraft_kernel::FaceSource::CertifiedExtrudeSide { producer, sketch, curve, .. } => {
                 if !self.feature(*producer).is_some_and(|feature| matches!(feature.kind, FeatureKind::Extrude { .. })) {
                     return Err(DocError::Invalid("side source producer missing".into()));
                 }
@@ -452,16 +525,21 @@ impl Document {
         certificate.validate()?;
         Ok(Some(certificate))
     }
-    pub fn strong_face_target(&self, body: &ModelBody, index: usize, point: solvecraft_geom::Vec3) -> Result<crate::config::ConfigFaceTarget> {
+    pub fn strong_face_target(&self, body: &ModelBody, index: usize, point: solidcraft_geom::Vec3) -> Result<crate::config::ConfigFaceTarget> {
         let mut target = self.configuration_face_target(body, index, point)?;
         match body.body.face_sources().and_then(|sources| sources.get(index)).and_then(Option::as_ref) {
-            Some(solvecraft_kernel::FaceSource::Box { producer: Some(producer), axis, high, .. }) => {
+            Some(solidcraft_kernel::FaceSource::Box { producer: Some(producer), axis, high, .. }) => {
                 target.origin_feature = *producer;
                 let axis_name = ["x", "y", "z"].get(*axis as usize).ok_or_else(|| DocError::Invalid("invalid box face axis".into()))?;
                 target.name = format!("F{producer}:{}{axis_name}", if *high { "+" } else { "-" });
                 target.certificate = Some(FaceCertificate::Box { axis: *axis, high: *high });
             }
-            Some(solvecraft_kernel::FaceSource::CertifiedExtrudeCap { producer, sketch, high, outer, holes, .. }) => {
+            Some(solidcraft_kernel::FaceSource::CylinderCap { producer, high, .. }) => {
+                target.origin_feature = *producer;
+                target.name = format!("F{producer}:{}", cylinder_cap_role(*high));
+                target.certificate = Some(FaceCertificate::CylinderCap { high: *high });
+            }
+            Some(solidcraft_kernel::FaceSource::CertifiedExtrudeCap { producer, sketch, high, outer, holes, .. }) => {
                 target.origin_feature = *producer;
                 target.name = format!("F{producer}:cap:{}:{}", if *high { "high" } else { "low" }, cap_key(outer, holes));
                 target.certificate = Some(FaceCertificate::ExtrudeCap { sketch: *sketch, high: *high, outer: outer.clone(), holes: holes.clone() });
@@ -486,6 +564,121 @@ mod shell_tests;
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn solved(mut sketch: solidcraft_sketch::Sketch) -> SolvedSketch {
+        let report = solidcraft_sketch::solve(&mut sketch);
+        SolvedSketch { feature: 1, name: "sources".into(), plane: solidcraft_geom::Plane::XY, sketch, report, profiles: Vec::new() }
+    }
+
+    #[test]
+    fn cylinder_cap_certificate_json_is_exact() {
+        for high in [true, false] {
+            let valid = json!({"kind":"cylinder_cap","high":high});
+            assert!(validate_certificate_json(&valid).is_ok());
+            let certificate: FaceCertificate = serde_json::from_value(valid.clone()).unwrap();
+            assert_eq!(certificate, FaceCertificate::CylinderCap { high });
+            assert_eq!(serde_json::to_value(&certificate).unwrap(), valid);
+        }
+        let shelled = json!({"kind":"shell_planar","source_producer":3,"source":{"kind":"cylinder_cap","high":false},"inner":true});
+        assert!(validate_certificate_json(&shelled).is_ok());
+        let certificate: FaceCertificate = serde_json::from_value(shelled).unwrap();
+        assert_eq!(shell_certificate_role(&FaceCertificate::CylinderCap { high: false }, true).unwrap(), "shell:inner:cylinder:bottom");
+        assert!(certificate.validate().is_ok());
+        for bad in [
+            json!({"kind":"cylinder_cap"}),
+            json!({"kind":"cylinder_cap","high":1}),
+            json!({"kind":"cylinder_cap","high":null}),
+            json!({"kind":"cylinder_cap","high":true,"axis":2}),
+            json!({"kind":"cylinder_cap","high":true,"extra":[[[]]]}),
+        ] {
+            assert!(validate_certificate_json(&bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn prepared_sources_keep_exact_identity_and_reject_ambiguity() {
+        use solidcraft_geom::Vec2;
+        let mut sketch = solidcraft_sketch::Sketch::new();
+        sketch.add_line(Vec2::ZERO, Vec2::new(10., 0.), None, None, Some("line")).unwrap();
+        sketch.add_circle(Vec2::new(20., 0.), 2., None, Some("circle")).unwrap();
+        let construction = sketch.add_line(Vec2::ZERO, Vec2::new(10., 0.), None, None, Some("construction")).unwrap();
+        sketch.curves[construction].construction = true;
+        let sketch = solved(sketch);
+        let curves = ExactSketchCurves::new(&sketch);
+        let partial = Seg2::Line { a: Vec2::new(8., 0.), b: Vec2::new(2., 0.) };
+        assert_eq!(curves.find(&partial).as_deref(), Some("line"));
+        assert_eq!(curves.find(&Seg2::Arc { center: Vec2::new(20., 0.), radius: 2., start: 1., sweep: -2. }).as_deref(), Some("circle"));
+        assert_eq!(curves.find(&Seg2::Line { a: Vec2::ZERO, b: Vec2::new(11., 0.) }), None);
+        let mut ambiguous = sketch.clone();
+        ambiguous.sketch.add_line(Vec2::new(1., 0.), Vec2::new(9., 0.), None, None, Some("overlap")).unwrap();
+        assert_eq!(ExactSketchCurves::new(&ambiguous).find(&partial), None);
+        // A prepared pass borrows one immutable evaluated sketch, so an upstream edit
+        // necessarily prepares fresh sources rather than retaining stale coordinates.
+        let mut moved = sketch.clone();
+        moved.sketch = solidcraft_sketch::Sketch::new();
+        moved.sketch.add_line(Vec2::new(0., 1.), Vec2::new(10., 1.), None, None, Some("line")).unwrap();
+        assert_eq!(ExactSketchCurves::new(&moved).find(&partial), None);
+    }
+
+    #[test]
+    fn a_curve_drawn_over_a_projected_boundary_is_the_source() {
+        use solidcraft_geom::Vec2;
+        // A face sketch's live boundary, with a profile edge traced over it (issue #489).
+        let mut sketch = solidcraft_sketch::Sketch::new();
+        let projected = sketch.add_line(Vec2::ZERO, Vec2::new(10., 0.), None, None, Some("edge")).unwrap();
+        sketch.curves[projected].link = Some("boundary".into());
+        let sketch = solved(sketch);
+        let edge = Seg2::Line { a: Vec2::new(10., 0.), b: Vec2::ZERO };
+        assert_eq!(ExactSketchCurves::new(&sketch).find(&edge).as_deref(), Some("edge"), "a lone projection is its own source");
+        let mut traced = sketch.clone();
+        traced.sketch.add_line(Vec2::ZERO, Vec2::new(10., 0.), None, None, Some("drawn")).unwrap();
+        assert_eq!(ExactSketchCurves::new(&traced).find(&edge).as_deref(), Some("drawn"));
+        // Two drawn curves over it, or two projections, stay ambiguous.
+        let mut twice = traced.clone();
+        twice.sketch.add_line(Vec2::ZERO, Vec2::new(10., 0.), None, None, Some("again")).unwrap();
+        assert_eq!(ExactSketchCurves::new(&twice).find(&edge), None);
+        let mut projections = sketch.clone();
+        let other = projections.sketch.add_line(Vec2::ZERO, Vec2::new(10., 0.), None, None, Some("other")).unwrap();
+        projections.sketch.curves[other].link = Some("edge link".into());
+        assert_eq!(ExactSketchCurves::new(&projections).find(&edge), None);
+    }
+
+    #[test]
+    #[ignore = "manual optimized certification microbenchmark; no timing assertion"]
+    fn benchmark_prepared_extrude_sources() {
+        use solidcraft_geom::Vec2;
+        let mut sketch = solidcraft_sketch::Sketch::new();
+        for i in 0..1000 {
+            let y = i as f64;
+            sketch.add_line(Vec2::new(0., y), Vec2::new(10., y), None, None, None).unwrap();
+        }
+        let sketch = solved(sketch);
+        let queries: Vec<_> = (0..1000).map(|i| Seg2::Line { a: Vec2::new(2., i as f64), b: Vec2::new(8., i as f64) }).collect();
+        let start = std::time::Instant::now();
+        let old: Vec<_> = queries
+            .iter()
+            .map(|generated| {
+                let mut found = None;
+                for (index, curve) in sketch.sketch.curves.iter().enumerate() {
+                    if sketch.sketch.segs(index).iter().any(|original| exact_segment_contains(original, generated)) {
+                        if found.is_some() {
+                            return None;
+                        }
+                        found = Some(curve.id.clone());
+                    }
+                }
+                found
+            })
+            .collect();
+        let old_ms = start.elapsed().as_secs_f64() * 1000.;
+        let start = std::time::Instant::now();
+        let curves = ExactSketchCurves::new(&sketch);
+        let new: Vec<_> = queries.iter().map(|query| curves.find(query)).collect();
+        let new_ms = start.elapsed().as_secs_f64() * 1000.;
+        assert_eq!(old, new);
+        assert!(new.iter().all(Option::is_some));
+        eprintln!("1000 analytic sources / 1000 face segments: repeated={old_ms:.3}ms prepared={new_ms:.3}ms (includes preparation)");
+    }
     #[test]
     fn certificate_budgets_apply_before_saved_target_and_paint_decode() {
         for certificate in [
@@ -506,7 +699,7 @@ mod tests {
     #[test]
     fn analytic_arc_interval_refuses_unsampled_gaps_and_accepts_wrap_reversal() {
         let radians = |degrees: f64| degrees.to_radians();
-        let arc = |start, sweep| Seg2::Arc { center: solvecraft_geom::Vec2::default(), radius: 10., start: radians(start), sweep: radians(sweep) };
+        let arc = |start, sweep| Seg2::Arc { center: solidcraft_geom::Vec2::default(), radius: 10., start: radians(start), sweep: radians(sweep) };
         assert!(!exact_segment_contains(&arc(10., 350.), &arc(20., 360.)), "five point probes missed the missing ten-degree gap");
         assert!(!exact_segment_contains(&arc(10., 350.), &arc(20., -360.)));
         assert!(exact_segment_contains(&arc(350., 40.), &arc(355., 20.)));

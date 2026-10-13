@@ -1,0 +1,111 @@
+{
+ "commands": [
+  {
+   "command": "sketch.create",
+   "params": {
+    "plane": "XY",
+    "name": "Base"
+   }
+  },
+  {
+   "command": "sketch.rectangle.two_point",
+   "params": {
+    "p0": [
+     0,
+     0
+    ],
+    "p1": [
+     40,
+     30
+    ]
+   }
+  },
+  {
+   "command": "sketch.finish",
+   "params": {}
+  },
+  {
+   "command": "solid.extrude",
+   "params": {
+    "distance": 10,
+    "name": "Block"
+   }
+  },
+  {
+   "command": "sketch.create",
+   "params": {
+    "plane": "XY",
+    "name": "SlotSketch"
+   }
+  },
+  {
+   "command": "sketch.rectangle.two_point",
+   "params": {
+    "p0": [
+     15,
+     -5
+    ],
+    "p1": [
+     25,
+     35
+    ]
+   }
+  },
+  {
+   "command": "sketch.finish",
+   "params": {}
+  },
+  {
+   "command": "solid.extrude",
+   "params": {
+    "sketch": "SlotSketch",
+    "distance": 10,
+    "start_offset": 5,
+    "operation": "cut",
+    "name": "Slot"
+   }
+  },
+  {
+   "command": "solid.fillet",
+   "params": {
+    "edges": [
+     [
+      40,
+      15,
+      10
+     ]
+    ],
+    "radius": 2,
+    "name": "Round"
+   }
+  },
+  {
+   "command": "solid.chamfer",
+   "params": {
+    "edges": [
+     [
+      0,
+      15,
+      10
+     ]
+    ],
+    "distance": 1.5,
+    "name": "Bevel"
+   }
+  },
+  {
+   "command": "solid.offset_face",
+   "params": {
+    "faces": [
+     [
+      7,
+      15,
+      10
+     ]
+    ],
+    "distance": 2,
+    "name": "Raise"
+   }
+  }
+ ]
+}

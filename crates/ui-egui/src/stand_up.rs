@@ -1,5 +1,5 @@
 //! Standing up a Y-up file (#3). Many CAD programs save parts with Y up, so a STEP or IGES file
-//! from them opens lying on its back in a Z-up design. After such a file opens, SolveCraft
+//! from them opens lying on its back in a Z-up design. After such a file opens, SolidCraft
 //! offers to stand it up: a quarter turn about X (Y → Z) of the bodies it brought, as one
 //! Move feature that can be undone or edited. Preferences › Design › "Offer to stand up Y-up
 //! files" turns the offer off; with Y up as the default orientation it isn't needed.
@@ -11,8 +11,8 @@ use crate::SolveApp;
 /// The bodies a just-opened file brought (`before`: body names before it opened, none for a
 /// new design): offer to stand them up.
 pub fn offer(app: &mut SolveApp, path: &str, before: &[String]) {
-    let io = &solvecraft_engine::io::is_step_path;
-    if !(io(path) || solvecraft_engine::io::is_iges_path(path)) || !app.preferences.offer_stand_up || app.preferences.up_axis != "z" {
+    let io = &solidcraft_engine::io::is_step_path;
+    if !(io(path) || solidcraft_engine::io::is_iges_path(path)) || !app.preferences.offer_stand_up || app.preferences.up_axis != "z" {
         return;
     }
     let bodies: Vec<String> = app.session.world_state().bodies.iter().map(|b| b.name.clone()).filter(|n| !before.contains(n)).collect();

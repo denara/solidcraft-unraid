@@ -1,7 +1,7 @@
 use super::*;
 use serde_json::json;
-use solvecraft_geom::Vec2;
-use solvecraft_sketch::{LinkGeom, LinkKind, LinkSource};
+use solidcraft_geom::Vec2;
+use solidcraft_sketch::{LinkGeom, LinkKind, LinkSource};
 
 fn line(sk: &mut Sketch, y: f64) -> usize {
     sk.add_line(Vec2::new(0., y), Vec2::new(2., y), None, None, None).unwrap()
@@ -25,7 +25,7 @@ fn sampler_keeps_style_precedence_hidden_references_text_and_disjoint_parts() {
     let text = sk
         .add_link(
             LinkKind::Text,
-            LinkSource::Text { text: "A".into(), at: Vec2::ZERO, height: 2., angle: 0. },
+            LinkSource::Text { text: "A".into(), at: Vec2::ZERO, height: 2., angle: 0., font: None },
             &[LinkGeom::Line(Vec2::new(0., 7.), Vec2::new(2., 7.))],
         )
         .unwrap();

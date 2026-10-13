@@ -1,8 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::panic)]
 use serde_json::{Value, json};
-use solvecraft_doc::{Document, FeatureKind, ProfileSel};
-use solvecraft_geom::Vec2;
-use solvecraft_sketch::{CurveKind, Sketch};
+use solidcraft_doc::{Document, FeatureKind, ProfileSel};
+use solidcraft_geom::Vec2;
+use solidcraft_sketch::{CurveKind, Sketch};
 
 use crate::{Session, Snapshot};
 

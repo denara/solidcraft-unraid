@@ -108,7 +108,7 @@ fn compact_exponentially_instanced_assembly_refuses_partial_totals() {
     for _ in 0..17 {
         let parent = s.active_component;
         let component = s.doc_mut().add_component(None, parent).unwrap();
-        last_occurrence = s.doc_mut().add_occurrence(component, parent, solvecraft_doc::IDENTITY).unwrap();
+        last_occurrence = s.doc_mut().add_occurrence(component, parent, solidcraft_doc::IDENTITY).unwrap();
         s.active_component = component;
     }
     for command in ["component.properties", "occurrence.properties"] {
@@ -126,4 +126,20 @@ fn excessively_nested_assembly_refuses_partial_totals() {
     }
     let error = s.execute("component.properties", &json!({"component": 0})).unwrap_err();
     assert!(error.to_string().contains("traversal limits"), "{error}");
+}
+
+/// #532: a product BOM needs materials outside the built-in library (walnut, polypropylene,
+/// rubber, leather). A user-defined material with its density is assigned like a built-in one
+/// and sets the body's mass: a 10 mm walnut cube at 0.65 g/cm³ weighs 0.65 g.
+#[test]
+#[ignore = "fails until #532 is fixed"]
+fn user_defined_material_sets_the_body_mass() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10, "body_name": "Slat"}));
+    run(&mut s, "material.create", json!({"name": "Walnut", "density_g_cm3": 0.65}));
+    run(&mut s, "material.assign", json!({"bodies": ["Slat"], "material": "Walnut"}));
+    let props = run(&mut s, "component.properties", json!({"component": "root"}));
+    assert_eq!(props["bodies"][0]["material"], "Walnut", "{props}");
+    close(&props["bodies"][0]["density_g_cm3"], 0.65);
+    close(&props["total"]["mass_g"], 0.65);
 }

@@ -1,7 +1,7 @@
 //! Keyboard-authored intent must survive stage transitions and later model edits.
 use crate::scenario::Harness;
 use serde_json::json;
-use solvecraft_engine::sketch::{ConstraintKind, CurveKind};
+use solidcraft_engine::sketch::{ConstraintKind, CurveKind};
 
 fn start(command: &str) -> Harness {
     let mut h = Harness::new();
@@ -39,7 +39,7 @@ fn typed_arc_radius_and_signed_sweep_survive_stages_parameter_edit_and_reopen() 
     assert!(kinds.iter().any(|k| matches!(k, ConstraintKind::Radius{value,..} if (*value-5.0).abs()<1e-7)));
     assert!(kinds.iter().any(|k| matches!(k, ConstraintKind::ArcSweep{value,..} if (*value+std::f64::consts::FRAC_PI_2).abs()<1e-7)));
     h.app.run("parameters.change", json!({"name":"arc_radius","expression":"8 mm"})).unwrap();
-    let path = h.dir.join("typed-arc.solvecraft");
+    let path = h.dir.join("typed-arc.solidcraft");
     h.app.run("file.save", json!({"path":path})).unwrap();
     h.app.run("doc.open", json!({"path":path})).unwrap();
     let state = h.app.session.world_state();

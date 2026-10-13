@@ -1,11 +1,11 @@
 //! Contact Sets, Motion Study and Exploded views.
 
 use serde_json::{Value, json};
-use solvecraft_doc::Mat;
-use solvecraft_doc::joints::{self, JointKind};
-use solvecraft_doc::motion::{ContactSet, ExplodedView, MotionStudy, StudyKey};
-use solvecraft_geom::Vec3;
-use solvecraft_kernel::Body;
+use solidcraft_doc::Mat;
+use solidcraft_doc::joints::{self, JointKind};
+use solidcraft_doc::motion::{ContactSet, ExplodedView, MotionStudy, StudyKey};
+use solidcraft_geom::Vec3;
+use solidcraft_kernel::Body;
 
 use super::CommandSpec;
 use super::joints::{joint_id, occurrence_id, resolve, value};
@@ -29,7 +29,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .icon("joint")
         .params("occurrences: [ids or names] (two or more); name?"),
     CommandSpec::new("contact.edit", "Edit Contact Set", edit_set).params("set: id|name; occurrences?; name?; suppressed?: bool; delete?: bool"),
-    CommandSpec::new("contact.list", "List Contact Sets", list_sets).noundo().params("→ sets, enabled, all"),
+    CommandSpec::new("contact.list", "List Contact Sets", list_sets).noundo().doc_only().params("→ sets, enabled, all"),
     CommandSpec::new("contact.check", "Check Contact", check).noundo().params("→ pairs in contact sets that pass through each other now"),
     CommandSpec::new("motion.study", "Motion Study", study).at("SOLID", "ASSEMBLE").icon("joint").params(
         "name?; study? (edit an existing one); steps? (timeline length, default 100); keys: [{joint, index?, points: [[step, value], …]}] \
@@ -93,8 +93,8 @@ fn placed(s: &Session) -> Vec<(Vec<u64>, Body)> {
             // Moving a body into another component preserves its world placement using an
             // offset from its authoring frame. Contact and explode centres must use that
             // same offset as display and physical properties.
-            let frame = s.doc.model_body_offset(b).map(|offset| solvecraft_doc::mat_mul(&m, offset)).unwrap_or(m);
-            if let Ok(t) = solvecraft_kernel::transform_matrix(&b.body, frame) {
+            let frame = s.doc.model_body_offset(b).map(|offset| solidcraft_doc::mat_mul(&m, offset)).unwrap_or(m);
+            if let Ok(t) = solidcraft_kernel::transform_matrix(&b.body, frame) {
                 out.push((path.clone(), t));
             }
         }
@@ -141,7 +141,7 @@ fn overlap(a: &Body, b: &Body) -> Option<f64> {
     mesh_overlap(&ma, &mb, 1e-4 * a.size().max(b.size()).max(1.0))
 }
 
-fn mesh_overlap(ma: &solvecraft_geom::Mesh, mb: &solvecraft_geom::Mesh, tol: f64) -> Option<f64> {
+fn mesh_overlap(ma: &solidcraft_geom::Mesh, mb: &solidcraft_geom::Mesh, tol: f64) -> Option<f64> {
     let (ba, bb) = (ma.bounds(), mb.bounds());
     if ba.max.x < bb.min.x + tol
         || bb.max.x < ba.min.x + tol
@@ -156,12 +156,12 @@ fn mesh_overlap(ma: &solvecraft_geom::Mesh, mb: &solvecraft_geom::Mesh, tol: f64
     (depth > tol).then_some(depth)
 }
 
-fn tris(m: &solvecraft_geom::Mesh) -> Vec<[Vec3; 3]> {
+fn tris(m: &solidcraft_geom::Mesh) -> Vec<[Vec3; 3]> {
     m.triangles.iter().filter_map(|t| m.tri(t)).collect()
 }
 
 /// The deepest any sample point of `a` lies inside `b` (0 if none).
-fn deepest(a: &solvecraft_geom::Mesh, b: &solvecraft_geom::Mesh, tol: f64) -> f64 {
+fn deepest(a: &solidcraft_geom::Mesh, b: &solidcraft_geom::Mesh, tol: f64) -> f64 {
     let tb = tris(b);
     let bx = b.bounds();
     let mut pts: Vec<Vec3> = a.positions.clone();
@@ -589,7 +589,7 @@ fn export(s: &mut Session, p: &Value) -> Result<Value> {
         } else {
             serde_json::to_string_pretty(&out).unwrap_or_default()
         };
-        solvecraft_io::write_atomic(std::path::Path::new(path), text.as_bytes(), false).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+        solidcraft_io::write_atomic(std::path::Path::new(path), text.as_bytes(), false).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
         return Ok(json!({"path": path, "samples": rows.len()}));
     }
     Ok(out)
@@ -715,7 +715,7 @@ fn explode_delete(s: &mut Session, p: &Value) -> Result<Value> {
 /// World position of a point of an occurrence (tests).
 #[cfg(test)]
 pub fn world_point(s: &Session, occurrence: u64, p: Vec3) -> Vec3 {
-    solvecraft_doc::apply_point(&joints::occurrence_world(&s.doc, occurrence), p)
+    solidcraft_doc::apply_point(&joints::occurrence_world(&s.doc, occurrence), p)
 }
 
 #[cfg(test)]

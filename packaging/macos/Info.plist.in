@@ -11,9 +11,9 @@
   <key>CFBundleName</key>
   <string>SolidCraft</string>
   <key>CFBundleExecutable</key>
-  <string>SolveCraft</string>
+  <string>SolidCraft</string>
   <key>CFBundleIdentifier</key>
-  <string>ai.storyteller.solvecraft</string>
+  <string>ai.storyteller.solidcraft</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundlePackageType</key>
@@ -24,10 +24,12 @@
   <string>@SHORT_VERSION@</string>
   <key>CFBundleVersion</key>
   <string>@SHORT_VERSION@</string>
-  <key>SolveCraftVersion</key>
+  <key>SolidCraftVersion</key>
   <string>@VERSION@</string>
   <key>CFBundleIconFile</key>
-  <string>SolveCraft</string>
+  <string>SolidCraft</string>
+  <key>CFBundleIconName</key>
+  <string>SolidCraft</string>
   <key>LSApplicationCategoryType</key>
   <string>public.app-category.graphics-design</string>
   <!-- Must match MACOSX_DEPLOYMENT_TARGET in package.sh. -->
@@ -43,7 +45,8 @@
       <key>CFBundleTypeName</key>
       <string>SolidCraft design</string>
       <key>CFBundleTypeExtensions</key>
-      <array><string>solvecraft</string></array>
+      <!-- solvecraft: designs saved before the rename (compatibility shim, docs/compatibility.md). -->
+      <array><string>solidcraft</string><string>solvecraft</string></array>
       <key>CFBundleTypeRole</key>
       <string>Editor</string>
       <key>LSHandlerRank</key>

@@ -6,9 +6,9 @@
 //! moves on, Esc cancels.
 
 use egui::{Color32, Pos2, Stroke, vec2};
-use solvecraft_engine::Sel;
-use solvecraft_engine::doc::expr::Kind as ValueKind;
-use solvecraft_engine::geom::{Mesh, Vec3};
+use solidcraft_engine::Sel;
+use solidcraft_engine::doc::expr::Kind as ValueKind;
+use solidcraft_engine::geom::{Mesh, Vec3};
 
 use crate::SolveApp;
 use crate::dialogs::{Dialog, Kind};
@@ -36,9 +36,9 @@ pub fn anchor(app: &SolveApp, d: &Dialog) -> Option<(Vec3, Option<Vec3>)> {
                     })
                     .map(|p| p.region.clone())
                     .collect();
-                let regions = solvecraft_engine::sketch::merge_regions(&regions);
+                let regions = solidcraft_engine::sketch::merge_regions(&regions);
                 let points: Vec<_> = regions.iter().flat_map(|r| r.outer.polyline(1e-2)).collect();
-                points.iter().fold(solvecraft_engine::geom::Vec2::default(), |sum, p| sum + *p) * (1.0 / points.len().max(1) as f64)
+                points.iter().fold(solidcraft_engine::geom::Vec2::default(), |sum, p| sum + *p) * (1.0 / points.len().max(1) as f64)
             } else {
                 p.region.interior_point()
             };
@@ -54,8 +54,8 @@ pub fn anchor(app: &SolveApp, d: &Dialog) -> Option<(Vec3, Option<Vec3>)> {
         }
         Sel::Body { name } => (st.body(name)?.mesh().bounds().center(), None),
         Sel::Plane { name } => {
-            let pl = solvecraft_engine::geom::Plane::named(name).or_else(|| {
-                solvecraft_engine::view::construction_planes(&app.session).into_iter().find(|(_, n, _)| n == name).map(|(_, _, pl)| pl)
+            let pl = solidcraft_engine::geom::Plane::named(name).or_else(|| {
+                solidcraft_engine::view::construction_planes(&app.session).into_iter().find(|(_, n, _)| n == name).map(|(_, _, pl)| pl)
             })?;
             (pl.origin, Some(pl.normal()))
         }
@@ -64,14 +64,14 @@ pub fn anchor(app: &SolveApp, d: &Dialog) -> Option<(Vec3, Option<Vec3>)> {
     Some(match &d.kind {
         Kind::Extrude { start, .. } => {
             let n = normal?;
-            let plane = solvecraft_engine::geom::Plane::from_normal(at, n)?;
+            let plane = solidcraft_engine::geom::Plane::from_normal(at, n)?;
             let from = reference_height(app, d, "From Object", &plane, at).unwrap_or(0.0);
             let offset = if start.trim().is_empty() { 0.0 } else { app.session.doc.eval(start, ValueKind::Length).ok()? };
             (at + n * (from + offset), Some(n))
         }
-        Kind::Fillet { .. } | Kind::Section { .. } | Kind::Hole { .. } | Kind::OffsetPlane { .. } | Kind::OffsetFaces { .. } => (at, normal),
-        // Shell thickness grows into the body.
-        Kind::Shell { .. } => (at, normal.map(|n| -n)),
+        Kind::Section { .. } | Kind::Hole { .. } | Kind::OffsetPlane { .. } | Kind::OffsetFaces { .. } => (at, normal),
+        // Fillet radii, chamfer distances and shell thickness grow into the body.
+        Kind::Fillet { .. } | Kind::Shell { .. } => (at, normal.map(|n| -n)),
         Kind::Sheet(_) => (at, crate::dialogs_sheet::arrow(app, d).or(normal)),
         Kind::Plastic(_) => (at, normal),
         Kind::PatternRect { .. } => (at, d.inputs.get(1).and_then(|i| i.items.first()).and_then(|x| crate::dialogs::axis_of(app, x)).map(|a| a.1)),
@@ -79,27 +79,27 @@ pub fn anchor(app: &SolveApp, d: &Dialog) -> Option<(Vec3, Option<Vec3>)> {
     })
 }
 
-fn profile_plane(app: &SolveApp, sketch: u64) -> Option<solvecraft_engine::geom::Plane> {
+fn profile_plane(app: &SolveApp, sketch: u64) -> Option<solidcraft_engine::geom::Plane> {
     let component = app.session.doc.feature(sketch)?.component;
     let state = app.session.model.state();
     let plane = state.sketch(sketch)?.plane;
     let frame = crate::dialogs::feature_frame(&app.session, component);
-    solvecraft_engine::geom::Plane::new(
-        solvecraft_engine::doc::apply_point(&frame, plane.origin),
-        solvecraft_engine::doc::apply_vector(&frame, plane.x),
-        solvecraft_engine::doc::apply_vector(&frame, plane.y),
+    solidcraft_engine::geom::Plane::new(
+        solidcraft_engine::doc::apply_point(&frame, plane.origin),
+        solidcraft_engine::doc::apply_vector(&frame, plane.x),
+        solidcraft_engine::doc::apply_vector(&frame, plane.y),
     )
 }
 
-fn reference_height(app: &SolveApp, d: &Dialog, label: &str, plane: &solvecraft_engine::geom::Plane, centre: Vec3) -> Option<f64> {
+fn reference_height(app: &SolveApp, d: &Dialog, label: &str, plane: &solidcraft_engine::geom::Plane, centre: Vec3) -> Option<f64> {
     let point = crate::dialogs::object_point(&d.inputs, label)?;
     let p = point.as_array()?;
     let p = Vec3::new(p.first()?.as_f64()?, p.get(1)?.as_f64()?, p.get(2)?.as_f64()?);
-    Some(solvecraft_engine::doc::object_height(&app.session.world_state(), plane, centre, p))
+    Some(solidcraft_engine::doc::object_height(&app.session.world_state(), plane, centre, p))
 }
 
-/// The outward direction between the two faces at an edge (where a fillet's radius arrow
-/// points).
+/// The outward direction between the two faces at an edge (a fillet's radius arrow points the
+/// other way, into the body).
 fn edge_bisector(m: &Mesh, index: usize, p: Vec3) -> Option<Vec3> {
     let faces = m.edge_faces.get(index)?;
     let mut sum = Vec3::ZERO;
@@ -125,12 +125,12 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui, painter: &egui::Painter, proj
         app.dialog = Some(d);
         return;
     }
-    if crate::dialogs_sheet::overlay(painter, proj.rect, &d) {
+    if crate::dialogs_sheet::overlay(app, painter, proj.rect, &d) {
         app.dialog = Some(d);
         return;
     }
     if let Kind::Measure { result: Some(r), .. } = &d.kind {
-        measure_line(painter, proj, r);
+        measure_line(app, painter, proj, r);
         app.dialog = Some(d);
         return;
     }
@@ -195,7 +195,7 @@ fn offset_plane_quad(proj: &Proj, c: Vec3, n: Vec3, h: f64) -> Option<Vec<Pos2>>
 fn draw(app: &SolveApp, ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj, d: &mut Dialog, base: Vec3, bs: Pos2, dir: Option<Vec3>) {
     let t = Tokens::get();
     let to_span = dir.and_then(|n| {
-        let plane = solvecraft_engine::geom::Plane::from_normal(base, n)?;
+        let plane = solidcraft_engine::geom::Plane::from_normal(base, n)?;
         reference_height(app, d, "To Object", &plane, base)
     });
     let all_span = if matches!(d.kind, Kind::Extrude { all: true, .. }) {
@@ -203,7 +203,7 @@ fn draw(app: &SolveApp, ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj,
             let state = app.session.world_state();
             let plane = match d.inputs.first()?.items.first()? {
                 Sel::Profile { sketch, .. } => profile_plane(app, *sketch)?,
-                _ => solvecraft_engine::geom::Plane::from_normal(base, n)?,
+                _ => solidcraft_engine::geom::Plane::from_normal(base, n)?,
             };
             let targets: Vec<String> = d
                 .extra
@@ -211,7 +211,7 @@ fn draw(app: &SolveApp, ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj,
                 .and_then(serde_json::Value::as_array)
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
                 .unwrap_or_default();
-            solvecraft_engine::doc::through_all_distance(&state, &plane, &targets).ok()
+            solidcraft_engine::doc::through_all_distance(&state, &plane, &targets).ok()
         })
     } else {
         None
@@ -375,7 +375,7 @@ fn drag_arrow(
 }
 
 /// The measured distance: a line between the closest points with its length.
-fn measure_line(painter: &egui::Painter, proj: &Proj, r: &serde_json::Value) {
+fn measure_line(app: &SolveApp, painter: &egui::Painter, proj: &Proj, r: &serde_json::Value) {
     let t = Tokens::get();
     let p = |k: &str| -> Option<Vec3> {
         let a = r.get(k)?.as_array()?;
@@ -388,7 +388,7 @@ fn measure_line(painter: &egui::Painter, proj: &Proj, r: &serde_json::Value) {
         painter.circle(s, 3.5, t.manipulator, Stroke::new(1.0, Color32::WHITE));
     }
     let mid = sa + (sb - sa) * 0.5 + vec2(10.0, -14.0);
-    let galley = painter.layout_no_wrap(format!("{d:.3} mm"), egui::FontId::proportional(12.5), t.text);
+    let galley = painter.layout_no_wrap(crate::prefs::show_mm(app, d, 1), egui::FontId::proportional(12.5), t.text);
     let rect = egui::Rect::from_min_size(mid, galley.size() + vec2(10.0, 6.0));
     painter.rect(rect, 3.0, t.overlay, Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
     painter.galley(rect.min + vec2(5.0, 3.0), galley, t.text);
@@ -441,7 +441,7 @@ pub(crate) fn revolve_axis(app: &SolveApp, d: &Dialog) -> Option<(Vec3, Vec3)> {
                 "Y" => Vec3::Y,
                 _ => Vec3::Z,
             };
-            return Some((solvecraft_engine::doc::apply_point(&frame, Vec3::ZERO), solvecraft_engine::doc::apply_vector(&frame, dir)));
+            return Some((solidcraft_engine::doc::apply_point(&frame, Vec3::ZERO), solidcraft_engine::doc::apply_vector(&frame, dir)));
         }
         if let Sel::Axis { name } = selected
             && matches!(name.as_str(), "x" | "y")
@@ -474,7 +474,7 @@ fn draw_revolve(
     focus: bool,
 ) {
     let to_mode = d.inputs.iter().any(|input| input.label == "To Object");
-    let extent = revolve_display_extent(app, d, axis).unwrap_or(solvecraft_engine::doc::RevolveExtent {
+    let extent = revolve_display_extent(app, d, axis).unwrap_or(solidcraft_engine::doc::RevolveExtent {
         start: 0.0,
         sweep: f64::NAN,
         rotation_axis: axis.1,
@@ -490,8 +490,8 @@ fn draw_revolve(
             let e1 = (base - centre) / radius;
             let e2 = extent.rotation_axis.cross(e1);
             let handed = match revolve_convention(d) {
-                solvecraft_engine::doc::RevolveConvention::LegacyAxisStart => -direction.dot(extent.rotation_axis),
-                solvecraft_engine::doc::RevolveConvention::SketchNormal => 1.0,
+                solidcraft_engine::doc::RevolveConvention::LegacyAxisStart => -direction.dot(extent.rotation_axis),
+                solidcraft_engine::doc::RevolveConvention::SketchNormal => 1.0,
             };
             let at = |angle: f64| centre + (e1 * angle.cos() + e2 * angle.sin()) * radius;
             let points: Vec<_> = (0..=48).filter_map(|i| proj.to_screen(at(extent.display_start + extent.sweep * i as f64 / 48.0))).collect();
@@ -606,14 +606,14 @@ fn draw_revolve(
     });
 }
 
-fn revolve_convention(d: &Dialog) -> solvecraft_engine::doc::RevolveConvention {
+fn revolve_convention(d: &Dialog) -> solidcraft_engine::doc::RevolveConvention {
     d.extra
         .get("convention")
         .and_then(|value| serde_json::from_value(value.clone()).ok())
-        .unwrap_or(solvecraft_engine::doc::RevolveConvention::SketchNormal)
+        .unwrap_or(solidcraft_engine::doc::RevolveConvention::SketchNormal)
 }
 
-fn revolve_display_extent(app: &SolveApp, d: &Dialog, axis: (Vec3, Vec3)) -> Option<solvecraft_engine::doc::RevolveExtent> {
+fn revolve_display_extent(app: &SolveApp, d: &Dialog, axis: (Vec3, Vec3)) -> Option<solidcraft_engine::doc::RevolveExtent> {
     let Sel::Profile { sketch, .. } = d.inputs.first()?.items.first()? else { return None };
     let state = app.session.world_state();
     let ss = state.sketch(*sketch)?;
@@ -627,7 +627,7 @@ fn revolve_display_extent(app: &SolveApp, d: &Dialog, axis: (Vec3, Vec3)) -> Opt
             _ => None,
         })
         .collect();
-    let regions = solvecraft_engine::sketch::merge_regions(&regions);
+    let regions = solidcraft_engine::sketch::merge_regions(&regions);
     let plane = profile_plane(app, *sketch)?;
     let to_mode = d.inputs.iter().any(|input| input.label == "To Object");
     let to = if to_mode {
@@ -644,7 +644,7 @@ fn revolve_display_extent(app: &SolveApp, d: &Dialog, axis: (Vec3, Vec3)) -> Opt
         let other = d.extra.get("angle2").map(|value| app.session.doc.eval(value.as_str().unwrap_or_default(), ValueKind::Angle)).transpose().ok()?;
         (angle, other)
     };
-    solvecraft_engine::doc::revolve_extent_with_convention(
+    solidcraft_engine::doc::revolve_extent_with_convention(
         &state,
         &plane,
         &regions,
@@ -783,7 +783,7 @@ mod tests {
         let mut worst = f32::NEG_INFINITY;
         for n in [Vec3::X, Vec3::Y, Vec3::Z] {
             for dir in crate::viewport::orbit_directions() {
-                let cam = solvecraft_engine::render::Camera::default().looking_from(dir);
+                let cam = solidcraft_engine::render::Camera::default().looking_from(dir);
                 let proj = Proj { cam, vp: cam.view_proj(4.0 / 3.0, 100.0), rect };
                 let h = cam.half_height() * 0.25;
                 let (Some(q), Some(c), Some(side)) =

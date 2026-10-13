@@ -45,7 +45,8 @@ pub fn tool_definitions() -> Vec<Value> {
             "The command catalog: id, label, toolbar tab/panel, shortcut, one-line parameter docs and whether the command is \
              enabled right now. Ids are dotted and lower-case (solid.extrude, sketch.create, \
              solid.fillet, sketch.inspect, timeline.rollback). Optional case-insensitive \
-             substring `filter` over id, label, panel and params.",
+             substring `filter` over id, label, tab and panel (not the parameter docs, so a command id \
+             finds that command rather than every command whose docs mention it).",
             obj(json!({"filter": string("Substring to match, e.g. \"sketch\", \"fillet\", \"pattern\"")}), &[]),
             true,
             false,
@@ -61,7 +62,8 @@ pub fn tool_definitions() -> Vec<Value> {
              the command's result; failures leave the design unchanged. Sketch commands that add geometry return \
              created: {points, curves, constraints, dimensions}: the ids of what they added, stable and not reused \
              after a delete (undo rewinds the counters with the design), usable right away \
-             in sketch.dimension, sketch.constraint.* and sketch.delete.",
+             in sketch.dimension, sketch.constraint.* and sketch.delete. Feature commands return the feature's id \
+             and name, every body (bodies) and the bodies the feature created (created_bodies).",
             obj(
                 json!({
                     "command": string("Command id (see list_commands)"),
@@ -182,6 +184,24 @@ pub fn tool_definitions() -> Vec<Value> {
             false,
             false,
         ),
+        tool(
+            "crash_reports",
+            "Crash reports",
+            "SolidCraft's crash reports on this computer (the app's when connected to it). Without `id`: the list, newest \
+             first (id, kind, time, message, command, count, version, path, replayable). With `id`: the whole report: \
+             message, location, backtrace, app version and commit, system, the command that crashed and the recent ones, \
+             and design_path / replay_path when it can be replayed: `solidcraft-cli crashes replay <id>`, or \
+             `solidcraft-cli run <replay_path> --in <design_path>`. Reports never leave this computer.",
+            obj(
+                json!({
+                    "id": string("A report id from the list"),
+                    "limit": {"type": "integer", "description": "Reports to list (default 20)"},
+                }),
+                &[],
+            ),
+            true,
+            false,
+        ),
         tool("undo", "Undo", "Undo the last change to the design.", obj(json!({}), &[]), false, false),
         tool("redo", "Redo", "Redo the last undone change.", obj(json!({}), &[]), false, false),
         tool(
@@ -195,18 +215,21 @@ pub fn tool_definitions() -> Vec<Value> {
         tool(
             "open",
             "Open a design",
-            "Open a .solvecraft design file, a STEP file (.step/.stp: a new design whose bodies come from the file, as an \
+            "Open a .solidcraft design file, a STEP file (.step/.stp: a new design whose bodies come from the file, as an \
              Import base feature) or a 3MF/STL mesh (.3mf/.stl: mesh bodies). Replaces the current design; insert into it \
              instead with the file.insert_step (STEP) or file.insert_mesh (3MF/STL) commands.",
-            obj(json!({"path": string("Path to a .solvecraft, .step/.stp, .3mf or .stl file")}), &["path"]),
+            obj(json!({"path": string("Path to a .solidcraft, .step/.stp, .3mf or .stl file")}), &["path"]),
             false,
             true,
         ),
         tool(
             "save",
             "Save the design",
-            "Save the design as a .solvecraft file (to `path`, or to the file it came from).",
-            obj(json!({"path": string("Path to save to (default: the current file)")}), &[]),
+            "Save the design to `path` or its current file. The default is a design container; a .json path selects plain JSON. Set format to container or json to override the path.",
+            obj(
+                json!({"path": string("Path to save to (default: the current file)"), "format": {"type": "string", "enum": ["container", "json"], "description": "Design encoding (default: JSON for .json, container otherwise)"}}),
+                &[],
+            ),
             false,
             false,
         ),
@@ -310,9 +333,8 @@ fn dispatch(b: &mut dyn Backend, name: &str, a: &Map<String, Value>) -> Result<V
             let all = b.call("engine.commands", json!({}))?;
             let Some(f) = str_arg(a, "filter").map(str::to_lowercase).filter(|f| !f.is_empty()) else { return Ok(all) };
             let hit = |c: &Value| {
-                ["id", "label", "panel", "tab", "params"]
-                    .iter()
-                    .any(|k| c.get(*k).and_then(Value::as_str).is_some_and(|s| s.to_lowercase().contains(&f)))
+                // Not "params": many docs name other commands (e.g. "usable in sketch.delete"), #269.
+                ["id", "label", "panel", "tab"].iter().any(|k| c.get(*k).and_then(Value::as_str).is_some_and(|s| s.to_lowercase().contains(&f)))
             };
             Ok(Value::Array(all.as_array().map(|v| v.iter().filter(|c| hit(c)).cloned().collect()).unwrap_or_default()))
         }
@@ -352,11 +374,15 @@ fn dispatch(b: &mut dyn Backend, name: &str, a: &Map<String, Value>) -> Result<V
             exec(b, "parameters.change", p)
         }
         "export" => exec(b, "file.export", pick(a, &["path", "format", "bodies"])),
+        "crash_reports" => match a.get("id") {
+            Some(_) => exec(b, "diagnostics.crash_report", pick(a, &["id"])),
+            None => exec(b, "diagnostics.crash_reports", pick(a, &["limit"])),
+        },
         "undo" => exec(b, "edit.undo", json!({})),
         "redo" => exec(b, "edit.redo", json!({})),
         "new_design" => exec(b, "file.new", pick(a, &["name"])),
         "open" => exec(b, "doc.open", pick(a, &["path"])),
-        "save" => exec(b, "file.save", pick(a, &["path"])),
+        "save" => exec(b, "file.save", pick(a, &["path", "format"])),
         other => Err(format!("unknown tool `{other}`")),
     }
 }
@@ -477,7 +503,7 @@ fn capture(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<(Vec<u8>, Valu
     let keep = str_arg(a, "path").filter(|p| !p.trim().is_empty()).map(str::to_string);
     let path = keep.clone().unwrap_or_else(|| {
         let n = SHOT.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("solvecraft-mcp-{}-{n}.png", std::process::id())).to_string_lossy().to_string()
+        std::env::temp_dir().join(format!("solidcraft-mcp-{}-{n}.png", std::process::id())).to_string_lossy().to_string()
     });
     let window = match str_arg(a, "source") {
         Some("model") => false,

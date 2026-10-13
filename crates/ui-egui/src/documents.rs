@@ -6,8 +6,8 @@
 
 use egui::{Align2, Color32, FontId, Rect, Sense, Stroke, pos2, vec2};
 use serde_json::{Value, json};
-use solvecraft_engine::Session;
-use solvecraft_engine::render::Camera;
+use solidcraft_engine::Session;
+use solidcraft_engine::render::Camera;
 
 use crate::SolveApp;
 use crate::theme::Tokens;
@@ -555,7 +555,7 @@ mod tests {
     fn tabs_keep_their_own_design() {
         let mut a = app();
         a.run("solid.box", json!({"length": 10, "width": 10, "height": 10})).unwrap();
-        a.session.selection = vec![solvecraft_engine::Sel::Body { name: "Body1".into() }];
+        a.session.selection = vec![solidcraft_engine::Sel::Body { name: "Body1".into() }];
         a.cam.distance = 123.0;
         new_design(&mut a);
         assert_eq!(a.docs.count(), 2);
@@ -591,7 +591,7 @@ mod tests {
         assert!(a.quit_requested, "nothing unsaved: quits at once");
 
         let mut a = app();
-        let file = std::env::temp_dir().join(format!("solvecraft-quit-save-{}.solvecraft", std::process::id()));
+        let file = std::env::temp_dir().join(format!("solidcraft-quit-save-{}.solidcraft", std::process::id()));
         let _ = std::fs::remove_file(&file);
         a.run("solid.box", json!({"length": 10, "width": 10, "height": 10})).unwrap();
         a.run("file.save_as", json!({"path": file.to_string_lossy()})).unwrap();
@@ -607,7 +607,7 @@ mod tests {
         answer_prompt(&mut a, Answer::Save);
         assert!(!dirty(&a, 0), "saved");
         assert_eq!(
-            std::fs::read(&file).ok().and_then(|b| solvecraft_engine::io::read_design(&b).ok()).map(|d| d.features.len()),
+            std::fs::read(&file).ok().and_then(|b| solidcraft_engine::io::read_design(&b).ok()).map(|d| d.features.len()),
             Some(2),
             "the file holds the change"
         );
@@ -638,7 +638,7 @@ mod tests {
         assert!(!a.quit_requested && a.docs.quitting.is_none() && a.session.is_dirty());
 
         // A picked file: saved, then quit.
-        let file = std::env::temp_dir().join(format!("solvecraft-quit-saveas-{}.solvecraft", std::process::id()));
+        let file = std::env::temp_dir().join(format!("solidcraft-quit-saveas-{}.solidcraft", std::process::id()));
         let _ = std::fs::remove_file(&file);
         let to = file.to_string_lossy().to_string();
         a.services.pick_save = Some(Box::new(move |_: &str, _: &[&str]| Some(to.clone())));
@@ -653,7 +653,7 @@ mod tests {
     fn adopt_reuses_a_blank_design() {
         let mut a = app();
         let mut s = Session::default();
-        s.run_script(&solvecraft_engine::sample::script()).unwrap();
+        s.run_script(&solidcraft_engine::sample::script()).unwrap();
         adopt(&mut a, s);
         assert_eq!(a.docs.count(), 1);
         assert!(!a.session.doc.features.is_empty());

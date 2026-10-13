@@ -1,6 +1,7 @@
 //! Explicit cyclic C2 fit splines. Missing periodic markers retain natural interpolation.
+use crate::model::in_range;
 use crate::{MAX_SPLINE_POINTS, Sketch, SketchError};
-use solvecraft_geom::Vec2;
+use solidcraft_geom::Vec2;
 
 type Result<T> = std::result::Result<T, SketchError>;
 fn bad() -> SketchError {
@@ -11,7 +12,7 @@ pub(crate) fn validate_periodic_points(points: &[Vec2]) -> Result<()> {
     if points.len() < 4
         || points.len() > MAX_SPLINE_POINTS
         || points.first() != points.last()
-        || points.iter().any(|p| !p.is_finite() || p.x.abs() >= 1e9 || p.y.abs() >= 1e9)
+        || points.iter().any(|p| !in_range(*p))
         || points.windows(2).any(|p| {
             let h = p[0].dist(p[1]);
             !h.is_finite() || h <= 1e-9
@@ -89,7 +90,7 @@ pub fn periodic_beziers(points: &[Vec2]) -> Result<Vec<[Vec2; 4]>> {
         let t0 = chord - (second[i] * 2.0 + second[next]) * (h[i] * h[i] / 6.0);
         let t1 = chord + (second[i] + second[next] * 2.0) * (h[i] * h[i] / 6.0);
         let cubic = [points[i], points[i] + t0 / 3.0, points[i + 1] - t1 / 3.0, points[i + 1]];
-        if cubic.iter().any(|p| !p.is_finite() || p.x.abs() >= 1e9 || p.y.abs() >= 1e9) {
+        if cubic.iter().any(|p| !in_range(*p)) {
             return Err(bad());
         }
         out.push(cubic);
@@ -162,7 +163,7 @@ mod tests {
         sk.add_curve(crate::CurveKind::Spline { pts: vec![first, a, b, seam], control: false, degree: 3, periodic: true }, None).unwrap();
         sk.add_curve(crate::CurveKind::Spline { pts: vec![seam, c, d, last], control: false, degree: 3, periodic: true }, None).unwrap();
         sk.points[first].pos = Vec2::new(0.2, 0.1);
-        assert!(crate::solve_holding(&mut sk, &crate::Hold { points: vec![first], radii: vec![] }).ok());
+        assert!(crate::solve_with(&mut sk, &crate::Hold { points: vec![first], radii: vec![] }, None, crate::Analysis::Full, None).ok());
         assert_eq!(sk.point(first), sk.point(seam));
         assert_eq!(sk.point(first), sk.point(last));
         sk.validate_periodic_splines().unwrap();
@@ -176,7 +177,7 @@ mod tests {
         let mut collapsed = sk;
         collapsed.points[a].pos = collapsed.points[first].pos;
         let before = collapsed.clone();
-        assert!(!crate::solve_holding(&mut collapsed, &crate::Hold { points: vec![first, a], radii: vec![] }).ok());
+        assert!(!crate::solve_with(&mut collapsed, &crate::Hold { points: vec![first, a], radii: vec![] }, None, crate::Analysis::Full, None).ok());
         assert_eq!(collapsed, before);
     }
 

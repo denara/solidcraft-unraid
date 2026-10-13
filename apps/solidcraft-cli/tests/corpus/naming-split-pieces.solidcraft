@@ -1,0 +1,373 @@
+{
+  "format": "solidcraft/13",
+  "name": "Untitled",
+  "units": "mm",
+  "params": [],
+  "features": [
+    {
+      "id": 1,
+      "name": "Base",
+      "suppressed": false,
+      "type": "sketch",
+      "plane": {
+        "type": "origin",
+        "name": "XY"
+      },
+      "sketch": {
+        "points": [
+          {
+            "id": "origin",
+            "pos": [
+              0.0,
+              0.0
+            ],
+            "fixed": true
+          },
+          {
+            "id": "p1",
+            "pos": [
+              0.0,
+              0.0
+            ],
+            "fixed": false
+          },
+          {
+            "id": "p2",
+            "pos": [
+              40.0,
+              0.0
+            ],
+            "fixed": false
+          },
+          {
+            "id": "p3",
+            "pos": [
+              40.0,
+              30.0
+            ],
+            "fixed": false
+          },
+          {
+            "id": "p4",
+            "pos": [
+              0.0,
+              30.0
+            ],
+            "fixed": false
+          }
+        ],
+        "curves": [
+          {
+            "id": "l1",
+            "type": "line",
+            "a": 1,
+            "b": 2,
+            "construction": false
+          },
+          {
+            "id": "l2",
+            "type": "line",
+            "a": 2,
+            "b": 3,
+            "construction": false
+          },
+          {
+            "id": "l3",
+            "type": "line",
+            "a": 3,
+            "b": 4,
+            "construction": false
+          },
+          {
+            "id": "l4",
+            "type": "line",
+            "a": 4,
+            "b": 1,
+            "construction": false
+          }
+        ],
+        "constraints": [
+          {
+            "id": "k1",
+            "type": "horizontal",
+            "l": 0
+          },
+          {
+            "id": "k2",
+            "type": "horizontal",
+            "l": 2
+          },
+          {
+            "id": "k3",
+            "type": "vertical",
+            "l": 1
+          },
+          {
+            "id": "k4",
+            "type": "vertical",
+            "l": 3
+          },
+          {
+            "id": "k5",
+            "type": "coincident",
+            "p": 0,
+            "q": 1
+          }
+        ],
+        "counters": {
+          "k": 5,
+          "l": 4,
+          "p": 4
+        }
+      }
+    },
+    {
+      "id": 2,
+      "name": "Block",
+      "suppressed": false,
+      "param_names": [
+        "d1"
+      ],
+      "type": "extrude",
+      "sketch": 1,
+      "profiles": {
+        "type": "all"
+      },
+      "extent": {
+        "distance": "10",
+        "direction": "positive"
+      },
+      "operation": "new_body"
+    },
+    {
+      "id": 3,
+      "name": "SlotSketch",
+      "suppressed": false,
+      "type": "sketch",
+      "plane": {
+        "type": "origin",
+        "name": "XY"
+      },
+      "sketch": {
+        "points": [
+          {
+            "id": "origin",
+            "pos": [
+              0.0,
+              0.0
+            ],
+            "fixed": true
+          },
+          {
+            "id": "p1",
+            "pos": [
+              15.0,
+              -5.0
+            ],
+            "fixed": false
+          },
+          {
+            "id": "p2",
+            "pos": [
+              25.0,
+              -5.0
+            ],
+            "fixed": false
+          },
+          {
+            "id": "p3",
+            "pos": [
+              25.0,
+              35.0
+            ],
+            "fixed": false
+          },
+          {
+            "id": "p4",
+            "pos": [
+              15.0,
+              35.0
+            ],
+            "fixed": false
+          }
+        ],
+        "curves": [
+          {
+            "id": "l1",
+            "type": "line",
+            "a": 1,
+            "b": 2,
+            "construction": false
+          },
+          {
+            "id": "l2",
+            "type": "line",
+            "a": 2,
+            "b": 3,
+            "construction": false
+          },
+          {
+            "id": "l3",
+            "type": "line",
+            "a": 3,
+            "b": 4,
+            "construction": false
+          },
+          {
+            "id": "l4",
+            "type": "line",
+            "a": 4,
+            "b": 1,
+            "construction": false
+          }
+        ],
+        "constraints": [
+          {
+            "id": "k1",
+            "type": "horizontal",
+            "l": 0
+          },
+          {
+            "id": "k2",
+            "type": "horizontal",
+            "l": 2
+          },
+          {
+            "id": "k3",
+            "type": "vertical",
+            "l": 1
+          },
+          {
+            "id": "k4",
+            "type": "vertical",
+            "l": 3
+          }
+        ],
+        "counters": {
+          "k": 4,
+          "l": 4,
+          "p": 4
+        }
+      }
+    },
+    {
+      "id": 4,
+      "name": "Slot",
+      "suppressed": false,
+      "param_names": [
+        "d2",
+        "d3"
+      ],
+      "type": "extrude",
+      "sketch": 3,
+      "profiles": {
+        "type": "all"
+      },
+      "extent": {
+        "distance": "10",
+        "direction": "positive",
+        "start_offset": "5"
+      },
+      "operation": "cut"
+    },
+    {
+      "id": 5,
+      "name": "Round",
+      "suppressed": false,
+      "param_names": [
+        "d4"
+      ],
+      "edge_refs": [
+        {
+          "dir": [
+            0.0,
+            -1.0,
+            0.0
+          ],
+          "min": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "max": [
+            40.0,
+            30.0,
+            10.0
+          ]
+        }
+      ],
+      "edge_names": [
+        "F2:side:l2|F2:top#2"
+      ],
+      "type": "fillet",
+      "edges": [
+        [
+          40.0,
+          15.0,
+          10.0
+        ]
+      ],
+      "radius": "2"
+    },
+    {
+      "id": 6,
+      "name": "Bevel",
+      "suppressed": false,
+      "param_names": [
+        "d5"
+      ],
+      "edge_refs": [
+        {
+          "dir": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "min": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "max": [
+            40.0,
+            30.000000000000007,
+            10.0
+          ]
+        }
+      ],
+      "edge_names": [
+        "F2:side:l4|F2:top#1"
+      ],
+      "type": "chamfer",
+      "edges": [
+        [
+          0.0,
+          15.0,
+          10.0
+        ]
+      ],
+      "distance": "1.5"
+    },
+    {
+      "id": 7,
+      "name": "Raise",
+      "suppressed": false,
+      "param_names": [
+        "d6"
+      ],
+      "face_names": [
+        "F2:top#1"
+      ],
+      "type": "offset_face",
+      "faces": [
+        [
+          7.0,
+          15.0,
+          10.0
+        ]
+      ],
+      "distance": "2"
+    }
+  ],
+  "next_id": 8
+}

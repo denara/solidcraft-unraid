@@ -13,7 +13,7 @@ fn run(s: &mut Session, id: &str, p: Value) -> Value {
 }
 
 fn volume(s: &Session, body: &str) -> f64 {
-    s.model.state().body(body).map(|b| solvecraft_kernel::measure(&b.body).unwrap().volume).unwrap_or(0.0)
+    s.model.state().body(body).map(|b| solidcraft_kernel::measure(&b.body).unwrap().volume).unwrap_or(0.0)
 }
 
 #[test]
@@ -45,22 +45,22 @@ fn enclosure_datums_follow_wall_height_and_board_depth_with_material_proofs() {
     assert!(s.model.results.iter().all(|result| result.error.is_none()));
     for (name, z) in [("PCB standoff", 2.5), ("Lid boss", 2.5), ("Lid lip", 30.), ("Lid screw", 34.)] {
         let feature =
-            s.doc.features.iter().find(|feature| feature.name == name && matches!(feature.kind, solvecraft_doc::FeatureKind::Sketch { .. })).unwrap();
+            s.doc.features.iter().find(|feature| feature.name == name && matches!(feature.kind, solidcraft_doc::FeatureKind::Sketch { .. })).unwrap();
         assert!((s.model.state().sketch(feature.id).unwrap().plane.origin.z - z).abs() < 1e-6);
     }
     let usb =
-        s.doc.features.iter().find(|feature| feature.name == "USB" && matches!(feature.kind, solvecraft_doc::FeatureKind::Sketch { .. })).unwrap();
+        s.doc.features.iter().find(|feature| feature.name == "USB" && matches!(feature.kind, solidcraft_doc::FeatureKind::Sketch { .. })).unwrap();
     assert!((s.model.state().sketch(usb.id).unwrap().plane.origin.y + 35.5).abs() < 1e-6);
     let assert_material = |session: &Session| {
         let state = session.world_state();
         let case = state.body("Case").unwrap().mesh();
         let lid = state.body("Lid").unwrap().mesh();
-        assert!(case.contains(solvecraft_geom::Vec3::new(-24.5, -21.5, 7.)));
-        assert!(!case.contains(solvecraft_geom::Vec3::new(-26.5, -21.5, 7.)));
-        assert!(!case.contains(solvecraft_geom::Vec3::new(-10., -35.25, 11.35)));
-        assert!(case.contains(solvecraft_geom::Vec3::new(-10., -35.25, 15.)));
+        assert!(case.contains(solidcraft_geom::Vec3::new(-24.5, -21.5, 7.)));
+        assert!(!case.contains(solidcraft_geom::Vec3::new(-26.5, -21.5, 7.)));
+        assert!(!case.contains(solidcraft_geom::Vec3::new(-10., -35.25, 11.35)));
+        assert!(case.contains(solidcraft_geom::Vec3::new(-10., -35.25, 15.)));
         assert!(
-            lid.contains(solvecraft_geom::Vec3::new(0., 32.2, 29.)),
+            lid.contains(solidcraft_geom::Vec3::new(0., 32.2, 29.)),
             "lid bounds {:?}; lip {:?}; probes {:?}",
             lid.bounds(),
             session
@@ -71,30 +71,30 @@ fn enclosure_datums_follow_wall_height_and_board_depth_with_material_proofs() {
                         .doc
                         .features
                         .iter()
-                        .find(|feature| feature.name == "Lid lip" && matches!(feature.kind, solvecraft_doc::FeatureKind::Sketch { .. }))
+                        .find(|feature| feature.name == "Lid lip" && matches!(feature.kind, solidcraft_doc::FeatureKind::Sketch { .. }))
                         .unwrap()
                         .id
                 )
                 .unwrap()
                 .sketch
                 .links,
-            (20..35).map(|y| (y, lid.contains(solvecraft_geom::Vec3::new(0., f64::from(y) + 0.2, 29.)))).collect::<Vec<_>>()
+            (20..35).map(|y| (y, lid.contains(solidcraft_geom::Vec3::new(0., f64::from(y) + 0.2, 29.)))).collect::<Vec<_>>()
         );
-        assert!(!lid.contains(solvecraft_geom::Vec3::new(0., 32.9, 29.)));
-        assert!(!lid.contains(solvecraft_geom::Vec3::new(-33.5, -28.5, 32.)));
-        assert!(lid.contains(solvecraft_geom::Vec3::new(-31.5, -28.5, 32.)));
+        assert!(!lid.contains(solidcraft_geom::Vec3::new(0., 32.9, 29.)));
+        assert!(!lid.contains(solidcraft_geom::Vec3::new(-33.5, -28.5, 32.)));
+        assert!(lid.contains(solidcraft_geom::Vec3::new(-31.5, -28.5, 32.)));
     };
     assert_material(&s);
-    let reopened = Session::new(solvecraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
     assert!(reopened.model.results.iter().all(|result| result.error.is_none()));
     assert_material(&reopened);
 }
 
 #[test]
 fn enclosure_arc_extinction_keeps_a_real_sharp_inner_lip_after_resize_and_reopen() {
-    use solvecraft_doc::FeatureKind;
-    use solvecraft_geom::{Vec2, Vec3};
-    use solvecraft_sketch::CurveKind;
+    use solidcraft_doc::FeatureKind;
+    use solidcraft_geom::{Vec2, Vec3};
+    use solidcraft_sketch::CurveKind;
 
     let mut s = Session::default();
     let script: Value = serde_json::from_str(include_str!("../../../examples/acceptance/sensor_enclosure.json")).unwrap();
@@ -106,11 +106,13 @@ fn enclosure_arc_extinction_keeps_a_real_sharp_inner_lip_after_resize_and_reopen
         let errors = session.model.results.iter().filter_map(|r| r.error.as_ref().map(|e| (&r.name, e))).collect::<Vec<_>>();
         let warnings = session.model.results.iter().filter_map(|r| r.warning.as_ref().map(|e| (&r.name, e))).collect::<Vec<_>>();
         assert!(errors.is_empty(), "errors {errors:?}");
-        // The earlier snap-fit operation retains its documented legacy split-face
-        // notice. Offset/projection failures or frozen borders are not accepted.
+        // The earlier snap-fit operation retains its notice about its face reference: the
+        // shell's inner wall it sits on, which the resized boss join (no exact history there)
+        // leaves to be found by geometry. Offset/projection failures or frozen borders are not
+        // accepted.
         assert!(
             warnings.iter().all(|(name, message)| name.as_str() == "SnapFit1"
-                && message.as_str() == "face `F11:side:bs#7` was split; using the piece nearest the picked point"),
+                && message.as_str() == "face `F4:inner:F2:side:l1` was found by geometry, not exact history; check it"),
             "warnings {warnings:?}"
         );
         assert!(session.model.results.iter().filter(|r| r.name == "Lid lip").all(|r| r.warning.is_none()));
@@ -137,10 +139,10 @@ fn enclosure_arc_extinction_keeps_a_real_sharp_inner_lip_after_resize_and_reopen
             }
         }
         assert_eq!(corners.len(), 4);
-        let regions = solvecraft_doc::select_profiles(solved, profiles).unwrap();
+        let regions = solidcraft_doc::select_profiles(solved, profiles).unwrap();
         assert_eq!(regions.len(), 1);
         assert!((regions[0].area() - 332.570619298295).abs() < 1e-7, "area {}", regions[0].area());
-        let ring = solvecraft_kernel::extrude(&solved.plane, &regions, 0., 2.).unwrap();
+        let ring = solidcraft_kernel::extrude(&solved.plane, &regions, 0., 2.).unwrap();
         assert_eq!(ring.len(), 1);
         let precise_ring = ring[0].tessellate(1e-6).unwrap();
         let bounds = precise_ring.bounds();
@@ -158,14 +160,14 @@ fn enclosure_arc_extinction_keeps_a_real_sharp_inner_lip_after_resize_and_reopen
             .segs
             .iter()
             .map(|segment| match segment {
-                solvecraft_geom::Seg2::Arc { radius, sweep, .. } => radius.abs() * sweep.abs(),
-                solvecraft_geom::Seg2::Line { .. } => 0.,
+                solidcraft_geom::Seg2::Arc { radius, sweep, .. } => radius.abs() * sweep.abs(),
+                solidcraft_geom::Seg2::Line { .. } => 0.,
                 other => panic!("unexpected ring boundary {other:?}"),
             })
             .sum::<f64>();
         assert!((arc_perimeter - std::f64::consts::TAU * 0.8).abs() < 1e-8);
         assert_eq!(regions[0].holes.len(), 1);
-        assert!(regions[0].holes[0].segs.iter().all(|segment| matches!(segment, solvecraft_geom::Seg2::Line { .. })));
+        assert!(regions[0].holes[0].segs.iter().all(|segment| matches!(segment, solidcraft_geom::Seg2::Line { .. })));
         // Body::tessellate floors the requested sag tolerance at size * 1e-6.
         // Only the outer arcs incur chord error: their tolerance-wide boundary
         // strip bounds the volume error without changing CAD or export tolerances.
@@ -197,7 +199,7 @@ fn enclosure_arc_extinction_keeps_a_real_sharp_inner_lip_after_resize_and_reopen
     };
     check(&s);
     let saved = s.doc.to_json();
-    let reopened = Session::new(solvecraft_doc::Document::from_json(&saved).unwrap());
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&saved).unwrap());
     check(&reopened);
     assert_eq!(reopened.doc.to_json(), saved);
 }

@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
-use solvecraft_geom::{Mesh, Vec3};
+use solidcraft_geom::{Mesh, Vec3};
 
 use crate::Result;
 use crate::body::{Body, from_p3};
@@ -239,7 +239,7 @@ pub fn seam_flags(b: &Body, mesh: &Mesh) -> Vec<bool> {
     let solid = &*b.solid;
     let nf = solid.face_iter().count();
     let tol = (b.size() * 1e-4).max(1e-6);
-    let surfs = classify_faces(mesh, nf, tol);
+    let surfs = classify_faces(b, mesh, nf, tol);
     let verts = face_vertices(mesh, nf);
     // Faces cut from one surface (an imported face split where it wraps around a closed
     // surface) carry the very same surface: the edge between them is a seam.
@@ -312,7 +312,7 @@ fn fit_sphere(pts: &[Vec3]) -> Option<(Vec3, f64)> {
     (r2 > 0.0 && r2.is_finite()).then(|| (c + m, r2.sqrt()))
 }
 
-fn classify_faces(mesh: &Mesh, nf: usize, tol: f64) -> Vec<Surf> {
+fn classify_faces(b: &Body, mesh: &Mesh, nf: usize, tol: f64) -> Vec<Surf> {
     let mut pts: Vec<Vec<Vec3>> = vec![Vec::new(); nf];
     let mut nrm: Vec<Vec<Vec3>> = vec![Vec::new(); nf];
     for (t, f) in mesh.triangles.iter().zip(&mesh.tri_face) {
@@ -351,7 +351,27 @@ fn classify_faces(mesh: &Mesh, nf: usize, tol: f64) -> Vec<Surf> {
             nv.retain(|_| it.next().copied().unwrap_or(true));
         }
     }
-    (0..nf).map(|i| classify(pts.get(i).map(Vec::as_slice).unwrap_or(&[]), nrm.get(i).map(Vec::as_slice).unwrap_or(&[]), tol * 10.0, i)).collect()
+    let fitted = (0..nf).map(|i| classify(pts.get(i).map(Vec::as_slice).unwrap_or(&[]), nrm.get(i).map(Vec::as_slice).unwrap_or(&[]), tol * 10.0, i));
+    // A sliver (a strip one triangle wide) has too few distinct samples to fit: its points
+    // can fit a sphere or nothing. Where the fit finds no plane or cylinder, take the face's
+    // exact surface when that is a plane, cylinder or sphere.
+    let exact_tol = (b.size() * 1e-7).max(1e-9) * 100.0;
+    let faces: Vec<_> = b.solid.face_iter().collect();
+    fitted
+        .enumerate()
+        .map(|(i, fit)| match (fit, faces.get(i)) {
+            (Surf::Sphere { .. } | Surf::Other(_), Some(face)) => match crate::offset::surf_of(face, exact_tol) {
+                Some(crate::offset::Surf::Plane { n, d }) => Surf::Plane { n, d },
+                Some(crate::offset::Surf::Cylinder { o, a, r, .. }) => {
+                    let axis = if a.x + a.y * 1e-3 + a.z * 1e-6 < 0.0 { -a } else { a };
+                    Surf::Cylinder { axis, p: o, r }
+                }
+                Some(crate::offset::Surf::Sphere { c, r, .. }) => Surf::Sphere { c, r },
+                _ => fit,
+            },
+            _ => fit,
+        })
+        .collect()
 }
 
 /// Merged face/edge/vertex counts (see module docs). `mesh` must be `b.tessellate(..)`.
@@ -373,7 +393,7 @@ pub fn merged_topology(b: &Body, mesh: &Mesh) -> Result<TopoCounts> {
     let solid = &*b.solid;
     let nf = solid.face_iter().count();
     let tol = (b.size() * 1e-4).max(1e-6);
-    let surfs = classify_faces(mesh, nf, tol);
+    let surfs = classify_faces(b, mesh, nf, tol);
     let verts = face_vertices(mesh, nf);
     // Zero-area faces (a revolved profile edge lying on the axis) don't count.
     let mut area = vec![0.0f64; nf];
@@ -469,6 +489,24 @@ pub fn merged_topology(b: &Body, mesh: &Mesh) -> Result<TopoCounts> {
             let (ra, rb) = (find(&mut fp, a), find(&mut fp, b));
             if let Some(s) = fp.get_mut(ra) {
                 *s = rb;
+            }
+        }
+    }
+    // Two tangent holes touch along a line that both carry: there four faces meet, two on
+    // each hole's surface. Each surface's two pieces are one face, as for any other edge.
+    for (ei, faces) in &edge_faces {
+        if faces.len() <= 2 || faces.len() > 8 || (keep_split && poly(*ei).is_some_and(|pl| crate::heal::on_split_line(pl, b_keep))) {
+            continue;
+        }
+        for (i, &a) in faces.iter().enumerate() {
+            for &b in faces.iter().skip(i + 1) {
+                let analytic = !matches!(surfs.get(a), Some(Surf::Other(_)) | None);
+                if analytic && same_surface(&surfs, &verts, poly(*ei), a, b, tol * 10.0) {
+                    let (ra, rb) = (find(&mut fp, a), find(&mut fp, b));
+                    if let Some(s) = fp.get_mut(ra) {
+                        *s = rb;
+                    }
+                }
             }
         }
     }
@@ -604,7 +642,7 @@ pub fn cylinder_face_at(b: &Body, p: Vec3) -> Option<CylinderFace> {
     }
     let nf = b.face_count();
     let tol = (size * 1e-4).max(1e-6);
-    let surfs = classify_faces(&mesh, nf, tol);
+    let surfs = classify_faces(b, &mesh, nf, tol);
     let Surf::Cylinder { axis, p: ap, r } = *surfs.get(face as usize)? else { return None };
     let mut lo = f64::INFINITY;
     let mut hi = f64::NEG_INFINITY;

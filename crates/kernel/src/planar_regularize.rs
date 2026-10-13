@@ -1,8 +1,9 @@
 //! Exact topological removal of construction-induced planar subdivisions.
 //! Shared edge identity and complete construction lineage select the groups.
 use super::{Body, from_p3};
+use crate::history::FaceOrigin;
 use crate::{Result, guard};
-use solvecraft_geom::Plane;
+use solidcraft_geom::Plane;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use truck_modeling as mt;
@@ -82,8 +83,8 @@ fn merged_face(faces: &[&mt::Face], members: &[usize], plane: Plane, eligible: &
             let edge = boundary.get(index)?.clone();
             let da = from_p3(edge.front().point()) - origin;
             let db = from_p3(edge.back().point()) - origin;
-            let a = solvecraft_geom::Vec2::new(da.dot(plane.x), da.dot(plane.y));
-            let b = solvecraft_geom::Vec2::new(db.dot(plane.x), db.dot(plane.y));
+            let a = solidcraft_geom::Vec2::new(da.dot(plane.x), da.dot(plane.y));
+            let b = solidcraft_geom::Vec2::new(db.dot(plane.x), db.dot(plane.y));
             let term = a.cross(b);
             area += term;
             magnitude += term.abs();
@@ -113,6 +114,24 @@ fn merged_face(faces: &[&mt::Face], members: &[usize], plane: Plane, eligible: &
     let mut wires = vec![outer?];
     wires.extend(holes);
     mt::Face::try_new(wires, faces.get(*members.first()?)?.oriented_surface()).ok()
+}
+
+/// `body` with its history: `input`'s faces with each output face made of the input faces
+/// `members` lists for it (every edge of `body` one of `input`'s, by identity), composed with
+/// the history of the operation that made `input`; none where `input` has none.
+fn with_joined_history(body: Body, input: &Body, members: Vec<Vec<usize>>) -> Body {
+    let Some(inner) = input.history() else { return body };
+    let faces = members.into_iter().map(|m| (m.iter().map(|&face| FaceOrigin::Face { operand: 0, face }).collect(), m.len() == 1)).collect();
+    let joined = crate::record::traced(
+        body,
+        &crate::record::counts(&[input]),
+        Some(crate::record::regions(faces)),
+        Some(&crate::record::edge_origins(&input.solid, 0)),
+    );
+    // Both steps are checked (`traced` against `input`, `through` composing over its checked
+    // history); the composed operands' counts are not known here, so it is set in place.
+    let history = crate::boolean_record::through(&joined, 0, Some(inner));
+    Body { history: history.map(Arc::new), ..joined }
 }
 
 impl Body {
@@ -181,7 +200,7 @@ impl Body {
                         .and_then(|source| {
                             if generated {
                                 match source {
-                                    super::FaceSource::ExtrudeSide { segment: solvecraft_geom::Seg2::Line { .. }, plane: Some(p), .. } => Some(*p),
+                                    super::FaceSource::ExtrudeSide { segment: solidcraft_geom::Seg2::Line { .. }, plane: Some(p), .. } => Some(*p),
                                     _ => None,
                                 }
                             } else {
@@ -252,6 +271,8 @@ impl Body {
             let mut shells = Vec::new();
             let mut output_sources = Vec::new();
             let mut output_ids = Vec::new();
+            // The input faces each output face is made of, for its history.
+            let mut output_members: Vec<Vec<usize>> = Vec::new();
             let mut offset = 0;
             for shell in self.solid.boundaries() {
                 let mut output = Vec::new();
@@ -260,12 +281,15 @@ impl Body {
                     if let Some(merged) = replacements.get(&leader) {
                         if offset == leader {
                             output.push(merged.clone());
+                            let Some(members) = groups.remove(&leader) else { return Ok(None) };
+                            output_members.push(members);
                         } else {
                             offset += 1;
                             continue;
                         }
                     } else {
                         output.push(face.clone());
+                        output_members.push(vec![offset]);
                     }
                     output_ids.push(output.last().ok_or_else(|| crate::KernelError::Failed("missing regularized face".into()))?.id());
                     let source = sources[offset].as_ref();
@@ -291,7 +315,7 @@ impl Body {
             if !body.solid.face_iter().map(|f| f.id()).eq(output_ids) {
                 return Ok(None);
             }
-            Ok(Some(body.with_face_sources(Some(Arc::new(output_sources)))))
+            Ok(Some(with_joined_history(body.with_face_sources(Some(Arc::new(output_sources))), &self, output_members)))
         })?;
         Ok(result.unwrap_or(self))
     }
@@ -303,7 +327,7 @@ mod tests {
     #[test]
     fn alternate_adjacency_path_cannot_remove_protected_internal_edge() {
         let vertices: Vec<_> =
-            (0..9).map(|i| mt::builder::vertex(super::super::p3(solvecraft_geom::Vec3::new((i % 3) as f64, (i / 3) as f64, 0.)))).collect();
+            (0..9).map(|i| mt::builder::vertex(super::super::p3(solidcraft_geom::Vec3::new((i % 3) as f64, (i / 3) as f64, 0.)))).collect();
         let mut edges = HashMap::<(usize, usize), mt::Edge>::new();
         let mut faces = Vec::new();
         for (x, y) in [(0, 0), (1, 0), (0, 1), (1, 1)] {

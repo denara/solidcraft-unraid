@@ -1,4 +1,4 @@
-//! Cases found by the robustness runs (`solvecraft-cli fuzz`, docs/robustness.md), cut down to
+//! Cases found by the robustness runs (`solidcraft-cli fuzz`, docs/robustness.md), cut down to
 //! the steps that matter, and a fixed set of seeds that must keep running clean.
 
 use std::f64::consts::PI;
@@ -114,7 +114,7 @@ fn samples_build_without_panics() {
 }
 
 fn total_volume(s: &Session) -> f64 {
-    s.model.state().bodies.iter().map(|b| solvecraft_kernel::measure(&b.body).map(|m| m.volume).unwrap_or(0.0)).sum()
+    s.model.state().bodies.iter().map(|b| solidcraft_kernel::measure(&b.body).map(|m| m.volume).unwrap_or(0.0)).sum()
 }
 
 /// Volume of a box L×W×H with its vertical edges rounded (R) and its bottom loop filleted

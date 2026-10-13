@@ -1,0 +1,144 @@
+{
+  "bodies": [
+    {
+      "area_mm2": 4078.7680390666596,
+      "bbox": {
+        "max": [
+          40.0,
+          30.000000000000014,
+          12.000000000000002
+        ],
+        "min": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "center_of_mass": [
+        19.25890231218174,
+        15.000000010054242,
+        5.04117761026949
+      ],
+      "density_g_cm3": 1.29,
+      "edges": 30,
+      "face_types": {
+        "cylinder": 1,
+        "plane": 11
+      },
+      "faces": 12,
+      "kernel": {
+        "edges": 30,
+        "faces": 12,
+        "shells": 1,
+        "vertices": 20
+      },
+      "mass_g": 14.435720327850033,
+      "material": "Default",
+      "name": "Body1",
+      "vertices": 20,
+      "volume_mm3": 11190.480874302351
+    }
+  ],
+  "body_count": 1,
+  "params": [],
+  "sketches": [
+    {
+      "curves": 4,
+      "dof": 2,
+      "id": 1,
+      "name": "Base",
+      "profiles": 1,
+      "status": "solved",
+      "visible": false
+    },
+    {
+      "curves": 4,
+      "dof": 4,
+      "id": 3,
+      "name": "SlotSketch",
+      "profiles": 1,
+      "status": "solved",
+      "visible": false
+    }
+  ],
+  "timeline": [
+    {
+      "error": null,
+      "id": 1,
+      "ms": 0.09895799999999999,
+      "name": "Base",
+      "rolled_back": false,
+      "suppressed": false,
+      "type": "Sketch",
+      "warning": null
+    },
+    {
+      "error": null,
+      "id": 2,
+      "ms": 20.768292000000002,
+      "name": "Block",
+      "rolled_back": false,
+      "suppressed": false,
+      "type": "ExtrudeFeature",
+      "warning": null
+    },
+    {
+      "error": null,
+      "id": 3,
+      "ms": 0.057,
+      "name": "SlotSketch",
+      "rolled_back": false,
+      "suppressed": false,
+      "type": "Sketch",
+      "warning": null
+    },
+    {
+      "error": null,
+      "id": 4,
+      "ms": 136.28875,
+      "name": "Slot",
+      "rolled_back": false,
+      "suppressed": false,
+      "type": "ExtrudeFeature",
+      "warning": null
+    },
+    {
+      "error": null,
+      "id": 5,
+      "ms": 153.58625,
+      "name": "Round",
+      "rolled_back": false,
+      "suppressed": false,
+      "type": "FilletFeature",
+      "warning": null
+    },
+    {
+      "error": null,
+      "id": 6,
+      "ms": 169.174375,
+      "name": "Bevel",
+      "rolled_back": false,
+      "suppressed": false,
+      "type": "ChamferFeature",
+      "warning": null
+    },
+    {
+      "error": null,
+      "id": 7,
+      "ms": 47.772166,
+      "name": "Raise",
+      "rolled_back": false,
+      "suppressed": false,
+      "type": "OffsetFacesFeature",
+      "warning": null
+    }
+  ],
+  "total": {
+    "area_mm2": 4078.7680390666596,
+    "edges": 30,
+    "faces": 12,
+    "mass_g": 14.435720327850033,
+    "vertices": 20,
+    "volume_mm3": 11190.480874302351
+  }
+}

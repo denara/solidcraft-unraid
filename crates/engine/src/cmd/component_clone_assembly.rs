@@ -2,8 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use solvecraft_doc::Document;
-use solvecraft_doc::joints::{Assembly, JointOrigin, Snap};
+use solidcraft_doc::Document;
+use solidcraft_doc::joints::{Assembly, JointOrigin, Snap};
 
 use crate::{EngineError, Result};
 

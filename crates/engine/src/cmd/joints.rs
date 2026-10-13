@@ -1,12 +1,12 @@
-//! Joints between occurrences (`solvecraft_doc::joints`): Joint Origin, Joint, As-built Joint,
+//! Joints between occurrences (`solidcraft_doc::joints`): Joint Origin, Joint, As-built Joint,
 //! Rigid Group, Drive Joints, Motion Link, limits, and Interference. Every change re-solves the
 //! joint graph and moves the occurrences it places; the session re-solves after any edit too,
 //! so joints follow the geometry their origins snap to.
 
 use serde_json::{Value, json};
-use solvecraft_doc::expr::Kind;
-use solvecraft_doc::joints::{self, Joint, JointKind, JointOrigin, MotionLink, NamedOrigin, Snap};
-use solvecraft_geom::Vec3;
+use solidcraft_doc::expr::Kind;
+use solidcraft_doc::joints::{self, Joint, JointKind, JointOrigin, MotionLink, NamedOrigin, Snap};
+use solidcraft_geom::{Aabb3, Vec3};
 
 use super::CommandSpec;
 use crate::params::{bad, bool_, num, str_, string_list, vec3};
@@ -37,7 +37,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("joint.list", "List Joints", list).noundo().params("→ joints (type, occurrences, values, limits), origins, links, degrees of freedom, conflicts"),
     CommandSpec::new("joint.solve", "Solve Joints", solve_cmd).params("re-place the occurrences from the joints → conflicts, errors, dof"),
     CommandSpec::new("inspect.interference", "Interference", interference).at("SOLID", "INSPECT").icon("interference").noundo().params(
-        "bodies?: [names] (default: all, in world placement) → pairs that overlap with the overlap volume, area, bounding box and centre",
+        "bodies?: [names] (default: all, in world placement) → interferences: pairs that overlap with the overlap volume, area, bounding box and centre; unchecked: pairs that could not be checked, with the reason. Bodies are pruned by bounding box first, so any number of bodies is fine; at most 20000 pairs whose boxes overlap are intersected per call (truncated: true and skipped_pairs: n say when more were left out)",
     ),
 ];
 
@@ -88,9 +88,9 @@ pub(crate) fn occurrence_at(s: &Session, p: Vec3) -> Option<u64> {
         let comp = s.doc.model_body_component(b);
         let occs: Vec<u64> = if comp == 0 { vec![0] } else { s.doc.occurrences.iter().filter(|o| o.component == comp).map(|o| o.id).collect() };
         for occ in occs {
-            let t = if occ == 0 { solvecraft_doc::IDENTITY } else { joints::occurrence_world(&s.doc, occ) };
-            let inv = solvecraft_doc::mat_inverse(&t)?;
-            let q = solvecraft_doc::apply_point(&inv, p);
+            let t = if occ == 0 { solidcraft_doc::IDENTITY } else { joints::occurrence_world(&s.doc, occ) };
+            let inv = solidcraft_doc::mat_inverse(&t)?;
+            let q = solidcraft_doc::apply_point(&inv, p);
             let bb = b.mesh().bounds();
             let c = Vec3::new(q.x.clamp(bb.min.x, bb.max.x), q.y.clamp(bb.min.y, bb.max.y), q.z.clamp(bb.min.z, bb.max.z));
             let d = c.dist(q);
@@ -126,10 +126,10 @@ fn origin_param(s: &Session, v: Option<&Value>, cmd: &str) -> Result<JointOrigin
         None => occurrence_at(s, world).ok_or_else(|| bad(cmd, "no body there"))?,
     };
     // World → the component's own coordinates.
-    let t = if occurrence == 0 { solvecraft_doc::IDENTITY } else { joints::occurrence_world(&s.doc, occurrence) };
-    let inv = solvecraft_doc::mat_inverse(&t).ok_or_else(|| bad(cmd, "occurrence transform"))?;
-    let local = |p: Vec3| solvecraft_doc::apply_point(&inv, p);
-    let local_dir = |d: Vec3| solvecraft_doc::apply_vector(&inv, d);
+    let t = if occurrence == 0 { solidcraft_doc::IDENTITY } else { joints::occurrence_world(&s.doc, occurrence) };
+    let inv = solidcraft_doc::mat_inverse(&t).ok_or_else(|| bad(cmd, "occurrence transform"))?;
+    let local = |p: Vec3| solidcraft_doc::apply_point(&inv, p);
+    let local_dir = |d: Vec3| solidcraft_doc::apply_vector(&inv, d);
     let snap = match what {
         "face" | "circle" => {
             let pick = local(world);
@@ -139,7 +139,7 @@ fn origin_param(s: &Session, v: Option<&Value>, cmd: &str) -> Result<JointOrigin
             } else {
                 pick
             };
-            let face = solvecraft_doc::naming::face_names_at(&s.model.state(), &[named_at]).into_iter().next().filter(|n| !n.is_empty());
+            let face = solidcraft_doc::naming::face_names_at(&s.model.state(), &[named_at]).into_iter().next().filter(|n| !n.is_empty());
             if what == "face" { Snap::FaceCenter { pick, face } } else { Snap::CircleCenter { pick, face } }
         }
         "point" => Snap::Point { point: local(world), z: v.get("z").and_then(vec3).map(local_dir) },
@@ -523,35 +523,79 @@ fn solve_cmd(s: &mut Session, _p: &Value) -> Result<Value> {
 }
 
 fn interference(s: &mut Session, p: &Value) -> Result<Value> {
-    let cmd = "inspect.interference";
     let want = string_list(p, "bodies");
     let st = s.world_state();
-    let bodies: Vec<&solvecraft_doc::ModelBody> =
+    let bodies: Vec<&solidcraft_doc::ModelBody> =
         st.bodies.iter().filter(|b| want.is_empty() || want.contains(&b.name)).filter(|b| !b.body.is_mesh()).collect();
-    if bodies.len() > 200 {
-        return Err(bad(cmd, "too many bodies (200 at most)"));
-    }
-    let mut hits = Vec::new();
-    for (i, a) in bodies.iter().enumerate() {
-        for b in bodies.iter().skip(i + 1) {
-            let (ba, bb) = (a.mesh().bounds(), b.mesh().bounds());
-            let apart = ba.max.x < bb.min.x
-                || bb.max.x < ba.min.x
-                || ba.max.y < bb.min.y
-                || bb.max.y < ba.min.y
-                || ba.max.z < bb.min.z
-                || bb.max.z < ba.min.z;
-            if apart {
+    // Prune by bounding boxes first (sort and sweep), so the cost follows the pairs that can
+    // touch rather than the square of the body count.
+    let boxes: Vec<Aabb3> = bodies.iter().map(|b| b.mesh().bounds()).collect();
+    let (pairs, skipped) = overlapping_pairs(&boxes, MAX_INTERFERENCE_PAIRS);
+    let (mut hits, mut unchecked) = (Vec::new(), Vec::new());
+    for (i, j) in pairs {
+        let (Some(a), Some(b)) = (bodies.get(i), bodies.get(j)) else { continue };
+        // A pair whose shared part can't be worked out is reported, not passed as clear.
+        let (shared, report) =
+            solidcraft_kernel::capture_boolean_diagnostics(|| solidcraft_kernel::boolean(&a.body, &b.body, solidcraft_kernel::BoolOp::Intersect));
+        let mut skip = |reason: String| unchecked.push(json!({"a": a.name, "b": b.name, "reason": reason}));
+        let shared = match shared {
+            Ok(o) => o,
+            Err(e) => {
+                skip(e.to_string());
                 continue;
             }
-            let Ok(Some(o)) = solvecraft_kernel::boolean(&a.body, &b.body, solvecraft_kernel::BoolOp::Intersect) else { continue };
-            let Ok(m) = solvecraft_kernel::measure(&o) else { continue };
-            if m.volume > 1e-9 * a.body.size().max(1.0).powi(3) {
-                hits.push(json!({"a": a.name, "b": b.name, "volume_mm3": m.volume, "area_mm2": m.area, "center": m.centroid, "bbox": {"min": m.bbox.min, "max": m.bbox.max}}));
+        };
+        if let Some(reason) = report.unverified() {
+            skip(reason);
+        }
+        let Some(o) = shared else { continue };
+        let m = match solidcraft_kernel::measure(&o) {
+            Ok(m) => m,
+            Err(e) => {
+                skip(e.to_string());
+                continue;
+            }
+        };
+        if m.volume > 1e-9 * a.body.size().max(1.0).powi(3) {
+            hits.push(json!({"a": a.name, "b": b.name, "volume_mm3": m.volume, "area_mm2": m.area, "center": m.centroid, "bbox": {"min": m.bbox.min, "max": m.bbox.max}}));
+        }
+    }
+    Ok(json!({"interferences": hits, "count": hits.len(), "checked": bodies.len(), "unchecked": unchecked,
+        "truncated": skipped > 0, "skipped_pairs": skipped}))
+}
+
+/// Most pairs with overlapping bounding boxes `inspect.interference` intersects in one call.
+const MAX_INTERFERENCE_PAIRS: usize = 20_000;
+
+/// Index pairs `(i, j)`, `i < j`, whose boxes overlap or touch (sort and sweep along X), at most
+/// `limit` of them, plus how many more there were.
+fn overlapping_pairs(boxes: &[Aabb3], limit: usize) -> (Vec<(usize, usize)>, usize) {
+    let mut order: Vec<usize> = (0..boxes.len()).collect();
+    order.sort_by(|&a, &b| match (boxes.get(a), boxes.get(b)) {
+        (Some(a), Some(b)) => a.min.x.total_cmp(&b.min.x),
+        _ => std::cmp::Ordering::Equal,
+    });
+    let (mut pairs, mut skipped) = (Vec::new(), 0);
+    for (k, &i) in order.iter().enumerate() {
+        let Some(a) = boxes.get(i) else { continue };
+        for &j in order.iter().skip(k + 1) {
+            let Some(b) = boxes.get(j) else { continue };
+            // Sorted by min.x: once one starts past `a`, all later ones do.
+            if b.min.x > a.max.x {
+                break;
+            }
+            if b.max.x < a.min.x || a.max.y < b.min.y || b.max.y < a.min.y || a.max.z < b.min.z || b.max.z < a.min.z {
+                continue;
+            }
+            if pairs.len() < limit {
+                pairs.push((i.min(j), i.max(j)));
+            } else {
+                skipped += 1;
             }
         }
     }
-    Ok(json!({"interferences": hits, "count": hits.len(), "checked": bodies.len()}))
+    pairs.sort_unstable();
+    (pairs, skipped)
 }
 
 #[cfg(test)]
@@ -559,8 +603,8 @@ fn interference(s: &mut Session, p: &Value) -> Result<Value> {
 mod tests;
 
 /// A point in the middle of the cylindrical face at `pick` (on its wall, halfway along).
-fn cylinder_wall_point(b: &solvecraft_doc::kernel::Body, pick: Vec3) -> Option<Vec3> {
-    let c = solvecraft_doc::kernel::cylinder_face_at(b, pick)?;
+fn cylinder_wall_point(b: &solidcraft_doc::kernel::Body, pick: Vec3) -> Option<Vec3> {
+    let c = solidcraft_doc::kernel::cylinder_face_at(b, pick)?;
     let v = pick - c.axis_point;
     let along = v.dot(c.axis);
     let radial = (v - c.axis * along).normalized()?;

@@ -4,10 +4,10 @@
 //! normal geometry.
 
 use serde_json::{Value, json};
-use solvecraft_doc::project::resolve;
-use solvecraft_doc::{Document, FeatureKind};
-use solvecraft_geom::{Plane, Vec3};
-use solvecraft_sketch::{ConstraintKind, LinkKind, LinkSource, Sketch};
+use solidcraft_doc::project::resolve;
+use solidcraft_doc::{Document, FeatureKind};
+use solidcraft_geom::{Plane, Vec3};
+use solidcraft_sketch::{ConstraintKind, LinkKind, LinkSource, Sketch};
 
 use super::{CommandSpec, in_sketch};
 use crate::params::{bad, bool_, str_, vec3};
@@ -118,12 +118,33 @@ fn source(s: &Session, v: &Value, cmd: &str) -> Result<LinkSource> {
     Err(bad(cmd, format!("cannot project {v}")))
 }
 
-/// The plane of a sketch feature.
-fn sketch_plane(doc: &Document, id: u64) -> Result<Plane> {
+/// The plane of a sketch feature, resolved against `st`: the model before the sketch as its
+/// component sees it, which is what evaluation resolves it against. A construction plane built
+/// from the model (through a sketch line, three points, between two faces…) exists only there.
+fn sketch_plane(doc: &Document, id: u64, st: &solidcraft_doc::ModelState) -> Result<Plane> {
     let (vals, _) = doc.param_values();
     match doc.feature(id).map(|f| &f.kind) {
-        Some(FeatureKind::Sketch { plane, .. }) => Ok(doc.resolve_plane(&vals, plane, 0)?),
+        Some(FeatureKind::Sketch { plane, .. }) => Ok(doc.resolve_plane_in(&vals, plane, 0, Some(st))?),
         _ => Err(EngineError::Other(format!("feature {id} is not a sketch"))),
+    }
+}
+
+/// The model before sketch `id` in the frame its links and its plane are resolved in: the
+/// attached face's frame for a sketch on a face, else its component's.
+fn state_for_sketch<'a>(
+    s: &Session,
+    doc: &Document,
+    id: u64,
+    st: &'a solidcraft_doc::ModelState,
+) -> std::result::Result<std::borrow::Cow<'a, solidcraft_doc::ModelState>, solidcraft_doc::DocError> {
+    let comp = doc.feature(id).map(|f| f.component).unwrap_or(0);
+    let attachment = doc.feature(id).and_then(|feature| match &feature.kind {
+        solidcraft_doc::FeatureKind::Sketch { plane, .. } => super::sketch::face::anchor(plane),
+        _ => None,
+    });
+    match attachment {
+        Some(anchor) => solidcraft_doc::state_in_face_anchor_frame(doc, st, anchor, comp),
+        None => Ok(solidcraft_doc::state_in_frame_at(doc, st, comp, owner_frame(s, doc, comp))),
     }
 }
 
@@ -141,7 +162,7 @@ fn placed_candidate<'a>(s: &Session, doc: &'a Document) -> std::borrow::Cow<'a, 
     std::borrow::Cow::Owned(placed)
 }
 
-fn owner_frame(s: &Session, doc: &Document, comp: u64) -> solvecraft_doc::Mat {
+fn owner_frame(s: &Session, doc: &Document, comp: u64) -> solidcraft_doc::Mat {
     if comp == s.active_component { s.active_component_frame() } else { doc.component_transform(comp) }
 }
 
@@ -152,51 +173,37 @@ pub(super) fn refresh(s: &Session, doc: &Document, id: u64, sk: &mut Sketch) -> 
         return Vec::new();
     }
     let doc = placed_candidate(s, doc);
-    let Ok(plane) = sketch_plane(&doc, id) else { return Vec::new() };
     let (vals, _) = doc.param_values();
     let st = s.model.state_before(id);
-    let comp = doc.feature(id).map(|f| f.component).unwrap_or(0);
     let attachment = doc.feature(id).and_then(|feature| match &feature.kind {
-        solvecraft_doc::FeatureKind::Sketch { plane, .. } => super::sketch::face::anchor(plane),
+        solidcraft_doc::FeatureKind::Sketch { plane, .. } => super::sketch::face::anchor(plane),
         _ => None,
     });
-    let st = match attachment {
-        Some(anchor) => solvecraft_doc::state_in_face_anchor_frame(&doc, &st, anchor, comp),
-        None => Ok(solvecraft_doc::state_in_frame_at(&doc, &st, comp, owner_frame(s, &doc, comp))),
-    };
-    let Ok(st) = st else {
+    let Ok(st) = state_for_sketch(s, &doc, id, &st) else {
         return vec!["lost face attachment; reattach explicitly".into()];
     };
+    let Ok(plane) = sketch_plane(&doc, id, &st) else { return Vec::new() };
     match attachment {
-        Some(anchor) => solvecraft_doc::project::refresh_face_anchor_links(&doc, &vals, &st, &plane, sk, anchor),
-        None => solvecraft_doc::project::refresh_links(&doc, &vals, &st, &plane, sk),
+        Some(anchor) => solidcraft_doc::project::refresh_face_anchor_links(&doc, &vals, &st, &plane, sk, anchor),
+        None => solidcraft_doc::project::refresh_links(&doc, &vals, &st, &plane, sk),
     }
 }
 
 /// Add a link for `src` to sketch `id` in `doc` (not stored in the session). Returns the link id.
 pub(super) fn add_link(s: &Session, doc: &Document, id: u64, sk: &mut Sketch, kind: LinkKind, src: LinkSource) -> Result<String> {
     let doc = placed_candidate(s, doc);
-    let plane = sketch_plane(&doc, id)?;
     let (vals, _) = doc.param_values();
     let st = s.model.state_before(id);
     // The model as the sketch's component sees it.
-    let comp = doc.feature(id).map(|f| f.component).unwrap_or(0);
-    let attachment = doc.feature(id).and_then(|feature| match &feature.kind {
-        solvecraft_doc::FeatureKind::Sketch { plane, .. } => super::sketch::face::anchor(plane),
-        _ => None,
-    });
-    let st = match attachment {
-        Some(anchor) => solvecraft_doc::state_in_face_anchor_frame(&doc, &st, anchor, comp),
-        None => Ok(solvecraft_doc::state_in_frame_at(&doc, &st, comp, owner_frame(s, &doc, comp))),
-    };
-    let st = st?;
+    let st = state_for_sketch(s, &doc, id, &st)?;
+    let plane = sketch_plane(&doc, id, &st)?;
     let r = resolve(&doc, &vals, &st, &plane, kind, &src)?;
     let name = if let LinkSource::Face { body, at } = &r.source {
         st.body(body).and_then(|body| {
             if let Some(index) = r.face_index {
-                solvecraft_doc::naming::face_names(body).get(index).filter(|name| !name.is_empty()).cloned()
+                solidcraft_doc::naming::face_names(body).get(index).filter(|name| !name.is_empty()).cloned()
             } else {
-                solvecraft_doc::naming::face_name_at_body(body, *at)
+                solidcraft_doc::naming::face_name_at_body(body, *at)
             }
         })
     } else {
@@ -312,7 +319,7 @@ fn spun_profile(s: &mut Session, p: &Value) -> Result<Value> {
             let st = s.model.state();
             let ss = st.sketch(id).ok_or_else(|| EngineError::Other("the sketch is not evaluated".into()))?;
             let ci = ss.sketch.curve_index(axis).ok_or_else(|| bad(cmd, format!("unknown curve `{axis}`")))?;
-            let Some(solvecraft_sketch::Shape::Line { a, b }) = ss.sketch.shape(ci) else { return Err(bad(cmd, "the axis must be a line")) };
+            let Some(solidcraft_sketch::Shape::Line { a, b }) = ss.sketch.shape(ci) else { return Err(bad(cmd, "the axis must be a line")) };
             let (wa, wb) = (ss.plane.to_world(a), ss.plane.to_world(b));
             (wa, wb - wa)
         }
@@ -417,7 +424,7 @@ pub(super) fn snap_points(s: &mut Session, p: &Value, cmd: &str) -> Result<Value
             let (c, xy) = t.rsplit_once(':')?;
             let n: Vec<f64> = xy.split(',').filter_map(|x| x.trim().parse().ok()).collect();
             match n[..] {
-                [x, y] if x.is_finite() && y.is_finite() => Some((c.to_string(), solvecraft_geom::Vec2::new(x, y))),
+                [x, y] if x.is_finite() && y.is_finite() => Some((c.to_string(), solidcraft_geom::Vec2::new(x, y))),
                 _ => None,
             }
         });
@@ -444,7 +451,7 @@ pub(super) fn snap_points(s: &mut Session, p: &Value, cmd: &str) -> Result<Value
         } else if let Some(line) = mid {
             // "mid:<line>": a new point at the line's midpoint, kept there.
             let l = sk.curve_index(&line).ok_or_else(|| bad(cmd, format!("unknown curve `{line}`")))?;
-            let Some(solvecraft_sketch::Shape::Line { a, b }) = sk.shape(l) else { return Err(bad(cmd, format!("`{line}` is not a line"))) };
+            let Some(solidcraft_sketch::Shape::Line { a, b }) = sk.shape(l) else { return Err(bad(cmd, format!("`{line}` is not a line"))) };
             let pi = sk.add_point((a + b) * 0.5, None)?;
             sk.add_constraint(ConstraintKind::Midpoint { p: pi, l }, None)?;
             sk.points.get(pi).map(|q| q.id.clone()).unwrap_or_default()
@@ -454,7 +461,8 @@ pub(super) fn snap_points(s: &mut Session, p: &Value, cmd: &str) -> Result<Value
             sk.points.get(pi).map(|q| q.id.clone()).unwrap_or_default()
         } else if let Some(at) = edge {
             let l = add_link(s, d, id, sk, LinkKind::Project, LinkSource::Edge { body, at }).map_err(|e| bad(cmd, format!("edge: {e}")))?;
-            let plane = sketch_plane(d, id)?;
+            let before = s.model.state_before(id);
+            let plane = sketch_plane(d, id, &*state_for_sketch(s, d, id, &before)?)?;
             let q = plane.to_local(at);
             let ci = sk.link_curves(&l).first().copied().ok_or_else(|| bad(cmd, "the edge projects to a point"))?;
             let pi = sk.add_point(q, None)?;
@@ -490,12 +498,12 @@ pub(super) fn snap_points(s: &mut Session, p: &Value, cmd: &str) -> Result<Value
 /// edits, but cannot provide the construction certificate required by public attachments.
 pub(super) fn project_internal_face(s: &mut Session, id: u64, body: &str, index: usize) -> Result<String> {
     let mut doc = (*s.doc).clone();
-    let plane = sketch_plane(&doc, id)?;
     let raw = s.model.state_before(id);
     let component = doc.feature(id).map(|feature| feature.component).unwrap_or(0);
-    let state = solvecraft_doc::state_in_frame_at(&doc, &raw, component, owner_frame(s, &doc, component));
-    let resolved = solvecraft_doc::project::resolve_face_indices(&state, &plane, LinkKind::Project, body, &[index])?;
-    let face_name = state.body(body).and_then(|body| solvecraft_doc::naming::face_names(body).get(index).cloned());
+    let state = solidcraft_doc::state_in_frame_at(&doc, &raw, component, owner_frame(s, &doc, component));
+    let plane = sketch_plane(&doc, id, &state)?;
+    let resolved = solidcraft_doc::project::resolve_face_indices(&state, &plane, LinkKind::Project, body, &[index])?;
+    let face_name = state.body(body).and_then(|body| solidcraft_doc::naming::face_names(body).get(index).cloned());
     let mut sk = doc.sketch(id)?.clone();
     let link = sk.add_link_with_wires(LinkKind::Project, resolved.source, &resolved.geom, &resolved.wires)?;
     if let Some(entry) = sk.links.iter_mut().find(|entry| entry.id == link) {
@@ -512,7 +520,7 @@ pub(super) fn auto_project_face(s: &mut Session, id: u64, _at: Vec3) -> Result<O
     let Some(anchor) = doc
         .feature(id)
         .and_then(|feature| match &feature.kind {
-            solvecraft_doc::FeatureKind::Sketch { plane, .. } => super::sketch::face::anchor(plane),
+            solidcraft_doc::FeatureKind::Sketch { plane, .. } => super::sketch::face::anchor(plane),
             _ => None,
         })
         .cloned()
@@ -521,9 +529,9 @@ pub(super) fn auto_project_face(s: &mut Session, id: u64, _at: Vec3) -> Result<O
     };
     let raw = s.model.state_before(id);
     let author = doc.feature(id).map(|feature| feature.component).unwrap_or(0);
-    let state = solvecraft_doc::state_in_face_anchor_frame(&doc, &raw, &anchor, author)?;
+    let state = solidcraft_doc::state_in_face_anchor_frame(&doc, &raw, &anchor, author)?;
     let plane = doc.resolve_face_anchor(&anchor, author, &raw)?;
-    let resolved = solvecraft_doc::project::resolve_anchored_face(&doc, &state, &plane, LinkKind::Project, &anchor)?;
+    let resolved = solidcraft_doc::project::resolve_anchored_face(&doc, &state, &plane, LinkKind::Project, &anchor)?;
     let mut sk = doc.sketch(id)?.clone();
     let link = sk.add_link_with_wires(LinkKind::Project, resolved.source, &resolved.geom, &resolved.wires)?;
     if let Some(link) = sk.links.iter_mut().find(|entry| entry.id == link) {
@@ -538,3 +546,7 @@ pub(super) fn auto_project_face(s: &mut Session, id: u64, _at: Vec3) -> Result<O
 #[cfg(test)]
 #[path = "sketch_project_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "sketch_model_plane_tests.rs"]
+mod model_plane_tests;

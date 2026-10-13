@@ -17,23 +17,23 @@ build you also need `rustup target add wasm32-unknown-unknown` and [`trunk`](htt
 
 ```sh
 git clone https://github.com/bherbruck/solidcraft && cd solidcraft
-cargo run --release -p solvecraft -- --sample      # desktop app with a sample part
+cargo run --release -p solidcraft -- --sample      # desktop app with a sample part
 cargo xtask test                                   # unit, engine and UI-scenario tests
 cargo xtask ci                                     # everything a PR must pass (see below)
 ```
 
-SolidCraft is the product and repository name. Cargo packages and executables retain
-their `solvecraft` names for compatibility with existing scripts and MCP clients.
-Build the desktop app with `cargo build --release -p solvecraft`, or the CLI with
-`cargo build --release -p solvecraft-cli`. Run the CLI with
-`cargo run --release -p solvecraft-cli -- commands` (or `target/release/solvecraft-cli commands`
-after building). There is no Cargo package named `solidcraft`.
+SolidCraft is the product, repository, Cargo package and executable name.
+Build the desktop app with `cargo build --release -p solidcraft`, or the CLI with
+`cargo build --release -p solidcraft-cli`. Run the CLI with
+`cargo run --release -p solidcraft-cli -- commands` (or `target/release/solidcraft-cli commands`
+after building). The old name appears only in the compatibility shims listed in
+[docs/compatibility.md](docs/compatibility.md); don't add new uses of it.
 
-Web: `cd apps/solvecraft-web && trunk serve --release`, then open the printed URL (`?sample`
+Web: `cd apps/solidcraft-web && trunk serve --release`, then open the printed URL (`?sample`
 opens the sample part, `?webgl` forces WebGL2). Saving and opening files in the browser needs
 HTTPS or localhost, because it uses the Origin Private File System.
 
-Windows from Linux: `cargo xwin build --release --target x86_64-pc-windows-msvc -p solvecraft`.
+Windows from Linux: `cargo xwin build --release --target x86_64-pc-windows-msvc -p solidcraft`.
 
 ### NixOS: `nix develop`
 
@@ -43,7 +43,7 @@ loader wgpu renders through, and libdbus-1, which rfd's file dialogs reach xdg-d
 through (a dialog then never appears and the pick returns no path):
 
 ```
-ERROR solvecraft: winit EventLoopError: ... The wayland library could not be loaded
+ERROR solidcraft: winit EventLoopError: ... The wayland library could not be loaded
 ERROR eframe::native::run: Exiting because of error: WGPU error: Failed to create surface for any enabled backend: {}
 ERROR rfd::backend::xdg_desktop_portal::portal::libdbus: Can't connect to a portal: libdbus-1.so not found
 ```
@@ -59,8 +59,8 @@ The default development shell retains the Rust/C toolchain already on `PATH`;
 To launch, use `nix run .#solidcraft -- --sample`. To install the app's terminal
 commands, desktop entry and generated icons, use `nix profile install .#solidcraft`.
 `nix build` alone creates a build result; it does not install a launcher in your
-desktop menu. The installed `solidcraft` command and compatible `solvecraft`
-command run the same wrapped app; `solvecraft-cli` is included as well. See
+desktop menu. The installed `solidcraft` command runs the wrapped app; `solidcraft-cli` is included as
+well. See
 [Nix installation and troubleshooting](docs/nix.md) for remote-flake commands,
 desktop integration and how to distinguish an old executable on `PATH`.
 
@@ -82,19 +82,22 @@ The [README](README.md#architecture) has the layer table. The short version:
   commands.
 - `crates/ui-egui`: the desktop/web front end (egui + wgpu). It's swappable; nothing below it
   depends on egui.
-- `crates/mcp`, `apps/solvecraft`, `apps/solvecraft-cli`, `apps/solvecraft-web`.
+- `crates/mcp`, `apps/solidcraft`, `apps/solidcraft-cli`, `apps/solidcraft-web`.
 
 `cargo xtask layers` fails the build if a lower layer depends on a higher one.
 
 ## Rules that aren't negotiable
 
-1. **Clean-room.** We observe Fusion as a black box: its UI, how parts it builds measure, and
-   what it does with a given input. We never copy Autodesk code, icons, artwork, help text,
-   tooltips, templates or materials, and we never commit files Fusion produced. Command ids are
-   our own (`solid.fillet`, not Fusion's internal names).
+1. **Independent.** SolidCraft is independent. Behaviour is designed from public
+   documentation, general CAD conventions and user feedback. Reference tests use analytic values
+   and open-source tools. We don't drive, script, automate or extract data from commercial CAD
+   products, and we never copy another product's code, icons, artwork, help text, tooltips,
+   templates or materials. Command ids are our own (`solid.fillet`).
 2. **No GPL/LGPL/AGPL code, not even reading it.** That rules out OpenCASCADE, FreeCAD
    (including planegcs), SolveSpace, CadQuery/OCP, LibreCAD and QCAD. SolidCraft is
-   MIT OR Apache-2.0, and its solver and blends are written from the maths. Permissive
+   MIT OR Apache-2.0, and its solver and blends are written from the maths. (Running an
+   open-source application to get reference values for a test is fine; reading its source is
+   not.) Permissive
    dependencies are fine. Note which one you're adding and why in the PR, and run
    `cargo xtask licences` so THIRD-PARTY-LICENSES.txt lists it (CI checks that it is current).
 3. **Every asset is original or openly licensed and has a row in
@@ -104,7 +107,7 @@ The [README](README.md#architecture) has the layer table. The short version:
    - Non-test code never uses `unwrap`, `expect`, `panic!` or indexing on input-derived data.
      There's no `unsafe`, and clippy denies it.
    - An unsupported case returns an error ("not supported yet: …"); it never panics.
-   - Every call into truck goes through `solvecraft_kernel::guard`.
+   - Every call into truck goes through `solidcraft_kernel::guard`.
    - Every crash fix comes with a regression test.
 5. **Everything is a command, with a test.** A new feature means a `CommandSpec` in
    `crates/engine/src/cmd/`, engine tests that measure the result (volume, area,
@@ -119,7 +122,7 @@ the most complete description of the house style.
 |---|---|---|
 | Unit and engine tests | next to the code, or `*_tests.rs` files | `cargo xtask test` (or `cargo test --workspace --profile ci`) |
 | UI scenarios | `crates/ui-egui/tests/scenarios/*.json` | part of `cargo test` |
-| Fusion oracle | `cargo xtask oracle` | needs the local oracle data (see below) |
+| Reference tests | `cargo xtask oracle` | `tests/oracle/` (see below) |
 
 **UI scenarios** drive the real app headless: start a tool, click a plane or a sketch point,
 press keys, then assert on the result.
@@ -138,6 +141,10 @@ press keys, then assert on the result.
 A new `.json` file in that folder is picked up automatically. To record a bug before it's fixed,
 put `{"pending": "why"}` in the scenario, and remove it in the PR that fixes the bug.
 
+**A failing test without its fix can't merge as-is:** it would turn `main`'s CI red for everyone.
+Either include the fix in the same PR, or mark the test `#[ignore = "fails until #123 is fixed"]`
+(it can then merge right away), and remove that line in the PR that fixes the bug.
+
 **Use the `ci` profile.** CI runs the tests with `--profile ci`: light optimisation, line tables,
 no LTO, and debug assertions off (truck has debug-only assertions that reject valid geometry). It
 builds several times faster than `--release`. If a test fails only in a plain debug build, say so
@@ -146,11 +153,33 @@ in the PR. `cargo xtask test` builds the tests with it and then runs every test 
 `cargo xtask test -- shell`. Tests run beside each other on a busy machine, so a test must not
 depend on wall-clock timing.
 
-**The Fusion oracle** is a set of 76 reference parts, each built in Fusion from a recipe.
-SolidCraft rebuilds the same recipe and compares volume, area and topology counts with Fusion's
-measurements; [docs/oracle.md](docs/oracle.md) has the current results. The recipes and
-measurements live outside the repo (`plan/`, gitignored), because they come from a Fusion
-install. If you work on geometry and want to check against it, ask in an issue.
+**CI shards the tests.** One job builds them into a cargo-nextest archive and four jobs run a
+quarter each, so every test runs in its own process: don't rely on state left by another test.
+Pull requests skip a few heavy tests (one to four minutes each), which run on every push to
+`main` and nightly; check the `main` run after merging. They are listed in
+`.config/nextest.toml` and the [testing page](docs/book/src/dev/testing.md):
+
+- `solidcraft-engine`: `tests::hostile_params_never_panic`, everything in `tests::robustness`,
+  `pattern_suppress_tests::enclosure_arc_extinction_keeps_a_real_sharp_inner_lip_after_resize_and_reopen`,
+  `pattern_suppress_tests::enclosure_datums_follow_wall_height_and_board_depth_with_material_proofs`,
+  `cmd::plastic::tests::enclosure_snap_fit_follows_resized_front_wall`
+- `solidcraft-kernel`: `tests::boolean_identity_on_tangent_primitives`
+- `solidcraft-ui-egui` scenarios: `acceptance_sensor_enclosure`
+
+**The action matrix** tries every ordinary action on every face, edge, vertex and body of a
+corpus of designs against a checked-in ratchet ([docs/action-matrix.md](docs/action-matrix.md)).
+A pull request that makes an action pass should record it with `cargo xtask action-matrix --bless`;
+one that makes a passing action fail fails the sample every CI run checks.
+
+**The reference tests** are 76 parts in [`tests/oracle/`](tests/oracle/), each a `recipe.json`
+in our own format with an `expected.json` beside it. SolidCraft rebuilds the recipe and compares
+body count, volume, area, centre of mass and bounding box (and, where there is a `reference.stl`,
+the surface itself). Expected values are either worked out in closed form
+(`tools/oracle-analytic/`) or computed by building the same recipe in FreeCAD, run as a separate
+program (`tools/freecad-oracle/`); each file says which. [docs/oracle.md](docs/oracle.md) has
+the current results, and CI runs `cargo xtask oracle` on every pull request. A case that fails
+because of a known bug names its issue in `expected.json` (`"known_failure": "#123"`); never
+change an expected value to match SolidCraft's output.
 
 ## Sending a change
 

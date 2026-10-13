@@ -1,7 +1,7 @@
 //! Group disconnected material regions without moving a cavity to another enclosing shell.
 //! A valid shell hierarchy alternates material and void at every nesting level.
 
-use solvecraft_geom::{Aabb3, Mesh, Vec3};
+use solidcraft_geom::{Aabb3, Mesh, Vec3};
 
 use crate::{KernelError, Result};
 
@@ -24,7 +24,7 @@ fn box_of(points: &[Vec3]) -> Aabb3 {
     bounds
 }
 
-fn boxes_separate(a: Aabb3, b: Aabb3, gap: f64) -> bool {
+pub(crate) fn boxes_separate(a: Aabb3, b: Aabb3, gap: f64) -> bool {
     a.max.x < b.min.x - gap
         || b.max.x < a.min.x - gap
         || a.max.y < b.min.y - gap

@@ -1,6 +1,7 @@
 #![allow(clippy::many_single_char_names)]
 
 use super::*;
+use super::history::Lineage;
 use rustc_hash::FxHashMap as HashMap;
 use truck_base::cgmath64::*;
 use truck_geometry::prelude::IntersectionCurve;
@@ -172,11 +173,13 @@ impl<P: Copy, C: Clone> Loops<P, C> {
             })
     }
 
+    // SolidCraft: `replaced(old, new)` is told of every edge rebuilt on the new vertex.
     fn change_vertex(
         &mut self,
         old_vertex: &Vertex<P>,
         new_vertex: &Vertex<P>,
         emap: &mut HashMap<EdgeID<C>, Edge<P, C>>,
+        replaced: &mut impl FnMut(EdgeID<C>, EdgeID<C>),
     ) {
         self.iter_mut()
             .flat_map(|wire| wire.iter_mut())
@@ -193,6 +196,7 @@ impl<P: Copy, C: Clone> Loops<P, C> {
                     return;
                 }
                 .clone();
+                replaced(edge.id(), new_edge.id());
                 if !edge.orientation() {
                     new_edge.invert();
                 }
@@ -290,9 +294,10 @@ impl<P: Copy + Tolerance, C: Clone> LoopsStore<P, C> {
         old_vertex: &Vertex<P>,
         new_vertex: &Vertex<P>,
         emap: &mut HashMap<EdgeID<C>, Edge<P, C>>,
+        replaced: &mut impl FnMut(EdgeID<C>, EdgeID<C>),
     ) {
         self.iter_mut()
-            .for_each(|loops| loops.change_vertex(old_vertex, new_vertex, emap));
+            .for_each(|loops| loops.change_vertex(old_vertex, new_vertex, emap, replaced));
     }
 
     #[inline(always)]
@@ -317,13 +322,13 @@ impl<P: Copy + Tolerance, C: Clone> LoopsStore<P, C> {
                 let old_vertex = self[loops_index][wire_index][edge_index]
                     .absolute_front()
                     .clone();
-                self.change_vertex(&old_vertex, v, emap);
+                self.change_vertex(&old_vertex, v, emap, &mut |_, _| {});
             }
             ParameterKind::Back => {
                 let old_vertex = self[loops_index][wire_index][edge_index]
                     .absolute_back()
                     .clone();
-                self.change_vertex(&old_vertex, v, emap);
+                self.change_vertex(&old_vertex, v, emap, &mut |_, _| {});
             }
             ParameterKind::Inner(t) => {
                 let edge = self[loops_index][wire_index][edge_index].absolute_clone();
@@ -345,6 +350,7 @@ impl<C> LoopsStore<Point3, C> {
         kind: ParameterKind,
         another_surface: &S,
         emap: &mut HashMap<EdgeID<C>, Edge<Point3, C>>,
+        lineage: &mut Lineage<C, S>,
     ) -> Option<()>
     where
         C: Cut<Point = Point3, Vector = Vector3> + SearchNearestParameter<D1, Point = Point3>,
@@ -356,14 +362,14 @@ impl<C> LoopsStore<Point3, C> {
                     .absolute_front()
                     .clone();
                 v.set_point(old_vertex.point());
-                self.change_vertex(&old_vertex, v, emap);
+                self.change_vertex(&old_vertex, v, emap, &mut |old, new| lineage.edge_piece(old, new));
             }
             ParameterKind::Back => {
                 let old_vertex = self[loops_index][wire_index][edge_index]
                     .absolute_back()
                     .clone();
                 v.set_point(old_vertex.point());
-                self.change_vertex(&old_vertex, v, emap);
+                self.change_vertex(&old_vertex, v, emap, &mut |old, new| lineage.edge_piece(old, new));
             }
             ParameterKind::Inner(_) => {
                 let curve = self[loops_index][wire_index][edge_index].curve();
@@ -373,6 +379,8 @@ impl<C> LoopsStore<Point3, C> {
                 let edge = self[loops_index][wire_index][edge_index].absolute_clone();
                 let edge_id = edge.id();
                 let (edge0, edge1) = edge.cut_with_parameter(v, t)?;
+                lineage.edge_piece(edge_id, edge0.id());
+                lineage.edge_piece(edge_id, edge1.id());
                 let new_wire: Wire<_, _> = vec![edge0, edge1].into();
                 self.swap_edge_into_wire(edge_id, &new_wire);
             }
@@ -445,6 +453,7 @@ pub fn create_loops_stores<C, S>(
     geom_shell1: &Shell<Point3, C, S>,
     poly_shell1: &Shell<Point3, PolylineCurve, Option<PolygonMesh>>,
     tol: f64,
+    lineage: &mut Lineage<C, S>,
 ) -> Option<LoopsStoreQuadruple<C>>
 where
     C: SearchNearestParameter<D1, Point = Point3>
@@ -466,6 +475,7 @@ where
             let ori1 = geom_shell1[face_index1].orientation();
             let surface0 = geom_shell0[face_index0].surface();
             let surface1 = geom_shell1[face_index1].surface();
+            let meeting = [geom_shell0[face_index0].id(), geom_shell1[face_index1].id()];
             let polygon0 = crate::tr!(poly_shell0[face_index0].surface(), "polygon0");
             let polygon1 = crate::tr!(poly_shell1[face_index1].surface(), "polygon1");
             intersection_curve::intersection_curves(
@@ -492,6 +502,7 @@ where
                     poly_loops_store1[face_index1]
                         .add_independent_loop(BoundaryWire::new(poly_wire, status1));
                     let geom_wire = create_independent_loop(intersection_curve);
+                    geom_wire.iter().for_each(|edge| lineage.meet(edge.id(), meeting));
                     geom_loops_store0[face_index0]
                         .add_independent_loop(BoundaryWire::new(geom_wire.clone(), status0));
                     geom_loops_store1[face_index1]
@@ -514,6 +525,7 @@ where
                             kind,
                             &surface1,
                             &mut gemap0,
+                            lineage,
                         ), "add_geom_vertex 1");
                         let polyline = intersection_curve.editor().leader;
                         *polyline.first_mut().unwrap() = gv0.point();
@@ -527,6 +539,7 @@ where
                             kind,
                             &surface1,
                             &mut gemap1,
+                            lineage,
                         ), "add_geom_vertex 2");
                         let polyline = intersection_curve.editor().leader;
                         *polyline.last_mut().unwrap() = gv1.point();
@@ -540,6 +553,7 @@ where
                             kind,
                             &surface0,
                             &mut gemap0,
+                            lineage,
                         ), "add_geom_vertex 3");
                         let polyline = intersection_curve.editor().leader;
                         *polyline.first_mut().unwrap() = gv0.point();
@@ -553,12 +567,14 @@ where
                             kind,
                             &surface0,
                             &mut gemap1,
+                            lineage,
                         ), "add_geom_vertex 4");
                         let polyline = intersection_curve.editor().leader;
                         *polyline.last_mut().unwrap() = gv1.point();
                     }
                     let pedge = Edge::new(&pv0, &pv1, polyline);
                     let gedge = Edge::new(&gv0, &gv1, intersection_curve.into());
+                    lineage.meet(gedge.id(), meeting);
                     poly_loops_store0[face_index0].add_edge(pedge.clone(), status0);
                     geom_loops_store0[face_index0].add_edge(gedge.clone(), status0);
                     poly_loops_store1[face_index1].add_edge(pedge, status1);

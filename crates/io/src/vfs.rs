@@ -113,7 +113,7 @@ pub fn read_to_string(path: &str, max: usize) -> Result<String> {
 mod tests {
     #[test]
     fn files_round_trip() {
-        let dir = std::env::temp_dir().join(format!("solvecraft-vfs-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("solidcraft-vfs-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let p = dir.join("a.txt").to_string_lossy().to_string();
         assert!(!super::exists(&p));
@@ -140,7 +140,7 @@ mod tests {
         assert!(e.to_string().contains("not a regular file"), "{e}");
         assert!(super::read_to_string("/dev/zero", 1024).is_err());
 
-        let dir = std::env::temp_dir().join(format!("solvecraft-vfs-fifo-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("solidcraft-vfs-fifo-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let fifo = dir.join("p");
         let made = std::process::Command::new("mkfifo").arg(&fifo).status().map(|s| s.success()).unwrap_or(false);

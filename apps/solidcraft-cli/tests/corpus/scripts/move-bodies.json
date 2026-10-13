@@ -1,0 +1,14 @@
+{
+ "commands": [
+  {"command": "sketch.create", "params": {"plane": "XY", "name": "Base"}},
+  {"command": "sketch.rectangle.two_point", "params": {"p0": [0, 0], "p1": [20, 20]}},
+  {"command": "sketch.finish", "params": {}},
+  {"command": "solid.extrude", "params": {"distance": 20, "body_name": "Block"}},
+  {"command": "sketch.create", "params": {"plane": "XY", "name": "Peg"}},
+  {"command": "sketch.rectangle.two_point", "params": {"p0": [40, 0], "p1": [50, 10]}},
+  {"command": "sketch.finish", "params": {}},
+  {"command": "solid.extrude", "params": {"distance": 10, "operation": "new", "body_name": "Peg"}},
+  {"command": "solid.move", "params": {"bodies": ["Block"], "translate": [30, 0, 0]}},
+  {"command": "solid.move", "params": {"bodies": ["Peg"], "translate": [0, 40, 0], "axis": [0, 0, 1], "angle": "90 deg"}}
+ ]
+}

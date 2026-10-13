@@ -1,6 +1,6 @@
 //! The design file format version and the migrations that bring older files up to date.
 //!
-//! A design file starts with `"format": "solvecraft/N"`. A file of an older format is read and
+//! A design file starts with `"format": "solidcraft/N"`. A file of an older format is read and
 //! upgraded step by step (N → N+1 → … → current): JSON-level steps first, for changes in the
 //! file's shape, then document-level steps. A file of a newer format than this build knows is
 //! refused with a message saying so, never guessed at.
@@ -39,27 +39,175 @@
 //! - 13: exact planar shell face anchors retain the shell producer, original certified
 //!   source and distinct inner/outer role. Version 12 anchors retain their identities;
 //!   migration never guesses attachments for older designs.
+//! - 14: persistent names follow the kernel's exact face history. Pieces of a split face are
+//!   named by the faces around them (`F2:top#[F2:side:l4,F4:side:l4]`) instead of numbered by
+//!   where their centres lay (`F2:top#2`). Names stored by older formats were worked out from
+//!   geometry, and a few of them name a face that history names differently; they get the
+//!   legacy mark (`?F2:top#2`) and are found again as the build that saved them found them.
+//!   Pieces a feature splits a body into are named after their faces; features saved before
+//!   keep the kernel's shell order (`shell_piece_order`), which their stored body names mean.
+//! - 15: sketch face anchors and face bindings can name a cylinder primitive's cap
+//!   (`cylinder_cap`), sketches can link lines to their own axes (`sketch_axis`), and sketch
+//!   anchors can name a sheet metal panel side (`sheet:<body>:<panel>:<side>`). Version 14
+//!   designs need no transformation; the version stamp lets older readers request an update
+//!   instead of encountering an unknown certificate or link kind.
+//! - 16: sheet metal rules can choose a corner relief shape (`corner_relief_shape`: notch,
+//!   round or rectangular). Version 15 designs need no transformation (an absent shape is the
+//!   notch they always had); the version stamp lets older readers request an update instead of
+//!   silently building notches where a design asks for another shape.
+//!   Under the same version, sketch text can be set in a font other than the built-in one
+//!   (`font` in the text link's source: an installed family or a font file); a text without
+//!   `font` is in the built-in font, as it always was.
+//!   A Move feature can also keep its source bodies and transform a copy (`copy: true`); a
+//!   move without it saves as before.
 
 use serde_json::Value;
 
 use crate::{DocError, Document, Result};
 
 /// The format this build writes.
-pub const FORMAT: u32 = 13;
+pub const FORMAT: u32 = 16;
 
 pub fn format_string(n: u32) -> String {
-    format!("solvecraft/{n}")
+    format!("solidcraft/{n}")
 }
 
-/// The version in a format string (`solvecraft/N`).
+/// The format tag of designs saved before the rename. Compatibility shim (docs/compatibility.md):
+/// read, never written.
+pub const LEGACY_FORMAT_PREFIX: &str = "solvecraft/";
+
+/// The version in a format string (`solidcraft/N`, or the legacy `solvecraft/N`).
 pub fn version_of(s: &str) -> Option<u32> {
-    s.strip_prefix("solvecraft/")?.parse().ok()
+    s.strip_prefix("solidcraft/").or_else(|| s.strip_prefix(LEGACY_FORMAT_PREFIX))?.parse().ok()
 }
 
 /// JSON-level upgrades: entry `i` turns format `i + 1` into `i + 2`.
 type JsonStep = fn(&mut Value) -> Result<()>;
-const JSON_STEPS: [JsonStep; 12] =
-    [|_| Ok(()), v2_to_v3, v3_to_v4, v4_to_v5, v5_to_v6, |_| Ok(()), |_| Ok(()), |_| Ok(()), |_| Ok(()), |_| Ok(()), |_| Ok(()), |_| Ok(())];
+const JSON_STEPS: [JsonStep; 15] = [
+    |_| Ok(()),
+    v2_to_v3,
+    v3_to_v4,
+    v4_to_v5,
+    v5_to_v6,
+    |_| Ok(()),
+    |_| Ok(()),
+    |_| Ok(()),
+    |_| Ok(()),
+    |_| Ok(()),
+    |_| Ok(()),
+    |_| Ok(()),
+    v13_to_v14,
+    |_| Ok(()),
+    |_| Ok(()),
+];
+
+/// Stored face and edge names were worked out from geometry before format 14; they get the
+/// legacy mark (`?`, see `naming::LEGACY_MARK`) so they are found again as those builds found
+/// them, and an older design evaluates as it was saved. The step marks the fields that store
+/// such a name, by their place in the schema:
+/// - each feature's `face_names`, and fillets' and chamfers' `edge_names` (other features' edge
+///   names are sheet metal's own);
+/// - a sketch feature's links' `face_name`;
+/// - face and edge references (`PlaneRef::Face`, `GeoRef::Face`, `GeoRef::Edge`: tagged
+///   `"type": "face"|"edge"`, picked `at` a point), wherever a feature holds one;
+/// - joint snaps on a face (`face_center`, `circle_center`), in joints and named origins;
+/// - face appearances, but not strict ones, whose names are certified lineage.
+///
+/// Every feature also keeps naming the pieces it splits a body into in the kernel's shell order
+/// (`Feature::shell_piece_order`): the body names stored after it (bodies, targets, participants,
+/// materials, appearances, joints) mean the pieces in that order.
+fn v13_to_v14(v: &mut Value) -> Result<()> {
+    if let Some(Value::Array(features)) = v.get_mut("features") {
+        for f in features.iter_mut() {
+            let Value::Object(o) = f else { continue };
+            let kind = o.get("type").and_then(Value::as_str).map(str::to_string);
+            if matches!(kind.as_deref(), Some("fillet" | "chamfer")) {
+                mark_all(o.get_mut("edge_names"));
+            }
+            mark_all(o.get_mut("face_names"));
+            if kind.as_deref() == Some("sketch")
+                && let Some(Value::Array(links)) = o.get_mut("sketch").and_then(|s| s.get_mut("links"))
+            {
+                links.iter_mut().filter_map(|l| l.get_mut("face_name")).for_each(mark);
+            }
+            o.insert("shell_piece_order".into(), Value::Bool(true));
+            references(f);
+        }
+    }
+    if let Some(Value::Array(joints)) = v.get_mut("assembly").and_then(|a| a.get_mut("joints")) {
+        for j in joints.iter_mut() {
+            for side in ["a", "b"] {
+                snap(j.get_mut(side));
+            }
+        }
+    }
+    if let Some(Value::Array(origins)) = v.get_mut("assembly").and_then(|a| a.get_mut("origins")) {
+        origins.iter_mut().for_each(|o| snap(o.get_mut("origin")));
+    }
+    // Face appearances carry the face's name without a type tag.
+    if let Some(Value::Array(faces)) = v.get_mut("appearances").and_then(|a| a.get_mut("faces")) {
+        for face in faces.iter_mut().filter(|f| f.get("strict_name").and_then(Value::as_bool) != Some(true)) {
+            if let Some(n) = face.get_mut("name") {
+                mark(n);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Mark the `name` of every face or edge reference in `v` (see [`v13_to_v14`]).
+fn references(v: &mut Value) {
+    match v {
+        Value::Object(o) => {
+            let reference = matches!(o.get("type").and_then(Value::as_str), Some("face" | "edge")) && o.contains_key("at");
+            for (key, x) in o.iter_mut() {
+                if reference && key == "name" {
+                    mark(x);
+                } else {
+                    references(x);
+                }
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(references),
+        _ => {}
+    }
+}
+
+/// Mark the face name of a joint origin's snap on a face.
+fn snap(origin: Option<&mut Value>) {
+    if let Some(snap) = origin.and_then(|o| o.get_mut("snap"))
+        && matches!(snap.get("type").and_then(Value::as_str), Some("face_center" | "circle_center"))
+        && let Some(n) = snap.get_mut("face")
+    {
+        mark(n);
+    }
+}
+
+/// Mark every name in a list of stored names.
+fn mark_all(names: Option<&mut Value>) {
+    if let Some(Value::Array(names)) = names {
+        names.iter_mut().for_each(mark);
+    }
+}
+
+/// `features` (a design's, as JSON) as an upgrade from before format 14 leaves them: each keeps
+/// the shell order of the pieces it makes (see [`v13_to_v14`]).
+#[cfg(test)]
+pub(crate) fn pieces_in_shell_order(features: &mut Value) {
+    for f in features.as_array_mut().into_iter().flatten().filter_map(Value::as_object_mut) {
+        f.insert("shell_piece_order".into(), Value::Bool(true));
+    }
+}
+
+/// A stored name with the legacy mark (an empty name stays empty: no reference).
+fn mark(n: &mut Value) {
+    if let Value::String(s) = n
+        && !s.is_empty()
+        && crate::naming::legacy_name(s).is_none()
+    {
+        s.insert(0, crate::naming::LEGACY_MARK);
+    }
+}
 
 /// Old XZ references retain their exact frame, including nested offset and angled planes.
 /// New origin references use +Y; freezing the old frame avoids changing sketch coordinates,
@@ -172,7 +320,7 @@ pub fn read(s: &str) -> Result<Document> {
         if let Some(crate::Feature { kind: crate::FeatureKind::Sketch { sketch, .. }, .. }) = d.features.get_mut(feature_index) {
             let mut spaces = std::collections::BTreeMap::new();
             for link in &sketch.links {
-                spaces.entry(link.id.as_str()).or_insert_with(|| solvecraft_sketch::WireSpace::from_legacy_link(link));
+                spaces.entry(link.id.as_str()).or_insert_with(|| solidcraft_sketch::WireSpace::from_legacy_link(link));
             }
             for wire_index in wire_indices {
                 if let Some(wire) = sketch.wires.get_mut(wire_index) {
@@ -230,9 +378,9 @@ fn validate_sketch_sizes(value: &Value) -> Result<()> {
         }
         let Some(sketch) = feature.get("sketch") else { continue };
         let len = |key: &str| sketch.get(key).and_then(Value::as_array).map_or(0, Vec::len);
-        if len("points") > solvecraft_sketch::MAX_POINTS
-            || len("curves") > solvecraft_sketch::MAX_CURVES
-            || len("constraints") > solvecraft_sketch::MAX_CONSTRAINTS
+        if len("points") > solidcraft_sketch::MAX_POINTS
+            || len("curves") > solidcraft_sketch::MAX_CURVES
+            || len("constraints") > solidcraft_sketch::MAX_CONSTRAINTS
         {
             return Err(invalid());
         }
@@ -425,7 +573,7 @@ fn validate_versioned_geometry(value: &Value) -> Result<()> {
             }
             let indices = curve.get("pts").and_then(Value::as_array).ok_or_else(invalid)?;
             work = work.saturating_add(indices.len());
-            if !(4..=solvecraft_sketch::MAX_SPLINE_POINTS).contains(&indices.len())
+            if !(4..=solidcraft_sketch::MAX_SPLINE_POINTS).contains(&indices.len())
                 || work > 1_000_000
                 || curve.get("control").is_some_and(|control| control.as_bool() != Some(false))
                 || curve.get("degree").is_some_and(|degree| degree.as_u64() != Some(3))
@@ -502,7 +650,7 @@ fn validate_freeform_offsets(value: &Value) -> Result<()> {
             if !(1..=256).contains(&divisions)
                 || !divisions.is_power_of_two()
                 || !(1..=256).contains(&pieces)
-                || pieces * divisions >= solvecraft_sketch::MAX_SPLINE_POINTS as u64
+                || pieces * divisions >= solidcraft_sketch::MAX_SPLINE_POINTS as u64
                 || !distance.is_finite()
                 || !(1e-9..=MAX_REAL).contains(&distance.abs())
                 || !tolerance.is_finite()
@@ -597,9 +745,77 @@ mod tests {
     use super::*;
 
     #[test]
+    fn version_thirteen_names_keep_their_meaning_under_the_legacy_mark() {
+        let file = serde_json::json!({
+            "format": "solidcraft/13",
+            "features": [
+                {"type": "fillet", "edge_names": ["F2:side:l2|F2:top#2~1", ""], "face_names": ["F2:top#1", ""]},
+                {"type": "sheet_flange", "edge_names": ["base:l1:top"]},
+                {"type": "sketch", "plane": {"type": "face", "plane": {}, "at": [0, 0, 0], "name": "F2:top#1"},
+                 "sketch": {"links": [{"id": "l1", "face_name": "F2:top#2"}]}},
+                {"type": "construction_axis", "def": {"type": "two_points",
+                 "a": {"type": "edge", "at": [0, 0, 0], "name": "F2:start|F2:side:l1"},
+                 "b": {"type": "face", "at": [0, 0, 0], "name": "F2:start"}}},
+                {"name": "Hole #2", "type": "extrude"},
+                {"type": "thread", "face": [1, 2, 3]}
+            ],
+            "assembly": {
+                "joints": [{"a": {"occurrence": 0, "snap": {"type": "face_center", "pick": [0, 0, 0], "face": "F2:top#2"}},
+                            "b": {"occurrence": 1, "snap": {"type": "point", "point": [0, 0, 0]}}}],
+                "origins": [{"name": "O1", "origin": {"occurrence": 0, "snap": {"type": "circle_center", "pick": [0, 0, 0], "face": "F3:side"}}}]
+            },
+            "appearances": {"faces": [{"body": "Body1", "name": "F2:top#1"}, {"body": "Body1", "name": "F2:+x", "strict_name": true}]}
+        });
+        let mut v = file.clone();
+        v13_to_v14(&mut v).unwrap();
+        assert_eq!(v["features"][0]["edge_names"], serde_json::json!(["?F2:side:l2|F2:top#2~1", ""]));
+        assert_eq!(v["features"][0]["face_names"], serde_json::json!(["?F2:top#1", ""]));
+        assert_eq!(v["features"][1]["edge_names"][0], "base:l1:top", "sheet metal's edge names are its own");
+        assert_eq!(v["features"][2]["plane"]["name"], "?F2:top#1");
+        assert_eq!(v["features"][2]["sketch"]["links"][0]["face_name"], "?F2:top#2");
+        assert_eq!(v["features"][3]["def"]["a"]["name"], "?F2:start|F2:side:l1");
+        assert_eq!(v["features"][3]["def"]["b"]["name"], "?F2:start");
+        assert_eq!(v["features"][4]["name"], "Hole #2", "a feature's own name is not a face name");
+        assert_eq!(v["features"][5]["face"], serde_json::json!([1, 2, 3]));
+        assert_eq!(v["assembly"]["joints"][0]["a"]["snap"]["face"], "?F2:top#2");
+        assert_eq!(v["assembly"]["origins"][0]["origin"]["snap"]["face"], "?F3:side");
+        assert_eq!(v["appearances"]["faces"][0]["name"], "?F2:top#1");
+        assert_eq!(v["appearances"]["faces"][1]["name"], "F2:+x", "strict appearance names are certified lineage");
+        // Every feature keeps naming the pieces it splits a body into as the saving build did.
+        assert!(v["features"].as_array().unwrap().iter().all(|f| f["shell_piece_order"] == true));
+        // The step never marks twice.
+        let once = v.clone();
+        v13_to_v14(&mut v).unwrap();
+        assert_eq!(v, once);
+    }
+
+    /// Only the fields that store a face or edge name are marked: other fields with the same key
+    /// names, and objects tagged `face` or `edge` that are not references, are left alone.
+    #[test]
+    fn version_thirteen_marking_targets_name_fields_not_key_names() {
+        let file = serde_json::json!({
+            "format": "solidcraft/13",
+            "features": [
+                {"type": "extrude", "options": {"face": "flat", "face_name": "label", "face_names": ["a"]}},
+                {"type": "fillet", "settings": {"edge_names": ["kept"]}},
+                {"type": "sketch", "sketch": {"style": {"face_name": "kept"}}},
+                {"type": "split_body", "tool": {"type": "face", "name": "not a reference"}}
+            ],
+            "assembly": {"joints": [{"a": {"occurrence": 0, "snap": {"type": "frame", "face": "kept"}}}]},
+            "notes": {"face": "F2:top", "face_name": "F2:top", "face_names": ["F2:top"]}
+        });
+        let mut v = file.clone();
+        v13_to_v14(&mut v).unwrap();
+        for f in v["features"].as_array_mut().unwrap() {
+            f.as_object_mut().unwrap().remove("shell_piece_order");
+        }
+        assert_eq!(v, file);
+    }
+
+    #[test]
     fn version_nine_wire_spaces_preserve_saved_points_and_explicit_markers() {
-        use solvecraft_geom::Vec3;
-        use solvecraft_sketch::{LinkKind, LinkSource, Sketch, WireSpace};
+        use solidcraft_geom::Vec3;
+        use solidcraft_sketch::{LinkKind, LinkSource, Sketch, WireSpace};
         let mut sketch = Sketch::new();
         sketch.add_drawn_wire(&[Vec3::new(12.0, 3.0, 4.0)]).unwrap();
         let link = sketch
@@ -614,7 +830,7 @@ mod tests {
         let mut doc = Document::new("legacy wire spaces");
         doc.add_feature(crate::FeatureKind::Sketch { plane: crate::PlaneRef::Origin { name: "XY".into() }, sketch }, None).unwrap();
         let mut json: Value = serde_json::from_str(&doc.to_json()).unwrap();
-        json["format"] = Value::from("solvecraft/9");
+        json["format"] = Value::from("solidcraft/9");
         for wire in json["features"][0]["sketch"]["wires"].as_array_mut().unwrap() {
             wire.as_object_mut().unwrap().remove("space");
         }
@@ -695,7 +911,7 @@ mod tests {
         let mut document = Document::new("legacy named extent");
         document.set_param("offset", "2", Some("mm"), None).unwrap();
         let sketch = document
-            .add_feature(FeatureKind::Sketch { plane: PlaneRef::Origin { name: "XY".into() }, sketch: solvecraft_sketch::Sketch::new() }, None)
+            .add_feature(FeatureKind::Sketch { plane: PlaneRef::Origin { name: "XY".into() }, sketch: solidcraft_sketch::Sketch::new() }, None)
             .unwrap();
         document
             .add_feature(
@@ -709,9 +925,9 @@ mod tests {
                         start_offset: None,
                         through_all: false,
                         taper: Some("0 deg".into()),
-                        to: Some(solvecraft_geom::Vec3::new(0.0, 0.0, 10.0)),
+                        to: Some(solidcraft_geom::Vec3::new(0.0, 0.0, 10.0)),
                         to_offset: Some("offset + 1 mm".into()),
-                        from: Some(solvecraft_geom::Vec3::new(0.0, 0.0, 5.0)),
+                        from: Some(solidcraft_geom::Vec3::new(0.0, 0.0, 5.0)),
                     },
                     operation: Operation::NewBody,
                     targets: vec![],
@@ -732,7 +948,7 @@ mod tests {
             )
             .unwrap();
         let mut legacy: Value = serde_json::from_str(&document.to_json()).unwrap();
-        legacy["format"] = Value::from("solvecraft/8");
+        legacy["format"] = Value::from("solidcraft/8");
         // Version 8 exposed distance and taper, but had no model slot for To Offset.
         legacy["features"][1]["param_names"] = serde_json::json!(["d1", "d2"]);
         legacy["features"][2]["param_names"] = serde_json::json!(["d3", "d4", "d5"]);
@@ -756,8 +972,8 @@ mod tests {
 
     #[test]
     fn saved_offset_cannot_alias_and_overwrite_its_source_geometry() {
-        use solvecraft_geom::Vec2;
-        use solvecraft_sketch::{CurveKind, Sketch};
+        use solidcraft_geom::Vec2;
+        use solidcraft_sketch::{CurveKind, Sketch};
         let mut sketch = Sketch::new();
         let center = sketch.add_point(Vec2::ZERO, None).unwrap();
         let major = sketch.add_point(Vec2::new(10.0, 0.0), None).unwrap();
@@ -780,7 +996,7 @@ mod tests {
         let mut document = Document::new("missing offset geometry");
         document
             .add_feature(
-                crate::FeatureKind::Sketch { plane: crate::PlaneRef::Origin { name: "XY".into() }, sketch: solvecraft_sketch::Sketch::new() },
+                crate::FeatureKind::Sketch { plane: crate::PlaneRef::Origin { name: "XY".into() }, sketch: solidcraft_sketch::Sketch::new() },
                 None,
             )
             .unwrap();
@@ -856,7 +1072,7 @@ mod tests {
             ("degree", serde_json::json!(2)),
             ("pts", serde_json::json!([0, 1, 2])),
             ("pts", serde_json::json!([0, 1, 2, u64::MAX])),
-            ("pts", serde_json::json!(vec![0; solvecraft_sketch::MAX_SPLINE_POINTS + 1])),
+            ("pts", serde_json::json!(vec![0; solidcraft_sketch::MAX_SPLINE_POINTS + 1])),
         ] {
             let mut damaged = curve.clone();
             damaged[key] = malformed;
@@ -895,8 +1111,8 @@ mod tests {
 
     #[test]
     fn periodic_file_validation_refuses_damaged_closed_geometry() {
-        use solvecraft_geom::Vec2;
-        use solvecraft_sketch::{CurveKind, Sketch};
+        use solidcraft_geom::Vec2;
+        use solidcraft_sketch::{CurveKind, Sketch};
         let mut sketch = Sketch::new();
         let mut pts = Vec::new();
         for point in [Vec2::ZERO, Vec2::new(10.0, 0.0), Vec2::new(0.0, 10.0), Vec2::ZERO] {
@@ -1003,9 +1219,10 @@ mod tests {
         ];
         d.configs.active = Some("Default".into());
         let mut legacy: Value = serde_json::from_str(&d.to_json()).unwrap();
-        legacy["format"] = Value::from("solvecraft/6");
+        legacy["format"] = Value::from("solidcraft/6");
         let original_table = legacy["configs"].clone();
         let upgraded = read(&legacy.to_string()).unwrap();
+        d.features.iter_mut().for_each(|f| f.shell_piece_order = true);
         assert_eq!(upgraded, d, "the identity migration preserves the complete design");
         assert_eq!(serde_json::to_value(&upgraded.configs).unwrap(), original_table);
         assert_eq!(upgraded.format, format_string(FORMAT));
@@ -1027,7 +1244,7 @@ mod tests {
         }];
         d.apply_configuration("Blue steel").unwrap();
         let mut value: Value = serde_json::from_str(&d.to_json()).unwrap();
-        value["format"] = Value::from("solvecraft/7");
+        value["format"] = Value::from("solidcraft/7");
         let original_table = value["configs"].clone();
         let roundtrip = read(&value.to_string()).unwrap();
         assert_eq!(roundtrip, d);
@@ -1044,8 +1261,8 @@ mod tests {
 
     #[test]
     fn version_seven_origin_sketch_keeps_geometry_dimension_ids_and_expressions() {
-        use solvecraft_geom::Vec2;
-        use solvecraft_sketch::{ConstraintKind, Sketch};
+        use solidcraft_geom::Vec2;
+        use solidcraft_sketch::{ConstraintKind, Sketch};
         let mut d = Document::new("legacy origin dimensions");
         d.set_param("reach", "25 mm", Some("mm"), None).unwrap();
         let dim = d.new_model_param("reach", "mm");
@@ -1056,10 +1273,12 @@ mod tests {
         sketch.add_constraint(ConstraintKind::Length { l: line, value: 25.0 }, Some(dim)).unwrap();
         d.add_feature(crate::FeatureKind::Sketch { plane: crate::PlaneRef::Origin { name: "XY".into() }, sketch }, Some("Dimensioned")).unwrap();
         let mut legacy: Value = serde_json::from_str(&d.to_json()).unwrap();
-        legacy["format"] = Value::from("solvecraft/7");
-        let features = legacy["features"].clone();
+        legacy["format"] = Value::from("solidcraft/7");
+        let mut features = legacy["features"].clone();
+        pieces_in_shell_order(&mut features);
         let params = legacy["params"].clone();
         let upgraded = read(&legacy.to_string()).unwrap();
+        d.features.iter_mut().for_each(|f| f.shell_piece_order = true);
         assert_eq!(upgraded, d);
         let upgraded_json: Value = serde_json::from_str(&upgraded.to_json()).unwrap();
         assert_eq!(upgraded_json["features"], features);
@@ -1069,8 +1288,8 @@ mod tests {
 
     #[test]
     fn version_eight_persistent_angle_sweep_and_slot_dimensions_roundtrip() {
-        use solvecraft_geom::Vec2;
-        use solvecraft_sketch::{ConstraintKind, Sketch};
+        use solidcraft_geom::Vec2;
+        use solidcraft_sketch::{ConstraintKind, Sketch};
         let mut d = Document::new("persistent typed dimensions");
         let heading = d.new_model_param("45 deg", "deg");
         let sweep = d.new_model_param("180 deg", "deg");
@@ -1159,8 +1378,11 @@ mod tests {
 
     #[test]
     fn versions() {
-        assert_eq!(version_of("solvecraft/1"), Some(1));
-        assert_eq!(version_of("solvecraft/x"), None);
+        assert_eq!(version_of("solidcraft/1"), Some(1));
+        assert_eq!(version_of("solidcraft/x"), None);
+        // Compatibility shim: files saved before the rename carry the legacy tag.
+        assert_eq!(version_of("solvecraft/13"), Some(13));
+        assert_eq!(version_of("solvecraftx/13"), None);
         let d = Document::new("A");
         assert_eq!(d.format, format_string(FORMAT));
         let back = read(&d.to_json()).unwrap();
@@ -1179,44 +1401,44 @@ mod tests {
             )
             .unwrap();
         let mut json: Value = serde_json::from_str(&doc.to_json()).unwrap();
-        json["format"] = Value::from("solvecraft/5");
+        json["format"] = Value::from("solidcraft/5");
         let migrated = read(&json.to_string()).unwrap();
         let crate::FeatureKind::ConstructionPlane { plane } = &migrated.feature(id).unwrap().kind else { panic!("plane") };
         let (values, errors) = migrated.param_values();
         assert!(errors.is_empty());
         let p = migrated.resolve_plane(&values, plane, 0).unwrap();
-        assert_eq!(p.y, solvecraft_geom::Vec3::Z);
-        assert_eq!(p.normal(), -solvecraft_geom::Vec3::Y);
-        assert_eq!(p.origin, solvecraft_geom::Vec3::new(0.0, -7.0, 0.0));
+        assert_eq!(p.y, solidcraft_geom::Vec3::Z);
+        assert_eq!(p.normal(), -solidcraft_geom::Vec3::Y);
+        assert_eq!(p.origin, solidcraft_geom::Vec3::new(0.0, -7.0, 0.0));
         assert_eq!(read(&migrated.to_json()).unwrap(), migrated);
         let fresh = doc.resolve_plane(&values, &crate::PlaneRef::Origin { name: "XZ".into() }, 0).unwrap();
-        assert_eq!(fresh.normal(), solvecraft_geom::Vec3::Y);
+        assert_eq!(fresh.normal(), solidcraft_geom::Vec3::Y);
     }
 
     #[test]
     fn older_upgraded_newer_refused_others_rejected() {
         let mut v: Value = serde_json::from_str(&Document::new("A").to_json()).unwrap();
-        v["format"] = Value::from("solvecraft/1");
+        v["format"] = Value::from("solidcraft/1");
         assert_eq!(read(&v.to_string()).unwrap().format, format_string(FORMAT));
         v.as_object_mut().unwrap().remove("format");
         assert!(read(&v.to_string()).is_ok(), "a file without a format is format 1");
         v["format"] = Value::from(format_string(FORMAT + 1));
         let e = read(&v.to_string()).unwrap_err().to_string();
         assert!(e.contains("newer SolidCraft"), "{e}");
-        for bad in ["solvecraft/0", "acad/3", "solvecraft/-1", "solvecraft/99999999999999999999"] {
+        for bad in ["solidcraft/0", "acad/3", "solidcraft/-1", "solidcraft/99999999999999999999"] {
             v["format"] = Value::from(bad);
             assert!(read(&v.to_string()).is_err(), "{bad}");
         }
         assert!(read("[]").is_err());
         // Format 2 body colours become body appearances.
         let mut old: Value = serde_json::from_str(&Document::new("A").to_json()).unwrap();
-        old["format"] = Value::from("solvecraft/2");
+        old["format"] = Value::from("solidcraft/2");
         old["appearances"] = serde_json::json!({"Body1": [200, 10, 20]});
         let d = read(&old.to_string()).unwrap();
         let l = d.appearances.bodies.get("Body1").unwrap();
         // Format 3 joints (aligned unless flipped) keep their placement.
         let mut j: Value = serde_json::from_str(&Document::new("A").to_json()).unwrap();
-        j["format"] = Value::from("solvecraft/3");
+        j["format"] = Value::from("solidcraft/3");
         j["assembly"] = serde_json::json!({"joints": [{"id": 1, "name": "J", "kind": "rigid", "a": {"occurrence": 0, "snap": {"type": "point", "point": [0, 0, 0]}}, "b": {"occurrence": 0, "snap": {"type": "point", "point": [0, 0, 0]}}}]});
         let dj = read(&j.to_string()).unwrap();
         assert!(dj.assembly.joints[0].flip, "aligned before = not mated now");
@@ -1232,14 +1454,14 @@ mod tests {
     /// file too, before the arrays are deserialised.
     #[test]
     fn oversized_sketches_are_refused_before_typed_decoding() {
-        use solvecraft_sketch::{MAX_CONSTRAINTS, MAX_CURVES, MAX_POINTS, Sketch};
+        use solidcraft_sketch::{MAX_CONSTRAINTS, MAX_CURVES, MAX_POINTS, Sketch};
 
         // A sketch right at the point cap, chained by coincident constraints.
         let mut sketch = Sketch::new();
         let mut previous = 0;
         while sketch.points.len() < MAX_POINTS {
-            let i = sketch.add_point(solvecraft_geom::Vec2::new(0.001 * sketch.points.len() as f64, 0.0), None).unwrap();
-            sketch.add_constraint(solvecraft_sketch::ConstraintKind::Coincident { p: previous, q: i }, None).unwrap();
+            let i = sketch.add_point(solidcraft_geom::Vec2::new(0.001 * sketch.points.len() as f64, 0.0), None).unwrap();
+            sketch.add_constraint(solidcraft_sketch::ConstraintKind::Coincident { p: previous, q: i }, None).unwrap();
             previous = i;
         }
         let mut doc = Document::new("big sketch");

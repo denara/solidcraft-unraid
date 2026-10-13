@@ -2,7 +2,7 @@
 //! 40 × 30 × 20 box at the origin, a cylinder, a sphere and a torus.
 
 use serde_json::{Value, json};
-use solvecraft_geom::{Plane, Vec3};
+use solidcraft_geom::{Plane, Vec3};
 
 use crate::Session;
 use crate::view::{construction_axes, construction_planes, construction_points};
@@ -216,6 +216,47 @@ fn plane_along_a_path() {
     run(&mut s, "sketch.create", json!({"plane": "P", "name": "OnPath"}));
 }
 
+#[test]
+fn construction_on_a_3d_wire_ignores_its_sketch_plane_and_follows_edits() {
+    let mut s = Session::default();
+    let sketch = run(&mut s, "sketch.create", json!({"plane":{"origin":[100,200,300],"x_dir":[0,1,0],"y_dir":[0,0,1]}}))["sketch"].as_u64().unwrap();
+    run(&mut s, "sketch.options", json!({"sketch_3d":true}));
+    let wire = run(&mut s, "sketch.line3d", json!({"points":[[10,20,10],[30,35,40]]}))["curves"][0].as_str().unwrap().to_string();
+    run(&mut s, "sketch.finish", json!({}));
+    let path = json!({"sketch":sketch,"curve":wire});
+    run(&mut s, "construct.plane.along_path", json!({"path":path,"t":0.5,"name":"BridgePlane"}));
+    run(&mut s, "construct.point.along_path", json!({"path":path,"t":0.25,"name":"Quarter"}));
+    let p = plane(&s, "BridgePlane");
+    assert!(near(p.origin, Vec3::new(20.0, 27.5, 25.0)), "{p:?}");
+    assert!(parallel(p.normal(), Vec3::new(20.0, 15.0, 30.0)));
+    assert!(near(point(&s, "Quarter"), Vec3::new(15.0, 23.75, 17.5)));
+    run(&mut s, "sketch.edit", json!({"sketch":sketch}));
+    run(&mut s, "sketch.move3d", json!({"wire":wire,"index":1,"to":[50,35,40]}));
+    run(&mut s, "sketch.finish", json!({}));
+    let updated = plane(&s, "BridgePlane");
+    assert!(near(updated.origin, Vec3::new(30.0, 27.5, 25.0)), "{updated:?}");
+    assert!(parallel(updated.normal(), Vec3::new(40.0, 15.0, 30.0)));
+    let restored = solidcraft_doc::format::read(&s.doc.to_json()).unwrap();
+    let mut cold = Session { doc: restored.into(), ..Default::default() };
+    cold.refresh();
+    assert!(near(plane(&cold, "BridgePlane").origin, updated.origin));
+}
+
+#[test]
+fn plane_on_a_3d_wire_moves_with_its_component() {
+    let mut s = Session::default();
+    run(&mut s, "component.create", json!({"name":"Part"}));
+    let sketch = run(&mut s, "sketch.create", json!({"plane":"XY"}))["sketch"].as_u64().unwrap();
+    run(&mut s, "sketch.options", json!({"sketch_3d":true}));
+    let wire = run(&mut s, "sketch.line3d", json!({"points":[[0,0,10],[0,0,40]]}))["curves"][0].as_str().unwrap().to_string();
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "construct.plane.along_path", json!({"path":{"sketch":sketch,"curve":wire},"t":0.5,"name":"Section"}));
+    run(&mut s, "occurrence.move", json!({"occurrence":"Part:1","translate":[50,20,0],"capture":true}));
+    let p = plane(&s, "Section");
+    assert!(near(p.origin, Vec3::new(50.0, 20.0, 25.0)), "{p:?}");
+    assert!(parallel(p.normal(), Vec3::Z));
+}
+
 /// Built from model geometry, they follow when the model changes: the box gets taller.
 #[test]
 fn construction_follows_the_model() {
@@ -271,4 +312,117 @@ fn plane_perpendicular_to_a_plane_through_a_line() {
     assert!(parallel(g.normal(), Vec3::X) && on_plane(&g, Vec3::new(0.0, 5.0, 9.0)), "{g:?}");
     // A line square to the plane has no single answer.
     assert!(s.execute("construct.plane.perpendicular", &json!({"plane": "XY", "line": {"axis": "Z"}})).is_err());
+}
+
+#[test]
+fn ambiguous_plane_aliases_refuse_without_document_or_history_changes() {
+    for alias in ["Top", "Front", "Right", "XY", "XZ", "YZ"] {
+        let mut s = Session::default();
+        run(&mut s, "parameters.add", json!({"name":"height","expression":"19.05 mm"}));
+        run(&mut s, "sketch.create", json!({"plane":alias}));
+        run(&mut s, "sketch.finish", json!({}));
+        let made = run(&mut s, "construct.plane.offset", json!({"base":{"origin":[0,0,0],"normal":[0,0,1]},"offset":"height","name":"Lid"}));
+        let id = made["feature"].as_u64().unwrap();
+        legacy_plane_name(&mut s, id, alias);
+        let before = s.doc.to_json();
+        let history = s.undo.len();
+        for command in ["sketch.create", "inspect.section"] {
+            let error = s.execute(command, &json!({"plane":format!(" {} ",alias.to_lowercase())})).unwrap_err();
+            assert!(error.to_string().contains("ambiguous"), "{error}");
+            assert!(error.to_string().contains(&format!("feature id {id}")), "{error}");
+            let other = match alias {
+                "Top" => "XY",
+                "XY" => "Top",
+                "Front" => "XZ",
+                "XZ" => "Front",
+                "Right" => "YZ",
+                _ => "Right",
+            };
+            assert!(error.to_string().contains(&format!("use `{other}` for the origin plane")), "{error}");
+            assert_eq!(s.doc.to_json(), before);
+            assert_eq!(s.undo.len(), history);
+            assert!(s.section.is_none());
+        }
+        run(&mut s, "sketch.create", json!({"plane":id}));
+        let inspected = run(&mut s, "sketch.inspect", json!({}));
+        assert_eq!(inspected["plane"]["origin"], json!([0.0, 0.0, 19.05]));
+        let cut = run(&mut s, "inspect.section", json!({"plane":id}));
+        assert_eq!(cut["section"]["origin"], json!([0.0, 0.0, 19.05]));
+        run(&mut s, "parameters.change", json!({"name":"height","expression":"25.4 mm"}));
+        let mut reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+        let old = run(&mut reopened, "sketch.inspect", json!({"sketch":"Sketch1"}));
+        assert_eq!(old["plane"]["origin"], json!([0.0, 0.0, 0.0]), "saved origin reference is not reinterpreted");
+        let linked = run(&mut reopened, "sketch.inspect", json!({"sketch":"Sketch2"}));
+        assert_eq!(linked["plane"]["origin"], json!([0.0, 0.0, 25.4]), "disambiguated reference follows edits and reopen");
+    }
+}
+
+#[test]
+fn disambiguated_top_plane_pocket_survives_undo_and_cold_reopen() {
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane":"XY"}));
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0":[0,0],"p1":[100,200]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"distance":19.05,"name":"Plate"}));
+    let top = run(&mut s, "construct.plane.offset", json!({"base":"XY","offset":19.05,"name":"Lid"}));
+    legacy_plane_name(&mut s, top["feature"].as_u64().unwrap(), "Top");
+    assert!(s.execute("sketch.create", &json!({"plane":"Top"})).unwrap_err().to_string().contains("ambiguous"));
+    run(&mut s, "sketch.create", json!({"plane":top["feature"]}));
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0":[3,3],"p1":[97,30]}));
+    run(&mut s, "sketch.finish", json!({}));
+    let before = s.doc.to_json();
+    run(&mut s, "solid.extrude", json!({"distance":12.7,"direction":"negative","operation":"cut","name":"Pocket"}));
+    let saved = s.doc.to_json();
+    let expected = 100.0 * 200.0 * 19.05 - 94.0 * 27.0 * 12.7;
+    let measured = run(&mut s, "inspect.measure", json!({}));
+    assert!((measured["total"]["volume_mm3"].as_f64().unwrap() - expected).abs() < 1e-6, "{measured}");
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!(s.doc.to_json(), before);
+    run(&mut s, "edit.redo", json!({}));
+    assert_eq!(s.doc.to_json(), saved);
+    let mut reopened = Session::new(solidcraft_doc::Document::from_json(&saved).unwrap());
+    let measured = run(&mut reopened, "inspect.measure", json!({}));
+    assert!((measured["total"]["volume_mm3"].as_f64().unwrap() - expected).abs() < 1e-6, "{measured}");
+}
+
+/// A construction plane named like an origin plane, as an older saved design can hold.
+fn legacy_plane_name(s: &mut Session, id: u64, name: &str) {
+    s.doc_mut().feature_mut(id).unwrap().name = name.to_string();
+}
+
+#[test]
+fn construction_planes_cannot_take_origin_plane_names() {
+    let mut s = Session::default();
+    let made = run(&mut s, "construct.plane.offset", json!({"base":"XY","offset":5,"name":"Lid"}));
+    let id = made["feature"].as_u64().unwrap();
+    for alias in ["XY", "XZ", "YZ", "Top", "Front", "Right", " top ", "xz"] {
+        let before = s.doc.to_json();
+        let history = s.undo.len();
+        let created = s.execute("construct.plane.offset", &json!({"base":"XY","offset":10,"name":alias})).unwrap_err();
+        assert!(created.to_string().contains("reserved for an origin plane"), "{created}");
+        let renamed = s.execute("timeline.rename", &json!({"feature":id,"name":alias})).unwrap_err();
+        assert!(renamed.to_string().contains("reserved for an origin plane"), "{renamed}");
+        assert_eq!(s.doc.to_json(), before);
+        assert_eq!(s.undo.len(), history);
+    }
+    // Other features may still use the names; only a plane parameter could confuse them.
+    run(&mut s, "sketch.create", json!({"plane":"XY"}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "timeline.rename", json!({"feature":"Sketch1","name":"Top"}));
+    run(&mut s, "timeline.rename", json!({"feature":id,"name":"Topside"}));
+}
+
+#[test]
+fn ambiguity_error_names_the_other_origin_alias() {
+    for (name, other) in [("Top", "XY"), ("XY", "Top"), ("Front", "XZ"), ("XZ", "Front"), ("Right", "YZ"), ("YZ", "Right")] {
+        let mut s = Session::default();
+        let made = run(&mut s, "construct.plane.offset", json!({"base":"XY","offset":5,"name":"Lid"}));
+        legacy_plane_name(&mut s, made["feature"].as_u64().unwrap(), name);
+        let error = s.execute("sketch.create", &json!({"plane":name})).unwrap_err().to_string();
+        assert!(error.contains(&format!("use `{other}` for the origin plane")), "{error}");
+        // The suggested alias is unambiguous and reaches the origin plane.
+        run(&mut s, "sketch.create", json!({"plane":other}));
+        let inspected = run(&mut s, "sketch.inspect", json!({}));
+        assert_eq!(inspected["plane"]["origin"], json!([0.0, 0.0, 0.0]));
+    }
 }

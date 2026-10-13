@@ -2,7 +2,7 @@
 //! positive side is hidden). It changes no geometry and is not an undo step.
 
 use serde_json::{Value, json};
-use solvecraft_geom::{Plane, Vec3};
+use solidcraft_geom::{Plane, Vec3};
 
 use super::CommandSpec;
 use crate::params::{bad, bool_, expr, vec3};
@@ -25,6 +25,8 @@ fn section(s: &mut Session, p: &Value) -> Result<Value> {
     // A named plane's world axis: which component of a point lies along its normal.
     let (origin, normal, axis) = match p.get("plane") {
         Some(Value::String(n)) if Plane::named(n.trim()).is_some() => {
+            // Apply the same ambiguity check as modelling commands before treating a name as an origin alias.
+            super::features::plane_param(s, p.get("plane"), cmd)?;
             let pl = Plane::named(n.trim()).ok_or_else(|| bad(cmd, format!("unknown plane `{n}`")))?;
             let normal = pl.normal();
             let axis = [normal.x, normal.y, normal.z].iter().position(|c| c.abs() > 0.5);
@@ -33,13 +35,13 @@ fn section(s: &mut Session, p: &Value) -> Result<Value> {
         // A construction plane (name or id): where it is now.
         Some(v @ (Value::String(_) | Value::Number(_))) => {
             let r = super::features::plane_param(s, Some(v), cmd)?;
-            let solvecraft_doc::PlaneRef::Construction { name } = &r else { return Err(bad(cmd, "`plane` must be a plane")) };
+            let solidcraft_doc::PlaneRef::Construction { name } = &r else { return Err(bad(cmd, "`plane` must be a plane")) };
             let st = s.model.state();
             let pl = st
                 .construct
                 .iter()
                 .find(|c| &c.name == name)
-                .and_then(|c| if let solvecraft_doc::construct::ConstructGeom::Plane(pl) = &c.geom { Some(*pl) } else { None })
+                .and_then(|c| if let solidcraft_doc::construct::ConstructGeom::Plane(pl) = &c.geom { Some(*pl) } else { None })
                 .ok_or_else(|| bad(cmd, format!("construction plane `{name}` is not built (rolled back, suppressed or failed)")))?;
             (pl.origin, pl.normal(), None)
         }
@@ -52,7 +54,7 @@ fn section(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let length = |key: &str| -> Result<Option<f64>> {
         match expr(p, key) {
-            Some(e) => s.doc.eval(&e, solvecraft_doc::expr::Kind::Length).map(Some).map_err(|e| bad(cmd, format!("{key}: {e}"))),
+            Some(e) => s.doc.eval(&e, solidcraft_doc::expr::Kind::Length).map(Some).map_err(|e| bad(cmd, format!("{key}: {e}"))),
             None => Ok(None),
         }
     };

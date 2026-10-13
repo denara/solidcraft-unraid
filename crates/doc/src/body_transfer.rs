@@ -1,6 +1,6 @@
 //! Recorded ownership changes are evaluated at their timeline position.
 use crate::{DocError, Document, Mat, ModelBody, ModelState, Result};
-use solvecraft_geom::Vec3;
+use solidcraft_geom::Vec3;
 use std::collections::BTreeSet;
 
 pub fn valid_transfer_matrix(m: &Mat) -> bool {
@@ -39,14 +39,14 @@ pub(crate) fn evaluate(doc: &Document, st: &mut ModelState, bodies: &[String], f
         if doc.model_body_component(old) != from {
             return Err(DocError::Invalid(format!("body `{name}` no longer belongs to transfer source component {from}")));
         }
-        let shape = if crate::is_identity(&transform) { old.body.clone() } else { solvecraft_kernel::transform_matrix(&old.body, transform)? };
+        let shape = if crate::is_identity(&transform) { old.body.clone() } else { solidcraft_kernel::transform_matrix(&old.body, transform)? };
         let mut body = ModelBody::new(old.name.clone(), shape, old.feature);
         body.component = to;
         body.transferred = true;
         body.source_name = old.source_name.clone();
         body.source_transform = crate::mat_mul(&transform, &old.source_transform);
         body.imported = old.imported.clone();
-        body.names = crate::naming::NameCell::known(crate::naming::face_names(old));
+        body.names = crate::naming::NameCell::same(old);
         let slot = next.bodies.iter_mut().find(|b| b.name == *name).ok_or_else(|| DocError::Unknown(format!("transferred body `{name}`")))?;
         *slot = body;
     }

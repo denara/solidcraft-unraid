@@ -6,7 +6,7 @@
 
 use egui::{Align2, FontId, Pos2, Rect, Sense, Stroke, pos2, vec2};
 use serde_json::{Value, json};
-use solvecraft_engine::command_specs;
+use solidcraft_engine::command_specs;
 
 use crate::theme::Tokens;
 use crate::{SolveApp, icons};
@@ -34,10 +34,7 @@ impl ShortcutBox {
     }
     pub fn load(&mut self, v: &Value) {
         let list = |k: &str| -> Vec<String> {
-            v.get(k)
-                .and_then(Value::as_array)
-                .map(|a| a.iter().take(64).filter_map(|x| x.as_str().map(|id| solvecraft_engine::legacy_ids::current_id(id).to_string())).collect())
-                .unwrap_or_default()
+            v.get(k).and_then(Value::as_array).map(|a| a.iter().take(64).filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default()
         };
         self.recent = list("recent");
         self.pinned = list("pinned");
@@ -165,7 +162,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
             if !app.sbox.pinned.is_empty() {
                 ui.horizontal_wrapped(|ui| {
                     for id in app.sbox.pinned.clone() {
-                        let Some(c) = solvecraft_engine::find_command(&id) else { continue };
+                        let Some(c) = solidcraft_engine::find_command(&id) else { continue };
                         let (r, resp) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::click());
                         if resp.hovered() {
                             ui.painter().rect_filled(r, 4.0, t.hover);
@@ -192,7 +189,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
             egui::ScrollArea::vertical().max_height(h - 90.0).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 for (i, (id, label, icon, place)) in list.iter().enumerate().take(80) {
-                    let enabled = solvecraft_engine::find_command(id).is_some_and(|c| c.info(&app.session).enabled);
+                    let enabled = solidcraft_engine::find_command(id).is_some_and(|c| c.info(&app.session).enabled);
                     let (r, resp) = ui.allocate_exact_size(vec2(W - 20.0, 26.0), Sense::click());
                     let lit = i == app.sbox.index || resp.hovered();
                     if lit {
@@ -283,7 +280,7 @@ mod tests {
 
     #[test]
     fn search_finds_by_name_id_and_panel_and_puts_recent_first() {
-        let mut app = SolveApp::new(solvecraft_engine::Session::default(), Default::default());
+        let mut app = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
         assert_eq!(search(&app, "extr").first().map(|x| x.0), Some("solid.extrude"));
         assert_eq!(search(&app, "solid.fil").first().map(|x| x.0), Some("solid.fillet"));
         assert!(search(&app, "constraints").iter().any(|x| x.0 == "sketch.constraint.parallel"), "by panel");
@@ -292,7 +289,7 @@ mod tests {
         let all = search(&app, "");
         assert_eq!((all[0].0, all[1].0), ("solid.revolve", "solid.shell"));
         app.sbox.toggle_pin("solid.extrude");
-        let mut other = SolveApp::new(solvecraft_engine::Session::default(), Default::default());
+        let mut other = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
         other.sbox.load(&app.sbox.prefs());
         assert_eq!((other.sbox.pinned.clone(), other.sbox.recent.len()), (vec!["solid.extrude".to_string()], 2));
     }

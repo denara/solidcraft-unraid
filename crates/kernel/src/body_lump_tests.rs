@@ -115,7 +115,9 @@ fn curved_internal_void_and_disconnected_material_keep_analytic_volume() {
     }
     let imported = step_import(&step_export(&[&body], "curved nested cavities").unwrap()).unwrap();
     assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
-    let imported: Vec<_> = imported.bodies.into_iter().flat_map(|b| b.body.lumps().unwrap()).collect();
+    // The two pieces are written as two solids (each with its own void), so they come back as
+    // two bodies.
+    let imported: Vec<_> = imported.bodies.into_iter().map(|b| b.body).collect();
     assert_eq!(imported.len(), 2);
     let imported_meshes: Vec<_> = imported.iter().map(|b| b.tessellate_with(0.01, true).unwrap()).collect();
     for (p, want) in [(Vec3::ZERO, 0), (Vec3::X * 3.0, 1), (Vec3::X * 7.0, 0), (Vec3::X * 15.0, 1)] {
@@ -224,7 +226,7 @@ fn shortcut_clearance_refuses_curved_contact_hidden_between_mesh_vertices() {
 }
 
 fn certified_lump_witness() -> Body {
-    use solvecraft_geom::{Loop2, Plane, Region2, Vec2};
+    use solidcraft_geom::{Loop2, Plane, Region2, Vec2};
     // The current trimmed lower prism: a rectangular tool with a circular stop
     // removed. Its cap footprint differs materially from the original sketch.
     let region = Region2 {

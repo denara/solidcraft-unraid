@@ -1,5 +1,5 @@
 [package]
-name = "solvecraft-doc"
+name = "solidcraft-doc"
 description = "SolidCraft document model: parameters and expressions, sketches and features on a parametric timeline, incremental evaluation"
 version.workspace = true
 edition.workspace = true
@@ -9,9 +9,9 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-solvecraft-geom = { workspace = true }
-solvecraft-sketch = { workspace = true }
-solvecraft-kernel = { workspace = true }
+solidcraft-geom = { workspace = true }
+solidcraft-sketch = { workspace = true }
+solidcraft-kernel = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

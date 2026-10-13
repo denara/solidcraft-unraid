@@ -1,9 +1,15 @@
 # Fast checks always run; native builds run for code/CI changes.
+# Tests are built once and run in 4 shards. A few heavy tests (see .config/nextest.toml) are
+# skipped on pull requests and run on pushes to main and nightly.
 # Cross-compilation is opt-in through Run workflow; release builds remain in release.yml.
 name: CI
 
 on:
   pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 6 * * *"
   workflow_dispatch:
     inputs:
       cross_compile:
@@ -16,7 +22,8 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Every push to main gets its full run; a new PR push replaces the old run.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -39,7 +46,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           native=false
-          if [ "$EVENT_NAME" = workflow_dispatch ]; then
+          if [ "$EVENT_NAME" != pull_request ]; then
             native=true
           else
             # Compare both old and new paths of renames; unknown paths run native checks.
@@ -92,12 +99,12 @@ jobs:
           key: native-clippy
       - run: cargo clippy --workspace --all-targets --profile ci --locked -- -D warnings
 
-  tests:
-    name: Native Linux tests
+  build-tests:
+    name: Build tests
     needs: changes
     if: needs.changes.outputs.native == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 45
     env:
       CARGO_INCREMENTAL: "0"
       RUSTC_WRAPPER: sccache
@@ -113,18 +120,145 @@ jobs:
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
-      - name: Compile tests
-        run: cargo test --workspace --profile ci --locked --no-run
-      - name: Run tests
-        # Every test binary at once (cargo test runs them one after another).
-        run: cargo xtask test --locked
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-nextest
+      - name: Compile tests into a nextest archive
+        run: cargo nextest archive --workspace --cargo-profile ci --locked --archive-file tests.tar.zst
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nextest-archive
+          path: tests.tar.zst
+          retention-days: 1
+          compression-level: 0
       - name: Compiler cache statistics
         if: always()
         run: sccache --show-stats
 
+  tests:
+    name: Native Linux tests (${{ matrix.shard }}/4)
+    needs: build-tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-nextest
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: nextest-archive
+      - name: Run tests
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          # Pull requests skip the heavy tests (default-filter in .config/nextest.toml).
+          all=()
+          if [ "$EVENT_NAME" != pull_request ]; then all=(--ignore-default-filter); fi
+          # Extract into ./target: tests that run a built binary (env!("CARGO_BIN_EXE_*")) have
+          # the build job's path, which is the same checkout path here.
+          cargo nextest run --archive-file tests.tar.zst --workspace-remap . --extract-to . --extract-overwrite \
+            --profile ci --partition "slice:$SHARD/4" "${all[@]}"
+      - name: Upload test timings
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: junit-${{ matrix.shard }}
+          path: target/nextest/ci/junit.xml
+          retention-days: 7
+
+  action-matrix:
+    # Every ordinary action on every face, edge, vertex and body of the design corpus, against
+    # tests/action_matrix/baseline.json (docs/action-matrix.md). Every test run checks a sample;
+    # the whole matrix runs nightly (or by hand), a quarter per job.
+    name: Action matrix (${{ matrix.part }}/4)
+    needs: build-tests
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-nextest
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: nextest-archive
+      - name: Run a quarter of the matrix
+        env:
+          PART: ${{ matrix.part }}
+        run: |
+          cargo nextest run --archive-file tests.tar.zst --workspace-remap . --extract-to . --extract-overwrite \
+            --profile ci --run-ignored only -E "binary(action_matrix) & test(=action_matrix_full_$PART)"
+
+  doc-tests:
+    name: Doc tests
+    needs: changes
+    if: needs.changes.outputs.native == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: doc-tests
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+      # nextest does not run doc tests.
+      - run: cargo test --workspace --profile ci --locked --doc
+
+  oracle:
+    name: Reference tests
+    needs: changes
+    if: needs.changes.outputs.native == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: oracle
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+      - name: Build the command line
+        run: cargo build -p solidcraft-cli --profile ci --locked
+      - name: Replay tests/oracle and compare with expected.json
+        run: cargo xtask oracle --cli target/ci/solidcraft-cli
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: oracle-report
+          path: docs/oracle.md
+
   # Preserve the existing check name for branch protection, including docs-only PRs.
   ci:
-    needs: [changes, checks, clippy, tests]
+    needs: [changes, checks, clippy, build-tests, tests, doc-tests, oracle]
     if: always()
     runs-on: ubuntu-24.04
     steps:
@@ -134,13 +268,19 @@ jobs:
           CHECKS: ${{ needs.checks.result }}
           NATIVE: ${{ needs.changes.outputs.native }}
           CLIPPY: ${{ needs.clippy.result }}
+          BUILD: ${{ needs.build-tests.result }}
           TESTS: ${{ needs.tests.result }}
+          DOCS: ${{ needs.doc-tests.result }}
+          ORACLE: ${{ needs.oracle.result }}
         run: |
           test "$CHANGES" = success
           test "$CHECKS" = success
           if [ "$NATIVE" = true ]; then
             test "$CLIPPY" = success
+            test "$BUILD" = success
             test "$TESTS" = success
+            test "$DOCS" = success
+            test "$ORACLE" = success
           fi
 
   wasm:

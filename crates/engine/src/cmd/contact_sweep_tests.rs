@@ -1,6 +1,6 @@
 use crate::Session;
 use serde_json::{Value, json};
-use solvecraft_geom::Vec3;
+use solidcraft_geom::Vec3;
 
 fn run(s: &mut Session, command: &str, p: Value) -> Value {
     s.execute(command, &p).unwrap()
@@ -57,7 +57,7 @@ fn revolute_cannot_cross_a_blocker_between_clear_endpoints() {
     assert!(result["stopped_by_contact"].is_object(), "{result}");
     let angle = s.doc.assembly.joints.iter().find(|j| j.name == "Pivot").unwrap().values[0];
     assert!(angle > 60_f64.to_radians() && angle < 90_f64.to_radians(), "angle={angle}");
-    let arm = solvecraft_doc::apply_point(&solvecraft_doc::joints::occurrence_world(&s.doc, occurrence(&s, "Arm")), Vec3::new(22.0, 0.0, 0.0));
+    let arm = solidcraft_doc::apply_point(&solidcraft_doc::joints::occurrence_world(&s.doc, occurrence(&s, "Arm")), Vec3::new(22.0, 0.0, 0.0));
     assert!(arm.y > 20.0 && arm.x > 2.0, "{arm:?}");
 }
 
@@ -105,7 +105,7 @@ fn over_budget_sweep_errors_and_restores_document() {
 #[test]
 fn thin_tilted_plates_cannot_cross_between_axis_bound_samples() {
     let mut s = Session::default();
-    let normal = solvecraft_doc::apply_vector(&solvecraft_doc::rigid(Vec3::ZERO, Vec3::ZERO, Vec3::new(1.0, 1.0, 0.0), 55_f64.to_radians()), Vec3::Z);
+    let normal = solidcraft_doc::apply_vector(&solidcraft_doc::rigid(Vec3::ZERO, Vec3::ZERO, Vec3::new(1.0, 1.0, 0.0), 55_f64.to_radians()), Vec3::Z);
     for name in ["Plate A", "Plate B"] {
         run(&mut s, "component.activate", json!({"component": 0}));
         run(&mut s, "component.create", json!({"name": name}));

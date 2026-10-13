@@ -1,0 +1,96 @@
+{
+ "description": "A sheet metal L bracket: a 60 x 40 base flange, a 30 mm flange up one long edge, and two holes cut through the base.",
+ "commands": [
+  {
+   "command": "parameters.change",
+   "params": {
+    "name": "flange_h",
+    "expression": "30 mm"
+   }
+  },
+  {
+   "command": "sketch.create",
+   "params": {
+    "plane": "XY",
+    "name": "Base"
+   }
+  },
+  {
+   "command": "sketch.rectangle.two_point",
+   "params": {
+    "p0": [
+     0,
+     0
+    ],
+    "p1": [
+     60,
+     40
+    ]
+   }
+  },
+  {
+   "command": "sketch.finish",
+   "params": {}
+  },
+  {
+   "command": "sheet.flange",
+   "params": {
+    "type": "base",
+    "sketch": "Base"
+   }
+  },
+  {
+   "command": "sheet.flange",
+   "params": {
+    "type": "edge",
+    "edges": [
+     [
+      30,
+      40,
+      0
+     ]
+    ],
+    "height": "flange_h"
+   }
+  },
+  {
+   "command": "sketch.create",
+   "params": {
+    "plane": "XY",
+    "name": "Holes"
+   }
+  },
+  {
+   "command": "sketch.circle.center",
+   "params": {
+    "center": [
+     15,
+     20
+    ],
+    "radius": 2.5
+   }
+  },
+  {
+   "command": "sketch.circle.center",
+   "params": {
+    "center": [
+     45,
+     20
+    ],
+    "radius": 2.5
+   }
+  },
+  {
+   "command": "sketch.finish",
+   "params": {}
+  },
+  {
+   "command": "solid.extrude",
+   "params": {
+    "through_all": true,
+    "direction": "symmetric",
+    "operation": "cut"
+   }
+  }
+ ]
+}

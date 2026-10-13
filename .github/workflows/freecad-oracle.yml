@@ -1,0 +1,47 @@
+# Optional, run by hand: rebuild the reference cases whose expected values come from FreeCAD
+# (tools/freecad-oracle/) and show what changed. FreeCAD runs as a separate program on the runner;
+# it is not a dependency of SolidCraft. Nothing is committed: review the diff and the uploaded
+# files, then commit them in a pull request if the change is intended.
+name: FreeCAD reference values
+
+on:
+  workflow_dispatch:
+    inputs:
+      cases:
+        description: "Case directories (space separated); empty = every case whose source is FreeCAD"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  regenerate:
+    name: Regenerate FreeCAD expected values
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install FreeCAD
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends freecad
+          freecadcmd --version || true
+      - name: Rebuild the cases
+        env:
+          CASES: ${{ inputs.cases }}
+        run: |
+          if [ -z "$CASES" ]; then
+            CASES=$(grep -l '"source": *"freecad' tests/oracle/*/expected.json | xargs -n1 dirname | tr '\n' ' ')
+          fi
+          # shellcheck disable=SC2086
+          tools/freecad-oracle/run.sh --write $CASES
+      - name: Show the changes
+        run: git diff --stat && git diff -- tests/oracle/*/expected.json
+      - name: Upload the regenerated files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: freecad-expected
+          path: |
+            tests/oracle/*/expected.json
+            tests/oracle/*/reference.stl

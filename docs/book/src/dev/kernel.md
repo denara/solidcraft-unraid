@@ -9,7 +9,7 @@ SolidCraft types (`Body`, face and edge indices, meshes, measures) and a
 ## `guard`
 
 truck can panic on geometry it doesn't handle. Every call into it goes through
-`solvecraft_kernel::guard`, which catches the panic and turns it into
+`solidcraft_kernel::guard`, which catches the panic and turns it into
 `KernelError::Internal`, leaving the model unchanged:
 
 ```rust

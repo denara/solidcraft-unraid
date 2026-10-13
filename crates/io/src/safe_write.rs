@@ -114,7 +114,7 @@ mod tests {
     use super::*;
 
     fn dir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("solvecraft-safe-write-{tag}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("solidcraft-safe-write-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d
@@ -123,7 +123,7 @@ mod tests {
     #[test]
     fn replaces_and_keeps_a_backup() {
         let d = dir("bak");
-        let p = d.join("a.solvecraft");
+        let p = d.join("a.solidcraft");
         write_atomic(&p, b"one", true).unwrap();
         assert!(!backup_path(&p).exists(), "nothing to back up the first time");
         write_atomic(&p, b"two", true).unwrap();
@@ -139,7 +139,7 @@ mod tests {
     #[test]
     fn a_save_stopped_part_way_keeps_the_old_file() {
         let d = dir("stop");
-        let p = d.join("a.solvecraft");
+        let p = d.join("a.solidcraft");
         write_atomic(&p, b"old", true).unwrap();
         for stop in [Step::TempWritten, Step::BackupWritten, Step::Replaced] {
             write_steps(&p, b"new content", true, Some(stop)).unwrap();
@@ -160,7 +160,7 @@ mod tests {
     #[test]
     fn a_failed_write_leaves_the_target() {
         let d = dir("fail");
-        let p = d.join("missing-dir").join("a.solvecraft");
+        let p = d.join("missing-dir").join("a.solidcraft");
         assert!(write_atomic(&p, b"x", true).is_err());
         assert!(!p.exists());
         let _ = fs::remove_dir_all(&d);

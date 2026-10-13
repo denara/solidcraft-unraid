@@ -1,5 +1,5 @@
 use serde_json::{Value, json};
-use solvecraft_geom::Vec2;
+use solidcraft_geom::Vec2;
 
 use crate::Session;
 
@@ -20,7 +20,7 @@ fn new_sketch() -> Session {
     s
 }
 
-fn sketch(s: &Session) -> solvecraft_sketch::Sketch {
+fn sketch(s: &Session) -> solidcraft_sketch::Sketch {
     s.model.state().sketch(s.active_sketch.unwrap()).unwrap().sketch.clone()
 }
 
@@ -97,7 +97,7 @@ fn curvature_polygon_arc_length_linear_diameter() {
     let sk = sketch(&s);
     let ai = sk.curve_index(&a).unwrap();
     let len = match sk.segs(ai)[0] {
-        solvecraft_geom::Seg2::Arc { radius, sweep, .. } => radius * sweep,
+        solidcraft_geom::Seg2::Arc { radius, sweep, .. } => radius * sweep,
         _ => 0.0,
     };
     assert!((len - 20.0).abs() < 1e-6, "{len}");

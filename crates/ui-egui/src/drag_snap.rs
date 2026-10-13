@@ -7,9 +7,9 @@
 use std::cell::{Cell, RefCell};
 
 use egui::{Align2, FontId, Shape, Stroke};
-use serde_json::json;
-use solvecraft_engine::geom::Vec2;
-use solvecraft_engine::sketch::{CurveKind, Sketch};
+use serde_json::{Value, json};
+use solidcraft_engine::geom::Vec2;
+use solidcraft_engine::sketch::{CurveKind, Sketch};
 
 use crate::SolveApp;
 use crate::theme::Tokens;
@@ -195,18 +195,18 @@ pub fn moving_points(sk: &Sketch, entity: &str) -> (Vec<usize>, Vec<usize>) {
     (own, ex)
 }
 
-/// The drag let go: the constraint of the snap it ended on (none for lining up).
-pub fn release(app: &mut SolveApp) {
-    let Some(s) = current() else { return };
+/// The drag let go: the constraint of the snap it ended on (none for lining up), as
+/// `sketch.drag_end` takes it.
+pub fn release() -> Option<Value> {
+    let s = current()?;
     clear();
     let (cmd, params) = match &s.target {
         Target::Point(t) => ("sketch.constraint.coincident", json!({"a": s.point, "b": t})),
         Target::Mid(l) => ("sketch.constraint.midpoint", json!({"point": s.point, "line": l})),
         Target::On(c) => ("sketch.constraint.coincident", json!({"a": s.point, "b": c})),
-        Target::Align => return,
+        Target::Align => return None,
     };
-    // A snap that would over-constrain the sketch is simply not kept.
-    let _ = app.session.execute(cmd, &params);
+    Some(json!({"command": cmd, "params": params}))
 }
 
 /// The snap of the drag in progress: its dashed guides, a ring on the target and its label.

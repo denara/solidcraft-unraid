@@ -3,9 +3,9 @@
 //! moves until a value is typed or the triad is dragged.
 
 use serde_json::{Value, json};
-use solvecraft_engine::Sel;
-use solvecraft_engine::doc::expr::Kind as ValueKind;
-use solvecraft_engine::geom::Vec3;
+use solidcraft_engine::Sel;
+use solidcraft_engine::doc::expr::Kind as ValueKind;
+use solidcraft_engine::geom::Vec3;
 
 use crate::SolveApp;
 use crate::dialogs::{Dialog, Kind, combo, field, row_label};
@@ -226,6 +226,9 @@ pub fn params(app: &SolveApp, d: &Dialog) -> Result<Value, String> {
             p["translate"] = num(at - from);
         }
     }
+    if d.extra.get("copy").and_then(Value::as_bool).unwrap_or(false) {
+        p["copy"] = json!(true);
+    }
     Ok(p)
 }
 
@@ -285,7 +288,7 @@ pub fn drag(app: &SolveApp, d: &mut Dialog, g: Drag) {
 
 /// The dialog for editing a move: Free Move with its translation and, about a world axis
 /// through the origin, its angle (another axis is kept as it is).
-pub fn for_feature(d: &mut Dialog, bodies: &[String], translate: &[String; 3], axis: Option<Vec3>, angle: Option<&String>) {
+pub fn for_feature(d: &mut Dialog, bodies: &[String], translate: &[String; 3], axis: Option<Vec3>, angle: Option<&String>, copy: bool) {
     let [x, y, z] = translate.clone();
     let mut k = kind(FREE);
     if let Kind::Move { x: kx, y: ky, z: kz, rx, ry, rz, .. } = &mut k {
@@ -310,5 +313,8 @@ pub fn for_feature(d: &mut Dialog, bodies: &[String], translate: &[String; 3], a
     d.inputs = inputs(FREE);
     if let Some(inp) = d.inputs.first_mut() {
         inp.items = bodies.iter().map(|n| Sel::Body { name: n.clone() }).collect();
+    }
+    if copy {
+        d.extra.insert("copy".into(), json!(true));
     }
 }

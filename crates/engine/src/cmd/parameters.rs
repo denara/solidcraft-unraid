@@ -3,7 +3,7 @@
 //! graph, CSV/JSON import and export, expression evaluation and autocomplete.
 
 use serde_json::{Value, json};
-use solvecraft_doc::expr::{self, Kind};
+use solidcraft_doc::expr::{self, Kind};
 
 use super::CommandSpec;
 use crate::params::{bad, bool_, str_};
@@ -15,7 +15,7 @@ pub static COMMANDS: &[CommandSpec] = &[
              favorite?: bool, new_name?: rename (references follow); or delete: name → recomputed: features rebuilt, \
          restored: features whose earlier result for the same inputs was reused (e.g. a value set back)",
     ),
-    CommandSpec::new("parameters.list", "List Parameters", list).noundo().params(
+    CommandSpec::new("parameters.list", "List Parameters", list).noundo().doc_only().params(
         "favorites?: bool (only favourites), filter?: all|user|sketch|feature|favorites → parameters (name, expression, unit, value in its unit, \
          source, feature/input, comment, favorite, uses, used_by, error) and cycles",
     ),
@@ -38,9 +38,11 @@ pub static COMMANDS: &[CommandSpec] = &[
         .params("text: CSV (header with name, expression, unit?, comment?) or JSON [{name, expression, unit?, comment?}] | path; all or nothing"),
     CommandSpec::new("expr.evaluate", "Evaluate Expression", evaluate)
         .noundo()
+        .doc_only()
         .params("expression, kind?: length|angle|unitless (or unit?: mm|in|deg…) → ok, value (mm/rad), display_value, references, error"),
     CommandSpec::new("parameters.complete", "Complete Expression", complete)
         .noundo()
+        .doc_only()
         .params("prefix?: the text before the cursor → word, suggestions [{text, kind: parameter|function|unit|constant, detail}]"),
 ];
 
@@ -67,8 +69,10 @@ fn known(s: &Session, name: &str) -> bool {
 
 fn change_param(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "parameters.change";
+    let solved = s.solved_sketches();
     if let Some(n) = str_(p, "delete") {
         s.doc_mut().remove_param(n.trim())?;
+        s.settle_value_edit(&solved)?;
         return Ok(json!({"deleted": n.trim()}));
     }
     let mut name = param_name(cmd, p)?.to_string();
@@ -101,7 +105,7 @@ fn change_param(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(f) = bool_(p, "favorite") {
         s.doc_mut().set_favorite(&name, f)?;
     }
-    s.refresh();
+    s.settle_value_edit(&solved)?;
     let (vals, _) = s.doc.param_values();
     out["name"] = json!(name);
     out["expression"] = json!(e);
@@ -119,7 +123,7 @@ fn list(s: &mut Session, p: &Value) -> Result<Value> {
         (_, Some(f)) => f.to_ascii_lowercase(),
         _ => "all".to_string(),
     };
-    let mut rows: Vec<solvecraft_doc::ParamRow> = s
+    let mut rows: Vec<solidcraft_doc::ParamRow> = s
         .doc
         .param_rows()
         .into_iter()
@@ -132,7 +136,7 @@ fn list(s: &mut Session, p: &Value) -> Result<Value> {
         .collect();
     // Favourites first; otherwise the table order (user, sketch, feature).
     rows.sort_by_key(|r| !r.favorite);
-    let cycles = solvecraft_doc::cycles(&s.doc.all_param_exprs());
+    let cycles = solidcraft_doc::cycles(&s.doc.all_param_exprs());
     Ok(json!({"parameters": rows, "count": rows.len(), "cycles": cycles}))
 }
 
@@ -140,7 +144,9 @@ fn add(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "parameters.add";
     let name = param_name(cmd, p)?.to_string();
     let e = expr_arg(p, "expression").or_else(|| expr_arg(p, "value")).ok_or_else(|| bad(cmd, "`expression` must be a number or text"))?;
+    let solved = s.solved_sketches();
     s.doc_mut().add_user_param(&name, &e, str_(p, "unit"), str_(p, "comment"))?;
+    s.settle_value_edit(&solved)?;
     if let Some(f) = bool_(p, "favorite") {
         s.doc_mut().set_favorite(&name, f)?;
     }
@@ -160,7 +166,9 @@ fn rename(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn delete(s: &mut Session, p: &Value) -> Result<Value> {
     let name = param_name("parameters.delete", p)?.to_string();
+    let solved = s.solved_sketches();
     s.doc_mut().remove_param(&name)?;
+    s.settle_value_edit(&solved)?;
     Ok(json!({"deleted": name}))
 }
 
@@ -195,7 +203,7 @@ fn graph(s: &mut Session, _p: &Value) -> Result<Value> {
     let (_, errs) = s.doc.param_values();
     let nodes: Vec<String> = s.doc.param_defs().into_iter().map(|d| d.name).collect();
     let edges: Vec<[String; 2]> = s.doc.param_graph().into_iter().map(|(a, b)| [a, b]).collect();
-    let cycles = solvecraft_doc::cycles(&s.doc.all_param_exprs());
+    let cycles = solidcraft_doc::cycles(&s.doc.all_param_exprs());
     Ok(json!({"nodes": nodes, "edges": edges, "cycles": cycles, "errors": errs}))
 }
 
@@ -221,7 +229,7 @@ fn export(s: &mut Session, p: &Value) -> Result<Value> {
         other => return Err(bad(cmd, format!("unknown format `{other}` (csv or json)"))),
     };
     if let Some(path) = path {
-        solvecraft_io::vfs::write(path, text.as_bytes()).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+        solidcraft_io::vfs::write(path, text.as_bytes()).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
     }
     Ok(json!({"format": format, "path": path, "text": text}))
 }
@@ -234,12 +242,13 @@ fn import(s: &mut Session, p: &Value) -> Result<Value> {
     let text = match (str_(p, "text"), str_(p, "path")) {
         (Some(t), _) => t.to_string(),
         (None, Some(path)) => {
-            solvecraft_io::vfs::read_to_string(path, MAX_PARAMETER_BYTES).map_err(|e| EngineError::Other(format!("{path}: {e}")))?
+            solidcraft_io::vfs::read_to_string(path, MAX_PARAMETER_BYTES).map_err(|e| EngineError::Other(format!("{path}: {e}")))?
         }
         _ => return Err(bad(cmd, "give `text` or `path`")),
     };
+    let solved = s.solved_sketches();
     let names = s.doc_mut().import_params(&text)?;
-    s.refresh();
+    s.settle_value_edit(&solved)?;
     Ok(json!({"imported": names, "errors": failing(s)}))
 }
 
@@ -263,10 +272,10 @@ fn evaluate(s: &mut Session, p: &Value) -> Result<Value> {
     let (vals, _) = s.doc.param_values();
     let defaults = expr::Defaults::for_unit(unit.unwrap_or(""), 1.0);
     let refs = expr::references(&e);
-    let lookup = |n: &str| vals.get(n).copied().ok_or_else(|| solvecraft_doc::DocError::Expr(format!("unknown parameter `{n}`")));
+    let lookup = |n: &str| vals.get(n).copied().ok_or_else(|| solidcraft_doc::DocError::Expr(format!("unknown parameter `{n}`")));
     let r = expr::eval_with_defaults(&e, &lookup, defaults).and_then(|v| match kind {
         Some(k) => v.to_kind_in(k, defaults).map(|x| (x, k)),
-        None => v.kind().map(|k| (v.v, k)).ok_or_else(|| solvecraft_doc::DocError::Expr(format!("the result is {}", v.describe()))),
+        None => v.kind().map(|k| (v.v, k)).ok_or_else(|| solidcraft_doc::DocError::Expr(format!("the result is {}", v.describe()))),
     });
     Ok(match r {
         Ok((v, k)) => {
@@ -292,7 +301,7 @@ fn complete(s: &mut Session, p: &Value) -> Result<Value> {
     let word: String = text.chars().rev().take_while(|c| c.is_alphanumeric() || *c == '_').collect::<Vec<_>>().into_iter().rev().collect();
     let starts = |n: &str| word.is_empty() || n.to_ascii_lowercase().starts_with(&word.to_ascii_lowercase());
     let mut out: Vec<Value> = Vec::new();
-    let mut rows: Vec<solvecraft_doc::ParamRow> = s.doc.param_rows().into_iter().filter(|r| starts(&r.name)).collect();
+    let mut rows: Vec<solidcraft_doc::ParamRow> = s.doc.param_rows().into_iter().filter(|r| starts(&r.name)).collect();
     // Favourites, then user parameters, then the rest.
     rows.sort_by_key(|r| (!r.favorite, r.source != "user"));
     for r in rows.into_iter().take(200) {

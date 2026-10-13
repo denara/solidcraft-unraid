@@ -1,0 +1,75 @@
+[
+ {
+  "note": "#288: a panel drop-down highlights the row under the pointer with the hover background, and the row with keyboard focus. Drop-down rows publish `dropdown:<command id>`, the highlighted one also `dropdown_hot:<command id>`."
+ },
+ {
+  "click": {
+   "handle": "panel:SOLID:CREATE"
+  }
+ },
+ {
+  "expect": {
+   "shown_handles": ["dropdown:solid.box", "dropdown:solid.sphere"],
+   "hidden_handles": ["dropdown_hot:solid.box", "dropdown_hot:solid.sphere"]
+  }
+ },
+ {
+  "move": {
+   "handle": "dropdown:solid.box"
+  }
+ },
+ {
+  "expect": {
+   "shown_handles": ["dropdown_hot:solid.box"],
+   "hidden_handles": ["dropdown_hot:solid.sphere", "dropdown_hot:solid.cylinder"]
+  }
+ },
+ {
+  "move": {
+   "handle": "dropdown:solid.sphere"
+  }
+ },
+ {
+  "expect": {
+   "shown_handles": ["dropdown_hot:solid.sphere"],
+   "hidden_handles": ["dropdown_hot:solid.box"]
+  }
+ },
+ {
+  "move": [700, 600]
+ },
+ {
+  "expect": {
+   "shown_handles": ["dropdown:solid.box"],
+   "hidden_handles": ["dropdown_hot:solid.sphere", "dropdown_hot:solid.box"]
+  }
+ },
+ {
+  "note": "The keyboard: Down focuses the first row, Down again the next; the highlight follows."
+ },
+ {
+  "key": "ArrowDown"
+ },
+ {
+  "expect": {
+   "shown_handles": ["dropdown_hot:sketch.create"]
+  }
+ },
+ {
+  "key": "ArrowDown"
+ },
+ {
+  "expect": {
+   "shown_handles": ["dropdown_hot:solid.extrude"],
+   "hidden_handles": ["dropdown_hot:sketch.create"]
+  }
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "expect": {
+   "hidden_handles": ["dropdown:solid.box"]
+  }
+ }
+]

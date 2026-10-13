@@ -13,11 +13,13 @@
 
 use std::collections::HashMap;
 
-use solvecraft_geom::Vec3;
+use solidcraft_geom::{Aabb3, Vec3};
 use truck_modeling::{self as mt, builder};
 
+use crate::body::shell_groups::boxes_separate;
 use crate::body::{Body, Solid, from_p3, p3, v3};
-use crate::{BoolOp, KernelError, Result, guard};
+use crate::history::{Change, EdgeOrigin, FaceOrigin, FaceProv, History};
+use crate::{BoolOp, KernelError, Result, guard, record};
 
 #[derive(Clone, Copy, Debug)]
 struct PlaneFace {
@@ -41,7 +43,8 @@ fn planes(b: &Body) -> Vec<(usize, PlaneFace)> {
 }
 
 /// Push the planar faces of `b` lying in the plane (n, d) — n their outward normal — along n
-/// by `delta` (negative: inward). Their neighbours must stand perpendicular to the plane.
+/// by `delta` (negative: inward). Their neighbours must stand perpendicular to the plane. The
+/// result's history is over `[b]`.
 pub(crate) fn push_faces(b: &Body, n: Vec3, d: f64, delta: f64) -> Result<Body> {
     // The exact rebuild, unless it came out unsound (a curved side it couldn't re-sweep).
     match push_faces_exact(b, n, d, delta)
@@ -75,6 +78,9 @@ pub(crate) fn push_faces_exact(b: &Body, n: Vec3, d: f64, delta: f64) -> Result<
     let fail = |m: &str| KernelError::Failed(format!("pushing a face: {m}"));
     guard("push face", || {
         let solid = b.deep_copy();
+        // The copy's edges are b's, in order; the faces come out in place, one for one.
+        let mut edge_origins = record::edge_origins(&solid, 0);
+        let mut faces_from = Vec::new();
         let shift = n * delta;
         let mat = mt::Matrix4::from_translation(v3(shift));
         let mut shells = Vec::new();
@@ -89,7 +95,9 @@ pub(crate) fn push_faces_exact(b: &Body, n: Vec3, d: f64, delta: f64) -> Result<
                 _ => false,
             };
             let moving: Vec<usize> = (0..faces.len()).filter(|i| faces.get(*i).is_some_and(on_plane)).collect();
+            let first = faces_from.len();
             if moving.is_empty() {
+                faces_from.extend((first..first + faces.len()).map(|i| record::from_face(0, i, Change::Kept)));
                 shells.push(sh.clone());
                 continue;
             }
@@ -161,10 +169,18 @@ pub(crate) fn push_faces_exact(b: &Body, n: Vec3, d: f64, delta: f64) -> Result<
                     })
                     .collect()
             };
+            // Each moved or stretched edge stands for the one it replaces.
+            for (old, new) in &emap {
+                if let Some(o) = edge_origins.get(old).cloned() {
+                    edge_origins.insert(new.id(), o);
+                }
+            }
             use mt::{ParametricSurface3D, SearchNearestParameter};
             let mut out: Vec<mt::Face> = Vec::new();
             for (i, f) in faces.iter().enumerate() {
                 let touches = f.edge_iter().any(|e| emap.contains_key(&e.id()));
+                let change = if touches { Change::Modified } else { Change::Kept };
+                faces_from.push(record::from_face(0, first + i, change));
                 if !touches {
                     out.push(f.clone());
                     continue;
@@ -208,7 +224,7 @@ pub(crate) fn push_faces_exact(b: &Body, n: Vec3, d: f64, delta: f64) -> Result<
             shells.push(out.into());
         }
         let s = Solid::try_new(shells).map_err(|e| fail(&e.to_string()))?;
-        Body::new(s)
+        record::build(s, &record::counts(&[b]), Some(faces_from), Some(&edge_origins))
     })
 }
 
@@ -217,22 +233,78 @@ fn slab_beyond(n: Vec3, d: f64, depth: f64, extent: f64) -> Result<Body> {
     let u = n.any_perp();
     let w = n.cross(u);
     let o = n * d;
-    let pl = solvecraft_geom::Plane::new(o, u, w).ok_or_else(|| KernelError::Failed("slab plane".into()))?;
-    let sq = solvecraft_geom::Loop2::polygon(&[
-        solvecraft_geom::Vec2::new(-extent, -extent),
-        solvecraft_geom::Vec2::new(extent, -extent),
-        solvecraft_geom::Vec2::new(extent, extent),
-        solvecraft_geom::Vec2::new(-extent, extent),
+    let pl = solidcraft_geom::Plane::new(o, u, w).ok_or_else(|| KernelError::Failed("slab plane".into()))?;
+    let sq = solidcraft_geom::Loop2::polygon(&[
+        solidcraft_geom::Vec2::new(-extent, -extent),
+        solidcraft_geom::Vec2::new(extent, -extent),
+        solidcraft_geom::Vec2::new(extent, extent),
+        solidcraft_geom::Vec2::new(-extent, extent),
     ]);
-    let r = solvecraft_geom::Region2 { outer: sq, holes: vec![] };
+    let r = solidcraft_geom::Region2 { outer: sq, holes: vec![] };
     crate::extrude(&pl, &[r], 0.0, depth)?.pop().ok_or_else(|| KernelError::Failed("slab".into()))
 }
 
-/// Do the bodies have planar faces in a common plane?
-pub(crate) fn has_coincident_faces(a: &Body, b: &Body) -> bool {
-    let tol = (a.size().max(b.size()) * 1e-7).max(1e-9);
+/// The box of a face's boundary sampled to within `tol` of each curve: the face, planar, lies
+/// within `tol` of it. `None` when the boundary can't be sampled.
+fn face_box(f: &mt::Face, tol: f64) -> Option<Aabb3> {
+    use mt::{BoundedCurve, ParameterDivision1D};
+    const MAX_POINTS: usize = 100_000;
+    guard("face box", || {
+        let mut bb = Aabb3::EMPTY;
+        let mut count = 0usize;
+        for e in f.edge_iter() {
+            let points = match e.curve() {
+                mt::Curve::Line(_) => vec![e.front().point(), e.back().point()],
+                // The division checks its deviation at midpoints only (as in blend.rs).
+                c => c.parameter_division(c.range_tuple(), tol * 0.25).1,
+            };
+            count = count.saturating_add(points.len());
+            if count > MAX_POINTS {
+                return Err(KernelError::Failed("face box: too many boundary points".into()));
+            }
+            for p in points {
+                bb.add(from_p3(p));
+            }
+        }
+        if bb.is_empty() {
+            return Err(KernelError::Failed("face box: no boundary".into()));
+        }
+        Ok(bb)
+    })
+    .ok()
+}
+
+/// The planes (normal, offset) in which a planar face of `a` and one of `b` coincide, as `a`'s
+/// face lies in them, each with whether `b`'s face points the same way. Faces in a common plane but apart from
+/// each other (the tops of two posts standing on one floor) don't coincide: they need no
+/// pushing apart. A face whose extent can't be found counts as meeting every face in its plane.
+pub(crate) fn coincident_planes(a: &Body, b: &Body) -> Vec<(Vec3, f64, bool)> {
+    let size = a.size().max(b.size());
+    let tol = (size * 1e-7).max(1e-9) * 10.0;
+    let sample = (size * 1e-4).max(tol);
+    let (fa, fb): (Vec<&mt::Face>, Vec<&mt::Face>) = (a.solid.face_iter().collect(), b.solid.face_iter().collect());
     let (pa, pb) = (planes(a), planes(b));
-    pa.iter().any(|(_, x)| pb.iter().any(|(_, y)| x.n.dot(y.n).abs() > 1.0 - 1e-9 && (x.d - y.d * x.n.dot(y.n)).abs() < tol * 10.0))
+    let (mut boxes_a, mut boxes_b): (Vec<Option<Option<Aabb3>>>, Vec<Option<Option<Aabb3>>>) = (vec![None; fa.len()], vec![None; fb.len()]);
+    let mut found: Vec<(Vec3, f64, bool)> = Vec::new();
+    for (ia, x) in &pa {
+        for (ib, y) in &pb {
+            let cos = x.n.dot(y.n);
+            if cos.abs() <= 1.0 - 1e-9 || (x.d - y.d * cos).abs() >= tol {
+                continue;
+            }
+            let same = cos > 0.0;
+            if found.iter().any(|(n, d, s)| *s == same && n.dot(x.n) > 1.0 - 1e-9 && (d - x.d).abs() < tol) {
+                continue;
+            }
+            let ba = boxes_a.get_mut(*ia).and_then(|b| *b.get_or_insert_with(|| fa.get(*ia).and_then(|f| face_box(f, sample))));
+            let bb = boxes_b.get_mut(*ib).and_then(|b| *b.get_or_insert_with(|| fb.get(*ib).and_then(|f| face_box(f, sample))));
+            // Each box is within `sample` of its face.
+            if !ba.zip(bb).is_some_and(|(p, q)| boxes_separate(p, q, 2.0 * sample)) {
+                found.push((x.n, x.d, same));
+            }
+        }
+    }
+    found
 }
 
 /// Retry a failed boolean with coincident planar faces pushed apart. `None` when there are no
@@ -240,30 +312,25 @@ pub(crate) fn has_coincident_faces(a: &Body, b: &Body) -> bool {
 pub(crate) fn boolean_apart(a: &Body, b: &Body, op: BoolOp) -> Option<Result<Option<Body>>> {
     let size = a.size().max(b.size());
     let tol = (size * 1e-7).max(1e-9);
-    let (pa, pb) = (planes(a), planes(b));
-    let mut same: Vec<(Vec3, f64)> = Vec::new();
-    let mut back: Vec<(Vec3, f64)> = Vec::new();
-    for (_, x) in &pa {
-        for (_, y) in &pb {
-            if (x.d - y.d * x.n.dot(y.n)).abs() < tol * 10.0 && x.n.dot(y.n).abs() > 1.0 - 1e-9 {
-                let list = if x.n.dot(y.n) > 0.0 { &mut same } else { &mut back };
-                if !list.iter().any(|(n, d)| n.dot(x.n) > 1.0 - 1e-9 && (d - x.d).abs() < tol * 10.0) {
-                    list.push((x.n, x.d));
-                }
-            }
-        }
-    }
-    if same.is_empty() && back.is_empty() {
+    let coincident = coincident_planes(a, b);
+    if coincident.is_empty() {
         return None;
     }
+    let same: Vec<(Vec3, f64)> = coincident.iter().filter(|(_, _, s)| *s).map(|(n, d, _)| (*n, *d)).collect();
+    let back: Vec<(Vec3, f64)> = coincident.iter().filter(|(_, _, s)| !*s).map(|(n, d, _)| (*n, *d)).collect();
     let (d1, d2) = (size * 0.0137, size * 0.0229);
+    let counts = record::counts(&[a, b]);
     let run = || -> Result<Option<Body>> {
         let (mut a2, mut b2) = (a.clone(), b.clone());
+        // What the pushed bodies are made of: their histories over [a] and [b].
+        let (mut ha, mut hb) = (crate::boolean_record::kept(a, 0, 1), crate::boolean_record::kept(b, 0, 1));
         for (n, d) in &same {
             // b's face points along n too.
             b2 = push_faces(&b2, *n, *d, d2)?;
+            hb = crate::boolean_record::through(&b2, 0, hb.as_ref());
             if op == BoolOp::Union {
                 a2 = push_faces(&a2, *n, *d, d1)?;
+                ha = crate::boolean_record::through(&a2, 0, ha.as_ref());
             }
         }
         for (n, d) in &back {
@@ -285,20 +352,76 @@ pub(crate) fn boolean_apart(a: &Body, b: &Body, op: BoolOp) -> Option<Result<Opt
                 -d2
             };
             b2 = push_faces(&b2, -*n, -*d, shift)?;
+            hb = crate::boolean_record::through(&b2, 0, hb.as_ref());
         }
         let Some(mut r) = crate::ops::boolean(&a2, &b2, op)? else { return Ok(None) };
+        // The pushed bodies' histories as over [a, b], a's and b's in their places.
+        let (ha, hb) = (crate::boolean_record::placed(ha, 0, 2), crate::boolean_record::placed(hb, 1, 2));
+        let mut h = crate::boolean_record::of_pair(&r, &ha, &hb);
         if op == BoolOp::Union {
             for (n, d) in &same {
                 let slab = slab_beyond(*n, *d, d1.max(d2) * 3.0, size * 4.0)?;
                 match crate::ops::boolean(&r, &slab, BoolOp::Cut)? {
-                    Some(x) => r = x,
+                    Some(x) => {
+                        h = h.and_then(|h| trimmed(&x, h, &slab, [a, b], *n, *d, tol));
+                        r = x;
+                    }
                     None => return Ok(None),
                 }
             }
         }
-        Ok(Some(r))
+        Ok(Some(r.with_checked_history(h, &counts)))
     };
     Some(run())
+}
+
+/// The history over `[a, b]` of `x`, the union `r` of `a` and `b` (with history `h` over them),
+/// pushed out past the plane (n, d), with the slab beyond it (`slab`, whose start cap lies in
+/// the plane) cut off. The slab's cap in `x` is where the operands' faces in that plane were
+/// (all of them, so only a cap that stays one face says which), and where it meets a side of
+/// an operand is that side's edge along one of those faces. `None` where that is not so.
+fn trimmed(x: &Body, h: History, slab: &Body, operands: [&Body; 2], n: Vec3, d: f64, tol: f64) -> Option<History> {
+    let mut cut = x.history()?.clone();
+    cut.substitute(0, &h).ok()?;
+    let cap = slab.history()?.faces.iter().position(|f| f.origins == [FaceOrigin::Cap { end: false }])?;
+    let cap = FaceOrigin::Face { operand: 2, face: cap };
+    // The operands' faces in the plane, facing along n, and their edges with each other face.
+    let in_plane: Vec<Vec<usize>> = operands
+        .iter()
+        .map(|o| planes(o).into_iter().filter(|(_, p)| p.n.dot(n) > 1.0 - 1e-9 && (p.d - d).abs() < tol * 10.0).map(|(i, _)| i).collect())
+        .collect();
+    let bounds: Vec<Vec<Vec<usize>>> = operands.iter().map(|o| crate::history::edge_faces(&o.solid)).collect();
+    if cut.faces.iter().filter(|f| f.origins.contains(&cap)).count() != 1 {
+        return None;
+    }
+    for f in &mut cut.faces {
+        if f.origins.contains(&cap) {
+            let mut origins: std::collections::BTreeSet<FaceOrigin> = f.origins.iter().copied().filter(|o| *o != cap).collect();
+            for (operand, faces) in in_plane.iter().enumerate() {
+                origins.extend(faces.iter().map(|face| FaceOrigin::Face { operand, face: *face }));
+            }
+            f.change = if origins.len() > 1 { Change::Merged } else { Change::Modified };
+            f.origins = origins.into_iter().collect();
+        }
+    }
+    let cap = crate::history::Side::from(cap);
+    for e in &mut cut.edges {
+        for o in &mut e.origins {
+            let side = match o {
+                EdgeOrigin::Meet { a, b } if *a == cap => b,
+                EdgeOrigin::Meet { a, b } if *b == cap => a,
+                _ => continue,
+            };
+            let Some(FaceOrigin::Face { operand, face }) = side.single() else { return None };
+            let (plane_faces, bounds) = (in_plane.get(operand)?, bounds.get(operand)?);
+            let mut along = (0..bounds.len())
+                .filter(|k| bounds.get(*k).is_some_and(|fs| fs.len() == 2 && fs.contains(&face) && fs.iter().any(|f| plane_faces.contains(f))));
+            let (Some(edge), None) = (along.next(), along.next()) else { return None };
+            *o = EdgeOrigin::Edge { operand, edge };
+        }
+    }
+    cut.renumber(&[Some(0), Some(1), None], 2).ok()?;
+    Some(cut)
 }
 
 /// Has `a` material behind every part of b's faces in the plane (m, d) (m their outward
@@ -398,6 +521,17 @@ pub(crate) fn glue(a: &Body, b: &Body) -> Option<Result<Body>> {
                     edges.insert(e.id(), mt::Edge::new(&v0, &v1, e.curve()));
                 }
                 let mut faces: Vec<mt::Face> = fa_list.iter().enumerate().filter(|(i, _)| i != ia).map(|(_, f)| (*f).clone()).collect();
+                // Every face but the two glued is kept; an edge along the seam is an edge of both.
+                let kept = |operand: usize, n: usize, skip: usize| {
+                    (0..n).filter(move |i| *i != skip).map(move |i| record::from_face(operand, i, Change::Kept))
+                };
+                let from: Vec<FaceProv> = kept(0, fa_list.len(), *ia).chain(kept(1, fb_list.len(), *ib)).collect();
+                let mut origins = record::edge_origins(&a.solid, 0);
+                for (old, o) in record::edge_origins(&b.solid, 1) {
+                    if let Some(new) = edges.get(&old) {
+                        origins.entry(new.id()).or_default().extend(o);
+                    }
+                }
                 for (i, f) in fb_list.iter().enumerate() {
                     if i == *ib {
                         continue;
@@ -419,7 +553,9 @@ pub(crate) fn glue(a: &Body, b: &Body) -> Option<Result<Body>> {
                     faces.push(nf);
                 }
                 let solid = Solid::try_new(vec![faces.into()]).map_err(|e| fail(&e.to_string()))?;
-                Body::new(crate::heal::heal(solid, size))
+                // Each edge's origins in the solid's edge order.
+                let origins = crate::body::edge_order(solid.face_iter()).0.iter().map(|e| origins.get(&e.id()).cloned()).collect();
+                crate::boolean_record::heal_build(solid, size, &[], Some(from), origins, &record::counts(&[a, b]))
             }));
         }
     }
@@ -450,6 +586,33 @@ fn same_cylinder(x: &CylFace, y: &CylFace, tol: f64) -> bool {
     x.axis.dot(y.axis).abs() > 1.0 - 1e-9 && (x.radius - y.radius).abs() < tol && (off - x.axis * off.dot(x.axis)).len() < tol
 }
 
+/// The history over `[a, b]` of `r`, made in [`bore_union`]: `joined` (the target joined with
+/// `narrowed`, the tool with its bore narrowed) less `cut`, the cylinder whose wall restores the
+/// tool's bore faces `bore` (the tool is operand `tool_operand`). Nothing of the cylinder but its
+/// wall may be left. Only a bore of one face: the cylinder's wall faces are split where its own
+/// construction splits them, so which of several bore faces a piece of it lies over is not known.
+fn recut(r: &Body, joined: &Body, narrowed: &Body, cut: &Body, bore: &[usize], tool_operand: usize) -> Option<History> {
+    if bore.len() != 1 {
+        return None;
+    }
+    // Over [target, tool].
+    let joined = crate::boolean_record::through(joined, 1, narrowed.history())?;
+    let wall = || record::region(bore.iter().map(|&face| FaceOrigin::Face { operand: 1, face }).collect(), false);
+    let faces = cut
+        .history()?
+        .faces
+        .iter()
+        .map(|f| match f.origins.first() {
+            Some(FaceOrigin::Profile { .. }) => wall(),
+            _ => record::generated(Vec::new()),
+        })
+        .collect();
+    let cut = record::from_faces(&cut.solid, 2, faces);
+    let h = crate::boolean_record::of_pair(r, &Some(joined), &Some(cut))?;
+    let map = if tool_operand == 1 { [Some(0), Some(1)] } else { [Some(1), Some(0)] };
+    crate::boolean_record::composed(h.renumbered(&map, 2))
+}
+
 /// Do the bodies have cylindrical faces on a common cylinder?
 pub(crate) fn has_coincident_cylinders(a: &Body, b: &Body) -> bool {
     let tol = (a.size().max(b.size()) * 1e-7).max(1e-9) * 10.0;
@@ -465,7 +628,8 @@ pub(crate) fn has_coincident_cylinders(a: &Body, b: &Body) -> bool {
 /// samples are plausibility checks; a whole-boundary guard rejects additional boundaries
 /// crossing the recut. Original common-bore trims retain the legacy eligibility policy.
 /// This is not a general emptiness or Boolean-equivalence certificate. Each direction
-/// returns a result only when `accept` takes it; otherwise this returns `None`.
+/// returns a result only when `accept` takes it; otherwise this returns `None`. The result's
+/// history is over `[a, b]`.
 pub(crate) fn bore_union(a: &Body, b: &Body, accept: &dyn Fn(&Body) -> bool) -> Option<Body> {
     let size = a.size().max(b.size());
     let tol = (size * 1e-7).max(1e-9) * 10.0;
@@ -474,9 +638,10 @@ pub(crate) fn bore_union(a: &Body, b: &Body, accept: &dyn Fn(&Body) -> bool) -> 
     let (ia, ib) = (ma.inside_index(), mb.inside_index());
     let empty = |p: Vec3| !ia.contains(p) && !ib.contains(p);
     let (ca, cb) = (cylinders(a), cylinders(b));
-    // (body to narrow, its mesh and inside test, the other body, their faces on the cylinder).
-    let ways = [(b, &mb, &ib, a, &cb, &ca), (a, &ma, &ia, b, &ca, &cb)];
-    for (tool, mesh, inside, target, ct, co) in ways {
+    // (body to narrow, its operand number, its mesh and inside test, the other body, their faces
+    // on the cylinder).
+    let ways = [(b, 1, &mb, &ib, a, &cb, &ca), (a, 0, &ma, &ia, b, &ca, &cb)];
+    for (tool, tool_operand, mesh, inside, target, ct, co) in ways {
         for c in ct {
             if !co.iter().any(|o| same_cylinder(c, o, tol)) {
                 continue;
@@ -555,10 +720,19 @@ pub(crate) fn bore_union(a: &Body, b: &Body, accept: &dyn Fn(&Body) -> bool) -> 
                 }
                 let Some(joined) = crate::ops::boolean(target, &narrowed, BoolOp::Union)? else { return Ok(None) };
                 let cut = crate::build::cylinder(at(lo, 0.0, 0.0), c.axis, c.radius, hi - lo)?;
-                crate::ops::boolean(&joined, &cut, BoolOp::Cut)
+                let Some(r) = crate::ops::boolean(&joined, &cut, BoolOp::Cut)? else { return Ok(None) };
+                let h = recut(&r, &joined, &narrowed, &cut, &bore, tool_operand);
+                Ok(Some(r.with_checked_history(h, &record::counts(&[a, b]))))
             };
-            match run() {
-                Ok(Some(r)) if accept(&r) => return Some(r),
+            let (result, diagnostics) = crate::capture_boolean_diagnostics(run);
+            match result {
+                Ok(Some(r)) if accept(&r) => {
+                    crate::boolean_diagnostics::merge(diagnostics);
+                    let mut event = crate::BooleanFallback::new(crate::BooleanStrategy::CommonBore);
+                    event.face_shift_mm = d;
+                    crate::boolean_diagnostics::record(event);
+                    return Some(r);
+                }
                 _ => continue,
             }
         }

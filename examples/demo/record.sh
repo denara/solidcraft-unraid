@@ -5,7 +5,7 @@
 set -e
 DISP=${1:-:0}; PORT=${2:-7878}; OUT=${3:-.}
 HERE=$(cd "$(dirname "$0")" && pwd)
-CLI=${SOLVECRAFT_CLI:-solvecraft-cli}
+CLI=${SOLIDCRAFT_CLI:-solidcraft-cli}
 mkdir -p "$OUT"
 # x11grab stamps frames with the wall clock: its "start:" is when the first frame was taken.
 ffmpeg -loglevel info -nostats -y -f x11grab -draw_mouse 0 -video_size 1920x1080 -framerate 30 -i "$DISP" \

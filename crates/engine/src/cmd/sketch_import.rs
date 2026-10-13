@@ -3,9 +3,9 @@
 use std::collections::HashMap;
 
 use serde_json::{Value, json};
-use solvecraft_geom::Vec2;
-use solvecraft_io::{Geom2, MAX_DRAWING_BYTES};
-use solvecraft_sketch::{CurveKind, LinkKind, LinkSource, Sketch};
+use solidcraft_geom::Vec2;
+use solidcraft_io::{Geom2, MAX_DRAWING_BYTES};
+use solidcraft_sketch::{CurveKind, LinkKind, LinkSource, Sketch};
 
 use super::CommandSpec;
 use super::sketch::{edit, ids_of};
@@ -34,7 +34,7 @@ fn source_text(p: &Value, cmd: &str) -> Result<String> {
         return Ok(t.to_string());
     }
     let path = str_(p, "path").filter(|x| !x.trim().is_empty() && x.len() < 4096).ok_or_else(|| bad(cmd, "give `path` or `text`"))?;
-    let bytes = solvecraft_io::vfs::read(path, MAX_DRAWING_BYTES).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+    let bytes = solidcraft_io::vfs::read(path, MAX_DRAWING_BYTES).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
     Ok(String::from_utf8_lossy(&bytes).to_string())
 }
 
@@ -79,7 +79,7 @@ fn add_geometry(sk: &mut Sketch, geom: &[Geom2], f: &dyn Fn(Vec2) -> Vec2, k: f6
             Geom2::Ellipse { c, major, minor } => Some(CurveKind::Ellipse { c: pt(sk, *c)?, m: pt(sk, *major)?, r: minor * k }),
             Geom2::Spline { pts, control, degree } => {
                 let mut idx = Vec::new();
-                for p in pts.iter().take(solvecraft_sketch::MAX_SPLINE_POINTS) {
+                for p in pts.iter().take(solidcraft_sketch::MAX_SPLINE_POINTS) {
                     let i = pt(sk, *p)?;
                     if idx.last() != Some(&i) {
                         idx.push(i);
@@ -107,7 +107,7 @@ fn add_geometry(sk: &mut Sketch, geom: &[Geom2], f: &dyn Fn(Vec2) -> Vec2, k: f6
 
 fn insert(s: &mut Session, p: &Value, cmd: &str, svg: bool) -> Result<Value> {
     let text = source_text(p, cmd)?;
-    let geom = if svg { solvecraft_io::read_svg(&text) } else { solvecraft_io::read_dxf(&text) }.map_err(|e| bad(cmd, e.to_string()))?;
+    let geom = if svg { solidcraft_io::read_svg(&text) } else { solidcraft_io::read_dxf(&text) }.map_err(|e| bad(cmd, e.to_string()))?;
     if geom.is_empty() {
         return Err(bad(cmd, "the drawing has no geometry SolidCraft reads"));
     }
@@ -135,7 +135,8 @@ fn insert(s: &mut Session, p: &Value, cmd: &str, svg: bool) -> Result<Value> {
         if let Geom2::Text { text, at, height, angle } = t {
             let mut doc = (*s.doc).clone();
             let mut sk = doc.sketch(id)?.clone();
-            if super::sketch_project::add_link(s, &doc, id, &mut sk, LinkKind::Text, LinkSource::Text { text, at, height, angle }).is_ok() {
+            if super::sketch_project::add_link(s, &doc, id, &mut sk, LinkKind::Text, LinkSource::Text { text, at, height, angle, font: None }).is_ok()
+            {
                 *doc.sketch_mut(id)? = sk;
                 *s.doc_mut() = doc;
                 n_text += 1;
@@ -180,9 +181,9 @@ fn export_dxf(s: &mut Session, p: &Value) -> Result<Value> {
             }
         }
     }
-    let text = solvecraft_io::write_dxf(&geom);
+    let text = solidcraft_io::write_dxf(&geom);
     if let Some(path) = str_(p, "path").filter(|x| !x.trim().is_empty()) {
-        solvecraft_io::vfs::write(path, text.as_bytes()).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+        solidcraft_io::vfs::write(path, text.as_bytes()).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
         return Ok(json!({"path": path, "entities": geom.len()}));
     }
     Ok(json!({"dxf": text, "entities": geom.len()}))

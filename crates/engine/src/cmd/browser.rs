@@ -6,7 +6,7 @@
 
 use serde_json::{Value, json};
 
-use solvecraft_doc::FeatureKind;
+use solidcraft_doc::FeatureKind;
 
 use super::CommandSpec;
 use crate::params::{bad, bool_, str_};
@@ -32,7 +32,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .params("name?; camera: {target: [x,y,z], yaw, pitch, distance, fov?} (replaces a view of the same name)"),
     CommandSpec::new("view.rename", "Rename Named View", view_rename).params("view: name, name"),
     CommandSpec::new("view.delete", "Delete Named View", view_delete).params("view: name"),
-    CommandSpec::new("view.list", "List Named Views", view_list).noundo(),
+    CommandSpec::new("view.list", "List Named Views", view_list).noundo().doc_only(),
     CommandSpec::new("browser.order", "Order Browser Items", order).params("folder, component?, order: [keys] (the folder's items in display order)"),
     CommandSpec::new("browser.visibility", "Show/Hide", visibility).icon("eye").noundo().params(
         "visible: bool; items?: [sketch id or name | body name | construction name | O|X|Y|Z|XY|XZ|YZ]; \
@@ -92,7 +92,7 @@ fn group(s: &mut Session, p: &Value) -> Result<Value> {
     for g in d.browser_groups.iter_mut().filter(|g| g.component == component && g.folder == folder) {
         g.items.retain(|k| !items.contains(k));
     }
-    d.browser_groups.push(solvecraft_doc::BrowserGroup { id, name: name.clone(), component, folder, items });
+    d.browser_groups.push(solidcraft_doc::BrowserGroup { id, name: name.clone(), component, folder, items });
     Ok(json!({ "group": id, "name": name }))
 }
 
@@ -312,6 +312,7 @@ fn document_units(s: &mut Session, p: &Value) -> Result<Value> {
     // What the geometry reads: every feature's length inputs.
     let matched_configuration = s.doc.configuration_matches().then(|| s.doc.configs.active.clone()).flatten();
     let before = s.doc.length_inputs();
+    let solved = s.solved_sketches();
     s.doc_mut().units = u.to_string();
     // Unit-less user parameters holding a bare number read it in the design's units where they
     // stand for lengths. If any input moved, those numbers keep the old unit, written out.
@@ -325,7 +326,7 @@ fn document_units(s: &mut Session, p: &Value) -> Result<Value> {
             .doc
             .params
             .iter()
-            .filter(|p| !p.model && p.unit.is_empty() && solvecraft_doc::expr::is_literal(&p.expr) && p.expr.trim().parse::<f64>().is_ok())
+            .filter(|p| !p.model && p.unit.is_empty() && solidcraft_doc::expr::is_literal(&p.expr) && p.expr.trim().parse::<f64>().is_ok())
             .map(|p| (p.name.clone(), p.expr.trim().to_string()))
             .collect();
         for (name, e) in bare {
@@ -346,13 +347,14 @@ fn document_units(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(row) = matched_configuration {
         s.doc_mut().apply_configuration(&row)?;
     }
+    s.settle_value_edit(&solved)?;
     Ok(json!({ "units": u, "kept": kept }))
 }
 
 fn view_save(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "view.save";
     let c = p.get("camera").ok_or_else(|| bad(cmd, "`camera` is required"))?;
-    let mut v: solvecraft_doc::NamedView = serde_json::from_value(c.clone()).map_err(|e| bad(cmd, format!("bad camera: {e}")))?;
+    let mut v: solidcraft_doc::NamedView = serde_json::from_value(c.clone()).map_err(|e| bad(cmd, format!("bad camera: {e}")))?;
     let ok = [v.target.x, v.target.y, v.target.z, v.yaw, v.pitch, v.distance, v.fov].iter().all(|x| x.is_finite()) && v.distance > 0.0;
     if !ok {
         return Err(bad(cmd, "the camera must be finite with a positive distance"));
@@ -403,7 +405,7 @@ fn view_list(s: &mut Session, _p: &Value) -> Result<Value> {
 }
 
 /// Rename an item key in the browser's groups and orders of a folder.
-fn rename_key(d: &mut solvecraft_doc::Document, folder: &str, old: &str, new: &str) {
+fn rename_key(d: &mut solidcraft_doc::Document, folder: &str, old: &str, new: &str) {
     for g in d.browser_groups.iter_mut().filter(|g| g.folder == folder) {
         for k in g.items.iter_mut().filter(|k| *k == old) {
             *k = new.to_string();
@@ -445,13 +447,14 @@ fn rename_body(s: &mut Session, p: &Value) -> Result<Value> {
     if st.body(name).is_some() {
         return Err(bad(cmd, format!("another body is called `{name}`")));
     }
-    // The body is the k-th new body of its feature; the names before it are kept as they are.
+    // The body is the k-th new body of its feature; its siblings keep the names they have now
+    // (unpinned pattern copies would otherwise be renumbered into the freed name, #265).
     let fid = b.feature;
     let siblings: Vec<String> = st.bodies.iter().filter(|x| x.feature == fid).map(|x| x.name.clone()).collect();
     let k = siblings.iter().position(|n| *n == old).unwrap_or(0);
     let d = s.doc_mut();
     let f = d.feature_mut(fid).ok_or_else(|| bad(cmd, "the body's feature is gone"))?;
-    while f.body_names.len() <= k {
+    while f.body_names.len() < siblings.len().max(k + 1) {
         let i = f.body_names.len();
         f.body_names.push(siblings.get(i).cloned().unwrap_or_default());
     }
@@ -461,6 +464,9 @@ fn rename_body(s: &mut Session, p: &Value) -> Result<Value> {
     // Later features refer to bodies by name.
     let mut failed = None;
     for f in d.features.iter_mut().filter(|f| f.id != fid) {
+        if let FeatureKind::Sketch { plane, .. } = &mut f.kind {
+            solidcraft_doc::sheet::rename_plane_sheet_body(plane, &old, name);
+        }
         if let FeatureKind::Sketch { plane, sketch } = &mut f.kind
             && let Some(anchor) = super::sketch::face::anchor_mut(plane)
             && anchor.target.body == old
@@ -469,7 +475,7 @@ fn rename_body(s: &mut Session, p: &Value) -> Result<Value> {
             let bodies = std::collections::BTreeMap::from([(old.clone(), name.to_string())]);
             anchor.remap_target(&ids, &bodies)?;
             for link in &mut sketch.links {
-                if link.auto_face && matches!(&link.source,solvecraft_sketch::LinkSource::Face {body,..} if *body==old) {
+                if link.auto_face && matches!(&link.source,solidcraft_sketch::LinkSource::Face {body,..} if *body==old) {
                     link.face_name = Some(anchor.target.name.clone());
                 }
             }
@@ -496,10 +502,10 @@ fn rename_body(s: &mut Session, p: &Value) -> Result<Value> {
     }
     for column in &mut d.configs.columns {
         match column {
-            solvecraft_doc::config::Column::Material(body) | solvecraft_doc::config::Column::Appearance(body) if *body == old => {
+            solidcraft_doc::config::Column::Material(body) | solidcraft_doc::config::Column::Appearance(body) if *body == old => {
                 *body = name.to_string();
             }
-            solvecraft_doc::config::Column::FaceAppearance(target) if target.body == old => {
+            solidcraft_doc::config::Column::FaceAppearance(target) if target.body == old => {
                 target.body = name.to_string();
             }
             _ => {}
@@ -589,7 +595,7 @@ fn redefine_sketch(s: &mut Session, p: &Value) -> Result<Value> {
             .filter(|link| {
                 link.auto_face
                     && link.face_name.as_ref() == Some(&anchor.target.name)
-                    && matches!(&link.source,solvecraft_sketch::LinkSource::Face {body,..} if *body==anchor.target.body)
+                    && matches!(&link.source,solidcraft_sketch::LinkSource::Face {body,..} if *body==anchor.target.body)
             })
             .map(|link| link.id.clone())
             .collect();
@@ -611,7 +617,13 @@ fn redefine_sketch(s: &mut Session, p: &Value) -> Result<Value> {
     s.pending_moves = trial.pending_moves;
 
     let attachment = s.doc.feature(id).and_then(|feature| match &feature.kind {
-        FeatureKind::Sketch { plane, .. } => Some(if super::sketch::face::anchor(plane).is_some() { "exact_face" } else { "fixed" }),
+        FeatureKind::Sketch { plane, .. } => Some(if super::sketch::face::anchor(plane).is_some() {
+            "exact_face"
+        } else if solidcraft_doc::sheet::plane_sheet_face(plane).is_some() {
+            "sheet_face"
+        } else {
+            "fixed"
+        }),
         _ => None,
     });
     Ok(json!({ "sketch": id,"attachment":attachment }))
@@ -720,7 +732,7 @@ mod tests {
         run(&mut s, "view.save", json!({"camera": cam, "name": "Detail"}));
         run(&mut s, "view.rename", json!({"view": "Named View1", "name": "Overview"}));
         assert!(s.execute("view.rename", &json!({"view": "Overview", "name": "Detail"})).is_err());
-        let back: solvecraft_doc::Document = serde_json::from_str(&serde_json::to_string(&*s.doc).unwrap()).unwrap();
+        let back: solidcraft_doc::Document = serde_json::from_str(&serde_json::to_string(&*s.doc).unwrap()).unwrap();
         assert_eq!(back.named_views.len(), 2);
         assert_eq!(back.named_views[0].target.z, 3.0);
         run(&mut s, "view.delete", json!({"view": "Detail"}));
@@ -745,7 +757,7 @@ mod tests {
         run(&mut s, "construct.plane.offset", json!({"base": "XY", "offset": 5, "name": "Floor"}));
         let body = s.model.state().bodies[0].name.clone();
         let drain_name = s.doc.feature(drain).unwrap().name.clone();
-        let cam = solvecraft_render::Camera::default();
+        let cam = solidcraft_render::Camera::default();
         let lines = |s: &Session| crate::view::scene(s, &cam).lines.len();
         let shown = |s: &mut Session| {
             let d = run(s, "document.inspect", json!({}));
@@ -803,7 +815,7 @@ mod tests {
         run(&mut s, "browser.move", json!({"folder": "bodies", "items": [b.clone()]}));
         assert_eq!(s.doc.browser_groups[0].items, vec!["Bolt".to_string()]);
         run(&mut s, "browser.order", json!({"folder": "bodies", "order": [b.clone(), "Bolt"]}));
-        let saved: solvecraft_doc::Document = serde_json::from_str(&serde_json::to_string(&*s.doc).unwrap()).unwrap();
+        let saved: solidcraft_doc::Document = serde_json::from_str(&serde_json::to_string(&*s.doc).unwrap()).unwrap();
         assert_eq!(saved.browser_groups, s.doc.browser_groups);
         assert_eq!(saved.browser_order["0/bodies"], vec![b, "Bolt".to_string()]);
         run(&mut s, "browser.ungroup", json!({"group": g}));
