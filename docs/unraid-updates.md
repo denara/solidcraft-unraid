@@ -486,3 +486,29 @@ Unraid update, back up server designs and separately export browser designs; for
 need this snapshot or newer for reading, including rollback. The daily 09:00 automation remains.
 Later upstream main moved to `54a8c807bf205a12b1c15d896e8325c2adfd2ae6`; its libraries and sheet
 perforations are deferred to the next fixed-snapshot run.
+
+Publication passed [container workflow 38601814806](https://github.com/denara/solidcraft-unraid/actions/runs/38601814806)
+from validated merge `a28c4d5f70593b034e5956e042157260fa85e236`. The public build repeated
+modelling/PNG/STEP, auth/origin/file/font/diagnostic/stored-link confinement, independent
+sessions, restart persistence, browser/offline assets and logging/privacy proofs before push.
+Public image: `ghcr.io/denara/solidcraft-unraid:latest` (Linux amd64), immutable tag
+`sha-a28c4d5f70593b034e5956e042157260fa85e236`.
+Digest: `sha256:7b8a1790e3b45388d95ce67485404c5c96a671c01c45c9a3c57ab0dbb121f6e2`.
+Both tags pulled anonymously with an empty Docker configuration; the anonymous manifest
+returned HTTP 200 with matching digest, OCI source and architecture.
+
+The sole local runtime `solvecraft-solvecraft-1` now runs that immutable public image,
+healthy at 0.10.0. A private data/config backup and rollback image
+`solvecraft-unraid:rollback-before-8ea1fd64` (previous public 0.8.0) remain available.
+Volume, MCP token, full environment, user, ports/origins and resource/security limits are
+preserved. Authenticated SDK modelling/PNG and read-only known public saved-design reopen
+passed; the actual browser visibly rendered Sample Plate at 0.10.0 after replacement.
+Thirteen owned obsolete build/check/offline/fixture/candidate containers were removed after
+label, image, mount and activity checks. Diagnostics remain local; no volumes were deleted.
+Reusable toolchain/browser images, build caches, archives and private backups remain intact.
+No CA metadata commit was required and no Unraid installation or nginx/DNS change was made.
+
+Before updating through Unraid's normal Docker action, back up server and separate browser
+designs, retain the existing token/settings/data mapping and reload the browser afterward.
+New format20 designs require this snapshot or newer. The final upstream check observed
+`805ea45be6db658061cb44d13fcc4d532bb04f5e`; later changes are left to the next fixed-snapshot run.
