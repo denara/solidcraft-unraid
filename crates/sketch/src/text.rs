@@ -3,14 +3,15 @@
 //! OpenType (CFF) cubic Béziers are cubic control splines, both exact. A glyph's counters (the
 //! holes of A, B, 8…) are loops inside its outline; profile detection makes them holes.
 //!
-//! The default font is embedded (Liberation Sans, SIL OFL 1.1; see `fonts/OFL.txt` and
+//! The default font is embedded (Liberation Sans, SIL OFL 1.1; see `assets/fonts/liberation-sans/OFL.txt` and
 //! ATTRIBUTION.md); [`crate::fonts`] finds others by file path or installed family name.
 
+use serde::{Deserialize, Serialize};
 use solidcraft_geom::Vec2;
 
-use crate::fonts::font_data;
-use crate::link::{LinkGeom, MAX_LINK_ENTITIES};
-use crate::model::{Result, SketchError};
+use crate::fonts::font_data_styled;
+use crate::link::{LinkGeom, LinkKind, LinkSource, MAX_LINK_ENTITIES};
+use crate::model::{Result, Sketch, SketchError};
 
 /// Most characters in one text.
 pub const MAX_TEXT_CHARS: usize = 1000;
@@ -80,6 +81,85 @@ impl ttf_parser::OutlineBuilder for Outline {
     }
 }
 
+/// Where each line of a text sits against its anchor (`at`, or a point of its path).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextAlign {
+    /// The line starts at the anchor.
+    #[default]
+    Left,
+    /// The line is centred on it.
+    Center,
+    /// The line ends at it.
+    Right,
+}
+
+impl TextAlign {
+    fn is_left(&self) -> bool {
+        *self == TextAlign::Left
+    }
+}
+
+/// How a text is set: the style of its font, where its lines sit, the space between its letters
+/// and lines, and the sketch curve its baseline follows (instead of the straight line from `at`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TextStyle {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub bold: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub italic: bool,
+    #[serde(default, skip_serializing_if = "TextAlign::is_left")]
+    pub align: TextAlign,
+    /// Extra space between letters (mm; negative brings them closer).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub letter_spacing: f64,
+    /// The distance between lines as a multiple of the font's own.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub line_spacing: f64,
+    /// The id of a curve of the same sketch the baseline follows (`at` and the angle then do not
+    /// place the text).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Along the path the other way round, so the text sits on its other side.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub reverse: bool,
+}
+
+impl Default for TextStyle {
+    fn default() -> Self {
+        TextStyle { bold: false, italic: false, align: TextAlign::Left, letter_spacing: 0.0, line_spacing: 1.0, path: None, reverse: false }
+    }
+}
+
+impl TextStyle {
+    /// Nothing but the defaults (what a text saved before styles had).
+    pub fn is_plain(&self) -> bool {
+        *self == TextStyle::default()
+    }
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+fn is_zero(x: &f64) -> bool {
+    *x == 0.0
+}
+
+fn one() -> f64 {
+    1.0
+}
+
+fn is_one(x: &f64) -> bool {
+    *x == 1.0
+}
+
+/// How far a slanted (made-up italic) glyph leans: 12 degrees.
+const SLANT_DEG: f64 = 12.0;
+/// Largest letter spacing (mm either way) and line spacing factor accepted.
+const MAX_LETTER_SPACING: f64 = 1e5;
+const LINE_SPACING_RANGE: (f64, f64) = (0.05, 100.0);
+
 /// Outline geometry of `text` in the built-in font (see [`text_geometry_in`]).
 pub fn text_geometry(text: &str, at: Vec2, height: f64, angle: f64) -> Result<Vec<LinkGeom>> {
     text_geometry_in(None, text, at, height, angle)
@@ -89,41 +169,229 @@ pub fn text_geometry(text: &str, at: Vec2, height: f64, angle: f64) -> Result<Ve
 /// installed family name, see [`crate::fonts::font_data`]) with its baseline starting at `at`,
 /// capital height `height` (mm), rotated by `angle` (radians) about `at`. Lines break at `\n`.
 pub fn text_geometry_in(font: Option<&str>, text: &str, at: Vec2, height: f64, angle: f64) -> Result<Vec<LinkGeom>> {
+    text_geometry_styled(font, text, at, height, angle, &TextStyle::default(), None)
+}
+
+/// Outline geometry of `text` set in `style` (see [`text_geometry_in`]). With `path` (the
+/// points of the curve [`TextStyle::path`] names) the baseline follows it: each letter stands on
+/// the curve, turned with it, and the lines after the first run below it.
+pub fn text_geometry_styled(
+    font: Option<&str>,
+    text: &str,
+    at: Vec2,
+    height: f64,
+    angle: f64,
+    style: &TextStyle,
+    path: Option<&[Vec2]>,
+) -> Result<Vec<LinkGeom>> {
     if text.chars().count() > MAX_TEXT_CHARS {
         return Err(SketchError::TooLarge);
     }
     if !(height.is_finite() && height > 1e-6 && height < 1e6 && angle.is_finite() && at.is_finite()) {
         return Err(SketchError::Invalid("text height must be positive".into()));
     }
-    let data = font_data(font)?;
+    if !(style.letter_spacing.is_finite() && style.letter_spacing.abs() <= MAX_LETTER_SPACING) {
+        return Err(SketchError::Invalid("the letter spacing must be a finite length".into()));
+    }
+    if !(style.line_spacing.is_finite() && (LINE_SPACING_RANGE.0..=LINE_SPACING_RANGE.1).contains(&style.line_spacing)) {
+        return Err(SketchError::Invalid(format!(
+            "the line spacing must be between {} and {} times the font's",
+            LINE_SPACING_RANGE.0, LINE_SPACING_RANGE.1
+        )));
+    }
+    let (data, slant) = font_data_styled(font, style.bold, style.italic)?;
     let face = ttf_parser::Face::parse(data.bytes(), data.index).map_err(|e| SketchError::Invalid(format!("font: {e}")))?;
-    let cap = cap_height(&face);
-    let k = height / cap;
+    let k = height / cap_height(&face);
     let line_gap = f64::from(face.ascender()) - f64::from(face.descender()) + f64::from(face.line_gap());
-    let line_gap = if line_gap > 0.0 { line_gap * k } else { height * 1.5 };
-    let (s, c) = angle.sin_cos();
+    let line_gap = if line_gap > 0.0 { line_gap * k } else { height * 1.5 } * style.line_spacing;
+    let shear = if slant { SLANT_DEG.to_radians().tan() } else { 0.0 };
+    // Each line's glyphs (glyph, where its origin is along the line, its advance) and width.
+    let lines: Vec<(Vec<(ttf_parser::GlyphId, f64, f64)>, f64)> = text
+        .split('\n')
+        .map(|line| {
+            let mut pen = 0.0f64;
+            let mut glyphs = Vec::new();
+            for ch in line.chars() {
+                let Some(gid) = face.glyph_index(ch).or_else(|| face.glyph_index('?')) else { continue };
+                let advance = f64::from(face.glyph_hor_advance(gid).unwrap_or(0)) * k;
+                glyphs.push((gid, pen, advance));
+                pen += advance + style.letter_spacing;
+            }
+            let width = glyphs.last().map(|(_, x, advance)| x + advance).unwrap_or(0.0);
+            (glyphs, width)
+        })
+        .collect();
+    let along = path.map(|pts| Path::new(pts, style.reverse)).transpose()?;
+    let anchor = along.as_ref().map(|p| p.anchor(style.align)).unwrap_or(0.0);
+    let (sin, cos) = angle.sin_cos();
     let mut out = Vec::new();
-    for (row, line) in text.split('\n').enumerate() {
-        let mut pen = 0.0f64;
+    for (row, (glyphs, width)) in lines.iter().enumerate() {
         let base_y = -(row as f64) * line_gap;
-        for ch in line.chars() {
-            let Some(gid) = face.glyph_index(ch).or_else(|| face.glyph_index('?')) else { continue };
-            let x0 = pen;
-            let map = Box::new(move |x: f32, y: f32| {
-                let (lx, ly) = (x0 + f64::from(x) * k, base_y + f64::from(y) * k);
-                at + Vec2::new(lx * c - ly * s, lx * s + ly * c)
+        let start = match style.align {
+            TextAlign::Left => 0.0,
+            TextAlign::Center => -width / 2.0,
+            TextAlign::Right => -width,
+        };
+        for &(gid, x, advance) in glyphs {
+            // The glyph's frame: its origin on the baseline and the way the baseline runs.
+            let (origin, dir) = match &along {
+                None => {
+                    let dir = Vec2::new(cos, sin);
+                    (at + dir * (start + x) + Vec2::new(-sin, cos) * base_y, dir)
+                }
+                Some(p) => {
+                    let (mid, dir) = p.frame(anchor + start + x + advance / 2.0, advance);
+                    (mid - dir * (advance / 2.0) + Vec2::new(-dir.y, dir.x) * base_y, dir)
+                }
+            };
+            let up = Vec2::new(-dir.y, dir.x);
+            let map = Box::new(move |gx: f32, gy: f32| {
+                let (gx, gy) = (f64::from(gx) * k, f64::from(gy) * k);
+                origin + dir * (gx + gy * shear) + up * gy
             });
-            let mut ob = Outline { out: Vec::new(), start: at, cur: at, map };
+            let mut ob = Outline { out: Vec::new(), start: origin, cur: origin, map };
             let _ = face.outline_glyph(gid, &mut ob);
             out.extend(ob.out);
             // A font can give a glyph any number of points: stop where the link would be refused anyway.
             if out.len() > MAX_LINK_ENTITIES {
                 return Err(SketchError::TooLarge);
             }
-            pen += f64::from(face.glyph_hor_advance(gid).unwrap_or(0)) * k;
         }
     }
+    if out.iter().any(|g| !geom_finite(g)) {
+        return Err(SketchError::Invalid("the text does not fit its path".into()));
+    }
     Ok(out)
+}
+
+fn geom_finite(g: &LinkGeom) -> bool {
+    match g {
+        LinkGeom::Line(a, b) => a.is_finite() && b.is_finite(),
+        LinkGeom::Conic { a, apex, b, rho } => a.is_finite() && apex.is_finite() && b.is_finite() && rho.is_finite(),
+        LinkGeom::Spline { pts, .. } => pts.iter().all(|p| p.is_finite()),
+        _ => true,
+    }
+}
+
+/// A curve a text follows, as points with the distance along it to each: oriented so the text
+/// reads left to right (an open curve runs rightwards, a closed one clockwise, the text on its
+/// outside) unless reversed.
+struct Path {
+    pts: Vec<Vec2>,
+    along: Vec<f64>,
+    closed: bool,
+}
+
+impl Path {
+    fn new(points: &[Vec2], reverse: bool) -> Result<Path> {
+        let mut pts: Vec<Vec2> = Vec::with_capacity(points.len());
+        for p in points {
+            if !p.is_finite() {
+                return Err(SketchError::Invalid("the text's path is not a finite curve".into()));
+            }
+            if pts.last().is_none_or(|q: &Vec2| q.dist(*p) > 1e-9) {
+                pts.push(*p);
+            }
+        }
+        let (Some(first), Some(last)) = (pts.first().copied(), pts.last().copied()) else {
+            return Err(SketchError::Invalid("the text's path has no length".into()));
+        };
+        let length: f64 = pts.iter().zip(pts.iter().skip(1)).map(|(a, b)| a.dist(*b)).sum();
+        if pts.len() < 2 || length < 1e-9 {
+            return Err(SketchError::Invalid("the text's path has no length".into()));
+        }
+        let closed = first.dist(last) <= 1e-9 * length.max(1.0);
+        let readable = if closed {
+            // Clockwise: the text stands on the outside.
+            let area: f64 = pts.iter().zip(pts.iter().skip(1)).map(|(a, b)| a.cross(*b)).sum::<f64>() + last.cross(first);
+            area <= 0.0
+        } else {
+            last.x >= first.x - 1e-9 * length
+        };
+        if readable == reverse {
+            pts.reverse();
+        }
+        let mut along = Vec::with_capacity(pts.len());
+        let mut total = 0.0;
+        for (i, p) in pts.iter().enumerate() {
+            if let Some(prev) = i.checked_sub(1).and_then(|j| pts.get(j)) {
+                total += prev.dist(*p);
+            }
+            along.push(total);
+        }
+        Ok(Path { pts, along, closed })
+    }
+
+    fn length(&self) -> f64 {
+        self.along.last().copied().unwrap_or(0.0)
+    }
+
+    /// Where the lines are aligned to: an open curve's start, middle or end; on a closed curve
+    /// its top, whatever the alignment.
+    fn anchor(&self, align: TextAlign) -> f64 {
+        if self.closed {
+            return self.pts.iter().zip(&self.along).max_by(|(p, _), (q, _)| p.y.total_cmp(&q.y)).map(|(_, s)| *s).unwrap_or(0.0);
+        }
+        match align {
+            TextAlign::Left => 0.0,
+            TextAlign::Center => self.length() / 2.0,
+            TextAlign::Right => self.length(),
+        }
+    }
+
+    /// The point at distance `s` along the curve (around a closed one; past the ends of an open
+    /// one, straight on).
+    fn point(&self, s: f64) -> Vec2 {
+        let length = self.length();
+        let s = if self.closed { s.rem_euclid(length) } else { s };
+        let (first, last) = (self.pts.first().copied().unwrap_or_default(), self.pts.last().copied().unwrap_or_default());
+        if !self.closed && s <= 0.0 {
+            let d = self.pts.get(1).and_then(|q| (*q - first).normalized()).unwrap_or(Vec2::X);
+            return first + d * s;
+        }
+        if !self.closed && s >= length {
+            let n = self.pts.len();
+            let d = n.checked_sub(2).and_then(|i| self.pts.get(i)).and_then(|q| (last - *q).normalized()).unwrap_or(Vec2::X);
+            return last + d * (s - length);
+        }
+        let i = self.along.partition_point(|a| *a < s).clamp(1, self.pts.len().saturating_sub(1).max(1));
+        match (self.pts.get(i - 1), self.pts.get(i), self.along.get(i - 1), self.along.get(i)) {
+            (Some(a), Some(b), Some(sa), Some(sb)) if sb > sa => *a + (*b - *a) * ((s - sa) / (sb - sa)),
+            (Some(a), ..) => *a,
+            _ => first,
+        }
+    }
+
+    /// The point at `s` and the way the curve runs there, over a glyph `width` wide (the chord
+    /// across it, so a glyph sits evenly on a bend).
+    fn frame(&self, s: f64, width: f64) -> (Vec2, Vec2) {
+        let h = (width / 2.0).max(self.length() * 1e-4).max(1e-9);
+        let dir = (self.point(s + h) - self.point(s - h)).normalized().unwrap_or(Vec2::X);
+        (self.point(s), dir)
+    }
+}
+
+impl Sketch {
+    /// The outline geometry of a text source of this sketch: its path, when it has one, is a
+    /// curve of this sketch as it is now.
+    pub fn text_source_geometry(&self, src: &LinkSource) -> Result<Vec<LinkGeom>> {
+        let LinkSource::Text { text, at, height, angle, font, style } = src else {
+            return Err(SketchError::Invalid("not a text".into()));
+        };
+        let path = match &style.path {
+            None => None,
+            Some(id) => {
+                let ci = self.curve_index(id).ok_or_else(|| SketchError::Invalid(format!("the text's path `{id}` is not a curve of this sketch")))?;
+                let of_text =
+                    self.curves.get(ci).and_then(|c| c.link.as_deref()).and_then(|l| self.link(l)).is_some_and(|l| l.kind == LinkKind::Text);
+                if of_text {
+                    return Err(SketchError::Invalid("a text cannot follow the outline of a text".into()));
+                }
+                Some(self.polyline(ci))
+            }
+        };
+        text_geometry_styled(font.as_deref(), text, *at, *height, *angle, style, path.as_deref())
+    }
 }
 
 /// The font's capital height in font units: from its OS/2 table, else the top of its `H`, else
@@ -135,6 +403,10 @@ fn cap_height(face: &ttf_parser::Face) -> f64 {
         .or_else(|| face.glyph_index('H').and_then(|g| face.glyph_bounding_box(g)).map(|b| f64::from(b.y_max)).filter(|c| *c > 0.0))
         .unwrap_or(f64::from(face.units_per_em().max(1)) * 0.7)
 }
+
+#[cfg(test)]
+#[path = "text_style_tests.rs"]
+mod style_tests;
 
 #[cfg(test)]
 mod tests {
@@ -163,7 +435,7 @@ mod tests {
 
     #[test]
     fn a_font_file_gives_the_same_outlines_and_unknown_fonts_are_errors() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts").join("LiberationSans-Regular.ttf");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts/liberation-sans/LiberationSans-Regular.ttf");
         let by_file = text_geometry_in(Some(&path.to_string_lossy()), "A7_L", Vec2::ZERO, 8.0, 0.0).unwrap();
         assert_eq!(by_file, text_geometry("A7_L", Vec2::ZERO, 8.0, 0.0).unwrap());
         let e = text_geometry_in(Some("No Such Family 12345"), "A", Vec2::ZERO, 8.0, 0.0).unwrap_err().to_string();

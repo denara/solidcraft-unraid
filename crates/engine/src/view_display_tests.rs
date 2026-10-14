@@ -25,7 +25,7 @@ fn sampler_keeps_style_precedence_hidden_references_text_and_disjoint_parts() {
     let text = sk
         .add_link(
             LinkKind::Text,
-            LinkSource::Text { text: "A".into(), at: Vec2::ZERO, height: 2., angle: 0., font: None },
+            LinkSource::Text { text: "A".into(), at: Vec2::ZERO, height: 2., angle: 0., font: None, style: Default::default() },
             &[LinkGeom::Line(Vec2::new(0., 7.), Vec2::new(2., 7.))],
         )
         .unwrap();
@@ -69,6 +69,47 @@ fn sampler_keeps_style_precedence_hidden_references_text_and_disjoint_parts() {
     assert_eq!(finished[4].1, colors::SKETCH_DONE);
     assert_eq!(finished[5].1, colors::SKETCH_DONE);
     assert!(sk.link(&projected).is_some() && sk.link(&text).is_some());
+}
+
+/// Construction Geometries hides the `construction` line type and nothing else. Centerlines
+/// are their own line type. A projected curve that carries the construction flag (the trace of
+/// a plane or an axis) is drawn in the projected colour, so Projected Geometries owns it and
+/// Construction Geometries leaves it alone. `sketch_curve_visible` is the one answer the GPU
+/// viewport's picking uses as well, so nothing hidden here can still be clicked there.
+#[test]
+fn hiding_construction_geometry_keeps_ordinary_curves_centerlines_and_projected_traces() {
+    let mut sk = Sketch::new();
+    let ordinary = line(&mut sk, 0.);
+    let construction = line(&mut sk, 1.);
+    sk.curves[construction].construction = true;
+    let centerline = line(&mut sk, 2.);
+    sk.curves[centerline].centerline = true;
+    let axis = sk.add_link(LinkKind::Project, LinkSource::Origin, &[LinkGeom::Line(Vec2::new(0., 3.), Vec2::new(2., 3.))]).unwrap();
+    let trace = sk.link_curves(&axis)[0];
+    sk.curves[trace].construction = true;
+    let determined = vec![false; sk.curves.len()];
+    let drawn = |sk: &Sketch| -> Vec<usize> {
+        let mut seen = Vec::new();
+        sketch_lines_with_sampler(sk, &Plane::XY, true, &determined, |_, i, _| {
+            seen.push(i);
+            vec![vec![Vec3::ZERO, Vec3::X]]
+        });
+        seen
+    };
+    assert_eq!(drawn(&sk), vec![ordinary, construction, centerline, trace]);
+
+    sk.view.hide_construction = true;
+    assert_eq!(drawn(&sk), vec![ordinary, centerline, trace], "only the construction curve goes");
+    for (i, want) in [(ordinary, true), (construction, false), (centerline, true), (trace, true)] {
+        assert_eq!(sketch_curve_visible(&sk, i), want, "curve {i}");
+    }
+    // The projected trace answers to its own toggle, in either order.
+    sk.view.hide_projected = true;
+    assert_eq!(drawn(&sk), vec![ordinary, centerline]);
+    sk.view.hide_construction = false;
+    assert_eq!(drawn(&sk), vec![ordinary, construction, centerline]);
+    // A curve index that does not exist is not visible, and nothing panics asking.
+    assert!(!sketch_curve_visible(&sk, sk.curves.len()));
 }
 
 #[test]

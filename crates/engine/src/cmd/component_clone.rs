@@ -319,7 +319,7 @@ pub(super) fn paste(
         bodies.insert(body.name.clone(), new_name.clone());
         let feature_name = unique(&format!("{} Base", body.name), &mut used);
         let id = scratch.doc_mut().add_feature(
-            FeatureKind::Import { file: format!("{} independent base", body.name), step, components: Vec::new() },
+            FeatureKind::Import { file: format!("{} independent base", body.name), step: step.into(), components: Vec::new() },
             Some(&feature_name),
         )?;
         if let Some(f) = scratch.doc_mut().feature_mut(id) {

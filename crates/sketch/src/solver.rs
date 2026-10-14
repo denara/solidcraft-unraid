@@ -400,6 +400,8 @@ fn line_dist(p: Vec2, a: Vec2, b: Vec2) -> f64 {
 fn residuals(s: &State, k: &ConstraintKind, out: &mut Vec<f64>) {
     use ConstraintKind::*;
     match *k {
+        // Offset distances drive derived geometry in refresh_offsets, never source DOFs.
+        OffsetDistance { .. } => {}
         Coincident { p, q } => {
             let d = s.p(p) - s.p(q);
             out.extend([d.x, d.y]);
@@ -782,7 +784,7 @@ fn block_refs(sk: &Sketch, b: &Block) -> Vec<Ref> {
             Tangent { a, b } => tangent(a, b).to_vec(),
             Smooth { a, b } => vec![C(a), C(b)],
             Symmetric { p, q, l } => vec![P(p), P(q), L(l)],
-            Fix { .. } => vec![],
+            Fix { .. } | OffsetDistance { .. } => vec![],
         },
         Block::TangentAt(_, k, p) => match **k {
             ConstraintKind::Tangent { a, b } if freeform(a) || freeform(b) => vec![P(*p), C(a), C(b)],
@@ -1343,7 +1345,7 @@ fn build_blocks<'a>(sk: &'a Sketch, lay: &Layout, on_curve: &[(usize, usize)]) -
         }
     }
     for (i, c) in sk.constraints.iter().enumerate() {
-        if c.driven {
+        if c.driven || matches!(c.kind, ConstraintKind::OffsetDistance { .. }) {
             continue;
         }
         raw.push(match touch_point(sk, &c.kind, on_curve) {

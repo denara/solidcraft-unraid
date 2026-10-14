@@ -505,7 +505,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     let mut retake = false;
     let mut close = false;
     let screen = ctx.content_rect();
-    crate::frame::window(ctx, "Create Issue — review draft", crate::frame::Width::Wide)
+    crate::frame::window(ctx, crate::i18n::tr_label("Create Issue — review draft"), crate::frame::Width::Wide)
         .id(egui::Id::new("sc_issue_report"))
         .open(&mut open)
         .resizable(true)
@@ -514,11 +514,11 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
         .max_height((screen.height() - 32.0).max(100.0))
         .vscroll(true)
         .show(ctx, |ui| {
-            ui.label("Review the report and screenshot before opening GitHub.");
+            ui.label(crate::i18n::tr_label("Review the report and screenshot before opening GitHub."));
             ui.add(
                 egui::TextEdit::singleline(&mut draft.title)
                     .id(egui::Id::new("issue_report_title"))
-                    .hint_text("Issue title")
+                    .hint_text(crate::i18n::tr_label("Issue title"))
                     .char_limit(160)
                     .desired_width(f32::INFINITY),
             );
@@ -533,7 +533,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
             });
             truncate(&mut draft.title, 160);
             truncate(&mut draft.body, MAX_BODY);
-            ui.label(RichText::new("Remove private design details or paths before sharing.").small());
+            ui.label(RichText::new(crate::i18n::tr_label("Remove private design details or paths before sharing.")).small());
             ui.label(&draft.note);
             if let Some(image) = draft.image.as_ref() {
                 let texture =
@@ -545,8 +545,8 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                 );
             }
             ui.horizontal_wrapped(|ui| {
-                retake = ui.button("Retake screenshot").clicked();
-                if ui.add_enabled(draft.image.is_some(), egui::Button::new("Copy screenshot")).clicked()
+                retake = ui.button(crate::i18n::tr_label("Retake screenshot")).clicked();
+                if ui.add_enabled(draft.image.is_some(), egui::Button::new(crate::i18n::tr_label("Copy screenshot"))).clicked()
                     && let Some(image) = draft.image.as_ref()
                 {
                     ctx.copy_image((**image).clone());
@@ -564,19 +564,19 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                         format!("Could not save screenshot: {}", debug(&result.get("error"), 1000))
                     };
                 }
-                if ui.add_enabled(draft.image.is_some(), egui::Button::new("Remove screenshot")).clicked() {
+                if ui.add_enabled(draft.image.is_some(), egui::Button::new(crate::i18n::tr_label("Remove screenshot"))).clicked() {
                     draft.image = None;
                     draft.texture = None;
                     draft.note = "Screenshot removed from this draft.".into();
                 }
             });
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Copy report").clicked() {
+                if ui.button(crate::i18n::tr_label("Copy report")).clicked() {
                     ctx.copy_text(draft.body.clone());
                     draft.note = "Report copied. Paste it into the GitHub draft if needed.".into();
                 }
                 let (url, copy_needed) = draft_url(&draft.title, &draft.body);
-                if ui.button("Open GitHub draft").clicked() {
+                if ui.button(crate::i18n::tr_label("Open GitHub draft")).clicked() {
                     if copy_needed {
                         ctx.copy_text(draft.body.clone());
                     }
@@ -588,7 +588,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                     }
                     .into();
                 }
-                close = ui.button("Close draft").clicked();
+                close = ui.button(crate::i18n::tr_label("Close draft")).clicked();
             });
         });
     if open && !close {
@@ -789,6 +789,7 @@ mod tests {
         let mut h = crate::scenario::Harness::new();
         h.app.home.open = false;
         h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+        let start = h.app.session.undo.len();
         h.app.start("sketch.text");
         h.frames(3);
         h.step(&json!({"click":{"sketch":[0,0]}})).unwrap();
@@ -822,8 +823,11 @@ mod tests {
         assert_eq!(before, (h.app.session.doc.to_json(), h.app.session.undo.len(), h.app.session.redo.len(), h.app.session.revision));
         assert!(h.widget("Pending CAD text").is_some());
         h.step(&json!({"key":"Enter"})).unwrap();
-        assert_ne!(before.0, h.app.session.doc.to_json(), "closing the report must return control to the preserved CAD text");
-        assert_eq!(h.app.session.undo.len(), before.1 + 1);
+        assert!(!crate::sketch_text::editing(&h.app), "closing the report must return control to the preserved CAD text");
+        assert_eq!(h.app.session.undo.len(), start + 1, "placing and typing the text is one undo step");
+        let sid = h.app.session.active_sketch.unwrap();
+        let sk = h.app.session.doc.sketch(sid).unwrap();
+        assert!(sk.links.iter().any(|l| matches!(&l.source, solidcraft_engine::sketch::LinkSource::Text { text, .. } if text == "Pending CAD text")));
     }
 
     #[test]

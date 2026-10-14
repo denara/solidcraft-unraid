@@ -1,0 +1,19 @@
+[
+  {"note": "A right-click on a sketch curve in the work area must offer the sketch's own menu. It used to give the empty-space view menu instead. Edit Sketch was then reachable only from the browser. The `menu:ui.editSketch` handle is published by context_menu::list_row. Clicking that handle therefore fails unless the row is drawn."},
+  {"start": "sketch.create"},
+  {"click": {"plane": "XY"}},
+  {"start": "sketch.rectangle.two_point"},
+  {"click": {"sketch": [0, 0]}},
+  {"click": {"sketch": [40, 30]}},
+  {"key": "Escape"},
+  {"start": "sketch.finish"},
+  {"call": "ui.view", "params": {"view": "iso"}},
+  {"expect": {"sketching": false}},
+  {"click": {"world": [20, 0, 0]}, "button": "right"},
+  {"expect": {"selection": 1}},
+  {"shot": "s52_sketch_menu"},
+  {"click": {"handle": "menu:ui.editSketch"}},
+  {"expect": {"sketching": true}},
+  {"start": "sketch.finish"},
+  {"expect": {"errors": 0, "sketching": false}}
+]

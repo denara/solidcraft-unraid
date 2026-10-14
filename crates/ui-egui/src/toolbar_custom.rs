@@ -228,7 +228,7 @@ pub fn window(app: &mut SolveApp, ctx: &egui::Context) {
     let mut open = true;
     let mut changes: Vec<(&'static str, bool)> = Vec::new();
     let mut reset_tab = false;
-    crate::frame::window(ctx, "Customize Toolbar", crate::frame::Width::Normal)
+    crate::frame::window(ctx, crate::i18n::tr_label("Customize Toolbar"), crate::frame::Width::Normal)
         .id(egui::Id::new("sc_toolbar_customize"))
         .open(&mut open)
         .default_height(520.0)
@@ -261,7 +261,7 @@ pub fn window(app: &mut SolveApp, ctx: &egui::Context) {
             });
             ui.separator();
             ui.horizontal(|ui| {
-                if ui.button("Reset Toolbar").clicked() {
+                if ui.button(crate::i18n::tr_label("Reset Toolbar")).clicked() {
                     reset_tab = true;
                 }
             });

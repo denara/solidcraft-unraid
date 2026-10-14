@@ -380,6 +380,7 @@ pub fn convert_body(mb: &ModelBody, rule: &str, rv: &RuleValues, face: Vec3, ben
                 slope: (0.0, 0.0),
                 shape: None,
                 tag: String::new(),
+                tear: (false, false),
             });
             queue.push((g, Some(sh.flanges.len() - 1)));
         }

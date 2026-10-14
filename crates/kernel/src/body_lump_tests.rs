@@ -170,9 +170,15 @@ fn shell_grouping_preserves_large_disconnected_patterns_and_bounds_hostile_work(
     let mut oversized = mesh.clone();
     oversized.positions.resize(shell_groups::MAX_POINTS + 1, Vec3::ZERO);
     assert!(shell_groups::groups(&[oversized], &[8.0], 1e-8).unwrap_err().to_string().contains("grouping limit"));
-    let mut repeated = mesh.clone();
-    repeated.triangles = mesh.triangles.iter().copied().cycle().take(7000).collect();
-    assert!(shell_groups::groups(&[repeated.clone(), repeated], &[8.0, 8.0], 1e-8).unwrap_err().to_string().contains("boundary work"));
+    // Two stacks of one slanted triangle, in parallel planes 1 µm apart: every pair's boxes
+    // overlap but none touch, so all 7000² pairs need testing.
+    let slanted = |dz: f64| Mesh {
+        positions: vec![Vec3::new(0.0, 0.0, dz), Vec3::new(1.0, 0.0, 1.0 + dz), Vec3::new(0.0, 1.0, 1.0 + dz)],
+        triangles: vec![[0, 1, 2]; 7000],
+        ..Mesh::default()
+    };
+    let (repeated, lifted) = (slanted(0.0), slanted(1e-3));
+    assert!(shell_groups::groups(&[repeated, lifted], &[8.0, 8.0], 1e-8).unwrap_err().to_string().contains("boundary work"));
     let mut outer = cube(2.0).tessellate_with(0.01, true).unwrap();
     let mut inner = mesh;
     outer.triangles = outer.triangles.iter().copied().cycle().take(4000).collect();

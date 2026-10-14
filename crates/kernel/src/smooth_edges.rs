@@ -256,13 +256,15 @@ mod tests {
                 assert!(mesh.shaded_edge_visible(index));
             }
         }
+        // Smoothing flags are display-only: the edges and faces keep the body's identities.
         let raw = body.tessellate(0.02).unwrap();
-        assert_eq!(mesh.edges, raw.edges);
+        assert_eq!(mesh.edges.len(), raw.edges.len());
         assert_eq!(mesh.edge_faces, raw.edge_faces);
-        assert_eq!(mesh.tri_face, raw.tri_face);
-        assert_eq!(mesh.triangles, raw.triangles);
-        assert_eq!(mesh.positions, raw.positions);
-        assert_eq!(mesh.normals, raw.normals);
+        for (a, b) in mesh.edges.iter().zip(&raw.edges) {
+            assert_eq!((a.first(), a.last()), (b.first(), b.last()));
+        }
+        let faces = |m: &Mesh| m.tri_face.iter().copied().collect::<std::collections::BTreeSet<u32>>();
+        assert_eq!(faces(&mesh), faces(&raw));
         let moved = crate::transform_matrix(&body, [[1., 0., 0., 0.], [0., 0., 1., 0.], [0., -1., 0., 0.], [30., 20., 10., 1.]]).unwrap();
         assert_eq!(moved.display_mesh(0.02).unwrap().smooth_edges.iter().filter(|f| **f).count(), 512);
     }

@@ -14,12 +14,14 @@
 - [Plastic parts](guide/plastic.md)
 - [Import and export](guide/files.md)
 - [Keyboard shortcuts](guide/shortcuts.md)
+- [Updates and privacy](guide/updates.md)
 - [Driving SolidCraft with an AI agent (MCP)](guide/mcp.md)
 
 # Developer guide
 
 - [Contributing](dev/contributing.md)
 - [Architecture](dev/architecture.md)
+- [Extensible library proposal](dev/libraries.md)
 - [The command engine](dev/commands.md)
 - [The kernel boundary and truck](dev/kernel.md)
 - [Persistent naming](dev/naming.md)

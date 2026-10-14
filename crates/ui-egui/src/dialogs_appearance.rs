@@ -315,7 +315,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Ap, inputs: &mut [Sel
         ui.label(format!("Component: {component}"));
         ui.end_row();
         row_label(ui, "");
-        if ui.button("Select bodies or faces instead").clicked() {
+        if ui.button(crate::i18n::tr_label("Select bodies or faces instead")).clicked() {
             k.component = None;
         }
         ui.end_row();
@@ -353,7 +353,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Ap, inputs: &mut [Sel
     let picked: Vec<Sel> = inputs.first().map(|i| i.items.clone()).unwrap_or_default();
     ui.horizontal(|ui| {
         let has_target = !picked.is_empty() || k.component.is_some();
-        if ui.add_enabled(has_target, egui::Button::new("Apply to selection")).clicked()
+        if ui.add_enabled(has_target, egui::Button::new(crate::i18n::tr_label("Apply to selection"))).clicked()
             && let Some(p) = selected_params(k, &picked)
         {
             k.remove_override = false;
@@ -366,8 +366,8 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Ap, inputs: &mut [Sel
             });
         }
         if ui
-            .add_enabled(has_target, egui::Button::new("Remove override"))
-            .on_hover_text("Restore the inherited component or physical material appearance")
+            .add_enabled(has_target, egui::Button::new(crate::i18n::tr_label("Remove override")))
+            .on_hover_text(crate::i18n::tr_label("Restore the inherited component or physical material appearance"))
             .clicked()
             && let Some(p) = clear_params(k, &picked)
         {
@@ -420,7 +420,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Ap, inputs: &mut [Sel
     combo(ui, "ap_cat", &refs, &mut k.category);
     ui.end_row();
     row_label(ui, "Search");
-    let search = ui.add(egui::TextEdit::singleline(&mut k.search).hint_text("Appearance name").desired_width(190.0));
+    let search = ui.add(egui::TextEdit::singleline(&mut k.search).hint_text(crate::i18n::tr_label("Appearance name")).desired_width(190.0));
     crate::scenario::publish_handle("appearance:search", search.rect.center());
     ui.end_row();
     row_label(ui, "");
@@ -429,7 +429,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Ap, inputs: &mut [Sel
     let shown: Vec<(usize, &Look)> =
         lib.iter().enumerate().filter(|(_, l)| (k.category == 0 || l.category == want) && l.name.to_lowercase().contains(&query)).collect();
     if shown.is_empty() {
-        ui.label(RichText::new("No matching appearances").color(t.text_dim));
+        ui.label(RichText::new(crate::i18n::tr_label("No matching appearances")).color(t.text_dim));
     }
     swatch_rows(ui, &shown, |ui, (i, l)| {
         let picked_look = k.look.as_deref() == Some(l.name.as_str());

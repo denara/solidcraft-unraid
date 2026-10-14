@@ -490,6 +490,99 @@ fn tapered_extrude_of_lines_and_arcs() {
     assert!(e.to_string().contains("arc meets another edge at a corner"), "{e}");
 }
 
+/// A circle drawn as four conics (the way free curves come, as in text) tapered inward: each
+/// conic's control polygon moves in by d, which for a circle is the exact smaller circle, so
+/// the solid is a cone frustum.
+#[test]
+fn tapered_extrude_of_conics() {
+    let (r, h, a) = (10.0, 12.0, 8f64.to_radians());
+    let w = std::f64::consts::FRAC_1_SQRT_2;
+    let p = |x: f64, y: f64| Vec2::new(x, y);
+    let disc = Loop2 {
+        segs: vec![
+            Seg2::Conic { a: p(r, 0.0), apex: p(r, r), b: p(0.0, r), w },
+            Seg2::Conic { a: p(0.0, r), apex: p(-r, r), b: p(-r, 0.0), w },
+            Seg2::Conic { a: p(-r, 0.0), apex: p(-r, -r), b: p(0.0, -r), w },
+            Seg2::Conic { a: p(0.0, -r), apex: p(r, -r), b: p(r, 0.0), w },
+        ],
+    };
+    let b = extrude_tapered(&Plane::XY, &Region2 { outer: disc, holes: vec![] }, h, 1.0, -a).unwrap();
+    let r1 = r - h * a.tan();
+    let v = PI * h / 3.0 * (r * r + r1 * r1 + r * r1);
+    let m = measure(&b).unwrap();
+    assert!(rel(m.volume, v) < 1e-3, "{} vs {v}", m.volume);
+    assert!((m.bbox.max.x - r).abs() < 1e-6 && (m.bbox.max.z - h).abs() < 1e-6, "{:?}", m.bbox);
+}
+
+/// A wedge whose tip is a flat line far shorter than the taper moves its sides in: the tip line
+/// goes, the two long sides meet, and its side is the flat triangle up to there. The solid is a
+/// prismatoid, its volume h/6 · (A₀ + 4·A_mid + A₁).
+#[test]
+fn tapered_extrude_swallows_a_short_tip() {
+    let (h, a) = (2.0, 5f64.to_radians());
+    let d = h * a.tan();
+    let pts = [Vec2::new(0.0, -2.0), Vec2::new(20.0, -0.01), Vec2::new(20.0, 0.01), Vec2::new(0.0, 2.0)];
+    let b = extrude_tapered(&Plane::XY, &Region2 { outer: Loop2::polygon(&pts), holes: vec![] }, h, 1.0, -a).unwrap();
+    // The top: the three long lines moved in by d (to their left, the loop running
+    // counter-clockwise), meeting each other.
+    let moved = |p: Vec2, q: Vec2| {
+        let t = (q - p).normalized().unwrap();
+        (p + t.perp() * d, t)
+    };
+    let meet = |(p0, t0): (Vec2, Vec2), (p1, t1): (Vec2, Vec2)| p0 + t0 * ((p1 - p0).cross(t1) / t0.cross(t1));
+    let (low, high, left) = (moved(pts[0], pts[1]), moved(pts[2], pts[3]), moved(pts[3], pts[0]));
+    let top = [meet(left, low), meet(low, high), meet(high, left)];
+    let area = |q: &[Vec2]| 0.5 * q.iter().zip(q.iter().cycle().skip(1)).map(|(a, b)| a.cross(*b)).sum::<f64>();
+    // Halfway up, each side edge's midpoint (the two tip corners both run to the top's tip).
+    let mid = [pts[0].lerp(top[0], 0.5), pts[1].lerp(top[1], 0.5), pts[2].lerp(top[1], 0.5), pts[3].lerp(top[2], 0.5)];
+    let v = h / 6.0 * (area(&pts) + 4.0 * area(&mid) + area(&top));
+    let m = measure(&b).unwrap();
+    assert!(rel(m.volume, v) < 1e-6, "{} vs {v}", m.volume);
+    assert_eq!(m.merged.faces, 6, "bottom, top, three sides and the tip's triangle");
+}
+
+/// A taper from below the profile, with a foot: the sides stand straight for the foot's height,
+/// then slope on to the top, and the section at the profile's plane is the profile.
+#[test]
+fn tapered_extrude_between_with_a_foot() {
+    let a = 10f64.to_radians();
+    let sq = Region2 {
+        outer: Loop2::polygon(&[Vec2::new(-20.0, -20.0), Vec2::new(20.0, -20.0), Vec2::new(20.0, 20.0), Vec2::new(-20.0, 20.0)]),
+        holes: vec![],
+    };
+    let (from, to, foot) = (-2.0, 10.0, 0.5);
+    let b = extrude_tapered_between(&Plane::XY, &sq, from, to, foot, 1.0, a).unwrap();
+    let side = |z: f64| 40.0 + 2.0 * z * a.tan();
+    let (s0, s1, rise) = (side(from), side(to), to - from - foot);
+    let v = foot * s0 * s0 + rise / 3.0 * (s0 * s0 + s1 * s1 + s0 * s1);
+    let m = measure(&b).unwrap();
+    assert!(rel(m.volume, v) < 1e-6, "{} vs {v}", m.volume);
+    assert!((m.bbox.min.z - from).abs() < 1e-6 && (m.bbox.max.z - to).abs() < 1e-6, "{:?}", m.bbox);
+    assert_eq!(m.merged.faces, 10);
+    assert!(extrude_tapered_between(&Plane::XY, &sq, from, to, 7.0, 1.0, a).is_err(), "a foot taller than half the solid");
+}
+
+/// A taper steeper than a profile's details is refused, and says why: a slot narrower than the
+/// taper closes; a ring's hole smaller than it closes.
+#[test]
+fn tapered_extrude_refuses_a_taper_steeper_than_the_details() {
+    let slot = Loop2::polygon(&[
+        Vec2::new(0.0, 0.0),
+        Vec2::new(10.0, 0.0),
+        Vec2::new(10.0, 10.0),
+        Vec2::new(5.1, 10.0),
+        Vec2::new(5.1, 2.0),
+        Vec2::new(4.9, 2.0),
+        Vec2::new(4.9, 10.0),
+        Vec2::new(0.0, 10.0),
+    ]);
+    let e = extrude_tapered(&Plane::XY, &Region2 { outer: slot, holes: vec![] }, 2.0, 1.0, 10f64.to_radians()).unwrap_err();
+    assert!(e.to_string().contains("the taper closes the profile"), "{e}");
+    let ring = Region2 { outer: Loop2::circle(Vec2::ZERO, 5.0), holes: vec![Loop2::circle(Vec2::ZERO, 0.3).reversed()] };
+    let e = extrude_tapered(&Plane::XY, &ring, 2.0, 1.0, 10f64.to_radians()).unwrap_err();
+    assert!(e.to_string().contains("the taper closes the profile"), "{e}");
+}
+
 #[test]
 fn polyhedra_shell_and_draft() {
     let b = box_solid(Vec3::ZERO, Vec3::new(50.0, 40.0, 30.0)).unwrap();
@@ -832,6 +925,17 @@ fn sphere_booleans() {
     let m = measure(&c).unwrap();
     assert!(rel(m.volume, 50.0 * 50.0 * 20.0 - 2.0 / 3.0 * PI * 3375.0) < 1e-3, "{}", m.volume);
     assert_eq!((m.merged.faces, m.merged.edges, m.merged.vertices), (7, 13, 9));
+}
+
+#[test]
+fn similar_spheres_meet() {
+    // bherbruck/solidcraft#232: the contact test compared every pair of nearby triangles of the
+    // two fine sphere meshes and gave up past its work limit, so their join was refused.
+    let a = sphere(Vec3::ZERO, 10.0).unwrap();
+    for (x, meet) in [(12.0, true), (4.0, true), (20.0, true), (20.5, false)] {
+        let b = sphere(Vec3::new(x, 0.0, 0.0), 10.0).unwrap();
+        assert_eq!(a.meets(&b).unwrap(), meet, "centres {x} mm apart");
+    }
 }
 
 #[test]
@@ -2300,4 +2404,77 @@ fn shell_of_a_disc_rounded_smaller_than_the_wall() {
             assert!(rel(v, want) < 1e-3, "round at z {edge_z}, t {t}: {v} vs {want}");
         }
     }
+}
+
+/// The cache-budget estimate counts edge and vertex uses on the borrowed boundaries; it must
+/// equal what walking the cloned wires (`Solid::edge_iter`, `vertex_iter`) counts.
+#[test]
+fn retained_bytes_matches_the_iterator_counts() {
+    let block = box_solid(Vec3::ZERO, Vec3::new(40.0, 30.0, 10.0)).unwrap();
+    let hole = cylinder(Vec3::new(20.0, 15.0, -5.0), Vec3::Z, 5.0, 30.0).unwrap();
+    let drilled = boolean(&block, &hole, BoolOp::Cut).unwrap().unwrap();
+    for body in [&block, &hole, &drilled] {
+        let s = &body.solid;
+        let walked = s.face_iter().count() * 2048 + s.edge_iter().count() * 512 + s.vertex_iter().count() * 96;
+        assert_eq!(body.retained_bytes(), walked);
+    }
+}
+
+/// #881: a pleated band lofted to a nearly flat one, both 18 vertices from (-26, 3), counter-
+/// clockwise and mirror-symmetric about x = 0. The zig-zag's centroid sits well above its first
+/// vertex, so that vertex pointed nowhere near the lead's: the loft started three vertices round,
+/// twisted (14 820 mm³, centre of mass at x = 5.3). Vertex to vertex, it is a prismoid.
+#[test]
+fn loft_pairs_the_vertices_of_matching_non_convex_sections() {
+    let bottom = [
+        (-26.0, 3.0),
+        (-24.76384, 3.0),
+        (-16.0568, 14.97217),
+        (-8.0, 4.90117),
+        (0.0, 14.90117),
+        (8.0, 4.90117),
+        (16.0568, 14.97217),
+        (24.76384, 3.0),
+        (26.0, 3.0),
+        (26.0, 0.0),
+        (23.23616, 0.0),
+        (15.9432, 10.02783),
+        (8.0, 0.09883),
+        (0.0, 10.09883),
+        (-8.0, 0.09883),
+        (-15.9432, 10.02783),
+        (-23.23616, 0.0),
+        (-26.0, 0.0),
+    ];
+    let top = [
+        (-26.0, 3.0),
+        (-24.02812, 3.0),
+        (-16.0, 3.30105),
+        (-8.0, 3.00105),
+        (0.0, 3.30105),
+        (8.0, 3.00105),
+        (16.0, 3.30105),
+        (24.02812, 3.0),
+        (26.0, 3.0),
+        (26.0, 0.0),
+        (23.97188, 0.0),
+        (16.0, 0.29895),
+        (8.0, -0.00105),
+        (0.0, 0.29895),
+        (-8.0, -0.00105),
+        (-16.0, 0.29895),
+        (-23.97188, 0.0),
+        (-26.0, 0.0),
+    ];
+    let v = |p: &[(f64, f64)]| p.iter().map(|&(x, y)| Vec2::new(x, y)).collect::<Vec<_>>();
+    let mid: Vec<Vec2> = v(&bottom).into_iter().zip(v(&top)).map(|(a, b)| (a + b) * 0.5).collect();
+    // Prismoid: h/6 · (A0 + 4 Amid + A1) = 17 914.43.
+    let area = |p: &[Vec2]| Loop2::polygon(p).signed_area().abs();
+    let want = 90.0 / 6.0 * (area(&v(&bottom)) + 4.0 * area(&mid) + area(&v(&top)));
+    let secs = [(Plane::XY, Loop2::polygon(&v(&bottom))), (Plane::XY.offset(90.0), Loop2::polygon(&v(&top)))];
+    let m = measure(&loft(&secs).unwrap()).unwrap();
+    // Twisted ruled faces measure a little under the prismoid (17 884; a square lofted to a
+    // skewed quad, one twisted face, 0.3 % under), so the bounds leave room for that.
+    assert!(rel(m.volume, want) < 5e-3, "{} vs {want}", m.volume);
+    assert!(m.centroid.x.abs() < 0.05, "centre of mass x {}", m.centroid.x);
 }

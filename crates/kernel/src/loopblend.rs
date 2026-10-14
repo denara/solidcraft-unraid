@@ -271,6 +271,27 @@ fn build(
         side = sd;
         walls.push(wf);
     }
+    // A run ends in the cross-section through its end vertex: the face there must hold it (a
+    // plane square to the run). One at an angle cuts the blend's two contacts at different
+    // places, which the rolling-ball blend handles.
+    if open {
+        let ends = [
+            (edges.first().map(|e| e.front().clone()), segs.first().map(|s| (s.start(), *s))),
+            (edges.last().map(|e| e.back().clone()), segs.last().map(|s| (s.end(), *s))),
+        ];
+        for (v, seg) in ends {
+            let (Some(v), Some((p, s))) = (v, seg) else { return Err(KernelError::Failed("run end".into())) };
+            let t = s.tangent(p).ok_or_else(|| unsupported("degenerate loop edge"))?;
+            let square = faces
+                .iter()
+                .enumerate()
+                .filter(|(gi, g)| *gi != fi && !walls.contains(gi) && g.vertex_iter().any(|x| x == v))
+                .all(|(_, g)| plane_normal(g).is_some_and(|gn| gn.dot(t).abs() > 1.0 - 1e-6));
+            if !square {
+                return Err(unsupported("a run of edges ending at a face at an angle"));
+            }
+        }
+    }
     // Cross-section at a loop point: into the face (m) and up the wall (t, away from the edge,
     // up a concave wall and down a convex one). The ball of radius r touches both at the
     // setback s = r / tan(φ/2), φ the angle between m and t; its centre is on the bisector.

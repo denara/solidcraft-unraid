@@ -453,18 +453,24 @@ fn rename_key(d: &mut solidcraft_doc::Document, folder: &str, old: &str, new: &s
     }
 }
 
-/// Replace every string equal to `old` with `new`; true when something changed.
-fn replace_str(v: &mut Value, old: &str, new: &str, depth: usize) -> bool {
+/// The keys whose strings name bodies, alone or in a list (`body`, `targets`…), at any depth of a
+/// feature: its own fields and the face, edge and link references inside it.
+const BODY_KEYS: [&str; 5] = ["body", "bodies", "target", "targets", "tools"];
+
+/// Replace the body name `old` with `new` where a string names a body (the value of one of
+/// [`BODY_KEYS`]); other strings equal to it (sketch text, plane and feature names, expressions)
+/// stay. True when something changed.
+fn replace_body_name(v: &mut Value, old: &str, new: &str, names_body: bool, depth: usize) -> bool {
     if depth > 64 {
         return false;
     }
     match v {
-        Value::String(s) if s == old => {
+        Value::String(s) if names_body && s == old => {
             *s = new.to_string();
             true
         }
-        Value::Array(a) => a.iter_mut().fold(false, |acc, x| replace_str(x, old, new, depth + 1) | acc),
-        Value::Object(o) => o.values_mut().fold(false, |acc, x| replace_str(x, old, new, depth + 1) | acc),
+        Value::Array(a) => a.iter_mut().fold(false, |acc, x| replace_body_name(x, old, new, names_body, depth + 1) | acc),
+        Value::Object(o) => o.iter_mut().fold(false, |acc, (k, x)| replace_body_name(x, old, new, BODY_KEYS.contains(&k.as_str()), depth + 1) | acc),
         _ => false,
     }
 }
@@ -483,7 +489,10 @@ fn rename_body(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad(cmd, format!("another body is called `{name}`")));
     }
     // The body is the k-th new body of its feature; its siblings keep the names they have now
-    // (unpinned pattern copies would otherwise be renumbered into the freed name, #265).
+    // (unpinned pattern copies would otherwise be renumbered into the freed name, #265). That
+    // includes the siblings whose stored name is shared: the solids of a STEP file with one label
+    // are stored as `X`, `X`, `X` and built as `X`, `X (2)`, `X (3)`, so the stored names are set
+    // to the numbered ones, or `X (3)` would turn into `X (2)` once the second solid is renamed.
     let fid = b.feature;
     let siblings: Vec<String> = st.bodies.iter().filter(|x| x.feature == fid).map(|x| x.name.clone()).collect();
     let k = siblings.iter().position(|n| *n == old).unwrap_or(0);
@@ -492,6 +501,9 @@ fn rename_body(s: &mut Session, p: &Value) -> Result<Value> {
     while f.body_names.len() < siblings.len().max(k + 1) {
         let i = f.body_names.len();
         f.body_names.push(siblings.get(i).cloned().unwrap_or_default());
+    }
+    for (slot, current) in f.body_names.iter_mut().zip(&siblings) {
+        slot.clone_from(current);
     }
     if let Some(slot) = f.body_names.get_mut(k) {
         *slot = name.to_string();
@@ -516,7 +528,7 @@ fn rename_body(s: &mut Session, p: &Value) -> Result<Value> {
             }
         }
         let Ok(mut v) = serde_json::to_value(&f.kind) else { continue };
-        if replace_str(&mut v, &old, name, 0) {
+        if replace_body_name(&mut v, &old, name, false, 0) {
             match serde_json::from_value(v) {
                 Ok(k) => f.kind = k,
                 Err(e) => failed = Some(e.to_string()),
@@ -697,6 +709,28 @@ mod tests {
         assert!(s.execute("body.rename", &json!({"body": "Lid", "name": " "})).is_err());
         run(&mut s, "edit.undo", json!({}));
         assert_eq!(names(&s)[1], b);
+    }
+
+    #[test]
+    fn renaming_a_body_leaves_other_text_with_its_name_alone() {
+        let mut s = Session::default();
+        run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10}));
+        let body = names(&s)[0].clone();
+        run(&mut s, "solid.move", json!({"bodies": [body.clone()], "translate": [0, 0, 5]}));
+        // Sketch text that happens to spell the body's name is not a reference to it.
+        run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Label"}));
+        run(&mut s, "sketch.text", json!({"text": body.clone(), "at": [30, 30], "height": 5}));
+        run(&mut s, "sketch.finish", json!({}));
+        run(&mut s, "body.rename", json!({"body": body.clone(), "name": "Lid"}));
+        let kind = |name: &str| serde_json::to_value(&s.doc.find_feature(name).unwrap().kind).unwrap();
+        let label = kind("Label").to_string();
+        assert!(label.contains(&format!("\"{body}\"")) && !label.contains("\"Lid\""), "{label}");
+        let moved = s.doc.features.iter().find_map(|f| match &f.kind {
+            solidcraft_doc::FeatureKind::Move { bodies, .. } => Some(bodies.clone()),
+            _ => None,
+        });
+        assert_eq!(moved, Some(vec!["Lid".to_string()]), "the move follows the rename");
+        assert!(s.model.results.iter().all(|r| r.error.is_none()));
     }
 
     #[test]

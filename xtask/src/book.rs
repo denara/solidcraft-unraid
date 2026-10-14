@@ -19,6 +19,7 @@ const SNAPSHOT_SIZE: (&str, &str) = ("960", "600");
 
 pub fn run(root: &Path, build: bool) -> Result<(), String> {
     let book = root.join("docs/book");
+    std::fs::copy(root.join("assets/branding/web/source/og.png"), book.join("src/og.png")).map_err(|e| format!("book preview card: {e}"))?;
     let mut c = cargo();
     c.args(["build", "-q", "--release", "-p", "solidcraft-cli"]);
     crate::run(c, "cargo build -p solidcraft-cli")?;

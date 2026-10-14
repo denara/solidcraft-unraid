@@ -10,6 +10,17 @@
 //! - union of faces facing the same way: both faces move outward by different amounts, the
 //!   union is taken, and the slab beyond the plane is cut off (now a transversal cut);
 //! - union of faces back to back: the tool's face moves into the target, which overlaps it.
+//!
+//! Each of these leaves the result unchanged only where the space a face moves through holds
+//! what the boolean leaves there anyway: none of the target for a cut or an intersection, the
+//! target's material for a union, nothing of either body beyond a plane whose slab is cut off
+//! again. The faces of a coincident plane lie on each other, but nothing says that what lies
+//! beside them does: a tool's side in the face of a wall has the neighbouring walls beside it,
+//! a channel's top in the face a rib stands on has the rib over it. So a face is asked first
+//! what it would move through: a join's face moving into the target at points behind it
+//! (`backed`), the others on the other body's faces (see [`crate::clearance`]). A face with
+//! no room stays where it is and the boolean fails with [`NO_ROOM`], for the strategies that
+//! take the bodies as they lie.
 
 use std::collections::HashMap;
 
@@ -18,6 +29,7 @@ use truck_modeling::{self as mt, builder};
 
 use crate::body::shell_groups::boxes_separate;
 use crate::body::{Body, Solid, from_p3, p3, v3};
+use crate::clearance::{Clearance, Occupancy};
 use crate::history::{Change, EdgeOrigin, FaceOrigin, FaceProv, History};
 use crate::{BoolOp, KernelError, Result, guard, record};
 
@@ -307,8 +319,12 @@ pub(crate) fn coincident_planes(a: &Body, b: &Body) -> Vec<(Vec3, f64, bool)> {
     found
 }
 
+/// What [`boolean_apart`] fails with when a face has no room to move.
+pub(crate) const NO_ROOM: &str = "coincident faces were left in place: pushing them apart would change the result";
+
 /// Retry a failed boolean with coincident planar faces pushed apart. `None` when there are no
-/// coincident faces or the faces can't be pushed.
+/// coincident faces or the faces can't be pushed; the error [`NO_ROOM`] when a face would
+/// move through something that changes the result.
 pub(crate) fn boolean_apart(a: &Body, b: &Body, op: BoolOp) -> Option<Result<Option<Body>>> {
     let size = a.size().max(b.size());
     let tol = (size * 1e-7).max(1e-9);
@@ -320,12 +336,31 @@ pub(crate) fn boolean_apart(a: &Body, b: &Body, op: BoolOp) -> Option<Result<Opt
     let back: Vec<(Vec3, f64)> = coincident.iter().filter(|(_, _, s)| !*s).map(|(n, d, _)| (*n, *d)).collect();
     let (d1, d2) = (size * 0.0137, size * 0.0229);
     let counts = record::counts(&[a, b]);
+    let (skin, chord) = (tol * 10.0, size * 2e-4);
+    let no_room = || KernelError::Failed(NO_ROOM.into());
     let run = || -> Result<Option<Body>> {
+        // The target's faces, meshed when the first face asks what it would move through.
+        let faces_of_a = std::cell::OnceCell::new();
+        let target = || faces_of_a.get_or_init(|| Clearance::new(a, chord)).as_ref().ok_or_else(no_room);
         let (mut a2, mut b2) = (a.clone(), b.clone());
         // What the pushed bodies are made of: their histories over [a] and [b].
         let (mut ha, mut hb) = (crate::boolean_record::kept(a, 0, 1), crate::boolean_record::kept(b, 0, 1));
         for (n, d) in &same {
             // b's face points along n too.
+            let free = if op == BoolOp::Union {
+                // Both faces move out and the slab beyond the plane is cut off the joined body
+                // again, everywhere: neither body may have anything in it.
+                let depth = d1.max(d2) * 3.0 * 1.25;
+                let tool = Clearance::new(b, chord).ok_or_else(no_room)?;
+                target()?.clear_of_slab(*n, *d, skin, depth) && tool.clear_of_slab(*n, *d, skin, depth)
+            } else {
+                // The tool takes whatever of `a` its face moves through (a rib standing on the
+                // face a cut ends in).
+                target()?.swept(&in_plane(&b2, *n, *d, skin), *n, skin, d2 * 1.25) == Occupancy::Empty
+            };
+            if !free {
+                return Err(no_room());
+            }
             b2 = push_faces(&b2, *n, *d, d2)?;
             hb = crate::boolean_record::through(&b2, 0, hb.as_ref());
             if op == BoolOp::Union {
@@ -346,6 +381,11 @@ pub(crate) fn boolean_apart(a: &Body, b: &Body, op: BoolOp) -> Option<Result<Opt
                     .find(|depth| backed(a, b, -*n, -*d, *depth))
                     .ok_or_else(|| KernelError::Failed("pushing a face: part of it lies over a hole or past the edge of the other body".into()))?
             } else {
+                // Back into the tool, the face gives up what the tool took of `a` there (a
+                // wall standing beside the face the tool's foot lies on).
+                if target()?.swept(&in_plane(&b2, -*n, -*d, skin), *n, skin, d2 * 1.25) != Occupancy::Empty {
+                    return Err(no_room());
+                }
                 -d2
             };
             b2 = push_faces(&b2, -*n, -*d, shift)?;
@@ -445,6 +485,26 @@ pub(crate) fn faces_touch(a: &Body, b: &Body) -> bool {
     })
 }
 
+/// The triangles of `tool`'s faces in the plane (`m`, `d`), `m` their outward normal, each with
+/// how far its face reaches past it sideways. A face bounded by straight edges is its
+/// triangles; they are drawn in by `skin`, so that faces of the other body lying against the
+/// face's sides are not in its way. A face with a curved edge reaches past its triangles by
+/// the chord error.
+fn in_plane(tool: &Body, m: Vec3, d: f64, skin: f64) -> Vec<([Vec3; 3], f64)> {
+    let chord = (tool.size() * 2e-4).max(skin);
+    let Ok(mesh) = tool.tessellate_with(chord, true) else { return Vec::new() };
+    let faces: Vec<&mt::Face> = tool.solid.face_iter().collect();
+    let margins: HashMap<usize, f64> = planes(tool)
+        .into_iter()
+        .filter(|(_, p)| p.n.dot(m) > 1.0 - 1e-9 && (p.d - d).abs() < skin)
+        .filter_map(|(i, _)| {
+            let straight = faces.get(i)?.edge_iter().all(|e| matches!(e.curve(), mt::Curve::Line(_)));
+            Some((i, if straight { -skin } else { 2.0 * chord }))
+        })
+        .collect();
+    mesh.triangles.iter().zip(&mesh.tri_face).filter_map(|(t, face)| Some((mesh.tri(t)?, *margins.get(&(*face as usize))?))).collect()
+}
+
 /// Has `a` material behind every part of b's faces in the plane (m, d) (m their outward
 /// normal, pointing into `a`), to `depth`? Checked at points inside the faces' triangles.
 fn backed(a: &Body, b: &Body, m: Vec3, d: f64, depth: f64) -> bool {
@@ -473,28 +533,74 @@ fn faces_in(body: &Body, n: Vec3, d: f64, tol: f64) -> Vec<usize> {
     planes(body).into_iter().filter(|(_, p)| p.n.dot(n) > 1.0 - 1e-9 && (p.d - d).abs() < tol).map(|(i, _)| i).collect()
 }
 
-/// Do faces `i` and `j` of `body` lie on one plane or one cylinder?
-fn same_surface(body: &Body, i: usize, j: usize, tol: f64) -> bool {
-    match (crate::face_surface(body, i), crate::face_surface(body, j)) {
-        (Some(crate::FaceSurface::Plane { normal: n1, point: p1 }), Some(crate::FaceSurface::Plane { normal: n2, point: p2 })) => {
-            n1.dot(n2) > 1.0 - 1e-9 && n1.dot(p2 - p1).abs() < tol
-        }
-        (Some(crate::FaceSurface::Cylinder { .. }), Some(crate::FaceSurface::Cylinder { .. })) => {
-            let c = cylinders(body);
-            match (c.iter().find(|x| x.index == i), c.iter().find(|x| x.index == j)) {
-                (Some(x), Some(y)) => same_cylinder(x, y, tol),
-                _ => false,
-            }
+/// Do two face surfaces lie on one plane or one cylinder?
+fn same_surface(x: &Option<crate::FaceSurface>, y: &Option<crate::FaceSurface>, tol: f64) -> bool {
+    use crate::FaceSurface::{Cylinder, Plane};
+    match (x, y) {
+        (Some(Plane { normal: n1, point: p1 }), Some(Plane { normal: n2, point: p2 })) => n1.dot(*n2) > 1.0 - 1e-9 && n1.dot(*p2 - *p1).abs() < tol,
+        (Some(Cylinder { origin: o1, axis: a1, radius: r1 }), Some(Cylinder { origin: o2, axis: a2, radius: r2 })) => {
+            let off = *o2 - *o1;
+            a1.dot(*a2).abs() > 1.0 - 1e-9 && (r1 - r2).abs() < tol && (off - *a1 * off.dot(*a1)).len() < tol
         }
         _ => false,
     }
 }
 
+/// A box around face `f` from its edges' control points (a B-spline or NURBS curve with positive
+/// weights lies in their hull; an edge's curve may run past the edge, which only grows the box).
+/// No dividing: for choosing faces it need only contain the face, and dividing a split face's
+/// curved edges down to a tolerance ran away on the sensor enclosure's lid (gigabytes, minutes).
+/// `None` for an edge on an intersection curve or with weights that don't bound it.
+fn hull_box(f: &mt::Face) -> Option<Aabb3> {
+    let mut bb = Aabb3::EMPTY;
+    for e in f.edge_iter() {
+        match e.curve() {
+            mt::Curve::Line(_) => {
+                bb.add(from_p3(e.front().point()));
+                bb.add(from_p3(e.back().point()));
+            }
+            mt::Curve::BSplineCurve(c) => c.control_points().iter().for_each(|p| bb.add(from_p3(*p))),
+            mt::Curve::NurbsCurve(c) => {
+                for p in c.control_points() {
+                    if !(p.w > 0.0 && p.w.is_finite()) {
+                        return None;
+                    }
+                    bb.add(Vec3::new(p.x / p.w, p.y / p.w, p.z / p.w));
+                }
+            }
+            mt::Curve::IntersectionCurve(_) => return None,
+        }
+    }
+    (!bb.is_empty() && bb.min.is_finite() && bb.max.is_finite()).then_some(bb)
+}
+
+/// The box around faces `faces` of `body` ([`hull_box`]), grown by `gap`. `None` when a face's
+/// extent can't be found.
+fn faces_box(body: &Body, faces: &[usize], gap: f64) -> Option<Aabb3> {
+    let fs: Vec<&mt::Face> = body.solid.face_iter().collect();
+    let mut bb = Aabb3::EMPTY;
+    for f in faces {
+        let b = hull_box(fs.get(*f)?)?;
+        bb.add(b.min);
+        bb.add(b.max);
+    }
+    (!bb.is_empty()).then(|| Aabb3 { min: bb.min - Vec3::new(gap, gap, gap), max: bb.max + Vec3::new(gap, gap, gap) })
+}
+
 /// `body` (with its history `h` over its operand) with its faces in the plane (n, d) split
 /// where the faces of `tool` next to the tool's faces in the opposite plane cross them: the
-/// outline of the tool's contact imprinted on the body's.
+/// outline of the tool's contact imprinted on the body's. Only the faces near the contact are
+/// split, and each surface once.
 fn imprinted(body: Body, mut h: Option<History>, n: Vec3, d: f64, tool: &Body, tol: f64) -> Result<(Body, Option<History>)> {
     let contact = faces_in(tool, -n, -d, tol);
+    let gap = tol * 10.0;
+    // A face whose extent can't be found counts as near.
+    let region = faces_box(tool, &contact, gap);
+    let near = |b: &Body, faces: Vec<usize>| -> Vec<usize> {
+        let Some(region) = region else { return faces };
+        let fs: Vec<&mt::Face> = b.solid.face_iter().collect();
+        faces.into_iter().filter(|f| fs.get(*f).and_then(|x| hull_box(x)).is_none_or(|bx| !boxes_separate(bx, region, gap))).collect()
+    };
     let bounds = crate::history::edge_faces(&tool.solid);
     let mut beside: Vec<usize> = bounds
         .iter()
@@ -508,25 +614,19 @@ fn imprinted(body: Body, mut h: Option<History>, n: Vec3, d: f64, tool: &Body, t
     // One split per surface: the halves of a round side lie on one cylinder, and splitting
     // along it again re-traces the line already there, leaving a sliver (or not) depending
     // on how the second trace falls.
-    let mut used: Vec<usize> = Vec::new();
+    let mut used: Vec<Option<crate::FaceSurface>> = Vec::new();
     for t in beside {
-        if used.iter().any(|u| same_surface(tool, *u, t, tol)) {
+        let surface = crate::face_surface(tool, t);
+        if used.iter().any(|u| same_surface(u, &surface, tol)) {
             continue;
         }
-        used.push(t);
-        let faces = faces_in(&body, n, d, tol);
+        used.push(surface);
+        let faces = near(&body, faces_in(&body, n, d, tol));
         if faces.is_empty() {
             break;
         }
-        // Faces the tool's face does not cross stay as they are.
-        let crossed: Vec<usize> = faces
-            .into_iter()
-            .filter(|f| crate::splitface::split_any(&body, &[*f], &crate::SplitTool::Face { body: tool, face: t }).is_ok())
-            .collect();
-        if crossed.is_empty() {
-            continue;
-        }
-        let (split, _) = crate::splitface::split_any(&body, &crossed, &crate::SplitTool::Face { body: tool, face: t })?;
+        // Faces the tool's face does not cross stay as they are; none crossed is an error.
+        let Ok((split, _)) = crate::splitface::split_any(&body, &faces, &crate::SplitTool::Face { body: tool, face: t }) else { continue };
         h = crate::boolean_record::through(&split, 0, h.as_ref());
         body = split;
     }
@@ -998,3 +1098,7 @@ pub(crate) fn bore_union(a: &Body, b: &Body, accept: &dyn Fn(&Body) -> bool) -> 
     }
     None
 }
+
+#[cfg(test)]
+#[path = "coplanar_tests.rs"]
+mod tests;

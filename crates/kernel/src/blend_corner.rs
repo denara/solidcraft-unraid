@@ -128,6 +128,150 @@ fn hit(v: Vec3, u: Vec3, t: Vec3, s: f64) -> Result<Vec3> {
     Ok(v + u * (s / k))
 }
 
+/// Unit direction in which a (curved) edge leaves its end vertex `v`.
+fn leaving(e: &mt::Edge, v: &mt::Vertex) -> Option<Vec3> {
+    use mt::{BoundedCurve, ParametricCurve};
+    let c = e.curve();
+    let (t0, t1) = c.range_tuple();
+    let at_front = e.absolute_front() == v;
+    let d = c.der(if at_front { t0 } else { t1 });
+    let d = Vec3::new(d.x, d.y, d.z);
+    (if at_front { d } else { d * -1.0 }).normalized()
+}
+
+/// Point where the contact line at setback `s` (in-face direction `t`) crosses a curved edge
+/// leaving `v`: the first along it from `v`.
+fn crossing(e: &mt::Edge, v: Vec3, t: Vec3, s: f64) -> Result<Vec3> {
+    use mt::{BoundedCurve, ParametricCurve};
+    let c = e.curve();
+    let (t0, t1) = c.range_tuple();
+    let from_front = crate::body::from_p3(e.absolute_front().point()).dist(v) <= crate::body::from_p3(e.absolute_back().point()).dist(v);
+    let at = |f: f64| crate::body::from_p3(c.subs(if from_front { t0 + (t1 - t0) * f } else { t1 - (t1 - t0) * f }));
+    let g = |f: f64| (at(f) - v).dot(t) - s;
+    let steps = 256;
+    let mut lo = 0.0;
+    for i in 1..=steps {
+        let hi = i as f64 / steps as f64;
+        if g(hi) >= 0.0 {
+            let (mut a, mut b) = (lo, hi);
+            for _ in 0..60 {
+                let m = (a + b) * 0.5;
+                if g(m) >= 0.0 {
+                    b = m;
+                } else {
+                    a = m;
+                }
+            }
+            return Ok(at((a + b) * 0.5));
+        }
+        lo = hi;
+    }
+    Err(too_large("a fillet larger than the faces next to it"))
+}
+
+/// The cylinder's (a chamfer's plane's) section by a curved end face `g`, from `a` (on the
+/// contact line with in-face direction `ta`) to `b` (`tb`) round the edge's end `v` (its other
+/// end `far`): points of the blend's cross-sections on the face, interpolated; within tolerance
+/// of both.
+#[allow(clippy::too_many_arguments)]
+fn curved_section(
+    sel: &Sel,
+    g: &mt::Face,
+    (a, ta): (Vec3, Vec3),
+    (b, tb): (Vec3, Vec3),
+    v: Vec3,
+    far: Vec3,
+    round: bool,
+    size: f64,
+) -> Result<mt::Curve> {
+    use mt::ParametricCurve;
+    let tolerance = (size * 1e-5).clamp(1e-5, 0.001);
+    let fail = || too_large("a fillet larger than the faces next to it");
+    // Position along the edge, and the cross-section there (fraction 0 on `ta`'s side).
+    let along = |x: Vec3| (x - sel.p0).dot(sel.d);
+    let point = |f: f64, l: f64| -> Vec3 {
+        let apex = sel.p0 + sel.d * l;
+        let (pa, pb) = (apex + ta * sel.s, apex + tb * sel.s);
+        if round { crate::body::from_p3(conic(pa, apex, pb, sel.w).subs(f)) } else { pa + (pb - pa) * f }
+    };
+    // The face's surface, each search started from the last one's answer (the points come in
+    // small steps).
+    let surface = g.oriented_surface();
+    let last = std::cell::Cell::new(None::<(f64, f64)>);
+    let side = |x: Vec3| -> f64 {
+        use mt::{ParametricSurface, ParametricSurface3D, SearchNearestParameter};
+        let found = last
+            .get()
+            .and_then(|hint| surface.search_nearest_parameter(p3(x), Some(hint), 20))
+            .or_else(|| surface.search_nearest_parameter(p3(x), None, 100));
+        found.map_or(f64::NAN, |(u, w)| {
+            last.set(Some((u, w)));
+            let n = surface.normal(u, w);
+            (x - crate::body::from_p3(surface.subs(u, w))).dot(Vec3::new(n.x, n.y, n.z))
+        })
+    };
+    let (la, lb) = (along(a), along(b));
+    // Out of the material: toward the edge's end.
+    let outward = if along(v) >= along(far) { 1.0 } else { -1.0 };
+    let step = ((lb - la).abs().max(sel.s * 0.05)) / 16.0;
+    let root = |f: f64| -> Option<f64> {
+        let guess = la + (lb - la) * f;
+        let gv = side(point(f, guess));
+        if !gv.is_finite() {
+            return None;
+        }
+        let dir = if gv < 0.0 { outward } else { -outward };
+        let mut prev = (guess, gv);
+        for i in 1..=4096 {
+            let l = guess + dir * step * i as f64;
+            let cur = (l, side(point(f, l)));
+            if !cur.1.is_finite() {
+                return None;
+            }
+            if (prev.1 < 0.0) != (cur.1 < 0.0) {
+                let (mut x, mut y) = (prev, cur);
+                for _ in 0..60 {
+                    let m = (x.0 + y.0) * 0.5;
+                    let gm = side(point(f, m));
+                    if (gm < 0.0) == (x.1 < 0.0) {
+                        x = (m, gm);
+                    } else {
+                        y = (m, gm);
+                    }
+                }
+                return Some((x.0 + y.0) * 0.5);
+            }
+            prev = cur;
+        }
+        None
+    };
+    // Closer together toward the ends, where the face may only touch the blend.
+    let across = |t: f64| (1.0 - (std::f64::consts::PI * t).cos()) * 0.5;
+    let mut m = 8;
+    loop {
+        let mut pts = vec![a];
+        for i in 1..m {
+            let f = across(i as f64 / m as f64);
+            pts.push(point(f, root(f).ok_or_else(fail)?));
+        }
+        pts.push(b);
+        let curve = crate::build::interpolate_cubic(&pts).ok_or_else(|| KernelError::Failed("fillet: end curve".into()))?;
+        let accurate = (0..m).all(|i| {
+            let t = (i as f64 + 0.5) / m as f64;
+            let f = across(t);
+            let x = crate::body::from_p3(curve.subs(t));
+            root(f).is_some_and(|l| point(f, l).dist(x) <= tolerance) && side(x).abs() <= tolerance
+        });
+        if accurate {
+            return Ok(mt::Curve::BSplineCurve(curve));
+        }
+        if m >= 128 {
+            return Err(KernelError::Failed("fillet: could not fit the blend's end in a curved face".into()));
+        }
+        m *= 2;
+    }
+}
+
 /// Point in a face where the contact lines of two edges from `v` (directions `u1`, `u2`, in-face
 /// directions `t1`, `t2`, setbacks `s1`, `s2`) cross.
 fn meet(v: Vec3, (u1, t1, s1): (Vec3, Vec3, f64), (u2, t2, s2): (Vec3, Vec3, f64)) -> Result<Vec3> {
@@ -292,18 +436,26 @@ fn build(cur: &Body, sel_pts: &[(Vec3, f64)], round: bool) -> Result<Body> {
         if eids.len() != 3 || fids.len() != 3 {
             return Err(unsupported("fillets ending where more than three edges meet"));
         }
-        if fids.iter().any(|f| normal(*f).is_none()) {
+        // Where one fillet ends, the face it ends on may be curved (and the edges it shares
+        // with the others): the blend ends in that face's section of the cylinder.
+        let chosen = eids.iter().filter(|id| sels.contains_key(id)).count();
+        let sides: Vec<usize> = eids.iter().filter_map(|id| sels.get(id)).flat_map(|s| [s.fa, s.fb]).collect();
+        if fids.iter().any(|f| normal(*f).is_none() && (chosen != 1 || sides.contains(f))) {
             return Err(unsupported("fillets ending on curved faces"));
         }
         let pv = vtx(v);
         let mut list = Vec::new();
         for id in eids {
             let e = edges.get(id).ok_or_else(|| KernelError::Failed("edge".into()))?;
-            if !matches!(e.curve(), mt::Curve::Line(_)) {
+            let u = if matches!(e.curve(), mt::Curve::Line(_)) {
+                let other = if e.absolute_front() == v { e.absolute_back() } else { e.absolute_front() };
+                (vtx(other) - pv).normalized()
+            } else if chosen == 1 && !sels.contains_key(id) {
+                leaving(e, v)
+            } else {
                 return Err(unsupported("fillets ending next to curved edges"));
             }
-            let other = if e.absolute_front() == v { e.absolute_back() } else { e.absolute_front() };
-            let u = (vtx(other) - pv).normalized().ok_or_else(|| KernelError::Failed("zero-length edge".into()))?;
+            .ok_or_else(|| KernelError::Failed("zero-length edge".into()))?;
             list.push((*id, u));
         }
         around.insert(*vid, Around { edges: list });
@@ -345,14 +497,29 @@ fn build(cur: &Body, sel_pts: &[(Vec3, f64)], round: bool) -> Result<Body> {
                     let s1 = sel(*e1)?;
                     let (f12, f31) = (face_with(*e1, *e2)?, face_with(*e1, *e3)?);
                     let f23 = face_with(*e2, *e3)?;
-                    let p2 = hit(*u2, s1.t(f12), s1.s, f12)?;
-                    let p3_ = hit(*u3, s1.t(f31), s1.s, f31)?;
+                    // Along a curved neighbouring edge: where it crosses the contact line.
+                    let reach = |e: mt::EdgeID, u: Vec3, f: usize| -> Result<Vec3> {
+                        match edges.get(&e) {
+                            Some(x) if !matches!(x.curve(), mt::Curve::Line(_)) => crossing(x, v, s1.t(f), s1.s),
+                            _ => hit(u, s1.t(f), s1.s, f),
+                        }
+                    };
+                    let p2 = reach(*e2, *u2, f12)?;
+                    let p3_ = reach(*e3, *u3, f31)?;
                     let (a, b) = (builder::vertex(p3(p2)), builder::vertex(p3(p3_)));
                     endpt.insert((*e2, *vid, None), a.clone());
                     endpt.insert((*e1, *vid, Some(f12)), a.clone());
                     endpt.insert((*e3, *vid, None), b.clone());
                     endpt.insert((*e1, *vid, Some(f31)), b.clone());
-                    let c = if round { edge(&a, &b, mt::Curve::NurbsCurve(conic(p2, v, p3_, s1.w)))? } else { builder::line(&a, &b) };
+                    let c = match faces.get(f23) {
+                        Some(g) if normal(f23).is_none() => {
+                            let e1v = edges.get(e1).ok_or_else(|| KernelError::Failed("edge".into()))?;
+                            let far = if e1v.absolute_front().id() == *vid { vtx(e1v.absolute_back()) } else { vtx(e1v.absolute_front()) };
+                            edge(&a, &b, curved_section(s1, g, (p2, s1.t(f12)), (p3_, s1.t(f31)), v, far, round, size)?)?
+                        }
+                        _ if round => edge(&a, &b, mt::Curve::NurbsCurve(conic(p2, v, p3_, s1.w)))?,
+                        _ => builder::line(&a, &b),
+                    };
                     list.push((c, vec![Owner::Face(f23), Owner::Cyl(*e1)]));
                 }
                 ([(ea, ua), (eb, ub)], [(e3, u3)]) => {
@@ -467,7 +634,13 @@ fn build(cur: &Body, sel_pts: &[(Vec3, f64)], round: bool) -> Result<Body> {
             if (pb - pa).dot(orig) <= size * 1e-9 * orig.len() {
                 return Err(too_large("a fillet larger than the faces next to it"));
             }
-            let x = builder::line(&a, &b);
+            let x = if matches!(e.curve(), mt::Curve::Line(_)) {
+                builder::line(&a, &b)
+            } else {
+                // A curved edge next to a fillet's end, shortened along its own curve.
+                let moved = |n: &mt::Vertex, o: &mt::Vertex| (n != o).then(|| n.clone());
+                crate::curveblend::trim_curved_seam(&e.absolute_clone(), moved(&a, e.absolute_front()), moved(&b, e.absolute_back()), size)?
+            };
             lines.insert((e.id(), f), x.clone());
             Ok(x)
         };

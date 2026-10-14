@@ -3,6 +3,10 @@
 //! Methods (JSON lines over the host's transport, `{"id", "method", "params"}`):
 //! - `engine.execute {command, params}`: run any command with JSON parameters (no dialogs)
 //! - `engine.script {commands: [...]}`: run a command script
+//! - `engine.batch {commands: [...], rollback?}`: the steps in one request, each as
+//!   `engine.execute` runs it; stops at the first failure and goes back to the checkpoint
+//!   (per-step results, `failed`, `undone`). Refused (`engine.batch unavailable: …`) while the
+//!   agent cursor is shown or when a step loads a file
 //! - `engine.commands`: every command with tab, panel, params and enablement
 //! - `document.inspect {measure?}`: the design (parameters, timeline, bodies, sketches)
 //! - `ui.inspect`: UI state, viewport rect, camera, tool and dialog
@@ -37,6 +41,7 @@
 use std::sync::mpsc::Sender;
 
 use serde_json::{Value, json};
+use solidcraft_engine::io::vfs;
 use solidcraft_engine::render::{StandardView, render_png};
 
 use crate::SolveApp;
@@ -85,28 +90,102 @@ fn key_from(name: &str) -> Option<egui::Key> {
     })
 }
 
+/// Run one command as `engine.execute` does: through `app.run`, then the first-body fit and the
+/// camera the command asked for.
+fn execute(app: &mut SolveApp, id: &str, params: Value) -> Result<Value, String> {
+    let r = app.run(id, params);
+    if r.is_ok()
+        && id != "view.navigate"
+        && app.session.active_sketch.is_none()
+        && app.session.world_state().bodies.len() == 1
+        && app.session.undo.len() <= 2
+    {
+        app.fit_view();
+    }
+    // After the first-body fit, so a camera the command asked for (`view.apply`) wins.
+    app.follow_view_request(false);
+    r
+}
+
+/// A batch step's command id.
+fn command(step: &Value) -> Option<&str> {
+    step.get("command").or_else(|| step.get("id")).and_then(Value::as_str)
+}
+
+/// Most steps in one `engine.batch` (as in the MCP `batch` tool).
+const MAX_BATCH: usize = 10_000;
+
+/// Commands that load a file: through `engine.execute` they go to the app's file loader
+/// (`file_load::control`: off the window thread, with progress and Cancel), which a batch would
+/// bypass.
+const LOADS_A_FILE: [&str; 3] = ["doc.open", "file.insert_step", "file.insert_mesh"];
+
+/// `engine.batch {commands, rollback?}`: the steps in one request, so in one frame (#743). Each
+/// step runs as `engine.execute` runs it; the first failure stops the batch and, with
+/// `rollback` (the default), the design goes back to its checkpoint. Step failures are part of
+/// the reply; refusals (`engine.batch unavailable: …`) come before anything runs, so the client
+/// can send the steps one by one instead.
+fn batch(app: &mut SolveApp, p: &Value) -> Outcome {
+    let Some(steps) = p.get("commands").and_then(Value::as_array).filter(|s| s.len() <= MAX_BATCH) else {
+        return err(format!("engine.batch: commands must be an array of at most {MAX_BATCH} steps"));
+    };
+    // The agent cursor acts out each `engine.execute` on its own.
+    if app.ui.agent_cursor.show {
+        return err("engine.batch unavailable: the agent cursor is shown");
+    }
+    if let Some((i, c)) = steps.iter().enumerate().find_map(|(i, step)| command(step).filter(|c| LOADS_A_FILE.contains(c)).map(|c| (i, c))) {
+        return err(format!("engine.batch unavailable: step {i} ({c}) loads a file"));
+    }
+    let rollback = p.get("rollback").and_then(Value::as_bool).unwrap_or(true);
+    let checkpoint = if rollback { app.run("edit.checkpoint", json!({})).ok().and_then(|v| v["checkpoint"].as_u64()) } else { None };
+    let mut results = Vec::with_capacity(steps.len());
+    for (i, step) in steps.iter().enumerate() {
+        let r = match command(step) {
+            Some(id) => execute(app, id, step.get("params").cloned().filter(|v| !v.is_null()).unwrap_or(json!({}))),
+            None => Err("missing `command`".to_string()),
+        };
+        match r {
+            Ok(v) => results.push(v),
+            Err(e) => {
+                let restored = checkpoint.is_some_and(|id| app.run("edit.restore_checkpoint", json!({"checkpoint": id})).is_ok());
+                let failed = json!({"index": i, "command": command(step), "error": e});
+                return ok(json!({"completed": i, "results": results, "failed": failed, "undone": if restored { i } else { 0 }}));
+            }
+        }
+    }
+    if let Some(id) = checkpoint {
+        let _ = app.run("edit.restore_checkpoint", json!({"checkpoint": id, "forget": true}));
+    }
+    ok(json!({"completed": results.len(), "results": results, "undone": 0}))
+}
+
 pub fn handle(app: &mut SolveApp, ctx: &egui::Context, req: &ControlRequest) -> Outcome {
-    let p = &req.params;
+    // A request from an MCP server carries the folders its agent may use; every file the
+    // request reaches must lie inside them (docs/mcp.md).
+    let Some(allowed) = req.params.get("allow_paths") else { return dispatch(app, ctx, &req.method, &req.params) };
+    let Some(roots) = allowed.as_array().and_then(|a| a.iter().map(|r| r.as_str().map(std::path::PathBuf::from)).collect::<Option<Vec<_>>>()) else {
+        return err("`allow_paths` must be a list of folders");
+    };
+    let mut p = req.params.clone();
+    if let Some(o) = p.as_object_mut() {
+        o.remove("allow_paths");
+    }
+    // Plus the app's own recovery folder and, when it is a safe one, the open design's folder.
+    let roots = roots.into_iter().chain(solidcraft_engine::recovery::default_dir());
+    let scope = vfs::PathScope::new(roots).with_design(app.session.path.as_deref());
+    vfs::scoped(Some(scope), || dispatch(app, ctx, &req.method, &p))
+}
+
+fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) -> Outcome {
     let s = |k: &str| p.get(k).and_then(Value::as_str);
     let f = |k: &str| p.get(k).and_then(Value::as_f64).filter(|x| x.is_finite());
     let b = |k: &str| p.get(k).and_then(Value::as_bool).unwrap_or(false);
-    match req.method.as_str() {
+    match method {
         "engine.execute" | "command" => {
             let Some(id) = s("command").or(s("id")) else { return err("missing `command`") };
-            let params = p.get("params").cloned().filter(|v| !v.is_null()).unwrap_or(json!({}));
-            let r = app.run(id, params);
-            if r.is_ok()
-                && id != "view.navigate"
-                && app.session.active_sketch.is_none()
-                && app.session.world_state().bodies.len() == 1
-                && app.session.undo.len() <= 2
-            {
-                app.fit_view();
-            }
-            // After the first-body fit, so a camera the command asked for (`view.apply`) wins.
-            app.follow_view_request(false);
-            wrap(r)
+            wrap(execute(app, id, p.get("params").cloned().filter(|v| !v.is_null()).unwrap_or(json!({}))))
         }
+        "engine.batch" => batch(app, p),
         "ui.agent_cursor" => {
             let s = &mut app.ui.agent_cursor;
             if let Some(v) = p.get("show").and_then(Value::as_bool) {
@@ -235,7 +314,7 @@ pub fn handle(app: &mut SolveApp, ctx: &egui::Context, req: &ControlRequest) -> 
             let (Some(x), Some(y)) = (f("x"), f("y")) else { return err("missing x/y") };
             let pos = egui::pos2(x as f32, y as f32);
             app.synthetic.push(egui::Event::PointerMoved(pos));
-            if req.method == "ui.click" {
+            if method == "ui.click" {
                 let button = match s("button") {
                     Some("right") => egui::PointerButton::Secondary,
                     Some("middle") => egui::PointerButton::Middle,
@@ -534,7 +613,10 @@ pub fn handle(app: &mut SolveApp, ctx: &egui::Context, req: &ControlRequest) -> 
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w.clamp(320.0, 8192.0) as f32, h.clamp(240.0, 8192.0) as f32)));
             ok(Value::Null)
         }
-        "ui.screenshot" => Outcome::Screenshot { path: s("path").map(str::to_string) },
+        "ui.screenshot" => match s("path").map(vfs::check) {
+            Some(Err(e)) => err(e),
+            _ => Outcome::Screenshot { path: s("path").map(str::to_string) },
+        },
         "ui.render" => {
             let w = f("width").unwrap_or(1280.0).clamp(16.0, 8192.0) as usize;
             let h = f("height").unwrap_or(800.0).clamp(16.0, 8192.0) as usize;
@@ -543,7 +625,7 @@ pub fn handle(app: &mut SolveApp, ctx: &egui::Context, req: &ControlRequest) -> 
             let scene = solidcraft_engine::view::scene_with_section(&app.session, &app.cam, crate::viewport::section_plane(app));
             let Some(png) = render_png(&scene, &app.cam, w, h) else { return err("render failed") };
             match s("path") {
-                Some(path) => match std::fs::write(path, &png) {
+                Some(path) => match vfs::check(path).and_then(|()| std::fs::write(path, &png)) {
                     Ok(()) => ok(json!({"path": path, "bytes": png.len()})),
                     Err(e) => err(e),
                 },
@@ -620,5 +702,196 @@ mod tests {
         app.dialog = None;
         assert!(render(&mut app, &dir.join("committed.png")) == preview, "the committed section renders differently");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn batch(h: &mut crate::scenario::Harness, params: serde_json::Value) -> serde_json::Value {
+        h.call("engine.batch", params)
+    }
+
+    fn inspect(h: &mut crate::scenario::Harness) -> serde_json::Value {
+        h.call("document.inspect", json!({}))["result"].clone()
+    }
+
+    /// Timing fields (`ms`) differ from run to run.
+    fn without_timings(v: &serde_json::Value) -> serde_json::Value {
+        match v {
+            serde_json::Value::Object(o) => o.iter().filter(|(k, _)| *k != "ms").map(|(k, v)| (k.clone(), without_timings(v))).collect(),
+            serde_json::Value::Array(a) => a.iter().map(without_timings).collect(),
+            v => v.clone(),
+        }
+    }
+
+    /// #743: a batch is one request through the app's queue, answered within a frame, however
+    /// many steps it has.
+    #[test]
+    fn engine_batch_runs_in_one_frame() {
+        let mut h = crate::scenario::Harness::new();
+        let steps: Vec<_> = (0..40)
+            .flat_map(|_| [json!({"command": "sketch.create", "params": {"plane": "XY"}}), json!({"command": "sketch.finish", "params": {}})])
+            .collect();
+        let (v, frames) = h.call_queued("engine.batch", json!({"commands": steps}));
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(v["result"]["completed"], 80, "{v}");
+        assert_eq!(v["result"]["results"].as_array().map(Vec::len), Some(80));
+        assert!(v["result"].get("failed").is_none(), "{v}");
+        assert!(frames <= 2, "a batch of 80 steps took {frames} frames");
+        assert_eq!(inspect(&mut h)["sketches"].as_array().map(Vec::len), Some(40));
+    }
+
+    #[test]
+    fn engine_batch_rolls_back_at_the_first_failure() {
+        let mut h = crate::scenario::Harness::new();
+        assert_eq!(h.call("engine.execute", json!({"command": "solid.box", "params": {"length": 10, "width": 10, "height": 10}}))["ok"], true);
+        let before = inspect(&mut h);
+        let v = batch(
+            &mut h,
+            json!({"commands": [
+                {"command": "solid.sphere", "params": {"radius": 3, "center": [50, 0, 0]}},
+                {"command": "solid.extrude", "params": {"distance": "bogus +"}},
+                {"command": "solid.sphere", "params": {"radius": 3, "center": [80, 0, 0]}},
+            ]}),
+        );
+        assert_eq!(v["ok"], true, "{v}");
+        let r = &v["result"];
+        assert_eq!((r["completed"].clone(), r["failed"]["index"].clone(), r["undone"].clone()), (json!(1), json!(1), json!(1)), "{v}");
+        assert_eq!(r["failed"]["command"], "solid.extrude");
+        let after = inspect(&mut h);
+        assert_eq!(after["undo"], before["undo"], "{after}");
+        assert_eq!(after["bodies"], before["bodies"]);
+        assert_eq!(without_timings(&after["timeline"]), without_timings(&before["timeline"]));
+    }
+
+    #[test]
+    fn engine_batch_without_rollback_keeps_completed_steps() {
+        let mut h = crate::scenario::Harness::new();
+        let v = batch(
+            &mut h,
+            json!({"rollback": false, "commands": [
+                {"command": "solid.sphere", "params": {"radius": 3}},
+                {"command": "NoSuchCommand"},
+            ]}),
+        );
+        assert_eq!(v["result"]["failed"]["index"], 1, "{v}");
+        assert_eq!(v["result"]["undone"], 0, "{v}");
+        assert_eq!(inspect(&mut h)["bodies"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn engine_batch_step_without_a_command_fails_that_step() {
+        let mut h = crate::scenario::Harness::new();
+        let v = batch(&mut h, json!({"commands": [{"params": {}}]}));
+        assert_eq!(v["result"]["failed"]["index"], 0, "{v}");
+        assert!(v["result"]["failed"]["error"].as_str().is_some_and(|e| e.contains("missing `command`")), "{v}");
+    }
+
+    #[test]
+    fn engine_batch_is_refused_when_a_step_loads_a_file() {
+        let mut h = crate::scenario::Harness::new();
+        let v = batch(
+            &mut h,
+            json!({"commands": [
+                {"command": "solid.box", "params": {"length": 10, "width": 10, "height": 10}},
+                {"command": "doc.open", "params": {"path": "elsewhere.solidcraft"}},
+            ]}),
+        );
+        assert_eq!(v["ok"], false, "{v}");
+        assert_eq!(v["error"], "engine.batch unavailable: step 1 (doc.open) loads a file", "{v}");
+        assert_eq!(inspect(&mut h)["bodies"].as_array().map(Vec::len), Some(0), "nothing may run before the refusal");
+    }
+
+    #[test]
+    fn engine_batch_is_refused_while_the_agent_cursor_is_shown() {
+        let mut h = crate::scenario::Harness::new();
+        assert_eq!(h.call("ui.agent_cursor", json!({"show": true}))["ok"], true);
+        let v = batch(&mut h, json!({"commands": [{"command": "solid.box", "params": {"length": 10, "width": 10, "height": 10}}]}));
+        assert_eq!(v["ok"], false, "{v}");
+        assert!(v["error"].as_str().is_some_and(|e| e.starts_with("engine.batch unavailable")), "{v}");
+        assert_eq!(inspect(&mut h)["bodies"].as_array().map(Vec::len), Some(0));
+    }
+
+    /// Every step of a batch from an MCP server stays inside the agent's folders (#205), as an
+    /// `engine.execute` would.
+    #[test]
+    fn engine_batch_stays_inside_allow_paths() {
+        let mut h = crate::scenario::Harness::new();
+        let base = vfs::temp_dir().join(format!("solidcraft-batch-scope-{}", std::process::id()));
+        let (root, out) = (base.join("root"), base.join("out"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        let export = |d: &std::path::Path| json!({"command": "file.export", "params": {"path": d.join("a.step").to_string_lossy()}});
+        let v = batch(
+            &mut h,
+            json!({"allow_paths": [root.to_string_lossy()], "commands": [
+                {"command": "solid.box", "params": {"length": 10, "width": 10, "height": 10}},
+                export(&root),
+                export(&out),
+            ]}),
+        );
+        assert_eq!(v["result"]["failed"]["index"], 2, "{v}");
+        assert!(v["result"]["failed"]["error"].as_str().is_some_and(|e| e.contains("outside the folders this agent may use")), "{v}");
+        assert!(root.join("a.step").exists());
+        assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0, "nothing written outside");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Each step runs as `engine.execute` runs it: same results, same design.
+    #[test]
+    fn engine_batch_matches_engine_execute() {
+        let steps = [
+            json!({"command": "sketch.create", "params": {"plane": "XY"}}),
+            json!({"command": "sketch.rectangle.two_point", "params": {"p0": [0, 0], "p1": [40, 30]}}),
+            json!({"command": "sketch.finish", "params": {}}),
+            json!({"command": "solid.extrude", "params": {"distance": 20}}),
+        ];
+        let mut a = crate::scenario::Harness::new();
+        let batched = batch(&mut a, json!({"commands": steps}));
+        let mut b = crate::scenario::Harness::new();
+        let one_by_one: Vec<_> = steps.iter().map(|s| b.call("engine.execute", s.clone())["result"].clone()).collect();
+        assert_eq!(without_timings(&batched["result"]["results"]), without_timings(&json!(one_by_one)), "{batched}");
+        assert_eq!(without_timings(&inspect(&mut a)["timeline"]), without_timings(&inspect(&mut b)["timeline"]));
+        assert_eq!(a.app.cam, b.app.cam, "the first-body fit must happen as for engine.execute");
+    }
+
+    /// A request carrying `allow_paths` (from an MCP server, #205) reaches files only inside
+    /// those folders; the same request without it, like the user's own dialogs, is unconfined.
+    #[test]
+    fn requests_with_allow_paths_stay_inside_them() {
+        let mut s = Session::default();
+        s.execute("solid.box", &json!({"length": 10, "width": 10, "height": 10})).unwrap();
+        let mut app = SolveApp::new(s, Services::default());
+        let base = vfs::temp_dir().join(format!("solidcraft-control-scope-{}", std::process::id()));
+        let (root, out) = (base.join("root"), base.join("out"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        let at = |d: &std::path::Path, f: &str| d.join(f).to_string_lossy().to_string();
+        let mut call = |method: &str, mut params: Value, scoped: bool| {
+            if scoped {
+                params["allow_paths"] = json!([root.to_string_lossy()]);
+            }
+            let (req, _rx) = ControlRequest::new(method, params);
+            match handle(&mut app, &egui::Context::default(), &req) {
+                Outcome::Done(v) => v,
+                Outcome::Screenshot { path } => json!({"ok": true, "screenshot": path}),
+            }
+        };
+        let export = |p: String| json!({"command": "file.export", "params": {"path": p}});
+        assert_eq!(call("engine.execute", export(at(&root, "a.step")), true)["ok"], true);
+        assert_eq!(call("ui.render", json!({"path": at(&root, "a.png"), "width": 32, "height": 32}), true)["ok"], true);
+        assert_eq!(call("ui.screenshot", json!({"path": at(&root, "b.png")}), true)["ok"], true);
+        for (method, params) in [
+            ("engine.execute", export(at(&out, "a.step"))),
+            ("engine.execute", export(at(&root, "../out/a.step"))),
+            ("engine.script", json!({"commands": [{"command": "file.export", "params": {"path": at(&out, "a.step")}}]})),
+            ("ui.render", json!({"path": at(&out, "a.png"), "width": 32, "height": 32})),
+            ("ui.screenshot", json!({"path": at(&out, "b.png")})),
+        ] {
+            let v = call(method, params, true);
+            assert!(v["ok"] == false && v.to_string().contains("outside the folders this agent may use"), "{method}: {v}");
+        }
+        assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0, "nothing written outside");
+        assert_eq!(call("engine.execute", export(at(&out, "a.step")), false)["ok"], true, "without allow_paths: unconfined");
+        let bad = call("engine.execute", json!({"command": "file.new", "allow_paths": "/"}), false);
+        assert!(bad["error"].as_str().is_some_and(|e| e.contains("allow_paths")), "{bad}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

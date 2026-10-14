@@ -8,16 +8,26 @@ use std::ops::Deref;
 use truck_meshalgo::prelude::*;
 use truck_topology::*;
 
+/// SolidCraft: `p` moved into the surface's parameter range (a point found on the boundary can lie a
+/// hair outside it, and a search started from there fails).
+fn clamped<P, S: ParametricSurface<Point = P>>(surface: &S, p: Point2) -> Point2 {
+    match surface.try_range_tuple() {
+        (Some((u0, u1)), Some((v0, v1))) => Point2::new(p.x.clamp(u0, u1), p.y.clamp(v0, v1)),
+        _ => p,
+    }
+}
+
 fn create_parameter_boundary<P, C, S>(
     face: &Face<P, C, S>,
     wire: &Wire<P, C>,
     polys: &mut HashMap<EdgeID<C>, PolylineCurve<P>>,
     tol: f64,
+    lenient: bool,
 ) -> Option<PolylineCurve<Point2>>
 where
     P: Copy,
     C: BoundedCurve<Point = P> + ParameterDivision1D<Point = P>,
-    S: Clone + SearchParameter<D2, Point = P> + SearchNearestParameter<D2, Point = P>,
+    S: Clone + ParametricSurface<Point = P> + SearchParameter<D2, Point = P> + SearchNearestParameter<D2, Point = P>,
 {
     let surface = face.surface();
     let pt = wire.front_vertex().unwrap().point();
@@ -35,10 +45,23 @@ where
         });
         let mut p = *vec.last().unwrap();
         let closure = |q: &P| -> Option<Point2> {
-            p = surface
-                .search_parameter(*q, Some(p.into()), 100)
-                .or_else(|| surface.search_nearest_parameter(*q, Some(p.into()), 100))?
-                .into();
+            // SolidCraft: the points of an intersection curve on a lofted or swept surface lie on
+            // the seam between its halves, a hair outside the parameter range, and Newton's
+            // method from the previous point's parameter then fails (or the surface bends away
+            // from it). `lenient`, the second try after the first gave up: start from the hint
+            // moved into the range, and as a last resort search the whole surface.
+            let hint = if lenient { clamped(&surface, p) } else { p };
+            let found = surface
+                .search_parameter(*q, Some(hint.into()), 100)
+                .or_else(|| surface.search_nearest_parameter(*q, Some(hint.into()), 100));
+            let found = if lenient {
+                found
+                    .or_else(|| surface.search_parameter(*q, None, 100))
+                    .or_else(|| surface.search_nearest_parameter(*q, None, 100))
+            } else {
+                found
+            };
+            p = found?.into();
             Some(p)
         };
         let add: Option<Vec<Point2>> = match edge.orientation() {
@@ -48,6 +71,18 @@ where
         vec.append(&mut add?);
         Some(vec)
     })?;
+    // SolidCraft: a lenient boundary whose points jump half the parameter range or more has been
+    // found across a periodic surface's seam by the whole-surface search (on a cylinder the
+    // points of one edge landed at both ends of its angle): it would divide the face wrongly, so
+    // the face is left undivided as before.
+    if lenient {
+        let (u, v) = surface.try_range_tuple();
+        let half = |r: Option<(f64, f64)>| r.map_or(f64::INFINITY, |(a, b)| (b - a).abs() / 2.0);
+        let (hu, hv) = (half(u), half(v));
+        if vec.windows(2).any(|w| (w[1].x - w[0].x).abs() >= hu || (w[1].y - w[0].y).abs() >= hv) {
+            return None;
+        }
+    }
     Some(PolylineCurve(vec))
 }
 
@@ -65,12 +100,15 @@ fn divide_one_face<C, S>(
 ) -> Option<Vec<FaceWithShapesOpStatus<C, S>>>
 where
     C: BoundedCurve<Point = Point3> + ParameterDivision1D<Point = Point3>,
-    S: Clone + SearchParameter<D2, Point = Point3> + SearchNearestParameter<D2, Point = Point3>,
+    S: Clone + ParametricSurface3D + SearchParameter<D2, Point = Point3> + SearchNearestParameter<D2, Point = Point3>,
 {
     let (mut pre_faces, mut negative_wires) = (Vec::new(), Vec::new());
     let mut map = HashMap::default();
     loops.iter().try_for_each(|wire| {
-        let poly = crate::tr!(create_parameter_boundary(face, wire, &mut map, tol), "parameter boundary");
+        let poly = crate::tr!(
+            create_parameter_boundary(face, wire, &mut map, tol, false).or_else(|| create_parameter_boundary(face, wire, &mut map, tol, true)),
+            "parameter boundary"
+        );
         match poly.area() > 0.0 {
             true => pre_faces.push(vec![WireChunk { poly, wire }]),
             false => negative_wires.push(WireChunk { poly, wire }),
@@ -133,7 +171,7 @@ pub fn divide_faces<C, S>(
 ) -> Option<FacesClassification<Point3, C, S>>
 where
     C: BoundedCurve<Point = Point3> + ParameterDivision1D<Point = Point3>,
-    S: Clone + SearchParameter<D2, Point = Point3> + SearchNearestParameter<D2, Point = Point3>,
+    S: Clone + ParametricSurface3D + SearchParameter<D2, Point = Point3> + SearchNearestParameter<D2, Point = Point3>,
 {
     let mut res = FacesClassification::<Point3, C, S>::default();
     shell

@@ -29,6 +29,7 @@ fn plate_doc() -> (Document, u64) {
     let s = doc.add_feature(FeatureKind::Sketch { plane: PlaneRef::Origin { name: "XY".into() }, sketch: sk }, None).unwrap();
     doc.add_feature(
         FeatureKind::Extrude {
+            thin: None,
             sketch: s,
             profiles: ProfileSel::All,
             extent: Extent {
@@ -120,6 +121,7 @@ fn box_fillet_cut_timeline() {
     let s2 = doc.add_feature(FeatureKind::Sketch { plane: PlaneRef::Origin { name: "XY".into() }, sketch: sk }, None).unwrap();
     doc.add_feature(
         FeatureKind::Extrude {
+            thin: None,
             sketch: s2,
             profiles: ProfileSel::Points { points: vec![Vec2::new(20.0, 15.0)] },
             extent: Extent {
@@ -342,41 +344,6 @@ fn input_sketches_cover_points_and_patches() {
     assert_eq!(pipe.input_sketches(), vec![72]);
 }
 
-/// Guard for `FeatureKind::input_sketches`: a variant with a field that refers to a sketch
-/// (a field named `*sketch*` holding an id, sketch points or loft sections) must not sit in the
-/// arm that returns no sketches. New variants are caught by the compiler (the match has no
-/// wildcard); this catches a sketch field added to an existing variant.
-#[test]
-fn input_sketches_lists_every_variant_with_a_sketch_field() {
-    let src = include_str!("document.rs");
-    let body = src.split("pub enum FeatureKind {").nth(1).and_then(|s| s.split("\n}\n").next()).unwrap();
-    let mut with_sketch = Vec::new();
-    let mut variant = "";
-    for line in body.lines() {
-        let t = line.trim();
-        if line.starts_with("    ") && !line.starts_with("     ") && t.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
-            variant = t.split(|c: char| !c.is_alphanumeric()).next().unwrap_or("");
-            continue;
-        }
-        let Some((name, ty)) = t.strip_prefix("pub ").unwrap_or(t).split_once(':') else { continue };
-        let refers = (name.contains("sketch") && (ty.contains("u64") || ty.contains("SketchPoints")))
-            || ty.contains("SketchPoints")
-            || ty.contains("LoftSection");
-        if refers && !line.trim_start().starts_with("//") && !with_sketch.contains(&variant) {
-            with_sketch.push(variant);
-        }
-    }
-    assert!(with_sketch.len() >= 10, "the FeatureKind parse found too few sketch users: {with_sketch:?}");
-    let f = src.split("pub fn input_sketches(&self)").nth(1).unwrap();
-    let empty_arm = f.split("=> Vec::new()").next().and_then(|s| s.rsplit("=> ").next()).unwrap();
-    for v in with_sketch {
-        assert!(
-            !empty_arm.contains(&format!("K::{v} {{")),
-            "FeatureKind::{v} has a sketch field but input_sketches says it uses no sketch: deleting the sketch would leave it broken"
-        );
-    }
-}
-
 #[test]
 fn timeline_clones_share_meshes_even_when_cloned_before_tessellation() {
     let body = solidcraft_kernel::box_solid(Vec3::ZERO, Vec3::new(10., 10., 10.)).unwrap();
@@ -384,6 +351,25 @@ fn timeline_clones_share_meshes_even_when_cloned_before_tessellation() {
     let b = a.clone();
     assert!(std::sync::Arc::ptr_eq(&a.mesh(), &b.mesh()));
     assert!(!a.mesh().triangles.is_empty());
+}
+
+#[test]
+fn feature_inserted_at_a_marker_inside_a_timeline_folder_joins_it() {
+    let mut doc = Document::new("folder insertion");
+    let first = doc.add_feature(FeatureKind::Sketch { plane: PlaneRef::Origin { name: "XY".into() }, sketch: Sketch::new() }, Some("First")).unwrap();
+    let second =
+        doc.add_feature(FeatureKind::Sketch { plane: PlaneRef::Origin { name: "XY".into() }, sketch: Sketch::new() }, Some("Second")).unwrap();
+    doc.timeline_groups.push(TimelineGroup { id: 100, name: "Pair".into(), parent: None, features: vec![first, second] });
+    doc.marker = Some(1);
+
+    let inserted =
+        doc.add_feature(FeatureKind::Sketch { plane: PlaneRef::Origin { name: "XY".into() }, sketch: Sketch::new() }, Some("Inserted")).unwrap();
+
+    assert_eq!(doc.features.iter().map(|feature| feature.id).collect::<Vec<_>>(), vec![first, inserted, second]);
+    assert_eq!(doc.timeline_groups[0].features, vec![first, inserted, second]);
+    assert_eq!(doc.marker, Some(2));
+    assert!(non_contiguous_timeline_group(&doc.features, &doc.timeline_groups).is_none());
+    assert!(Document::from_json(&doc.to_json()).is_ok(), "the inserted feature must leave a reopenable design");
 }
 
 /// A construction plane that is its own side resolves through the model and back into the

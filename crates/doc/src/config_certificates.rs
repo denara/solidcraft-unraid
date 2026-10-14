@@ -457,6 +457,46 @@ impl<'a> ExactSketchCurves<'a> {
     }
 }
 
+impl ExactSketchCurves<'_> {
+    /// The sketch curves a generated segment is drawn on: [`find_along`](Self::find_along)'s one
+    /// curve, else every drawn curve that contains it or runs along and overlaps it (projections
+    /// only where no drawn curve does), in the sketch's order. A segment two coincident curves
+    /// were drawn over (four squares drawn edge to edge), or one a profile merged from collinear
+    /// curves (the outline of several adjacent profiles extruded together), is drawn on all of
+    /// them: the set is exact and fixed by the sketch, so its face is named by it (the first its
+    /// name, the others aliases) rather than not at all. Empty when it lies on none.
+    pub(crate) fn find_all_along(&self, generated: &Seg2) -> Vec<String> {
+        if let Some(id) = self.find_along(generated) {
+            return vec![id];
+        }
+        let runs_along = |original: &Seg2| {
+            if exact_segment_contains(original, generated) {
+                return true;
+            }
+            let (Seg2::Line { a, b }, Seg2::Line { a: c, b: d }) = (*original, *generated) else { return false };
+            let direction = b - a;
+            let scale = direction.len().max((d - c).len()).max(1.);
+            if direction.len() <= 1e-12
+                || direction.cross(c - a).abs() > 1e-10 * scale * scale
+                || direction.cross(d - a).abs() > 1e-10 * scale * scale
+            {
+                return false;
+            }
+            let (tc, td) = ((c - a).dot(direction) / direction.len2(), (d - a).dot(direction) / direction.len2());
+            tc.min(td).max(0.) < tc.max(td).min(1.) - 1e-9
+        };
+        let pick = |linked: bool| -> Vec<String> {
+            self.segments
+                .iter()
+                .filter(|(_, l, originals)| *l == linked && originals.iter().any(runs_along))
+                .map(|(id, _, _)| (*id).to_owned())
+                .collect()
+        };
+        let drawn = pick(false);
+        if drawn.is_empty() { pick(true) } else { drawn }
+    }
+}
+
 fn exact_segment_contains(original: &Seg2, generated: &Seg2) -> bool {
     match (original, generated) {
         (Seg2::Line { a, b }, Seg2::Line { a: c, b: d }) => {

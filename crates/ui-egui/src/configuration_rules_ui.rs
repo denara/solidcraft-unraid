@@ -58,14 +58,14 @@ pub(super) fn show(ui: &mut Ui, app: &mut SolveApp, error: &mut Option<String>, 
     let suppression_features: Vec<(u64, String)> =
         features.iter().filter(|(id, _)| app.session.doc.configs.columns.contains(&Column::Suppress(*id))).cloned().collect();
     ui.separator();
-    ui.label(RichText::new("Configuration rules").strong());
+    ui.label(RichText::new(crate::i18n::tr_label("Configuration rules")).strong());
     ui.add(egui::Label::new("Rules run from top to bottom. Matched drives change effective values.").wrap());
     ui.add(egui::Label::new("Matched restrictions check the final values.").wrap());
     for (index, rule) in rules.iter().enumerate() {
         ui.push_id(&rule.id, |ui| {
             ui.horizontal(|ui| {
                 let mut enabled = rule.enabled;
-                if ui.checkbox(&mut enabled, "").on_hover_text("Enable rule").changed() {
+                if ui.checkbox(&mut enabled, "").on_hover_text(crate::i18n::tr_label("Enable rule")).changed() {
                     let mut r = rule.clone();
                     r.enabled = enabled;
                     *error = app.run("config.rule", json!({"rule":r})).err();
@@ -74,10 +74,14 @@ pub(super) fn show(ui: &mut Ui, app: &mut SolveApp, error: &mut Option<String>, 
                 if ui.small_button("Edit").clicked() {
                     editor.rule = rule.clone();
                 }
-                if ui.add_enabled(index > 0, egui::Button::new("↑").small()).on_hover_text("Move earlier").clicked() {
+                if ui.add_enabled(index > 0, egui::Button::new("↑").small()).on_hover_text(crate::i18n::tr_label("Move earlier")).clicked() {
                     *error = app.run("config.rule", json!({"id":rule.id,"index":index-1})).err();
                 }
-                if ui.add_enabled(index + 1 < rules.len(), egui::Button::new("↓").small()).on_hover_text("Move later").clicked() {
+                if ui
+                    .add_enabled(index + 1 < rules.len(), egui::Button::new("↓").small())
+                    .on_hover_text(crate::i18n::tr_label("Move later"))
+                    .clicked()
+                {
                     *error = app.run("config.rule", json!({"id":rule.id,"index":index+1})).err();
                 }
                 if ui.small_button("Delete").clicked() {
@@ -98,7 +102,7 @@ pub(super) fn show(ui: &mut Ui, app: &mut SolveApp, error: &mut Option<String>, 
     ui.collapsing("Add or edit rule", |ui| {
         ui.horizontal(|ui| {
             expression(ui, "Rule name", &mut editor.rule.name);
-            ui.checkbox(&mut editor.rule.enabled, "Enabled");
+            ui.checkbox(&mut editor.rule.enabled, crate::i18n::tr_label("Enabled"));
             if ui.small_button("New").clicked() {
                 editor.rule = Editor::default().rule;
             }
@@ -106,7 +110,7 @@ pub(super) fn show(ui: &mut Ui, app: &mut SolveApp, error: &mut Option<String>, 
         let mut length_unit = editor.rule.length_unit.clone().unwrap_or_else(|| app.session.doc.units.clone());
         let old_unit = length_unit.clone();
         ui.horizontal(|ui| {
-            ui.label("Length units");
+            ui.label(crate::i18n::tr_label("Length units"));
             choose(ui, "rule_length_units", &mut length_unit, &["mm".into(), "cm".into(), "m".into(), "in".into(), "ft".into()]);
         });
         if length_unit != old_unit {
@@ -122,7 +126,7 @@ pub(super) fn show(ui: &mut Ui, app: &mut SolveApp, error: &mut Option<String>, 
         .to_string();
         let prior = effect_kind.clone();
         ui.horizontal(|ui| {
-            ui.label("Then");
+            ui.label(crate::i18n::tr_label("Then"));
             choose(
                 ui,
                 "rule_effect_kind",
@@ -149,7 +153,7 @@ pub(super) fn show(ui: &mut Ui, app: &mut SolveApp, error: &mut Option<String>, 
             RuleEffect::DriveSuppression { feature, value } => {
                 ui.horizontal(|ui| {
                     feature_choice(ui, "effect_feature", feature, &suppression_features);
-                    ui.checkbox(value, "Suppressed");
+                    ui.checkbox(value, crate::i18n::tr_label("Suppressed"));
                 });
             }
             RuleEffect::ParameterRange { parameter, minimum, maximum } => {
@@ -164,13 +168,13 @@ pub(super) fn show(ui: &mut Ui, app: &mut SolveApp, error: &mut Option<String>, 
             RuleEffect::AllowParameterValues { parameter, expressions } => {
                 choose(ui, "allowed_parameter", parameter, &parameters);
                 let mut text = expressions.join("; ");
-                ui.label("Allowed expressions, separated by semicolons");
+                ui.label(crate::i18n::tr_label("Allowed expressions, separated by semicolons"));
                 if ui.add(egui::TextEdit::singleline(&mut text).desired_width(300.0)).changed() {
                     *expressions = text.split(';').map(|s| s.trim().to_string()).collect();
                 }
             }
         }
-        if ui.add_enabled(!app.session.doc.configs.rows.is_empty(), egui::Button::new("Save Rule")).clicked() {
+        if ui.add_enabled(!app.session.doc.configs.rows.is_empty(), egui::Button::new(crate::i18n::tr_label("Save Rule"))).clicked() {
             let result = (|| -> Result<(), String> {
                 let mut rule = editor.rule.clone();
                 if rule.id.is_empty() {
@@ -190,7 +194,7 @@ pub(super) fn show(ui: &mut Ui, app: &mut SolveApp, error: &mut Option<String>, 
     let previous_row = editor.row.clone();
     ui.horizontal(|ui| {
         choose(ui, "preview_configuration", &mut editor.row, &rows);
-        if ui.add_enabled(!editor.row.is_empty(), egui::Button::new("Preview Row")).clicked() {
+        if ui.add_enabled(!editor.row.is_empty(), egui::Button::new(crate::i18n::tr_label("Preview Row"))).clicked() {
             match app.session.execute("config.preview", &json!({"row":editor.row})) {
                 Ok(result) => {
                     editor.preview = Some(result);
@@ -209,7 +213,7 @@ pub(super) fn show(ui: &mut Ui, app: &mut SolveApp, error: &mut Option<String>, 
     }
     if let Some(preview) = &editor.preview {
         ui.collapsing(format!("Preview: {}", preview["active"].as_str().unwrap_or("row")), |ui| {
-            ui.label("Preview leaves the current design unchanged.");
+            ui.label(crate::i18n::tr_label("Preview leaves the current design unchanged."));
             if let Some(styles) = preview["styles"].as_array() {
                 for style in styles {
                     ui.add(
@@ -287,7 +291,7 @@ fn condition_editor(ui: &mut Ui, condition: &mut RuleCondition, parameters: &[St
         choices.extend(["All".into(), "Any".into(), "Not".into()]);
     }
     ui.horizontal(|ui| {
-        ui.label("When");
+        ui.label(crate::i18n::tr_label("When"));
         choose(ui, "condition_kind", &mut kind, &choices);
     });
     if previous != kind {
@@ -336,7 +340,7 @@ fn condition_editor(ui: &mut Ui, condition: &mut RuleCondition, parameters: &[St
         RuleCondition::Suppression { feature, value } => {
             ui.horizontal(|ui| {
                 feature_choice(ui, "condition_feature", feature, features);
-                ui.checkbox(value, "Suppressed");
+                ui.checkbox(value, crate::i18n::tr_label("Suppressed"));
             });
         }
         RuleCondition::All { conditions } | RuleCondition::Any { conditions } => {
@@ -354,7 +358,7 @@ fn condition_editor(ui: &mut Ui, condition: &mut RuleCondition, parameters: &[St
             if let Some(index) = remove {
                 conditions.remove(index);
             }
-            if ui.add_enabled(conditions.len() < 32, egui::Button::new("Add condition").small()).clicked() {
+            if ui.add_enabled(conditions.len() < 32, egui::Button::new(crate::i18n::tr_label("Add condition")).small()).clicked() {
                 conditions.push(RuleCondition::Always);
             }
         }

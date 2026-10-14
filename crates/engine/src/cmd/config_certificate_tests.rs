@@ -71,7 +71,10 @@ fn certified_annulus_side_rows_follow_radius_edits_and_clone() {
 
 fn imported(session: &mut Session, step: String, name: &str) -> u64 {
     let owner = session.active_component;
-    let id = session.doc_mut().add_feature(FeatureKind::Import { file: "fixture.step".into(), step, components: vec![] }, Some(name)).unwrap();
+    let id = session
+        .doc_mut()
+        .add_feature(FeatureKind::Import { file: "fixture.step".into(), step: step.into(), components: vec![] }, Some(name))
+        .unwrap();
     let feature = session.doc_mut().feature_mut(id).unwrap();
     feature.body_names = vec![name.into()];
     feature.component = owner;
@@ -262,8 +265,8 @@ fn certified_import_payload_binding_roundtrip_clone_and_replacement_refusal() {
     assert_eq!(painted_radius(&s, "Imported", 10.), pieces);
     // Identical geometry, entity IDs and item IDs, but a replaced embedded payload.
     let FeatureKind::Import { step: payload, .. } = &mut s.doc_mut().feature_mut(source).unwrap().kind else { panic!() };
-    *payload = step.replace("certificate fixture", "replacement fixture");
-    assert_ne!(*payload, step);
+    *payload = step.replace("certificate fixture", "replacement fixture").into();
+    assert_ne!(&**payload, step.as_str());
     s.refresh();
     assert!(s.doc.face_colors(s.model.state().body("Imported").unwrap()).is_empty());
     assert_eq!(painted_radius(&s, "Imported (copy)", 10.), pieces);

@@ -575,15 +575,6 @@ impl GeoRef {
     }
 }
 
-impl GeoRef {
-    fn plane_ref(&self) -> Option<&PlaneRef> {
-        match self {
-            GeoRef::Plane { plane } => Some(plane),
-            _ => None,
-        }
-    }
-}
-
 impl AxisDef {
     pub fn refs(&self) -> Vec<&GeoRef> {
         match self {
@@ -592,11 +583,6 @@ impl AxisDef {
             AxisDef::NormalToFace { face, point } => vec![face, point],
             AxisDef::TwoPlanes { a, b } | AxisDef::TwoPoints { a, b } => vec![a, b],
         }
-    }
-
-    /// Planes it refers to (whose expressions it depends on).
-    pub fn planes(&self) -> Vec<&PlaneRef> {
-        self.refs().into_iter().filter_map(GeoRef::plane_ref).collect()
     }
 
     pub fn refs_mut(&mut self) -> Vec<&mut GeoRef> {
@@ -619,10 +605,6 @@ impl PointDef {
             PointDef::EdgeAndPlane { edge, plane } => vec![edge, plane],
             PointDef::AlongPath { path, .. } => vec![path],
         }
-    }
-
-    pub fn planes(&self) -> Vec<&PlaneRef> {
-        self.refs().into_iter().filter_map(GeoRef::plane_ref).collect()
     }
 
     pub fn refs_mut(&mut self) -> Vec<&mut GeoRef> {

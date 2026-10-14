@@ -54,6 +54,46 @@ fn language_preference_cancel_restores_previous_locale() {
     assert_eq!(h.app.tr("ui.preferences"), "Preferences");
 }
 
+/// The chrome a user sees before touching anything: the browser heading and the SELECT panel.
+/// Both were English literals in the drawing code, and a broken message id falls back to
+/// English silently, so check the word actually rendered in each language.
+#[test]
+fn window_chrome_renders_in_the_active_language() {
+    for (lang, browser, filter, faces) in [
+        ("zh", "浏览器", "选择筛选", "面"),
+        ("ja", "ブラウザ", "選択フィルター", "面"),
+        ("de", "BROWSER", "Auswahlfilter", "Flächen"),
+        ("ko", "브라우저", "선택 필터", "면"),
+        ("ru", "БРАУЗЕР", "Фильтр выделения", "Грани"),
+    ] {
+        let mut h = Harness::new();
+        h.app.preferences.language = lang.into();
+        h.app.home.open = false;
+        h.frames(2);
+        // The browser heading is on screen from the start; the selection filter lives in the
+        // SELECT panel, which is not the one shown by default.
+        assert!(h.widget(browser).is_some(), "{lang}: the browser heading must show {browser:?}");
+        let select = scenario::handle_at("panel:SOLID:SELECT").expect("the SELECT panel is on the SOLID tab");
+        h.step(&json!({"click": [select.x, select.y]})).unwrap();
+        h.frames(2);
+        assert!(h.widget(filter).is_some(), "{lang}: the selection filter must show {filter:?}");
+        assert!(h.widget(faces).is_some(), "{lang}: the Faces checkbox must show {faces:?}");
+    }
+}
+
+/// The command palette's hint embeds a JSON example, so its braces must not be mistaken for a
+/// placeholder name by the catalog's parser, and the example must survive interpolation whole.
+#[test]
+fn command_palette_hint_keeps_its_json_example_intact() {
+    let mut h = Harness::new();
+    h.app.preferences.language = "zh".into();
+    h.app.home.open = false;
+    h.frames(2);
+    let hint = crate::i18n::format("ui.command_palette_hint", &[("example", "Extrude {\"distance\": 20}")]);
+    assert!(hint.contains("Extrude {\"distance\": 20}"), "the example is inserted literally: {hint:?}");
+    assert!(!hint.contains("{example}"), "the placeholder is substituted: {hint:?}");
+}
+
 #[test]
 fn translated_dialog_buttons_do_not_wrap() {
     fn cancel_rows(shape: &egui::Shape) -> Option<usize> {

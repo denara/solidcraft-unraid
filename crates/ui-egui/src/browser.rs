@@ -10,6 +10,7 @@
 #[path = "occurrence_ui_tests.rs"]
 mod occurrence_ui_tests;
 
+use crate::icons::glyphs::badge;
 use std::collections::BTreeSet;
 
 use egui::{Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, pos2, vec2};
@@ -19,6 +20,7 @@ use solidcraft_engine::doc::FeatureKind;
 
 use crate::context_menu::{Item, Target};
 use crate::theme::Tokens;
+
 use crate::{SolveApp, icons};
 
 thread_local! {
@@ -55,8 +57,15 @@ pub struct TreeState {
     pub picked_components: Vec<u64>,
     /// Canvases picked in the tree.
     pub picked_canvases: Vec<u64>,
+    /// Folders picked in the feature history (features use the engine selection).
+    pub picked_timeline_groups: Vec<u64>,
+    /// Last feature-history item clicked, for Shift ranges (`f:<id>` or `g:<id>`).
+    pub timeline_anchor: Option<String>,
     /// The Edit Canvas / Calibrate panel.
     pub canvas_panel: Option<CanvasPanel>,
+    /// A Section Analysis hidden with its eye in the Analysis folder: its plane (origin,
+    /// normal), so the eye can bring it back (#822).
+    pub hidden_section: Option<(solidcraft_engine::geom::Vec3, solidcraft_engine::geom::Vec3)>,
     /// What waits for the Capture Position question: a command id, or [`SAVE`].
     pub capture_prompt: Option<String>,
     /// The last row clicked (for Shift ranges).
@@ -330,13 +339,8 @@ pub(crate) fn draw_row(ui: &mut egui::Ui, id: egui::Id, row: &Row) -> RowResp {
     // Fold arrow.
     if let Some(open) = row.fold {
         let ar = Rect::from_center_size(pos2(x + 6.0, cy), vec2(12.0, 12.0));
-        let pts = if open {
-            vec![pos2(ar.left() + 2.0, ar.top() + 4.0), pos2(ar.right() - 2.0, ar.top() + 4.0), pos2(ar.center().x, ar.bottom() - 3.0)]
-        } else {
-            vec![pos2(ar.left() + 4.0, ar.top() + 2.0), pos2(ar.right() - 3.0, ar.center().y), pos2(ar.left() + 4.0, ar.bottom() - 2.0)]
-        };
         let ink = if hover_on == 1 { t.text } else { t.text_dim };
-        ui.painter().add(egui::Shape::convex_polygon(pts, ink, Stroke::NONE));
+        crate::icons::glyphs::disclosure(ui.painter(), ar, open, ink);
         out.fold = resp.clicked() && click_on == 1;
         crate::scenario::publish_handle(&format!("fold:{}", row.label), fold_r.center());
     }
@@ -349,6 +353,7 @@ pub(crate) fn draw_row(ui: &mut egui::Ui, id: egui::Id, row: &Row) -> RowResp {
             ui.painter().line_segment([er.left_bottom() + vec2(2.0, -2.0), er.right_top() + vec2(-2.0, 2.0)], Stroke::new(1.4, t.text_dim));
         }
         out.eye = resp.clicked() && click_on == 2;
+        crate::scenario::publish_handle(&format!("eye:{}", row.label), er.center());
     }
     x += 18.0;
     // Activation radio (components).
@@ -396,35 +401,6 @@ pub(crate) fn draw_row(ui: &mut egui::Ui, id: egui::Id, row: &Row) -> RowResp {
         out.secondary = resp.interact_pointer_pos().or(Some(r.left_bottom()));
     }
     out
-}
-
-/// Small glyphs after a row's label: a padlock, a pin (grounded).
-fn badge(p: &egui::Painter, r: Rect, name: &str, c: Color32) {
-    let s = Stroke::new(1.3, c);
-    match name {
-        "lock" => {
-            let body = Rect::from_min_max(pos2(r.left() + 1.5, r.center().y - 0.5), pos2(r.right() - 1.5, r.bottom() - 0.5));
-            p.rect_filled(body, 1.5, c);
-            let top = pos2(r.center().x, r.top() + 4.0);
-            p.add(egui::Shape::line(
-                (0..=8)
-                    .map(|k| {
-                        let a = std::f32::consts::PI * (k as f32 / 8.0);
-                        pos2(top.x - 3.2 * a.cos(), top.y - 3.2 * a.sin() + 1.0)
-                    })
-                    .chain([pos2(top.x + 3.2, body.top())])
-                    .collect(),
-                s,
-            ));
-            p.line_segment([pos2(top.x - 3.2, top.y + 1.0), pos2(top.x - 3.2, body.top())], s);
-        }
-        "pin" => {
-            let head = pos2(r.center().x + 2.0, r.top() + 4.0);
-            p.circle_filled(head, 3.2, c);
-            p.line_segment([head, pos2(r.left() + 1.5, r.bottom() - 1.0)], Stroke::new(1.6, c));
-        }
-        _ => {}
-    }
 }
 
 /// A Ctrl/Shift-aware click on a selectable row.
@@ -496,6 +472,15 @@ struct Actions {
 }
 
 pub fn browser(app: &mut SolveApp, ui: &mut egui::Ui) {
+    browser_panel(app, ui, false);
+}
+
+/// The left-sidebar layout: feature history first, parts and scene browser below it.
+pub fn browser_below_timeline(app: &mut SolveApp, ui: &mut egui::Ui) {
+    browser_panel(app, ui, true);
+}
+
+fn browser_panel(app: &mut SolveApp, ui: &mut egui::Ui, timeline_above: bool) {
     let t = Tokens::get();
     app.tree.order.clear();
     DRAWN.with(|d| d.borrow_mut().clear());
@@ -506,16 +491,66 @@ pub fn browser(app: &mut SolveApp, ui: &mut egui::Ui) {
         .resizable(false)
         .frame(egui::Frame::NONE.fill(t.panel).inner_margin(egui::Margin::symmetric(6, 6)))
         .show(ui, |ui| {
-            ui.label(RichText::new("BROWSER").size(11.0).strong().color(t.text_dim));
-            ui.add_space(4.0);
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .scroll_source(egui::scroll_area::ScrollSource { scroll_bar: true, mouse_wheel: true, ..egui::scroll_area::ScrollSource::NONE })
-                .show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    component_rows(app, ui, 0, 0, &mut acts);
+            if timeline_above {
+                let available = ui.available_height();
+                let browser_collapsed = app.preferences.timeline_left_browser_collapsed;
+                let max_timeline_height = (available - if browser_collapsed { 30.0 } else { 130.0 }).max(150.0);
+                let remembered = app.preferences.timeline_left_height;
+                let timeline_height =
+                    if remembered.is_finite() { remembered.clamp(150.0, max_timeline_height) } else { 360.0_f32.clamp(150.0, max_timeline_height) };
+                ui.allocate_ui_with_layout(vec2(ui.available_width(), timeline_height), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    crate::timeline_left::left_timeline(app, ui)
                 });
+                if !browser_collapsed {
+                    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 8.0), egui::Sense::hover());
+                    let response = ui
+                        .interact(rect, egui::Id::new("left_history_divider"), egui::Sense::drag())
+                        .on_hover_cursor(egui::CursorIcon::ResizeVertical);
+                    if response.dragged() {
+                        let delta = ui.input(|input| input.pointer.delta().y);
+                        if delta.is_finite() {
+                            app.preferences.timeline_left_height = (timeline_height + delta).clamp(150.0, max_timeline_height);
+                        }
+                    }
+                    ui.painter().hline(rect.x_range(), rect.center().y, egui::Stroke::new(1.0, t.border));
+                    crate::scenario::publish_handle("left-history-divider", rect.center());
+                }
+                let arrow = if browser_collapsed { "▶" } else { "▼" };
+                let response =
+                    ui.add(egui::Button::new(RichText::new(format!("{arrow}  BROWSER")).size(11.0).strong().color(t.text_dim)).frame(false));
+                crate::scenario::publish_handle("left-browser-toggle", response.rect.center());
+                if response.clicked() {
+                    app.preferences.timeline_left_browser_collapsed = !browser_collapsed;
+                }
+                if !browser_collapsed {
+                    ui.add_space(4.0);
+                    browser_rows(app, ui, &mut acts);
+                }
+            } else {
+                browser_contents(app, ui, &mut acts);
+            }
         });
+    finish_browser(app, ui, acts);
+}
+
+fn browser_contents(app: &mut SolveApp, ui: &mut egui::Ui, acts: &mut Actions) {
+    let t = Tokens::get();
+    ui.label(RichText::new(crate::i18n::tr_label("BROWSER")).size(11.0).strong().color(t.text_dim));
+    ui.add_space(4.0);
+    browser_rows(app, ui, acts);
+}
+
+fn browser_rows(app: &mut SolveApp, ui: &mut egui::Ui, acts: &mut Actions) {
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .scroll_source(egui::scroll_area::ScrollSource { scroll_bar: true, mouse_wheel: true, ..egui::scroll_area::ScrollSource::NONE })
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            component_rows(app, ui, 0, 0, acts);
+        });
+}
+
+fn finish_browser(app: &mut SolveApp, ui: &mut egui::Ui, acts: Actions) {
     app.viewport.hover_bodies = acts.hover_bodies;
     if let Some(d) = acts.drop {
         apply_drop(app, d);
@@ -616,6 +651,7 @@ fn component_rows(app: &mut SolveApp, ui: &mut egui::Ui, id: u64, depth: usize, 
         named_view_rows(app, ui, d, acts);
         origin_rows(app, ui, d);
         canvas_rows(app, ui, d, acts);
+        analysis_rows(app, ui, d, acts);
     }
     let _ = t;
     for folder in ["bodies", "sketches", "construction"] {
@@ -888,6 +924,77 @@ pub fn view_items(app: &SolveApp, name: &str) -> Vec<Item> {
     ]
 }
 
+/// The Analysis folder: the Section Analysis, while there is one (shown or hidden), with an eye
+/// to hide and show it, a double-click to edit it and a menu to delete it (#822).
+fn analysis_rows(app: &mut SolveApp, ui: &mut egui::Ui, depth: usize, acts: &mut Actions) {
+    if app.session.section.is_some() {
+        // A section made (or remade) while an older one was hidden replaces it.
+        app.tree.hidden_section = None;
+    }
+    let visible = app.session.section.is_some();
+    if !visible && app.tree.hidden_section.is_none() {
+        return;
+    }
+    let key = "analysis";
+    let open = is_open(app, key, true);
+    let r = draw_row(
+        ui,
+        ui.id().with(key),
+        &Row { depth, fold: Some(open), eye: Some(visible), icon: "folder", label: "Analysis", ..Default::default() },
+    );
+    if r.fold || r.clicked {
+        toggle(app, key, true);
+    }
+    if r.eye {
+        set_section_visible(app, !visible);
+    }
+    if !open {
+        return;
+    }
+    let r = draw_row(
+        ui,
+        ui.id().with("section_analysis"),
+        &Row { depth: depth + 1, eye: Some(visible), icon: "section", label: "Section Analysis", dim: !visible, ..Default::default() },
+    );
+    if r.eye {
+        set_section_visible(app, !visible);
+    }
+    if r.double {
+        app.start("inspect.section");
+    }
+    if let Some(p) = r.secondary {
+        acts.menu = Some((p, Target::Section));
+    }
+}
+
+/// Hide the Section Analysis (keeping its plane to show it again) or show the hidden one.
+pub fn set_section_visible(app: &mut SolveApp, visible: bool) {
+    if visible {
+        if let Some((origin, normal)) = app.tree.hidden_section {
+            let plane = json!({"origin": [origin.x, origin.y, origin.z], "normal": [normal.x, normal.y, normal.z]});
+            if app.run("inspect.section", json!({ "plane": plane })).is_ok() {
+                app.tree.hidden_section = None;
+            }
+        }
+    } else if let Some(section) = app.session.section
+        && app.run("inspect.section", json!({"clear": true})).is_ok()
+    {
+        app.tree.hidden_section = Some(section);
+    }
+}
+
+/// The menu of the Section Analysis row.
+pub fn section_items(app: &SolveApp) -> Vec<Item> {
+    let visible = app.session.section.is_some();
+    vec![
+        Item::action("ui.editSection", "Edit Section Analysis", "section"),
+        Item::sep(),
+        Item::action("ui.unsection", "Delete", "delete"),
+        Item::sep(),
+        Item::action("ui.sectionVisible", "Show/Hide", "eye").key("V").with(json!({ "visible": !visible })),
+    ]
+}
+
 /// The Canvases folder (reference images) with an eye per canvas.
 fn canvas_rows(app: &mut SolveApp, ui: &mut egui::Ui, depth: usize, acts: &mut Actions) {
     let canvases: Vec<(u64, String, bool)> = app.session.doc.canvases.iter().map(|c| (c.id, c.name.clone(), c.visible)).collect();
@@ -1014,27 +1121,27 @@ fn canvas_panel(app: &mut SolveApp, ctx: &egui::Context) {
                         });
                         ui.end_row();
                     }
-                    ui.label("Distance");
+                    ui.label(crate::i18n::tr_label("Distance"));
                     ui.add(crate::prefs::length_drag(&mut m.distance, &app.session.doc.units, app.preferences.length_decimals).range(0.001..=1e6));
                     ui.end_row();
                 } else {
                     let (mut x, mut y, mut w, mut ang, mut op, mut flip) = (c.center.x, c.center.y, c.width, c.angle.to_degrees(), c.opacity, c.flip);
-                    ui.label("Center X");
+                    ui.label(crate::i18n::tr_label("Center X"));
                     let r1 = ui.add(crate::prefs::length_drag(&mut x, &app.session.doc.units, app.preferences.length_decimals));
                     ui.end_row();
-                    ui.label("Center Y");
+                    ui.label(crate::i18n::tr_label("Center Y"));
                     let r2 = ui.add(crate::prefs::length_drag(&mut y, &app.session.doc.units, app.preferences.length_decimals));
                     ui.end_row();
-                    ui.label("Width");
+                    ui.label(crate::i18n::tr_label("Width"));
                     let r3 = ui.add(crate::prefs::length_drag(&mut w, &app.session.doc.units, app.preferences.length_decimals).range(0.01..=1e6));
                     ui.end_row();
-                    ui.label("Angle");
+                    ui.label(crate::i18n::tr_label("Angle"));
                     let r4 = ui.add(egui::DragValue::new(&mut ang).speed(1.0).suffix(" deg"));
                     ui.end_row();
-                    ui.label("Opacity");
+                    ui.label(crate::i18n::tr_label("Opacity"));
                     let r5 = ui.add(egui::Slider::new(&mut op, 0.0..=1.0));
                     ui.end_row();
-                    ui.label("Flip");
+                    ui.label(crate::i18n::tr_label("Flip"));
                     let r6 = ui.checkbox(&mut flip, "");
                     ui.end_row();
                     if [r1, r2, r3, r4, r5, r6].iter().any(|r| r.changed()) {
@@ -1565,7 +1672,7 @@ fn occurrence_panel(app: &mut SolveApp, ui: &mut egui::Ui) {
         .collapsible(false)
         .show(&ctx, |ui| {
             if !m.path.is_empty() && app.session.occurrence_scope_count(&m.path).is_ok_and(|n| n > 1) {
-                ui.label("This child is shared. Position changes apply to every copy of its parent.");
+                ui.label(crate::i18n::tr_label("This child is shared. Position changes apply to every copy of its parent."));
             }
             egui::Grid::new("sc_occ_grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
                 for (k, axis) in ["X distance", "Y distance", "Z distance"].iter().enumerate() {
@@ -1587,10 +1694,10 @@ fn occurrence_panel(app: &mut SolveApp, ui: &mut egui::Ui) {
             });
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                if ui.button("Capture All Positions").clicked() {
+                if ui.button(crate::i18n::tr_label("Capture All Positions")).clicked() {
                     action = Some("capture");
                 }
-                if ui.button("Revert All Positions").clicked() {
+                if ui.button(crate::i18n::tr_label("Revert All Positions")).clicked() {
                     action = Some("revert");
                 }
             });
@@ -1720,9 +1827,7 @@ pub fn dims_overlay(app: &SolveApp, ctx: &egui::Context) {
             }
             for (tip, dir) in &lay.arrows {
                 if let (Some(t), Some(back)) = (to(*tip), to(*tip - *dir * px)) {
-                    let d = (t - back).normalized();
-                    let n = vec2(-d.y, d.x);
-                    painter.add(egui::Shape::convex_polygon(vec![t, t - d * 9.0 + n * 3.0, t - d * 9.0 - n * 3.0], col, Stroke::NONE));
+                    crate::icons::markers::dimension_arrow(&painter, t, back, col);
                 }
             }
             let Some(tc) = to(lay.text) else { continue };
@@ -1779,7 +1884,7 @@ fn capture_prompt(app: &mut SolveApp, ctx: &egui::Context) {
     }
     let n = app.session.pending_moves.len();
     let mut answer: Option<&str> = None;
-    crate::frame::window(ctx, "Capture Position", crate::frame::Width::Normal)
+    crate::frame::window(ctx, crate::i18n::tr_label("Capture Position"), crate::frame::Width::Normal)
         .id(egui::Id::new("sc_capture_prompt"))
         .collapsible(false)
         .resizable(false)
@@ -1793,10 +1898,10 @@ fn capture_prompt(app: &mut SolveApp, ctx: &egui::Context) {
             ui.label(RichText::new("Capture keeps the new position; Revert puts it back.").color(Tokens::get().text_dim));
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                if ui.button("Capture Position").clicked() {
+                if ui.button(crate::i18n::tr_label("Capture Position")).clicked() {
                     answer = Some("capture");
                 }
-                if ui.button("Revert").clicked() {
+                if ui.button(crate::i18n::tr_label("Revert")).clicked() {
                     answer = Some("revert");
                 }
                 if ui.button("Cancel").clicked() {
@@ -1819,3 +1924,7 @@ fn occurrence_origin(app: &SolveApp, occurrence: u64) -> Option<solidcraft_engin
     let own = app.session.pending_moves.get(&occurrence).copied().unwrap_or(o.transform);
     Some(solidcraft_engine::doc::apply_point(&solidcraft_engine::doc::mat_mul(&parent, &own), solidcraft_engine::geom::Vec3::ZERO))
 }
+
+#[cfg(test)]
+#[path = "section_browser_tests.rs"]
+mod section_browser_tests;

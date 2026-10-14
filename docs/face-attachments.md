@@ -36,7 +36,12 @@ keep the history of the body they go on and name their own faces by the part the
 (`F4:post:top`, `F5:rest:side:0`, `F6:arm:top`), so those take attachments too. A side an extrude grew to
 overlap a flush body before joining it (its neighbours lengthened past the sketch's corners) is
 still named by the sketch line it runs along, so a wall a Join merged from two extrudes' walls
-attaches by the first one's name and answers to the other's.
+attaches by the first one's name and answers to the other's. A side drawn on several sketch
+curves at once (two squares drawn edge to edge leave two coincident lines along the shared edge;
+several adjacent profiles extruded together leave one wall along collinear lines) is named by
+every curve it lies on, the first in the sketch's order its name and the others aliases: the set
+is fixed by the sketch, so one sketch extruded up and down and joined (a logo) takes an attached
+sketch on every wall, not only on its tops and bottoms.
 
 Faces whose history is not exact (faces a feature rebuilt without reporting its history),
 ambiguous sources, and the pieces of a face split on purpose with Split Face (each piece is its

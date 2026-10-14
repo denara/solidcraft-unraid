@@ -148,6 +148,30 @@ fn auto_project_can_be_turned_off() {
     assert!(r["projected"].is_null());
 }
 
+/// #680: auto-projection is a preference, not part of a design: turning it off holds for the
+/// next design started or opened in the session (`doc.recover` replaces the session the same way).
+#[test]
+fn auto_project_off_holds_for_designs_started_and_opened() {
+    let dir = std::env::temp_dir().join(format!("solidcraft-auto-project-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("box.solidcraft");
+    let mut s = Session::default();
+    box_part(&mut s);
+    run(&mut s, "file.save_as", json!({"path": file.to_string_lossy()}));
+    run(&mut s, "sketch.auto_project", json!({"value": false}));
+    run(&mut s, "file.new", json!({}));
+    assert!(!s.auto_project, "file.new");
+    run(&mut s, "doc.open", json!({"path": file.to_string_lossy()}));
+    assert!(!s.auto_project, "doc.open");
+    let r = run(&mut s, "sketch.create", json!({"plane": {"face": [20, 15, 20]}}));
+    assert!(r["projected"].is_null(), "{r}");
+    run(&mut s, "sketch.auto_project", json!({"value": true}));
+    run(&mut s, "file.new", json!({}));
+    assert!(s.auto_project, "turned back on, it stays on");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn project_edges_bodies_sketches_and_origin() {
     let mut s = Session::default();

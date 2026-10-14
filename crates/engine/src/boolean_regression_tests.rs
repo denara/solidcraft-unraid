@@ -215,3 +215,38 @@ fn ls_extruded_up_and_down_from_one_grid_join() {
     let v = volume(&s, "Logo");
     assert!((v - 6000.0).abs() < 1e-6, "{v}");
 }
+
+/// This process's CPU time (all threads) and peak resident memory, where the system says
+/// (Linux: /proc/self); `None` elsewhere.
+fn cpu_and_peak_memory() -> Option<(std::time::Duration, u64)> {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    // utime and stime, in clock ticks (100 a second on Linux), after the command's name.
+    let fields: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
+    let ticks: u64 = fields.get(11)?.parse::<u64>().ok()? + fields.get(12)?.parse::<u64>().ok()?;
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let kb: u64 = status.lines().find_map(|l| l.strip_prefix("VmHWM:"))?.trim().trim_end_matches("kB").trim().parse().ok()?;
+    Some((std::time::Duration::from_millis(ticks * 10), kb * 1024))
+}
+
+/// Press/pull on the sensor enclosure's lid top: joining the pulled face's prism imprints the
+/// contact (#825), and boxing the lid's faces by dividing their curved edges down to the
+/// contact tolerance ran away (over 24 GB and many minutes). It takes about 9 s of CPU here and
+/// no memory beyond the design's. The budgets are work, not wall time, which a loaded runner
+/// stretches (61-87 s for the same work on CI).
+#[test]
+fn press_pull_on_the_enclosure_lid_is_prompt() {
+    let mut s = Session::default();
+    let script: Value = serde_json::from_str(include_str!("../../../examples/acceptance/sensor_enclosure.json")).unwrap();
+    s.run_script(&script).unwrap();
+    let total = |s: &Session| -> f64 { s.model.state().bodies.iter().map(|b| solidcraft_kernel::measure(&b.body).unwrap().volume).sum() };
+    let before = total(&s);
+    let start = cpu_and_peak_memory();
+    s.execute("solid.press_pull", &json!({"face": [-12.0, 27.4, 23.0], "distance": 5.0})).unwrap();
+    if let (Some((cpu0, peak0)), Some((cpu1, peak1))) = (start, cpu_and_peak_memory()) {
+        let grew = peak1.saturating_sub(peak0);
+        assert!(grew < 1 << 30, "the press/pull grew the peak memory by {} MB", grew >> 20);
+        // Other tests in this process (cargo test) count too, so the bound is generous.
+        assert!(cpu1 - cpu0 < std::time::Duration::from_secs(300), "the press/pull took {:?} of CPU", cpu1 - cpu0);
+    }
+    assert!(total(&s) > before, "{before} -> {}", total(&s));
+}

@@ -1,6 +1,6 @@
 # SolidCraft roadmap
 
-Status as of **2026-10-11**. SolidCraft supports parametric modelling (sketch →
+Status as of **2026-10-14**. SolidCraft supports parametric modelling (sketch →
 features → parametric timeline) as an open, pure-Rust, agent-drivable application.
 
 ## At a glance
@@ -13,7 +13,7 @@ with timestamps, severity labels and icons, while omitting sensitive data and ro
 Requested upstream updates use the repository's
 [update skill](.agents/skills/update-solvecraft-unraid/SKILL.md), with a fixed target snapshot,
 isolated validation and local-only private deployment settings.
-The container's validated upstream baseline is `be55a49` (SolidCraft 0.8.0, previously `913583b`);
+The container's validated upstream baseline is `8ea1fd64` (SolidCraft 0.10.0, format 20, previously `be55a49`);
 the Linux image passes the changed CAD/UI tests and real web/MCP, restart and old-design
 compatibility checks. See [update records](docs/unraid-updates.md).
 
@@ -21,7 +21,7 @@ compatibility checks. See [update records](docs/unraid-updates.md).
 |---|---|
 | Where are we? | **M0 and M13 done; M1, M2, M5–M7, M9, M10, M14 in progress.** Sketch with solver and the full SKETCH create/modify set; extrude, revolve (two sides, symmetric, to object), fillet/chamfer (variable radius, chord length, a radius per edge, corner patches), holes, threads (cosmetic and modelled), patterns, mirror, shell (inside/outside/both), draft, loft, sweep, coil, split body and split face, delete face, construction planes, axes and points; persistent naming of faces and edges; parameters and configurations; components, joints, motion studies, exploded views; sheet metal and a plastic enclosure subset; STEP/IGES/3MF/STL/OBJ/DXF; autosave and crash recovery; desktop and browser (wasm) app, CLI, MCP server. |
 | Features | Every registered command by area — [docs/features.md](docs/features.md) (`cargo xtask features`); registry breadth does not establish workflow or geometric depth |
-| Reference tests | **76 / 76 parts match** — [docs/oracle.md](docs/oracle.md): public cases in `tests/oracle/` with analytic (55) or FreeCAD-computed (21) expected values, run by CI on every PR. |
+| Reference tests | **82 / 82 parts match** — [docs/oracle.md](docs/oracle.md): public cases in `tests/oracle/` with analytic (61) or FreeCAD-computed (21) expected values, run by CI on every PR. |
 | Tests | Solver, profiles, kernel booleans/blends/measures, expressions, timeline, persistent naming, file formats and migrations, assemblies, sheet metal, engine end-to-end, hostile-input fuzz over every command and headless UI scenarios. `cargo xtask ci` reports the current passing counts. |
 | Gates | `cargo xtask ci`: fmt, clippy -D warnings, tests, asset attribution, layering, wasm32 build — green |
 | Time to a useful alpha (M0–M6) | ≈ **82 agent hours** remain (sum of the M1–M6 estimates below) |
@@ -59,20 +59,50 @@ PCB / Package, Render, Animation, Simulation, Manufacture/CAM, Drawings.
 | M1 | Sketch depth: command coverage implemented — projection/intersect/include as linked geometry (auto-project on faces, lost-reference warnings, break link), full SKETCH create/modify set (slots, polygons, tangent arcs/circles, ellipse, fit/control splines, conic, text, trim/extend/break, fillet/chamfer, offset, mirror, patterns, move/scale, blend curve, centerline), constraints incl. curvature and polygon with over-constraint refusal, driven/arc-length/linear-diameter dimensions, AutoConstrain, DXF/SVG insert, 3D sketch curves (Project To Surface, Intersection Curve, Isoparametric Curve, Spun Profile), exact free-form profiles (B-spline/NURBS edges, any spline degree, curves cut by crossings), sweeps and pipes along 3D sketch curves, canvases and decals, curvature combs. Exact free-form Extend and certified associative offsets now preserve geometry and IDs through edits, deletion and reopen. Occurrence-frame 3D wires now store explicit coordinate spaces and retain points and analytic fits through moves, refresh, undo and reopen. Constructive sketch solving (Owen 1991, Fudos & Hoffmann 1997) ahead of the numerical solver: points and rigid clusters are placed on the branch the sketch had, so dimension edits and drags keep their solution; edits that would turn a sketch over are refused; drags re-solve only the sketch per frame. Remaining workflow repairs: mixed offset junctions, legacy natural-spline seams, and damaged legacy wire links lacking frame provenance | in progress | 4 |
 | M2 | Robust modelling: coplanar booleans in the kernel, holes (placed on faces and on sketch points), threads (cosmetic, then modelled), patterns, mirror, shell, draft, split, construction geometry | in progress | 16 |
 | M3 | General fillets and chamfers (curved edges, chains, vertex blends); saddle rolling-ball surfaces now use continuous seam sections and arc-length fitting with shared contact boundaries and bounded accuracy checks | in progress | 30 |
-| M4 | Files: STEP import (done — [docs/step-import.md](docs/step-import.md)), 3MF export and 3MF/STL import as mesh bodies (done), constant-section parametric mesh reconstruction, DXF sketches, OBJ import | in progress | 6 |
+| M4 | Files: STEP import (done — [docs/step-import.md](docs/step-import.md)), 3MF export and 3MF/STL import as mesh bodies (done), 3MF with B-rep face tags ([docs/formats/3mf-face-tags.md](docs/formats/3mf-face-tags.md), done), constant-section parametric mesh reconstruction, DXF sketches, OBJ import | in progress | 6 |
 | M5 | Persistent naming of faces and edges (docs/book/src/dev/naming.md): faces named from their exact kernel-reported history (sketch curve sides, caps, revolve sections, primitive sides, blends, shell inner walls, pattern/mirror copies; split pieces told apart by the faces around them, lumps of a cut body named after their faces), edges by their faces; fillets/chamfers, sketches on faces, shell/draft/offset/replace faces, hole placements, joint origins and face appearances resolve by name first and warn when the entity split or vanished: done. sheet metal edges by base sketch line and flange side, shell inner faces, sweep and loft roles: done. kernel-reported face history: done (merged faces answer to every name; operations without history yet fall back to geometric names, flagged unverified; format 14 keeps older designs' geometric names). Left: history through sheet metal, plastic, surface and emboss features; FaceSource certificates through history | in progress | 20 |
-| M6 | UI depth: selection feedback and origin (done), timeline editing (done: hover and selection highlight modifier faces, including fillets and chamfers; edit feature, history marker drag, reorder with dependency checks, suppress, rename, delete with dependents, re-resolved references; redefining selections refreshes persistent edge/face references while retaining feature identity and dimension names), right-docked dialogs (done), live previews for every feature dialog (done), keyboard-first commands with on-canvas value boxes and sketch inline dimensions (done), drag manipulators with automatic join/cut (done: extrude incl. two sides, fillet, shell, hole depth, move, pattern spacing, revolve rotator; taper handle open), dark theme (done), right-click menu with Repeat (done), measure tool (done), section analysis (done), selection filter (done), drag-solve of sketch points (done); appearance controls now preserve body/face/component targeting, named transparent looks, reuse/search and override removal; preferences | in progress | 6 |
-| M7 | Sweep, loft (incl. to a point), rib and web (to next / depth), emboss (planar faces and exact radial emboss/deboss of bounded orthogonal profiles on complete exterior cylinders/sleeves), thread (cosmetic, and modelled M3–M20 outside and inside: the ISO profile screwed in as a faceted cut), coil (smooth B-spline helical walls), pipe, pattern on path, patterns of bodies and components, replace face (parallel), align, remove, feature copy/paste: done. Unique eligible cylindrical targets are inferred for new Emboss features. Left: general curved-face emboss and exact (unfaceted) modelled threads | in progress | 12 |
+| M6 | UI depth: selection feedback and origin (done), timeline editing (done: hover and selection highlight modifier faces, including fillets and chamfers; edit feature, history marker drag, dependency-checked single and multi-item reorder, suppress, rename, delete with dependents, re-resolved references; redefining selections refreshes persistent edge/face references while retaining feature identity and dimension names; optional compact named left feature history with rollback bar, multi-selection and persistent folders above the parts browser), right-docked dialogs (done), live previews for every feature dialog (done), keyboard-first commands with on-canvas value boxes and sketch inline dimensions (done), drag manipulators with automatic join/cut (done: extrude incl. two sides, fillet, shell, hole depth, move, pattern spacing, revolve rotator; taper handle open), dark theme (done), right-click menu with Repeat (done), measure tool (done), section analysis (done), selection filter (done), drag-solve of sketch points (done); appearance controls now preserve body/face/component targeting, named transparent looks, reuse/search and override removal; preferences | in progress | 6 |
+| M7 | Thin extrude (walls along open or closed curves: centre, inside, outside or two sides; mitred corners, crossing walls joined; #721), sweep, loft (incl. to a point), rib and web (to next / depth), emboss (planar faces and exact radial emboss/deboss of bounded orthogonal profiles on complete exterior cylinders/sleeves), thread (cosmetic, and modelled M3–M20 outside and inside: the ISO profile screwed in as a faceted cut), coil (smooth B-spline helical walls), pipe, pattern on path, patterns of bodies and components, replace face (parallel), align, remove, feature copy/paste: done. Unique eligible cylindrical targets are inferred for new Emboss features. Left: general curved-face emboss and exact (unfaceted) modelled threads | in progress | 12 |
 | M8 | Surface workspace (#772). Done: Patch (sketch regions; edge loops filled G0), Stitch, Thicken (planes and cylinders), Extend (straight edges of planar surfaces), Trim (by a plane or a face), Delete Face (healing), Boundary Fill, zebra/draft/curvature-map analysis. Proposed, in order: surface Extrude/Revolve/Sweep/Loft from open and closed curves (#757), Offset surface (#758), Unstitch and Reverse Normal (#766), Delete Face without healing (#768); Extend curved faces and edges (#760), mutual trim and trim by projected curves (#767), Untrim (#761), Thicken every surface kind (#765); Ruled (#762), Boundary surface and curve networks with G0/G1/G2 (#763), Patch with G1/G2 and general loops (#759), Blend surface (#764), sweep rails, twist and scale (#771, loft rails #201), fillet between surface bodies (#769); continuity analysis, surface curvature combs and isocurves (#770) | deferred | — |
-| M9 | Components and assemblies: New Component / Create Components from Bodies, active component, per-component origin/bodies/sketches/timeline entries, occurrences with transforms, Copy/Paste vs Paste New, nested Browser tree with visibility and isolate; Ground, Move/Copy of occurrences, joints (rigid, revolute, slider, cylindrical, pin-slot, planar, ball) by joint origins with limits and Drive Joints, As-built Joint, Rigid Group, Contact Sets (driving and motion studies stop where bodies in a set would pass through each other), Motion Study (joint values keyed along a timeline, playback, export of occurrence positions as JSON/CSV), Exploded views (automatic or by hand, shown without changing placements); interference, per-component physical properties; STEP with assembly structure. Physical properties now measure material-aware component/occurrence placements, descendants and repeated instances, including pending moves and body reassignment offsets; contact geometry and automatic exploded centres respect those offsets. Groundwork done: component tree, occurrences with transforms (instances, Paste New), world placement, active component as authoring frame, ground, Capture/Revert Position, moving bodies and sketches. UI: ASSEMBLE panel dialogs for New Component, Joint (snaps on faces, edges, circles and vertices; animated motion preview; offsets, flip, limits), As-built Joint, Joint Origin, Rigid Group, Drive Joints (live slider), Motion Link and Interference (overlaps shown red); joints in the timeline and the Browser | in progress | 32 |
-| M10 | Sheet metal: flange (base, edge, contour), hem, unfold/refold, convert, flat pattern + DXF, rules: done. PLASTIC enclosure subset: Boss, Rib, Web, Lip/Groove, Snap Fit, Rest, Plastic Rules (library, edit, assign; rule draft and clearance as feature defaults): done, tested against hand-computed geometry. UI: SHEET METAL and PLASTIC tabs in Fusion's layout with dialogs (live preview, Edit Feature, pre-selection) for Flange, Hem, Unfold/Refold, Convert, Sheet Metal Rules, Create Flat Pattern (flat view with bend lines, bend table CSV/JSON and DXF export with exact circle/arc/line cutouts), Boss, Lip/Groove, Snap Fit, Rest, Manage and Assign Plastic Rules; Fold (bend along a sketch line); flanges meeting at a corner closed at any angle with the rule's gap; edge flanges with their own angle and height per edge in one feature; corner reliefs (notch, round, rectangular) chosen by the rule; Convert to Sheet Metal from a solid or shelled body by its bend edges (flat faces, sharp bends) | in progress | 36 |
+| M9 | Components and assemblies: New Component / Create Components from Bodies, active component, per-component origin/bodies/sketches/timeline entries, occurrences with transforms, Copy/Paste vs Paste New, nested Browser tree with visibility and isolate; Ground, Move/Copy of occurrences, joints (rigid, revolute, slider, cylindrical, pin-slot, planar, ball) by joint origins with limits and Drive Joints, As-built Joint, Rigid Group, Contact Sets (driving and motion studies stop where bodies in a set would pass through each other), Motion Study (joint values keyed along a timeline, playback, export of occurrence positions as JSON/CSV), Exploded views (automatic or by hand, shown without changing placements); interference, per-component physical properties; STEP with assembly structure; URDF export for robot simulators (links with meshes, mass and inertia; joint chains whose values match Drive Joints; docs/urdf.md). Physical properties now measure material-aware component/occurrence placements, descendants and repeated instances, including pending moves and body reassignment offsets; contact geometry and automatic exploded centres respect those offsets. Groundwork done: component tree, occurrences with transforms (instances, Paste New), world placement, active component as authoring frame, ground, Capture/Revert Position, moving bodies and sketches. UI: ASSEMBLE panel dialogs for New Component, Joint (snaps on faces, edges, circles and vertices; animated motion preview; offsets, flip, limits), As-built Joint, Joint Origin, Rigid Group, Drive Joints (live slider), Motion Link and Interference (overlaps shown red); joints in the timeline and the Browser | in progress | 32 |
+| M10 | Sheet metal: flange (base, edge, contour), hem, unfold/refold, convert, flat pattern + DXF, rules: done. PLASTIC enclosure subset: Boss, Rib, Web, Lip/Groove, Snap Fit, Rest, Plastic Rules (library, edit, assign; rule draft and clearance as feature defaults): done, tested against hand-computed geometry. UI: SHEET METAL and PLASTIC tabs in Fusion's layout with dialogs (live preview, Edit Feature, pre-selection) for Flange, Hem, Unfold/Refold, Convert, Sheet Metal Rules, Create Flat Pattern (flat view with bend lines, bend table CSV/JSON and DXF export with exact circle/arc/line cutouts), Boss, Lip/Groove, Snap Fit, Rest, Manage and Assign Plastic Rules; Fold (bend along a sketch line); flanges meeting at a corner closed at any angle with the rule's gap; edge flanges with their own angle and height per edge in one feature; corner reliefs (notch, round, rectangular, tear) chosen by the rule; Convert to Sheet Metal from a solid or shelled body by its bend edges (flat faces, sharp bends) | in progress | 36 |
 | M11 | 2D drawings | deferred | — |
 | M12 | Release: cross-platform packages, verification and deliberate publication implemented; original current-UI demo refreshed. Trusted distribution signing and broader performance work remain | in progress | 16 |
 | M14 | Configurations: a table of rows (parameter expressions and feature suppressions per row) switched with config.activate (undoable, all or nothing), kept through parameter renames and feature deletes (config.configure, config.table, config.column/row/activate). Per-row body materials and appearances (library looks, custom colour/opacity and clearing overrides), undoable activation and save/reopen: done. Ordered typed configuration rules, atomic validation and structured rule editing: done. Component appearance and certified semantic face style columns, atomic preview/apply and independent-copy remapping: done. Exact constructed sketch-side and immutable imported-face lineage now preserve legacy names and reject retargeting. Left: ambiguous shifted/two-sided caps | in progress | 4 |
 | M13 | Never lose work: atomic saves (temporary file, flush, rename; a crash at any moment leaves the old file or the new one) with the replaced version kept as `<file>.bak`; autosave of unsaved changes to the recovery folder every 5 minutes (preference) and after big operations, only when something changed; "Recover unsaved design?" on the next launch (`doc.recovery_list`, `doc.recover`, `doc.recovery_discard`); a kill-mid-save test (process killed while saving a 0.5 MB design 25 times). File format: `"format": "solidcraft/12"`, older formats upgraded step by step (`doc::format`), newer ones refused with a message, out-of-range numbers and broken placements refused; a corpus of designs saved by M0, components-era, joints-era and current builds (apps/solidcraft-cli/tests/corpus) that must open and evaluate as saved; damaged and hostile variants (truncation, bit flips, hostile values, removed keys, repeated features, deep nesting) never panic | done | 6 |
 
+## Physical material data
+
+- Physical material card validation (#923/#922) provides typed SI mechanical and
+  thermal data, per-property sources/conditions and isotropic/orthotropic stability
+  checks through read-only `material.properties.validate`. It does not assign or
+  persist properties, provide a solver or enable rendering; see
+  [the contract and staged follow-ups](docs/physical-material-cards.md).
+
+- Directional elasticity (#994) queries the validated card in material-local axes
+  through read-only `material.properties.directional`, with source/condition review.
+  It does not assign body frames, predict structural behavior or enable a solver.
+
+## Library foundations (#785, #786, #787)
+
+- Proposed phases cover offline bundled/project/user packs, physical materials and
+  appearances, editable wood mapping, and parameterized component/assembly families.
+  Stable identity/revision, copied design definitions, provenance and resource limits
+  apply from the first implementation. Existing material, appearance and standard-part
+  commands remain the application paths. See [the proposal](docs/book/src/dev/libraries.md)
+  for source/license review and acceptance gates. This is planning only: pack loading,
+  texture rendering and expanded component families are not implemented by this entry.
+
 ## Render foundation
 
+- The initial opaque surface numerical contract for #1004 provides bounded linear
+  color/metallic/roughness/IOR admission and an original tested direct-light BRDF.
+  It does not enable PBR rendering or change stored appearances. See
+  [the model, evidence and remaining consumer gates](docs/render-surface.md).
+
+- A bounded cooperative Radiance RGBE input utility is available in L1 render;
+  it does not yet enable HDRI/PBR rendering or a document import command. See
+  [the input contract](docs/render-hdr-input.md) and #813 for integration work.
 - R1 adds renderer-independent backend/profile metadata, strict request resolution and
   bounded image/scratch admission checks, exposed by the read-only `render.backends`
   command. It describes the current CPU raster snapshot path without evaluating the model.
@@ -146,6 +176,13 @@ PCB / Package, Render, Animation, Simulation, Manufacture/CAM, Drawings.
   Crash Reports…) with a reviewed issue draft; agents read them through
   `diagnostics.crash_reports`, the MCP `crash_reports` tool or the CLI. Nothing is sent
   anywhere. See [crash reports](docs/crash-reports.md).
+- Command scripts from designs (#886): `timeline.export_script` (CLI `solidcraft-cli script`)
+  writes a design's history as a script that `eval` and `run` replay into the same design —
+  user parameters, units, sheet metal and plastic rules and materials as their own commands,
+  then each feature through `timeline.add` with its ids, names and dimension parameters kept,
+  so every feature kind replays exactly and a failing feature fails the same way. Trimming the
+  script after a step gives the design at that step. Appearances, folders, views and
+  configurations are listed as left out; components and joints are not supported yet.
 
 ## 0.2.0 release batch
 
@@ -206,6 +243,9 @@ PCB / Package, Render, Animation, Simulation, Manufacture/CAM, Drawings.
 
 - Associative shell-face sketches require a unique certified planar source. Nested shell
   attachments and ambiguous coincident sources remain unsupported.
+- G2 fillets: exact quintic blends of straight edges between planar faces, with one perpendicular
+  planar end face at each end. The UI and `solid.fillet` expose `curvature` (alias `g2`); the size
+  is an equivalent circular setback. Curved faces/edges, sloped ends and corner junctions remain unsupported.
 - Fillets and chamfers: constant, variable-radius and chord-length fillets; a radius per edge,
   rounds next to earlier rounds of another radius, and smooth corner patches where three rounds
   meet (a sphere for equal radii); straight edges (convex or concave) between planar faces with perpendicular
@@ -223,7 +263,14 @@ PCB / Package, Render, Animation, Simulation, Manufacture/CAM, Drawings.
   edges between any two smooth sides (a branch pipe on a main pipe), by a rolling ball (the
   blend a rational B-spline through exact arcs), closed or ending at planar faces square to the
   edges, where straight or curved cap edges are trimmed to the contacts (the straight edge
-  between two overlapping extruded arcs).
+  between two overlapping extruded arcs); knife edges, where the two faces have opposite
+  normals (a wall that runs out tangent into a face: the ball that fits there); an edge that
+  runs out along an end face tangent to one side (the arc top edge of that wall), cut where the
+  blend meets it; rounds that end in an earlier round on curved faces, in any order (the rounds
+  of two edges at a vertex meet in a crease, as on a box), picked together or one after the
+  other, except a round after a round of the edge between the wall and a flat face that it
+  would run over; the three edges at a vertex of any smooth faces, of one radius, end in a
+  piece of sphere.
 - Booleans: prisms along one direction (plates with holes, slots, patterns of them, equal
   sections stacked end to end) are combined exactly in 2D. Qualified axial cuts preserve
   annular holes with overrun cutters, including inward Press Pull after a joined extrusion;
@@ -259,8 +306,12 @@ PCB / Package, Render, Animation, Simulation, Manufacture/CAM, Drawings.
   Sweeps along 3D sketch curves follow their polyline (smooth walls when the path is smooth).
 - Extend intersects exact ellipses and rational/high-degree splines without moving the line or
   circular support. Associative free-form offsets have a whole-span 0.002 mm normal-distance
-  certificate and refine within bounded node limits while retaining existing IDs. Singular,
-  self-intersecting and ambiguous curves refuse atomically; mixed junctions and nonsmooth
+  certificate and refine within bounded node limits while retaining existing IDs.
+  At the node limit, geometric certificate subdivisions accommodate unequal spline parameter
+  speeds without changing stored nodes or relaxing the distance tolerance (#971).
+  Associated offset fit nodes stay hidden from display, picking and snapping; dragging the
+  editable source updates the derived boundary live. Break Association restores point editing.
+  Singular, self-intersecting and ambiguous curves refuse atomically; mixed junctions and nonsmooth
   closed natural-spline seams remain limitations. New explicitly closed fit splines and closed
   offset outputs use periodic C2 interpolation, supporting repeated certified offsets; older
   natural splines are preserved. Clicking the starting fit point deliberately closes a new loop.

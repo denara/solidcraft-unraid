@@ -399,6 +399,7 @@ pub fn parse(text: &str) -> Result<Exchange, String> {
     }
     lx.expect(b';')?;
     let mut ex = Exchange::default();
+    let watch = crate::watch::current();
     loop {
         lx.ws()?;
         if lx.peek().is_none() {
@@ -469,6 +470,14 @@ pub fn parse(text: &str) -> Result<Exchange, String> {
                         vec![lx.record()?]
                     };
                     lx.expect(b';')?;
+                    if ex.entities.len() % 4096 == 0
+                        && let Some(w) = &watch
+                    {
+                        if w.cancelled() {
+                            return err("STEP import cancelled");
+                        }
+                        w.progress("reading", lx.i, lx.s.len());
+                    }
                     if ex.entities.len() >= MAX_ENTITIES {
                         return err(format!("STEP file has more than {MAX_ENTITIES} entities"));
                     }

@@ -446,6 +446,7 @@ mod tests {
         let producer = doc
             .add_feature(
                 FeatureKind::Extrude {
+                    thin: None,
                     sketch: source,
                     profiles: crate::ProfileSel::Indices { indices: vec![0, 1] },
                     extent,
@@ -555,7 +556,14 @@ mod tests {
         let extent = serde_json::from_value(serde_json::json!({"distance":"2"})).unwrap();
         let boss = doc
             .add_feature(
-                FeatureKind::Extrude { sketch: sk, profiles: crate::ProfileSel::All, extent, operation: crate::Operation::NewBody, targets: vec![] },
+                FeatureKind::Extrude {
+                    thin: None,
+                    sketch: sk,
+                    profiles: crate::ProfileSel::All,
+                    extent,
+                    operation: crate::Operation::NewBody,
+                    targets: vec![],
+                },
                 Some("Boss"),
             )
             .unwrap();

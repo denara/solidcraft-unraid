@@ -1,4 +1,5 @@
-//! Convert to Sheet Metal with bend edges: solid and shelled bodies.
+//! Convert to Sheet Metal: solid and shelled bodies with bend edges, and plates read from STEP
+//! files whose walls come in pieces.
 
 use std::f64::consts::{FRAC_PI_2, PI, SQRT_2};
 
@@ -444,4 +445,359 @@ fn conversions_that_cannot_work_say_why() {
     assert!(e.contains("curved"), "{e}");
     // Nothing changed.
     assert!(s.model.state().sheets.is_empty() && c.model.state().sheets.is_empty());
+}
+
+/// One side face of a plate written to STEP: flat from `a` to `b`, or a piece of a round wall
+/// about `c` from `a` to `b` (counter-clockwise seen from +z when `ccw`).
+#[derive(Clone, Copy)]
+enum Wall {
+    Flat([f64; 2], [f64; 2]),
+    Round([f64; 2], [f64; 2], [f64; 2], bool),
+}
+
+impl Wall {
+    fn ends(&self) -> ([f64; 2], [f64; 2]) {
+        match *self {
+            Wall::Flat(a, b) | Wall::Round(a, b, _, _) => (a, b),
+        }
+    }
+}
+
+/// A round hole of radius `r` about `c` (clockwise seen from +z), its wall in `pieces` cylinder
+/// faces, the first seam at `seam` degrees.
+fn hole(c: [f64; 2], r: f64, pieces: usize, seam: f64) -> Vec<Wall> {
+    let at = |i: usize| {
+        let a = (seam - 360.0 * i as f64 / pieces as f64).to_radians();
+        [c[0] + r * a.cos(), c[1] + r * a.sin()]
+    };
+    (0..pieces).map(|i| Wall::Round(at(i), at(i + 1), c, false)).collect()
+}
+
+/// A rectangle (counter-clockwise), its bottom side split in two faces when `split`.
+fn rectangle(w: f64, h: f64, split: bool) -> Vec<Wall> {
+    let mut walls = if split {
+        vec![Wall::Flat([0.0, 0.0], [w / 2.0, 0.0]), Wall::Flat([w / 2.0, 0.0], [w, 0.0])]
+    } else {
+        vec![Wall::Flat([0.0, 0.0], [w, 0.0])]
+    };
+    walls.extend([Wall::Flat([w, 0.0], [w, h]), Wall::Flat([w, h], [0.0, h]), Wall::Flat([0.0, h], [0.0, 0.0])]);
+    walls
+}
+
+/// The entities of a STEP file, numbered as they are added; vertices and vertical edges once.
+#[derive(Default)]
+struct Step {
+    lines: Vec<String>,
+    vertices: Vec<([i64; 3], usize)>,
+    verticals: Vec<([i64; 2], usize)>,
+}
+
+impl Step {
+    fn add(&mut self, entity: String) -> usize {
+        self.lines.push(format!("#{}={entity};", self.lines.len() + 1));
+        self.lines.len()
+    }
+
+    fn point(&mut self, p: [f64; 3]) -> usize {
+        self.add(format!("CARTESIAN_POINT('',({:.12},{:.12},{:.12}))", p[0], p[1], p[2]))
+    }
+
+    fn frame(&mut self, o: [f64; 3], z: [f64; 3], x: [f64; 3]) -> usize {
+        let o = self.point(o);
+        let z = self.add(format!("DIRECTION('',({:.12},{:.12},{:.12}))", z[0], z[1], z[2]));
+        let x = self.add(format!("DIRECTION('',({:.12},{:.12},{:.12}))", x[0], x[1], x[2]));
+        self.add(format!("AXIS2_PLACEMENT_3D('',#{o},#{z},#{x})"))
+    }
+
+    fn vertex(&mut self, p: [f64; 2], z: f64) -> usize {
+        let key = [p[0], p[1], z].map(|v| (v * 1e9).round() as i64);
+        if let Some((_, v)) = self.vertices.iter().find(|(k, _)| *k == key) {
+            return *v;
+        }
+        let point = self.point([p[0], p[1], z]);
+        let v = self.add(format!("VERTEX_POINT('',#{point})"));
+        self.vertices.push((key, v));
+        v
+    }
+
+    fn line(&mut self, a: [f64; 3], b: [f64; 3], va: usize, vb: usize) -> usize {
+        let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        let p = self.point(a);
+        let dir = self.add(format!("DIRECTION('',({:.12},{:.12},{:.12}))", d[0] / l, d[1] / l, d[2] / l));
+        let v = self.add(format!("VECTOR('',#{dir},{l:.12})"));
+        let line = self.add(format!("LINE('',#{p},#{v})"));
+        self.add(format!("EDGE_CURVE('',#{va},#{vb},#{line},.T.)"))
+    }
+
+    /// The wall's edge at height `z`.
+    fn edge(&mut self, wall: Wall, z: f64) -> usize {
+        let (a, b) = wall.ends();
+        let (va, vb) = (self.vertex(a, z), self.vertex(b, z));
+        match wall {
+            Wall::Flat(..) => self.line([a[0], a[1], z], [b[0], b[1], z], va, vb),
+            Wall::Round(_, _, c, ccw) => {
+                let frame = self.frame([c[0], c[1], z], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]);
+                let r = (a[0] - c[0]).hypot(a[1] - c[1]);
+                let circle = self.add(format!("CIRCLE('',#{frame},{r:.12})"));
+                self.add(format!("EDGE_CURVE('',#{va},#{vb},#{circle},{})", if ccw { ".T." } else { ".F." }))
+            }
+        }
+    }
+
+    fn vertical(&mut self, p: [f64; 2], t: f64) -> usize {
+        let key = p.map(|v| (v * 1e9).round() as i64);
+        if let Some((_, e)) = self.verticals.iter().find(|(k, _)| *k == key) {
+            return *e;
+        }
+        let (v0, v1) = (self.vertex(p, 0.0), self.vertex(p, t));
+        let e = self.line([p[0], p[1], 0.0], [p[0], p[1], t], v0, v1);
+        self.verticals.push((key, e));
+        e
+    }
+
+    fn edge_loop(&mut self, edges: &[(usize, bool)]) -> usize {
+        let oriented: Vec<String> = edges
+            .iter()
+            .map(|(e, forward)| format!("#{}", self.add(format!("ORIENTED_EDGE('',*,*,#{e},{})", if *forward { ".T." } else { ".F." }))))
+            .collect();
+        self.add(format!("EDGE_LOOP('',({}))", oriented.join(",")))
+    }
+}
+
+/// STEP text of a plate `t` thick standing on z = 0, its outline `loops` (the outer one
+/// counter-clockwise, holes clockwise, seen from +z) with one side face per wall: a plane, or a
+/// cylinder piece. Hand-written, the way exporters that split closed faces write them.
+fn plate_step(loops: &[Vec<Wall>], t: f64) -> String {
+    let mut s = Step::default();
+    let bottom: Vec<Vec<usize>> = loops.iter().map(|l| l.iter().map(|w| s.edge(*w, 0.0)).collect()).collect();
+    let top: Vec<Vec<usize>> = loops.iter().map(|l| l.iter().map(|w| s.edge(*w, t)).collect()).collect();
+    let mut faces = Vec::new();
+    for (i, walls) in loops.iter().enumerate() {
+        for (j, wall) in walls.iter().enumerate() {
+            let (a, b) = wall.ends();
+            let (va, vb) = (s.vertical(a, t), s.vertical(b, t));
+            let lp = s.edge_loop(&[(bottom[i][j], true), (vb, true), (top[i][j], false), (va, false)]);
+            let bound = s.add(format!("FACE_OUTER_BOUND('',#{lp},.T.)"));
+            let (surface, sense) = match *wall {
+                Wall::Flat(a, b) => {
+                    let l = (b[0] - a[0]).hypot(b[1] - a[1]);
+                    let (dx, dy) = ((b[0] - a[0]) / l, (b[1] - a[1]) / l);
+                    let frame = s.frame([a[0], a[1], 0.0], [dy, -dx, 0.0], [dx, dy, 0.0]);
+                    (s.add(format!("PLANE('',#{frame})")), true)
+                }
+                Wall::Round(a, _, c, ccw) => {
+                    let frame = s.frame([c[0], c[1], 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]);
+                    let r = (a[0] - c[0]).hypot(a[1] - c[1]);
+                    (s.add(format!("CYLINDRICAL_SURFACE('',#{frame},{r:.12})")), ccw)
+                }
+            };
+            faces.push(s.add(format!("ADVANCED_FACE('',(#{bound}),#{surface},{})", if sense { ".T." } else { ".F." })));
+        }
+    }
+    for (z, edges, up) in [(t, &top, true), (0.0, &bottom, false)] {
+        let mut bounds = Vec::new();
+        for (i, es) in edges.iter().enumerate() {
+            let walk: Vec<(usize, bool)> = if up { es.iter().map(|e| (*e, true)).collect() } else { es.iter().rev().map(|e| (*e, false)).collect() };
+            let lp = s.edge_loop(&walk);
+            bounds.push(format!("#{}", s.add(format!("{}('',#{lp},.T.)", if i == 0 { "FACE_OUTER_BOUND" } else { "FACE_BOUND" }))));
+        }
+        let frame = s.frame([0.0, 0.0, z], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]);
+        let plane = s.add(format!("PLANE('',#{frame})"));
+        faces.push(s.add(format!("ADVANCED_FACE('',({}),#{plane},{})", bounds.join(","), if up { ".T." } else { ".F." })));
+    }
+    let faces: Vec<String> = faces.iter().map(|f| format!("#{f}")).collect();
+    let shell = s.add(format!("CLOSED_SHELL('',({}))", faces.join(",")));
+    let brep = s.add(format!("MANIFOLD_SOLID_BREP('Plate',#{shell})"));
+    s.add(format!("SHAPE_REPRESENTATION('',(#{brep}),$)"));
+    format!(
+        "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION((''),'2;1');\nFILE_NAME('plate','',(''),(''),'','hand','');\nFILE_SCHEMA(('AUTOMOTIVE_DESIGN {{ 1 0 10303 214 1 1 1 1 }}'));\nENDSEC;\nDATA;\n{}\nENDSEC;\nEND-ISO-10303-21;\n",
+        s.lines.join("\n")
+    )
+}
+
+/// The plate inserted from a STEP file and converted, picked on its top face at `pick`.
+fn convert_step_plate(tag: &str, loops: &[Vec<Wall>], t: f64, pick: [f64; 2]) -> Session {
+    let path = std::env::temp_dir().join(format!("solidcraft-split-walls-{tag}-{}.step", std::process::id()));
+    std::fs::write(&path, plate_step(loops, t)).unwrap();
+    let mut s = Session::default();
+    run(&mut s, "file.insert_step", json!({"path": path.to_string_lossy()}));
+    let _ = std::fs::remove_file(&path);
+    run(&mut s, "sheet.convert", json!({"body": "Plate", "face": [pick[0], pick[1], t]}));
+    s
+}
+
+/// The flat pattern's cut-outs that are whole circles, as (radius, centre).
+fn flat_circles(s: &mut Session) -> Vec<(f64, [f64; 2])> {
+    let shapes = flat(s)["cutout_shapes"].as_array().cloned().unwrap_or_default();
+    let c = |v: &Value| [v["center"][0].as_f64().unwrap_or(f64::NAN), v["center"][1].as_f64().unwrap_or(f64::NAN)];
+    shapes.iter().filter_map(|x| x.get("circle")).map(|x| (x["radius"].as_f64().unwrap_or(f64::NAN), c(x))).collect()
+}
+
+/// How many entities of each kind the flat pattern's DXF has.
+fn dxf_entities(s: &mut Session) -> (usize, usize, usize) {
+    let dxf = run(s, "sheet.export_dxf", json!({}))["dxf"].as_str().unwrap_or("").replace("\r\n", "\n");
+    let n = |kind: &str| dxf.matches(&format!("\n0\n{kind}\n")).count();
+    (n("LINE"), n("ARC"), n("CIRCLE"))
+}
+
+/// A plate whose round holes' walls are two half-cylinders each (as many exporters write a hole)
+/// converts with the holes as circles. It was refused as "not a plate of even thickness": its
+/// holes came out as polygons, whose area missed the holes' by more than the plate check allows.
+#[test]
+fn a_plate_whose_hole_walls_are_half_cylinders_converts_with_round_holes() {
+    let (w, t, r) = (30.0, 2.0, 2.0);
+    let centres = [[6.0, 6.0], [24.0, 6.0], [24.0, 24.0], [6.0, 24.0]];
+    let mut loops = vec![rectangle(w, w, false)];
+    loops.extend(centres.iter().map(|c| hole(*c, r, 2, 90.0)));
+    let mut s = convert_step_plate("halves", &loops, t, [15.0, 15.0]);
+    let want = (w * w - 4.0 * PI * r * r) * t;
+    assert!((volume(&mut s) - want).abs() < 1e-4 * want, "{} vs {want}", volume(&mut s));
+    let circles = flat_circles(&mut s);
+    assert_eq!(circles.len(), 4, "{circles:?}");
+    assert!(circles.iter().all(|(radius, _)| (radius - r).abs() < 1e-9), "{circles:?}");
+    // The holes keep their places: 18 apart along the sides, 18·√2 across.
+    let d = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).hypot(a[1] - b[1]);
+    let mut gaps: Vec<f64> = (0..4).flat_map(|i| (i + 1..4).map(move |j| (i, j))).map(|(i, j)| d(circles[i].1, circles[j].1)).collect();
+    gaps.sort_by(f64::total_cmp);
+    assert!(gaps[..4].iter().all(|g| (g - 18.0).abs() < 1e-9) && gaps[4..].iter().all(|g| (g - 18.0 * SQRT_2).abs() < 1e-9), "{gaps:?}");
+    // The DXF: the outline's four lines and one circle per hole.
+    assert_eq!(dxf_entities(&mut s), (4, 0, 4));
+}
+
+/// Holes of any radius whose walls come in two, three or four pieces, seams anywhere: each is one
+/// circle.
+#[test]
+fn hole_walls_in_any_number_of_pieces_each_make_one_circle() {
+    let (t, holes) = (2.0, [([20.0, 30.0], 5.0, 2, 0.0), ([50.0, 30.0], 3.0, 3, 37.0), ([80.0, 30.0], 8.0, 4, 10.0)]);
+    let mut loops = vec![rectangle(100.0, 60.0, false)];
+    loops.extend(holes.iter().map(|(c, r, pieces, seam)| hole(*c, *r, *pieces, *seam)));
+    let mut s = convert_step_plate("pieces", &loops, t, [35.0, 10.0]);
+    let want = (6000.0 - PI * (25.0 + 9.0 + 64.0)) * t;
+    assert!((volume(&mut s) - want).abs() < 1e-4 * want, "{} vs {want}", volume(&mut s));
+    let mut radii: Vec<f64> = flat_circles(&mut s).iter().map(|c| c.0).collect();
+    radii.sort_by(f64::total_cmp);
+    assert!(radii.len() == 3 && radii.iter().zip([3.0, 5.0, 8.0]).all(|(a, b)| (a - b).abs() < 1e-9), "{radii:?}");
+    assert_eq!(dxf_entities(&mut s), (4, 0, 3));
+}
+
+/// Other walls such files split: rounded corners in two pieces each, a slot whose round ends are
+/// in two pieces each, a straight side in two faces. Each corner and slot end is one arc, the
+/// side one line.
+#[test]
+fn rounded_corners_slot_ends_and_split_sides_convert_as_single_arcs_and_lines() {
+    let (t, rc, rs, rh) = (2.0, 6.0, 4.0, 5.0);
+    let quarter = |c: [f64; 2], from: f64, pieces: usize| -> Vec<Wall> {
+        let at = |i: usize| {
+            let a = (from + 90.0 * i as f64 / pieces as f64).to_radians();
+            [c[0] + rc * a.cos(), c[1] + rc * a.sin()]
+        };
+        (0..pieces).map(|i| Wall::Round(at(i), at(i + 1), c, true)).collect()
+    };
+    // 100 x 60, corners rounded by 6, the bottom side in two faces.
+    let mut outer = vec![Wall::Flat([rc, 0.0], [50.0, 0.0]), Wall::Flat([50.0, 0.0], [100.0 - rc, 0.0])];
+    outer.extend(quarter([100.0 - rc, rc], -90.0, 2));
+    outer.push(Wall::Flat([100.0, rc], [100.0, 60.0 - rc]));
+    outer.extend(quarter([100.0 - rc, 60.0 - rc], 0.0, 2));
+    outer.push(Wall::Flat([100.0 - rc, 60.0], [rc, 60.0]));
+    outer.extend(quarter([rc, 60.0 - rc], 90.0, 2));
+    outer.push(Wall::Flat([0.0, 60.0 - rc], [0.0, rc]));
+    outer.extend(quarter([rc, rc], 180.0, 2));
+    // A slot 30 between its end centres, 8 wide, each end in two pieces (clockwise).
+    let (a, b) = ([45.0, 30.0], [75.0, 30.0]);
+    let slot = vec![
+        Wall::Flat([a[0], a[1] + rs], [b[0], b[1] + rs]),
+        Wall::Round([b[0], b[1] + rs], [b[0] + rs, b[1]], b, false),
+        Wall::Round([b[0] + rs, b[1]], [b[0], b[1] - rs], b, false),
+        Wall::Flat([b[0], b[1] - rs], [a[0], a[1] - rs]),
+        Wall::Round([a[0], a[1] - rs], [a[0] - rs, a[1]], a, false),
+        Wall::Round([a[0] - rs, a[1]], [a[0], a[1] + rs], a, false),
+    ];
+    let loops = vec![outer, slot, hole([20.0, 30.0], rh, 2, 90.0)];
+    let mut s = convert_step_plate("sides", &loops, t, [20.0, 50.0]);
+    let area = 6000.0 - (4.0 - PI) * rc * rc - (30.0 * 2.0 * rs + PI * rs * rs) - PI * rh * rh;
+    assert!((volume(&mut s) - area * t).abs() < 1e-4 * area * t, "{} vs {}", volume(&mut s), area * t);
+    // The outline: four lines and four quarter arcs; the slot: two lines and two half arcs; the
+    // hole: a circle.
+    assert_eq!(dxf_entities(&mut s), (6, 6, 1));
+    let shapes = flat(&mut s)["cutout_shapes"].as_array().cloned().unwrap_or_default();
+    let slot = shapes.iter().find_map(|x| x["segments"].as_array().cloned()).unwrap_or_default();
+    let sweeps: Vec<f64> = slot.iter().filter_map(|x| x["arc"]["sweep_deg"].as_f64()).map(f64::abs).collect();
+    assert!(slot.len() == 4 && sweeps.len() == 2 && sweeps.iter().all(|x| (x - 180.0).abs() < 1e-6), "{slot:?}");
+}
+
+/// Holes drilled here come out as circles too (their walls are half-cylinders as well), and a
+/// plate with many small ones converts: nine 4 mm holes in a 30 x 30 x 2 plate were refused too.
+#[test]
+fn a_plate_with_holes_drilled_here_converts_with_round_holes() {
+    let (w, t, r) = (30.0, 2.0, 2.0);
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": w, "width": w, "height": t, "body_name": "Plate"}));
+    for x in [6.0, 15.0, 24.0] {
+        for y in [6.0, 15.0, 24.0] {
+            run(&mut s, "solid.hole", json!({"position": [x, y, t], "diameter": 2.0 * r}));
+        }
+    }
+    run(&mut s, "sheet.convert", json!({"body": "Plate", "face": [10.5, 10.5, t]}));
+    let want = (w * w - 9.0 * PI * r * r) * t;
+    assert!((volume(&mut s) - want).abs() < 1e-4 * want, "{} vs {want}", volume(&mut s));
+    let circles = flat_circles(&mut s);
+    assert!(circles.len() == 9 && circles.iter().all(|(radius, _)| (radius - r).abs() < 1e-9), "{circles:?}");
+    assert_eq!(dxf_entities(&mut s), (4, 0, 9));
+}
+
+/// A box `l` x `w` x `t` with round holes (centre, diameter) drilled through it, converted,
+/// picked on its top face.
+fn convert_box(l: f64, w: f64, t: f64, holes: &[([f64; 2], f64)]) -> Session {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": l, "width": w, "height": t, "body_name": "Plate"}));
+    for (c, d) in holes {
+        run(&mut s, "solid.hole", json!({"position": [c[0], c[1], t], "diameter": d}));
+    }
+    run(&mut s, "sheet.convert", json!({"body": "Plate", "face": [l * 0.4, w * 0.25, t]}));
+    s
+}
+
+/// A long thin strip converts. 1200 x 100 x 1 was refused with "no outline on that face": the
+/// outline's tolerance was a thousandth of the body's size (1.2), more than the thickness, so the
+/// far side's triangles counted as the picked face's and no boundary was left.
+#[test]
+fn a_long_thin_strip_converts() {
+    let mut s = convert_box(1200.0, 100.0, 1.0, &[]);
+    assert!((volume(&mut s) - 120_000.0).abs() < 1e-6 * 120_000.0, "{}", volume(&mut s));
+    assert!(same_size(flat_size(&mut s), (1200.0, 100.0), 1e-6), "{:?}", flat_size(&mut s));
+    let t = flat(&mut s)["flat_size_mm"][2].as_f64().unwrap_or(f64::NAN);
+    assert!((t - 1.0).abs() < 1e-9, "{t}");
+    assert_eq!(dxf_entities(&mut s), (4, 0, 0));
+}
+
+/// Plates further past that, a thousandth of their size two to six times their thickness: a
+/// full sheet, a foil, a long bar.
+#[test]
+fn plates_thousands_of_times_longer_than_thick_convert() {
+    for (l, w, t) in [(3000.0, 1500.0, 0.5), (400.0, 100.0, 0.2), (6000.0, 20.0, 1.0)] {
+        let mut s = convert_box(l, w, t, &[]);
+        let want = l * w * t;
+        assert!((volume(&mut s) - want).abs() < 1e-6 * want, "{l} x {w} x {t}: {} vs {want}", volume(&mut s));
+        assert!(same_size(flat_size(&mut s), (l, w), 1e-6), "{l} x {w} x {t}: {:?}", flat_size(&mut s));
+        assert_eq!(dxf_entities(&mut s), (4, 0, 0), "{l} x {w} x {t}");
+    }
+}
+
+/// The strip with round holes down to its thickness across keeps every one as a circle. At 1200
+/// long it was refused; just under the old limit, 990 long, it converted without the 1 mm hole:
+/// the outline's chords could sag 0.99, more than that hole's radius, and it fell out.
+#[test]
+fn a_long_thin_strip_keeps_its_small_round_holes() {
+    let d = [10.0, 4.0, 2.0, 1.0];
+    for l in [990.0, 1200.0] {
+        let holes: Vec<([f64; 2], f64)> = d.iter().enumerate().map(|(i, d)| ([l * (i as f64 + 1.0) / 5.0, 50.0], *d)).collect();
+        let mut s = convert_box(l, 100.0, 1.0, &holes);
+        let want = l * 100.0 - PI / 4.0 * d.iter().map(|d| d * d).sum::<f64>();
+        assert!((volume(&mut s) - want).abs() < 1e-5 * want, "{l}: {} vs {want}", volume(&mut s));
+        let mut radii: Vec<f64> = flat_circles(&mut s).iter().map(|c| c.0).collect();
+        radii.sort_by(f64::total_cmp);
+        assert!(radii.len() == 4 && radii.iter().zip([0.5, 1.0, 2.0, 5.0]).all(|(a, b)| (a - b).abs() < 1e-9), "{l}: {radii:?}");
+        assert_eq!(dxf_entities(&mut s), (4, 0, 4), "{l}");
+    }
 }

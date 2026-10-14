@@ -67,7 +67,9 @@ pub fn palette_bar(app: &mut SolveApp, ui: &mut egui::Ui) {
                 ui.label(RichText::new("›").strong().color(t.accent));
                 let r = ui.add(
                     egui::TextEdit::singleline(&mut app.palette.text)
-                        .hint_text("Type a command, e.g. Extrude {\"distance\": 20}  — or press S to search")
+                        // The JSON example keeps its braces here rather than in the catalog, so the
+                        // placeholder parser never has to treat JSON punctuation as a name.
+                        .hint_text(crate::i18n::format("ui.command_palette_hint", &[("example", "Extrude {\"distance\": 20}")]))
                         .desired_width(520.0),
                 );
                 if app.palette.focus {
@@ -95,7 +97,7 @@ pub fn popup(app: &mut SolveApp, ctx: &egui::Context) {
     let mut picked: Option<&'static str> = None;
     let t = Tokens::get();
     let center = ctx.content_rect().center();
-    crate::frame::window(ctx, "Search commands", crate::frame::Width::Normal)
+    crate::frame::window(ctx, crate::i18n::tr_label("Search commands"), crate::frame::Width::Normal)
         .id(egui::Id::new("sc_search"))
         .pivot(egui::Align2::LEFT_TOP)
         .fixed_pos(egui::pos2(center.x - 200.0, 150.0))
@@ -103,7 +105,7 @@ pub fn popup(app: &mut SolveApp, ctx: &egui::Context) {
         .collapsible(false)
         .open(&mut open)
         .show(ctx, |ui| {
-            let r = ui.add(egui::TextEdit::singleline(&mut app.palette.text).hint_text("command name").desired_width(380.0));
+            let r = ui.add(egui::TextEdit::singleline(&mut app.palette.text).hint_text(crate::i18n::tr_label("command name")).desired_width(380.0));
             // Read Enter before taking the focus back (lost_focus reads the focus as it is now).
             let entered = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             r.request_focus();

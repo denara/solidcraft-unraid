@@ -2,7 +2,10 @@
 //! `[Content_Types].xml`, `_rels/.rels` and the model part `3D/3dmodel.model`.
 //!
 //! Writing: one mesh object per body (shared vertices, outward winding), named after the body,
-//! one build item each, colours as base materials. Reading: every build item becomes one mesh
+//! one build item each, colours as base materials. Objects with face tags also carry, per
+//! triangle, the B-rep face it lies on (`ft:face`, SolidCraft's face-tag namespace; spec:
+//! docs/formats/3mf-face-tags.md) and are written at full `f64`
+//! precision so the receiver gets the tessellation exactly. Reading: every build item becomes one mesh
 //! (components flattened with their transforms), converted to millimetres. Packages are
 //! untrusted: sizes, entry counts, mesh sizes and component nesting are capped.
 
@@ -28,6 +31,9 @@ const MAX_XML_DEPTH: usize = 256;
 
 const CORE_NS: &str = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02";
 const MODEL_REL: &str = "http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel";
+/// SolidCraft's face-tag namespace, version 1: `ft:face` on triangles, `ft:faces` on objects
+/// (docs/formats/3mf-face-tags.md).
+pub const FACE_TAGS_NS: &str = "https://github.com/bherbruck/solidcraft/formats/3mf-face-tags/2026/10";
 
 /// A named triangle mesh (millimetres, counter-clockwise seen from outside).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -43,6 +49,17 @@ pub struct MeshObject {
     /// empty when no triangle has one.
     pub looks: Vec<([f32; 3], f32)>,
     pub tri_looks: Vec<u32>,
+    /// The B-rep face each triangle lies on, or empty for no face tags. A tagged object is
+    /// written with exact (`f64`) coordinates.
+    pub tri_faces: Vec<u32>,
+    /// Number of B-rep faces (written as `ft:faces` when the object is tagged).
+    pub faces: u32,
+}
+
+impl MeshObject {
+    fn tagged(&self) -> bool {
+        !self.tri_faces.is_empty()
+    }
 }
 
 fn esc(s: &str) -> String {
@@ -61,14 +78,24 @@ fn esc(s: &str) -> String {
     o
 }
 
-/// Shared vertices (merged at single precision, as written) and non-degenerate triangles.
-fn indexed(m: &MeshObject) -> (Vec<[f32; 3]>, Vec<([u32; 3], u32)>) {
-    let mut map: HashMap<[u32; 3], u32> = HashMap::new();
-    let mut verts: Vec<[f32; 3]> = Vec::new();
+/// A triangle as written: its vertices, its colour entry (0: the object's own) and its face.
+struct Tri {
+    v: [u32; 3],
+    look: u32,
+    face: u32,
+}
+
+/// Shared vertices, merged at the precision they are written in (single, or double for tagged
+/// objects), and non-degenerate triangles.
+fn indexed(m: &MeshObject) -> (Vec<[f64; 3]>, Vec<Tri>) {
+    let exact = m.tagged();
+    let mut map: HashMap<[u64; 3], u32> = HashMap::new();
+    let mut verts: Vec<[f64; 3]> = Vec::new();
     let mut remap = Vec::with_capacity(m.positions.len());
     for p in &m.positions {
-        let v = [p.x as f32 + 0.0, p.y as f32 + 0.0, p.z as f32 + 0.0];
-        let key = v.map(f32::to_bits);
+        // `+ 0.0` turns -0 into 0, so both merge.
+        let v = if exact { [p.x + 0.0, p.y + 0.0, p.z + 0.0] } else { [p.x as f32 as f64 + 0.0, p.y as f32 as f64 + 0.0, p.z as f32 as f64 + 0.0] };
+        let key = v.map(f64::to_bits);
         let next = u32::try_from(verts.len()).unwrap_or(u32::MAX);
         let i = *map.entry(key).or_insert_with(|| {
             verts.push(v);
@@ -82,7 +109,11 @@ fn indexed(m: &MeshObject) -> (Vec<[f32; 3]>, Vec<([u32; 3], u32)>) {
         .enumerate()
         .filter_map(|(k, t)| {
             let (a, b, c) = (*remap.get(t[0] as usize)?, *remap.get(t[1] as usize)?, *remap.get(t[2] as usize)?);
-            (a != b && b != c && c != a).then_some(([a, b, c], m.tri_looks.get(k).copied().unwrap_or(0)))
+            (a != b && b != c && c != a).then(|| Tri {
+                v: [a, b, c],
+                look: m.tri_looks.get(k).copied().unwrap_or(0),
+                face: m.tri_faces.get(k).copied().unwrap_or(0),
+            })
         })
         .collect();
     (verts, tris)
@@ -109,7 +140,7 @@ pub fn weld_tagged(positions: &[Vec3], triangles: &[[u32; 3]], tags: &[u32], eps
         'search: for dx in -1..=1 {
             for dy in -1..=1 {
                 for dz in -1..=1 {
-                    for &i in grid.get(&[c[0] + dx, c[1] + dy, c[2] + dz]).into_iter().flatten() {
+                    for &i in grid.get(&[c[0].saturating_add(dx), c[1].saturating_add(dy), c[2].saturating_add(dz)]).into_iter().flatten() {
                         if verts.get(i as usize).is_some_and(|q| q.dist(*p) <= eps) {
                             found = Some(i);
                             break 'search;
@@ -210,7 +241,8 @@ pub fn weld_tagged(positions: &[Vec3], triangles: &[[u32; 3]], tags: &[u32], eps
 pub fn model_xml(objects: &[MeshObject]) -> String {
     let mut x = String::new();
     x.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-    let _ = writeln!(x, "<model unit=\"millimeter\" xml:lang=\"en-US\" xmlns=\"{CORE_NS}\">");
+    let ft = if objects.iter().any(MeshObject::tagged) { format!(" xmlns:ft=\"{FACE_TAGS_NS}\"") } else { String::new() };
+    let _ = writeln!(x, "<model unit=\"millimeter\" xml:lang=\"en-US\" xmlns=\"{CORE_NS}\"{ft}>");
     x.push_str(" <metadata name=\"Application\">SolidCraft</metadata>\n <resources>\n");
     let colored = objects.iter().any(|o| o.color.is_some() || o.transparency > 0.0 || !o.looks.is_empty());
     // Base material group id 1 (each object's own colour, then its faces' colours); objects
@@ -240,22 +272,29 @@ pub fn model_xml(objects: &[MeshObject]) -> String {
         let id = k + 2;
         let own = first.get(k).copied().unwrap_or(0);
         let mat = if colored { format!(" pid=\"1\" pindex=\"{own}\"") } else { String::new() };
-        let _ = writeln!(x, "  <object id=\"{id}\" type=\"model\" name=\"{}\"{mat}>", esc(&o.name));
+        let faces = if o.tagged() { format!(" ft:faces=\"{}\"", o.faces.max(1)) } else { String::new() };
+        let _ = writeln!(x, "  <object id=\"{id}\" type=\"model\" name=\"{}\"{mat}{faces}>", esc(&o.name));
         x.push_str("   <mesh>\n    <vertices>\n");
         let (verts, tris) = indexed(o);
         for v in &verts {
-            let _ = writeln!(x, "     <vertex x=\"{}\" y=\"{}\" z=\"{}\"/>", v[0], v[1], v[2]);
+            // Shortest round-trip form: f64 comes back exactly, f32 as written before.
+            if o.tagged() {
+                let _ = writeln!(x, "     <vertex x=\"{}\" y=\"{}\" z=\"{}\"/>", v[0], v[1], v[2]);
+            } else {
+                let _ = writeln!(x, "     <vertex x=\"{}\" y=\"{}\" z=\"{}\"/>", v[0] as f32, v[1] as f32, v[2] as f32);
+            }
         }
         x.push_str("    </vertices>\n    <triangles>\n");
-        for (t, look) in &tris {
-            match look {
-                l if colored && *l > 0 && (*l as usize) <= o.looks.len() => {
-                    let _ = writeln!(x, "     <triangle v1=\"{}\" v2=\"{}\" v3=\"{}\" pid=\"1\" p1=\"{}\"/>", t[0], t[1], t[2], own + *l as usize);
-                }
-                _ => {
-                    let _ = writeln!(x, "     <triangle v1=\"{}\" v2=\"{}\" v3=\"{}\"/>", t[0], t[1], t[2]);
-                }
+        for t in &tris {
+            let [a, b, c] = t.v;
+            let _ = write!(x, "     <triangle v1=\"{a}\" v2=\"{b}\" v3=\"{c}\"");
+            if colored && t.look > 0 && (t.look as usize) <= o.looks.len() {
+                let _ = write!(x, " pid=\"1\" p1=\"{}\"", own + t.look as usize);
             }
+            if o.tagged() {
+                let _ = write!(x, " ft:face=\"{}\"", t.face);
+            }
+            x.push_str("/>\n");
         }
         x.push_str("    </triangles>\n   </mesh>\n  </object>\n");
     }
@@ -797,5 +836,16 @@ mod tests {
         let (objs, warnings) = read_3mf(&package(&model, None)).unwrap();
         assert!(objs.len() < 4_000, "the shared budget must stop the later items: {} built", objs.len());
         assert!(warnings.iter().any(|w| w.contains("too many triangles")), "{warnings:?}");
+    }
+
+    /// A body far from the origin (a pattern spacing of "1e12 mm" gets there) welds without
+    /// overflowing the grid's cell indices.
+    #[test]
+    fn weld_survives_extreme_coordinates() {
+        let o = Vec3::new(1e12, 0.0, 0.0);
+        let positions = [o, o + Vec3::new(0.1, 0.0, 0.0), o + Vec3::new(0.0, 0.1, 0.0), o + Vec3::new(0.0, 0.0, 0.1)];
+        let triangles = [[0, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3]];
+        let (v, t) = weld(&positions, &triangles, 1e-7);
+        assert_eq!((v.len(), t.len()), (4, 4));
     }
 }

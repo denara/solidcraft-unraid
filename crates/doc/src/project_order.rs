@@ -1,7 +1,7 @@
 //! Stable face projection order: outer boundary first, then holes by geometry.
 //! B-rep edge indices depend on face enumeration and must not choose sketch curve IDs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use solidcraft_geom::{Mesh, Plane, Vec3};
 
@@ -17,13 +17,13 @@ pub(super) fn face_edges(mesh: &Mesh, face: u32, plane: &Plane) -> Result<Vec<us
         return family_edges(mesh, &patch.into_iter().collect(), plane);
     }
     let edges = mesh.face_edges(face).into_iter().filter(|e| !mesh.seams.get(*e).copied().unwrap_or(false)).collect();
-    boundary_edges(mesh, edges, plane)
+    boundary_edges(mesh, edges, &[face as usize].into_iter().collect(), plane)
 }
 
 /// Full boundary of an explicitly selected analytic planar piece. Display seams
 /// hide subdivisions for picking, but cannot remove a raw piece's closing edge.
 pub(super) fn raw_face_edges(mesh: &Mesh, face: u32, plane: &Plane) -> Result<Vec<usize>> {
-    boundary_edges(mesh, mesh.face_edges(face), plane)
+    boundary_edges(mesh, mesh.face_edges(face), &[face as usize].into_iter().collect(), plane)
 }
 
 /// Exterior of an exact current face family. Shared topological edges are internal;
@@ -42,10 +42,13 @@ pub(super) fn family_edges(mesh: &Mesh, selected: &std::collections::BTreeSet<us
             edges.push(index);
         }
     }
-    boundary_edges(mesh, edges, plane)
+    boundary_edges(mesh, edges, selected, plane)
 }
 
-fn boundary_edges(mesh: &Mesh, mut edges: Vec<usize>, plane: &Plane) -> Result<Vec<usize>> {
+/// `faces`: the faces the edges bound. Where boundaries touch at a vertex (a pinch: an even number of
+/// boundary edges meet there), the walk stays on the face it came along, or else takes the first
+/// edge in geometric order; either way every loop closes. An odd number is a real branch.
+fn boundary_edges(mesh: &Mesh, mut edges: Vec<usize>, faces: &BTreeSet<usize>, plane: &Plane) -> Result<Vec<usize>> {
     let bounds = mesh.bounds();
     let origin = bounds.min;
     let local_origin = plane.to_local(origin);
@@ -111,26 +114,36 @@ fn boundary_edges(mesh: &Mesh, mut edges: Vec<usize>, plane: &Plane) -> Result<V
             // Neighbouring quantization cells cover points on either side of a rounding
             // boundary. Connectivity is checked in world space, not in the projection.
             let (x, y, z) = key(current);
-            let mut candidates = Vec::new();
+            let mut incident = Vec::new();
             for dx in -1..=1 {
                 for dy in -1..=1 {
                     for dz in -1..=1 {
                         let cell = (x.saturating_add(dx), y.saturating_add(dy), z.saturating_add(dz));
                         if let Some(list) = at.get(&cell) {
-                            candidates.extend(list.iter().copied().filter(|e| {
-                                !used.get(*e).copied().unwrap_or(true)
-                                    && mesh.edges.get(*e).is_some_and(|p| {
-                                        p.first().is_some_and(|a| a.dist(current) <= tol) || p.last().is_some_and(|b| b.dist(current) <= tol)
-                                    })
+                            incident.extend(list.iter().copied().filter(|e| {
+                                mesh.edges.get(*e).is_some_and(|p| {
+                                    p.first().is_some_and(|a| a.dist(current) <= tol) || p.last().is_some_and(|b| b.dist(current) <= tol)
+                                })
                             }));
                         }
                     }
                 }
             }
-            candidates.sort_by_key(|e| geometry_key(*e));
-            candidates.dedup();
+            incident.sort_by_key(|e| geometry_key(*e));
+            incident.dedup();
+            let mut candidates: Vec<usize> = incident.iter().copied().filter(|e| !used.get(*e).copied().unwrap_or(true)).collect();
             if candidates.len() > 1 {
-                return Err(DocError::Invalid("face projection has a branched boundary".into()));
+                if incident.len() % 2 != 0 {
+                    return Err(DocError::Invalid("face projection has a branched boundary".into()));
+                }
+                let face_of = |e: usize| -> Vec<u32> {
+                    mesh.edge_faces.get(e).map(|fs| fs.iter().copied().filter(|f| faces.contains(&(*f as usize))).collect()).unwrap_or_default()
+                };
+                let here = face_of(edge);
+                let same: Vec<usize> = candidates.iter().copied().filter(|c| face_of(*c).iter().any(|f| here.contains(f))).collect();
+                if same.len() == 1 {
+                    candidates = same;
+                }
             }
             let Some(next) = candidates.first() else { break };
             edge = *next;
@@ -181,6 +194,27 @@ mod tests {
         assert!(family_edges(&mesh, &selected, &Plane::XY).is_err());
         mesh.edge_faces[2] = vec![0, 0];
         assert!(family_edges(&mesh, &selected, &Plane::XY).is_err());
+    }
+
+    #[test]
+    fn boundaries_touching_at_a_vertex_project() {
+        // Two squares of one face family meet only at the corner (1, 1): four boundary edges meet
+        // there (a pinch), and the walk keeps each square's loop on its own face.
+        let mut mesh = Mesh::default();
+        for (face, x, y) in [(0, 0., 0.), (1, 1., 1.)] {
+            let corners = [Vec3::new(x, y, 0.), Vec3::new(x + 1., y, 0.), Vec3::new(x + 1., y + 1., 0.), Vec3::new(x, y + 1., 0.)];
+            mesh.positions.extend(corners);
+            for i in 0..4 {
+                mesh.edges.push(vec![corners[i], corners[(i + 1) % 4]]);
+                mesh.edge_faces.push(vec![face]);
+            }
+        }
+        let edges = family_edges(&mesh, &[0, 1].into_iter().collect(), &Plane::XY).unwrap();
+        assert_eq!(edges.len(), 8);
+        // A third edge ending at the corner leaves an odd number there: a real branch.
+        mesh.edges.push(vec![Vec3::new(1., 1., 0.), Vec3::new(3., 0., 0.)]);
+        mesh.edge_faces.push(vec![1]);
+        assert!(family_edges(&mesh, &[0, 1].into_iter().collect(), &Plane::XY).unwrap_err().to_string().contains("branched"));
     }
 
     #[test]

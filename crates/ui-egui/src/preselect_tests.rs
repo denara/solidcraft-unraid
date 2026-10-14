@@ -2,6 +2,7 @@
 //! type, whether the command starts from a shortcut, the toolbar or a menu.
 
 use serde_json::json;
+use solidcraft_engine::doc::expr::Kind as ValueKind;
 use solidcraft_engine::geom::Vec3;
 use solidcraft_engine::{Sel, Session};
 
@@ -561,6 +562,34 @@ fn a_hole_is_mirrored_as_a_feature() {
     assert_eq!(cmds[0].1["features"], json!(["Hole1"]));
 }
 
+/// The canvas names the G2 size correctly and edits the same value when the feature is reopened.
+#[test]
+fn curvature_canvas_value_uses_equivalent_radius_when_created_and_reopened() {
+    for style in ["curvature", "g2"] {
+        let mut app = boxed();
+        let e = edge(&app, Vec3::new(20.0, 0.0, 20.0));
+        let mut d = start(&mut app, vec![e], "solid.fillet");
+        d.extra.insert("type".into(), json!(style));
+        let (label, kind, value) = d.primary().unwrap();
+        assert_eq!((label, kind), ("Equivalent Radius", ValueKind::Length));
+        *value = "3 mm".into();
+        let (command, params) = apply_commands(&app, &d).unwrap().remove(0);
+        assert_eq!(params["radius"], json!("3 mm"), "the canvas edits the actual command value");
+        app.session.execute(&command, &params).unwrap();
+        let feature = app.session.doc.features.last().unwrap().id;
+        let mut reopened = crate::dialogs::for_feature(&app, feature, None).unwrap();
+        let (label, kind, value) = reopened.primary().unwrap();
+        assert_eq!((label, kind), ("Equivalent Radius", ValueKind::Length));
+        assert_eq!(value.as_str(), "3 mm");
+    }
+    for (command, label) in [("solid.fillet", "Radius"), ("solid.chamfer", "Distance")] {
+        let mut app = boxed();
+        let e = edge(&app, Vec3::new(20.0, 0.0, 20.0));
+        let mut d = start(&mut app, vec![e], command);
+        assert_eq!(d.primary().unwrap().0, label);
+    }
+}
+
 /// The radius arrow points into the body: dragging toward the material grows the round.
 #[test]
 fn fillet_and_chamfer_arrows_point_into_the_body() {
@@ -798,6 +827,170 @@ fn surface_dialogs_make_their_commands() {
     app.session.execute(&id, &p).unwrap();
     let v = app.session.model.state().bodies.iter().map(|b| b.mesh().measure().volume).fold(0.0, f64::max);
     assert!((v - 30.0 * 20.0 * 2.0).abs() < 1.0, "{v}");
+}
+
+#[test]
+fn surface_extrude_dialog_takes_profiles_and_curves() {
+    // A rectangle and a free line in one sketch: the dialog sends both (the profile's walls
+    // and the line's wall) as one surface extrude, and Edit Feature brings the picks back.
+    let mut app = app_with(json!([
+        {"command": "sketch.create", "params": {"plane": "XY"}},
+        {"command": "sketch.rectangle.two_point", "params": {"p0": [0, 0], "p1": [30, 20]}},
+        {"command": "sketch.line", "params": {"points": [[40, 0], [50, 0]], "ids": ["free"]}},
+        {"command": "sketch.finish", "params": {}}
+    ]));
+    let sk = app.session.doc.features.last().unwrap().id;
+    let mut d = start(&mut app, vec![], "surface.extrude");
+    d.inputs[0].items = vec![Sel::Profile { sketch: sk, index: 0 }, Sel::SketchCurve { id: "free".into() }];
+    let (id, p) = apply_commands(&app, &d).unwrap().remove(0);
+    assert_eq!(id, "surface.extrude");
+    assert_eq!(p["curves"], json!(["free"]), "{p}");
+    assert_eq!(p["profiles"], json!([0]), "{p}");
+    app.session.execute(&id, &p).unwrap();
+    let st = app.session.model.state();
+    let sheet = st.bodies.last().unwrap();
+    assert!(sheet.body.is_surface() && sheet.body.face_count() == 5);
+    let area = sheet.mesh().measure().area;
+    assert!((area - (100.0 + 10.0) * 10.0).abs() < 1e-6, "{area}");
+    let fid = app.session.doc.features.last().unwrap().id;
+    let back = crate::dialogs::for_feature(&app, fid, None).unwrap();
+    assert!(matches!(back.kind, Kind::Surface(_)));
+    assert_eq!(back.inputs[0].items.len(), 2);
+}
+
+#[test]
+fn unstitch_and_reverse_normal_dialogs_take_a_body_or_faces() {
+    // A whole box picked: Unstitch sends the body alone; two of its faces: their points.
+    let mut app = app_with(json!([{"command": "solid.box", "params": {"length": 10, "width": 10, "height": 10, "body_name": "Box"}}]));
+    let mut d = start(&mut app, vec![], "surface.unstitch");
+    d.inputs[0].items = vec![Sel::Body { name: "Box".into() }];
+    let (id, p) = apply_commands(&app, &d).unwrap().remove(0);
+    assert_eq!((id.as_str(), &p["body"], &p["faces"]), ("surface.unstitch", &json!("Box"), &json!([])), "{p}");
+    let top = Vec3::new(5.0, 5.0, 10.0);
+    d.inputs[0].items = vec![Sel::Face { body: "Box".into(), index: 0, point: top }];
+    let (_, p) = apply_commands(&app, &d).unwrap().remove(0);
+    assert_eq!(p["faces"], json!([[5.0, 5.0, 10.0]]), "{p}");
+    app.session.execute("surface.unstitch", &p).unwrap();
+    assert_eq!(app.session.model.state().bodies.len(), 2);
+    let fid = app.session.doc.features.last().unwrap().id;
+    assert!(matches!(crate::dialogs::for_feature(&app, fid, None).unwrap().kind, Kind::Surface(_)));
+    app.dialog = None;
+    let sheet = app.session.model.state().bodies.last().unwrap().name.clone();
+    let mut d = start(&mut app, vec![], "surface.reverse_normal");
+    d.inputs[0].items = vec![Sel::Body { name: sheet.clone() }];
+    let (id, p) = apply_commands(&app, &d).unwrap().remove(0);
+    assert_eq!((id.as_str(), &p["body"]), ("surface.reverse_normal", &json!(sheet)), "{p}");
+    app.session.execute(&id, &p).unwrap();
+}
+
+#[test]
+fn surface_revolve_dialog_takes_curves_and_an_axis() {
+    // A line beside the sketch's y axis, turned a quarter round: a quarter cylinder. Edit
+    // Feature brings back the curve and the axis.
+    let mut app = app_with(json!([
+        {"command": "sketch.create", "params": {"plane": "XY"}},
+        {"command": "sketch.line", "params": {"points": [[3, 0], [3, 4]], "ids": ["side"]}},
+        {"command": "sketch.finish", "params": {}}
+    ]));
+    let mut d = start(&mut app, vec![], "surface.revolve");
+    d.inputs[0].items = vec![Sel::SketchCurve { id: "side".into() }];
+    assert!(apply_commands(&app, &d).is_err(), "no axis yet");
+    d.inputs[1].items = vec![Sel::Axis { name: "y".into() }];
+    if let Kind::Surface(crate::dialogs_surface::Surf::Revolve { angle, .. }) = &mut d.kind {
+        *angle = "90 deg".into();
+    }
+    let (id, p) = apply_commands(&app, &d).unwrap().remove(0);
+    assert_eq!((id.as_str(), &p["axis"], &p["curves"]), ("surface.revolve", &json!("y"), &json!(["side"])), "{p}");
+    app.session.execute(&id, &p).unwrap();
+    let area = app.session.model.state().bodies.last().unwrap().mesh().measure().area;
+    let want = std::f64::consts::FRAC_PI_2 * 3.0 * 4.0;
+    assert!((area - want).abs() < want * 2e-3, "{area} vs {want}");
+    let fid = app.session.doc.features.last().unwrap().id;
+    let back = crate::dialogs::for_feature(&app, fid, None).unwrap();
+    assert_eq!(back.inputs[0].items, vec![Sel::SketchCurve { id: "side".into() }]);
+    assert_eq!(back.inputs[1].items, vec![Sel::Axis { name: "y".into() }]);
+}
+
+#[test]
+fn surface_sweep_dialog_takes_curves_and_a_path() {
+    // A line along y carried 5 up a line in the XZ plane: a 10 × 5 sheet. Edit Feature brings
+    // back the curve and the path.
+    let mut app = app_with(json!([
+        {"command": "sketch.create", "params": {"plane": "XY"}},
+        {"command": "sketch.line", "params": {"points": [[0, 0], [0, 10]], "ids": ["l"]}},
+        {"command": "sketch.finish", "params": {}},
+        {"command": "sketch.create", "params": {"plane": "XZ"}},
+        {"command": "sketch.line", "params": {"points": [[0, 0], [0, 5]], "ids": ["up"]}},
+        {"command": "sketch.finish", "params": {}}
+    ]));
+    let mut d = start(&mut app, vec![], "surface.sweep");
+    d.inputs[0].items = vec![Sel::SketchCurve { id: "l".into() }];
+    assert!(apply_commands(&app, &d).is_err(), "no path yet");
+    d.inputs[1].items = vec![Sel::SketchCurve { id: "up".into() }];
+    let (id, p) = apply_commands(&app, &d).unwrap().remove(0);
+    assert_eq!((id.as_str(), &p["path"], &p["curves"]), ("surface.sweep", &json!(["up"]), &json!(["l"])), "{p}");
+    assert_ne!(p["path_sketch"], p["sketch"], "{p}");
+    app.session.execute(&id, &p).unwrap();
+    let area = app.session.model.state().bodies.last().unwrap().mesh().measure().area;
+    assert!((area - 50.0).abs() < 1e-6, "{area}");
+    let fid = app.session.doc.features.last().unwrap().id;
+    let back = crate::dialogs::for_feature(&app, fid, None).unwrap();
+    assert_eq!(back.inputs[0].items, vec![Sel::SketchCurve { id: "l".into() }]);
+    assert_eq!(back.inputs[1].items, vec![Sel::SketchCurve { id: "up".into() }]);
+}
+
+#[test]
+fn surface_loft_dialog_makes_a_section_per_sketch() {
+    // A line in each of two sketches 5 apart: two sections, a 10 × 5 strip; Edit Feature brings
+    // the curves back.
+    let mut app = app_with(json!([
+        {"command": "construct.plane.offset", "params": {"base": "XY", "offset": 5, "name": "Mid"}},
+        {"command": "sketch.create", "params": {"plane": "XY"}},
+        {"command": "sketch.line", "params": {"points": [[0, 0], [10, 0]], "ids": ["a"]}},
+        {"command": "sketch.finish", "params": {}},
+        {"command": "sketch.create", "params": {"plane": "Mid"}},
+        {"command": "sketch.line", "params": {"points": [[0, 0], [10, 0]], "ids": ["b"]}},
+        {"command": "sketch.finish", "params": {}}
+    ]));
+    let mut d = start(&mut app, vec![], "surface.loft");
+    d.inputs[0].items = vec![Sel::SketchCurve { id: "a".into() }];
+    assert!(apply_commands(&app, &d).is_err(), "one section");
+    d.inputs[0].items.push(Sel::SketchCurve { id: "b".into() });
+    let (id, p) = apply_commands(&app, &d).unwrap().remove(0);
+    assert_eq!(id, "surface.loft");
+    assert_eq!(p["sections"].as_array().map(Vec::len), Some(2), "{p}");
+    assert_eq!((&p["sections"][0]["curves"], &p["sections"][1]["curves"]), (&json!(["a"]), &json!(["b"])), "{p}");
+    app.session.execute(&id, &p).unwrap();
+    let area = app.session.model.state().bodies.last().unwrap().mesh().measure().area;
+    assert!((area - 50.0).abs() < 1e-6, "{area}");
+    let fid = app.session.doc.features.last().unwrap().id;
+    let back = crate::dialogs::for_feature(&app, fid, None).unwrap();
+    assert_eq!(back.inputs[0].items, vec![Sel::SketchCurve { id: "a".into() }, Sel::SketchCurve { id: "b".into() }]);
+}
+
+#[test]
+fn offset_surface_dialog_takes_faces_a_distance_and_the_chain() {
+    // A box top picked, moved up 5: a 10 × 10 square at z = 15; Edit Feature brings it back.
+    let mut app = app_with(json!([{"command": "solid.box", "params": {"length": 10, "width": 10, "height": 10, "body_name": "Box"}}]));
+    let mut d = start(&mut app, vec![], "surface.offset");
+    assert!(apply_commands(&app, &d).is_err(), "no faces yet");
+    d.inputs[0].items = vec![Sel::Face { body: "Box".into(), index: 0, point: Vec3::new(5.0, 5.0, 10.0) }];
+    if let Kind::Surface(crate::dialogs_surface::Surf::Offset { distance, chain }) = &mut d.kind {
+        *distance = "5 mm".into();
+        *chain = true;
+    }
+    let (id, p) = apply_commands(&app, &d).unwrap().remove(0);
+    assert_eq!(
+        (id.as_str(), &p["body"], &p["faces"], &p["chain"]),
+        ("surface.offset", &json!("Box"), &json!([[5.0, 5.0, 10.0]]), &json!(true)),
+        "{p}"
+    );
+    app.session.execute(&id, &p).unwrap();
+    let m = app.session.model.state().bodies.last().unwrap().mesh().measure();
+    assert!((m.area - 100.0).abs() < 1e-6, "{}", m.area);
+    let fid = app.session.doc.features.last().unwrap().id;
+    let back = crate::dialogs::for_feature(&app, fid, None).unwrap();
+    assert_eq!(back.inputs[0].items.len(), 1);
 }
 
 #[test]

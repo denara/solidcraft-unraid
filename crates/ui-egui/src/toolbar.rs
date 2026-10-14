@@ -1,5 +1,7 @@
 //! Application bar, the workspace toolbar (tabs and panels) and keyboard shortcuts.
 
+use crate::icons::glyphs::caret;
+use crate::icons::glyphs::pin_icon;
 use egui::{Align2, Color32, FontId, Rect, Sense, Stroke, pos2, vec2};
 use serde_json::json;
 
@@ -168,47 +170,7 @@ pub fn app_bar(app: &mut SolveApp, ui: &mut egui::Ui) {
         // (viewBox 357 x 412). Same 20 px height and centre as the old block.
         {
             let c = pos2(left + 20.0, r.center().y);
-            let s = 20.0 / 412.217;
-            let m =
-                |pts: &[(f32, f32)]| -> Vec<egui::Pos2> { pts.iter().map(|&(x, y)| pos2(c.x + (x - 178.5) * s, c.y + (y - 206.1) * s)).collect() };
-            let p = ui.painter();
-            // egui only fills convex shapes, so each face is a few overlapping convex pieces.
-            let face = |col: Color32, pts: &[(f32, f32)]| {
-                p.add(egui::Shape::convex_polygon(m(pts), col, Stroke::NONE));
-            };
-            let (light, mid, dark) = (Color32::from_rgb(96, 158, 236), Color32::from_rgb(58, 136, 238), Color32::from_rgb(55, 108, 197));
-            face(light, &[(3.5, 105.9), (177.0, 5.8), (263.4, 55.6), (263.8, 156.0), (177.0, 406.4)]);
-            face(light, &[(177.0, 206.1), (263.8, 156.0), (350.5, 206.2), (350.5, 306.3), (177.0, 406.4)]);
-            face(mid, &[(3.5, 105.9), (177.0, 206.1), (177.0, 406.4)]);
-            face(mid, &[(3.5, 105.9), (3.5, 205.7), (90.3, 256.2), (177.0, 206.1)]);
-            face(mid, &[(177.0, 206.1), (90.3, 256.2), (90.0, 356.2), (177.0, 406.4)]);
-            face(dark, &[(264.1, 155.8), (177.0, 206.1), (177.0, 406.4), (263.8, 256.2)]);
-            face(dark, &[(263.8, 256.2), (350.5, 206.2), (350.5, 306.3), (177.0, 406.4)]);
-            face(dark, &[(177.0, 206.1), (177.0, 406.4), (350.5, 306.3)]);
-            face(dark, &[(263.8, 55.9), (263.8, 156.0), (177.1, 105.9)]);
-            // White edge lines.
-            let edge = Stroke::new(10.0 * s, Color32::WHITE);
-            let line = |pts: &[(f32, f32)]| {
-                p.add(egui::Shape::line(m(pts), edge));
-            };
-            line(&[(263.8, 55.9), (177.1, 105.9), (263.8, 156.0), (263.8, 256.2), (350.6, 206.1)]);
-            line(&[(5.0, 105.9), (178.5, 206.1), (178.5, 406.4)]);
-            line(&[(177.0, 206.1), (263.8, 156.0)]);
-            p.add(egui::Shape::closed_line(
-                m(&[
-                    (178.5, 5.8),
-                    (5.0, 105.9),
-                    (5.0, 206.1),
-                    (91.7, 256.2),
-                    (91.7, 356.4),
-                    (178.5, 406.4),
-                    (352.0, 306.3),
-                    (352.0, 206.1),
-                    (265.2, 156.0),
-                    (265.2, 55.9),
-                ]),
-                edge,
-            ));
+            crate::icons::glyphs::brand_mark(ui.painter(), c);
         }
         if !compact_actions {
             ui.painter().text(pos2(left + 36.0, r.center().y), Align2::LEFT_CENTER, "SolidCraft", FontId::proportional(14.0), t.app_bar_text);
@@ -288,7 +250,9 @@ pub fn app_bar(app: &mut SolveApp, ui: &mut egui::Ui) {
         let captions = if app.custom_titlebar { crate::titlebar::WIDTH } else { 0.0 };
         let tabs_start = x + 16.0;
         let (report, report_label) = report_rect(r, captions, tabs_start);
-        let tabs_end = report.left() - 8.0;
+        // A newer release: its Update button, left of Report a bug (`update`).
+        let update = crate::update::button(app, ui, report.left() - 6.0, report.top(), report_label);
+        let tabs_end = update.map_or(report.left(), |u| u.left()) - 8.0;
         // Narrow title bars can fit only part of the tab strip. Its hit regions must not
         // extend into the persistent report and window controls.
         let tabs_rect = Rect::from_min_max(pos2(tabs_start.min(tabs_end), r.top()), pos2(tabs_end, r.bottom()));
@@ -296,7 +260,8 @@ pub fn app_bar(app: &mut SolveApp, ui: &mut egui::Ui) {
         tabs_ui.set_clip_rect(tabs_rect.intersect(ui.clip_rect()));
         crate::documents::tabs(app, &mut tabs_ui, r, tabs_start, tabs_end);
         let response = ui.interact(report, ui.id().with("sc_report_button"), Sense::click());
-        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Report a bug"));
+        let report_text = crate::i18n::tr("ui.report_a_bug");
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), report_text));
         crate::scenario::publish_handle("titlebar:report", report.center());
         ui.painter().rect_filled(report, 4.0, if response.hovered() || response.has_focus() { t.hover } else { t.app_bar });
         ui.painter().rect_stroke(report, 4.0, Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
@@ -306,12 +271,12 @@ pub fn app_bar(app: &mut SolveApp, ui: &mut egui::Ui) {
             ui.painter().text(
                 pos2(report.left() + 29.0, report.center().y),
                 Align2::LEFT_CENTER,
-                "Report a bug",
+                report_text,
                 FontId::proportional(13.0),
                 t.app_bar_text,
             );
         }
-        if response.on_hover_text("Report a bug — review a screenshot and open a GitHub draft").clicked() {
+        if response.on_hover_text(crate::i18n::tr_label("Report a bug — review a screenshot and open a GitHub draft")).clicked() {
             crate::help::run(app, &ui.ctx().clone(), "report");
         }
         // Preferences, at the top right like Fusion's profile menu (also Ctrl+,).
@@ -333,7 +298,7 @@ pub fn app_bar(app: &mut SolveApp, ui: &mut egui::Ui) {
         ui.painter().text(
             pos2(r.right() - 12.0 - captions, r.center().y),
             Align2::RIGHT_CENTER,
-            format!("v{}", env!("CARGO_PKG_VERSION")),
+            format!("v{}", crate::update::current_version()),
             FontId::proportional(11.0),
             Color32::from_rgb(160, 168, 182),
         );
@@ -428,8 +393,16 @@ fn file_menu(app: &mut SolveApp, ctx: &egui::Context) {
                     export(app, "3mf");
                     close = true;
                 }
+                if item_if(ui, "Export 3MF with Face Tags…", "", shown) {
+                    export_as(app, "3mf", Some("3mf-tagged"));
+                    close = true;
+                }
                 if item_if(ui, "Export OBJ…", "", shown) {
                     export(app, "obj");
+                    close = true;
+                }
+                if item_if(ui, "Export URDF…", "", shown) {
+                    export(app, "urdf");
                     close = true;
                 }
                 if item(ui, "Export Design as JSON…", "") {
@@ -488,10 +461,18 @@ fn save_as_with_extension(app: &mut SolveApp, extension: &str) {
 }
 
 fn export(app: &mut SolveApp, ext: &str) {
+    export_as(app, ext, None);
+}
+
+/// Export to a file with extension `ext`, in `format` when the extension alone doesn't name it.
+fn export_as(app: &mut SolveApp, ext: &str, format: Option<&str>) {
     let name = format!("{}.{ext}", app.session.doc.name);
-    if let Some(p) = app.services.pick_save.as_ref().and_then(|f| f(&name, &[ext]))
-        && app.run("file.export", json!({"path": p})).is_ok()
-    {
+    let Some(p) = app.services.pick_save.as_ref().and_then(|f| f(&name, &[ext])) else { return };
+    let params = match format {
+        Some(f) => json!({"path": p, "format": f}),
+        None => json!({"path": p}),
+    };
+    if app.run("file.export", params).is_ok() {
         app.set_status(format!("Exported {p}"), false);
     }
 }
@@ -607,7 +588,9 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
             let sketch_create = tab == "SKETCH" && *panel == "CREATE";
             let stride = if sketch_create { 68.0 } else { 40.0 };
             let enabled_panel = !cmds.is_empty() || *panel == "SELECT";
-            let popup_id = ui.id().with(("panel_menu", panel));
+            // Per tab: panels of the same name on other tabs (MODIFY, CREATE…) list other commands,
+            // and the drop-down's area remembers its size by this id (#874).
+            let popup_id = ui.id().with(("panel_menu", &tab, panel));
             // Dropped on the panel's free space (all of a collapsed panel): the button goes to
             // its end.
             let drawn = if collapsed { 0 } else { shown.len() };
@@ -790,7 +773,7 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
                         if *panel == "SELECT" {
                             selection_filter(app, ui);
                         } else if cmds.is_empty() {
-                            ui.label(egui::RichText::new("Not available yet").color(t.text_dim));
+                            ui.label(egui::RichText::new(crate::i18n::tr_label("Not available yet")).color(t.text_dim));
                         }
                         if sketch_create {
                             sketch_create_menu(app, ui, &cmds, &mut menu, &mut toggle);
@@ -819,8 +802,10 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
                             }
                         }
                         // The rows scroll when the drop-down would run past the window's bottom.
+                        // `min_scrolled_height` lets the rows grow past the size the area kept from
+                        // an earlier, shorter list (#874); they still shrink to fit their content.
                         let room = (ui.ctx().content_rect().bottom() - ui.cursor().top() - 12.0).max(ROW_H * 3.0);
-                        egui::ScrollArea::vertical().id_salt("panel_menu_rows").max_height(room).show(ui, |ui| {
+                        egui::ScrollArea::vertical().id_salt("panel_menu_rows").max_height(room).min_scrolled_height(room).show(ui, |ui| {
                             for c in &cmds {
                                 let pinned = crate::toolbar_custom::pinned_on(app, &tab, c.id).is_some();
                                 match dropdown_row(app, ui, c, row_w, pinned) {
@@ -874,7 +859,7 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
                     }
                 });
                 crate::scenario::publish_handle("toolbar:overflow", response.response.rect.center());
-                response.response.on_hover_text("More toolbar panels");
+                response.response.on_hover_text(crate::i18n::tr_label("More toolbar panels"));
             });
         }
         painter.line_segment([pos2(r.left(), r.bottom() - 0.5), pos2(r.right(), r.bottom() - 0.5)], Stroke::new(1.0, t.border));
@@ -1109,35 +1094,16 @@ fn drag_ghost(ctx: &egui::Context, id: &str, at: egui::Pos2, removing: bool) {
         let s = Stroke::new(2.0, t.error);
         let x = Rect::from_center_size(r.right_top(), vec2(9.0, 9.0));
         p.circle_filled(x.center(), 7.0, t.toolbar);
-        p.line_segment([x.left_top(), x.right_bottom()], s);
-        p.line_segment([x.right_top(), x.left_bottom()], s);
+        crate::icons::glyphs::cross(&p, x, s);
     }
     crate::scenario::publish_handle(if removing { "toolbar_drag:remove" } else { "toolbar_drag" }, at);
-}
-
-/// A push pin (drawn in code): upright and filled when the command is on the toolbar, tilted and
-/// outlined when not.
-fn pin_icon(p: &egui::Painter, r: Rect, on: bool, col: Color32) {
-    let c = r.center();
-    let (sin, cos) = if on { (0.0, 1.0) } else { std::f32::consts::FRAC_PI_4.sin_cos() };
-    // Local coordinates: the pin points down, its head on top.
-    let at = |x: f32, y: f32| c + vec2(x * cos - y * sin, x * sin + y * cos);
-    let head = vec![at(-2.5, -7.0), at(2.5, -7.0), at(3.0, -2.0), at(-3.0, -2.0)];
-    let stroke = Stroke::new(1.4, col);
-    if on {
-        p.add(egui::Shape::convex_polygon(head, col, stroke));
-    } else {
-        p.add(egui::Shape::closed_line(head, stroke));
-    }
-    p.line_segment([at(-5.5, -2.0), at(5.5, -2.0)], stroke);
-    p.line_segment([at(0.0, -2.0), at(0.0, 7.0)], stroke);
 }
 
 /// The SELECT panel: what a click in the view picks.
 fn selection_filter(app: &mut SolveApp, ui: &mut egui::Ui) {
     let t = Tokens::get();
-    ui.label(egui::RichText::new("Selection filter").color(t.text_dim).size(11.0));
-    ui.checkbox(&mut app.ui.pick_bodies, "Select bodies (a face picks its body)");
+    ui.label(egui::RichText::new(crate::i18n::tr_label("Selection filter")).color(t.text_dim).size(11.0));
+    ui.checkbox(&mut app.ui.pick_bodies, crate::i18n::tr_label("Select bodies (a face picks its body)"));
     for (k, label) in [
         ("faces", "Faces"),
         ("edges", "Edges"),
@@ -1149,18 +1115,13 @@ fn selection_filter(app: &mut SolveApp, ui: &mut egui::Ui) {
         ("constraints", "Sketch constraints"),
     ] {
         let mut on = !app.ui.pick_off.iter().any(|x| x == k);
-        if ui.checkbox(&mut on, label).changed() {
+        if ui.checkbox(&mut on, crate::i18n::tr_label(label)).changed() {
             app.ui.pick_off.retain(|x| x != k);
             if !on {
                 app.ui.pick_off.push(k.to_string());
             }
         }
     }
-}
-
-/// A small drop-down caret.
-fn caret(p: &egui::Painter, c: egui::Pos2, col: Color32) {
-    p.add(egui::Shape::convex_polygon(vec![pos2(c.x - 3.5, c.y - 2.0), pos2(c.x + 3.5, c.y - 2.0), pos2(c.x, c.y + 2.5)], col, Stroke::NONE));
 }
 
 /// Global keyboard shortcuts (when no text field has focus).
@@ -1235,7 +1196,11 @@ pub fn shortcuts(app: &mut SolveApp, ctx: &egui::Context) {
                 crate::context_menu::rename_selection(app, at);
             }
             Key::F6 => app.animate_view("fit"),
-            Key::Delete | Key::Backspace => crate::viewport::delete_selection(app),
+            Key::Delete | Key::Backspace => {
+                if !crate::timeline_left::delete_selected_folders(app) {
+                    crate::viewport::delete_selection(app);
+                }
+            }
             _ => crate::keymap::press(app, &crate::keymap::key_name(k, mods)),
         }
     }
@@ -1432,7 +1397,8 @@ mod home_tests {
             let name = if cmd { format!("Ctrl+{key}") } else { key.to_string() };
             actions.push((name, Box::new(move |h| drop(h.call("ui.key", json!({"key": key, "cmd": cmd}))))));
         }
-        for item in ["Insert STEP…", "Insert Mesh…", "Save", "Save As…", "Export STL…", "Export STEP…", "Export 3MF…", "Export OBJ…"] {
+        for item in ["Insert STEP…", "Insert Mesh…", "Save", "Save As…", "Export STL…", "Export STEP…", "Export 3MF…", "Export OBJ…", "Export URDF…"]
+        {
             actions.push((
                 format!("File › {item}"),
                 Box::new(move |h| {
@@ -1467,6 +1433,22 @@ mod home_tests {
         h.call("ui.click", json!({"x": at.x, "y": at.y}));
         h.settle();
         assert!(h.app.session.path.is_some() && !h.app.session.is_dirty(), "the design saves once Home is closed");
+    }
+
+    /// File › Export URDF… writes the robot description and its meshes next to the picked file.
+    #[test]
+    fn file_menu_exports_a_urdf() {
+        let mut h = crate::scenario::Harness::new();
+        h.app.home.open = false;
+        h.app.run("solid.box", json!({"length": 10, "width": 10, "height": 10})).unwrap();
+        h.frames(2);
+        h.ctx.data_mut(|d| d.insert_temp(egui::Id::new("sc_file_menu"), false));
+        let at = crate::scenario::handle_at("appbar:folder").unwrap();
+        h.call("ui.click", json!({"x": at.x, "y": at.y}));
+        let _ = h.step(&json!({"widget": "Export URDF…"}));
+        h.settle();
+        let files: Vec<String> = std::fs::read_dir(&h.dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert!(files.iter().any(|f| f.ends_with(".urdf")) && files.iter().any(|f| f.ends_with("-base.stl")), "{files:?}");
     }
 
     /// The disabled buttons' tooltip is translated in every catalog (not English fallback).
@@ -1506,6 +1488,33 @@ mod dropdown_tests {
         let [(_, at)] = hot.as_slice() else { panic!("one highlighted row: {hot:?}") };
         let menu = crate::scenario::rect_of("toolbar_dropdown").unwrap();
         assert!(menu.contains(*at), "the focused last row is out of view: {at:?} in {menu:?}");
+    }
+
+    /// Every row of a drop-down is shown when the window has room, even after a shorter list was
+    /// shown first: another tab's panel of the same name, or the same panel collapsed (#874).
+    #[test]
+    fn a_drop_down_shows_all_its_rows_after_a_shorter_one() {
+        let mut h = crate::scenario::Harness::new();
+        h.app.home.open = false;
+        h.call("ui.resize", json!({"width":1600,"height":1000}));
+        let open = |h: &mut crate::scenario::Harness, tab: &str| {
+            h.app.ui.tab = tab.into();
+            h.frames(4);
+            h.step(&json!({"click":{"handle":format!("panel:{tab}:MODIFY")}})).unwrap();
+            h.frames(6);
+            let menu = crate::scenario::rect_of("toolbar_dropdown").expect("the drop-down is open");
+            let rows = crate::scenario::handles("dropdown:");
+            h.step(&json!({"key":"Escape"})).unwrap();
+            h.frames(4);
+            (menu, rows)
+        };
+        let (short, short_rows) = open(&mut h, "MESH");
+        let (menu, rows) = open(&mut h, "PLASTIC");
+        assert!(rows.len() > short_rows.len(), "PLASTIC MODIFY lists more than MESH MODIFY: {rows:?} vs {short_rows:?}");
+        assert!(menu.height() > short.height(), "the longer list is taller: {menu:?} vs {short:?}");
+        for (id, at) in &rows {
+            assert!(menu.contains(*at), "{id} at {at:?} is cut off by the drop-down {menu:?}");
+        }
     }
 }
 

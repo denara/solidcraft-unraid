@@ -8,6 +8,7 @@
 //!
 //! Adapted from VectorCraft's `crates/ui-egui/src/titlebar.rs` (MIT OR Apache-2.0).
 
+use crate::icons::glyphs::paint_glyph;
 use egui::{Color32, CursorIcon, Id, LayerId, Order, PointerButton, Rect, ResizeDirection, Sense, Stroke, Ui, ViewportCommand, pos2, vec2};
 
 use crate::SolveApp;
@@ -125,30 +126,6 @@ pub fn caption_buttons(app: &mut SolveApp, ui: &mut Ui, bar: Rect) {
         None => return,
     };
     let _ = window_action(app, &ui.ctx().clone(), action);
-}
-
-/// The 10 pt line glyphs of the caption buttons.
-fn paint_glyph(ui: &Ui, c: Caption, maximized: bool, at: egui::Pos2, s: Stroke) {
-    let p = ui.painter();
-    let g = Rect::from_center_size(at, vec2(10.0, 10.0));
-    match c {
-        Caption::Minimize => {
-            p.line_segment([g.left_center(), g.right_center()], s);
-        }
-        // Restore: a front square with the corner of the one behind it.
-        Caption::Maximize if maximized => {
-            let front = Rect::from_min_max(g.min + vec2(0.0, 2.0), g.max - vec2(2.0, 0.0));
-            p.rect_stroke(front, 0.0, s, egui::StrokeKind::Middle);
-            p.line(vec![g.min + vec2(2.0, 2.0), g.min + vec2(2.0, 0.0), g.right_top(), g.max - vec2(0.0, 2.0), g.max - vec2(2.0, 2.0)], s);
-        }
-        Caption::Maximize => {
-            p.rect_stroke(g, 0.0, s, egui::StrokeKind::Middle);
-        }
-        Caption::Close => {
-            p.line_segment([g.left_top(), g.right_bottom()], s);
-            p.line_segment([g.right_top(), g.left_bottom()], s);
-        }
-    }
 }
 
 /// The edge and corner zones of a window with content rect `w`: (zone, direction, cursor).

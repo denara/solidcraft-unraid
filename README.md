@@ -125,7 +125,8 @@ rebuild with no errors, replayed here at 2× speed.
   provisional picture from warm geometry caches while rebuilding before editing; caches never
   replace the parametric design. Export to STEP (AP242 with body names, colours and
   components as assemblies; revolved faces as native planes, cylinders, cones, spheres and tori),
-  IGES 5.3 (manifold solid B-reps with names and colours), 3MF, STL (binary/ASCII) and OBJ;
+  IGES 5.3 (manifold solid B-reps with names and colours), 3MF, STL (binary/ASCII) and OBJ, and
+  assemblies with joints as URDF for robot simulators (docs/urdf.md);
   3MF, STL and OBJ import as mesh bodies (they render, measure, move and export; solid features
   need B-rep bodies). Convert Mesh reconstructs supported closed constant-section parts
   as parametric solids with planar and circular cylindrical faces;
@@ -202,7 +203,9 @@ stdio. Headless it runs its own design session; with `--connect 127.0.0.1:PORT` 
 started with `solidcraft --control PORT`, so you can watch the agent model. Tools:
 `list_commands`, `execute`, `batch`, `inspect_design`, `measure`, `body_topology`,
 `set_parameter`, `screenshot` (returns the image), `export`, `undo`, `redo`, `new_design`, `open`,
-`save`. Claude Code: `claude mcp add solidcraft -- solidcraft-cli mcp`. Details, client
+`save`. Tool calls reach files only in the open design's folder (when it lies inside your home
+folder, never home itself or a hidden folder), SolidCraft's recovery folder and folders given with
+`--allow-path DIR`. Claude Code: `claude mcp add solidcraft -- solidcraft-cli mcp`. Details, client
 configuration and an example session: [docs/mcp.md](docs/mcp.md).
 
 ## Architecture

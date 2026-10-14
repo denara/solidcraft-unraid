@@ -53,14 +53,27 @@ pub fn anchor(app: &SolveApp, d: &Dialog) -> Option<(Vec3, Option<Vec3>)> {
             let (mid, tangent) = poly_mid(&pts)?;
             // An offset's drag arrow: the in-plane direction the distance grows along. The
             // command offsets a picked curve to its left, and the window's Flip row reverses it.
+            // Symmetric hides Flip and offsets both ways, so the arrow keeps the left side.
             let dir = match &d.kind {
-                Kind::SketchModify(crate::sketch_modify_ui::Mod::Offset { flip, .. }) => {
-                    let n = if *flip { -tangent.perp() } else { tangent.perp() };
+                Kind::SketchModify(crate::sketch_modify_ui::Mod::Offset { flip, mode, .. }) => {
+                    let n = if *flip && !crate::sketch_modify_ui::offset_symmetric(*mode) { -tangent.perp() } else { tangent.perp() };
                     Some(ss.plane.to_world(mid + n) - ss.plane.to_world(mid))
                 }
+                // A thin extrude's curves extrude along their sketch's normal.
+                Kind::Extrude { .. } => Some(ss.plane.normal()),
                 _ => None,
             };
             (ss.plane.to_world(mid), dir)
+        }
+        // A corner picked into a sketch window ("<sketch id>:<point id>", or a bare id when it
+        // was selected outside one): the value box sits on the corner itself.
+        Sel::SketchPoint { id } => {
+            let (sketch, point) = match id.split_once(':') {
+                Some((sketch, point)) => (sketch.parse().ok()?, point),
+                None => (app.session.active_sketch?, id.as_str()),
+            };
+            let ss = st.sketch(sketch)?;
+            (ss.plane.to_world(ss.sketch.point(ss.sketch.resolve_point(point)?)?), None)
         }
         Sel::Body { name } => (st.body(name)?.mesh().bounds().center(), None),
         Sel::Plane { name } => {
@@ -79,14 +92,45 @@ pub fn anchor(app: &SolveApp, d: &Dialog) -> Option<(Vec3, Option<Vec3>)> {
             let offset = if start.trim().is_empty() { 0.0 } else { app.session.doc.eval(start, ValueKind::Length).ok()? };
             (at + n * (from + offset), Some(n))
         }
-        Kind::Section { .. } | Kind::Hole { .. } | Kind::OffsetPlane { .. } | Kind::OffsetFaces { .. } => (at, normal),
+        // A hole on a curved face drills against the face's normal where it was picked.
+        Kind::Hole { .. } if matches!(first, Sel::Face { .. }) => {
+            (at, normal.or_else(|| solidcraft_engine::doc::hole_direction_at(&st, at).map(|d| -d)))
+        }
+        // Holes at sketch points go into the part the sketch touches (or away, flipped): the
+        // arrow shows which way.
+        Kind::Hole { .. } => {
+            let mut by_sketch: Vec<(u64, Vec<String>)> = Vec::new();
+            for x in &d.inputs.first()?.items {
+                if let Sel::SketchPoint { id } = x
+                    && let Some((sk, pid)) = id.split_once(':')
+                    && let Ok(sk) = sk.parse::<u64>()
+                {
+                    match by_sketch.iter_mut().find(|(s, _)| *s == sk) {
+                        Some((_, v)) => v.push(pid.to_string()),
+                        None => by_sketch.push((sk, vec![pid.to_string()])),
+                    }
+                }
+            }
+            let flip = d.extra.get("flip").and_then(serde_json::Value::as_bool).unwrap_or(false);
+            let dir = by_sketch.first().and_then(|(sk, ids)| solidcraft_engine::doc::sketch_hole_direction(&st, *sk, ids, flip));
+            (at, normal.or(dir.map(|d| -d)))
+        }
+        Kind::Section { .. } | Kind::OffsetPlane { .. } | Kind::OffsetFaces { .. } => (at, normal),
         // Fillet radii, chamfer distances and shell thickness grow into the body.
         Kind::Fillet { .. } | Kind::Shell { .. } => (at, normal.map(|n| -n)),
         Kind::Sheet(_) => (at, crate::dialogs_sheet::arrow(app, d).or(normal)),
         Kind::Plastic(_) => (at, normal),
         Kind::PatternRect { .. } => (at, d.inputs.get(1).and_then(|i| i.items.first()).and_then(|x| crate::dialogs::axis_of(app, x)).map(|a| a.1)),
-        // Already computed above, per picked curve; keep it rather than the default below.
-        Kind::SketchModify(_) => (at, normal),
+        // A sketch move's X Distance grows along the sketch's own x axis, so its drag arrow
+        // lies in the sketch plane. Scale has no arrow: a factor is not a length, and the
+        // square handle it wants is its own change.
+        Kind::SketchModify(crate::sketch_modify_ui::Mod::Move { .. }) => {
+            (at, app.session.active_sketch.and_then(|id| st.sketch(id)).and_then(|ss| ss.plane.x.normalized()))
+        }
+        // The rectangular pattern's spacing grows along the direction it was given, which the
+        // module works out per variant. Offset's arrow is already computed above, per picked
+        // curve, and `arrow` returns None for it so that one stands.
+        Kind::SketchModify(_) => (at, crate::sketch_modify_ui::arrow(app, d).or(normal)),
         _ => (at, None),
     })
 }
@@ -175,10 +219,12 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui, painter: &egui::Painter, proj
     // one sets it. The triad is the manipulator here, so the box comes without the drag arrow
     // every other dialog's value gets (`dir` is None below).
     if matches!(d.kind, Kind::Move { .. }) {
+        let mut dragging = false;
         if let Some(t) = crate::dialogs_move::triad(app, &d)
             && let Some(g) = crate::gizmo::show(ui, painter, proj, egui::Id::new("sc_move_triad"), &t, snap_step(app.cam.half_height()))
         {
             crate::dialogs_move::drag(app, &mut d, g);
+            dragging = true;
         }
         // Read the triad again after the drag, so the box follows it in the same frame. Move
         // types with no triad (Rotate, Point to Point, Point to Position) put the box on the
@@ -192,7 +238,7 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui, painter: &egui::Painter, proj
             // Clear of the triad: its arrows reach LEN_PX and its rings RING of that, so a box
             // beside the centre would cover the handles the user is reaching for.
             let off = if triad.is_some() { vec2(crate::gizmo::LEN_PX as f32 + 16.0, -12.0) } else { vec2(16.0, -30.0) };
-            value_box(ui, label, value, bs + off, focus);
+            value_box(ui, label, value, bs + off, focus || dragging);
         }
         app.dialog = Some(d);
         return;
@@ -277,8 +323,15 @@ fn draw(app: &SolveApp, ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj,
     };
     let symmetric = to_span.is_none() && matches!(d.kind, Kind::Extrude { direction: 2, .. });
     // Extrudes and moves go either way; radii and thicknesses stay positive.
-    let signed =
-        matches!(d.kind, Kind::Extrude { .. } | Kind::Move { .. } | Kind::Section { .. } | Kind::OffsetPlane { .. } | Kind::OffsetFaces { .. });
+    let signed = matches!(
+        d.kind,
+        Kind::Extrude { .. }
+            | Kind::Move { .. }
+            | Kind::Section { .. }
+            | Kind::OffsetPlane { .. }
+            | Kind::OffsetFaces { .. }
+            | Kind::SketchModify(crate::sketch_modify_ui::Mod::Move { .. })
+    );
     let focus = std::mem::take(&mut d.focus);
     let half_height = app.cam.half_height();
     let axis = revolve_axis(app, d);
@@ -364,7 +417,7 @@ fn draw(app: &SolveApp, ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj,
             box_at = ts + vec2(14.0, -12.0);
         }
     }
-    value_box(ui, label, value, box_at, focus);
+    value_box(ui, label, value, box_at, focus || *value != before);
     if *value != before
         && let Kind::Extrude { all, .. } = &mut d.kind
     {
@@ -374,8 +427,11 @@ fn draw(app: &SolveApp, ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj,
 
 /// The command's main value in the viewport, next to the geometry: the keyboard goes here while
 /// the window is open, so a number typed straight after a pick sets the value. `at` is its
-/// top-left corner.
-fn value_box(ui: &mut egui::Ui, label: &str, value: &mut String, at: Pos2, focus: bool) {
+/// top-left corner. `select_all` re-selects the whole field, both right after a pick and on every
+/// frame a drag is changing the value underneath it: without the latter, a drag that grows the
+/// text (e.g. "4 mm" -> "15 mm") would leave the stale, shorter selection from the pick in place,
+/// covering only part of the new text.
+fn value_box(ui: &mut egui::Ui, label: &str, value: &mut String, at: Pos2, select_all: bool) {
     let t = Tokens::get();
     let id = egui::Id::new("sc_canvas_value");
     crate::frame::area(egui::Id::new("sc_canvas_area")).fixed_pos(at).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
@@ -384,7 +440,7 @@ fn value_box(ui: &mut egui::Ui, label: &str, value: &mut String, at: Pos2, focus
                 ui.label(egui::RichText::new(label).color(t.text_dim).size(11.5));
                 let r = ui.add(egui::TextEdit::singleline(value).id(id).desired_width(72.0));
                 crate::params_dialog::complete(ui, &r, value);
-                if focus {
+                if select_all {
                     r.request_focus();
                     let n = value.chars().count();
                     let mut st = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
@@ -440,29 +496,45 @@ fn drag_arrow(
     Some(ts)
 }
 
-/// A fillet's radius spline on its first edge (a spline fillet, or the spline a taper gave it):
-/// the radius curve drawn into the body from the edge, and a handle per control radius at its
-/// Greville position, that far from the edge. Dragging a handle sets its control radius (snapped
-/// unless Alt/Ctrl); the first drag on a taper makes the fillet a spline fillet starting from the
-/// taper's spline. Whether the handles are shown.
+/// A fillet's radius spline on each of its edges (a spline fillet, or the splines a taper gave
+/// them): the radius curve drawn into the body from the edge, and a handle per control radius at
+/// its Greville position, that far from the edge. Dragging a handle sets its control radius
+/// (snapped unless Alt/Ctrl); double-clicking the curve adds a control radius there without
+/// changing it, double-clicking a handle between the ends removes it. A spline fillet's edges
+/// share one spline, so every edge's handles edit it. A taper's handles show on a single edge
+/// only: the first edit makes the fillet a spline fillet starting from that edge's taper, which
+/// would put the same radius on every other edge. Whether the handles are shown.
 fn radius_spline_handles(app: &SolveApp, ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj, d: &mut Dialog) -> bool {
     use serde_json::{Value, json};
+    use solidcraft_engine::doc::kernel::RadiusSpline;
+    enum Edit {
+        Set(usize, f64),
+        Insert(f64),
+        Remove(usize),
+    }
     let t = Tokens::get();
     let Kind::Fillet { chamfer: false, .. } = d.kind else { return false };
     let st = app.session.world_state();
-    let Some((mesh, index)) = d.inputs.first().and_then(|i| {
-        i.items.iter().find_map(|x| match x {
-            Sel::Edge { body, index, .. } => Some((st.body(body)?.mesh(), *index)),
+    let edges: Vec<(std::sync::Arc<Mesh>, usize, Vec3, Vec3)> = d
+        .inputs
+        .first()
+        .into_iter()
+        .flat_map(|i| &i.items)
+        .filter_map(|x| match x {
+            Sel::Edge { body, index, .. } => {
+                let m = st.body(body)?.mesh();
+                let (a, b) = m.edges.get(*index).and_then(|e| Some((*e.first()?, *e.last()?)))?;
+                Some((m, *index, a, b))
+            }
             _ => None,
         })
-    }) else {
-        return false;
-    };
-    let Some((a, b)) = mesh.edges.get(index).and_then(|e| Some((*e.first()?, *e.last()?))) else { return false };
+        .collect();
+    let Some(&(_, _, a0, b0)) = edges.first() else { return false };
     let eval = |e: &str| app.session.doc.eval(e, ValueKind::Length).ok().filter(|v| v.is_finite());
     let style = d.extra.get("type").and_then(Value::as_str).unwrap_or("constant").to_string();
-    // The spline, the end its positions start from and whether it is still the taper's.
-    let (spline, start, taper) = if style == "spline" {
+    // Each edge's spline with the end its positions start from; the spline the handles edit,
+    // whether it starts at the first edge's far end, and whether it is still the taper's.
+    let (laws, base, swap, taper): (Vec<Option<(RadiusSpline, Vec3)>>, Option<RadiusSpline>, bool, bool) = if style == "spline" {
         let Kind::Fillet { radius, .. } = &d.kind else { return false };
         let knots: Vec<f64> = d.extra.get("knots").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_f64).collect();
         let exprs: Vec<String> =
@@ -470,91 +542,159 @@ fn radius_spline_handles(app: &SolveApp, ui: &mut egui::Ui, painter: &egui::Pain
         let Some(radii) = std::iter::once(radius.as_str()).chain(exprs.iter().map(String::as_str)).map(eval).collect::<Option<Vec<f64>>>() else {
             return false;
         };
+        let spline = solidcraft_engine::doc::FilletStyle::spline(&knots, radii);
         let swap = d.extra.get("swap_ends").and_then(Value::as_bool).unwrap_or(false);
-        (solidcraft_engine::doc::FilletStyle::spline(&knots, radii), if swap { b } else { a }, false)
+        let start = if swap { b0 } else { a0 };
+        // Each edge runs from its end nearest the start, as the fillet builds it.
+        let laws = edges.iter().map(|(_, _, a, b)| Some((spline.clone(), if start.dist(*a) <= start.dist(*b) { *a } else { *b }))).collect();
+        (laws, Some(spline), swap, false)
     } else if style == "constant" && d.extra.get("fit").and_then(Value::as_str) == Some("taper") {
-        // The taper of this edge: its point lies on the edge's chord.
-        let on_edge = |p: Vec3| {
+        // The taper of an edge: its point lies on the edge's chord. An edge that fits has none.
+        let on_edge = |a: Vec3, b: Vec3, p: Vec3| {
             let ab = b - a;
             let s = ((p - a).dot(ab) / ab.dot(ab).max(1e-300)).clamp(0.0, 1.0);
             (a + ab * s).dist(p) <= 1e-6 * (1.0 + ab.len())
         };
-        let Some((_, tp)) = app.preview.tapered.iter().find(|(p, _)| on_edge(*p)) else { return false };
-        (tp.spline.clone(), tp.start, true)
+        let laws: Vec<Option<(RadiusSpline, Vec3)>> = edges
+            .iter()
+            .map(|(_, _, a, b)| app.preview.tapered.iter().find(|(p, _)| on_edge(*a, *b, *p)).map(|(_, tp)| (tp.spline.clone(), tp.start)))
+            .collect();
+        let base = laws.first().cloned().flatten().filter(|_| edges.len() == 1);
+        let swap = base.as_ref().is_some_and(|(_, s)| s.dist(b0) < s.dist(a0));
+        (laws, base.map(|(l, _)| l), swap, true)
     } else {
         return false;
     };
-    let other = if start.dist(a) <= start.dist(b) { b } else { a };
-    let at = |u: f64| start + (other - start) * u;
-    // Into the body, between the two faces (the edge is straight between planar faces).
-    let Some(n) = edge_bisector(&mesh, index, at(0.5)).map(|v| -v) else { return false };
-    let samples: Vec<Pos2> = (0..=48)
-        .filter_map(|k| {
-            let u = f64::from(k) / 48.0;
-            proj.to_screen(at(u) + n * spline.eval(u))
+    // Each drawn edge: its spline, the ends its positions run between, the direction into the
+    // body, and the curve on screen with its positions.
+    struct Drawn<'a> {
+        spline: &'a RadiusSpline,
+        start: Vec3,
+        other: Vec3,
+        n: Vec3,
+        curve: Vec<(f64, Pos2)>,
+    }
+    let drawn: Vec<Drawn> = edges
+        .iter()
+        .zip(&laws)
+        .filter_map(|((mesh, index, a, b), law)| {
+            let (spline, start) = law.as_ref()?;
+            let other = if start.dist(*a) <= start.dist(*b) { *b } else { *a };
+            let mid = *start + (other - *start) * 0.5;
+            // Into the body, between the two faces (the edge is straight between planar faces).
+            let n = -edge_bisector(mesh, *index, mid)?;
+            let curve = (0..=48)
+                .filter_map(|k| {
+                    let u = f64::from(k) / 48.0;
+                    Some((u, proj.to_screen(*start + (other - *start) * u + n * spline.eval(u))?))
+                })
+                .collect();
+            Some(Drawn { spline, start: *start, other, n, curve })
         })
         .collect();
-    painter.add(egui::Shape::line(samples, Stroke::new(1.5, t.manipulator)));
-    let g = spline.greville();
-    let tips: Vec<Option<Pos2>> = g.iter().zip(&spline.radii).map(|(u, r)| proj.to_screen(at(*u) + n * *r)).collect();
-    painter.add(egui::Shape::dashed_line(&tips.iter().flatten().copied().collect::<Vec<_>>(), Stroke::new(1.0, t.manipulator), 4.0, 3.0));
-    let half_height = app.cam.half_height();
-    let last = g.len().saturating_sub(1);
-    let mut changed = None;
-    for (k, (u, ts)) in g.iter().zip(&tips).enumerate() {
-        let Some(ts) = *ts else { continue };
-        crate::scenario::publish_handle(&format!("fillet_r{k}"), ts);
-        let r = ui.interact(egui::Rect::from_center_size(ts, vec2(16.0, 16.0)), egui::Id::new(("sc_fillet_r", k)), egui::Sense::drag());
-        let hot = r.hovered() || r.dragged();
-        let col = if hot { t.accent } else { t.manipulator };
-        if let Some(fs) = proj.to_screen(at(*u)) {
-            painter.line_segment([fs, ts], Stroke::new(1.0, col));
-        }
-        painter.circle(ts, if hot { 6.5 } else { 5.0 }, t.overlay, Stroke::new(2.0, col));
-        if hot {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
-        }
-        if r.dragged()
-            && let Some(p) = r.interact_pointer_pos()
-            && let Some(v) = along(proj, p, at(*u), n)
-        {
-            let free = ui.input(|i| i.modifiers.alt || i.modifiers.ctrl || i.modifiers.command);
-            let step = snap_step(half_height);
-            let v = if free { v } else { (v / step).round() * step };
-            // Zero only at an end, where the round closes to a point.
-            let floor = if k == 0 || k == last {
-                0.0
-            } else if free {
-                1e-3
-            } else {
-                step
-            };
-            changed = Some((k, v.max(floor)));
+    for e in &drawn {
+        painter.add(egui::Shape::line(e.curve.iter().map(|c| c.1).collect(), Stroke::new(1.5, t.manipulator)));
+    }
+    let Some(base) = base.filter(|_| !drawn.is_empty()) else { return false };
+    let mut edit = None;
+    // Double-clicking the curve adds a control radius at the nearest position along it. Under
+    // the handles, which are registered after it and so take the pointer first.
+    let near = ui.input(|i| i.pointer.hover_pos()).and_then(|p| {
+        drawn
+            .iter()
+            .flat_map(|e| e.curve.windows(2))
+            .map(|w| {
+                let ((u0, p0), (u1, p1)) = (w[0], w[1]);
+                let seg = p1 - p0;
+                let s = ((p - p0).dot(seg) / seg.length_sq().max(1e-6)).clamp(0.0, 1.0);
+                (p0.lerp(p1, s).distance(p), u0 + (u1 - u0) * f64::from(s))
+            })
+            .min_by(|x, y| x.0.total_cmp(&y.0))
+            .filter(|(dist, _)| *dist < 6.0)
+            .map(|(_, u)| (p, u))
+    });
+    if let Some((p, u)) = near {
+        crate::scenario::publish_handle("fillet_curve", p);
+        if ui.interact(egui::Rect::from_center_size(p, vec2(12.0, 12.0)), egui::Id::new("sc_fillet_curve"), egui::Sense::click()).double_clicked() {
+            edit = Some(Edit::Insert(u));
         }
     }
-    if let Some((k, v)) = changed {
-        let mut radii = spline.radii.clone();
-        if let Some(r) = radii.get_mut(k) {
-            *r = v;
+    let half_height = app.cam.half_height();
+    let last = base.radii.len().saturating_sub(1);
+    for (i, e) in drawn.iter().enumerate() {
+        let at = |u: f64| e.start + (e.other - e.start) * u;
+        let g = e.spline.greville();
+        let tips: Vec<Option<Pos2>> = g.iter().zip(&e.spline.radii).map(|(u, r)| proj.to_screen(at(*u) + e.n * *r)).collect();
+        painter.add(egui::Shape::dashed_line(&tips.iter().flatten().copied().collect::<Vec<_>>(), Stroke::new(1.0, t.manipulator), 4.0, 3.0));
+        for (k, (u, ts)) in g.iter().zip(&tips).enumerate() {
+            let Some(ts) = *ts else { continue };
+            crate::scenario::publish_handle(&if i == 0 { format!("fillet_r{k}") } else { format!("fillet_e{i}_r{k}") }, ts);
+            let r =
+                ui.interact(egui::Rect::from_center_size(ts, vec2(16.0, 16.0)), egui::Id::new(("sc_fillet_r", i, k)), egui::Sense::click_and_drag());
+            let hot = r.hovered() || r.dragged();
+            let col = if hot { t.accent } else { t.manipulator };
+            if let Some(fs) = proj.to_screen(at(*u)) {
+                painter.line_segment([fs, ts], Stroke::new(1.0, col));
+            }
+            painter.circle(ts, if hot { 6.5 } else { 5.0 }, t.overlay, Stroke::new(2.0, col));
+            if hot {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+            }
+            if r.double_clicked() {
+                edit = Some(Edit::Remove(k));
+            } else if r.dragged()
+                && let Some(p) = r.interact_pointer_pos()
+                && let Some(v) = along(proj, p, at(*u), e.n)
+            {
+                let free = ui.input(|i| i.modifiers.alt || i.modifiers.ctrl || i.modifiers.command);
+                let step = snap_step(half_height);
+                let v = if free { v } else { (v / step).round() * step };
+                // Zero only at an end, where the round closes to a point.
+                let floor = if k == 0 || k == last {
+                    0.0
+                } else if free {
+                    1e-3
+                } else {
+                    step
+                };
+                edit = Some(Edit::Set(k, v.max(floor)));
+            }
         }
-        if taper {
-            // The taper's spline becomes the fillet's own.
-            d.extra.insert("type".into(), json!("spline"));
-            d.extra.remove("fit");
-            d.extra.insert("knots".into(), json!(spline.knots));
-            d.extra.insert("swap_ends".into(), json!(start.dist(b) < start.dist(a)));
-            d.extra.insert("radii".into(), json!(radii.iter().skip(1).map(|r| format_len(*r)).collect::<Vec<_>>()));
-            if let Kind::Fillet { radius, .. } = &mut d.kind {
-                *radius = format_len(radii.first().copied().unwrap_or(0.0));
+    }
+    // A dragged radius on a spline fillet changes its own expression; anything else writes the
+    // whole spline (inserting or removing a knot moves its neighbours too).
+    let whole = match edit {
+        Some(Edit::Set(k, v)) if !taper => {
+            if k == 0 {
+                if let Kind::Fillet { radius, .. } = &mut d.kind {
+                    *radius = format_len(v);
+                }
+            } else if let Some(Value::Array(rs)) = d.extra.get_mut("radii")
+                && let Some(slot) = rs.get_mut(k - 1)
+            {
+                *slot = json!(format_len(v));
             }
-        } else if k == 0 {
-            if let Kind::Fillet { radius, .. } = &mut d.kind {
-                *radius = format_len(v);
+            None
+        }
+        Some(Edit::Set(k, v)) => {
+            let mut law = base.clone();
+            if let Some(r) = law.radii.get_mut(k) {
+                *r = v;
             }
-        } else if let Some(Value::Array(rs)) = d.extra.get_mut("radii")
-            && let Some(slot) = rs.get_mut(k - 1)
-        {
-            *slot = json!(format_len(v));
+            Some(law)
+        }
+        Some(Edit::Insert(u)) => base.insert(u),
+        Some(Edit::Remove(k)) => base.remove(k),
+        None => None,
+    };
+    if let Some(law) = whole {
+        d.extra.insert("type".into(), json!("spline"));
+        d.extra.remove("fit");
+        d.extra.insert("knots".into(), json!(law.knots));
+        d.extra.insert("swap_ends".into(), json!(swap));
+        d.extra.insert("radii".into(), json!(law.radii.iter().skip(1).map(|r| format_len(*r)).collect::<Vec<_>>()));
+        if let Kind::Fillet { radius, .. } = &mut d.kind {
+            *radius = format_len(law.radii.first().copied().unwrap_or(0.0));
         }
     }
     true
@@ -668,6 +808,7 @@ fn draw_revolve(
         curved_to: false,
     });
     let mut box_at = bs + vec2(16.0, -30.0);
+    let angle_before = if let Kind::Revolve { angle, .. } = &d.kind { angle.clone() } else { String::new() };
     if !extent.curved_to && extent.sweep.is_finite() {
         let (origin, direction) = axis;
         let centre = origin + direction * (base - origin).dot(direction);
@@ -760,9 +901,9 @@ fn draw_revolve(
             }
         }
     }
-    crate::frame::area(egui::Id::new("sc_canvas_area")).fixed_pos(box_at).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
-        egui::Frame::popup(ui.style()).inner_margin(egui::Margin::symmetric(6, 3)).show(ui, |ui| {
-            if to_mode {
+    if to_mode {
+        crate::frame::area(egui::Id::new("sc_canvas_area")).fixed_pos(box_at).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).inner_margin(egui::Margin::symmetric(6, 3)).show(ui, |ui| {
                 let text = if extent.curved_to {
                     "To surface".into()
                 } else if extent.sweep.is_finite() {
@@ -770,26 +911,13 @@ fn draw_revolve(
                 } else {
                     "Choose target".into()
                 };
-                ui.label(text).on_hover_text("Determined by To Object. Choose Angle to edit the angular extent.");
-            } else if let Kind::Revolve { angle, .. } = &mut d.kind {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Angle").color(Tokens::get().text_dim).size(11.5));
-                    let id = egui::Id::new("sc_canvas_value");
-                    let response = ui.add(egui::TextEdit::singleline(angle).id(id).desired_width(72.0));
-                    crate::params_dialog::complete(ui, &response, angle);
-                    if focus {
-                        response.request_focus();
-                        let n = angle.chars().count();
-                        let mut state = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
-                        state
-                            .cursor
-                            .set_char_range(Some(egui::text_selection::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(n))));
-                        state.store(ui.ctx(), id);
-                    }
-                });
-            }
+                ui.label(text).on_hover_text(crate::i18n::tr_label("Determined by To Object. Choose Angle to edit the angular extent."));
+            });
         });
-    });
+    } else if let Kind::Revolve { angle, .. } = &mut d.kind {
+        let dragging = *angle != angle_before;
+        value_box(ui, crate::i18n::tr_label("Angle"), angle, box_at, focus || dragging);
+    }
 }
 
 fn revolve_convention(d: &Dialog) -> solidcraft_engine::doc::RevolveConvention {

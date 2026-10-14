@@ -124,6 +124,10 @@ fn identity() -> Mat {
     IDENTITY
 }
 
+/// How deep and how many placements [`Document::placements`] walks.
+pub const MAX_PLACEMENT_DEPTH: usize = 64;
+pub const MAX_PLACEMENTS: usize = 100_000;
+
 fn map_plane(m: &Mat, p: &Plane) -> Plane {
     let (o, x, y) = (apply_point(m, p.origin), apply_vector(m, p.x), apply_vector(m, p.y));
     Plane::new(o, x, y).unwrap_or(*p)
@@ -221,7 +225,8 @@ impl FeatureKind {
                     pt(&mut t.point);
                 }
             }
-            FeatureKind::Revolve { axis: AxisRef::Line { origin, dir: d }, .. } => {
+            FeatureKind::Revolve { axis: AxisRef::Line { origin, dir: d }, .. }
+            | FeatureKind::SurfaceRevolve { axis: AxisRef::Line { origin, dir: d }, .. } => {
                 pt(origin);
                 dir(d);
             }
@@ -232,9 +237,10 @@ impl FeatureKind {
                 }
             }
             FeatureKind::Chamfer { edges, .. } => edges.iter_mut().for_each(pt),
-            FeatureKind::Shell { faces, .. } | FeatureKind::OffsetFace { faces, .. } | FeatureKind::DeleteFace { faces, .. } => {
-                faces.iter_mut().for_each(pt)
-            }
+            FeatureKind::Shell { faces, .. }
+            | FeatureKind::OffsetFace { faces, .. }
+            | FeatureKind::DeleteFace { faces, .. }
+            | FeatureKind::SurfaceOffset { faces, .. } => faces.iter_mut().for_each(pt),
             FeatureKind::Draft { faces, neutral, pull, .. } => {
                 faces.iter_mut().for_each(pt);
                 map_plane_ref(m, neutral);
@@ -321,6 +327,10 @@ impl FeatureKind {
             }
             FeatureKind::Revolve { .. }
             | FeatureKind::Extrude { .. }
+            | FeatureKind::SurfaceExtrude { .. }
+            | FeatureKind::SurfaceRevolve { .. }
+            | FeatureKind::SurfaceSweep { .. }
+            | FeatureKind::SurfaceLoft { .. }
             | FeatureKind::Combine { .. }
             | FeatureKind::Loft { .. }
             | FeatureKind::Sweep { .. }
@@ -336,6 +346,7 @@ impl FeatureKind {
             | FeatureKind::MeshConvert { .. }
             | FeatureKind::BodyTransfer { .. } => {}
             FeatureKind::Patch { edges, .. } | FeatureKind::SurfaceExtend { edges, .. } => edges.iter_mut().for_each(pt),
+            FeatureKind::Unstitch { faces, .. } | FeatureKind::ReverseNormal { faces, .. } => faces.iter_mut().for_each(pt),
             FeatureKind::SurfaceTrim { plane, tool, keep, .. } => {
                 map_plane_ref(m, plane);
                 if let Some(t) = tool {
@@ -369,12 +380,17 @@ impl Document {
     }
 
     /// Every placement of each component: (component, occurrence path ids, world transform).
+    /// A branch stops past [`MAX_PLACEMENT_DEPTH`] levels, the walk past [`MAX_PLACEMENTS`] placements.
     pub fn placements(&self) -> Vec<(u64, Vec<u64>, Mat)> {
         let mut out = vec![(0, Vec::new(), IDENTITY)];
         let mut stack: Vec<(u64, Vec<u64>, Mat)> = vec![(0, Vec::new(), IDENTITY)];
         while let Some((comp, path, m)) = stack.pop() {
-            if path.len() > 64 || out.len() > 100_000 {
+            if out.len() > MAX_PLACEMENTS {
                 break;
+            }
+            // Only this branch stops past the depth limit; the others are still walked.
+            if path.len() > MAX_PLACEMENT_DEPTH {
+                continue;
             }
             for o in self.occurrences.iter().filter(|o| o.parent == comp) {
                 let mut p = path.clone();
@@ -491,7 +507,7 @@ impl Document {
             return Err(DocError::Invalid("too many occurrences".into()));
         }
         let id = self.next_id.max(1);
-        self.next_id = id + 1;
+        self.next_id = id.checked_add(1).ok_or_else(|| DocError::Invalid("too many items in the design".into()))?;
         let cname = self.components.iter().find(|c| c.id == component).map(|c| c.name.clone()).unwrap_or_default();
         let k = self.occurrences.iter().filter(|o| o.component == component).count() + 1;
         self.occurrences.push(crate::Occurrence { id, component, parent, name: format!("{cname}:{k}"), transform, grounded: false });

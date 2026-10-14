@@ -1,6 +1,6 @@
 //! Preferences, one dialog in the spirit of Fusion's, opened from the gear at the top right of the
 //! window, File › Preferences or Ctrl+, (Cmd+, on macOS): General (theme, UI scale, units of new
-//! designs, autosave, display precision, the agent cursor), Navigation (mouse presets, zoom
+//! designs, autosave, display precision, timeline layout, the agent cursor), Navigation (mouse presets, zoom
 //! direction, zoom to the cursor, orbit centre, Look At animation), Keyboard Shortcuts (search,
 //! rebind, conflicts; `keymap`), Design (default modelling orientation, Y up or Z up), Graphics
 //! (visual style, grid, shadow, perspective, anti-aliasing), Sketch and Selection. Changes apply
@@ -223,6 +223,13 @@ pub struct Prefs {
     pub language: String,
     /// Interface scale (1 = 100 %).
     pub ui_scale: f32,
+    /// Put the feature history above the parts browser in the left sidebar instead of along the
+    /// bottom of the viewport.
+    pub timeline_left: bool,
+    /// Height of the feature-history section when it shares the left sidebar with the browser.
+    pub timeline_left_height: f32,
+    /// Whether the browser below the left feature history is collapsed.
+    pub timeline_left_browser_collapsed: bool,
     /// The wheel zooms toward the point under the cursor (else toward the view's centre).
     pub zoom_to_cursor: bool,
     /// Spread discrete wheel input across frames (off: apply each event immediately).
@@ -238,6 +245,10 @@ pub struct Prefs {
     pub offer_stand_up: bool,
     /// What a middle-button double-click in the view does: `home`, `fit` or `off`.
     pub middle_double_click: String,
+    /// Check for updates at start and once a day (docs/updates.md).
+    pub check_updates: bool,
+    /// When the last update check ran, and the versions skipped or put off (`update::Memo`).
+    pub update: crate::update::Memo,
 }
 
 /// What a middle-button double-click in the view does.
@@ -285,6 +296,9 @@ impl Default for Prefs {
             theme: "dark".into(),
             language: "en".into(),
             ui_scale: 1.0,
+            timeline_left: false,
+            timeline_left_height: 360.0,
+            timeline_left_browser_collapsed: false,
             zoom_to_cursor: true,
             smooth_wheel_zoom: true,
             trackpad_pan: true,
@@ -293,6 +307,8 @@ impl Default for Prefs {
             up_axis: "z".into(),
             offer_stand_up: true,
             middle_double_click: "home".into(),
+            check_updates: true,
+            update: crate::update::Memo::default(),
         }
     }
 }
@@ -349,7 +365,10 @@ impl Snapshot {
     }
     fn restore(self, app: &mut SolveApp) {
         let msaa = app.preferences.msaa;
+        // Update bookkeeping isn't a setting: a check that finished while the dialog was open stays.
+        let update = std::mem::take(&mut app.preferences.update);
         app.preferences = self.prefs;
+        app.preferences.update = update;
         app.ui.dark = self.dark;
         app.ui.show_grid = self.grid;
         app.ui.ground_shadow = self.shadow;
@@ -376,9 +395,13 @@ fn defaults(app: &mut SolveApp, page: usize) {
             p.theme = d.theme;
             p.language = d.language;
             p.ui_scale = d.ui_scale;
+            p.timeline_left = d.timeline_left;
+            p.timeline_left_height = d.timeline_left_height;
+            p.timeline_left_browser_collapsed = d.timeline_left_browser_collapsed;
             p.default_units = d.default_units;
             p.length_decimals = d.length_decimals;
             p.angle_decimals = d.angle_decimals;
+            p.check_updates = d.check_updates;
             app.ui.dark = true;
             app.ui.agent_cursor = Default::default();
             app.autosave_minutes = 5.0;
@@ -847,6 +870,15 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
             );
             crate::scenario::publish_rect("prefs:scale", scale.rect);
             ui.end_row();
+            ui.label(app.tr("ui.feature_history"));
+            let timeline_bottom = app.tr("ui.timeline_bottom").to_string();
+            let timeline_left = app.tr("ui.timeline_left_sidebar").to_string();
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut app.preferences.timeline_left, false, timeline_bottom);
+                ui.radio_value(&mut app.preferences.timeline_left, true, timeline_left);
+            });
+            ui.end_row();
+            note(ui, app.tr("ui.timeline_left_note"));
             ui.label(app.tr("ui.units_of_new_designs"));
             egui::ComboBox::from_id_salt("pref_units").selected_text(app.preferences.default_units.clone()).show_ui(ui, |ui| {
                 for u in UNITS {
@@ -859,7 +891,7 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
                 set_autosave(app);
             }
             ui.end_row();
-            note(ui, "0 turns it off");
+            note(ui, crate::i18n::tr_label("0 turns it off"));
             ui.label(app.tr("ui.length_decimals"));
             ui.add(egui::DragValue::new(&mut app.preferences.length_decimals).range(0..=6));
             ui.end_row();
@@ -869,7 +901,7 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
             ui.label(app.tr("ui.agent_cursor"));
             let speed_label = app.tr("ui.agent_cursor_speed");
             let s = &mut app.ui.agent_cursor;
-            ui.checkbox(&mut s.show, "Show the pointer an AI agent moves (#35)");
+            ui.checkbox(&mut s.show, crate::i18n::tr_label("Show the pointer an AI agent moves (#35)"));
             ui.end_row();
             ui.label(speed_label);
             ui.add_enabled_ui(s.show, |ui| {
@@ -877,29 +909,32 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
             });
             ui.end_row();
             ui.label("");
-            ui.add_enabled(s.show, egui::Checkbox::new(&mut s.follow_camera, "Follow the camera (Look At sketches)"));
+            ui.add_enabled(s.show, egui::Checkbox::new(&mut s.follow_camera, crate::i18n::tr_label("Follow the camera (Look At sketches)")));
             ui.end_row();
+            crate::update::prefs_rows(app, ui, t);
         }
         1 => {
-            ui.label("Pan, zoom, orbit");
-            egui::ComboBox::from_id_salt("pref_nav").selected_text(nav_preset(&app.preferences.nav).label).show_ui(ui, |ui| {
+            ui.label(app.tr_label("Pan, zoom, orbit"));
+            let current_preset_label = app.tr_label(nav_preset(&app.preferences.nav).label);
+            egui::ComboBox::from_id_salt("pref_nav").selected_text(current_preset_label).show_ui(ui, |ui| {
                 for p in &NAV_PRESETS {
-                    if ui.selectable_value(&mut app.preferences.nav, p.id.to_string(), p.label).clicked() {
+                    if ui.selectable_value(&mut app.preferences.nav, p.id.to_string(), crate::i18n::tr_label(p.label)).clicked() {
                         app.preferences.zoom_reverse = p.reverse_zoom;
                     }
                 }
             });
             ui.end_row();
             let snap_help = if app.preferences.nav == OPENSCAD_NAV { "" } else { "; hold Shift during orbit to snap" };
-            note(ui, &format!("{}; Ctrl+left drag on empty space orbits{snap_help}; the wheel zooms", nav_preset(&app.preferences.nav).help));
-            ui.label("Context menu");
-            ui.checkbox(&mut app.preferences.radial_context_menu, "Radial context menu");
+            let raw_help = format!("{}; Ctrl+left drag on empty space orbits{snap_help}; the wheel zooms", nav_preset(&app.preferences.nav).help);
+            note(ui, crate::i18n::tr_label(&raw_help));
+            ui.label(crate::i18n::tr_label("Context menu"));
+            ui.checkbox(&mut app.preferences.radial_context_menu, crate::i18n::tr_label("Radial context menu"));
             ui.end_row();
-            ui.label("View navigator");
+            ui.label(crate::i18n::tr_label("View navigator"));
             let picker =
-                egui::ComboBox::from_id_salt("pref_navigator_style").selected_text(app.preferences.navigator_style.label()).show_ui(ui, |ui| {
+                egui::ComboBox::from_id_salt("pref_navigator_style").selected_text(crate::i18n::tr_label(app.preferences.navigator_style.label())).show_ui(ui, |ui| {
                     for style in NavigatorStyle::ALL {
-                        let response = ui.selectable_value(&mut app.preferences.navigator_style, style, style.label());
+                        let response = ui.selectable_value(&mut app.preferences.navigator_style, style, crate::i18n::tr_label(style.label()));
                         crate::scenario::publish_rect(&format!("prefs:navigator:{}", style.label()), response.rect);
                         crate::scenario::publish_handle(&format!("prefs:navigator:{}", style.label()), response.rect.center());
                     }
@@ -907,89 +942,90 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
             crate::scenario::publish_rect("prefs:navigator", picker.response.rect);
             crate::scenario::publish_handle("prefs:navigator", picker.response.rect.center());
             ui.end_row();
-            ui.label("Reverse zoom direction");
+            ui.label(crate::i18n::tr_label("Reverse zoom direction"));
             ui.checkbox(&mut app.preferences.zoom_reverse, "");
             ui.end_row();
-            ui.label("Zoom to the cursor");
+            ui.label(crate::i18n::tr_label("Zoom to the cursor"));
             ui.checkbox(&mut app.preferences.zoom_to_cursor, "")
-                .on_hover_text("The wheel zooms toward the point under the cursor (off: toward the view's centre)");
+                .on_hover_text(crate::i18n::tr_label("The wheel zooms toward the point under the cursor (off: toward the view's centre)"));
             ui.end_row();
-            ui.label("Smooth wheel zoom");
+            ui.label(crate::i18n::tr_label("Smooth wheel zoom"));
             ui.checkbox(&mut app.preferences.smooth_wheel_zoom, "")
-                .on_hover_text("Turn off to apply each wheel event immediately, without a smoothing tail");
+                .on_hover_text(crate::i18n::tr_label("Turn off to apply each wheel event immediately, without a smoothing tail"));
             ui.end_row();
-            ui.label("Two-finger scroll pans");
-            ui.checkbox(&mut app.preferences.trackpad_pan, "").on_hover_text(
+            ui.label(crate::i18n::tr_label("Two-finger scroll pans"));
+            ui.checkbox(&mut app.preferences.trackpad_pan, "").on_hover_text(crate::i18n::tr_label(
                 "Trackpad gestures pan (off: they zoom like the wheel); mouse wheel zooms, thumb wheel pans sideways, pinch always zooms",
-            );
+            ));
             ui.end_row();
-            ui.label("Orbit around");
+            ui.label(crate::i18n::tr_label("Orbit around"));
             ui.horizontal(|ui| {
-                ui.radio_value(&mut app.preferences.orbit_cursor, false, "View centre");
-                ui.radio_value(&mut app.preferences.orbit_cursor, true, "Point under the cursor");
+                ui.radio_value(&mut app.preferences.orbit_cursor, false, crate::i18n::tr_label("View centre"));
+                ui.radio_value(&mut app.preferences.orbit_cursor, true, crate::i18n::tr_label("Point under the cursor"));
             });
             ui.end_row();
-            ui.label("Middle double-click");
+            ui.label(crate::i18n::tr_label("Middle double-click"));
             let current = MiddleDoubleClick::of(app);
-            egui::ComboBox::from_id_salt("pref_middle_double_click").selected_text(current.label()).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("pref_middle_double_click").selected_text(crate::i18n::tr_label(current.label())).show_ui(ui, |ui| {
                 for (m, id, label) in MiddleDoubleClick::ALL {
-                    if ui.selectable_label(current == m, label).clicked() {
+                    if ui.selectable_label(current == m, crate::i18n::tr_label(label)).clicked() {
                         app.preferences.middle_double_click = id.into();
                     }
                 }
             })
             .response
-            .on_hover_text("Double-clicking the middle button in the view: Home (the home view, framing what is shown), Fit (frame what is shown, keeping the orientation) or nothing");
+            .on_hover_text(crate::i18n::tr_label("Double-clicking the middle button in the view: Home (the home view, framing what is shown), Fit (frame what is shown, keeping the orientation) or nothing"));
             ui.end_row();
-            ui.label("Animate view changes");
-            ui.checkbox(&mut app.preferences.look_at_anim, "Axis view, Look At, Home and Fit");
+            ui.label(crate::i18n::tr_label("Animate view changes"));
+            ui.checkbox(&mut app.preferences.look_at_anim, crate::i18n::tr_label("Axis view, Look At, Home and Fit"));
             ui.end_row();
-            ui.label("Animation speed");
+            ui.label(crate::i18n::tr_label("Animation speed"));
             ui.add_enabled(
                 app.preferences.look_at_anim,
                 egui::Slider::new(&mut app.preferences.look_at_speed, 0.5..=3.0).step_by(0.25).custom_formatter(|v, _| format!("{v:.2}×")),
             );
             ui.end_row();
-            ui.label("3D mouse (Windows)");
-            ui.checkbox(&mut app.preferences.space_mouse_enabled, "Navigate with SpaceNavigator / SpaceMouse");
+            ui.label(crate::i18n::tr_label("3D mouse (Windows)"));
+            ui.checkbox(&mut app.preferences.space_mouse_enabled, crate::i18n::tr_label("Navigate with SpaceNavigator / SpaceMouse"));
             ui.end_row();
-            ui.label("3D mouse speed");
+            ui.label(crate::i18n::tr_label("3D mouse speed"));
             ui.add_enabled(
                 app.preferences.space_mouse_enabled,
                 egui::Slider::new(&mut app.preferences.space_mouse_speed, 0.25..=3.0).step_by(0.05).custom_formatter(|v, _| format!("{v:.2}×")),
             );
             ui.end_row();
-            note(ui, "Move and rotate the view together; sketches use pan and zoom only.");
+            note(ui, crate::i18n::tr_label("Move and rotate the view together; sketches use pan and zoom only."));
         }
         PAGE_DESIGN => {
-            ui.label("Default modelling orientation");
+            ui.label(crate::i18n::tr_label("Default modelling orientation"));
             ui.horizontal(|ui| {
-                ui.radio_value(&mut app.preferences.up_axis, "z".to_string(), "Z up");
-                ui.radio_value(&mut app.preferences.up_axis, "y".to_string(), "Y up");
+                ui.radio_value(&mut app.preferences.up_axis, "z".to_string(), crate::i18n::tr_label("Z up"));
+                ui.radio_value(&mut app.preferences.up_axis, "y".to_string(), crate::i18n::tr_label("Y up"));
             });
             ui.end_row();
-            note(ui, "Which axis points up in the views (axis view, Home, Look At). Designs are unchanged.");
-            ui.label("Offer to stand up Y-up files");
+            note(ui, crate::i18n::tr_label("Which axis points up in the views (axis view, Home, Look At). Designs are unchanged."));
+            ui.label(crate::i18n::tr_label("Offer to stand up Y-up files"));
             ui.checkbox(&mut app.preferences.offer_stand_up, "")
-                .on_hover_text("After a STEP or IGES file opens with Z up, offer a quarter turn about X");
+                .on_hover_text(crate::i18n::tr_label("After a STEP or IGES file opens with Z up, offer a quarter turn about X"));
             ui.end_row();
         }
         4 => {
-            ui.label("Visual style");
+            ui.label(crate::i18n::tr_label("Visual style"));
             let styles = ["Shaded with edges", "Shaded", "Wireframe", "Shaded with hidden edges"];
-            egui::ComboBox::from_id_salt("pref_style").selected_text(styles[usize::from(app.ui.visual_style.min(3))]).show_ui(ui, |ui| {
+            let selected_label = crate::i18n::tr_label(styles[usize::from(app.ui.visual_style.min(3))]);
+            egui::ComboBox::from_id_salt("pref_style").selected_text(selected_label).show_ui(ui, |ui| {
                 for (i, s) in styles.iter().enumerate() {
-                    ui.selectable_value(&mut app.ui.visual_style, i as u8, *s);
+                    ui.selectable_value(&mut app.ui.visual_style, i as u8, crate::i18n::tr_label(s));
                 }
             });
             ui.end_row();
-            ui.label("Grid");
+            ui.label(crate::i18n::tr_label("Grid"));
             ui.checkbox(&mut app.ui.show_grid, "");
             ui.end_row();
-            ui.label("Ground shadow");
+            ui.label(crate::i18n::tr_label("Ground shadow"));
             ui.checkbox(&mut app.ui.ground_shadow, "");
             ui.end_row();
-            ui.label("Perspective view");
+            ui.label(crate::i18n::tr_label("Perspective view"));
             ui.checkbox(&mut app.ui.perspective, "");
             ui.end_row();
             ui.label(app.tr("ui.anti_aliasing"));
@@ -1004,7 +1040,7 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
             });
             ui.end_row();
             note(ui, app.tr("settings.msaa_applies_on_restart"));
-            ui.label("Renderer");
+            ui.label(crate::i18n::tr_label("Renderer"));
             ui.label(match (&app.viewport.gpu, &app.help.gpu) {
                 (Some(_), Some(g)) => format!("GPU: {g}"),
                 (Some(_), None) => "GPU".to_string(),
@@ -1013,7 +1049,7 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
             ui.end_row();
         }
         5 => {
-            ui.label("Project face edges into new sketches");
+            ui.label(crate::i18n::tr_label("Project face edges into new sketches"));
             let mut auto = app.session.auto_project;
             if ui.checkbox(&mut auto, "").changed() {
                 let _ = app.run("sketch.auto_project", json!({ "value": auto }));
@@ -1021,7 +1057,7 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
             ui.end_row();
         }
         _ => {
-            ui.label("Click selects whole bodies");
+            ui.label(crate::i18n::tr_label("Click selects whole bodies"));
             ui.checkbox(&mut app.ui.pick_bodies, "");
             ui.end_row();
         }
@@ -1405,8 +1441,11 @@ mod tests {
         assert_eq!(app.tr("ui.extrude"), "Extrude");
 
         // Switch language to Japanese
-        set(&mut app, &json!({"language": "ja"})).unwrap();
+        set(&mut app, &json!({"language": "ja", "timeline_left": true})).unwrap();
+        app.preferences.timeline_left_height = 275.0;
+        app.preferences.timeline_left_browser_collapsed = true;
         assert_eq!(app.preferences.language, "ja");
+        assert!(app.preferences.timeline_left);
         assert_eq!(app.tr("ui.preferences"), "環境設定");
         assert_eq!(app.tr("ui.extrude"), "押し出し");
 
@@ -1414,6 +1453,9 @@ mod tests {
         let mut other = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
         other.load_prefs(&app.prefs());
         assert_eq!(other.preferences.language, "ja");
+        assert!(other.preferences.timeline_left);
+        assert_eq!(other.preferences.timeline_left_height, 275.0);
+        assert!(other.preferences.timeline_left_browser_collapsed);
         assert_eq!(other.tr("ui.preferences"), "環境設定");
     }
 

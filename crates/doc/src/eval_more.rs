@@ -345,9 +345,12 @@ fn on_sheet_material(st: &ModelState, i: usize, p: Vec3) -> bool {
     if mesh.triangles.is_empty() {
         return true;
     }
-    // Twice the display mesh's chord tolerance (see `ModelBody::mesh`).
+    // Twice the display mesh's chord tolerance (see `ModelBody::mesh`), and a quarter of the
+    // thickness: on a large thin sheet the first steps from a point on its face clean through
+    // it, so a point on the face would touch nothing (#685).
     let step = 2.0 * (mb.body.size() * 1e-3).max(1e-3);
-    let offsets = [-step, 0.0, step];
+    let thin = st.sheets.get(i).map_or(step, |sh| (sh.t * 0.25).min(step));
+    let offsets = [-step, -thin, 0.0, thin, step];
     offsets.iter().any(|&dx| offsets.iter().any(|&dy| offsets.iter().any(|&dz| mesh.contains(p + Vec3::new(dx, dy, dz)))))
 }
 
@@ -587,19 +590,35 @@ pub(super) fn sheet_eval(
         FeatureKind::SheetConvert { body, face, rule, .. } => {
             let mb = st.body(body).cloned().ok_or_else(|| DocError::Unknown(format!("body `{body}`")))?;
             let n = planar_normal_at(&mb.body, *face).ok_or_else(|| DocError::Invalid("pick a planar face of the plate".into()))?;
-            let tol = (mb.body.size() * 1e-3).max(1e-3);
-            let mesh = mb.body.tessellate(tol)?;
             // Thickness: the body's extent along the face normal.
-            let ds: Vec<f64> = mesh.positions.iter().map(|p| (*p - *face).dot(n)).collect();
-            let (lo, hi) = (ds.iter().cloned().fold(f64::MAX, f64::min), ds.iter().cloned().fold(f64::MIN, f64::max));
+            let extent = |mesh: &solidcraft_geom::Mesh| {
+                mesh.positions.iter().map(|p| (*p - *face).dot(n)).fold((f64::MAX, f64::MIN), |(lo, hi), d| (lo.min(d), hi.max(d)))
+            };
+            // The tolerance (the mesh's chords, and how far off the face's plane a point of it may
+            // be) is at most a tenth of the thickness, not only a thousandth of the size. On a long
+            // thin plate that thousandth passes the thickness: the far side's triangles counted as
+            // this face's (no outline was left), and a hole of a smaller radius than that fell out.
+            let mut tol = (mb.body.size() * 1e-3).max(1e-3);
+            let mut mesh = mb.body.tessellate(tol)?;
+            let (mut lo, mut hi) = extent(&mesh);
+            if hi - lo > 0.0 && tol > (hi - lo) * 0.1 {
+                tol = ((hi - lo) * 0.1).max(1e-6);
+                mesh = mb.body.tessellate(tol)?;
+                (lo, hi) = extent(&mesh);
+            }
             let t = hi - lo;
-            // The face outline: boundary edges of the triangles on that face's plane.
+            // The face outline: boundary edges of the triangles on that face's plane, where it runs
+            // along a round wall an arc of the wall's circle (not chords: the plate check below
+            // compares its area with the exact volume).
             let plane = Plane::from_normal(*face + n * lo, n * -1.0).ok_or_else(|| DocError::Invalid("face".into()))?;
-            let mut loops = face_loops(&mesh, &plane, *face, n, lo, tol);
-            loops.sort_by(|a, b| poly_area(b).abs().total_cmp(&poly_area(a).abs()));
+            let mut walls = std::collections::HashMap::new();
+            let mut wall = |f: u32| *walls.entry(f).or_insert_with(|| round_wall(&mb.body, &plane, n, f));
+            let mut loops: Vec<Loop2> =
+                face_outline(&mesh, &plane, *face, n, lo, tol).iter().map(|l| outline_loop(l, &mut wall, tol * 1e-2)).collect();
+            loops.sort_by(|a, b| b.signed_area().abs().total_cmp(&a.signed_area().abs()));
             let mut it = loops.into_iter();
-            let outer = Loop2::polygon(&it.next().ok_or_else(|| DocError::Invalid("no outline on that face".into()))?).ccw();
-            let region = Region2 { outer, holes: it.map(|l| Loop2::polygon(&l).ccw().reversed()).collect() };
+            let outer = it.next().ok_or_else(|| DocError::Invalid("no outline on that face".into()))?.ccw();
+            let region = Region2 { outer, holes: it.map(|l| l.ccw().reversed()).collect() };
             let area = region.area().abs();
             let vol = kernel::measure(&mb.body)?.volume;
             if (area * t - vol).abs() > 1e-3 * vol.max(1.0) {
@@ -726,9 +745,17 @@ fn any_eligible_sheet(f: &Feature, st: &ModelState, targets: &[String]) -> bool 
 
 /// A Box or Cylinder cut (or intersect) whose tool is a straight prism along the normal of
 /// the sheet it meets: machined like the equivalent extrude of its footprint, so the sheet
-/// keeps it as a flat cut-out or pocket. Returns the sheet bodies it handled; none when the
+/// keeps it as a flat cut-out or pocket. A hole's drill (`drill`) may also be square to a
+/// folded panel of the sheet, a flange's. Returns the sheet bodies it handled; none when the
 /// primitive is not such a prism (the generic preflight then refuses real 3D machining).
-pub(super) fn sheet_primitive_cut(f: &Feature, st: &mut ModelState, tool: &Body, prism: PrimitivePrism, operation: Operation) -> Result<Vec<String>> {
+pub(super) fn sheet_primitive_cut(
+    f: &Feature,
+    st: &mut ModelState,
+    tool: &Body,
+    prism: PrimitivePrism,
+    operation: Operation,
+    drill: bool,
+) -> Result<Vec<String>> {
     if !matches!(operation, Operation::Cut | Operation::Intersect) || !any_eligible_sheet(f, st, &[]) {
         return Ok(Vec::new());
     }
@@ -738,7 +765,14 @@ pub(super) fn sheet_primitive_cut(f: &Feature, st: &mut ModelState, tool: &Body,
         if let Some(mb) = st.body(&sh.body)
             && kernel::boolean(&mb.body, tool, kernel::BoolOp::Intersect)?.is_some()
         {
-            normal = Some(sh.frame.normal());
+            normal = Some(match prism {
+                PrimitivePrism::Cylinder { axis, .. }
+                    if drill && !sh.flat && Plane::from_normal(Vec3::ZERO, axis).is_some_and(|p| !sh.parallel_panels(&p).is_empty()) =>
+                {
+                    axis
+                }
+                _ => sh.frame.normal(),
+            });
             break;
         }
     }
@@ -746,6 +780,45 @@ pub(super) fn sheet_primitive_cut(f: &Feature, st: &mut ModelState, tool: &Body,
     let Some((plane, region, interval)) = prism.along(normal) else { return Ok(Vec::new()) };
     let tools = kernel::extrude(&plane, std::slice::from_ref(&region), interval.0, interval.1)?;
     sheet_prism_cut(f, st, &plane, std::slice::from_ref(&region), operation, &tools, &[], None, false)
+}
+
+/// A hole's straight drill along a panel of a sheet (into its rim), kept as a bore of each
+/// panel it meets (see [`crate::sheet::SheetBore`]), so the sheet still unfolds. Returns the
+/// sheet bodies it machined; None, with the model as it was, when the drill is not a plain
+/// cylinder or a sheet it meets can't keep it that way (it runs into a bend, or crosses a
+/// panel at an angle).
+pub(super) fn sheet_bore_cut(f: &Feature, st: &mut ModelState, prism: PrimitivePrism) -> Result<Option<Vec<String>>> {
+    let PrimitivePrism::Cylinder { base, axis, radius, height } = prism else { return Ok(None) };
+    let mut plans = Vec::new();
+    for original in &st.sheets {
+        if !sheet_eligible(f, st, &[], original) {
+            continue;
+        }
+        let mut sh = original.clone();
+        match sh.add_bore(base, axis, radius, height) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            // Refused here, the hole keeps the message of the machining it was first tried as.
+            Err(DocError::Invalid(_)) => return Ok(None),
+            Err(e) => return Err(e),
+        }
+        let body = sh.solid()?;
+        plans.push((sh, body));
+    }
+    if plans.is_empty() {
+        return Ok(None);
+    }
+    let mut handled = Vec::new();
+    for (sh, body) in plans {
+        if let Some(mb) = st.bodies.iter_mut().find(|b| b.name == sh.body) {
+            replace_sheet_body(mb, body);
+        }
+        handled.push(sh.body.clone());
+        if let Some(slot) = st.sheets.iter_mut().find(|s| s.body == sh.body) {
+            *slot = sh;
+        }
+    }
+    Ok(Some(handled))
 }
 
 /// A primitive tool's exact geometry, for [`sheet_primitive_cut`].
@@ -950,9 +1023,13 @@ fn sheet_prism_cut(
                 }
                 modeled = true;
             } else if z1 > z0 {
+                // Each tool meets only the panel's cut-outs near it: arranging every one of a
+                // perforation's holes against every new hole would grow with their square (#732).
+                let near = sheet::NearHoles::new(&panel)?;
                 for flat in mapped {
+                    let local = near.around(&flat)?;
                     let clipped =
-                        sheet::material_boolean(std::slice::from_ref(&panel), std::slice::from_ref(&flat), kernel::BoolOp::Intersect, &mut work)?;
+                        sheet::material_boolean(std::slice::from_ref(&local), std::slice::from_ref(&flat), kernel::BoolOp::Intersect, &mut work)?;
                     if !clipped.is_empty() && !depth_resolved {
                         return Err(DocError::Invalid(
                             "sheet machining depth is below the supported 0.000001 mm extrusion resolution; increase the layer depth".into(),
@@ -1010,50 +1087,78 @@ fn sheet_prism_cut(
 /// Outline loops (in `plane` coordinates) of the mesh triangles lying in the plane at distance
 /// `level` from `at` along `n`: the edges used by one of them only, chained.
 fn face_loops(mesh: &solidcraft_geom::Mesh, plane: &Plane, at: Vec3, n: Vec3, level: f64, tol: f64) -> Vec<Vec<Vec2>> {
-    let on: Vec<[u32; 3]> = mesh
-        .triangles
-        .iter()
-        .copied()
-        .filter(|t| t.iter().all(|k| mesh.positions.get(*k as usize).is_some_and(|p| ((*p - at).dot(n) - level).abs() < tol)))
-        .collect();
+    face_outline(mesh, plane, at, n, level, tol).into_iter().map(|l| l.into_iter().map(|(p, _)| p).collect()).collect()
+}
+
+/// [`face_loops`] with each point's B-rep face across the outline from it to the next point (the
+/// wall the outline runs along there): the face off the plane that meets both points.
+fn face_outline(mesh: &solidcraft_geom::Mesh, plane: &Plane, at: Vec3, n: Vec3, level: f64, tol: f64) -> Vec<Vec<(Vec2, Option<u32>)>> {
+    let on_plane = |t: &[u32; 3]| t.iter().all(|k| mesh.positions.get(*k as usize).is_some_and(|p| ((*p - at).dot(n) - level).abs() < tol));
+    let on: Vec<[u32; 3]> = mesh.triangles.iter().copied().filter(on_plane).collect();
     // Boundary edges by position (meshes may repeat vertices per triangle).
     let pos = |k: u32| mesh.positions.get(k as usize).copied().unwrap_or_default();
     let q = |p: Vec3| ((p.x * 1e6).round() as i64, (p.y * 1e6).round() as i64, (p.z * 1e6).round() as i64);
+    let key = |a: Vec3, b: Vec3| {
+        let (ka, kb) = (q(a), q(b));
+        (ka.min(kb), ka.max(kb))
+    };
     let mut count: std::collections::HashMap<((i64, i64, i64), (i64, i64, i64)), i32> = Default::default();
     let edges: Vec<(Vec3, Vec3)> = on.iter().flat_map(|t| [(pos(t[0]), pos(t[1])), (pos(t[1]), pos(t[2])), (pos(t[2]), pos(t[0]))]).collect();
     for (a, b) in &edges {
-        let (ka, kb) = (q(*a), q(*b));
-        *count.entry((ka.min(kb), ka.max(kb))).or_insert(0) += 1;
+        *count.entry(key(*a, *b)).or_insert(0) += 1;
     }
-    let mut boundary: Vec<(Vec3, Vec3)> = edges
-        .into_iter()
-        .filter(|(a, b)| {
-            let (ka, kb) = (q(*a), q(*b));
-            count.get(&(ka.min(kb), ka.max(kb))) == Some(&1)
-        })
-        .collect();
+    // The faces off the plane at each point on it, by position to a millionth of a millimetre
+    // either way (a neighbouring face's mesh may round a shared point differently).
+    let mut touch: std::collections::HashMap<(i64, i64, i64), Vec<u32>> = Default::default();
+    for (t, f) in mesh.triangles.iter().zip(&mesh.tri_face).filter(|(t, _)| !on_plane(t)) {
+        for p in t.iter().map(|k| pos(*k)).filter(|p| ((*p - at).dot(n) - level).abs() < tol) {
+            let faces = touch.entry(q(p)).or_default();
+            if !faces.contains(f) {
+                faces.push(*f);
+            }
+        }
+    }
+    let near = |p: Vec3| {
+        let (x, y, z) = q(p);
+        let cells = (-1..=1).flat_map(|i| (-1..=1).flat_map(move |j| (-1..=1).map(move |k| (x + i, y + j, z + k))));
+        let mut faces: Vec<u32> = cells.filter_map(|c| touch.get(&c)).flatten().copied().collect();
+        faces.sort_unstable();
+        faces.dedup();
+        faces
+    };
+    let across = |a: Vec3, b: Vec3| {
+        let at_b = near(b);
+        near(a).into_iter().find(|f| at_b.contains(f))
+    };
+    let mut boundary: Vec<(Vec3, Vec3)> = edges.into_iter().filter(|(a, b)| count.get(&key(*a, *b)) == Some(&1)).collect();
     // Chain into loops (plane coordinates).
-    let mut loops: Vec<Vec<Vec2>> = Vec::new();
+    let mut loops: Vec<Vec<(Vec2, Option<u32>)>> = Vec::new();
     for _ in 0..10_000 {
         let Some((s0, mut cur)) = boundary.pop() else { break };
-        let mut lp = vec![s0];
+        let mut lp = vec![(s0, across(s0, cur))];
         for _ in 0..boundary.len() + 1 {
             if q(cur) == q(s0) {
                 break;
             }
-            lp.push(cur);
             match boundary.iter().position(|(a, _)| q(*a) == q(cur)) {
-                Some(k) => cur = boundary.remove(k).1,
-                None => break,
+                Some(k) => {
+                    let b = boundary.remove(k).1;
+                    lp.push((cur, across(cur, b)));
+                    cur = b;
+                }
+                None => {
+                    lp.push((cur, None));
+                    break;
+                }
             }
         }
-        let raw: Vec<Vec2> = lp.iter().map(|p| plane.to_local(*p)).collect();
+        let raw: Vec<(Vec2, Option<u32>)> = lp.iter().map(|(p, f)| (plane.to_local(*p), *f)).collect();
         // Drop points in the middle of straight runs.
         let m = raw.len();
-        let pts: Vec<Vec2> = (0..m)
+        let pts: Vec<(Vec2, Option<u32>)> = (0..m)
             .filter_map(|i| {
-                let (p, c, n) = (*raw.get((i + m - 1) % m)?, *raw.get(i)?, *raw.get((i + 1) % m)?);
-                ((c - p).cross(n - c).abs() > 1e-9 * (c - p).len().max(1e-9) * (n - c).len().max(1e-9)).then_some(c)
+                let (p, c, n) = (raw.get((i + m - 1) % m)?.0, *raw.get(i)?, raw.get((i + 1) % m)?.0);
+                ((c.0 - p).cross(n - c.0).abs() > 1e-9 * (c.0 - p).len().max(1e-9) * (n - c.0).len().max(1e-9)).then_some(c)
             })
             .collect();
         if pts.len() >= 3 {
@@ -1061,6 +1166,62 @@ fn face_loops(mesh: &solidcraft_geom::Mesh, plane: &Plane, at: Vec3, n: Vec3, le
         }
     }
     loops
+}
+
+/// The circle (centre in `plane` coordinates, radius) of face `f` when it is a round wall
+/// standing square on the plane: a cylinder about the plane's normal `n`.
+fn round_wall(body: &Body, plane: &Plane, n: Vec3, f: u32) -> Option<(Vec2, f64)> {
+    match kernel::face_surface(body, f as usize)? {
+        kernel::FaceSurface::Cylinder { origin, axis, radius } if axis.cross(n).len() < 1e-6 => Some((plane.to_local(origin), radius)),
+        _ => None,
+    }
+}
+
+/// A loop of [`face_outline`] as segments: each run along one round wall (`wall` gives a face's
+/// circle) is an arc of that circle, the rest stays straight. Coaxial cylinders of one radius are
+/// one wall, however many faces it comes in (many systems write a round hole's wall as two
+/// half-cylinders), so such a hole is one circle. `eps`: how far off its circle a point may be.
+fn outline_loop(pts: &[(Vec2, Option<u32>)], wall: &mut impl FnMut(u32) -> Option<(Vec2, f64)>, eps: f64) -> Loop2 {
+    use std::f64::consts::{PI, TAU};
+    let m = pts.len();
+    let point = |i: usize| pts.get(i % m).map(|x| x.0).unwrap_or_default();
+    // The circle each segment runs along: its wall's, when both its ends lie on it.
+    let circles: Vec<Option<(Vec2, f64)>> = (0..m)
+        .map(|i| {
+            let (c, r) = wall(pts.get(i)?.1?)?;
+            ((point(i).dist(c) - r).abs() <= eps && (point(i + 1).dist(c) - r).abs() <= eps).then_some((c, r))
+        })
+        .collect();
+    let circle = |i: usize| circles.get(i % m).copied().flatten();
+    let same = |i: usize, (c, r): (Vec2, f64)| circle(i).is_some_and(|(d, s)| d.dist(c) <= eps && (s - r).abs() <= eps);
+    // Start where no arc runs on across the start (anywhere when the whole loop is one circle).
+    let start = (0..m).find(|i| circle(*i + m - 1).is_none_or(|c| !same(*i, c))).unwrap_or(0);
+    let mut segs = Vec::new();
+    let mut i = 0;
+    while i < m {
+        let k = start + i;
+        let Some((c, r)) = circle(k) else {
+            segs.push(Seg2::Line { a: point(k), b: point(k + 1) });
+            i += 1;
+            continue;
+        };
+        let mut j = i + 1;
+        while j < m && same(start + j, (c, r)) {
+            j += 1;
+        }
+        let sweep: f64 = (i..j)
+            .map(|s| {
+                let d = (point(start + s + 1) - c).angle() - (point(start + s) - c).angle();
+                (d + PI).rem_euclid(TAU) - PI
+            })
+            .sum();
+        // Arcs of up to half a turn each.
+        let pieces = ((sweep.abs() / PI - 1e-9).ceil() as usize).clamp(1, 4);
+        let (a0, step) = ((point(k) - c).angle(), sweep / pieces as f64);
+        segs.extend((0..pieces).map(|p| Seg2::Arc { center: c, radius: r, start: a0 + step * p as f64, sweep: step }));
+        i = j;
+    }
+    Loop2 { segs }
 }
 
 /// The body a placed plastic feature joins: by name, else the one under the point.
@@ -1239,8 +1400,32 @@ pub(super) fn plastic_eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &F
             let mut loops = face_loops(&mesh, &plane, *face, n, 0.0, tol);
             loops.sort_by(|a, b| poly_area(b).abs().total_cmp(&poly_area(a).abs()));
             let ccw = |l: &[Vec2]| if poly_area(l) < 0.0 { l.iter().rev().copied().collect::<Vec<_>>() } else { l.to_vec() };
-            let (Some(outer), Some(inner)) = (loops.first().map(|l| ccw(l)), loops.get(1).map(|l| ccw(l))) else {
-                return Err(DocError::Invalid("pick the rim face of a shelled body (a face with an inner and an outer edge)".into()));
+            // The inner edge is an opening (the cavity under a rim): not the foot of a boss or a
+            // wall standing on the face, whose side the band would run against.
+            let opening = |l: &[Vec2]| {
+                let eps = (tol * 4.0).max(1e-3);
+                l.iter().zip(l.iter().cycle().skip(1)).filter_map(|(a, b)| Some(((*a + *b) * 0.5, (*b - *a).normalized()?))).take(3).any(|(m, t)| {
+                    // Just over the face, inside the loop (to the left of a ccw loop's edges).
+                    let q = plane.to_world(m + Vec2::new(-t.y, t.x) * eps) + n * eps;
+                    !mesh.contains(q)
+                })
+            };
+            let outer = loops.first().map(|l| ccw(l));
+            let openings: Vec<Vec<Vec2>> = loops.iter().skip(1).map(|l| ccw(l)).filter(|l| opening(l)).collect();
+            // A rim runs round one opening, the cavity; smaller ones (a screw hole) may sit in it.
+            // Openings alike in size (a plate's holes) leave no edge that is the rim's.
+            let alike = match openings.as_slice() {
+                [a, b, ..] => poly_area(b).abs() > 0.5 * poly_area(a).abs(),
+                _ => false,
+            };
+            let (Some(outer), Some(inner), false) = (outer, openings.first().cloned(), alike) else {
+                let what = match (loops.len(), openings.len()) {
+                    (0 | 1, _) => "pick the rim face of a shelled body (a face with an inner and an outer edge)".to_string(),
+                    (_, 0) => "pick the rim face of a shelled body: this face's inner edges are where other features stand on it, not an opening"
+                        .to_string(),
+                    (_, k) => format!("pick the rim face of a shelled body (round one opening): this face has {k} openings alike in size"),
+                };
+                return Err(DocError::Invalid(what));
             };
             let bw = if *groove { w + g } else { w };
             // A lip: the band raised from the rim's own faces (its walls continue the walls

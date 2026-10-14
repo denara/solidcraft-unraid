@@ -1,5 +1,5 @@
 //! Associative offsets keep their output entity ids while their source curves move.
-use crate::{CurveKind, Shape, Sketch, SketchError, intersections};
+use crate::{ConstraintKind, CurveKind, Shape, Sketch, SketchError, intersections};
 use serde::{Deserialize, Serialize};
 use solidcraft_geom::Vec2;
 
@@ -13,7 +13,37 @@ pub struct OffsetChain {
     pub topology: Option<crate::offset_topology::OffsetTopology>,
 }
 
+impl OffsetChain {
+    /// Includes reserved corner roles that may temporarily disappear from the boundary.
+    pub fn owns_output(&self, output: &str) -> bool {
+        self.outputs.iter().any(|id| id == output) || self.topology.as_ref().is_some_and(|t| t.roles.iter().any(|r| r.output == output))
+    }
+}
+
 impl Sketch {
+    /// The signed distance of the association that owns an output (including retired roles).
+    pub fn offset_distance(&self, output: &str) -> Option<f64> {
+        self.offsets
+            .iter()
+            .find(|o| o.owns_output(output))
+            .map(|o| o.distance)
+            .or_else(|| self.freeform_offsets.iter().find(|o| o.output == output).map(|o| o.distance))
+    }
+
+    /// Endpoints of a normal-distance annotation, evaluated from its source curve.
+    pub fn offset_dimension_points(&self, output: &str) -> Option<(Vec2, Vec2)> {
+        let (source, forward, distance) = self
+            .offsets
+            .iter()
+            .find(|o| o.owns_output(output))
+            .and_then(|o| o.sources.first().map(|(id, forward)| (id.as_str(), *forward, o.distance)))
+            .or_else(|| self.freeform_offsets.iter().find(|o| o.output == output).map(|o| (o.source.as_str(), o.forward, o.distance)))?;
+        let index = self.curve_index(source)?;
+        let segment = self.exact_segs(index).unwrap_or_else(|| self.segs(index)).into_iter().next()?;
+        let p = segment.point_at(0.5);
+        let tangent = (segment.point_at(0.5001) - segment.point_at(0.4999)).normalized()?;
+        Some((p, p + tangent.perp() * if forward { distance } else { -distance }))
+    }
     /// Removing an output removes its relationship. A partial analytic chain
     /// deletion releases the surviving outputs, while retained dependents keep
     /// their source references so the command's refresh refuses broken sources.
@@ -26,11 +56,12 @@ impl Sketch {
             .offsets
             .iter()
             .filter(|offset| offset.outputs.iter().any(|id| removed.contains(id)))
-            .flat_map(|offset| offset.outputs.iter().cloned())
+            .flat_map(|offset| offset.outputs.iter().cloned().chain(offset.topology.iter().flat_map(|t| t.roles.iter().map(|r| r.output.clone()))))
             .chain(self.freeform_offsets.iter().filter(|offset| removed.contains(&offset.output)).map(|offset| offset.output.clone()))
             .collect::<std::collections::BTreeSet<_>>();
         self.offsets.retain(|offset| !offset.outputs.iter().any(|id| removed.contains(id)));
         self.freeform_offsets.retain(|offset| !removed.contains(&offset.output));
+        self.constraints.retain(|c| !matches!(&c.kind, ConstraintKind::OffsetDistance { output, .. } if released.contains(output)));
         let points = self
             .curves
             .iter()
@@ -52,6 +83,27 @@ impl Sketch {
             return Ok(());
         }
         let mut candidate = self.clone();
+        let mut driven = std::collections::BTreeSet::new();
+        for constraint in &self.constraints {
+            if let ConstraintKind::OffsetDistance { output, value, reverse } = &constraint.kind {
+                self.validate(&constraint.kind)?;
+                let analytic = candidate.offsets.iter().position(|o| o.owns_output(output));
+                let freeform = candidate.freeform_offsets.iter().position(|o| o.output == *output);
+                let identity = analytic
+                    .or_else(|| freeform.map(|i| candidate.offsets.len() + i))
+                    .ok_or_else(|| SketchError::Invalid("missing offset dimension association".into()))?;
+                if constraint.driven || !driven.insert(identity) {
+                    return Err(SketchError::Invalid("an offset must have exactly one driving distance".into()));
+                }
+                let distance = if *reverse { -*value } else { *value };
+                if let Some(offset) = analytic.and_then(|i| candidate.offsets.get_mut(i)) {
+                    offset.distance = distance;
+                }
+                if let Some(offset) = freeform.and_then(|i| candidate.freeform_offsets.get_mut(i)) {
+                    offset.distance = distance;
+                }
+            }
+        }
         candidate.refresh_analytic_offsets()?;
         candidate.refresh_freeform_offsets()?;
         *self = candidate;

@@ -1,6 +1,8 @@
 //! GPU viewport: shaded triangles and screen-space wide lines with a depth buffer, drawn in an
 //! `egui_wgpu` paint callback. Geometry is uploaded when the scene changes; each frame only the
-//! camera uniform changes.
+//! camera uniform changes. Where the device runs compute shaders, opaque bodies are drawn
+//! straight from their display plans: the plan is evaluated on the GPU into the vertex buffer
+//! the pass draws (see [`PlannedBody`]), with nothing built or read back on the CPU.
 
 use std::sync::{Arc, Mutex};
 
@@ -12,6 +14,14 @@ pub const TRI_SIZE: usize = 28;
 /// Line instance: a, b (3 × f32 each), colour (4 × u8), width in pixels (f32).
 pub const LINE_SIZE: usize = 32;
 const UNIFORM_SIZE: u64 = 208;
+
+/// A body drawn from its display plan, evaluated on the GPU: the plan, and a colour per face
+/// (the plan's face numbering; faces past the end take the last colour).
+#[derive(Clone)]
+pub struct PlannedBody {
+    pub plan: Arc<solidcraft_engine::geom::tess::TessPlan>,
+    pub face_colors: Vec<[u8; 4]>,
+}
 
 /// CPU-side geometry waiting to be uploaded. The model scene changes with the design; the
 /// highlight scene (hover, selection, the origin widget) changes often and is small.
@@ -39,6 +49,8 @@ pub struct GpuScene {
     /// Lines drawn first, under everything (the ground grid: the model hides it, it never
     /// hides the model).
     pub under: Vec<u8>,
+    /// Opaque bodies drawn from their plans on the GPU, like `tris`.
+    pub planned: Vec<PlannedBody>,
 }
 
 impl GpuScene {
@@ -167,9 +179,19 @@ pub struct AccessMap {
     pub scale: f32,
 }
 
+/// Vertices (or line instances) on the GPU, in as many buffers as the device's buffer size
+/// limit needs: a large import's triangles can exceed one buffer (#883).
 struct Batch {
-    buffer: wgpu::Buffer,
-    count: u32,
+    /// Each buffer and its vertex (instance) count.
+    parts: Vec<(wgpu::Buffer, u32)>,
+    /// Bytes per buffer (all but the last are full).
+    chunk: usize,
+}
+
+/// A chunk of planned bodies on the GPU: their evaluated mesh and a colour per vertex.
+struct PlannedDraw {
+    mesh: Arc<solidcraft_gpu::GpuMesh>,
+    colors: wgpu::Buffer,
 }
 
 #[derive(Default)]
@@ -187,14 +209,24 @@ struct Batches {
     ghost: Option<Batch>,
     xray: Option<Batch>,
     under: Option<Batch>,
+    planned: Vec<PlannedDraw>,
+    /// Evaluated chunks by their plans' addresses, holding the plans so the addresses stay
+    /// theirs: a chunk whose plans are unchanged is not evaluated again when the scene is rebuilt.
+    resident: std::collections::HashMap<Vec<usize>, (Vec<Arc<solidcraft_engine::geom::tess::TessPlan>>, Arc<solidcraft_gpu::GpuMesh>)>,
 }
 
 impl Batches {
-    fn take(&mut self, device: &wgpu::Device, key: u64, slot: &SceneSlot) {
+    /// Upload a new scene. Planned bodies not yet on the GPU are evaluated there: their
+    /// dispatches go into `encoder`, ahead of this frame's render pass.
+    fn take(&mut self, device: &wgpu::Device, key: u64, slot: &SceneSlot, tess: Option<(&solidcraft_gpu::TessGpu, &mut wgpu::CommandEncoder)>) {
         if self.key == Some(key) {
             return;
         }
         if let Some(sc) = slot.lock().ok().and_then(|mut s| s.take()) {
+            self.planned = match tess {
+                Some((tess, encoder)) => self.planned(device, tess, encoder, &sc.planned),
+                None => Vec::new(),
+            };
             self.tris = upload(device, "sc_tris", &sc.tris, TRI_SIZE);
             self.trans = upload(device, "sc_trans", &sc.trans, TRI_SIZE);
             self.glass = upload_with(device, "sc_glass", &sc.glass, TRI_SIZE, wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST);
@@ -209,10 +241,74 @@ impl Batches {
             self.key = Some(key);
         }
     }
+
+    /// The planned bodies on the GPU: in chunks of at most `MAX_BATCH` vertices (one for any
+    /// ordinary scene), each uploaded and evaluated in one dispatch and drawn in one call. A
+    /// chunk whose plans are unchanged is not evaluated again; colours are rebuilt each time.
+    fn planned(
+        &mut self,
+        device: &wgpu::Device,
+        tess: &solidcraft_gpu::TessGpu,
+        encoder: &mut wgpu::CommandEncoder,
+        bodies: &[PlannedBody],
+    ) -> Vec<PlannedDraw> {
+        let mut chunks: Vec<Vec<&PlannedBody>> = Vec::new();
+        let mut filled = 0usize;
+        for b in bodies {
+            let n = b.plan.vertex_count();
+            match chunks.last_mut() {
+                Some(c) if filled + n <= solidcraft_gpu::MAX_BATCH => c.push(b),
+                _ => {
+                    chunks.push(vec![b]);
+                    filled = 0;
+                }
+            }
+            filled += n;
+        }
+        let key = |c: &[&PlannedBody]| c.iter().map(|b| Arc::as_ptr(&b.plan) as usize).collect::<Vec<usize>>();
+        self.resident.retain(|k, _| chunks.iter().any(|c| key(c) == *k));
+        let mut out = Vec::with_capacity(chunks.len());
+        for chunk in &chunks {
+            let mesh = match self.resident.get(&key(chunk)) {
+                Some((_, m)) => m.clone(),
+                None => {
+                    let plans: Vec<&solidcraft_engine::geom::tess::TessPlan> = chunk.iter().map(|b| &*b.plan).collect();
+                    match tess.prepare_many(&plans) {
+                        Ok(m) => {
+                            tess.record(encoder, &m);
+                            let m = Arc::new(m);
+                            self.resident.insert(key(chunk), (chunk.iter().map(|b| b.plan.clone()).collect(), m.clone()));
+                            m
+                        }
+                        Err(e) => {
+                            log::warn!("bodies are not drawn on the GPU: {e}");
+                            continue;
+                        }
+                    }
+                }
+            };
+            let mut bytes = Vec::with_capacity(mesh.vertex_face.len() * 4);
+            for (part, b) in mesh.parts.iter().zip(chunk) {
+                let last = b.face_colors.last().copied().unwrap_or([200, 200, 200, 255]);
+                let faces = mesh.vertex_face.get(part.vertices.start as usize..part.vertices.end as usize).unwrap_or_default();
+                bytes.extend(faces.iter().flat_map(|f| b.face_colors.get(*f as usize).copied().unwrap_or(last)));
+            }
+            if let Some((colors, _)) = upload(device, "sc_planned_colors", &bytes, 4).and_then(|c| c.parts.into_iter().next()) {
+                out.push(PlannedDraw { mesh, colors });
+            }
+        }
+        out
+    }
 }
 
 struct Resources {
     tri: wgpu::RenderPipeline,
+    /// `tri` and `tri_cut` for planned bodies (positions and normals from the GPU evaluation,
+    /// colours per vertex, indexed).
+    tri_planned: wgpu::RenderPipeline,
+    tri_cut_planned: Option<(wgpu::RenderPipeline, wgpu::RenderPipeline)>,
+    /// The tessellation compute pipeline, where the device runs compute shaders.
+    tess: Option<solidcraft_gpu::TessGpu>,
     /// While a section is shown (when the depth buffer has a stencil): `tri` marking where the
     /// cap shows, then the cap again at the section plane's depth, so it hides the inside.
     tri_cut: Option<(wgpu::RenderPipeline, wgpu::RenderPipeline)>,
@@ -279,327 +375,27 @@ fn access_texture(device: &wgpu::Device, queue: Option<&wgpu::Queue>, bgl: &wgpu
     })
 }
 
-const SHADER: &str = r#"
-struct U {
-    vp: mat4x4<f32>,
-    back: vec4<f32>,   // xyz = toward the eye, w = 1 for linear output
-    screen: vec4<f32>, // viewport width, height (px), depth bias (see `biased_z`), silhouettes on (1)
-    clip: vec4<f32>,   // section plane: normal, d (zero normal: no section)
-    cap: vec4<f32>,    // colour of the inside of cut bodies
-    ana: vec4<f32>,    // surface analysis: mode (1 zebra, 2 draft, 3 curvature), parameter
-    pull: vec4<f32>,   // draft pull direction
-    acc_u: vec4<f32>,  // accessibility map axes (xyz, offset)
-    acc_v: vec4<f32>,
-    eye: vec4<f32>,    // eye position, w = 1 for perspective (0: orthographic, looking along -back)
-};
-
-@group(1) @binding(2) var acc_t: texture_2d<f32>;
-
-fn clipped(p: vec3<f32>) -> bool {
-    return length(u.clip.xyz) > 0.5 && dot(u.clip.xyz, p) > u.clip.w;
-}
-@group(0) @binding(0) var<uniform> u: U;
-
-fn to_linear(c: vec3<f32>) -> vec3<f32> {
-    return select(c, pow((c + vec3<f32>(0.055)) / vec3<f32>(1.055), vec3<f32>(2.4)), c > vec3<f32>(0.04045));
-}
-
-fn out_color(c: vec4<f32>) -> vec4<f32> {
-    if (u.back.w > 0.5) {
-        return vec4<f32>(to_linear(c.rgb), c.a);
-    }
-    return c;
-}
-
-struct TOut {
-    @builtin(position) pos: vec4<f32>,
-    @location(0) n: vec3<f32>,
-    @location(1) c: vec4<f32>,
-    @location(2) wp: vec3<f32>,
-};
-
-@vertex
-fn vs_tri(@location(0) p: vec3<f32>, @location(1) n: vec3<f32>, @location(2) c: vec4<f32>) -> TOut {
-    var o: TOut;
-    o.pos = u.vp * vec4<f32>(p, 1.0);
-    o.n = n;
-    o.c = c;
-    o.wp = p;
-    return o;
-}
-
-/// Opaque model surfaces: cut by the section plane, the inside shows as a flat cap colour.
-@fragment
-fn fs_solid(i: TOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
-    let c = solid(i, front);
-    return c;
-}
-
-struct CutOut {
-    @location(0) c: vec4<f32>,
-    @builtin(frag_depth) depth: f32,
-};
-
-/// The section cap (the inside seen through the cut, drawn on the far walls' back faces where
-/// they are the visible surface) again, at the depth of the section plane rather than of the
-/// far wall, so the cut face hides what lies inside the body instead of showing it like a
-/// pane of glass.
-@fragment
-fn fs_solid_cut(i: TOut, @builtin(front_facing) front: bool) -> CutOut {
-    var o: CutOut;
-    o.c = solid(i, front);
-    o.depth = cap_depth(i.wp, i.pos.z);
-    return o;
-}
-
-/// Depth of the section plane on the view ray through `wp` (a far wall seen through the cut),
-/// never behind the wall itself (`z`).
-fn cap_depth(wp: vec3<f32>, z: f32) -> f32 {
-    var dir = -u.back.xyz;
-    if (u.eye.w > 0.5) { dir = wp - u.eye.xyz; }
-    let dn = dot(u.clip.xyz, dir);
-    if (abs(dn) < 1e-9) { return z; }
-    let p = wp + dir * ((u.clip.w - dot(u.clip.xyz, wp)) / dn);
-    let c = u.vp * vec4<f32>(p, 1.0);
-    if (c.w <= 0.0) { return z; }
-    return clamp(c.z / c.w, 0.0, z);
-}
-
-fn solid(i: TOut, front: bool) -> vec4<f32> {
-    // Derivatives first, in uniform control flow (browsers' WGSL compilers reject them after
-    // a branch that returns; the whole shader module then fails and nothing is drawn).
-    let k = curvature(i);
-    let ndv = dot(normalize(i.n), normalize(u.back.xyz));
-    let fw = fwidth(ndv);
-    if (clipped(i.wp)) { discard; }
-    if (!front && length(u.clip.xyz) > 0.5) {
-        // The cut face in its body's colour (as Fusion's "from component"), tinted toward the
-        // cap colour so it reads as a cut, hatched at 45 degrees on screen.
-        let base = mix(i.c.rgb, u.cap.rgb, 0.35);
-        let h = fract((i.pos.x + i.pos.y) / 9.0);
-        return out_color(vec4<f32>(select(base, base * 0.6, h < 0.22), 1.0));
-    }
-    if (u.ana.x > 0.5 && length(i.n) > 0.5) {
-        return analysis(i, k);
-    }
-    let c = shade(i);
-    // Silhouettes (styles with edges): where a curved surface turns away from the eye, a line
-    // about 1.5 px wide, on the visible surface only (depth-correct).
-    if (u.screen.w > 0.5 && length(i.n) > 0.5 && fw > 1e-6) {
-        let a = 1.0 - smoothstep(fw * 0.8, fw * 2.0, abs(ndv));
-        return vec4<f32>(mix(c.rgb, out_color(vec4<f32>(0.07, 0.08, 0.10, 1.0)).rgb, a), c.a);
-    }
-    return c;
-}
-
-/// How fast the normal turns across the pixel (per mm).
-fn curvature(i: TOut) -> f32 {
-    let nn = normalize(i.n);
-    let kx = length(dpdx(nn)) / max(length(dpdx(i.wp)), 1e-6);
-    let ky = length(dpdy(nn)) / max(length(dpdy(i.wp)), 1e-6);
-    return max(kx, ky);
-}
-
-/// Surface analysis colours: zebra stripes, draft angle bands, curvature map (`k`: the
-/// surface's curvature here, worked out by the caller).
-fn analysis(i: TOut, k: f32) -> vec4<f32> {
-    let v = normalize(u.back.xyz);
-    var n = normalize(i.n);
-    if (dot(n, v) < 0.0) { n = -n; }
-    let lit = 0.55 + 0.45 * max(dot(n, v), 0.0);
-    if (u.ana.x < 1.5) {
-        // Reflections of upright light bars standing around the viewer: the stripe follows
-        // the reflected ray's sideways direction (horizontal on screen).
-        let r = reflect(-v, n);
-        var side = cross(v, vec3<f32>(0.0, 0.0, 1.0));
-        if (length(side) < 1e-3) { side = vec3<f32>(1.0, 0.0, 0.0); }
-        let s = sin(dot(r, normalize(side)) * u.ana.y * 3.14159265);
-        let c = select(0.08, 0.95, s > 0.0);
-        return out_color(vec4<f32>(vec3<f32>(c), 1.0));
-    }
-    if (u.ana.x > 4.5) {
-        // Reachable from the access direction: facing it and nothing above.
-        let d = normalize(u.pull.xyz);
-        let size = i32(u.ana.w);
-        let px = vec2<i32>(floor(vec2<f32>(dot(i.wp, u.acc_u.xyz) + u.acc_u.w, dot(i.wp, u.acc_v.xyz) + u.acc_v.w) * u.ana.z));
-        var top = -1e30;
-        if (px.x >= 0 && px.y >= 0 && px.x < size && px.y < size) {
-            top = textureLoad(acc_t, px, 0).x;
-        }
-        let cn = dot(normalize(i.n), d);
-        let facing = cn > 0.02;
-        // Slack of a pixel and a half, more on slopes (the map holds the pixel's highest point).
-        let slack = u.ana.y * (1.0 + sqrt(max(1.0 - cn * cn, 0.0)) / max(cn, 0.05));
-        let clear = dot(i.wp, d) >= top - slack;
-        var c = vec3<f32>(0.85, 0.22, 0.20);
-        if (facing && clear) { c = vec3<f32>(0.20, 0.75, 0.30); }
-        return out_color(vec4<f32>(c * lit, 1.0));
-    }
-    if (u.ana.x > 3.5) {
-        // A studio around the model: sky above, a dark floor below, a bright horizon band and
-        // two soft light panels, seen in a mirror.
-        let r = reflect(-v, n);
-        var c = mix(vec3<f32>(0.32, 0.34, 0.38), vec3<f32>(0.80, 0.86, 0.95), smoothstep(-0.05, 0.6, r.z));
-        c = c + vec3<f32>(0.6) * exp(-abs(r.z) * 40.0);
-        let side = atan2(r.y, r.x);
-        c = c + vec3<f32>(0.9) * smoothstep(0.92, 0.98, cos(side * 2.0)) * smoothstep(0.1, 0.3, r.z) * smoothstep(0.8, 0.6, r.z);
-        if (r.z < -0.02) {
-            // The floor: lighter toward the horizon, with light-panel streaks along it.
-            c = mix(vec3<f32>(0.55, 0.56, 0.60), vec3<f32>(0.20, 0.20, 0.22), clamp(-r.z * 1.6, 0.0, 1.0));
-            c = c + vec3<f32>(0.35) * smoothstep(0.95, 0.99, cos(side * 3.0));
-        }
-        return out_color(vec4<f32>(min(c, vec3<f32>(1.0)), 1.0));
-    }
-    if (u.ana.x < 2.5) {
-        let a = degrees(asin(clamp(dot(normalize(i.n), normalize(u.pull.xyz)), -1.0, 1.0)));
-        var c = vec3<f32>(0.95, 0.80, 0.15);
-        if (a >= u.ana.y) { c = vec3<f32>(0.20, 0.75, 0.30); }
-        if (a <= -u.ana.y) { c = vec3<f32>(0.85, 0.22, 0.20); }
-        return out_color(vec4<f32>(c * lit, 1.0));
-    }
-    // Curvature from how fast the normal turns across the pixel.
-    let t = clamp(k * u.ana.y, 0.0, 1.0);
-    let c = select(mix(vec3<f32>(0.10, 0.80, 0.25), vec3<f32>(0.90, 0.15, 0.10), t * 2.0 - 1.0),
-                   mix(vec3<f32>(0.15, 0.35, 0.95), vec3<f32>(0.10, 0.80, 0.25), t * 2.0), t < 0.5);
-    return out_color(vec4<f32>(c * lit, 1.0));
-}
-
-@fragment
-fn fs_tri(i: TOut) -> @location(0) vec4<f32> {
-    if (clipped(i.wp)) { discard; }
-    return shade(i);
-}
-
-fn shade(i: TOut) -> vec4<f32> {
-    // A zero normal marks flat colour (selection fills, translucent planes).
-    if (length(i.n) < 0.5) {
-        return out_color(i.c);
-    }
-    let v = normalize(u.back.xyz);
-    var n = normalize(i.n);
-    if (dot(n, v) < 0.0) { n = -n; }
-    let key = normalize(v * 0.8 + vec3<f32>(-0.3, 0.2, 0.6));
-    let diff = max(dot(n, key), 0.0);
-    let fill = max(dot(n, v), 0.0);
-    let h = normalize(key + v);
-    let spec = pow(max(dot(n, h), 0.0), 40.0) * 0.25;
-    let k = 0.42 + 0.38 * diff + 0.25 * fill;
-    return out_color(vec4<f32>(min(i.c.rgb * k + vec3<f32>(spec), vec3<f32>(1.0)), i.c.a));
-}
-
-/// Clip-space z of `p` (clipped to `c`) pulled `s` depth biases toward the eye (pushed away
-/// when negative). Orthographic depth is linear in distance, so the bias is a fixed step of it.
-/// Perspective depth is not: near the far plane a fixed step spans tens of millimetres (edges
-/// showed through walls), so the point moves toward the eye by a fraction of its distance.
-fn biased_z(p: vec3<f32>, c: vec4<f32>, s: f32) -> f32 {
-    if (u.eye.w > 0.5) {
-        let q = u.vp * vec4<f32>(mix(p, u.eye.xyz, u.screen.z * 8.0 * s), 1.0);
-        return q.z / max(q.w, 1e-6) * c.w;
-    }
-    return c.z - u.screen.z * s * c.w;
-}
-
-@vertex
-fn vs_ghost(@location(0) p: vec3<f32>, @location(1) n: vec3<f32>, @location(2) c: vec4<f32>) -> TOut {
-    var o: TOut;
-    o.pos = u.vp * vec4<f32>(p, 1.0);
-    o.pos.z = biased_z(p, o.pos, -4.0);
-    o.n = n;
-    o.c = c;
-    o.wp = p;
-    return o;
-}
-
-struct LOut {
-    @builtin(position) pos: vec4<f32>,
-    @location(0) c: vec4<f32>,
-    @location(1) wp: vec3<f32>,
-};
-
-@vertex
-fn vs_line(@builtin(vertex_index) vi: u32, @location(0) a: vec3<f32>, @location(1) b: vec3<f32>, @location(2) c: vec4<f32>, @location(3) w: f32) -> LOut {
-    var pa = a;
-    var pb = b;
-    var ca = u.vp * vec4<f32>(a, 1.0);
-    var cb = u.vp * vec4<f32>(b, 1.0);
-    // An end behind the near plane (clip z < 0) has no screen point: its divide flips the
-    // line or drops it whole (ground grid lines running past the eye at a low angle). Cut
-    // the segment at the plane instead; clip space is linear in the world point.
-    if (ca.z < 0.0 && cb.z > 0.0) {
-        let k = ca.z / (ca.z - cb.z);
-        ca = mix(ca, cb, k);
-        pa = mix(a, b, k);
-    } else if (cb.z < 0.0 && ca.z > 0.0) {
-        let k = cb.z / (cb.z - ca.z);
-        cb = mix(cb, ca, k);
-        pb = mix(b, a, k);
-    }
-    let half = u.screen.xy * 0.5;
-    let sa = ca.xy / max(ca.w, 1e-6) * half;
-    let sb = cb.xy / max(cb.w, 1e-6) * half;
-    var dir = sb - sa;
-    let len = length(dir);
-    if (len < 1e-6) { dir = vec2<f32>(1.0, 0.0); } else { dir = dir / len; }
-    let nrm = vec2<f32>(-dir.y, dir.x);
-    // Two triangles: corners (t, side).
-    var ts = array<f32, 6>(0.0, 1.0, 1.0, 0.0, 1.0, 0.0);
-    var ss = array<f32, 6>(-1.0, -1.0, 1.0, -1.0, 1.0, 1.0);
-    let t = ts[vi];
-    let s = ss[vi];
-    let base = select(ca, cb, t > 0.5);
-    let off = nrm * s * w * 0.5 + dir * (t * 2.0 - 1.0) * w * 0.5;
-    var o: LOut;
-    o.pos = vec4<f32>(base.xy + off / half * base.w, biased_z(select(pa, pb, t > 0.5), base, 1.0), base.w);
-    o.c = c;
-    o.wp = select(pa, pb, t > 0.5);
-    return o;
-}
-
-@fragment
-fn fs_line(i: LOut) -> @location(0) vec4<f32> {
-    if (clipped(i.wp)) { discard; }
-    return out_color(i.c);
-}
-
-struct IOut {
-    @builtin(position) pos: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-    @location(1) a: f32,
-    @location(2) wp: vec3<f32>,
-};
-
-@group(1) @binding(0) var img_t: texture_2d<f32>;
-@group(1) @binding(1) var img_s: sampler;
-
-@vertex
-fn vs_img(@location(0) p: vec3<f32>, @location(1) uv: vec2<f32>, @location(2) a: f32) -> IOut {
-    var o: IOut;
-    o.pos = u.vp * vec4<f32>(p, 1.0);
-    // Pulled toward the eye like lines, so a decal on a face is not lost in it.
-    o.pos.z = biased_z(p, o.pos, 1.0);
-    o.uv = uv;
-    o.a = a;
-    o.wp = p;
-    return o;
-}
-
-@fragment
-fn fs_img(i: IOut) -> @location(0) vec4<f32> {
-    let c = textureSample(img_t, img_s, i.uv);
-    if (clipped(i.wp)) { discard; }
-    return out_color(vec4<f32>(c.rgb, c.a * i.a));
-}
-
-/// Lines the section never cuts (the grid, highlights drawn on top).
-@fragment
-fn fs_line_all(i: LOut) -> @location(0) vec4<f32> {
-    return out_color(i.c);
-}
-"#;
+const SHADER: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/shaders/viewport.wgsl"));
 
 fn tri_layout() -> wgpu::VertexBufferLayout<'static> {
     const A: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Unorm8x4];
     wgpu::VertexBufferLayout { array_stride: TRI_SIZE as u64, step_mode: wgpu::VertexStepMode::Vertex, attributes: &A }
+}
+
+/// A planned body's vertices as the GPU evaluation writes them: the position, then the normal
+/// at [`solidcraft_gpu::NORMAL_OFFSET`] (each padded to four floats).
+fn planned_layout() -> wgpu::VertexBufferLayout<'static> {
+    const A: [wgpu::VertexAttribute; 2] = [
+        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
+        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: solidcraft_gpu::NORMAL_OFFSET, shader_location: 1 },
+    ];
+    wgpu::VertexBufferLayout { array_stride: solidcraft_gpu::VERTEX_STRIDE, step_mode: wgpu::VertexStepMode::Vertex, attributes: &A }
+}
+
+/// A planned body's colours, one per vertex.
+fn color_layout() -> wgpu::VertexBufferLayout<'static> {
+    const A: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![2 => Unorm8x4];
+    wgpu::VertexBufferLayout { array_stride: 4, step_mode: wgpu::VertexStepMode::Vertex, attributes: &A }
 }
 
 fn line_layout() -> wgpu::VertexBufferLayout<'static> {
@@ -613,10 +409,12 @@ pub struct GpuTarget {
     pub format: wgpu::TextureFormat,
     pub depth: Option<wgpu::TextureFormat>,
     pub samples: u32,
+    /// The device evaluates display plans (compute shaders): bodies may be drawn from them.
+    pub tess: bool,
 }
 
 impl Resources {
-    fn new(device: &wgpu::Device, t: GpuTarget) -> Self {
+    fn new(device: &wgpu::Device, t: GpuTarget, tess: Option<solidcraft_gpu::TessGpu>) -> Self {
         let module =
             device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("sc_viewport"), source: wgpu::ShaderSource::Wgsl(SHADER.into()) });
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -770,14 +568,16 @@ impl Resources {
             bind_group_layouts: &[Some(&bgl), Some(&access_bgl)],
             immediate_size: 0,
         });
-        let solid = |label: &str, fs: &str, cull: Option<wgpu::Face>, ds: Option<wgpu::DepthStencilState>| {
+        let built = [Some(tri_layout())];
+        let evaluated = [Some(planned_layout()), Some(color_layout())];
+        let solid = |label: &str, fs: &str, cull: Option<wgpu::Face>, ds: Option<wgpu::DepthStencilState>, planned: bool| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&solid_layout),
                 vertex: wgpu::VertexState {
                     module: &module,
                     entry_point: Some("vs_tri"),
-                    buffers: &[Some(tri_layout())],
+                    buffers: if planned { &evaluated[..] } else { &built[..] },
                     compilation_options: Default::default(),
                 },
                 primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: cull, ..Default::default() },
@@ -793,21 +593,9 @@ impl Resources {
                 cache: None,
             })
         };
-        let access_bind = access_texture(device, None, &access_bgl, 1, &[]);
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("sc_image"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-        Resources {
-            image,
-            image_bgl,
-            sampler,
-            textures: Default::default(),
-            quads: Vec::new(),
-            tri: solid("sc_tris", "fs_solid", None, depth(wgpu::CompareFunction::Less, true)),
-            tri_cut: t.depth.filter(|f| f.has_stencil_aspect()).map(|format| {
+        // While a section is shown: the stencil marking and the cap (see `Resources::tri_cut`).
+        let cut = |planned: bool| {
+            t.depth.filter(|f| f.has_stencil_aspect()).map(|format| {
                 // The visible surface marks the stencil: 1 where it is a back face (the cap).
                 use wgpu::StencilOperation::{Keep, Replace, Zero};
                 let face = |pass_op| wgpu::StencilFaceState { compare: wgpu::CompareFunction::Always, fail_op: Keep, depth_fail_op: Keep, pass_op };
@@ -827,12 +615,34 @@ impl Resources {
                     stencil: wgpu::StencilState { front: only, back: only, read_mask: 0xff, write_mask: 0 },
                     bias: Default::default(),
                 };
-                (solid("sc_tris_mark", "fs_solid", None, Some(mark)), solid("sc_tris_cap", "fs_solid_cut", Some(wgpu::Face::Front), Some(cap)))
-            }),
+                (
+                    solid("sc_tris_mark", "fs_solid", None, Some(mark), planned),
+                    solid("sc_tris_cap", "fs_solid_cut", Some(wgpu::Face::Front), Some(cap), planned),
+                )
+            })
+        };
+        let access_bind = access_texture(device, None, &access_bgl, 1, &[]);
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("sc_image"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        Resources {
+            image,
+            image_bgl,
+            sampler,
+            textures: Default::default(),
+            quads: Vec::new(),
+            tri: solid("sc_tris", "fs_solid", None, depth(wgpu::CompareFunction::Less, true), false),
+            tri_cut: cut(false),
+            tri_planned: solid("sc_tris_planned", "fs_solid", None, depth(wgpu::CompareFunction::Less, true), true),
+            tri_cut_planned: cut(true),
+            tess,
             access_bgl,
             access_bind,
             access_version: 0,
-            tri_hl: pipeline("sc_tris_hl", "vs_tri", "fs_tri", tri_layout(), depth(wgpu::CompareFunction::LessEqual, false), alpha),
+            tri_hl: pipeline("sc_tris_hl", "vs_tri", "fs_tri", tri_layout(), highlight_depth(t.depth), alpha),
             trans: pipeline("sc_trans", "vs_tri", "fs_tri", tri_layout(), depth(wgpu::CompareFunction::LessEqual, false), alpha),
             glass_far: glass("sc_glass_far", wgpu::Face::Front),
             glass_near: glass("sc_glass_near", wgpu::Face::Back),
@@ -852,18 +662,50 @@ impl Resources {
     }
 }
 
+/// Depth state of faces lit over the model (hover, selection): tested, not written, and pulled a
+/// little toward the eye. They lie on the model's own faces, but the GPU evaluates a body's plan
+/// in f32 while the highlight's copy of the same triangles is evaluated on the CPU, so the two
+/// depths differ by rounding and an unbiased equal test lights the face in speckles and wedges.
+/// The bias is a few depth steps plus the face's own slope: far less than any real gap.
+fn highlight_depth(format: Option<wgpu::TextureFormat>) -> Option<wgpu::DepthStencilState> {
+    format.map(|format| wgpu::DepthStencilState {
+        format,
+        depth_write_enabled: Some(false),
+        depth_compare: Some(wgpu::CompareFunction::LessEqual),
+        stencil: Default::default(),
+        bias: HIGHLIGHT_BIAS,
+    })
+}
+
+/// See [`highlight_depth`]. Negative: toward the eye (depth grows away from it).
+const HIGHLIGHT_BIAS: wgpu::DepthBiasState = wgpu::DepthBiasState { constant: -8, slope_scale: -1.0, clamp: 0.0 };
+
 fn upload(device: &wgpu::Device, label: &str, bytes: &[u8], stride: usize) -> Option<Batch> {
     upload_with(device, label, bytes, stride, wgpu::BufferUsages::VERTEX)
 }
 
 fn upload_with(device: &wgpu::Device, label: &str, bytes: &[u8], stride: usize, usage: wgpu::BufferUsages) -> Option<Batch> {
-    if bytes.len() < stride {
+    if bytes.len() < stride || stride == 0 {
         return None;
     }
-    Some(Batch {
-        buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: bytes, usage }),
-        count: u32::try_from(bytes.len() / stride).unwrap_or(0),
-    })
+    let chunk = buffer_chunk(stride, device.limits().max_buffer_size);
+    let parts = bytes
+        .chunks(chunk)
+        .filter(|part| part.len() >= stride)
+        .map(|part| {
+            let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: part, usage });
+            (buffer, u32::try_from(part.len() / stride).unwrap_or(0))
+        })
+        .collect();
+    Some(Batch { parts, chunk })
+}
+
+/// Bytes per GPU buffer for vertices of `stride` bytes: within the device's limit and a
+/// whole number of triangles and line pairs, so no primitive straddles two buffers.
+fn buffer_chunk(stride: usize, max_buffer_size: u64) -> usize {
+    let unit = stride.max(1) * 6;
+    let max = usize::try_from(max_buffer_size).unwrap_or(usize::MAX).min(1 << 30);
+    (max / unit).max(1) * unit
 }
 
 /// Triangles (3 vertices of `TRI_SIZE` bytes each, position first) ordered far to near along
@@ -885,8 +727,31 @@ impl Batches {
         let (Some(g), false) = (&self.glass, self.glass_cpu.is_empty()) else { return };
         let turned = self.glass_sorted_for.is_none_or(|s| s[0] * back[0] + s[1] * back[1] + s[2] * back[2] < 0.9994);
         if turned {
-            queue.write_buffer(&g.buffer, 0, &sort_back_to_front(&self.glass_cpu, back));
+            let sorted = sort_back_to_front(&self.glass_cpu, back);
+            for ((buffer, _), bytes) in g.parts.iter().zip(sorted.chunks(g.chunk.max(1))) {
+                queue.write_buffer(buffer, 0, bytes);
+            }
             self.glass_sorted_for = Some(back);
+        }
+    }
+}
+
+/// The tessellation pipeline (`shader`: its source), where display plans are evaluated: on a
+/// device that runs compute shaders with the storage buffers the evaluation binds (not WebGL2)
+/// and builds the pipeline. Elsewhere `None`, and bodies are built on the CPU: a device whose
+/// shader compiler rejects the shader (D3D12's FXC once did) only loses GPU evaluation.
+fn tessellation(adapter: &wgpu::Adapter, device: &wgpu::Device, queue: &wgpu::Queue, shader: &str) -> Option<solidcraft_gpu::TessGpu> {
+    let compute = adapter.get_downlevel_capabilities().flags.contains(wgpu::DownlevelFlags::COMPUTE_SHADERS)
+        && device.limits().max_storage_buffers_per_shader_stage >= 4;
+    if !compute {
+        return None;
+    }
+    let info = adapter.get_info();
+    match solidcraft_gpu::TessGpu::with_shader(info.name.clone(), device.clone(), queue.clone(), shader) {
+        Ok(t) => Some(t),
+        Err(e) => {
+            log::warn!("bodies are built on the CPU on {} ({:?}): {e}", info.name, info.backend);
+            None
         }
     }
 }
@@ -894,8 +759,9 @@ impl Batches {
 /// Create the pipelines. Call once with the app's render state and its depth/stencil/MSAA
 /// settings. Without a stencil the section cap does not hide the inside of cut bodies.
 pub fn install(rs: &egui_wgpu::RenderState, depth_bits: u8, stencil_bits: u8, samples: u32) -> GpuTarget {
-    let t = GpuTarget { format: rs.target_format, depth: egui_wgpu::depth_format_from_bits(depth_bits, stencil_bits), samples };
-    let res = Resources::new(&rs.device, t);
+    let tess = tessellation(&rs.adapter, &rs.device, &rs.queue, solidcraft_gpu::SHADER);
+    let t = GpuTarget { format: rs.target_format, depth: egui_wgpu::depth_format_from_bits(depth_bits, stencil_bits), samples, tess: tess.is_some() };
+    let res = Resources::new(&rs.device, t, tess);
     rs.renderer.write().callback_resources.insert(res);
     t
 }
@@ -906,14 +772,14 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         _screen: &egui_wgpu::ScreenDescriptor,
-        _encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut wgpu::CommandEncoder,
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
         let Some(res) = resources.get_mut::<Resources>() else { return Vec::new() };
-        res.model.take(device, self.key, &self.slot);
-        res.sketch.take(device, self.sketch_key, &self.sketch_slot);
-        res.highlight.take(device, self.hl_key, &self.hl_slot);
-        res.preview.take(device, self.pv_key, &self.pv_slot);
+        res.model.take(device, self.key, &self.slot, res.tess.as_ref().map(|t| (t, &mut *encoder)));
+        res.sketch.take(device, self.sketch_key, &self.sketch_slot, None);
+        res.highlight.take(device, self.hl_key, &self.hl_slot, None);
+        res.preview.take(device, self.pv_key, &self.pv_slot, None);
         res.model.sort_glass(queue, self.back);
         queue.write_buffer(&res.uniform, 0, &uniform_bytes(self, self.size_px[0], self.size_px[1], res.linear_out));
         if let Some(a) = &self.access
@@ -985,33 +851,49 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
         let tris = |pass: &mut wgpu::RenderPass<'static>, p: &wgpu::RenderPipeline, b: &Option<Batch>| {
             if let Some(b) = b {
                 pass.set_pipeline(p);
-                pass.set_vertex_buffer(0, b.buffer.slice(..));
-                pass.draw(0..b.count, 0..1);
+                for (buffer, count) in &b.parts {
+                    pass.set_vertex_buffer(0, buffer.slice(..));
+                    pass.draw(0..*count, 0..1);
+                }
             }
         };
         let lines = |pass: &mut wgpu::RenderPass<'static>, p: &wgpu::RenderPipeline, b: &Option<Batch>| {
             if let Some(b) = b {
                 pass.set_pipeline(p);
-                pass.set_vertex_buffer(0, b.buffer.slice(..));
-                pass.draw(0..6, 0..b.count);
+                for (buffer, count) in &b.parts {
+                    pass.set_vertex_buffer(0, buffer.slice(..));
+                    pass.draw(0..6, 0..*count);
+                }
             }
         };
         let (m, sk, h, pv) = (&res.model, &res.sketch, &res.highlight, &res.preview);
         lines(pass, &res.overlay, &m.under);
         lines(pass, &res.overlay, &sk.under);
         pass.set_bind_group(1, &res.access_bind, &[]);
-        let cut = res.tri_cut.as_ref().filter(|_| self.clip[..3].iter().map(|c| c * c).sum::<f32>() > 0.25);
-        match cut {
-            Some((mark, cap)) => {
+        let planned = |pass: &mut wgpu::RenderPass<'static>, p: &wgpu::RenderPipeline| {
+            for d in &m.planned {
+                pass.set_pipeline(p);
+                pass.set_vertex_buffer(0, d.mesh.vertices.slice(..));
+                pass.set_vertex_buffer(1, d.colors.slice(..));
+                pass.set_index_buffer(d.mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..d.mesh.index_count, 0, 0..1);
+            }
+        };
+        let sectioned = self.clip[..3].iter().map(|c| c * c).sum::<f32>() > 0.25;
+        match (res.tri_cut.as_ref().filter(|_| sectioned), res.tri_cut_planned.as_ref()) {
+            (Some((mark, cap)), Some((mark_planned, cap_planned))) => {
                 pass.set_stencil_reference(1);
                 tris(pass, mark, &m.tris);
                 tris(pass, mark, &pv.tris);
+                planned(pass, mark_planned);
                 tris(pass, cap, &m.tris);
                 tris(pass, cap, &pv.tris);
+                planned(pass, cap_planned);
             }
-            None => {
+            _ => {
                 tris(pass, &res.tri, &m.tris);
                 tris(pass, &res.tri, &pv.tris);
+                planned(pass, &res.tri_planned);
             }
         }
         tris(pass, &res.tri_hl, &h.tris);
@@ -1025,8 +907,10 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
             if let Some((_, bind)) = res.textures.get(id) {
                 pass.set_pipeline(&res.image);
                 pass.set_bind_group(1, bind, &[]);
-                pass.set_vertex_buffer(0, q.buffer.slice(..));
-                pass.draw(0..q.count, 0..1);
+                for (buffer, count) in &q.parts {
+                    pass.set_vertex_buffer(0, buffer.slice(..));
+                    pass.draw(0..*count, 0..1);
+                }
             }
         }
         tris(pass, &res.ghost, &pv.ghost);
@@ -1040,6 +924,132 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
         lines(pass, &res.overlay, &sk.overlays);
         lines(pass, &res.overlay, &h.overlays);
     }
+}
+
+/// Render `scene` offscreen on a device of its own, through the viewport's real resources and
+/// frame callback (`prepare`, then `paint`), and read the pixels back: straight RGBA, `size` ×
+/// `size`. `None` without a GPU adapter. With `tess` (the tessellation shader), planned bodies
+/// are evaluated on the GPU where the device builds that pipeline, as [`install`] sets it up.
+/// `highlight` is drawn as the viewport's highlight scene (hover and selection).
+#[cfg(all(test, not(target_arch = "wasm32")))]
+fn offscreen_device() -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
+        ..Default::default()
+    }))
+    .ok()?;
+    Some((adapter, device, queue))
+}
+
+/// Whether [`install`] would evaluate plans on the GPU with `shader`, on an offscreen device
+/// (`None` without a GPU adapter).
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn offscreen_tessellates(shader: &str) -> Option<bool> {
+    let (adapter, device, queue) = offscreen_device()?;
+    Some(tessellation(&adapter, &device, &queue, shader).is_some())
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn render_offscreen(
+    scene: GpuScene,
+    highlight: Option<GpuScene>,
+    view_proj: [[f32; 4]; 4],
+    back: [f32; 3],
+    eye: [f32; 4],
+    size: u32,
+    tess: Option<&str>,
+) -> Option<Vec<u8>> {
+    let (adapter, device, queue) = offscreen_device()?;
+    let (format, depth) = (wgpu::TextureFormat::Rgba8Unorm, wgpu::TextureFormat::Depth24PlusStencil8);
+    let compute = tess.and_then(|shader| tessellation(&adapter, &device, &queue, shader));
+    let target = GpuTarget { format, depth: Some(depth), samples: 1, tess: compute.is_some() };
+    let mut resources = egui_wgpu::CallbackResources::default();
+    resources.insert(Resources::new(&device, target, compute));
+    let none = || Arc::new(Mutex::new(None));
+    let cb = ViewportCallback {
+        key: 1,
+        slot: Arc::new(Mutex::new(Some(scene))),
+        sketch_key: 0,
+        sketch_slot: none(),
+        hl_key: u64::from(highlight.is_some()),
+        hl_slot: Arc::new(Mutex::new(highlight)),
+        pv_key: 0,
+        pv_slot: none(),
+        view_proj,
+        back,
+        size_px: [size as f32; 2],
+        clip: [0.0; 4],
+        cap: [0.0; 4],
+        images: Vec::new(),
+        analysis: [0.0; 8],
+        access: None,
+        outline: false,
+        eye,
+    };
+    let texture = |format, usage| {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("offscreen"),
+            size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage,
+            view_formats: &[],
+        })
+    };
+    let color = texture(format, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
+    let depth_tex = texture(depth, wgpu::TextureUsages::RENDER_ATTACHMENT);
+    let (color_view, depth_view) = (color.create_view(&Default::default()), depth_tex.create_view(&Default::default()));
+    let mut encoder = device.create_command_encoder(&Default::default());
+    let screen = egui_wgpu::ScreenDescriptor { size_in_pixels: [size, size], pixels_per_point: 1.0 };
+    let extra = egui_wgpu::CallbackTrait::prepare(&cb, &device, &queue, &screen, &mut encoder, &mut resources);
+    {
+        let mut pass = encoder
+            .begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("offscreen"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::WHITE), store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    stencil_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0), store: wgpu::StoreOp::Store }),
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            })
+            .forget_lifetime();
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(size as f32, size as f32));
+        let info = egui::PaintCallbackInfo { viewport: rect, clip_rect: rect, pixels_per_point: 1.0, screen_size_px: [size, size] };
+        egui_wgpu::CallbackTrait::paint(&cb, info, &mut pass, &resources);
+    }
+    let read = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("offscreen read"),
+        size: u64::from(size * size * 4),
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    encoder.copy_texture_to_buffer(
+        color.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &read,
+            layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(size * 4), rows_per_image: Some(size) },
+        },
+        wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+    );
+    queue.submit(extra.into_iter().chain([encoder.finish()]));
+    let slice = read.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
+    let bytes = slice.get_mapped_range().ok()?.to_vec();
+    Some(bytes)
 }
 
 /// Uniform bytes for a frame.
@@ -1153,6 +1163,22 @@ mod tests {
 #[cfg(test)]
 mod glass_tests {
     use super::*;
+
+    /// A large import's triangles once went into one buffer past the device's limit (524 MB
+    /// against 256 MB) and the app crashed (#883): they are split into whole triangles.
+    #[test]
+    fn large_scenes_are_split_into_buffers_within_the_device_limit() {
+        let limit = 256u64 << 20;
+        for stride in [TRI_SIZE, LINE_SIZE, 4] {
+            let chunk = buffer_chunk(stride, limit);
+            assert!(chunk as u64 <= limit && chunk > limit as usize / 2);
+            assert_eq!(chunk % (stride * 3), 0, "whole triangles");
+            assert_eq!(chunk % (stride * 2), 0, "whole line pairs");
+        }
+        let scene = 524_434_680usize;
+        assert_eq!(scene.div_ceil(buffer_chunk(TRI_SIZE, limit)), 2);
+        assert!(buffer_chunk(TRI_SIZE, 1) >= TRI_SIZE * 6, "a tiny limit still holds one unit");
+    }
 
     #[test]
     fn glass_is_drawn_far_to_near() {

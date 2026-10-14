@@ -17,11 +17,23 @@ pub struct Progress {
     total: AtomicUsize,
     /// The feature the evaluation waits at until cancelled ([`Progress::hold_at`]).
     hold: AtomicUsize,
+    /// Long work inside one feature (reading a large STEP file): its step and how far it is.
+    work_stage: std::sync::Mutex<&'static str>,
+    work_done: AtomicUsize,
+    work_total: AtomicUsize,
 }
 
 impl Default for Progress {
     fn default() -> Self {
-        Progress { cancelled: AtomicBool::new(false), done: AtomicUsize::new(0), total: AtomicUsize::new(0), hold: AtomicUsize::new(usize::MAX) }
+        Progress {
+            cancelled: AtomicBool::new(false),
+            done: AtomicUsize::new(0),
+            total: AtomicUsize::new(0),
+            hold: AtomicUsize::new(usize::MAX),
+            work_stage: std::sync::Mutex::new(""),
+            work_done: AtomicUsize::new(0),
+            work_total: AtomicUsize::new(0),
+        }
     }
 }
 
@@ -42,6 +54,29 @@ impl Progress {
     pub fn features(&self) -> (usize, usize) {
         (self.done.load(Ordering::Relaxed), self.total.load(Ordering::Relaxed))
     }
+    /// Long work inside a feature, such as reading a large STEP file: (step, done, total);
+    /// `None` while there is none to show.
+    pub fn work(&self) -> Option<(&'static str, usize, usize)> {
+        let total = self.work_total.load(Ordering::Relaxed);
+        let stage = self.work_stage.lock().map(|s| *s).unwrap_or("");
+        (total > 0 && !stage.is_empty()).then(|| (stage, self.work_done.load(Ordering::Relaxed).min(total), total))
+    }
+}
+
+/// The kernel's long work (STEP import) reports to the same progress and stops on Cancel.
+struct KernelWatch(Arc<Progress>);
+
+impl solidcraft_kernel::watch::Watch for KernelWatch {
+    fn cancelled(&self) -> bool {
+        self.0.is_cancelled()
+    }
+    fn progress(&self, stage: &'static str, done: usize, total: usize) {
+        if let Ok(mut s) = self.0.work_stage.lock() {
+            *s = stage;
+        }
+        self.0.work_total.store(total, Ordering::Relaxed);
+        self.0.work_done.store(done, Ordering::Relaxed);
+    }
 }
 
 struct Current {
@@ -56,6 +91,7 @@ thread_local! {
 
 /// Run `f` with `progress` watching every evaluation it makes on this thread.
 pub fn watch<R>(progress: Arc<Progress>, f: impl FnOnce() -> R) -> R {
+    let kernel = Arc::new(KernelWatch(progress.clone()));
     let previous = CURRENT.with(|c| c.replace(Some(Current { progress, depth: 0 })));
     struct Restore(Option<Option<Current>>);
     impl Drop for Restore {
@@ -66,7 +102,7 @@ pub fn watch<R>(progress: Arc<Progress>, f: impl FnOnce() -> R) -> R {
         }
     }
     let _restore = Restore(Some(previous));
-    f()
+    solidcraft_kernel::watch::watching(kernel, f)
 }
 
 /// Entered at the start of an evaluation; the guard leaves it.

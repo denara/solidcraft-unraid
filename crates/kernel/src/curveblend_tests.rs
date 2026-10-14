@@ -4,6 +4,8 @@
 use mt::{BoundedCurve, ParametricCurve, ParametricSurface, ParametricSurface3D, SearchNearestParameter};
 
 use super::*;
+use crate::blend::plane_normal;
+use crate::issue_851_tests::planned_volume;
 use crate::{Body, BoolOp, boolean, cylinder, fillet};
 
 fn tee(scale: f64, origin: Vec3) -> Body {
@@ -350,4 +352,296 @@ fn a_refused_edge_is_not_rolled_again_after_blends_far_from_it() {
     assert_eq!(rolls, 1, "the seam was rolled {rolls} times");
     // The far edges alone still round.
     assert!(fillet(&body, &ends, 3.0).is_ok());
+}
+
+/// At a knife edge (the plane and the wall's normals opposite) the ball's centre is the same
+/// whichever face is side 1: `r` inside the plane and `r` outside the wall's cylinder.
+#[test]
+fn knife_edge_ball_centre_does_not_depend_on_the_side_order() {
+    const R: f64 = 21.0;
+    let tip = Vec3::new(62.0 + 1.0 / 6.0, 0.0, 5.0);
+    let slab = crate::box_solid(Vec3::new(0.0, -R, 0.0), Vec3::new(tip.x, 0.0, 10.0)).unwrap();
+    let disc = cylinder(Vec3::new(tip.x, -R, 0.0), Vec3::Z, R, 10.0).unwrap();
+    let body = boolean(&slab, &disc, BoolOp::Cut).unwrap().unwrap();
+    let faces: Vec<&mt::Face> = body.solid.face_iter().collect();
+    let plane = faces.iter().copied().find(|f| plane_normal(f).is_some_and(|n| n.y > 0.99)).unwrap();
+    let wall = faces.iter().copied().find(|f| plane_normal(f).is_none()).unwrap();
+    for r in [0.5, 2.0, 5.0] {
+        let centre = Vec3::new(tip.x - (4.0 * R * r).sqrt(), -r, tip.z);
+        // `cusp` is +1 when n1 × t points into the cusp: the wall's normal is −y, the plane's +y.
+        for (f1, f2, cusp) in [(wall, plane, 1.0), (plane, wall, -1.0)] {
+            let s = solve(&[f1], &[f2], tip, Vec3::Z, r, -1.0, cusp, None, 1e-6).unwrap();
+            assert!(s.c.dist(centre) < 1e-6, "r={r} cusp={cusp}: centre {:?}, expected {centre:?}", s.c);
+        }
+    }
+}
+
+/// #896: the seams where rounds run into the faces beside them are picked to be rounded again.
+/// The faces meet tangentially there, so there is nothing to round: the refusal says so, rather
+/// than that blending such an edge isn't supported yet.
+#[test]
+fn a_smooth_seam_is_refused_as_having_no_corner() {
+    let b = crate::box_solid(Vec3::ZERO, Vec3::new(150.0, 200.0, 70.0)).unwrap();
+    let mut edges = Vec::new();
+    for (x, y) in [(0.0, 0.0), (150.0, 0.0), (0.0, 200.0), (150.0, 200.0)] {
+        edges.push(Vec3::new(x, y, 35.0));
+    }
+    for (a, z) in [(0.0, 0.0), (150.0, 0.0), (0.0, 70.0), (150.0, 70.0)] {
+        edges.push(Vec3::new(a, 100.0, z));
+    }
+    for (y, z) in [(0.0, 0.0), (200.0, 0.0), (0.0, 70.0), (200.0, 70.0)] {
+        edges.push(Vec3::new(75.0, y, z));
+    }
+    let rounded = fillet(&b, &edges, 10.0).unwrap();
+    // The seam on the top face beside the round of the edge along y at x = 0, and the seam
+    // with the end face x = 0 beside the round of the top edge along y.
+    for seam in [Vec3::new(10.0, 100.0, 70.0), Vec3::new(0.0, 100.0, 60.0)] {
+        for chamfer in [false, true] {
+            let r = if chamfer { crate::chamfer(&rounded, &[seam], 1.0) } else { fillet(&rounded, &[seam], 1.0) };
+            match r {
+                Err(KernelError::Invalid(m)) => assert!(m.contains("smooth") && m.contains("no corner"), "{m}"),
+                other => panic!("{seam:?}: {:?}", other.map(|_| "a body")),
+            }
+        }
+    }
+    // A sharp edge of a box with one round still takes a fillet beside the round's seams.
+    let one = fillet(&crate::box_solid(Vec3::ZERO, Vec3::new(40.0, 30.0, 20.0)).unwrap(), &[Vec3::new(40.0, 30.0, 10.0)], 5.0).unwrap();
+    assert!(fillet(&one, &[Vec3::new(20.0, 0.0, 20.0)], 1.0).is_ok());
+    assert!(matches!(fillet(&one, &[Vec3::new(35.0, 30.0, 10.0)], 1.0), Err(KernelError::Invalid(_))));
+}
+
+/// A 40 × 40 × 20 box whose front wall is an arc of radius 40 about a Z axis: `concave` cuts a
+/// cylinder away from the front (the wall curves into the part), otherwise the part is the box
+/// within the cylinder (the wall curves out). The arc meets the planar side walls x = 0 and
+/// x = 40 at an angle, not square. With the bottom arc's midpoint, the axis's base point and the
+/// side of the wall the material is on (+1 away from the axis, −1 toward it).
+fn arc_walled_box(concave: bool) -> (Body, Vec3, Vec3, f64) {
+    let block = crate::box_solid(Vec3::ZERO, Vec3::new(40.0, 40.0, 20.0)).unwrap();
+    let (axis, op, side) =
+        if concave { (Vec3::new(20.0, -30.0, 0.0), BoolOp::Cut, 1.0) } else { (Vec3::new(20.0, 70.0, 0.0), BoolOp::Intersect, -1.0) };
+    let tool = cylinder(axis, Vec3::Z, 40.0, 20.0).unwrap();
+    let body = boolean(&block, &tool, op).unwrap().unwrap();
+    (body, axis + Vec3::new(0.0, side * 40.0, 0.0), axis, side)
+}
+
+/// Volume the blend removes along the bottom arc: the corner's cross-section at each distance
+/// ρ from the axis (`depth(x)`, x ∈ [0, size] from the wall into the material), times the arc
+/// of radius ρ between the side walls.
+fn removed_volume(side: f64, size: f64, depth: impl Fn(f64) -> f64) -> f64 {
+    let steps = 4000;
+    let h = size / steps as f64;
+    (0..=steps)
+        .map(|i| {
+            let x = i as f64 * h;
+            let rho = 40.0 + side * x;
+            let w = if i == 0 || i == steps {
+                1.0
+            } else if i % 2 == 1 {
+                4.0
+            } else {
+                2.0
+            };
+            w * depth(x) * 2.0 * rho * (20.0 / rho).asin()
+        })
+        .sum::<f64>()
+        * h
+        / 3.0
+}
+
+#[test]
+fn rolling_ball_along_an_arc_ends_in_side_walls_at_an_angle() {
+    // The bottom edge of an arc wall ends in the side walls at an angle (#556). The round is the
+    // torus about the cylinder's axis (centre circle of radius 40 ± r at height r), trimmed by
+    // the side walls; the chamfer is the cone between the two contacts.
+    let r = 2.0;
+    for concave in [true, false] {
+        let (body, mid, axis, side) = arc_walled_box(concave);
+        let v0 = planned_volume(&body);
+        for round in [true, false] {
+            let what = format!("{} {}", if concave { "concave" } else { "convex" }, if round { "fillet" } else { "chamfer" });
+            let blend = if round { fillet(&body, &[mid], r) } else { crate::chamfer(&body, &[mid], r) }.unwrap_or_else(|e| panic!("{what}: {e}"));
+            assert!(blend.validity().is_empty(), "{what}: {:?}", blend.validity());
+            let volume = planned_volume(&blend);
+            let removed =
+                if round { removed_volume(side, r, |x| r - (r * r - (r - x) * (r - x)).max(0.0).sqrt()) } else { removed_volume(side, r, |x| r - x) };
+            assert!((v0 - volume - removed).abs() < removed * 3e-3, "{what}: removed {} vs {removed}", v0 - volume);
+            // The blend face stays between the side walls and, for the round, on the torus.
+            let surfaces: Vec<_> =
+                blend.solid.face_iter().map(|f| f.oriented_surface()).filter(|s| matches!(s, mt::Surface::NurbsSurface(_))).collect();
+            assert!(!surfaces.is_empty(), "{what}: no blend face");
+            let mesh = blend.tessellate_with(0.0005, true).unwrap();
+            let (lo, hi) = mesh.positions.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| (lo.min(p.x), hi.max(p.x)));
+            assert!(lo > -1e-3 && hi < 40.0 + 1e-3, "{what}: the blend runs past the side walls: x {lo}..{hi}");
+            if round {
+                // Sections of the round across the arc: the quarter circle about the centre
+                // ring (radius 40 ± r about the axis, at height r) from contact to contact.
+                let ring = 40.0 + side * r;
+                let mut worst: f64 = 0.0;
+                for i in 0..=40 {
+                    let x = 40.0 * i as f64 / 40.0;
+                    for a in 1..8 {
+                        let t = std::f64::consts::FRAC_PI_2 * a as f64 / 8.0;
+                        let (rho, z) = (ring - side * r * t.cos(), r - r * t.sin());
+                        let dx = x - axis.x;
+                        let dy = (rho * rho - dx * dx).sqrt() * if concave { 1.0 } else { -1.0 };
+                        let p = Vec3::new(x, axis.y + dy, z);
+                        worst = worst.max(nearest_blend(&surfaces, p).0);
+                    }
+                }
+                assert!(worst < 1e-3, "{what}: blend surface is {worst} mm off the torus");
+            }
+        }
+    }
+}
+
+#[test]
+fn rolling_ball_past_a_slanted_end_face_is_too_large_and_reduces() {
+    // On the outward-curving wall a round of 4 would run its bottom contact into the back face
+    // before it reaches the side wall (the contact circle of radius 36 meets x = 0 at y ≈ 40.07):
+    // too large, and the largest that fits rounds the edge.
+    let (body, mid, _, _) = arc_walled_box(false);
+    let e = fillet(&body, &[mid], 4.0).unwrap_err();
+    assert!(matches!(e, KernelError::TooLarge(_)), "{e}");
+    let (r, blend) = crate::fillet_max(&body, &[mid], 4.0).unwrap();
+    assert!(r > 3.0 && r < 4.0, "{r}");
+    assert!(blend.validity().is_empty(), "{:?}", blend.validity());
+}
+
+#[test]
+fn rolling_ball_runs_into_a_knife_edge_tip() {
+    // The corner of a block outside a cylinder of radius 21 about (21, −21): its wall meets the
+    // back face y = 0 tangentially at (21, 0) and the left face x = 0 at (0, −21), knife-edge
+    // tips at both ends of the arc. The round of the bottom arc runs into both, cut off by the
+    // end faces' planes, which touch the wall contact at the tips without crossing it: at
+    // distance ρ from the axis it runs from x = 0 to y = 0, ρ (asin(21 / ρ) − acos(21 / ρ)).
+    let block = crate::box_solid(Vec3::new(0.0, -21.0, 0.0), Vec3::new(21.0, 0.0, 10.0)).unwrap();
+    let body = boolean(&block, &cylinder(Vec3::new(21.0, -21.0, -1.0), Vec3::Z, 21.0, 12.0).unwrap(), BoolOp::Cut).unwrap().unwrap();
+    let mid = Vec3::new(21.0 - 21.0 * std::f64::consts::FRAC_1_SQRT_2, -21.0 + 21.0 * std::f64::consts::FRAC_1_SQRT_2, 0.0);
+    let r = 2.0;
+    let blend = fillet(&body, &[mid], r).unwrap();
+    assert!(blend.validity().is_empty(), "{:?}", blend.validity());
+    let (n, h) = (4000, r / 4000.0);
+    let removed = (0..=n)
+        .map(|i| {
+            let x = i as f64 * h;
+            let rho = 21.0 + x;
+            let w = if i == 0 || i == n {
+                1.0
+            } else if i % 2 == 1 {
+                4.0
+            } else {
+                2.0
+            };
+            w * (r - (r * r - (r - x) * (r - x)).max(0.0).sqrt()) * rho * ((21.0 / rho).asin() - (21.0 / rho).acos())
+        })
+        .sum::<f64>()
+        * h
+        / 3.0;
+    let got = planned_volume(&body) - planned_volume(&blend);
+    assert!((got - removed).abs() < removed * 5e-3, "removed {got} vs {removed}");
+}
+
+#[test]
+fn rolling_ball_turns_about_a_rounded_corner_of_its_radius() {
+    // The box with the inward-curving wall, its 60° corner at x = 0 rounded (r 2) first. The
+    // bottom edges then run: the side wall's, the corner round's (an arc of radius 2) and the
+    // arc wall's into the slanted side wall at x = 40. Rounded again with r 2 the ball can't
+    // roll round the corner: it turns about one point there, and the blend is a piece of sphere.
+    // It is what the rolling round tends to as its radius tends to the corner's, too large past
+    // it, and its mesh is closed.
+    let (body, _, _, _) = arc_walled_box(true);
+    let body = fillet(&body, &[Vec3::new(0.0, 4.641016151377546, 10.0)], 2.0).unwrap();
+    // The corner round's centre is 4 from the corner along its bisector, (2, 8.105): its arc's
+    // middle is 2 back toward the corner.
+    let ends = [Vec3::new(0.0, 25.0, 0.0), Vec3::new(1.0, 6.373, 0.0), Vec3::new(20.0, 10.0, 0.0)];
+    let v0 = planned_volume(&body);
+    let removed = |r: f64| {
+        let b = fillet(&body, &ends, r).unwrap_or_else(|e| panic!("r {r}: {e}"));
+        assert!(b.validity().is_empty(), "r {r}: {:?}", b.validity());
+        v0 - planned_volume(&b)
+    };
+    let (a, b, at) = (removed(1.96), removed(1.98), removed(2.0));
+    let expected = 2.0 * b - a;
+    assert!((at - expected).abs() < expected * 2e-3, "removed {at} at r 2, {a} and {b} before it");
+    let e = fillet(&body, &ends, 2.5).unwrap_err();
+    assert!(matches!(e, KernelError::TooLarge(_)), "{e}");
+    let (r, _) = crate::fillet_max(&body, &ends, 2.5).unwrap();
+    assert!(r > 1.5 && r <= 2.0 + 1e-9, "{r}");
+}
+
+#[test]
+fn rolling_ball_along_a_straight_edge_ends_in_a_curved_face() {
+    // The box with the inward-curving wall: the bottom edge of the side wall x = 0 runs from the
+    // back to the curved wall (#556). The round of radius 2 along it is cut off by that wall:
+    // at d from the side wall it runs from y = −30 + √(40² − (d − 20)²) to the back at y = 40.
+    let (body, _, _, _) = arc_walled_box(true);
+    let r = 2.0;
+    for round in [true, false] {
+        let blend =
+            if round { fillet(&body, &[Vec3::new(0.0, 25.0, 0.0)], r) } else { crate::chamfer(&body, &[Vec3::new(0.0, 25.0, 0.0)], r) }.unwrap();
+        assert!(blend.validity().is_empty(), "{:?}", blend.validity());
+        let (n, h) = (4000, r / 4000.0);
+        let removed = (0..=n)
+            .map(|i| {
+                let d = i as f64 * h;
+                let w = if i == 0 || i == n {
+                    1.0
+                } else if i % 2 == 1 {
+                    4.0
+                } else {
+                    2.0
+                };
+                let depth = if round { r - (r * r - (r - d) * (r - d)).max(0.0).sqrt() } else { r - d };
+                w * depth * (40.0 - (-30.0 + (1600.0 - (d - 20.0) * (d - 20.0)).sqrt()))
+            })
+            .sum::<f64>()
+            * h
+            / 3.0;
+        let (m0, m1) = (body.tessellate_with(0.0005, true).unwrap(), blend.tessellate_with(0.0005, true).unwrap());
+        let got = m0.measure().volume - m1.measure().volume;
+        assert!((got - removed).abs() < removed * 3e-3, "round {round}: removed {got} vs {removed}");
+        let volume_about = |o: Vec3| {
+            let at = |i: u32| m1.positions[i as usize] - o;
+            m1.triangles.iter().map(|t| at(t[0]).dot(at(t[1]).cross(at(t[2]))) / 6.0).sum::<f64>()
+        };
+        let shift = volume_about(Vec3::ZERO) - volume_about(Vec3::new(-100.0, 50.0, 30.0));
+        assert!(shift.abs() < 1e-2, "round {round}: the mesh is not closed (volume moves {shift} with the origin)");
+    }
+}
+
+#[test]
+fn chamfer_a_chain_of_a_line_and_an_arc_into_a_slanted_end() {
+    // A 40 × 40 block, 20 high, whose front runs straight for 20 and then along an arc of
+    // radius 29 about (20, 29), tangent to it, up to (40, 8): the right face meets the arc at an
+    // angle. The top front chain chamfered by 2 (the planes' and the cone's sections are 2 × 2
+    // corners, 2 − w high at w in from the edge): 2 a millimetre along the line, and along the
+    // arc out to the right face, at each distance ρ from its axis, the height times the arc of
+    // radius ρ inside x ≤ 40.
+    use solidcraft_geom::{Loop2, Plane, Region2, Seg2, Vec2};
+    let start = -std::f64::consts::FRAC_PI_2;
+    let end = (-21.0f64).atan2(20.0);
+    let segs = vec![
+        Seg2::Line { a: Vec2::new(0.0, 0.0), b: Vec2::new(20.0, 0.0) },
+        Seg2::Arc { center: Vec2::new(20.0, 29.0), radius: 29.0, start, sweep: end - start },
+        Seg2::Line { a: Vec2::new(40.0, 8.0), b: Vec2::new(40.0, 40.0) },
+        Seg2::Line { a: Vec2::new(40.0, 40.0), b: Vec2::new(0.0, 40.0) },
+        Seg2::Line { a: Vec2::new(0.0, 40.0), b: Vec2::new(0.0, 0.0) },
+    ];
+    let body = crate::extrude(&Plane::XY, &[Region2 { outer: Loop2 { segs }, holes: vec![] }], 0.0, 20.0).unwrap().pop().unwrap();
+    let volume = |b: &Body| b.tessellate_with(0.0005, true).unwrap().measure().volume;
+    let made = crate::chamfer(&body, &[Vec3::new(10.0, 0.0, 20.0)], 2.0).unwrap();
+    let n = 2000;
+    let h = 2.0 / n as f64;
+    let arc = (0..=n)
+        .map(|i| {
+            let rho = 27.0 + i as f64 * h;
+            let w = if i == 0 || i == n { 1.0 } else { [2.0, 4.0][i % 2] };
+            w * (rho - 27.0) * rho * (20.0 / rho).asin()
+        })
+        .sum::<f64>()
+        * h
+        / 3.0;
+    let want = 40.0 + arc;
+    let got = volume(&body) - volume(&made);
+    assert!((got - want).abs() < want * 1e-3, "removed {got} vs {want}");
 }

@@ -320,6 +320,73 @@ fn profiles_split_at_crossings_and_touch_points() {
     assert!(total > PI * 500.0, "{total}");
 }
 
+/// Curves made tangent by the solver touch within rounding noise, either side of exact (#588):
+/// the touch still splits them. Lines running past their tangent points close the band between
+/// two circles, and a square's side tangent to a circle closes the square off from the disc.
+#[test]
+fn solver_tangencies_split_profiles() {
+    use ConstraintKind::*;
+    // Two fixed circles and two free lines, longer than the band, made tangent to both.
+    for (r1, r2, d) in [(15.0, 8.0, 40.0), (20.0, 10.0, 50.0), (7.3, 7.3, 21.1)] {
+        let mut b = Sketch::new();
+        let c1 = b.add_circle(v(0.0, 0.0), r1, None, None).unwrap();
+        let c2 = b.add_circle(v(d, 0.0), r2, None, None).unwrap();
+        let l1 = b.add_line(v(-r1, r1 + 2.0), v(d + r2 + 5.0, r2 - 1.0), None, None, None).unwrap();
+        let l2 = b.add_line(v(-r1, -r1 - 2.0), v(d + r2 + 5.0, 1.0 - r2), None, None, None).unwrap();
+        for c in [c1, c2] {
+            let p = b.resolve_point(&format!("{}.center", b.curves[c].id)).unwrap();
+            b.add_constraint(Fix { p }, None).unwrap();
+        }
+        b.add_constraint(Radius { c: c1, value: r1 }, None).unwrap();
+        b.add_constraint(Radius { c: c2, value: r2 }, None).unwrap();
+        for (l, c) in [(l1, c1), (l1, c2), (l2, c1), (l2, c2)] {
+            b.add_constraint(Tangent { a: l, b: c }, None).unwrap();
+        }
+        assert!(solve(&mut b).ok());
+        let ps = find_profiles(&b);
+        // The band: the trapezoid between the tangent points less the circular segments the
+        // circles take from it (as exact sums: the hull less the two discs).
+        let alpha = ((r1 - r2) / d).asin();
+        let tangent_len = (d * d - (r1 - r2).powi(2)).sqrt();
+        let hull = r1 * r1 * (PI / 2.0 + alpha) + r2 * r2 * (PI / 2.0 - alpha) + (r1 + r2) * tangent_len;
+        let total: f64 = ps.iter().map(|p| p.area).sum();
+        assert_eq!(ps.len(), 3, "r {r1}, {r2}: {:?}", ps.iter().map(|p| p.area).collect::<Vec<_>>());
+        assert!((total - hull).abs() < 1e-6 * hull, "r {r1}, {r2}: {total} vs {hull}");
+    }
+    // A square tangent to a circle inside it and outside it, the circle placed by the solver.
+    for (inside, centre) in [(true, v(5.0, 6.3)), (false, v(5.0, 16.7))] {
+        let mut s = Sketch::new();
+        let sides = [v(0.0, 0.0), v(10.0, 0.0), v(10.0, 10.0), v(0.0, 10.0)];
+        let mut lines = Vec::new();
+        for k in 0..4 {
+            lines.push(s.add_line(sides[k], sides[(k + 1) % 4], None, None, None).unwrap());
+        }
+        for k in 0..4 {
+            let (a, b) = (
+                s.resolve_point(&format!("{}.end", s.curves[lines[k]].id)).unwrap(),
+                s.resolve_point(&format!("{}.start", s.curves[lines[(k + 1) % 4]].id)).unwrap(),
+            );
+            s.add_constraint(Coincident { p: a, q: b }, None).unwrap();
+            s.add_constraint(Fix { p: a }, None).unwrap();
+        }
+        let c = s.add_circle(centre, 3.7, None, None).unwrap();
+        s.add_constraint(Radius { c, value: 3.7 }, None).unwrap();
+        s.add_constraint(Tangent { a: lines[2], b: c }, None).unwrap();
+        assert!(solve(&mut s).ok());
+        let ps = find_profiles(&s);
+        let disc = PI * 3.7 * 3.7;
+        let mut areas: Vec<f64> = ps.iter().map(|p| p.area).collect();
+        areas.sort_by(f64::total_cmp);
+        let want = if inside { [disc, 100.0 - disc] } else { [disc, 100.0] };
+        let mut want = want.to_vec();
+        want.sort_by(f64::total_cmp);
+        assert_eq!(areas.len(), 2, "inside {inside}: {areas:?}");
+        for (a, w) in areas.iter().zip(&want) {
+            assert!((a - w).abs() < 1e-6, "inside {inside}: {areas:?} vs {want:?}");
+        }
+    }
+}
+
 /// Sorted curve ids.
 fn id_set(sk: &Sketch, curves: &[usize]) -> Vec<String> {
     let mut ids: Vec<String> = curves.iter().map(|c| sk.curves[*c].id.clone()).collect();
@@ -583,7 +650,7 @@ fn merging_adjacent_regions() {
 /// outlines.
 fn text_sketch(text: &str, at: Vec2, height: f64) -> Sketch {
     let mut sk = Sketch::new();
-    let source = LinkSource::Text { text: text.into(), at, height, angle: 0.0, font: None };
+    let source = LinkSource::Text { text: text.into(), at, height, angle: 0.0, font: None, style: Default::default() };
     sk.add_link(LinkKind::Text, source, &text_geometry(text, at, height, 0.0).unwrap()).unwrap();
     sk
 }
@@ -815,4 +882,42 @@ fn exact_profiles_for_high_degree_and_cut_free_form_curves() {
     sk.curves.pop();
     let uncut: f64 = find_profiles(&sk).iter().map(|p| p.area).sum();
     assert!((whole - uncut).abs() < 1e-6 * uncut, "{whole} vs {uncut}");
+}
+
+/// A face boundary saved with stations along its straight edges (#1049: booleans used to leave
+/// vertices nothing else used) keeps its saved pieces when the face comes back with each
+/// straight edge whole: the same region, and features that name the pieces still find them.
+#[test]
+fn projected_boundary_keeps_its_pieces_when_only_stations_go() {
+    use crate::{LinkGeom, LinkKind, LinkSource};
+    let mut sk = Sketch::new();
+    let v = Vec2::new;
+    let split = vec![
+        LinkGeom::Line(v(0.0, 0.0), v(5.0, 0.0)),
+        LinkGeom::Line(v(5.0, 0.0), v(10.0, 0.0)),
+        LinkGeom::Line(v(10.0, 0.0), v(10.0, 4.0)),
+        LinkGeom::Line(v(10.0, 4.0), v(10.0, 10.0)),
+        LinkGeom::Line(v(10.0, 10.0), v(0.0, 10.0)),
+        LinkGeom::Line(v(0.0, 10.0), v(0.0, 0.0)),
+    ];
+    let j = sk.add_link(LinkKind::Project, LinkSource::Origin, &split).unwrap();
+    let ids: Vec<String> = sk.link_curves(&j).iter().map(|c| sk.curves[*c].id.clone()).collect();
+    let whole = vec![
+        LinkGeom::Line(v(0.0, 0.0), v(10.0, 0.0)),
+        LinkGeom::Line(v(10.0, 0.0), v(10.0, 10.0)),
+        LinkGeom::Line(v(10.0, 10.0), v(0.0, 10.0)),
+        LinkGeom::Line(v(0.0, 10.0), v(0.0, 0.0)),
+    ];
+    assert!(!sk.update_link(&j, &whole).unwrap(), "only the stations went: the pieces stay");
+    let kept: Vec<String> = sk.link_curves(&j).iter().map(|c| sk.curves[*c].id.clone()).collect();
+    assert_eq!(ids, kept);
+    // A boundary that really changed is rebuilt.
+    let smaller = vec![
+        LinkGeom::Line(v(0.0, 0.0), v(8.0, 0.0)),
+        LinkGeom::Line(v(8.0, 0.0), v(8.0, 10.0)),
+        LinkGeom::Line(v(8.0, 10.0), v(0.0, 10.0)),
+        LinkGeom::Line(v(0.0, 10.0), v(0.0, 0.0)),
+    ];
+    assert!(sk.update_link(&j, &smaller).unwrap());
+    assert_eq!(sk.link_curves(&j).len(), 4);
 }

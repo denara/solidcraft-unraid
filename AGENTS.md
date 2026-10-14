@@ -16,7 +16,7 @@ new uses of it anywhere else. Public docs/web/Flatpak deployments use project Pa
 
 ## Container prototype baseline
 The first Unraid prototype used upstream commit `af536a7`. The current validated
-container baseline is `be55a49b047eb516c88a1f8add5723818cd2b57d`.
+container baseline is `8ea1fd643fb70cb17f8e335c57de23f03a3415a4`.
 Keep later upstream CAD/UI feature updates separate from this deployment addition;
 advance the baseline only as a separate, validated update. See [update records](docs/unraid-updates.md).
 
@@ -95,8 +95,8 @@ People trust SolidCraft with their designs; a crash loses their work. **This out
   nothing from FreeCAD is linked, vendored or shipped.) The sketch solver and the blend
   operations are our own.
 - **Assets — absolutely essential.** SolidCraft contains **no iconography, images, fonts or
-  artwork from commercial CAD products — ever.** Every icon is drawn in code
-  (`crates/ui-egui/src/icons.rs`). Any file asset must be original or openly licensed and **must have a row in ATTRIBUTION.md**
+  artwork from commercial CAD products — ever.** Every UI icon is drawn in collected code
+  (`assets/icons/ui/source/`, compiled through `crates/ui-egui/src/icons.rs`). Any file asset must be original or openly licensed and **must have a row in ATTRIBUTION.md**
   (`cargo xtask assets` enforces it). Screenshots of commercial CAD software are never committed.
   Breaking this rule is the most serious mistake you can make in this repo.
 - **Everything is a command.** User-visible behaviour = a command in `crates/engine/src/cmd/*`
@@ -111,7 +111,10 @@ People trust SolidCraft with their designs; a crash loses their work. **This out
   egui/eframe/winit/wgpu/rfd. **The UI crate is swappable.** Only `crates/kernel` may use `truck`.
 - **The UI is thin**: panels read engine state and act through `app.run(id, params)` /
   `app.start(id)`. Colours come from `theme::Tokens`.
-- **Rust only.** Units are millimetres and radians internally; Z is up.
+- **Rust only.** Units are millimetres and radians internally; Z is up. The one exception is
+  JavaScript the browser requires: the service worker `apps/solidcraft-web/sw.js` (browsers only
+  run service workers as JavaScript) and the small inline scripts in `apps/solidcraft-web/index.html`.
+  Keep them minimal; `cargo xtask web-offline-test` covers the service worker.
 - **Quality gates** before every commit: `cargo xtask ci` (fmt, clippy -D warnings, tests,
   assets, layers). Commit after every feature arc that builds.
 - **Publishing in this fork**: `origin` is github.com/denara/solidcraft-unraid;
@@ -159,7 +162,10 @@ before the draft is verified.
 ## Running and looking at the app
 - `cargo run --release -p solidcraft -- --sample --control PORT` (sample design + control channel).
   Pick a free port. Without a display, run it under `Xvfb :99` with `DISPLAY=:99`.
-- Drive it with JSON lines on `127.0.0.1:PORT` (see `docs/control-protocol.md`):
+- Drive it with JSON lines on `127.0.0.1:PORT` (see `docs/control-protocol.md`). The first
+  request on a connection carries the launch's token as `"token"`: read it from
+  `~/.local/share/solidcraft/control/PORT.token`, or start the app with
+  `SOLIDCRAFT_CONTROL_TOKEN=$(openssl rand -hex 32)` and send that.
   - `{"id":1,"method":"engine.execute","params":{"command":"solid.extrude","params":{"distance":20}}}`
   - `{"id":2,"method":"ui.start","params":{"command":"sketch.create"}}` then `ui.click {x, y}`
   - `{"id":3,"method":"ui.screenshot","params":{"path":"/tmp/shot.png"}}` then read the PNG.
@@ -176,3 +182,7 @@ before the draft is verified.
 `ROADMAP.md` (committed) tracks status, milestones and estimates. Update it whenever a
 milestone task lands. `cargo xtask features` regenerates `docs/features.md` (SolidCraft's
 commands by area, from the registry) when commands are added or renamed.
+
+The container integration omits upstream's macOS-only unsafe Finder bridge; command-line
+file opening and all Linux/container behavior are preserved. CAD and UI logic remain Rust.
+The upstream JavaScript service worker is browser infrastructure, independent of HTTP MCP.

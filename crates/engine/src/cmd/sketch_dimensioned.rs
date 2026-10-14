@@ -12,7 +12,9 @@ pub(super) fn draw(s: &mut Session, p: &Value) -> Result<Value> {
     let create = str_(p, "command").ok_or_else(|| bad(cmd, "`command` must name a supported sketch creator"))?;
     let roles: &[&str] = match create {
         "sketch.line" => &["length", "angle"],
-        "sketch.rectangle.two_point" | "sketch.rectangle.center" | "sketch.rectangle.three_point" => &["width", "height"],
+        "sketch.rectangle.two_point" | "sketch.rectangle.center" | "sketch.rectangle.three_point" | "sketch.rectangle.rounded" => {
+            &["width", "height"]
+        }
         "sketch.circle.center" | "sketch.circle.two_point" | "sketch.circle.three_point" => &["radius", "diameter"],
         "sketch.arc.center_point" => &["radius", "sweep"],
         "sketch.slot.center_to_center" | "sketch.slot.overall" => &["length", "width"],
@@ -82,6 +84,13 @@ pub(super) fn draw(s: &mut Session, p: &Value) -> Result<Value> {
         let (entities, ty) = match (create, role.as_str()) {
             ("sketch.line", "length") => (vec![curve(0)?], "length"),
             ("sketch.line", "angle") => (vec![curve(0)?], "angle"),
+            // A rounded rectangle's sides stop at the arcs: its size is between opposite sides.
+            ("sketch.rectangle.rounded", "width" | "height") => {
+                let [a, b] = if role == "width" { ["left", "right"] } else { ["bottom", "top"] };
+                let side =
+                    |k: &str| out["sides"].get(k).filter(|v| v.is_string()).cloned().ok_or_else(|| bad(cmd, "creator did not return its sides"));
+                (vec![side(a)?, side(b)?], "distance")
+            }
             (c, "width" | "height") if c.starts_with("sketch.rectangle.") => (vec![curve(usize::from(role == "height"))?], "length"),
             (c, "radius" | "diameter") if c.starts_with("sketch.circle.") => (vec![curve(0)?], role.as_str()),
             ("sketch.arc.center_point", "radius" | "sweep") => (vec![curve(0)?], role.as_str()),

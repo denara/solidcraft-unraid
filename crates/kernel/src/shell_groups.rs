@@ -1,7 +1,7 @@
 //! Group disconnected material regions without moving a cavity to another enclosing shell.
 //! A valid shell hierarchy alternates material and void at every nesting level.
 
-use solidcraft_geom::{Aabb3, Mesh, Vec3};
+use solidcraft_geom::{Aabb3, BoxedTriangle, Mesh, Vec3, find_close_pair};
 
 use crate::{KernelError, Result};
 
@@ -90,7 +90,7 @@ pub(super) fn meshes_meet(a: &Mesh, b: &Mesh, gap: f64) -> Result<bool> {
         return Ok(false);
     }
     // Only triangles near the other body can touch it.
-    let near = |m: &Mesh, other: Aabb3| -> Result<Vec<([Vec3; 3], Aabb3)>> {
+    let near = |m: &Mesh, other: Aabb3| -> Result<Vec<BoxedTriangle>> {
         let mut out = Vec::new();
         for t in &m.triangles {
             let tri = m.tri(t).ok_or_else(|| failed("invalid contact triangle"))?;
@@ -102,16 +102,11 @@ pub(super) fn meshes_meet(a: &Mesh, b: &Mesh, gap: f64) -> Result<bool> {
         Ok(out)
     };
     let (ta, tb) = (near(a, bb)?, near(b, ba)?);
-    let work = ta.len().checked_mul(tb.len()).ok_or_else(|| failed("contact work exceeds the limit"))?;
-    if work > MAX_PAIR_WORK {
-        return Err(failed("contact work exceeds the limit"));
-    }
-    for (x, xb) in &ta {
-        for (y, yb) in &tb {
-            if !boxes_separate(*xb, *yb, gap) && triangles_meet(x, y, gap) {
-                return Ok(true);
-            }
-        }
+    let mut budget = MAX_PAIR_WORK;
+    if find_close_pair(&ta, &tb, gap, &mut budget, |(x, _), (y, _)| triangles_meet(x, y, gap))
+        .ok_or_else(|| failed("contact work exceeds the limit"))?
+    {
+        return Ok(true);
     }
     // No boundary contact: they meet only if one lies wholly inside the other.
     Ok(b.positions.first().is_some_and(|p| a.contains(*p)) || a.positions.first().is_some_and(|p| b.contains(*p)))
@@ -127,7 +122,6 @@ pub(super) fn groups(meshes: &[Mesh], volumes: &[f64], gap: f64) -> Result<Vec<V
     let mut points = 0usize;
     let mut triangle_count = 0usize;
     let mut triangles = Vec::with_capacity(meshes.len());
-    let mut triangle_bounds = Vec::with_capacity(meshes.len());
     let mut bounds = Vec::with_capacity(meshes.len());
     for (mesh, volume) in meshes.iter().zip(volumes) {
         points = points.checked_add(mesh.positions.len()).ok_or_else(|| failed("point count exceeds the grouping limit"))?;
@@ -147,12 +141,11 @@ pub(super) fn groups(meshes: &[Mesh], volumes: &[f64], gap: f64) -> Result<Vec<V
         if tris.iter().any(|[a, b, c]| unit((*b - *a).cross(*c - *a)).is_none()) {
             return Err(failed("degenerate shell triangle"));
         }
-        triangle_bounds.push(tris.iter().map(|t| box_of(t)).collect::<Vec<_>>());
-        triangles.push(tris);
+        triangles.push(tris.into_iter().map(|t| (t, box_of(&t))).collect::<Vec<BoxedTriangle>>());
         bounds.push(mesh.bounds());
     }
     let mut inside = vec![vec![false; meshes.len()]; meshes.len()];
-    let mut pair_work = 0usize;
+    let mut pair_budget = MAX_PAIR_WORK;
     let mut probes = 0usize;
     let mut containment_work = 0usize;
     for (i, mesh) in meshes.iter().enumerate() {
@@ -162,21 +155,10 @@ pub(super) fn groups(meshes: &[Mesh], volumes: &[f64], gap: f64) -> Result<Vec<V
                 continue;
             }
             let (Some(a), Some(b)) = (triangles.get(i), triangles.get(j)) else { return Err(failed("missing shell triangles")) };
-            let work = a.len().checked_mul(b.len()).ok_or_else(|| failed("shell boundary work exceeds the grouping limit"))?;
-            pair_work = pair_work.checked_add(work).ok_or_else(|| failed("shell boundary work exceeds the grouping limit"))?;
-            if pair_work > MAX_PAIR_WORK {
-                return Err(failed("shell boundary work exceeds the grouping limit"));
-            }
-            for (ai, ta) in a.iter().enumerate() {
-                for (bi, tb) in b.iter().enumerate() {
-                    let (Some(ba), Some(bb)) = (triangle_bounds.get(i).and_then(|x| x.get(ai)), triangle_bounds.get(j).and_then(|x| x.get(bi)))
-                    else {
-                        return Err(failed("missing triangle bounds"));
-                    };
-                    if !boxes_separate(*ba, *bb, gap) && triangles_meet(ta, tb, gap) {
-                        return Err(failed("shell boundaries intersect or touch; cavity ownership is ambiguous"));
-                    }
-                }
+            if find_close_pair(a, b, gap, &mut pair_budget, |(x, _), (y, _)| triangles_meet(x, y, gap))
+                .ok_or_else(|| failed("shell boundary work exceeds the grouping limit"))?
+            {
+                return Err(failed("shell boundaries intersect or touch; cavity ownership is ambiguous"));
             }
             for (inner, outer) in [(i, j), (j, i)] {
                 let ib = bounds.get(inner).ok_or_else(|| failed("missing shell bounds"))?;

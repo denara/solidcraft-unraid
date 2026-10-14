@@ -337,6 +337,24 @@ mod tests {
     }
 
     #[test]
+    fn lip_on_a_face_that_is_not_a_rim_says_so() {
+        // The Sample Plate's top face (#892): two holes through it and the boss standing on it.
+        // The lip used to run round the boss's foot, against its wall, and the join failed in
+        // the boolean; it is refused as no rim instead.
+        let mut s = Session::default();
+        s.run_script(&crate::sample::script()).unwrap();
+        let lip = json!({"body": "Plate", "face": [51.89, 45.2, 8.0], "width": "1.5 mm", "height": "3.5 mm", "side": "inside", "type": "lip"});
+        let e = s.execute("plastic.lip", &lip).unwrap_err().to_string();
+        assert!(e.contains("rim face") && e.contains("2 openings alike"), "{e}");
+        // The boss alone, no holes: its foot is not an opening either.
+        let mut b = Session::default();
+        run(&mut b, "solid.box", json!({"length": 80, "width": 50, "height": 8, "body_name": "Plate"}));
+        run(&mut b, "solid.cylinder", json!({"base": [40, 25, 8], "axis": [0, 0, 1], "radius": 12, "height": 14, "operation": "join"}));
+        let e = b.execute("plastic.lip", &lip).unwrap_err().to_string();
+        assert!(e.contains("stand on it"), "{e}");
+    }
+
+    #[test]
     fn snap_fit_arm_and_catch() {
         let mut s = Session::default();
         run(&mut s, "solid.box", json!({"length": 40, "width": 40, "height": 4}));

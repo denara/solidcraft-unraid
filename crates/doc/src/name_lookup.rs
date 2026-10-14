@@ -260,6 +260,14 @@ impl EdgeHit {
 /// answering to it (merged into it, or the named piece told apart by the faces around it); else
 /// the piece of it nearest `p` (`split`).
 pub fn locate_face(st: &ModelState, name: &str, p: Vec3) -> Option<FaceHit> {
+    // Every body's names are read below: work out the ones not known yet on all cores first
+    // (each body's names are its own, whichever thread works them out).
+    if legacy_name(name).is_none() {
+        let bodies: Vec<&ModelBody> = st.bodies.iter().filter(|b| !b.body.is_mesh()).collect();
+        solidcraft_kernel::for_each_on_threads(&bodies, 16, |b| {
+            let _ = naming::names(b);
+        });
+    }
     locate_in(st.bodies.iter().enumerate().filter(|(_, b)| !b.body.is_mesh()), name, p)
 }
 

@@ -47,6 +47,10 @@ const SLOW: [&str; 7] = [
 const EDIT_SAMPLE: u64 = 6;
 /// An action that takes longer than this is recorded as a timeout.
 const ACTION_TIMEOUT: Duration = Duration::from_secs(90);
+/// Building a design and listing its actions, before the first one runs: the biggest designs
+/// (oracle 41's tube with radial holes, about 25 s here) take several times that on a loaded CI
+/// runner, and a design that never loads loses all its actions, not one.
+const LOAD_TIMEOUT: Duration = Duration::from_secs(300);
 /// Caps per body, so one large imported or patterned body cannot dominate the run.
 const MAX_FACES: usize = 120;
 const MAX_EDGES: usize = 240;
@@ -635,7 +639,14 @@ fn action_matrix_worker() {
     }
     let list = actions(&s);
     let edit = driving_parameter(&s);
+    // Local runs only: `ACTION_MATRIX_ACTIONS=edge.fillet,edge.chamfer` tries just those actions
+    // (don't bless such a run), `ACTION_MATRIX_VALIDITY=1` adds each passing action's body check.
+    let only: Option<Vec<String>> = std::env::var("ACTION_MATRIX_ACTIONS").ok().map(|v| v.split(',').map(str::to_string).collect());
+    let validity = std::env::var_os("ACTION_MATRIX_VALIDITY").is_some();
     for (i, a) in list.iter().enumerate().skip(from) {
+        if only.as_ref().is_some_and(|o| !o.iter().any(|x| x == a.action)) {
+            continue;
+        }
         // Whole families of pieces are sampled together (see [`family`]).
         let k = key(&design, &family(&a.entity), a.action);
         if !stable_hash(&k).is_multiple_of(sample) {
@@ -646,17 +657,44 @@ fn action_matrix_worker() {
         let mut scratch = s.scratch();
         let r = perform(&mut scratch, &a.act, &before);
         let mut line = outcome(&design, &a.entity, a.action, &r, t.elapsed().as_millis());
+        if validity && r.is_ok() {
+            let st = scratch.model.state();
+            let bad: Vec<String> = st.bodies.iter().flat_map(|b| b.body.validity().into_iter().map(|v| format!("{}: {v}", b.name))).collect();
+            line["validity"] = json!(bad);
+        }
         // What was sent, for reproducing a failure (kept in the results, not the baseline).
         line["command"] = match &a.act {
             Act::Run(id, p) => json!({"command": id, "params": p}),
             Act::Project { plane, edge } => json!({"command": "sketch.project", "params": {"refs": [edge]}, "sketch_plane": plane}),
         };
         emit(line);
+        // With ACTION_MATRIX_UNFOLD, sheet metal must still unfold and fold back after the action.
+        if r.is_ok() && std::env::var_os("ACTION_MATRIX_UNFOLD").is_some() {
+            let t = Instant::now();
+            let sheets: Vec<String> = scratch.model.state().sheets.iter().map(|sh| sh.body.clone()).collect();
+            let mut r = Ok(());
+            for body in &sheets {
+                for id in ["sheet.unfold", "sheet.refold"] {
+                    if r.is_ok() {
+                        r = scratch
+                            .execute(id, &json!({"body": body}))
+                            .map(|_| ())
+                            .map_err(|e| (command_kind(&e).to_string(), format!("{body}: {e}")));
+                    }
+                }
+            }
+            if !sheets.is_empty() {
+                let unfold: &'static str = Box::leak(format!("{}+unfold", a.action).into_boxed_str());
+                emit(outcome(&design, &a.entity, unfold, &r, t.elapsed().as_millis()));
+            }
+        }
         // The edit round: a driving parameter changes; the new feature still resolves.
         if r.is_ok()
             && let Some((name, expr)) = &edit
             && stable_hash(&format!("{k} edit")).is_multiple_of(EDIT_SAMPLE)
         {
+            // Marked like an action, so a hang here is put down to the edit round (not to loading).
+            emit(json!({"start": i, "edit": true}));
             let t = Instant::now();
             let start = s.doc.features.len();
             let r = scratch
@@ -725,7 +763,9 @@ fn run_design(design: &str, out: &Path, sample: u64) -> Vec<Value> {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        let mut seen = 0usize;
+        // Until the child writes, it is loading the design (again, after a restart).
+        let loaded_at = std::fs::metadata(out).map(|m| m.len() as usize).unwrap_or(0);
+        let mut seen = loaded_at;
         let mut last_change = Instant::now();
         let (status, timed_out) = loop {
             if let Some(status) = child.try_wait().unwrap() {
@@ -735,7 +775,7 @@ fn run_design(design: &str, out: &Path, sample: u64) -> Vec<Value> {
             if n != seen {
                 seen = n;
                 last_change = Instant::now();
-            } else if last_change.elapsed() > ACTION_TIMEOUT {
+            } else if last_change.elapsed() > if seen == loaded_at { LOAD_TIMEOUT } else { ACTION_TIMEOUT } {
                 let _ = child.kill();
                 let _ = child.wait();
                 break (None, true);
@@ -747,7 +787,9 @@ fn run_design(design: &str, out: &Path, sample: u64) -> Vec<Value> {
             .map(|f| std::io::BufReader::new(f).lines().map_while(Result::ok).filter_map(|l| serde_json::from_str(&l).ok()).collect())
             .unwrap_or_default();
         let done = lines.iter().any(|l| l.get("done").is_some());
-        let last_start = lines.iter().rev().take_while(|l| l.get("start").is_some() || l.get("design").is_none()).find_map(|l| l["start"].as_u64());
+        let last = lines.iter().rev().take_while(|l| l.get("start").is_some() || l.get("design").is_none()).find(|l| l.get("start").is_some());
+        let last_start = last.and_then(|l| l["start"].as_u64());
+        let in_edit = last.is_some_and(|l| l["edit"] == true);
         results = lines.iter().filter(|l| l.get("design").is_some()).cloned().collect();
         if done {
             break;
@@ -762,7 +804,7 @@ fn run_design(design: &str, out: &Path, sample: u64) -> Vec<Value> {
         };
         // Which action was it? The child enumerates them; ask it by running from there with a
         // marker: simplest is to record the index and let the next run name it.
-        extra.push(json!({"design": design, "index": i, "kind": if timed_out { "timeout" } else { "crash" },
+        extra.push(json!({"design": design, "index": i, "edit": in_edit, "kind": if timed_out { "timeout" } else { "crash" },
                           "message": if timed_out { format!("no result after {} s", ACTION_TIMEOUT.as_secs()) } else { format!("the process ended: {status:?}") }}));
         from = i as usize + 1;
     }
@@ -771,7 +813,10 @@ fn run_design(design: &str, out: &Path, sample: u64) -> Vec<Value> {
         let names = action_names(design);
         for e in &mut extra {
             if let Some(i) = e.get("index").and_then(Value::as_u64) {
-                let (entity, action) = names.get(i as usize).cloned().unwrap_or_else(|| (format!("action{i}"), "unknown".into()));
+                let (entity, mut action) = names.get(i as usize).cloned().unwrap_or_else(|| (format!("action{i}"), "unknown".into()));
+                if e["edit"] == true {
+                    action += "+edit";
+                }
                 *e = json!({"design": design, "entity": entity, "action": action, "ok": false, "kind": e["kind"], "message": e["message"]});
             }
         }
@@ -1045,6 +1090,18 @@ fn a_through_hole_into_a_shelled_box_rim() {
     );
 }
 
+/// #559: a 6 mm hole drilled at an angle through a 920 mm prism, its through-all tool nearly
+/// 1.9 m long beside a thin bar it misses. The bar's cut came out empty: the tool filled too
+/// little of its own box for the sampled shortcut, and the boolean's tolerances (from the
+/// tool's length) were wider than the hole.
+#[test]
+fn an_oblique_through_hole_beside_a_thin_bar() {
+    reproduces(
+        Some("examples/regressions/oblique_cut_of_cylinder.json"),
+        json!([{"command": "solid.hole", "params": {"diameter": 6.0, "position": [296.66666666666663, -458.66666666666663, 848.7633333333333]}}]),
+    );
+}
+
 #[test]
 fn a_hole_through_a_sheet_metal_base() {
     let mut c: Vec<Value> = rectangle(json!("XY"), [0., 0.], [60., 40.]).into();
@@ -1053,6 +1110,29 @@ fn a_hole_through_a_sheet_metal_base() {
         json!({"command": "solid.hole", "params": {"position": [30, 20, 0], "direction": [0, 0, 1], "diameter": 5}}),
     ]);
     reproduces(None, Value::Array(c));
+}
+
+/// `face.hole` on a rim of the sheet metal corpus (#560): drilled along the panel, the hole is a
+/// bore of that panel, and the part still unfolds and folds back.
+#[test]
+fn a_hole_drilled_into_a_sheet_metal_rim() {
+    // What the matrix sends: the face's point, the hole square into it.
+    for (design, at, diameter) in [
+        // The base's end rim of the L bracket, through to the other end.
+        ("typical/sheet-metal-bracket", [60.0, 7.777777777777779, 0.8333333333333333], 0.667),
+        // The end rim of a tray's wall, beside the corner.
+        ("oracle/69-sm-tray", [99.58333333333333, 4.267766952966369, 15.0], 0.333),
+    ] {
+        let Some((_, path)) = designs().into_iter().find(|(n, _)| n == design) else { panic!("no design {design}") };
+        let mut s = load(&path).unwrap();
+        let before = errors(&s);
+        let start = s.doc.features.len();
+        s.execute("solid.hole", &json!({"position": at, "diameter": diameter})).unwrap_or_else(|e| panic!("{design}: {e}"));
+        check(&s, start, &before).unwrap_or_else(|(kind, e)| panic!("{design}: {kind}: {e}"));
+        for id in ["sheet.unfold", "sheet.refold"] {
+            s.execute(id, &json!({})).unwrap_or_else(|e| panic!("{design} {id}: {e}"));
+        }
+    }
 }
 
 #[test]

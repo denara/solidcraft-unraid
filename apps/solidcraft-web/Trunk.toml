@@ -8,3 +8,9 @@ filehash = true
 [serve]
 addresses = ["127.0.0.1"]
 port = 8781
+
+# Offline use and updates: release builds get sw.js listing this build's files (xtask/src/web_offline.rs).
+[[hooks]]
+stage = "post_build"
+command = "cargo"
+command_arguments = ["xtask", "web-offline"]

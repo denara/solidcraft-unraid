@@ -568,9 +568,134 @@ impl Region2 {
     }
 }
 
+/// Most boundary segment pairs [`regions_apart`] compares before it gives up (and says no).
+const APART_BUDGET: usize = 50_000_000;
+
+/// Whether no two of the regions meet or come within `gap` of each other (their boundaries
+/// are farther apart than `gap` and none lies inside another; one inside another's hole is
+/// apart). Tools made from them alike (extruded over one interval) are then apart too, and
+/// can be cut as one. False when unsure (a degenerate region, too much to compare).
+pub fn regions_apart(regions: &[Region2], gap: f64) -> bool {
+    if !(gap.is_finite() && gap > 0.0) || regions.len() > 10_000 {
+        return false;
+    }
+    // The polylines lie within `tol` of the curves: boundaries this much farther than the gap
+    // apart are apart.
+    let tol = gap / 4.0;
+    let reach = gap + 2.0 * tol;
+    struct Outline {
+        loops: Vec<Vec<Vec2>>,
+        lo: Vec2,
+        hi: Vec2,
+        inside: Vec2,
+    }
+    let mut outlines = Vec::with_capacity(regions.len());
+    for r in regions {
+        let loops: Vec<Vec<Vec2>> = std::iter::once(&r.outer).chain(&r.holes).map(|l| l.polyline(tol)).collect();
+        let Some(outer) = loops.first().filter(|l| l.len() >= 2) else { return false };
+        if outer.iter().any(|p| !p.is_finite()) {
+            return false;
+        }
+        let lo = outer.iter().fold(Vec2::new(f64::MAX, f64::MAX), |m, p| Vec2::new(m.x.min(p.x), m.y.min(p.y)));
+        let hi = outer.iter().fold(Vec2::new(f64::MIN, f64::MIN), |m, p| Vec2::new(m.x.max(p.x), m.y.max(p.y)));
+        let Some(inside) = outer.first().copied() else { return false };
+        outlines.push(Outline { loops, lo, hi, inside });
+    }
+    let mut order: Vec<usize> = (0..outlines.len()).collect();
+    order.sort_by(|&i, &j| {
+        let x = |k: usize| outlines.get(k).map(|o| o.lo.x).unwrap_or(0.0);
+        x(i).total_cmp(&x(j))
+    });
+    let mut work = 0usize;
+    for (k, &i) in order.iter().enumerate() {
+        let Some(a) = outlines.get(i) else { return false };
+        for &j in order.iter().skip(k + 1) {
+            let Some(b) = outlines.get(j) else { return false };
+            if b.lo.x > a.hi.x + reach {
+                break;
+            }
+            if b.lo.y > a.hi.y + reach || a.lo.y > b.hi.y + reach {
+                continue;
+            }
+            // A boundary point of one inside the other: one holds the other (boundaries that do
+            // not come near each other do not cross).
+            let (Some(ra), Some(rb)) = (regions.get(i), regions.get(j)) else { return false };
+            if ra.contains(b.inside) || rb.contains(a.inside) {
+                return false;
+            }
+            for la in &a.loops {
+                for lb in &b.loops {
+                    work = work.saturating_add(la.len().saturating_mul(lb.len()));
+                    if work > APART_BUDGET {
+                        return false;
+                    }
+                    // (Each loop closed: its last point back to its first.)
+                    for (p, q) in la.iter().zip(la.iter().skip(1).chain(la.first())) {
+                        for (r, s) in lb.iter().zip(lb.iter().skip(1).chain(lb.first())) {
+                            if segment_distance(*p, *q, *r, *s) <= reach {
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
+/// The distance between segments `ab` and `cd` (0 where they cross).
+fn segment_distance(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> f64 {
+    let side = |p: Vec2, q: Vec2, r: Vec2| (q - p).cross(r - p);
+    let (d1, d2, d3, d4) = (side(c, d, a), side(c, d, b), side(a, b, c), side(a, b, d));
+    if ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0)) && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0)) {
+        return 0.0;
+    }
+    let to = |p: Vec2, s: Vec2, e: Vec2| {
+        let v = e - s;
+        let len2 = v.dot(v);
+        let t = if len2 > 0.0 { ((p - s).dot(v) / len2).clamp(0.0, 1.0) } else { 0.0 };
+        p.dist(s + v * t)
+    };
+    to(a, c, d).min(to(b, c, d)).min(to(c, a, b)).min(to(d, a, b))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn square(x: f64, y: f64, size: f64) -> Loop2 {
+        Loop2::polygon(&[Vec2::new(x, y), Vec2::new(x + size, y), Vec2::new(x + size, y + size), Vec2::new(x, y + size)])
+    }
+
+    fn solid(l: Loop2) -> Region2 {
+        Region2 { outer: l, holes: Vec::new() }
+    }
+
+    #[test]
+    fn regions_are_apart_only_when_nothing_meets_or_holds_another() {
+        let gap = 1e-3;
+        // Side by side, a millimetre apart.
+        assert!(regions_apart(&[solid(square(0.0, 0.0, 5.0)), solid(square(6.0, 0.0, 5.0))], gap));
+        // Touching along a side, or at a corner, or closer than the gap: not apart.
+        assert!(!regions_apart(&[solid(square(0.0, 0.0, 5.0)), solid(square(5.0, 0.0, 5.0))], gap));
+        assert!(!regions_apart(&[solid(square(0.0, 0.0, 5.0)), solid(square(5.0, 5.0, 5.0))], gap));
+        assert!(!regions_apart(&[solid(square(0.0, 0.0, 5.0)), solid(square(5.0005, 0.0, 5.0))], gap));
+        // Overlapping, or one inside another: not apart.
+        assert!(!regions_apart(&[solid(square(0.0, 0.0, 5.0)), solid(square(3.0, 3.0, 5.0))], gap));
+        assert!(!regions_apart(&[solid(square(0.0, 0.0, 10.0)), solid(square(2.0, 2.0, 2.0))], gap));
+        // Inside another's hole, clear of its edge: apart (a letter in the middle of an O).
+        let ring = Region2 { outer: square(0.0, 0.0, 10.0), holes: vec![square(2.0, 2.0, 6.0).reversed()] };
+        assert!(regions_apart(&[ring.clone(), solid(square(4.0, 4.0, 2.0))], gap));
+        // Filling the hole: its edge is the hole's.
+        assert!(!regions_apart(&[ring, solid(square(2.0, 2.0, 6.0))], gap));
+        // Curved boundaries: two circles a little apart, then touching.
+        assert!(regions_apart(&[solid(Loop2::circle(Vec2::ZERO, 1.0)), solid(Loop2::circle(Vec2::new(2.01, 0.0), 1.0))], gap));
+        assert!(!regions_apart(&[solid(Loop2::circle(Vec2::ZERO, 1.0)), solid(Loop2::circle(Vec2::new(2.0, 0.0), 1.0))], gap));
+        // Nothing to compare, and nonsense gaps.
+        assert!(regions_apart(&[], gap) && regions_apart(&[solid(square(0.0, 0.0, 1.0))], gap));
+        assert!(!regions_apart(&[solid(square(0.0, 0.0, 1.0)), solid(square(5.0, 0.0, 1.0))], f64::NAN));
+    }
 
     #[test]
     fn closest_line_projection_and_degeneracy() {

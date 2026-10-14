@@ -18,13 +18,16 @@ use solidcraft_doc::Document;
 use crate::{EngineError, Result, Session};
 
 /// The recovery folder: `SOLIDCRAFT_RECOVERY_DIR`, else the platform's per-user data folder.
+/// Spelled with long names (`vfs::long_names`): an agent's commands reach it by this path, and
+/// short (8.3) names are refused there.
 pub fn default_dir() -> Option<PathBuf> {
+    use solidcraft_io::vfs::long_names;
     // Tests never touch the user's real recovery folder.
     if cfg!(test) {
-        return Some(std::env::temp_dir().join(format!("solidcraft-test-recovery-{}", std::process::id())));
+        return Some(solidcraft_io::vfs::temp_dir().join(format!("solidcraft-test-recovery-{}", std::process::id())));
     }
     if let Some(d) = solidcraft_geom::env::var_os("RECOVERY_DIR").filter(|d| !d.is_empty()) {
-        return Some(PathBuf::from(d));
+        return Some(long_names(Path::new(&d)));
     }
     let env = |k: &str| std::env::var_os(k).filter(|d| !d.is_empty()).map(PathBuf::from);
     let root = if cfg!(windows) {
@@ -34,7 +37,7 @@ pub fn default_dir() -> Option<PathBuf> {
     } else {
         env("XDG_DATA_HOME").or_else(|| env("HOME").map(|h| h.join(".local/share")))?
     };
-    let (dir, legacy) = dirs_under(&root, cfg!(windows) || cfg!(target_os = "macos"));
+    let (dir, legacy) = dirs_under(&long_names(&root), cfg!(windows) || cfg!(target_os = "macos"));
     // Compatibility shim (docs/compatibility.md): autosaves made before the rename (or, in the
     // Flatpak sandbox, under the old app id) are copied to the new folder on first launch; the
     // old folder is left as it was.
@@ -44,6 +47,21 @@ pub fn default_dir() -> Option<PathBuf> {
         }
     }
     Some(dir)
+}
+
+/// SolidCraft's per-user data folder (the recovery folder's parent unless
+/// `SOLIDCRAFT_RECOVERY_DIR` moves that): `%LOCALAPPDATA%\SolidCraft`,
+/// `~/Library/Application Support/SolidCraft`, or `$XDG_DATA_HOME/solidcraft`
+/// (`~/.local/share/solidcraft`).
+pub fn data_dir() -> Option<PathBuf> {
+    let env = |k: &str| std::env::var_os(k).filter(|d| !d.is_empty()).map(PathBuf::from);
+    if cfg!(windows) {
+        Some(env("LOCALAPPDATA")?.join("SolidCraft"))
+    } else if cfg!(target_os = "macos") {
+        Some(env("HOME")?.join("Library/Application Support/SolidCraft"))
+    } else {
+        Some(env("XDG_DATA_HOME").or_else(|| env("HOME").map(|h| h.join(".local/share")))?.join("solidcraft"))
+    }
 }
 
 /// The recovery folder under the per-user data `root`, and the folder earlier releases used.
@@ -130,13 +148,19 @@ pub fn load(dir: &Path, id: &str) -> Result<(Document, Entry)> {
     Ok((solidcraft_io::read_design(&bytes)?, entry))
 }
 
-/// Delete an entry.
-pub fn remove(dir: &Path, id: &str) {
-    if valid_id(id) {
-        for ext in ["json", solidcraft_io::DESIGN_EXT, solidcraft_io::LEGACY_DESIGN_EXT, "lock"] {
-            let _ = fs::remove_file(file(dir, id, ext));
-        }
+/// Delete an entry. Only a real one: `<id>.json` must describe entry `id` and its design must
+/// be there, so a folder and id that merely name someone's `part.solidcraft` delete nothing.
+pub fn remove(dir: &Path, id: &str) -> Result<()> {
+    let is_entry = valid_id(id)
+        && fs::read(file(dir, id, "json")).ok().and_then(|b| serde_json::from_slice::<Entry>(&b).ok()).is_some_and(|e| e.id == id)
+        && design_file(dir, id).is_file();
+    if !is_entry {
+        return Err(EngineError::Other(format!("no recovered design `{id}`")));
     }
+    for ext in ["json", solidcraft_io::DESIGN_EXT, solidcraft_io::LEGACY_DESIGN_EXT, "lock"] {
+        let _ = fs::remove_file(file(dir, id, ext));
+    }
+    Ok(())
 }
 
 /// One app's autosaver.
@@ -241,7 +265,7 @@ mod tests {
         assert_eq!(orphans(&d).iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), [id]);
         let (_, loaded) = load(&d, id).unwrap();
         assert_eq!(loaded, entry);
-        remove(&d, id);
+        remove(&d, id).unwrap();
         assert!(orphans(&d).is_empty() && !d.join(format!("{id}.solvecraft")).exists());
         let _ = fs::remove_dir_all(&d);
     }
@@ -282,7 +306,7 @@ mod tests {
         let (doc, entry) = load(&d, &found[0].id).unwrap();
         assert_eq!(doc, *s.doc);
         assert_eq!(entry.features, 1);
-        remove(&d, &entry.id);
+        remove(&d, &entry.id).unwrap();
         assert!(orphans(&d).is_empty());
         let _ = fs::remove_dir_all(&d);
     }
@@ -299,6 +323,53 @@ mod tests {
         let found = orphans(&d);
         assert_eq!(found.len(), 1, "the crashed app's entry is offered");
         assert_ne!(found[0].id, b.id);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// `doc.recovery_discard` deletes recovery entries only (#205): a folder and id that merely
+    /// name someone's design, or a `<id>.json` describing another entry, delete nothing.
+    #[test]
+    fn discarding_refuses_what_is_not_a_recovery_entry() {
+        let d = dir("discard");
+        fs::create_dir_all(&d).unwrap();
+        let part = d.join("part.solidcraft");
+        fs::write(&part, solidcraft_io::write_design(&Document::default())).unwrap();
+        let mut s = Session::default();
+        let discard = |s: &mut Session, id: &str| s.execute("doc.recovery_discard", &json!({"dir": d.to_string_lossy(), "id": id}));
+        let e = discard(&mut s, "part").unwrap_err();
+        assert!(e.to_string().contains("no recovered design `part`"), "{e}");
+        let other = Entry { id: "other".into(), path: None, name: "x".into(), saved_at: 1, features: 0 };
+        fs::write(d.join("part.json"), serde_json::to_vec(&other).unwrap()).unwrap();
+        assert!(discard(&mut s, "part").is_err());
+        assert!(discard(&mut s, "../part").is_err());
+        assert!(part.exists() && d.join("part.json").exists(), "nothing deleted");
+        // A real entry still goes.
+        let mine = Entry { id: "part".into(), ..other };
+        fs::write(d.join("part.json"), serde_json::to_vec(&mine).unwrap()).unwrap();
+        assert_eq!(discard(&mut s, "part").unwrap()["discarded"], json!(["part"]));
+        assert!(!part.exists());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// `doc.recover {discard: true}` opens a real entry and then deletes it; given a folder and
+    /// id that only name someone's design, it deletes nothing (#205 review).
+    #[test]
+    fn recover_with_discard_deletes_only_the_entry_it_opened() {
+        let d = dir("recover-discard");
+        let mut s = Session::default();
+        let mut a = Autosaver::new(&d, Duration::from_secs(3600)).unwrap();
+        s.execute("solid.box", &json!({"length": 10, "width": 10, "height": 10})).unwrap();
+        assert!(a.save(&s).unwrap());
+        let id = a.id.clone();
+        drop(a);
+        let mut t = Session::default();
+        let r = t.execute("doc.recover", &json!({"dir": d.to_string_lossy(), "id": id, "discard": true})).unwrap();
+        assert_eq!(r["features"], 1, "{r}");
+        assert!(orphans(&d).is_empty() && !file(&d, &id, "json").exists() && !file(&d, &id, "solidcraft").exists());
+        let part = d.join("part.solidcraft");
+        fs::write(&part, solidcraft_io::write_design(&Document::default())).unwrap();
+        assert!(t.execute("doc.recover", &json!({"dir": d.to_string_lossy(), "id": "part", "discard": true})).is_err());
+        assert!(part.exists());
         let _ = fs::remove_dir_all(&d);
     }
 

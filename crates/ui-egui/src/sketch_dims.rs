@@ -38,6 +38,7 @@ pub fn boxes_for(cmd: &str, n: usize) -> Vec<DimBox> {
     match (cmd, n) {
         ("sketch.line", n) if n >= 1 => vec![b("Length", Length), b("Angle", Angle)],
         ("sketch.rectangle.two_point" | "sketch.rectangle.center", 1) => vec![b("Width", Length), b("Height", Length)],
+        ("sketch.rectangle.rounded", 1) => vec![b("Width", Length), b("Height", Length), b("Radius", Length)],
         ("sketch.circle.center", 1) => vec![b("Diameter", Length)],
         ("sketch.arc.center_point", 1) => vec![b("Radius", Length)],
         ("sketch.arc.center_point", 2) => vec![b("Sweep", Angle)],
@@ -74,7 +75,7 @@ pub fn effective(app: &SolveApp, t: &Tool, h: Vec2) -> Vec2 {
             let ang = lk("Angle").unwrap_or_else(|| snap_axis(v.angle()));
             a + Vec2::from_angle(ang) * len
         }
-        ("sketch.rectangle.two_point", 1) => {
+        ("sketch.rectangle.two_point" | "sketch.rectangle.rounded", 1) => {
             let d = h - a;
             Vec2::new(a.x + lk("Width").map_or(d.x, |w| w * sign(d.x)), a.y + lk("Height").map_or(d.y, |hh| hh * sign(d.y)))
         }
@@ -148,6 +149,16 @@ fn live(app: &SolveApp, t: &Tool, e: Vec2, px: f64) -> Vec<(f64, Vec2)> {
             vec![
                 ((e.x - a.x).abs(), Vec2::new((a.x + e.x) * 0.5, a.y - sy * off)),
                 ((e.y - a.y).abs(), Vec2::new(e.x + sx * 2.0 * off, (a.y + e.y) * 0.5)),
+            ]
+        }
+        ("sketch.rectangle.rounded", 1) => {
+            let (sx, sy) = (sign(e.x - a.x), sign(e.y - a.y));
+            let r = rounded_radius(app, t, a, e);
+            vec![
+                ((e.x - a.x).abs(), Vec2::new((a.x + e.x) * 0.5, a.y - sy * off)),
+                ((e.y - a.y).abs(), Vec2::new(e.x + sx * 2.0 * off, (a.y + e.y) * 0.5)),
+                // Outside the first corner, away from the cursor (a box there would take the click).
+                (r, Vec2::new(a.x - sx * 2.0 * off, a.y - sy * off)),
             ]
         }
         ("sketch.rectangle.center", 1) => {
@@ -230,7 +241,10 @@ pub fn dimensions(t: &Tool) -> Value {
         .dim_history
         .iter()
         .chain(&t.dims)
-        .filter(|dimension| dimension.locked && !matches!(dimension.label, "Sides" | "Rho"))
+        // A rounded rectangle's radius is its own parameter (sent with the shape), not a dimension.
+        .filter(|dimension| {
+            dimension.locked && !matches!(dimension.label, "Sides" | "Rho") && !(t.cmd == "sketch.rectangle.rounded" && dimension.label == "Radius")
+        })
         .map(|dimension| (dimension.label.to_ascii_lowercase(), json!(dimension.value)))
         .collect::<serde_json::Map<_, _>>();
     Value::Object(values)
@@ -265,6 +279,21 @@ pub fn validate(app: &SolveApp, t: &Tool) -> Result<(), String> {
         return Err("Overall slot Length must exceed Width".into());
     }
     Ok(())
+}
+
+/// The corner radius a rounded rectangle from `a` to `b` gets: the typed Radius, or a fifth of
+/// the shorter side.
+pub fn rounded_radius(app: &SolveApp, t: &Tool, a: Vec2, b: Vec2) -> f64 {
+    locked(app, t, "Radius").unwrap_or_else(|| 0.2 * (b.x - a.x).abs().min((b.y - a.y).abs()))
+}
+
+/// The radius to send with the rounded rectangle: the typed expression (it becomes the radius
+/// parameter as written, "d1 / 2" included), or the default as a number.
+pub fn rounded_radius_value(app: &SolveApp, t: &Tool, a: Vec2, b: Vec2) -> Value {
+    match t.dims.iter().chain(&t.dim_history).find(|d| d.label == "Radius" && d.locked) {
+        Some(d) => json!(d.value),
+        None => json!(rounded_radius(app, t, a, b)),
+    }
 }
 
 /// A locked box value by label (for the polygon side count).

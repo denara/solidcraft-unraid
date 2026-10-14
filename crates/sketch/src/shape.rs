@@ -97,6 +97,45 @@ pub fn intersections(x: &Shape, y: &Shape) -> Vec<Vec2> {
     }
 }
 
+/// Where two unbounded curves meet, missing by no more than `tol`: a line or circle that touches
+/// a circle within `tol` (outside or inside) meets it where it comes closest, as a double root.
+/// [`intersections`] takes the roots of the quadratic as they come, and at a tangency these are
+/// rounding noise: a line made tangent to a circle by the solver misses it whenever the noise
+/// falls outside, so the regions it closes off are never found (#588). Here the root's square
+/// root is clamped instead, and the touch comes back as two equal points (which profile
+/// detection merges). Circles nearly on one another still cross where they cross. Computed in
+/// the circle's own frame (no cancellation on long lines or small circles).
+pub fn intersections_within(x: &Shape, y: &Shape, tol: f64) -> Vec<Vec2> {
+    match (*x, *y) {
+        (Shape::Line { a, b }, Shape::Round { c, r, .. }) | (Shape::Round { c, r, .. }, Shape::Line { a, b }) => {
+            let Some(direction) = (b - a).normalized() else { return Vec::new() };
+            let foot = a + direction * (c - a).dot(direction);
+            let distance = foot.dist(c);
+            if distance > r + tol {
+                return Vec::new();
+            }
+            let half = ((r - distance).max(0.0) * (r + distance)).sqrt();
+            vec![foot - direction * half, foot + direction * half]
+        }
+        (Shape::Round { c: c1, r: r1, .. }, Shape::Round { c: c2, r: r2, .. }) => {
+            let ((small, r), (large, radius)) = if r1 <= r2 { ((c1, r1), (c2, r2)) } else { ((c2, r2), (c1, r1)) };
+            let delta = small - large;
+            let distance = delta.len();
+            if distance < 1e-12 || distance > radius + r + tol || distance < radius - r - tol {
+                return Vec::new();
+            }
+            let u = delta / distance;
+            // Along the line of centres from the large circle; factoring d² - r² avoids the
+            // cancellation of R² - a² for a small circle crossing a huge one.
+            let along = ((distance - r) * (distance + r) + radius * radius) / (2.0 * distance);
+            let height = ((radius - along).max(0.0) * (radius + along).max(0.0)).sqrt();
+            let foot = large + u * along.clamp(-radius, radius);
+            vec![foot - u.perp() * height, foot + u.perp() * height]
+        }
+        _ => intersections(x, y),
+    }
+}
+
 impl Shape {
     /// Unbounded curve parameter of `p` (line: t along a→b; round: angle offset from start in
     /// [0, 2π)).

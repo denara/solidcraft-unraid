@@ -4,7 +4,7 @@
 //! between stations, mitred at the corners.
 
 use mt::builder;
-use solidcraft_geom::{Plane, Region2, Vec2, Vec3};
+use solidcraft_geom::{Plane, Region2, Seg2, Vec2, Vec3};
 use truck_modeling as mt;
 
 use crate::body::{Body, p3};
@@ -175,9 +175,9 @@ fn start_cos(plane: &Plane, tangents: &[Vec3]) -> f64 {
     tangents.first().map(|t| t.dot(plane.normal()).abs()).unwrap_or(1.0).max(1e-3)
 }
 
-/// Ruled walls between stations at the path's points (mitred at corners), every loop of the
-/// (oriented) profile.
-fn ruled(plane: &Plane, profile: &NumberedRegion, pts: &[Vec3]) -> Result<Body> {
+/// Stations at the path's points (at most [`MAX_RULED_STATIONS`]), mitred at corners, with the
+/// points they stand at.
+fn ruled_stations(pts: &[Vec3]) -> Result<(Vec<Vec3>, Vec<Station>)> {
     let pts: Vec<Vec3> = if pts.len() > MAX_RULED_STATIONS { resample(pts, MAX_RULED_STATIONS) } else { pts.to_vec() };
     let n = pts.len();
     let seg_dir = |i: usize| -> Option<Vec3> { (*pts.get(i + 1)? - *pts.get(i)?).normalized() };
@@ -202,6 +202,146 @@ fn ruled(plane: &Plane, profile: &NumberedRegion, pts: &[Vec3]) -> Result<Body> 
         mitre.push(m);
     }
     let st = stations(&pts, &tangents, &mitre)?;
+    Ok((pts, st))
+}
+
+/// Walls of chains of sketch segments on `plane` (open, or closed) carried along a 3D polyline
+/// path that starts near them: ruled between stations at the path's points, mitred at corners,
+/// with no caps. Neighbouring walls share their edges.
+pub(crate) fn ruled_sheet(plane: &Plane, chains: &[Vec<Seg2>], path: &[Vec3]) -> Result<Vec<Side>> {
+    let (pts, st) = ruled_stations(&clean(path)?)?;
+    let edges: usize = chains.iter().map(Vec::len).sum();
+    if st.len().saturating_mul(edges) > 400_000 {
+        return Err(KernelError::Invalid("the sweep is too detailed (curves × path points)".into()));
+    }
+    let s0 = pts.first().copied().unwrap_or_default();
+    // Each chain's segments are numbered on from the last chain's; every station's wire of a
+    // chain has the same edges, each over the same segment.
+    let offsets: Vec<usize> = chains.iter().scan(0, |o, c| Some(std::mem::replace(o, *o + c.len()))).collect();
+    let mut wires: Vec<Vec<mt::Wire>> = Vec::with_capacity(st.len());
+    let mut numbers: Vec<Vec<Vec<usize>>> = Vec::new();
+    for s in &st {
+        let pl = station_plane(plane, s0, s);
+        let mut at = Vec::with_capacity(chains.len());
+        for (c, offset) in chains.iter().zip(&offsets) {
+            let (wire, seeds) = crate::build::chain_wire_seeds(&pl, c)?;
+            if numbers.len() < chains.len() {
+                numbers.push(seeds.iter().map(|(_, i)| vec![offset + i]).collect());
+            }
+            at.push(wire);
+        }
+        wires.push(at);
+    }
+    guard("path sweep", || {
+        let mut faces: Vec<Side> = Vec::new();
+        for w in wires.windows(2) {
+            let (Some(w0), Some(w1)) = (w.first(), w.get(1)) else { continue };
+            for ((a, b), n) in w0.iter().zip(w1).zip(&numbers) {
+                let sides: mt::Shell = builder::try_wire_homotopy(a, b).map_err(|e| KernelError::Failed(format!("path sweep: {e}")))?;
+                faces.extend(record::ruled(&sides, a, b, n, n));
+            }
+        }
+        Ok(faces)
+    })
+}
+
+/// Walls of chains of sketch segments on `plane` carried along a smooth 3D polyline path (no
+/// turn sharper than [`CORNER`]): one B-spline wall per segment through evenly spaced,
+/// rotation-minimising stations, neighbouring walls sharing their seam edges; no caps. `None`
+/// for a path with corners (see [`ruled_sheet`]).
+pub(crate) fn smooth_sheet(plane: &Plane, chains: &[Vec<Seg2>], path: &[Vec3]) -> Result<Option<Vec<Side>>> {
+    let pts = clean(path)?;
+    if pts.windows(3).any(|w| turn(w[1] - w[0], w[2] - w[1]) > CORNER) {
+        return Ok(None);
+    }
+    let fail = |w: &str| KernelError::Failed(format!("path sweep: {w}"));
+    if chains.iter().map(Vec::len).sum::<usize>() > 4096 {
+        return Err(fail("too many curves for a smooth sweep"));
+    }
+    let n = (pts.len() - 1).clamp(4, MAX_SMOOTH_STATIONS);
+    let sp = resample(&pts, n);
+    let tangents = central_tangents(&sp)?;
+    let st = stations(&sp, &tangents, &[])?;
+    let s0 = st.first().map(|s| s.at).unwrap_or_default();
+    let at = |i: usize, q: Vec2| st.get(i).map(|s| s.at + s.apply(plane.to_world(q) - s0)).unwrap_or_default();
+    let n = st.len() - 1;
+    let mut faces: Vec<Side> = Vec::new();
+    let mut offset = 0;
+    for chain in chains {
+        let closed = chain.first().zip(chain.last()).is_some_and(|(f, l)| l.end().dist(f.start()) <= 1e-6);
+        // Each segment: its curve at the first and last station, the columns through its start
+        // and end, and the wall surface.
+        let mut data = Vec::with_capacity(chain.len());
+        for s in chain {
+            let mut station_curves = Vec::with_capacity(n + 1);
+            for i in 0..=n {
+                let q: Vec<Vec3> = (0..SEG_SAMPLES).map(|j| at(i, s.point_at(j as f64 / (SEG_SAMPLES - 1) as f64))).collect();
+                station_curves.push(interpolate_cubic(&q).ok_or_else(|| fail("profile curve"))?);
+            }
+            let kv = station_curves.first().map(|c| c.knot_vec().clone()).ok_or_else(|| fail("no stations"))?;
+            let mut columns = Vec::with_capacity(SEG_SAMPLES);
+            for j in 0..SEG_SAMPLES {
+                let q: Vec<Vec3> = station_curves
+                    .iter()
+                    .map(|c| {
+                        let p = c.control_point(j);
+                        Vec3::new(p.x, p.y, p.z)
+                    })
+                    .collect();
+                columns.push(interpolate_cubic(&q).ok_or_else(|| fail("path curve"))?);
+            }
+            let ku = columns.first().map(|c| c.knot_vec().clone()).ok_or_else(|| fail("no columns"))?;
+            let net: Vec<Vec<mt::Point3>> = (0..=n).map(|m| columns.iter().map(|c| *c.control_point(m)).collect()).collect();
+            let surf = mt::BSplineSurface::try_new((ku, kv), net).map_err(|e| fail(&e.to_string()))?;
+            let (Some(c0), Some(c1), Some(first), Some(last)) =
+                (station_curves.first().cloned(), station_curves.last().cloned(), columns.first().cloned(), columns.last().cloned())
+            else {
+                return Err(fail("stations"));
+            };
+            data.push((c0, c1, first, last, surf));
+        }
+        let walls: Vec<mt::Face> = guard("path sweep", || {
+            let m = chain.len();
+            // Vertices along the chain (an open chain has one more than it has segments).
+            let corners: Vec<Vec2> = chain.iter().map(Seg2::start).chain(chain.last().map(Seg2::end).filter(|_| !closed)).collect();
+            let start: Vec<mt::Vertex> = corners.iter().map(|q| builder::vertex(p3(at(0, *q)))).collect();
+            let end: Vec<mt::Vertex> = corners.iter().map(|q| builder::vertex(p3(at(n, *q)))).collect();
+            let next = |j: usize| if closed { (j + 1) % m } else { j + 1 };
+            let mut seams = Vec::with_capacity(corners.len());
+            for (k, (a, b)) in start.iter().zip(&end).enumerate() {
+                // The column through each corner: the start column of the segment leaving it, or
+                // the end column of the last segment.
+                let col = match data.get(k) {
+                    Some((_, _, first, _, _)) => first,
+                    None => data.last().map(|d| &d.3).ok_or_else(|| fail("seam"))?,
+                };
+                seams.push(mt::Edge::try_new(a, b, mt::Curve::BSplineCurve(col.clone())).map_err(|e| fail(&e.to_string()))?);
+            }
+            let mut walls = Vec::with_capacity(m);
+            for (j, (c0, c1, _, _, surf)) in data.iter().enumerate() {
+                let (Some(a0), Some(b0), Some(a1), Some(b1), Some(sa), Some(sb)) =
+                    (start.get(j), start.get(next(j)), end.get(j), end.get(next(j)), seams.get(j), seams.get(next(j)))
+                else {
+                    return Err(fail("edges"));
+                };
+                let e0 = mt::Edge::try_new(a0, b0, mt::Curve::BSplineCurve(c0.clone())).map_err(|e| fail(&e.to_string()))?;
+                let e1 = mt::Edge::try_new(a1, b1, mt::Curve::BSplineCurve(c1.clone())).map_err(|e| fail(&e.to_string()))?;
+                let w: mt::Wire = vec![sa.clone(), e1, sb.inverse(), e0.inverse()].into();
+                walls.push(mt::Face::try_new(vec![w], mt::Surface::BSplineSurface(surf.clone())).map_err(|e| fail(&e.to_string()))?);
+            }
+            Ok(walls)
+        })?;
+        // Wall j comes from segment j of the chain.
+        faces.extend(walls.into_iter().enumerate().map(|(j, w)| (w, Some(record::profile(&[offset + j])))));
+        offset += chain.len();
+    }
+    Ok(Some(faces))
+}
+
+/// Ruled walls between stations at the path's points (mitred at corners), every loop of the
+/// (oriented) profile.
+fn ruled(plane: &Plane, profile: &NumberedRegion, pts: &[Vec3]) -> Result<Body> {
+    let (pts, st) = ruled_stations(pts)?;
     let s0 = pts.first().copied().unwrap_or_default();
     let loops: Vec<&NumberedLoop> = profile.loops().collect();
     let mut wires: Vec<Vec<mt::Wire>> = Vec::with_capacity(st.len());

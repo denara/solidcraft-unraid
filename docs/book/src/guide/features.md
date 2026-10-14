@@ -7,7 +7,7 @@ it.
 
 | Panel | Features |
 |---|---|
-| Create | extrude (one side, two sides, symmetric, taper, start offset, to a distance or through all; new body, join, cut, intersect), revolve, sweep, loft, box, cylinder, sphere, torus, coil, pipe, rib, web, emboss, hole (simple, counterbore, countersink, tapped; on faces or at sketch points), thread, rectangular/circular/path patterns, mirror |
+| Create | extrude (one side, two sides, symmetric, taper, start offset, to a distance or through all; new body, join, cut, intersect; thin walls along curves), revolve, sweep, loft, box, cylinder, sphere, torus, coil, pipe, rib, web, emboss, hole (simple, counterbore, countersink, tapped; on faces or at sketch points), thread, rectangular/circular/path patterns, mirror |
 | Modify | press pull, fillet, chamfer, shell, draft, scale, combine, split body, offset face, replace face, move/copy, align, remove |
 | Construct | offset plane, plane at angle, plane along path |
 | Inspect | measure, section analysis, interference, curvature comb and map, zebra, draft, minimum radius, isocurves, centre of mass |
@@ -17,6 +17,24 @@ solid, including sideways elbow connections and screw bosses that meet only part
 Extruding into existing material selects **Cut**. In an empty component it selects **New Body**;
 choose **New Body** explicitly to keep an addition separate. Changing the default does not alter
 operations already saved in a design.
+
+A taper slopes the sides of any profile, sketch text included: lines, arcs and spline or conic
+curves move in or out together, and a flat tip shorter than the taper closes to a point. A
+taper steeper than the profile's details (a stroke, a curve or a gap narrower than it) is
+refused with that reason; a smaller taper or distance builds.
+
+**Thin Extrude** (`thin: true` on `solid.extrude`, the Thin Extrude box in its dialog) builds a
+wall of constant thickness along sketch curves instead of filling profiles: open chains (a single
+wall) and closed loops (a ring), lines, arcs, circles, ellipses and splines. In the dialog, a
+picked profile stands for the curves around it (its outline and its holes). The wall lies on the curves' centre, inside,
+outside, or on both sides with two thicknesses (`side`: `center`, `inside`, `outside`,
+`two_sides` with `thickness2`). A closed loop's inside is the area it encloses; an open chain's
+is the side it bends toward (the inside of a U), and a straight line's is the left of its first
+curve as drawn. Curves that meet end to end are one chain whose corners are mitred; walls that
+cross or meet (a ring and a cross, a honeycomb) become one piece. Every extent, operation and target of an extrude applies, and a taper
+for walls of straight lines or of whole circles. A wall thicker than the
+radius of a curve it follows on the inside is refused. Spline walls follow the exact offset
+within 0.0001 mm.
 
 Editing an extrusion retains its signed distances, From/To Object inputs, taper expressions
 and explicit body targets. Revolve edits retain world, sketch and explicit-line axes, both
@@ -55,12 +73,28 @@ planar placement.
 A **Hole** with **Single** placement drills where you pick a planar face. A pick on or near a
 point of a shown sketch that lies on that face, such as a circle's centre, places the hole
 exactly at that point, as **Multiple** placement picks it; **Select Other** (press and hold) also
-offers the face where you clicked. The hole keeps that place on the face; to have holes follow
-later edits of the sketch, place them with **Multiple**.
+offers the face where you clicked. The corners of text outlines don't count, nor do projected
+points while the sketch hides projected geometry. The hole keeps that place on the face; to have
+holes follow later edits of the sketch, place them with **Multiple**.
 
 Fillets and chamfers handle straight edges between planar faces, whole smooth loops, runs of
 neighbouring edges with mitred or spherical corners, and closed chains of curved edges (a rolling
 ball). See the roadmap's known limitations for the rest.
+
+**Curvature (G2)** in the Fillet dialog's **Radius Type** blends straight edges between two
+planar faces with an exact quintic section. The tangent plane and curvature match each side
+face: curvature goes to zero at both contact rails, unlike a circular G1 fillet. Each end
+must meet one planar face perpendicular to the edge. Curved edges/faces, sloped or multi-face
+ends, and intersecting corner blends are not supported; they return an error, not a G1 fallback.
+**Equivalent Radius** sets the same contact setback as a circular fillet (for a right angle,
+setback equals the entered value); it is not a constant curvature radius. Reduce/Taper to Fit
+are unavailable for this type.
+
+Scripts and MCP use the same command, for example on a 20 mm box:
+```json
+{"command": "solid.fillet", "params": {"edges": [[20, 0, 10]], "radius": 2, "type": "curvature"}}
+```
+`type: "g2"` is an alias. Existing fillets still default to circular, constant-radius G1 blends.
 
 Feature references to faces and edges are stored by name, so an upstream edit that moves geometry
 keeps them on the right face (see [Persistent naming](../dev/naming.md)). When a reference can't
@@ -103,7 +137,7 @@ still be added through `set`. The fields of the common features:
 
 | Feature | Fields |
 |---|---|
-| Extrude | `extent`: {`distance`, `direction`: positive\|negative\|symmetric, `distance2`, `start_offset`, `through_all`, `taper`, `to`, `to_offset`, `from`}; `operation`: new_body\|join\|cut\|intersect; `targets`; `profiles`; `sketch` |
+| Extrude | `extent`: {`distance`, `direction`: positive\|negative\|symmetric, `distance2`, `start_offset`, `through_all`, `taper`, `to`, `to_offset`, `from`}; `operation`: new_body\|join\|cut\|intersect; `targets`; `profiles`; `sketch`; `thin`: {`curves`, `thickness`, `side`: center\|inside\|outside\|two_sides, `thickness2`} |
 | Revolve | `angle`, `angle2`, `symmetric`, `axis`, `to`, `operation`, `targets`, `profiles`, `sketch` |
 | Fillet | `radius`, `edges` (a point on each edge), `body`, `style` |
 | Chamfer | `distance`, `distance2` or `angle`, `flip`, `edges`, `body` |

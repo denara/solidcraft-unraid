@@ -118,6 +118,7 @@ fn shell_planar_anchor_rebuild_cold_geometry_and_missing_source_errors() {
     let boss = doc
         .add_feature(
             FeatureKind::Extrude {
+                thin: None,
                 sketch: sk,
                 profiles: crate::ProfileSel::All,
                 extent: serde_json::from_value(json!({"distance":"2"})).unwrap(),
@@ -280,6 +281,7 @@ fn saved_former_strip_projection_reports_lost_without_expanding_healthy_material
     let boss = doc
         .add_feature(
             FeatureKind::Extrude {
+                thin: None,
                 sketch: sk,
                 profiles: crate::ProfileSel::All,
                 extent: serde_json::from_value(json!({"distance":"1"})).unwrap(),
@@ -429,6 +431,7 @@ fn saved_curved_strip_projection_is_lost_after_exact_wall_coalescence() {
     let boss = doc
         .add_feature(
             FeatureKind::Extrude {
+                thin: None,
                 sketch: sk,
                 profiles: crate::ProfileSel::All,
                 extent: serde_json::from_value(json!({"distance":"1"})).unwrap(),
@@ -553,6 +556,7 @@ fn saved_stepped_tab_cut_piece_projection_is_lost_without_expanding_material() {
     let material = doc
         .add_feature(
             FeatureKind::Extrude {
+                thin: None,
                 sketch: sk,
                 profiles: crate::ProfileSel::All,
                 extent: serde_json::from_value(json!({"distance":"1"})).unwrap(),

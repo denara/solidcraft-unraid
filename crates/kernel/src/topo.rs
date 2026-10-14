@@ -148,21 +148,40 @@ fn classify(pts: &[Vec3], nrm: &[Vec3], tol: f64, id: usize) -> Surf {
 }
 
 /// Per-face vertex samples (position, normal) from the tessellation.
+///
+/// A vertex is listed once per face, where its first triangle lists it: the triangles around
+/// it would repeat it about six times, and every reader (nearest normal, cone signature) gives
+/// the same answer without the repeats, which only multiplied their work.
 fn face_vertices(mesh: &Mesh, nf: usize) -> Vec<Vec<(Vec3, Vec3)>> {
     let mut out: Vec<Vec<(Vec3, Vec3)>> = vec![Vec::new(); nf];
+    // The face that last listed each vertex (a vertex shared by faces may be listed again).
+    let mut listed = vec![u32::MAX; mesh.positions.len()];
     for (t, f) in mesh.triangles.iter().zip(&mesh.tri_face) {
         for &k in t {
+            if listed.get(k as usize) == Some(f) {
+                continue;
+            }
             if let (Some(p), Some(n), Some(v)) = (mesh.positions.get(k as usize), mesh.normals.get(k as usize), out.get_mut(*f as usize)) {
                 v.push((*p, *n));
+                if let Some(slot) = listed.get_mut(k as usize) {
+                    *slot = *f;
+                }
             }
         }
     }
     out
 }
 
-/// Normal of face `f` nearest to `p`.
+/// Normal of face `f` nearest to `p` (the first of equally near vertices).
 fn normal_near(verts: &[(Vec3, Vec3)], p: Vec3) -> Option<Vec3> {
-    verts.iter().min_by(|a, b| a.0.dist(p).total_cmp(&b.0.dist(p))).map(|v| v.1)
+    let mut best: Option<(f64, Vec3)> = None;
+    for (q, n) in verts {
+        let d = q.dist(p);
+        if best.is_none_or(|(b, _)| d.total_cmp(&b).is_lt()) {
+            best = Some((d, *n));
+        }
+    }
+    best.map(|(_, n)| n)
 }
 
 /// Cone signature of a non-analytic face: (axis, cos of the normal/axis angle) when all normals

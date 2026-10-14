@@ -12,7 +12,6 @@
 set -euo pipefail
 # shellcheck source=../env.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../env.sh"
-HERE="$ROOT/packaging/macos"
 # The same reverse-DNS id as the Linux APP_ID.
 MACOS_BUNDLE_ID=ai.storyteller.solidcraft
 
@@ -63,11 +62,11 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$WORK/bin/solidcraft" "$APP/Contents/MacOS/SolidCraft"
 # Apple-compiled layered icon and older-macOS fallback (regeneration: assets/README.md).
 # Keep compiled resources so packaging also works on runners with older Xcode versions.
-cp "$ROOT/assets/Assets.car" "$APP/Contents/Resources/Assets.car"
-cp "$ROOT/assets/icon.icns" "$APP/Contents/Resources/SolidCraft.icns"
+cp "$ROOT/assets/icons/app/macos/exports/Assets.car" "$APP/Contents/Resources/Assets.car"
+cp "$ROOT/assets/icons/app/macos/exports/icon.icns" "$APP/Contents/Resources/SolidCraft.icns"
 mkdir -p "$APP/Contents/Resources/Licenses"
 copy_docs "$APP/Contents/Resources/Licenses"
-sed -e "s/@VERSION@/$VERSION/g" -e "s/@SHORT_VERSION@/$SHORT_VERSION/g" "$HERE/Info.plist.in" >"$APP/Contents/Info.plist"
+sed -e "s/@VERSION@/$VERSION/g" -e "s/@SHORT_VERSION@/$SHORT_VERSION/g" "$ROOT/assets/platforms/macos/Info.plist.in" >"$APP/Contents/Info.plist"
 plutil -lint "$APP/Contents/Info.plist"
 printf 'APPL????' >"$APP/Contents/PkgInfo"
 # Ad-hoc signature over the whole bundle (Apple silicon refuses unsigned code).
@@ -80,7 +79,7 @@ STAGE="$WORK/dmg"
 mkdir -p "$STAGE"
 ditto "$APP" "$STAGE/SolidCraft.app"
 ln -s /Applications "$STAGE/Applications"
-cp "$HERE/README.txt" "$STAGE/README.txt"
+cp "$ROOT/assets/platforms/macos/README.txt" "$STAGE/README.txt"
 rm -f "$DMG" "$WORK/raw.dmg"
 # makehybrid + convert builds the image without attaching a device, unlike `create -srcfolder`,
 # which is flaky on CI runners ("Resource busy").
@@ -100,9 +99,9 @@ for key in CFBundleName CFBundleDisplayName CFBundleExecutable CFBundleIconFile 
 done
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$MNT/SolidCraft.app/Contents/Info.plist")" = "$MACOS_BUNDLE_ID"
 test -s "$MNT/SolidCraft.app/Contents/Resources/SolidCraft.icns"
-cmp "$ROOT/assets/icon.icns" "$MNT/SolidCraft.app/Contents/Resources/SolidCraft.icns"
-cmp "$ROOT/assets/Assets.car" "$MNT/SolidCraft.app/Contents/Resources/Assets.car"
-cmp "$HERE/README.txt" "$MNT/README.txt"
+cmp "$ROOT/assets/icons/app/macos/exports/icon.icns" "$MNT/SolidCraft.app/Contents/Resources/SolidCraft.icns"
+cmp "$ROOT/assets/icons/app/macos/exports/Assets.car" "$MNT/SolidCraft.app/Contents/Resources/Assets.car"
+cmp "$ROOT/assets/platforms/macos/README.txt" "$MNT/README.txt"
 case "$ARCH" in universal) WANT=(arm64 x86_64) ;; aarch64) WANT=(arm64) ;; *) WANT=(x86_64) ;; esac
 for arch in "${WANT[@]}"; do
   lipo "$MNT/SolidCraft.app/Contents/MacOS/SolidCraft" -verify_arch "$arch"

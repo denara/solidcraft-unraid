@@ -34,6 +34,11 @@ pub static COMMANDS: &[CommandSpec] = &[
         .icon("curvature_map")
         .noundo()
         .params("radius?: mm shown red (default: a tenth of the model's size); clear?: true turns the analysis off"),
+    planned!("inspect.continuity", "Continuity Analysis", "770")
+        .at("SURFACE", "INSPECT")
+        .icon("continuity")
+        .noundo()
+        .params("planned: body?; edges?: [[x,y,z]] (default: every edge of the body); returns each edge's worst gap (G0), normal angle (G1) and curvature jump (G2); clear?: true turns the analysis off"),
 ];
 
 fn set(s: &mut Session, p: &Value, a: SurfaceAnalysis) -> Result<Value> {

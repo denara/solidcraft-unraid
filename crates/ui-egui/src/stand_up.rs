@@ -35,20 +35,20 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
         return;
     }
     let mut act: Option<&str> = None;
-    crate::frame::window(ctx, "Stand this part up?", crate::frame::Width::Normal)
+    crate::frame::window(ctx, crate::i18n::tr_label("Stand this part up?"), crate::frame::Width::Normal)
         .id(egui::Id::new("sc_stand_up"))
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 140.0))
         .show(ctx, |ui| {
-            ui.label("Files from many CAD programs have Y up, so they open lying on their back here (Z up).");
-            ui.label("Stand it up: a quarter turn about X, as one Move feature you can undo.");
+            ui.label(crate::i18n::tr_label("Files from many CAD programs have Y up, so they open lying on their back here (Z up)."));
+            ui.label(crate::i18n::tr_label("Stand it up: a quarter turn about X, as one Move feature you can undo."));
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                if ui.button("Stand it up").clicked() {
+                if ui.button(crate::i18n::tr_label("Stand it up")).clicked() {
                     act = Some("stand");
                 }
-                if ui.button("Leave it").clicked() {
+                if ui.button(crate::i18n::tr_label("Leave it")).clicked() {
                     act = Some("leave");
                 }
                 if ui.button("Don't ask again").on_hover_text("Preferences › Design turns the offer back on").clicked() {

@@ -241,7 +241,7 @@ fn user_defined_material_survives_save_and_reopen() {
     run(&mut s, "material.create", json!({"name": "Leather", "density_g_cm3": 0.86, "appearance": "Rubber - Black"}));
     run(&mut s, "material.assign", json!({"bodies": ["Tab"], "material": "Leather"}));
     run(&mut s, "file.save", json!({"path": path}));
-    assert!(s.doc.to_json().contains("\"solidcraft/17\""));
+    assert!(s.doc.to_json().contains(&format!("\"{}\"", solidcraft_doc::format::format_string(solidcraft_doc::format::FORMAT))));
 
     run(&mut s, "file.new", json!({}));
     run(&mut s, "doc.open", json!({"path": path}));

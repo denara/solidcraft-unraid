@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use solidcraft_geom::{Loop2, Region2, Seg2, Vec2};
 
 use crate::model::{CurveKind, Sketch};
-use crate::shape::{Shape, intersections};
+use crate::shape::{Shape, intersections_within};
 use crate::union_find::{find, union};
 
 const MERGE_TOL: f64 = 1e-6;
@@ -742,7 +742,7 @@ fn find_profiles_bounded(sk: &Sketch, max_edges: usize) -> Vec<Profile> {
                 if gi == gj {
                     continue;
                 }
-                let mut pts = intersections(gx, gy);
+                let mut pts = intersections_within(gx, gy, tol);
                 // A tangent touch gives two nearly equal roots: one point.
                 if let [p, q] = pts[..]
                     && p.dist(q) < tol * 100.0

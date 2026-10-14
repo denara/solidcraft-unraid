@@ -18,6 +18,7 @@ use crate::dialogs::{Dialog, Kind, combo, field, row_label};
 use crate::preview::{Built, Colors};
 use crate::selection::{BODIES, EDGES, FACES, SelInput, VERTICES};
 use crate::theme::Tokens;
+
 use crate::viewport::Proj;
 
 /// Joint types in the order the Type box lists them (command names).
@@ -398,7 +399,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Asm, inputs: &mut [Se
     match k {
         Asm::NewComponent { name, activate } => {
             row_label(ui, "Name");
-            let r = ui.add(egui::TextEdit::singleline(name).hint_text("Component1"));
+            let r = ui.add(egui::TextEdit::singleline(name).hint_text(crate::i18n::tr_label("Component1")));
             enter |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             ui.end_row();
             row_label(ui, "Activate");
@@ -467,7 +468,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Asm, inputs: &mut [Se
         }
         Asm::JointOrigin { name, .. } => {
             row_label(ui, "Name");
-            let r = ui.add(egui::TextEdit::singleline(name).hint_text("Joint Origin1"));
+            let r = ui.add(egui::TextEdit::singleline(name).hint_text(crate::i18n::tr_label("Joint Origin1")));
             enter |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             ui.end_row();
         }
@@ -477,7 +478,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Asm, inputs: &mut [Se
             let list = movable(s);
             if list.is_empty() {
                 row_label(ui, "");
-                ui.label(RichText::new("no joint that moves yet").color(t.text_dim));
+                ui.label(RichText::new(crate::i18n::tr_label("no joint that moves yet")).color(t.text_dim));
                 ui.end_row();
                 return false;
             }
@@ -528,6 +529,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Asm, inputs: &mut [Se
                 row_label(ui, "");
                 ui.spacing_mut().slider_width = 160.0;
                 let r = ui.add(egui::Slider::new(&mut shown, lo * scale..=hi * scale).show_value(false));
+                crate::scenario::publish_handle(&format!("drive_slider:{i}"), r.rect.center());
                 if r.changed() {
                     *v = if angle { format!("{shown:.1} deg") } else { format!("{shown:.2} mm") };
                 }
@@ -552,7 +554,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Asm, inputs: &mut [Se
             let joints = &s.doc.assembly.joints;
             if joints.len() < 2 {
                 row_label(ui, "");
-                ui.label(RichText::new("needs two joints").color(t.text_dim));
+                ui.label(RichText::new(crate::i18n::tr_label("needs two joints")).color(t.text_dim));
                 ui.end_row();
                 return false;
             }
@@ -638,13 +640,13 @@ fn interference_rows(app: &SolveApp, ui: &mut egui::Ui, r: &Value) {
     let unchecked = r["unchecked"].as_array().cloned().unwrap_or_default();
     if hits.is_empty() && unchecked.is_empty() {
         row_label(ui, "Result");
-        ui.label(RichText::new("no interference").color(t.text_dim));
+        ui.label(RichText::new(crate::i18n::tr_label("no interference")).color(t.text_dim));
         ui.end_row();
         return;
     }
     if !hits.is_empty() {
         row_label(ui, "Interferes");
-        ui.label(RichText::new("Volume").strong());
+        ui.label(RichText::new(crate::i18n::tr_label("Volume")).strong());
         ui.end_row();
     }
     for h in hits {
@@ -919,57 +921,7 @@ pub fn overlay(app: &SolveApp, painter: &egui::Painter, proj: &Proj, d: &mut Dia
 fn glyph(painter: &egui::Painter, proj: &Proj, s: &SnapPt, col: Color32, half_height: f64, tag: Option<&str>) {
     let Some(c) = proj.to_screen(s.at) else { return };
     let len = half_height * 2.0 * 0.06;
-    // A dark halo under every stroke keeps the glyph readable on light and dark faces alike.
-    let halo = Stroke::new(4.5, Color32::from_black_alpha(150));
-    let white = Stroke::new(1.5, Color32::WHITE);
-    if let Some(tip) = proj.to_screen(s.at + s.z * len) {
-        let d = (tip - c).normalized();
-        let n = vec2(-d.y, d.x);
-        let head = vec![tip + d * 2.0, tip - d * 9.0 + n * 5.0, tip - d * 9.0 - n * 5.0];
-        painter.line_segment([c, tip], halo);
-        painter.add(egui::Shape::convex_polygon(head.clone(), Color32::TRANSPARENT, halo));
-        painter.line_segment([c, tip], Stroke::new(2.0, col));
-        painter.add(egui::Shape::convex_polygon(head, col, Stroke::NONE));
-    }
-    let shape = |fill: Color32, stroke: Stroke, grow: f32| -> egui::Shape {
-        match s.kind {
-            SnapKind::FaceCenter => egui::Shape::rect_filled(egui::Rect::from_center_size(c, vec2(12.0 + grow, 12.0 + grow)), 1.5, fill),
-            SnapKind::CircleCenter => egui::Shape::circle_filled(c, 7.0 + grow / 2.0, fill),
-            SnapKind::EdgeMid => {
-                let r = 8.0 + grow / 2.0;
-                egui::Shape::convex_polygon(vec![c + vec2(0.0, -r), c + vec2(r * 0.93, r * 0.7), c + vec2(-r * 0.93, r * 0.7)], fill, stroke)
-            }
-            SnapKind::Vertex => {
-                let r = 7.5 + grow / 2.0;
-                egui::Shape::convex_polygon(vec![c + vec2(0.0, -r), c + vec2(r, 0.0), c + vec2(0.0, r), c + vec2(-r, 0.0)], fill, stroke)
-            }
-        }
-    };
-    painter.add(shape(Color32::from_black_alpha(150), Stroke::NONE, 4.0));
-    painter.add(shape(col, Stroke::NONE, 0.0));
-    match s.kind {
-        SnapKind::FaceCenter => {
-            painter.rect_stroke(egui::Rect::from_center_size(c, vec2(12.0, 12.0)), 1.5, white, egui::StrokeKind::Middle);
-        }
-        SnapKind::CircleCenter => {
-            painter.circle_stroke(c, 7.0, white);
-            painter.line_segment([c - vec2(4.5, 0.0), c + vec2(4.5, 0.0)], Stroke::new(1.2, Color32::WHITE));
-            painter.line_segment([c - vec2(0.0, 4.5), c + vec2(0.0, 4.5)], Stroke::new(1.2, Color32::WHITE));
-        }
-        SnapKind::EdgeMid | SnapKind::Vertex => {
-            painter.add(shape(Color32::TRANSPARENT, white, 0.0));
-        }
-    }
-    // What it snaps to (hovered), or which component it is (picked): a small label.
-    if let Some(tag) = tag {
-        let t = Tokens::get();
-        let font = egui::FontId::proportional(11.5);
-        let g = painter.layout_no_wrap(tag.to_string(), font, t.text);
-        let at = c + vec2(12.0, 10.0);
-        let r = egui::Rect::from_min_size(at, g.size()).expand2(vec2(5.0, 2.0));
-        painter.rect(r, 3.0, t.panel.gamma_multiply(0.92), Stroke::new(1.0, col), egui::StrokeKind::Inside);
-        painter.galley(at, g, t.text);
-    }
+    crate::icons::markers::snap(painter, c, proj.to_screen(s.at + s.z * len), s.kind, col, tag);
 }
 
 /// What a snap is called (the hover label).
@@ -992,11 +944,11 @@ fn joint_menu(
     open: &mut Option<Dialog>,
     run: &mut Option<(&'static str, Value)>,
 ) {
-    if ui.button("Edit Joint").clicked() {
+    if ui.button(crate::i18n::tr_label("Edit Joint")).clicked() {
         *open = edit_joint(app, id);
         ui.close();
     }
-    if kind != JointKind::Rigid && ui.button("Drive Joint").clicked() {
+    if kind != JointKind::Rigid && ui.button(crate::i18n::tr_label("Drive Joint")).clicked() {
         *open = drive_joint(app, id);
         ui.close();
     }
@@ -1047,6 +999,50 @@ pub fn timeline_joints(app: &mut SolveApp, ui: &mut egui::Ui, p: &egui::Painter,
         app.dialog = Some(d);
     }
     x
+}
+
+/// Named joint rows for the vertical feature-history layout.
+pub fn timeline_joints_vertical(app: &mut SolveApp, ui: &mut egui::Ui) {
+    let t = Tokens::get();
+    let joints: Vec<(u64, String, JointKind, bool)> =
+        app.session.doc.assembly.joints.iter().map(|joint| (joint.id, joint.name.clone(), joint.kind, joint.suppressed)).collect();
+    if joints.is_empty() {
+        return;
+    }
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new("JOINTS").size(10.0).strong().color(t.text_dim));
+    let mut open = None;
+    let mut run = None;
+    for (id, name, kind, suppressed) in joints {
+        let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), egui::Sense::click());
+        if response.hovered() {
+            ui.painter().rect_filled(rect, 3.0, t.hover);
+        }
+        let icon = egui::Rect::from_min_size(egui::pos2(rect.left() + 4.0, rect.top() + 4.0), vec2(22.0, 22.0));
+        crate::icons::paint(ui.painter(), icon, "joint", if suppressed { t.border } else { t.icon }, t.icon_fill, t.accent);
+        if suppressed {
+            ui.painter().line_segment([icon.left_bottom(), icon.right_top()], Stroke::new(1.5, t.text_dim));
+        }
+        ui.painter().text(
+            egui::pos2(icon.right() + 7.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            &name,
+            egui::FontId::proportional(12.0),
+            if suppressed { t.text_dim } else { t.text },
+        );
+        let response = response.on_hover_text(format!("{name}  ({kind:?} joint)\nDouble-click to edit · right-click for more"));
+        if response.double_clicked() {
+            open = edit_joint(app, id);
+        }
+        response.context_menu(|ui| joint_menu(app, ui, (id, kind, suppressed), &mut open, &mut run));
+    }
+    if let Some((command, params)) = run {
+        let _ = app.run(command, params);
+    }
+    if let Some(dialog) = open {
+        app.tool = None;
+        app.dialog = Some(dialog);
+    }
 }
 
 /// The Joints folder at the end of the Browser: a row per joint (double-click edits, the menu

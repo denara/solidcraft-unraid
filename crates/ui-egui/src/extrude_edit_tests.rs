@@ -278,3 +278,20 @@ fn rotated_second_occurrence_keeps_saved_from_and_to_points_exact() {
     let after: Vec<_> = h.app.session.world_state().bodies.iter().map(|b| (b.name.clone(), b.mesh().bounds())).collect();
     assert_eq!(after, before);
 }
+
+#[test]
+fn dragging_to_update_value_reselects_whole_value_box_text() {
+    let mut h = make(json!({"distance":"4 mm"}));
+    open(&mut h);
+    let id = egui::Id::new("sc_canvas_value");
+    let selection = |h: &Harness| {
+        let range = egui::text_edit::TextEditState::load(&h.ctx, id).unwrap().cursor.char_range().unwrap();
+        let (a, b) = (range.primary.index, range.secondary.index);
+        (a.min(b).0, a.max(b).0)
+    };
+    assert_eq!(selection(&h), (0, 4), "the pick selects all of \"4 mm\"");
+    h.step(&json!({"drag":[{"handle":"arrow"},{"world":[5,5,15]}]})).unwrap();
+    let Some(crate::dialogs::Dialog { kind: crate::dialogs::Kind::Extrude { distance, .. }, .. }) = &h.app.dialog else { panic!("extrude dialog") };
+    assert_eq!(distance, "15 mm");
+    assert_eq!(selection(&h), (0, 5), "the drag grew the text length; the selection must cover all of it");
+}

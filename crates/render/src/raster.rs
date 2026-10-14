@@ -60,6 +60,9 @@ pub struct Canvas {
 
 const SS: usize = 2;
 const MAX_DIM: usize = 8192;
+/// The rounding the lines' depth test allows for, relative to the depth (a few steps of the
+/// `f32` depth buffer).
+const DEPTH_EPS: f64 = 4.0 * f32::EPSILON as f64;
 
 impl Canvas {
     fn new(w: usize, h: usize) -> Canvas {
@@ -116,6 +119,9 @@ pub fn render(scene: &Scene, cam: &Camera, w: usize, h: usize) -> Canvas {
     // glass, while holes through the cut stay open (as the viewport does with its stencil).
     let cap_z = scene.clip.and_then(|(n, d)| cap_plane(cam, n, d, scene.radius.max(1.0), &project));
     let mut cap_depth = if cap_z.is_some() { vec![f32::INFINITY; sw * sh] } else { Vec::new() };
+    // The screen depth slope (per canvas pixel) of the surface each pixel shows, for the lines'
+    // depth test.
+    let mut slope = vec![0f32; sw * sh];
     let cap_tint = scene.cap.unwrap_or(SECTION_CAP).f();
     for sm in &scene.meshes {
         let m = &sm.mesh;
@@ -148,6 +154,9 @@ pub fn render(scene: &Scene, cam: &Camera, w: usize, h: usize) -> Canvas {
             if area.abs() < 1e-12 {
                 continue;
             }
+            let gx = ((b[2] - a[2]) * (cc[1] - a[1]) - (cc[2] - a[2]) * (b[1] - a[1])) / area;
+            let gy = ((cc[2] - a[2]) * (b[0] - a[0]) - (b[2] - a[2]) * (cc[0] - a[0])) / area;
+            let tri_slope = gx.hypot(gy) as f32;
             for y in y0 as usize..=y1 as usize {
                 for x in x0 as usize..=x1 as usize {
                     let (px, py) = (x as f64 + 0.5, y as f64 + 0.5);
@@ -170,6 +179,9 @@ pub fn render(scene: &Scene, cam: &Camera, w: usize, h: usize) -> Canvas {
                     if c.depth.get(i).is_some_and(|d| z < *d) {
                         if let Some(d) = c.depth.get_mut(i) {
                             *d = z;
+                        }
+                        if let Some(s) = slope.get_mut(i) {
+                            *s = tri_slope;
                         }
                         let n = (ns[0] * p0 + ns[1] * p1 + ns[2] * p2).normalized().unwrap_or(Vec3::Z);
                         let cut = scene.clip.is_some() && inside;
@@ -201,9 +213,11 @@ pub fn render(scene: &Scene, cam: &Camera, w: usize, h: usize) -> Canvas {
             }
         }
     }
-    for (d, cz) in c.depth.iter_mut().zip(&cap_depth) {
+    let cap_slope = cap_z.map_or(0.0, |[a, b, _]| a.hypot(b) as f32);
+    for ((d, s), cz) in c.depth.iter_mut().zip(slope.iter_mut()).zip(&cap_depth) {
         if cz.is_finite() {
             *d = *cz;
+            *s = s.max(cap_slope);
         }
     }
     for l in &scene.lines {
@@ -233,7 +247,14 @@ pub fn render(scene: &Scene, cam: &Camera, w: usize, h: usize) -> Canvas {
                             continue;
                         }
                         let i = iy as usize * sw + ix as usize;
-                        let visible = l.on_top || c.depth.get(i).is_some_and(|dd| (z as f32) <= *dd + 2e-4);
+                        // A line on a face lies at the face's depth, but the pixel holds the
+                        // face's depth at its centre, `d` away: allow what the face's slope
+                        // spans over that distance, and the rounding. (A fixed allowance in
+                        // screen depth is a share of the scene's depth range, a millimetre or
+                        // more on a large design: close views showed the far side of thin
+                        // sheet, and parts just behind it, through it.)
+                        let visible = l.on_top
+                            || c.depth.get(i).zip(slope.get(i)).is_some_and(|(dd, s)| z <= f64::from(*dd) + f64::from(*s) * d + z.abs() * DEPTH_EPS);
                         if visible {
                             c.put(ix as usize, iy as usize, col, cov);
                         }
@@ -379,5 +400,91 @@ mod tests {
         assert!(render_png(&scene, &cam, 16, 16).unwrap().starts_with(&[0x89, b'P', b'N', b'G']));
         // Hostile sizes are clamped.
         assert_eq!(render(&scene, &cam, 0, usize::MAX).w, 1);
+    }
+
+    /// A sheet facing the front camera, turned back by `tilt` about X: the plane y = z·tan(tilt)
+    /// over x in ±15, z in ±`h`.
+    fn sheet(tilt: f64, h: f64) -> Mesh {
+        let t = tilt.tan();
+        let c = [(-15.0, -h), (15.0, -h), (15.0, h), (-15.0, h)].map(|(x, z)| Vec3::new(x, z * t, z));
+        Mesh {
+            positions: c.to_vec(),
+            normals: vec![Vec3::new(0.0, -tilt.cos(), tilt.sin()); 4],
+            triangles: vec![[0, 1, 2], [0, 2, 3]],
+            tri_face: vec![0, 0],
+            ..Default::default()
+        }
+    }
+
+    /// A close front view: 40 mm high on 64 px (128 canvas px, 0.3125 mm each), of a design of
+    /// radius `radius`.
+    fn close_view(mesh: Mesh, lines: Vec<SceneLine>, radius: f64, fov: f64) -> (Scene, Camera) {
+        let scene = Scene {
+            meshes: vec![SceneMesh { mesh: Arc::new(mesh), color: Rgb(160, 165, 175), face_colors: Vec::new() }],
+            lines,
+            radius,
+            ..Default::default()
+        };
+        let mut cam = Camera { distance: if fov > 0.0 { 20.0 / (fov * 0.5).tan() } else { 50.0 }, fov, ..Default::default() };
+        cam.set_view(StandardView::Front);
+        (scene, cam)
+    }
+
+    fn red_pixels(scene: &Scene, cam: &Camera) -> usize {
+        render(scene, cam, 64, 64).rgba.chunks(4).filter(|p| p[0] > 150 && p[1] < 100 && p[2] < 100).count()
+    }
+
+    /// An edge 1 mm behind a sheet is hidden in a close view of a large design. The old test
+    /// allowed 2e-4 of the depth range, 2e-4 · (8 · 1200 + 2) = 1.92 mm here (orthographic; far
+    /// more in perspective), so it was drawn on the sheet. Now the allowance is what the sheet's
+    /// slope spans across the line's width: none facing the camera; tilted 45°, the edge lies
+    /// 1 / cos 45° = 1.414 mm behind along the view, and the sheet's depth changes 0.3125 mm
+    /// per pixel, at most 2 · 1.7 · 0.3125 = 1.06 mm over a 1.2 px line (1.7 px from its centre
+    /// line to the edge of its anti-aliasing).
+    #[test]
+    fn edges_behind_a_thin_sheet_stay_hidden_in_close_views() {
+        for fov in [0.0, 0.6] {
+            for tilt in [0.0, 45f64.to_radians()] {
+                // 1 mm behind the sheet, along its normal, across the middle.
+                let back = Vec3::new(0.0, tilt.cos(), -tilt.sin());
+                let edge = SceneLine {
+                    points: vec![Vec3::new(-10.0, 0.0, 0.0) + back, Vec3::new(10.0, 0.0, 0.0) + back],
+                    color: Rgb(255, 0, 0),
+                    width: 1.2,
+                    on_top: false,
+                };
+                let (mut scene, cam) = close_view(sheet(tilt, 12.0), vec![edge], 1200.0, fov);
+                assert_eq!(red_pixels(&scene, &cam), 0, "fov {fov}, tilt {tilt}: the edge behind the sheet shows through it");
+                scene.lines[0].on_top = true;
+                assert!(red_pixels(&scene, &cam) > 20, "fov {fov}, tilt {tilt}: the edge is in the picture");
+            }
+        }
+    }
+
+    /// Edges lying on a face are drawn whole, however steep the face and whatever the design's
+    /// size: the outline of a sheet turned 70° away from the camera (its depth changes
+    /// tan 70° · 0.3125 = 0.86 mm per pixel) and a line across it draw exactly as they do
+    /// drawn over everything.
+    #[test]
+    fn edges_on_a_steep_face_draw_whole() {
+        let tilt = 70f64.to_radians();
+        let on = |x: f64, z: f64| Vec3::new(x, z * tilt.tan(), z);
+        let line = |points: Vec<Vec3>| SceneLine { points, color: Rgb(255, 0, 0), width: 1.2, on_top: false };
+        for fov in [0.0, 0.6] {
+            for radius in [30.0, 1200.0] {
+                let lines = vec![
+                    line(vec![on(-15.0, -5.0), on(15.0, -5.0), on(15.0, 5.0), on(-15.0, 5.0), on(-15.0, -5.0)]),
+                    line(vec![on(-10.0, 1.5), on(10.0, 1.5)]),
+                ];
+                let (mut scene, cam) = close_view(sheet(tilt, 5.0), lines, radius, fov);
+                let drawn = red_pixels(&scene, &cam);
+                for l in &mut scene.lines {
+                    l.on_top = true;
+                }
+                let whole = red_pixels(&scene, &cam);
+                assert!(whole > 100, "fov {fov}, radius {radius}: {whole} line pixels");
+                assert_eq!(drawn, whole, "fov {fov}, radius {radius}: parts of the lines on the face are hidden");
+            }
+        }
     }
 }

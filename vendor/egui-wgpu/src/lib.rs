@@ -670,3 +670,23 @@ mod msaa_tests {
         assert_eq!(super::clamp_msaa_samples(&[], 8), 1);
     }
 }
+
+/// SolidCraft: the surface size for a window of `width` x `height` pixels on a device whose
+/// textures are at most `max_side` on a side, and the scale it is drawn at. A window that fits is
+/// unchanged (scale 1); a larger one shrinks uniformly, keeping its aspect ratio, so the image
+/// the compositor stretches back over the window is not distorted. Never zero on a side.
+pub fn clamp_surface_extent(width: u32, height: u32, max_side: u32) -> (u32, u32, f32) {
+    let max_side = max_side.max(1);
+    let (width, height) = (width.max(1), height.max(1));
+    let longest = width.max(height);
+    if longest <= max_side {
+        return (width, height, 1.0);
+    }
+    let scale = f64::from(max_side) / f64::from(longest);
+    let fit = |side: u32| -> u32 {
+        let scaled = (f64::from(side) * scale).floor() as u32;
+        scaled.clamp(1, max_side)
+    };
+    let scale_f32 = scale as f32;
+    (fit(width), fit(height), scale_f32)
+}

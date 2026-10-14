@@ -76,7 +76,8 @@ On GitHub, one job builds the tests into a
 Pull requests skip a few heavy tests (each takes one to four minutes); they run on every push to
 `main`, nightly, and in `cargo xtask test`:
 
-- `solidcraft-engine`: `tests::hostile_params_never_panic`, everything in `tests::robustness`,
+- `solidcraft-engine`: `tests::hostile_params_never_panic`, everything in `tests::robustness` and
+  `tests::robustness_goldens` (pull requests that touch `crates/kernel` run its `sample_*` part),
   `pattern_suppress_tests::enclosure_arc_extinction_keeps_a_real_sharp_inner_lip_after_resize_and_reopen`,
   `pattern_suppress_tests::enclosure_datums_follow_wall_height_and_board_depth_with_material_proofs`,
   `cmd::plastic::tests::enclosure_snap_fit_follows_resized_front_wall`

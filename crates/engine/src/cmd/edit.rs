@@ -25,11 +25,28 @@ pub static COMMANDS: &[CommandSpec] = &[
         .key("Delete")
         .params("features: [id or name] (a sketch takes its dependent features with it) → deleted: [ids]; failing?: [{feature, error}] (later features that worked and now fail)"),
     CommandSpec::new("timeline.rename", "Rename", rename).params("feature: id|name, name (references to it follow)"),
+    CommandSpec::new("timeline.group", "New Feature Folder", group)
+        .icon("folder")
+        .doc_only()
+        .params("name?; features?: [id|name]; parent?: folder id (features leave any other timeline folder)"),
+    CommandSpec::new("timeline.ungroup", "Remove Feature Folders", ungroup)
+        .doc_only()
+        .params("group: id | groups: [ids] (features remain in the timeline)"),
+    CommandSpec::new("timeline.rename_group", "Rename Feature Folder", rename_group).doc_only().params("group: id, name"),
+    CommandSpec::new("timeline.move_to_group", "Move Features to Folder", move_to_group)
+        .doc_only()
+        .params("features?: [id|name], groups?: [ids], group?: id (omit or null to move to the timeline root)"),
+    CommandSpec::new("timeline.move_many", "Move Timeline Items", move_many).params(
+        "features?: [id|name], groups?: [folder ids], group?: folder id, position: insertion slot; atomically changes folder membership and moves all selected contents as one block",
+    ),
     CommandSpec::new("timeline.rollback", "Move Timeline Marker", rollback).params("position: number of features to keep active (omit = end)"),
     CommandSpec::new("timeline.roll_to", "Roll History Marker", rollback)
         .params("position: number of features to keep active (omit = end) | feature: id|name (the marker goes right after it)"),
     CommandSpec::new("timeline.reorder", "Reorder Feature", reorder)
         .params("feature: id|name, position: its new index; refused when a feature that worked would fail"),
+    CommandSpec::new("timeline.reorder_many", "Reorder Features", reorder_many).params(
+        "features: [id|name], position: insertion slot in the current history; selected features keep their relative order; refused when a feature that worked would fail",
+    ),
     CommandSpec::new("timeline.redefine", "Edit Feature", redefine)
         .params("feature: id|name, command: the feature's command id, params: its parameters (the feature is rebuilt in place)"),
     CommandSpec::new("timeline.dependents", "Feature Dependents", dependents)
@@ -185,6 +202,302 @@ fn rename(s: &mut Session, p: &Value) -> Result<Value> {
         f.kind.remap_refs(&sketches, &names);
     }
     Ok(json!({"feature": id, "name": name}))
+}
+
+fn timeline_group_id(s: &Session, p: &Value, cmd: &str) -> Result<u64> {
+    timeline_group_id_field(s, p, "group", cmd)
+}
+
+fn timeline_group_id_field(s: &Session, p: &Value, field: &str, cmd: &str) -> Result<u64> {
+    let id = p.get(field).and_then(Value::as_u64).ok_or_else(|| bad(cmd, format!("`{field}` must be a timeline folder id")))?;
+    if s.doc.timeline_groups.iter().any(|group| group.id == id) { Ok(id) } else { Err(bad(cmd, format!("no timeline folder {id}"))) }
+}
+
+fn group_features(s: &Session, p: &Value, required: bool, cmd: &str) -> Result<Vec<u64>> {
+    let values = match p.get("features") {
+        Some(Value::Array(values)) => values,
+        None if !required => return Ok(Vec::new()),
+        _ => return Err(bad(cmd, "`features` must be a list of feature ids or names")),
+    };
+    if values.is_empty() && required {
+        return Err(bad(cmd, "`features` must list at least one feature"));
+    }
+    if values.len() > 10_000 {
+        return Err(bad(cmd, "too many features"));
+    }
+    let mut ids = Vec::new();
+    for value in values {
+        let id = feature_id(s, Some(value), cmd)?;
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
+}
+
+fn group_ids(s: &Session, p: &Value, required: bool, cmd: &str) -> Result<Vec<u64>> {
+    let values = match p.get("groups") {
+        Some(Value::Array(values)) => values,
+        None if !required => return Ok(Vec::new()),
+        None => return Err(bad(cmd, "`groups` must be a list of timeline folder ids")),
+        _ => return Err(bad(cmd, "`groups` must be a list of timeline folder ids")),
+    };
+    if values.is_empty() && required {
+        return Err(bad(cmd, "`groups` must list at least one folder"));
+    }
+    if values.len() > 10_000 {
+        return Err(bad(cmd, "too many folders"));
+    }
+    let mut ids = Vec::new();
+    for value in values {
+        let id = value.as_u64().ok_or_else(|| bad(cmd, "`groups` must contain folder ids"))?;
+        if !s.doc.timeline_groups.iter().any(|group| group.id == id) {
+            return Err(bad(cmd, format!("no timeline folder {id}")));
+        }
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
+}
+
+fn group_move_would_cycle(s: &Session, target: u64, sources: &[u64]) -> bool {
+    let sources: std::collections::BTreeSet<u64> = sources.iter().copied().collect();
+    let parents: std::collections::BTreeMap<u64, Option<u64>> = s.doc.timeline_groups.iter().map(|group| (group.id, group.parent)).collect();
+    let mut current = Some(target);
+    let mut steps = 0usize;
+    while let Some(id) = current {
+        if sources.contains(&id) {
+            return true;
+        }
+        steps += 1;
+        if steps > s.doc.timeline_groups.len() {
+            return true;
+        }
+        current = parents.get(&id).copied().flatten();
+    }
+    false
+}
+
+fn group_feature_ids(doc: &solidcraft_doc::Document, roots: &[u64]) -> std::collections::BTreeSet<u64> {
+    let by_id: std::collections::BTreeMap<u64, &solidcraft_doc::TimelineGroup> = doc.timeline_groups.iter().map(|group| (group.id, group)).collect();
+    let mut children = std::collections::BTreeMap::<u64, Vec<u64>>::new();
+    for group in &doc.timeline_groups {
+        if let Some(parent) = group.parent {
+            children.entry(parent).or_default().push(group.id);
+        }
+    }
+    let mut pending = roots.to_vec();
+    let mut visited = std::collections::BTreeSet::new();
+    let mut features = std::collections::BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        if !visited.insert(id) {
+            continue;
+        }
+        if let Some(group) = by_id.get(&id) {
+            features.extend(group.features.iter().copied());
+            pending.extend(children.get(&id).into_iter().flatten().copied());
+        }
+    }
+    features
+}
+
+fn sort_group_features(doc: &mut solidcraft_doc::Document) {
+    let positions: std::collections::BTreeMap<u64, usize> = doc.features.iter().enumerate().map(|(index, feature)| (feature.id, index)).collect();
+    for group in &mut doc.timeline_groups {
+        group.features.sort_by_key(|feature| positions.get(feature).copied().unwrap_or(usize::MAX));
+    }
+}
+
+fn require_contiguous_groups(doc: &solidcraft_doc::Document, cmd: &str) -> Result<()> {
+    let Some(id) = solidcraft_doc::non_contiguous_timeline_group(&doc.features, &doc.timeline_groups) else { return Ok(()) };
+    let name = doc.timeline_groups.iter().find(|group| group.id == id).map(|group| group.name.as_str()).unwrap_or("unknown");
+    Err(bad(cmd, format!("timeline folder `{name}` must contain one contiguous run of features")))
+}
+
+fn group(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "timeline.group";
+    let mut features = group_features(s, p, false, cmd)?;
+    let groups = group_ids(s, p, false, cmd)?;
+    let name = match str_(p, "name").map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) if name.len() <= 128 => name.to_string(),
+        Some(_) => return Err(bad(cmd, "`name` must be 1…128 characters")),
+        None => format!("Folder{}", s.doc.timeline_groups.len() + 1),
+    };
+    let id = s
+        .doc
+        .timeline_groups
+        .iter()
+        .map(|group| group.id)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| bad(cmd, "no more timeline folder ids are available"))?;
+    let parent = match p.get("parent") {
+        Some(Value::Null) | None => None,
+        Some(_) => Some(timeline_group_id_field(s, p, "parent", cmd)?),
+    };
+    if let Some(parent) = parent
+        && group_move_would_cycle(s, parent, &groups)
+    {
+        return Err(bad(cmd, "a new folder cannot contain an ancestor of its parent"));
+    }
+    let nested = group_feature_ids(&s.doc, &groups);
+    features.retain(|feature| !nested.contains(feature));
+    let mut next = (*s.doc).clone();
+    for group in &mut next.timeline_groups {
+        group.features.retain(|feature| !features.contains(feature));
+        if groups.contains(&group.id) {
+            group.parent = Some(id);
+        }
+    }
+    next.timeline_groups.push(solidcraft_doc::TimelineGroup { id, name: name.clone(), parent, features });
+    sort_group_features(&mut next);
+    require_contiguous_groups(&next, cmd)?;
+    *s.doc_mut() = next;
+    Ok(json!({"group": id, "name": name, "parent": parent, "groups": groups}))
+}
+
+fn ungroup(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "timeline.ungroup";
+    let ids = match p.get("groups") {
+        Some(Value::Array(values)) if !values.is_empty() && values.len() <= 10_000 => {
+            let mut ids = Vec::new();
+            for value in values {
+                let id = value.as_u64().ok_or_else(|| bad(cmd, "`groups` must contain timeline folder ids"))?;
+                if !s.doc.timeline_groups.iter().any(|group| group.id == id) {
+                    return Err(bad(cmd, format!("no timeline folder {id}")));
+                }
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+            ids
+        }
+        Some(Value::Array(_)) => return Err(bad(cmd, "`groups` must list 1…10000 timeline folder ids")),
+        Some(_) => return Err(bad(cmd, "`groups` must be a list of timeline folder ids")),
+        None => vec![timeline_group_id(s, p, cmd)?],
+    };
+    let parents: std::collections::BTreeMap<u64, Option<u64>> =
+        s.doc.timeline_groups.iter().filter(|group| ids.contains(&group.id)).map(|group| (group.id, group.parent)).collect();
+    let surviving_parent = |mut parent: Option<u64>| {
+        let mut steps = 0usize;
+        while let Some(id) = parent.filter(|id| ids.contains(id)) {
+            parent = parents.get(&id).copied().flatten();
+            steps += 1;
+            if steps > parents.len() {
+                return None;
+            }
+        }
+        parent
+    };
+    let mut next = (*s.doc).clone();
+    let moved_features: Vec<(Option<u64>, Vec<u64>)> = next
+        .timeline_groups
+        .iter()
+        .filter(|group| ids.contains(&group.id))
+        .map(|group| (surviving_parent(group.parent), group.features.clone()))
+        .collect();
+    for group in &mut next.timeline_groups {
+        if ids.contains(&group.id) {
+            continue;
+        }
+        group.parent = surviving_parent(group.parent);
+        for (_, features) in moved_features.iter().filter(|(parent, _)| *parent == Some(group.id)) {
+            group.features.extend(features.iter().copied());
+        }
+    }
+    next.timeline_groups.retain(|group| !ids.contains(&group.id));
+    sort_group_features(&mut next);
+    require_contiguous_groups(&next, cmd)?;
+    *s.doc_mut() = next;
+    Ok(json!({"groups": ids}))
+}
+
+fn rename_group(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "timeline.rename_group";
+    let id = timeline_group_id(s, p, cmd)?;
+    let name = str_(p, "name")
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && name.len() <= 128)
+        .ok_or_else(|| bad(cmd, "`name` must be 1…128 characters"))?;
+    if let Some(group) = s.doc_mut().timeline_groups.iter_mut().find(|group| group.id == id) {
+        group.name = name.to_string();
+    }
+    Ok(json!({"group": id, "name": name}))
+}
+
+fn move_to_group(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "timeline.move_to_group";
+    let features = group_features(s, p, false, cmd)?;
+    let groups = group_ids(s, p, false, cmd)?;
+    if features.is_empty() && groups.is_empty() {
+        return Err(bad(cmd, "list at least one feature or folder"));
+    }
+    let target = match p.get("group") {
+        Some(Value::Null) | None => None,
+        Some(_) => Some(timeline_group_id(s, p, cmd)?),
+    };
+    if let Some(target) = target
+        && group_move_would_cycle(s, target, &groups)
+    {
+        return Err(bad(cmd, "a folder cannot be moved into itself or one of its descendants"));
+    }
+    let mut next = (*s.doc).clone();
+    for group in &mut next.timeline_groups {
+        group.features.retain(|feature| !features.contains(feature));
+        if Some(group.id) == target {
+            group.features.extend(features.iter().copied());
+        }
+    }
+    for group in &mut next.timeline_groups {
+        if groups.contains(&group.id) {
+            group.parent = target;
+        }
+    }
+    sort_group_features(&mut next);
+    require_contiguous_groups(&next, cmd)?;
+    *s.doc_mut() = next;
+    Ok(json!({"features": features, "groups": groups, "group": target}))
+}
+
+fn move_many(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "timeline.move_many";
+    let mut features = group_features(s, p, false, cmd)?;
+    let groups = group_ids(s, p, false, cmd)?;
+    if features.is_empty() && groups.is_empty() {
+        return Err(bad(cmd, "list at least one feature or folder"));
+    }
+    let target = match p.get("group") {
+        Some(Value::Null) | None => None,
+        Some(_) => Some(timeline_group_id(s, p, cmd)?),
+    };
+    if let Some(target) = target
+        && group_move_would_cycle(s, target, &groups)
+    {
+        return Err(bad(cmd, "a folder cannot be moved into itself or one of its descendants"));
+    }
+    let nested = group_feature_ids(&s.doc, &groups);
+    features.retain(|feature| !nested.contains(feature));
+    let moving: Vec<u64> =
+        s.doc.features.iter().filter(|feature| nested.contains(&feature.id) || features.contains(&feature.id)).map(|feature| feature.id).collect();
+    let mut next = (*s.doc).clone();
+    for group in &mut next.timeline_groups {
+        group.features.retain(|feature| !features.contains(feature));
+        if Some(group.id) == target {
+            group.features.extend(features.iter().copied());
+        }
+        if groups.contains(&group.id) {
+            group.parent = target;
+        }
+    }
+    sort_group_features(&mut next);
+    let slot = num(p, "position").map(|x| x.max(0.0) as usize).ok_or_else(|| bad(cmd, "`position` must be a number"))?;
+    let (next, ordered) = reorder_features(s, next, &moving, slot, cmd)?;
+    if next != *s.doc {
+        *s.doc_mut() = next;
+    }
+    Ok(json!({"features": ordered, "groups": groups, "group": target, "position": slot}))
 }
 
 fn rollback(s: &mut Session, p: &Value) -> Result<Value> {
@@ -354,7 +667,7 @@ fn edit_feature(s: &mut Session, p: &Value) -> Result<Value> {
     }
     // New face points: their faces' names now.
     if nf.kind.face_points() != f.kind.face_points() {
-        nf.face_names = solidcraft_doc::naming::face_names_at(&s.model.state_before(id), &nf.kind.face_points());
+        nf.face_names = solidcraft_doc::face_point_names(&s.doc, &s.model.state_before(id), &nf.kind, nf.component);
     }
     if let Some(slot) = s.doc_mut().feature_mut(id) {
         *slot = nf;
@@ -423,6 +736,8 @@ fn reorder(s: &mut Session, p: &Value) -> Result<Value> {
     let f = next.features.remove(from);
     let name = f.name.clone();
     next.features.insert(to, f);
+    sort_group_features(&mut next);
+    require_contiguous_groups(&next, cmd)?;
     // Everything that evaluated before must still evaluate.
     let mut after = solidcraft_doc::Model::new();
     after.evaluate(&next);
@@ -433,6 +748,60 @@ fn reorder(s: &mut Session, p: &Value) -> Result<Value> {
     }
     *s.doc_mut() = next;
     Ok(json!({"feature": id, "position": to}))
+}
+
+fn reorder_many(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "timeline.reorder_many";
+    let ids = group_features(s, p, true, cmd)?;
+    let slot = num(p, "position").map(|x| x.max(0.0) as usize).ok_or_else(|| bad(cmd, "`position` must be a number"))?;
+    let (next, ordered) = reorder_features(s, (*s.doc).clone(), &ids, slot, cmd)?;
+    if next != *s.doc {
+        *s.doc_mut() = next;
+    }
+    Ok(json!({"features": ordered, "position": slot.min(s.doc.features.len())}))
+}
+
+fn reorder_features(
+    s: &Session,
+    mut next: solidcraft_doc::Document,
+    ids: &[u64],
+    slot: usize,
+    cmd: &str,
+) -> Result<(solidcraft_doc::Document, Vec<u64>)> {
+    let n = next.features.len();
+    let slot = slot.min(n);
+    let selected: std::collections::BTreeSet<u64> = ids.iter().copied().collect();
+    let ordered: Vec<u64> = next.features.iter().filter(|feature| selected.contains(&feature.id)).map(|feature| feature.id).collect();
+    let before_slot = next.features.iter().take(slot).filter(|feature| selected.contains(&feature.id)).count();
+    let insert_at = slot.saturating_sub(before_slot).min(n.saturating_sub(ordered.len()));
+
+    let mut moving = Vec::new();
+    next.features.retain(|feature| {
+        if selected.contains(&feature.id) {
+            moving.push(feature.clone());
+            false
+        } else {
+            true
+        }
+    });
+    let unchanged = s.doc.features.iter().map(|feature| feature.id).eq(next.features[..insert_at]
+        .iter()
+        .chain(moving.iter())
+        .chain(next.features[insert_at..].iter())
+        .map(|feature| feature.id));
+    next.features.splice(insert_at..insert_at, moving);
+    sort_group_features(&mut next);
+    require_contiguous_groups(&next, cmd)?;
+    if !unchanged {
+        let mut after = solidcraft_doc::Model::new();
+        after.evaluate(&next);
+        let broken = newly_broken(&s.model, &after);
+        if !broken.is_empty() {
+            let list: Vec<String> = broken.iter().map(|(name, error)| format!("{name} ({error})")).collect();
+            return Err(bad(cmd, format!("moving the selected features there breaks {}", list.join("; "))));
+        }
+    }
+    Ok((next, ordered))
 }
 
 fn input_keys(kind: &FeatureKind) -> Vec<(String, solidcraft_doc::expr::Kind)> {
@@ -452,7 +821,7 @@ fn input_keys(kind: &FeatureKind) -> Vec<(String, solidcraft_doc::expr::Kind)> {
                     *key = format!("fillet.control.{i}");
                 }
             }
-            solidcraft_doc::FilletStyle::Constant | solidcraft_doc::FilletStyle::Chord => {}
+            solidcraft_doc::FilletStyle::Constant | solidcraft_doc::FilletStyle::Chord | solidcraft_doc::FilletStyle::Curvature => {}
         }
     }
     keys

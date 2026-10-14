@@ -125,7 +125,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     let t = Tokens::get();
     let mut open = true;
     let all = rows(app);
-    crate::frame::window(ctx, RichText::new("PARAMETERS").strong().size(13.0), crate::frame::Width::Wide)
+    crate::frame::window(ctx, RichText::new(crate::i18n::tr_label("PARAMETERS")).strong().size(13.0), crate::frame::Width::Wide)
         .id(egui::Id::new("sc_params_dialog"))
         .open(&mut open)
         .default_width(740.0)
@@ -134,9 +134,9 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
         .collapsible(false)
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut d.filter).hint_text("Filter").desired_width(180.0));
+                ui.add(egui::TextEdit::singleline(&mut d.filter).hint_text(crate::i18n::tr_label("Filter")).desired_width(180.0));
                 ui.separator();
-                if ui.button("Import…").on_hover_text("CSV or JSON: updates existing parameters, adds new ones").clicked()
+                if ui.button("Import…").on_hover_text(crate::i18n::tr_label("CSV or JSON: updates existing parameters, adds new ones")).clicked()
                     && let Some(p) = app.services.pick_open.as_ref().and_then(|f| f())
                 {
                     d.error = app.run("parameters.import", json!({ "path": p })).err();
@@ -226,7 +226,7 @@ fn table(app: &mut SolveApp, ui: &mut egui::Ui, d: &mut ParamsDialog, rows: &[&R
         for r in rows {
             // Favourite star.
             let star = if r.favorite { RichText::new("★").color(t.accent) } else { RichText::new("☆").color(t.text_dim) };
-            if ui.add(egui::Button::new(star).frame(false)).on_hover_text("Favourite").clicked() {
+            if ui.add(egui::Button::new(star).frame(false)).on_hover_text(crate::i18n::tr_label("Favourite")).clicked() {
                 d.error = app.run("parameters.favorite", json!({"name": r.name, "favorite": !r.favorite})).err();
             }
             // Name: double-click to rename.
@@ -245,7 +245,11 @@ fn table(app: &mut SolveApp, ui: &mut egui::Ui, d: &mut ParamsDialog, rows: &[&R
                 }
                 _ => {
                     let name = if r.source == "user" { RichText::new(&r.name) } else { RichText::new(&r.name).color(t.text_dim) };
-                    if ui.add(egui::Label::new(name).sense(egui::Sense::click())).on_hover_text("Double-click to rename").double_clicked() {
+                    if ui
+                        .add(egui::Label::new(name).sense(egui::Sense::click()))
+                        .on_hover_text(crate::i18n::tr_label("Double-click to rename"))
+                        .double_clicked()
+                    {
                         d.renaming = Some((r.name.clone(), r.name.clone()));
                     }
                 }
@@ -321,7 +325,7 @@ fn table(app: &mut SolveApp, ui: &mut egui::Ui, d: &mut ParamsDialog, rows: &[&R
             if r.source == "user" {
                 if ui
                     .add(egui::Button::new(RichText::new("Delete").small().color(t.text_dim)).frame(false))
-                    .on_hover_text("Delete this parameter")
+                    .on_hover_text(crate::i18n::tr_label("Delete this parameter"))
                     .clicked()
                 {
                     d.error = app.run("parameters.delete", json!({"name": r.name})).err();
@@ -360,7 +364,8 @@ fn add_row(app: &mut SolveApp, ui: &mut egui::Ui, d: &mut ParamsDialog) {
         let expr_id = ui.make_persistent_id("pnew_expr");
         let comment_id = ui.make_persistent_id("pnew_comment");
         let focused_id = ui.memory(|m| [name_id, expr_id, comment_id].into_iter().find(|id| m.has_focus(*id)));
-        let name = ui.add(egui::TextEdit::singleline(&mut d.new_name).id(name_id).hint_text("new parameter").desired_width(120.0));
+        let name =
+            ui.add(egui::TextEdit::singleline(&mut d.new_name).id(name_id).hint_text(crate::i18n::tr_label("new parameter")).desired_width(120.0));
         crate::scenario::publish_handle("param:new:name", name.rect.center());
         let unit_response = egui::ComboBox::from_id_salt("pnew_unit")
             .width(56.0)
@@ -389,7 +394,7 @@ fn add_row(app: &mut SolveApp, ui: &mut egui::Ui, d: &mut ParamsDialog) {
         crate::scenario::publish_handle("param:new:comment", comment.rect.center());
         let submit = !completed && enter_for(ui, focused_id.is_some());
         let ok = !d.new_name.trim().is_empty() && live.is_ok();
-        if ui.add_enabled(ok, egui::Button::new("Add")).clicked() || submit {
+        if ui.add_enabled(ok, egui::Button::new(crate::i18n::tr_label("Add"))).clicked() || submit {
             if let Err(error) = &live {
                 d.error = Some(error.clone());
                 if let Some(id) = focused_id {

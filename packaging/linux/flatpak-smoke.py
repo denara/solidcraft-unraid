@@ -28,6 +28,9 @@ work=$(mktemp -d)
 export XDG_CONFIG_HOME="$work/config" XDG_DATA_HOME="$work/data" XDG_CACHE_HOME="$work/cache"
 mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME"
 unset WGPU_BACKEND WGPU_BACKENDS
+# The control channel's token (docs/control-protocol.md), set here so this client knows it.
+SOLIDCRAFT_CONTROL_TOKEN=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+export SOLIDCRAFT_CONTROL_TOKEN
 solidcraft --control 18837 >"$work/app.log" 2>&1 &
 app=$!
 cleanup() {
@@ -44,7 +47,7 @@ for ((attempt=0; attempt<300; attempt++)); do
   sleep .1
 done
 test "$ready" = 1
-for request in '{"id":1,"method":"ui.inspect","params":{}}' '{"id":2,"method":"engine.execute","params":{"command":"solid.box","params":{"length":30,"width":20,"height":10}}}' '{"id":3,"method":"document.inspect","params":{"measure":true}}'; do
+for request in "{\"id\":1,\"method\":\"ui.inspect\",\"params\":{},\"token\":\"$SOLIDCRAFT_CONTROL_TOKEN\"}" '{"id":2,"method":"engine.execute","params":{"command":"solid.box","params":{"length":30,"width":20,"height":10}}}' '{"id":3,"method":"document.inspect","params":{"measure":true}}'; do
   printf '%s\n' "$request" >&3
   IFS= read -r -t 30 reply <&3
   printf '%s\n' "$reply"

@@ -305,6 +305,51 @@ fn sketch_color(t: &Tokens, c: Rgb) -> [u8; 4] {
     }
 }
 
+/// With a component active, bodies outside it are drawn faded.
+fn body_faded(app: &SolveApp, b: &solidcraft_engine::doc::ModelBody, active_bodies: &Option<Vec<String>>) -> bool {
+    let s = &app.session;
+    if let Some(names) = active_bodies {
+        !names.contains(&b.name)
+    } else {
+        s.active_component != 0 && !s.doc.component_within(b.component, s.active_component)
+    }
+}
+
+/// The display plan the model scene draws `b` from on the GPU, or `None` when its faces are built
+/// here from the reference mesh. Opaque shaded bodies (`opaque`: not faded, and no see-through
+/// body or face) are drawn from their plans where the device evaluates them; faded and
+/// see-through ones (sorted and blended per triangle) are built here.
+fn drawn_plan(
+    app: &SolveApp,
+    b: &solidcraft_engine::doc::ModelBody,
+    opaque: bool,
+) -> Option<std::sync::Arc<solidcraft_engine::geom::tess::TessPlan>> {
+    let shaded = app.ui.visual_style != 2;
+    (shaded && opaque && app.viewport.gpu.is_some_and(|g| g.tess))
+        .then(|| b.display_plan())
+        .flatten()
+        .filter(|plan| plan.vertex_count() <= solidcraft_gpu::MAX_BATCH)
+}
+
+/// The mesh whose triangles the model scene shows for `b`'s faces: the plan's (evaluated on the
+/// CPU, the same triangles the GPU draws) or the reference mesh. A face highlighted over the model
+/// must use the same triangles: another triangulation of the same face fights it at equal depth
+/// and shimmers.
+fn shown_mesh(
+    app: &SolveApp,
+    b: &solidcraft_engine::doc::ModelBody,
+    active_bodies: &Option<Vec<String>>,
+) -> std::sync::Arc<solidcraft_engine::geom::Mesh> {
+    let doc = &app.session.doc;
+    let opaque =
+        || !body_faded(app, b, active_bodies) && doc.model_body_opacity(b) >= 0.999 && doc.face_colors(b).iter().all(|(_, l)| l.opacity >= 0.999);
+    (app.viewport.gpu.is_some_and(|g| g.tess) && opaque())
+        .then(|| drawn_plan(app, b, true))
+        .flatten()
+        .and_then(|_| b.plan_mesh())
+        .unwrap_or_else(|| b.mesh())
+}
+
 fn build_scene(app: &SolveApp) -> GpuScene {
     let tk = Tokens::get();
     let mut sc = GpuScene::default();
@@ -316,12 +361,7 @@ fn build_scene(app: &SolveApp) -> GpuScene {
         if !app.session.body_visible(&b.name) || app.preview.replaced.contains(&b.name) {
             continue;
         }
-        // With a component active, bodies outside it are drawn faded.
-        let faded = if let Some(names) = &active_bodies {
-            !names.contains(&b.name)
-        } else {
-            s.active_component != 0 && !s.doc.component_within(b.component, s.active_component)
-        };
+        let faded = body_faded(app, b, &active_bodies);
         let base = body_color(&s.doc, b).unwrap_or(tk.body);
         let col = if faded { c4(base.gamma_multiply(0.35)) } else { c4(base) };
         let m = b.mesh();
@@ -338,7 +378,19 @@ fn build_scene(app: &SolveApp) -> GpuScene {
         let opacity = s.doc.model_body_opacity(b);
         let face_looks: std::collections::HashMap<usize, solidcraft_engine::doc::appearance::Look> =
             if shaded { s.doc.face_colors(b).into_iter().collect() } else { Default::default() };
-        for (ti, t) in m.triangles.iter().enumerate().filter(|_| shaded) {
+        let opaque = !faded && opacity >= 0.999 && face_looks.values().all(|l| l.opacity >= 0.999);
+        let planned = drawn_plan(app, b, opaque);
+        let on_gpu = planned.is_some();
+        if let Some(plan) = planned {
+            let face_colors = (0..b.body.face_count())
+                .map(|f| match face_looks.get(&f) {
+                    Some(l) => c4(Color32::from_rgb(l.color[0], l.color[1], l.color[2])),
+                    None => col,
+                })
+                .collect();
+            sc.planned.push(crate::gpu::PlannedBody { plan, face_colors });
+        }
+        for (ti, t) in m.triangles.iter().enumerate().filter(|_| shaded && !on_gpu) {
             let (mut col, a) = match m.tri_face.get(ti).and_then(|f| face_looks.get(&(*f as usize))) {
                 Some(l) => {
                     let c = Color32::from_rgb(l.color[0], l.color[1], l.color[2]);
@@ -829,10 +881,18 @@ fn pick_hits(app: &SolveApp, proj: &Proj, pos: Pos2, other_sketch_points: bool, 
     let external_points =
         wants_points || other_sketch_points || (app.dialog.is_none() && app.tool.as_ref().is_none_or(|tool| tool.cmd == "sketch.project"));
     let point_sketches: Vec<u64> = if external_points { visible_sketches(app) } else { s.active_sketch.into_iter().collect() };
+    // A face place (the Single hole's) snaps only to points their sketches show, so a nearer
+    // point that isn't shown (a letter's outline) neither takes the pick nor hides a shown one.
+    let snapping = app.dialog.as_ref().and_then(|d| d.active_input()).is_some_and(|i| crate::dialogs::snaps_to_points(i.accept));
     let mut best = Near::new(all);
     for ss in point_sketches.iter().filter_map(|sid| st.sketch(*sid)) {
         let sid = ss.feature;
+        let shown = snapping.then(|| crate::dialogs::SnapPoints::of(&ss.sketch));
+        let visible = solidcraft_engine::view::SketchPointVisibility::new(&ss.sketch);
         for p in &ss.sketch.points {
+            if !visible.takes(p) || shown.as_ref().is_some_and(|f| !f.takes(p)) {
+                continue;
+            }
             if let Some(sp) = proj.to_screen(ss.plane.to_world(p.pos)) {
                 let dd = sp.distance(pos) - if s.active_sketch == Some(sid) { 2.0 } else { 0.0 };
                 if dd < 8.0 && best.wants(dd) {
@@ -848,7 +908,7 @@ fn pick_hits(app: &SolveApp, proj: &Proj, pos: Pos2, other_sketch_points: bool, 
         let Some(ss) = st.sketch(sid) else { continue };
         let bonus = if s.active_sketch == Some(sid) { 2.0 } else { 0.0 };
         for (i, c) in ss.sketch.curves.iter().enumerate() {
-            if c.link.is_some() && ss.sketch.view.hide_projected {
+            if !solidcraft_engine::view::sketch_curve_visible(&ss.sketch, i) {
                 continue;
             }
             let straight = matches!(c.kind, CurveKind::Line { .. });
@@ -1215,8 +1275,8 @@ pub fn hit_sel(h: &Hit) -> Option<Sel> {
 /// dialog the first hit (sketch entities only belong to the active sketch).
 pub fn candidate(app: &SolveApp, hits: &[Hit]) -> Option<(Hit, Sel)> {
     if let Some(d) = app.dialog.as_ref().filter(|d| d.wants_picks()) {
-        let face = face_under(hits);
-        return hits.iter().find_map(|h| d.candidate_on(&app.session, h, face).map(|s| (h.clone(), s)));
+        let snap = d.face_snap(&app.session, hits);
+        return hits.iter().find_map(|h| d.candidate_on(&app.session, h, snap.as_ref()).map(|s| (h.clone(), s)));
     }
     hits.iter().filter(|h| pick_allowed(app, h)).find_map(|h| hit_candidate(app, h))
 }
@@ -1224,15 +1284,12 @@ pub fn candidate(app: &SolveApp, hits: &[Hit]) -> Option<(Hit, Sel)> {
 /// Every hit a click could pick, in order, each with its selection (Select Other).
 pub fn candidates(app: &SolveApp, hits: &[Hit]) -> Vec<(Hit, Sel)> {
     if let Some(d) = app.dialog.as_ref().filter(|d| d.wants_picks()) {
-        let face = face_under(hits);
-        return hits.iter().filter_map(|h| d.candidate_on(&app.session, h, face).map(|s| (h.clone(), s))).collect();
+        // The face under the cursor is looked up once for every sketch point a face place may
+        // snap to, before Select Other caps its rows.
+        let snap = d.face_snap(&app.session, hits);
+        return hits.iter().filter_map(|h| d.candidate_on(&app.session, h, snap.as_ref()).map(|s| (h.clone(), s))).collect();
     }
     hits.iter().filter(|h| pick_allowed(app, h)).filter_map(|h| hit_candidate(app, h)).collect()
-}
-
-/// The face under the cursor: the nearest face the pick ray meets (faces come nearest first).
-fn face_under(hits: &[Hit]) -> Option<&Hit> {
-    hits.iter().find(|h| matches!(h, Hit::Face { .. }))
 }
 
 /// What the selection filter lets a click pick with no dialog.
@@ -1378,6 +1435,10 @@ fn highlight_key(app: &SolveApp) -> u64 {
     format!("{:?}", app.viewport.hover).hash(&mut h);
     app.viewport.hover_feature.hash(&mut h);
     app.viewport.hover_bodies.hash(&mut h);
+    // Which mesh lights a face follows how the model draws its body (see `shown_mesh`).
+    app.session.active_component.hash(&mut h);
+    app.session.active_occurrence_path.hash(&mut h);
+    app.ui.visual_style.hash(&mut h);
     app.ui.pick_bodies.hash(&mut h);
     crate::theme::is_dark().hash(&mut h);
     app.preview.replaced.hash(&mut h);
@@ -1396,6 +1457,10 @@ fn build_highlight(app: &SolveApp) -> GpuScene {
     let t = Tokens::get();
     let mut sc = GpuScene::default();
     let st = app.session.world_state();
+    let s = &app.session;
+    let active_bodies = s.active_occurrence_path.as_ref().and_then(|p| s.occurrence_bodies(p, true).ok());
+    // Faces lit over the model use the triangles the model shows them with.
+    let shown = |b: &solidcraft_engine::doc::ModelBody| shown_mesh(app, b, &active_bodies);
     let mut sel = Vec::new();
     for item in app.highlighted() {
         for piece in displayed_selection(app, &item) {
@@ -1469,7 +1534,7 @@ fn build_highlight(app: &SolveApp) -> GpuScene {
             Sel::Face { body, index, .. } => {
                 // A live preview stands in for the body: its old faces would fight with it.
                 if let Some(b) = st.body(body).filter(|_| app.session.body_visible(body) && !app.preview.replaced.contains(body)) {
-                    face_tris(&mut sc, &b.mesh(), *index, c4(t.sel_face), false);
+                    face_tris(&mut sc, &shown(b), *index, c4(t.sel_face), false);
                     hidden_face_outline(&mut sc, &b.mesh(), *index, t.sel_edge);
                 }
             }
@@ -1477,7 +1542,7 @@ fn build_highlight(app: &SolveApp) -> GpuScene {
                 if let Some(b) = st.body(name)
                     && app.session.body_visible(name)
                 {
-                    let m = b.mesh();
+                    let m = shown(b);
                     for f in 0..b.body.face_count() {
                         face_tris(&mut sc, &m, f, c4(t.body_selected), true);
                     }
@@ -1551,11 +1616,12 @@ fn build_highlight(app: &SolveApp) -> GpuScene {
         let k = t.hover_face_lift;
         let c = body_rgb(app, &b.name);
         let m = b.mesh();
+        let lit = shown(b);
         for &f in &faces {
             if !sel.iter().any(|x| {
                 matches!(x, Sel::Face { body, index, .. } if body == &b.name && *index == f) || matches!(x, Sel::Body { name } if name == &b.name)
             }) {
-                face_tris(&mut sc, &m, f, [c.0.saturating_add(k), c.1.saturating_add(k), c.2.saturating_add(k), 255], true);
+                face_tris(&mut sc, &lit, f, [c.0.saturating_add(k), c.1.saturating_add(k), c.2.saturating_add(k), 255], true);
             }
         }
         for (ei, e) in m.edges.iter().enumerate() {
@@ -1571,7 +1637,7 @@ fn build_highlight(app: &SolveApp) -> GpuScene {
             if let Some(b) = st.body(body) {
                 let k = t.hover_face_lift;
                 let c = body_rgb(app, body);
-                let m = b.mesh();
+                let m = shown(b);
                 for f in 0..b.body.face_count() {
                     face_tris(&mut sc, &m, f, [c.0.saturating_add(k), c.1.saturating_add(k), c.2.saturating_add(k), 255], true);
                 }
@@ -1586,8 +1652,9 @@ fn build_highlight(app: &SolveApp) -> GpuScene {
                 let c = body_rgb(app, body);
                 let m = b.mesh();
                 let patch = m.surface_patch(*index);
+                let lit = shown(b);
                 for &f in &patch {
-                    face_tris(&mut sc, &m, f, [c.0.saturating_add(k), c.1.saturating_add(k), c.2.saturating_add(k), 255], true);
+                    face_tris(&mut sc, &lit, f, [c.0.saturating_add(k), c.1.saturating_add(k), c.2.saturating_add(k), 255], true);
                 }
                 for (e, _) in m.edge_faces.iter().enumerate().filter(|(_, fs)| fs.iter().any(|f| patch.contains(&(*f as usize)))) {
                     if let Some(p) = m.edges.get(e)
@@ -2010,7 +2077,16 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
         || app.viewport.orbit_snap.is_some()
         || app.cam_anim.is_some();
     let hits = hover.filter(|_| inside && app.viewport.boxsel.is_none() && !navigating).map(|p| pick_cached(app, &proj, p)).unwrap_or_default();
-    let cand = if app.tool.is_some() { hits.first().cloned().map(|h| (h, None)) } else { candidate(app, &hits).map(|(h, s)| (h, Some(s))) };
+    // The Fillet and Chamfer window resolves its own corners: the nearest sketch point to a
+    // corner drawn from the origin is the fixed origin, which ends no two curves.
+    let corner = hover.filter(|_| inside && !navigating).and_then(|p| crate::sketch_modify_ui::corner_hit(app, &proj, p));
+    let cand = if app.tool.is_some() {
+        hits.first().cloned().map(|h| (h, None))
+    } else if let Some((hit, sel)) = corner {
+        Some((hit, Some(sel)))
+    } else {
+        candidate(app, &hits).map(|(h, s)| (h, Some(s)))
+    };
     app.viewport.hover = cand.as_ref().map(|c| c.0.clone());
     // Select Other: a press held still opens the list of everything under it; while the list is
     // open its row under the pointer is what lights up.
@@ -2088,6 +2164,7 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
 
     // ---- interaction ----
     let add = mods.shift || mods.command || mods.ctrl;
+    crate::sketch_text::set_one_letter(mods.shift);
     if let Some(p) = hover.filter(|_| inside) {
         if app.tool.is_some() {
             crate::tools::on_hover(app, &proj, p);
@@ -2098,6 +2175,15 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
             } else if app.dialog.as_ref().is_some_and(|d| d.wants_picks()) {
                 if let Some((hit, Some(sel))) = cand {
                     dialog_pick(app, &hit, sel);
+                } else if let Some(mut dialog) = app.dialog.take() {
+                    let state = app.session.world_state();
+                    if let Some(sketch) = app.session.active_sketch.and_then(|id| state.sketch(id)) {
+                        let (origin, direction) = proj.ray(p);
+                        if let Some(point) = sketch.plane.intersect_ray(origin, direction) {
+                            crate::sketch_modify_ui::pick_position(&mut dialog, &app.session, point);
+                        }
+                    }
+                    app.dialog = Some(dialog);
                 }
             } else {
                 // Dimensions and constraint glyphs sit on top of the geometry.
@@ -2110,7 +2196,9 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
                     .or_else(|| if on_geometry { None } else { crate::dim_view::hit(p) })
                     .filter(|_| sketching && !off("dimensions"));
                 let on_glyph = crate::sketch_tools::glyph_at(p).filter(|_| sketching && !off("constraints"));
-                if !crate::sketch3d::click(app, &proj, p) {
+                if crate::sketch_text_handles::over(app, &proj, p) {
+                    // A text's resize or rotation handle: the text stays selected.
+                } else if !crate::sketch3d::click(app, &proj, p) {
                     match on_dim.or(on_glyph) {
                         Some(id) => select(app, Some(Sel::SketchConstraint { id }), add),
                         // Clicking again on the same spot selects the next thing under it (not
@@ -2127,6 +2215,16 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
         }
         // Double-click a dimension: edit its value in place.
         let dim_edit = resp.double_clicked() && !held && app.tool.is_none() && app.dialog.is_none() && crate::dim_view::double_click(app, p);
+        // Double-click a text (an outline or inside a letter; the first click selected it): edit it.
+        if resp.double_clicked()
+            && !held
+            && !dim_edit
+            && app.tool.is_none()
+            && app.dialog.is_none()
+            && let Some(entity) = crate::sketch_text::selected_entity(app)
+        {
+            crate::sketch_text::open(app, &entity);
+        }
         // Double-click a sketch curve: select the chain joined to it end to end.
         if resp.double_clicked()
             && !held
@@ -2179,9 +2277,10 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
             .drag_started_by(egui::PointerButton::Primary)
             .then(|| ui.input(|i| i.pointer.press_origin()))
             .flatten()
-            .filter(|a| !crate::sketch3d::drag_start(app, &proj, *a))
+            .filter(|a| !crate::sketch_text_handles::drag_start(app, &proj, *a) && !crate::sketch3d::drag_start(app, &proj, *a))
             .map(|a| (a, pick(app, &proj, a).into_iter().next()));
         if let Some((a, hit)) = &grabbed
+            && !crate::sketch_text_handles::dragging(app)
             && let Some(q) = on_plane(app, *a)
         {
             let on_geometry = matches!(hit, Some(Hit::SketchPoint { .. } | Hit::SketchCurve { .. }));
@@ -2193,6 +2292,12 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
         {
             crate::sketch3d::drag_to(app, &proj, p);
         }
+        if crate::sketch_text_handles::dragging(app)
+            && (resp.dragged_by(egui::PointerButton::Primary) || resp.drag_stopped())
+            && let Some(p) = hover
+        {
+            crate::sketch_text_handles::drag_to(app, &proj, p, mods.shift);
+        }
         if crate::dim_view::dragging()
             && (resp.dragged_by(egui::PointerButton::Primary) || resp.drag_stopped())
             && let Some(q) = hover.and_then(|p| on_plane(app, p))
@@ -2203,6 +2308,7 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
         if let Some((a, hit)) = grabbed
             && !crate::dim_view::dragging()
             && !crate::sketch3d::dragging()
+            && !crate::sketch_text_handles::dragging(app)
         {
             let active = app.session.active_sketch;
             match hit {
@@ -2278,6 +2384,7 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
             }
         }
         if resp.drag_stopped() {
+            crate::sketch_text_handles::drag_end(app);
             if let Some((_, depth, _)) = app.viewport.point_drag.clone() {
                 // Letting go on a point, midpoint or curve adds the matching constraint, then the
                 // whole model follows the drag, all in the drag's undo step.
@@ -2301,6 +2408,9 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
         let _ = app.session.execute("sketch.drag_end", &json!({}));
         crate::sketch_text_move::end_drag(app);
     }
+    if crate::sketch_text_handles::dragging(app) && !crate::issue_report::cad_input_blocked() && !ui.input(|i| i.pointer.primary_down()) {
+        crate::sketch_text_handles::drag_end(app);
+    }
     // Box selection: a primary drag on the model when no navigation mode is on.
     if app.tool.is_none()
         && !held
@@ -2309,6 +2419,7 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
         && app.viewport.point_drag.is_none()
         && !crate::dim_view::dragging()
         && !crate::sketch3d::dragging()
+        && !crate::sketch_text_handles::dragging(app)
     {
         let origin = ui.input(|i| i.pointer.press_origin());
         if resp.dragged_by(egui::PointerButton::Primary)
@@ -2326,10 +2437,12 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
     } else {
         app.viewport.boxsel = None;
     }
+    crate::preview::paint_sketches(app, &painter, &proj);
     crate::ref_images::show(app, ui, &painter, &proj);
     crate::dialogs_assembly::origins(app, &painter, &proj);
     overlays(app, &painter, &proj);
     crate::dim_view::show(app, ui, &painter, &proj);
+    crate::sketch_text_handles::show(app, ui, &painter, &proj, hover);
     crate::sketch3d::show(app, &painter, &proj);
     crate::inference::show(app, &painter, &proj);
     crate::drag_snap::show(app, &painter, &proj);
@@ -2382,7 +2495,7 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
 pub(crate) fn select(app: &mut SolveApp, sel: Option<Sel>, add: bool) {
     match sel {
         Some(x) => {
-            let items = grouped_selection(&app.session, &x);
+            let items = picked_selection(&app.session, &x);
             if add && items.iter().all(|x| app.session.selection.iter().any(|y| crate::selection::same_item(x, y))) {
                 let rest: Vec<Sel> =
                     app.session.selection.iter().filter(|y| !items.iter().any(|x| crate::selection::same_item(x, y))).cloned().collect();
@@ -2396,6 +2509,18 @@ pub(crate) fn select(app: &mut SolveApp, sel: Option<Sel>, add: bool) {
         }
         None => {}
     }
+}
+
+/// What a click on `sel` picks: its pieces ([`grouped_selection`]), and for a letter of a sketch
+/// text the whole text, unless Shift is held (Shift picks the one letter).
+pub(crate) fn picked_selection(s: &solidcraft_engine::Session, sel: &Sel) -> Vec<Sel> {
+    if let Sel::Profile { sketch, index } = sel
+        && !crate::sketch_text::one_letter()
+        && let Some(letters) = crate::sketch_text::text_profiles(s, *sketch, *index)
+    {
+        return letters.into_iter().map(|index| Sel::Profile { sketch: *sketch, index }).collect();
+    }
+    grouped_selection(s, sel)
 }
 
 /// Expand a visible rim or surface into the kernel pieces a command needs. The original
@@ -2474,13 +2599,20 @@ fn box_select(app: &mut SolveApp, proj: &Proj, bx: BoxSel, add: bool) {
     let st = app.session.world_state();
     let mut out: Vec<Sel> = Vec::new();
     let to2 = |pts: &[Vec3]| -> Vec<Pos2> { pts.iter().filter_map(|p| proj.to_screen(*p)).collect() };
-    if app.dialog.is_none()
+    let sketch_dialog = app.dialog.as_ref().is_some_and(|d| matches!(d.kind, crate::dialogs::Kind::SketchModify(_)));
+    let accepts = app.dialog.as_ref().and_then(|d| d.active_input()).map(|i| i.accept);
+    if (app.dialog.is_none() || sketch_dialog)
         && let Some(ss) = app.session.active_sketch.and_then(|sid| st.sketch(sid))
     {
         // What the selection filter lets through (window: wholly inside; crossing: touching).
         let off = |k: &str| app.ui.pick_off.iter().any(|x| x == k);
         for (i, c) in ss.sketch.curves.iter().enumerate().filter(|_| !off("sketch") && !off("sketch_curves")) {
-            if c.link.is_some() && ss.sketch.view.hide_projected {
+            if accepts
+                .is_some_and(|a| a & crate::selection::CURVES == 0 && (a & crate::selection::AXES == 0 || !matches!(c.kind, CurveKind::Line { .. })))
+            {
+                continue;
+            }
+            if !solidcraft_engine::view::sketch_curve_visible(&ss.sketch, i) {
                 continue;
             }
             let sampled = if bx.crossing {
@@ -2500,19 +2632,24 @@ fn box_select(app: &mut SolveApp, proj: &Proj, bx: BoxSel, add: bool) {
                 out.push(Sel::SketchCurve { id: c.id.clone() });
             }
         }
+        let visible = solidcraft_engine::view::SketchPointVisibility::new(&ss.sketch);
         for (i, p) in ss.sketch.points.iter().enumerate().filter(|_| !off("sketch") && !off("sketch_points")) {
-            if i != 0 && solidcraft_engine::view::sketch_point_visible(&ss.sketch, i) && bx.takes(&to2(&[ss.plane.to_world(p.pos)])) {
+            if accepts.is_none_or(|a| a & crate::selection::SKETCH_POINTS != 0)
+                && i != 0
+                && visible.takes(p)
+                && bx.takes(&to2(&[ss.plane.to_world(p.pos)]))
+            {
                 out.push(Sel::SketchPoint { id: p.id.clone() });
             }
         }
-        if !off("dimensions") {
+        if !sketch_dialog && !off("dimensions") {
             for (id, r) in crate::dim_view::text_rects() {
                 if bx.takes(&[r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()]) {
                     out.push(Sel::SketchConstraint { id });
                 }
             }
         }
-        if !off("constraints") {
+        if !sketch_dialog && !off("constraints") {
             for (id, c) in crate::sketch_tools::glyph_positions() {
                 if bx.takes(&[c]) {
                     out.push(Sel::SketchConstraint { id });
@@ -2673,8 +2810,9 @@ fn overlays(app: &SolveApp, painter: &egui::Painter, proj: &Proj) {
     let sk = &ss.sketch;
     let locked = sk.locked_points();
     let virtual_corners: Vec<usize> = sk.virtual_corners().into_iter().map(|(i, _)| i).collect();
+    let visible = solidcraft_engine::view::SketchPointVisibility::new(sk);
     for (i, p) in sk.points.iter().enumerate() {
-        if !solidcraft_engine::view::sketch_point_visible(sk, i) {
+        if !visible.takes(p) {
             continue;
         }
         let hidden = (sk.view.hide_points && i != 0) || (sk.view.hide_projected && p.link.is_some());
@@ -2741,13 +2879,11 @@ fn cpu_render(app: &mut SolveApp, ctx: &egui::Context, painter: &egui::Painter, 
 
 pub(crate) fn refresh_layout(app: &mut SolveApp, scale: f32) {
     if let Some(rect) = app.viewport.rect {
-        let docks: Vec<_> = [
-            app.viewport.palette_rect.filter(|_| app.session.active_sketch.is_some() && app.dialog.is_none()),
-            app.viewport.dialog_rect.filter(|_| app.dialog.is_some()),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
+        let docks: Vec<_> =
+            [app.viewport.palette_rect.filter(|_| app.session.active_sketch.is_some()), app.viewport.dialog_rect.filter(|_| app.dialog.is_some())]
+                .into_iter()
+                .flatten()
+                .collect();
         app.viewport.layout = Some(crate::viewport_layout::Layout::new(rect, &docks, scale, app.preferences.navigator_style));
     }
 }
@@ -2765,7 +2901,7 @@ fn axis_rect(app: &SolveApp, rect: Rect) -> Rect {
 }
 
 const AXIS_LENGTH: f64 = 38.0;
-const AXIS_RADIUS: f32 = 11.0;
+use crate::icons::navigation::AXIS_RADIUS;
 
 /// Six signed world axes, sorted back to front so overlapping tips have one owner.
 fn axis_tips(cam: &Camera, c: Pos2) -> Vec<(&'static str, Vec3, Pos2, f64)> {
@@ -2932,24 +3068,7 @@ fn signed_axis_view(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect) {
         painter.circle_filled(c, 55.0, t.overlay);
     }
     for (i, (name, d, at, depth)) in tips.iter().enumerate() {
-        let col = if d.x != 0.0 {
-            colors::AXIS_X
-        } else if d.y != 0.0 {
-            colors::AXIS_Y
-        } else {
-            colors::AXIS_Z
-        };
-        let col = Color32::from_rgb(col.0, col.1, col.2);
-        let positive = !name.starts_with('-');
-        let ink = if *depth < -0.01 { col.gamma_multiply(0.55) } else { col };
-        painter.line_segment([c, *at], Stroke::new(if positive { 2.0 } else { 1.0 }, ink));
-        painter.circle_filled(*at, AXIS_RADIUS, if hovered == Some(i) { t.accent_soft } else { t.overlay });
-        painter.circle_stroke(
-            *at,
-            AXIS_RADIUS,
-            Stroke::new(if hovered == Some(i) { 2.0 } else { 1.0 }, if hovered == Some(i) { t.accent } else { ink }),
-        );
-        painter.text(*at, Align2::CENTER_CENTER, name.to_uppercase(), FontId::proportional(11.0), ink);
+        crate::icons::navigation::axis_tip(&painter, c, name, d, *at, *depth, hovered == Some(i), t);
         crate::scenario::publish_handle(&format!("axis_view:{name}"), *at);
     }
     crate::scenario::publish_count("axis_view_highlights", f64::from(u8::from(hovered.is_some())));
@@ -2982,7 +3101,7 @@ fn signed_axis_view(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect) {
     crate::scenario::publish_handle("axis_view:home", home.center());
     let hr = ui.interact(home, ui.id().with("axis_view_home"), Sense::click());
     icons::paint(&painter, home, "home", t.icon, if hr.hovered() { t.accent_soft } else { t.overlay }, t.accent);
-    if hr.on_hover_text("Home view").clicked() {
+    if hr.on_hover_text(crate::i18n::tr_label("Home view")).clicked() {
         app.animate_view("home");
     }
 }
@@ -3153,19 +3272,19 @@ fn view_menu(app: &mut SolveApp, ui: &mut egui::Ui, button: Rect) -> bool {
     let r = area.show(ui.ctx(), |ui| {
         egui::Frame::popup(ui.style()).show(ui, |ui| {
             ui.set_width(220.0);
-            ui.label(egui::RichText::new("VIEW").strong().size(11.5));
-            ui.checkbox(&mut app.ui.show_grid, "Grid");
-            ui.checkbox(&mut app.ui.ground_shadow, "Ground shadow");
+            ui.label(egui::RichText::new(crate::i18n::tr_label("VIEW")).strong().size(11.5));
+            ui.checkbox(&mut app.ui.show_grid, crate::i18n::tr_label("Grid"));
+            ui.checkbox(&mut app.ui.ground_shadow, crate::i18n::tr_label("Ground shadow"));
             ui.separator();
             let s = &mut app.ui.agent_cursor;
-            let show = ui.checkbox(&mut s.show, "Show Agent Cursor");
+            let show = ui.checkbox(&mut s.show, crate::i18n::tr_label("Show Agent Cursor"));
             crate::scenario::publish_handle("view:agent_cursor", show.rect.center());
             ui.add_enabled_ui(s.show, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label("Speed");
+                    ui.label(crate::i18n::tr_label("Speed"));
                     crate::agent_cursor::speed_slider(ui, &mut s.speed);
                 });
-                ui.checkbox(&mut s.follow_camera, "Follow camera (Look At sketches)");
+                ui.checkbox(&mut s.follow_camera, crate::i18n::tr_label("Follow camera (Look At sketches)"));
             });
         });
     });
@@ -3177,6 +3296,140 @@ fn view_menu(app: &mut SolveApp, ui: &mut egui::Ui, button: Rect) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Bodies drawn from their display plans, evaluated on the GPU, look like the same bodies
+    /// built into triangles on the CPU: the sample design rendered both ways through the
+    /// viewport's real pipelines, offscreen, on this machine's GPU (skipped without one).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn bodies_evaluated_on_the_gpu_look_like_bodies_built_on_the_cpu() {
+        let mut s = solidcraft_engine::Session::default();
+        s.run_script(&solidcraft_engine::sample::script()).unwrap();
+        let mut app = SolveApp::new(s, crate::Services::default());
+        app.viewport.no_pixels = true;
+        app.fit_view();
+        const SIZE: u32 = 256;
+        let rect = Rect::from_min_size(Pos2::ZERO, vec2(SIZE as f32, SIZE as f32));
+        let mut render = |tess: bool| {
+            app.viewport.gpu = Some(GpuTarget { format: egui_wgpu::wgpu::TextureFormat::Rgba8Unorm, depth: None, samples: 1, tess });
+            let scene = build_scene(&app);
+            let proj = projection(&app, rect);
+            let e = proj.cam.eye().to_f32();
+            let eye = [e[0], e[1], e[2], if proj.cam.fov > 0.0 { 1.0 } else { 0.0 }];
+            let (planned, shader) = (scene.planned.len(), tess.then_some(solidcraft_gpu::SHADER));
+            (planned, scene.tris.len(), crate::gpu::render_offscreen(scene, None, proj.vp.to_f32(), proj.cam.back().to_f32(), eye, SIZE, shader))
+        };
+        let (planned, gpu_tris, gpu) = render(true);
+        let (none, cpu_tris, cpu) = render(false);
+        let (Some(gpu), Some(cpu)) = (gpu, cpu) else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        assert!(planned > 0 && none == 0, "{planned} bodies planned");
+        assert!(gpu_tris < cpu_tris, "the planned bodies' triangles are not built on the CPU ({gpu_tris} vs {cpu_tris} bytes)");
+        let px = |img: &[u8], i: usize| [img[4 * i], img[4 * i + 1], img[4 * i + 2]];
+        let n = (SIZE * SIZE) as usize;
+        let drawn = (0..n).filter(|&i| px(&cpu, i) != [255, 255, 255]).count();
+        assert!(drawn > n / 20, "the model covers the view: {drawn} pixels");
+        let differ = (0..n).filter(|&i| px(&gpu, i).iter().zip(px(&cpu, i)).any(|(a, b)| a.abs_diff(b) > 24)).count();
+        assert!(differ * 100 < drawn, "{differ} of {drawn} model pixels differ");
+    }
+
+    /// A device that cannot build the tessellation pipeline (D3D12's FXC rejected the shader
+    /// at startup and the app panicked) still shows the model: the failure is caught, logged,
+    /// and bodies are built on the CPU and drawn. A shader the device rejects stands in for FXC.
+    /// Skipped without a GPU adapter.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn bodies_are_built_on_the_cpu_when_the_tessellation_pipeline_fails() {
+        const REJECTED: &str = "
+            @group(0) @binding(1) var<storage, read_write> surfaces: array<u32>;
+            @compute @workgroup_size(64)
+            fn main(@builtin(global_invocation_id) gid: vec3<u32>) { surfaces[gid.x] = 1u; }
+        ";
+        let Some(tess) = crate::gpu::offscreen_tessellates(REJECTED) else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        assert!(!tess, "the rejected shader built a pipeline");
+        let mut s = solidcraft_engine::Session::default();
+        s.run_script(&solidcraft_engine::sample::script()).unwrap();
+        let mut app = SolveApp::new(s, crate::Services::default());
+        app.viewport.no_pixels = true;
+        app.fit_view();
+        app.viewport.gpu = Some(GpuTarget { format: egui_wgpu::wgpu::TextureFormat::Rgba8Unorm, depth: None, samples: 1, tess });
+        const SIZE: u32 = 256;
+        let rect = Rect::from_min_size(Pos2::ZERO, vec2(SIZE as f32, SIZE as f32));
+        let scene = build_scene(&app);
+        assert!(scene.planned.is_empty(), "no body waits for the GPU evaluation");
+        assert!(!scene.tris.is_empty(), "the bodies are meshed on the CPU");
+        let proj = projection(&app, rect);
+        let e = proj.cam.eye().to_f32();
+        let eye = [e[0], e[1], e[2], if proj.cam.fov > 0.0 { 1.0 } else { 0.0 }];
+        let Some(img) = crate::gpu::render_offscreen(scene, None, proj.vp.to_f32(), proj.cam.back().to_f32(), eye, SIZE, Some(REJECTED)) else {
+            return;
+        };
+        let n = (SIZE * SIZE) as usize;
+        let drawn = img.chunks(4).filter(|p| p[..3] != [255, 255, 255]).count();
+        assert!(drawn > n / 20, "the model is drawn: {drawn} pixels");
+    }
+
+    /// A hovered face lights solidly over a body drawn from its display plan on the GPU: the
+    /// highlight uses the plan's triangles, not the reference mesh's other triangulation of the
+    /// same face, which fought the model at equal depth and shimmered in wedges. Every face of a
+    /// box with a pocket and a round boss, hovered, changes the same pixels as on the CPU path (where model and
+    /// highlight share the reference mesh). Skipped without a GPU adapter.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_hovered_face_lights_whole_over_a_body_drawn_from_its_plan() {
+        let mut s = solidcraft_engine::Session::default();
+        s.execute("solid.box", &json!({"length": 40, "width": 40, "height": 40, "corner": [0, 0, 0], "operation": "new"})).unwrap();
+        s.execute("solid.box", &json!({"length": 16, "width": 16, "height": 20, "corner": [12, 12, 20], "operation": "cut"})).unwrap();
+        s.execute("solid.cylinder", &json!({"base": [33, 33, 40], "diameter": 10, "height": 10, "operation": "join"})).unwrap();
+        let mut app = SolveApp::new(s, crate::Services::default());
+        app.viewport.no_pixels = true;
+        app.fit_view();
+        const SIZE: u32 = 256;
+        let rect = Rect::from_min_size(Pos2::ZERO, vec2(SIZE as f32, SIZE as f32));
+        let body = app.session.world_state().bodies[0].clone();
+        let faces = body.body.face_count();
+        let mut render = |tess: bool, hover: Option<usize>| {
+            app.viewport.gpu = Some(GpuTarget { format: egui_wgpu::wgpu::TextureFormat::Rgba8Unorm, depth: None, samples: 1, tess });
+            app.viewport.hover = hover.map(|index| Hit::Face { body: body.name.clone(), index, point: Vec3::ZERO });
+            let (scene, highlight) = (build_scene(&app), build_highlight(&app));
+            assert_eq!(!scene.planned.is_empty(), tess, "the box is drawn from its plan exactly on the GPU path");
+            let proj = projection(&app, rect);
+            let e = proj.cam.eye().to_f32();
+            let eye = [e[0], e[1], e[2], if proj.cam.fov > 0.0 { 1.0 } else { 0.0 }];
+            let shader = tess.then_some(solidcraft_gpu::SHADER);
+            crate::gpu::render_offscreen(scene, Some(highlight), proj.vp.to_f32(), proj.cam.back().to_f32(), eye, SIZE, shader)
+        };
+        let lit = |plain: &[u8], hovered: &[u8]| -> Vec<bool> { plain.chunks(4).zip(hovered.chunks(4)).map(|(a, b)| a != b).collect() };
+        let (Some(gpu_plain), Some(cpu_plain)) = (render(true, None), render(false, None)) else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let mut checked = 0;
+        for f in 0..faces {
+            let (Some(gpu), Some(cpu)) = (render(true, Some(f)), render(false, Some(f))) else { return };
+            let (on_gpu, on_cpu) = (lit(&gpu_plain, &gpu), lit(&cpu_plain, &cpu));
+            let area = on_cpu.iter().filter(|x| **x).count();
+            if area < 400 {
+                continue; // facing away or hidden
+            }
+            // Inside the face, two pixels in from its outline: a curved face's outline follows
+            // its own facets, which the plan and the reference mesh cut differently.
+            let n = SIZE as i32;
+            let inside = |i: usize| {
+                let (x, y) = (i as i32 % n, i as i32 / n);
+                (-2..=2).all(|dy| (-2..=2).all(|dx| on_cpu.get(((y + dy).clamp(0, n - 1) * n + (x + dx).clamp(0, n - 1)) as usize) == Some(&true)))
+            };
+            let missed = (0..on_cpu.len()).filter(|&i| inside(i) && !on_gpu[i]).count();
+            assert!(missed * 200 < area, "face {f}: {missed} of its {area} hovered pixels do not light (the highlight fights the model)");
+            checked += 1;
+        }
+        assert!(checked >= 3, "{checked} faces seen lit");
+    }
 
     #[test]
     fn construction_drawing_and_hover_overlays_preserve_visible_gaps() {
@@ -3372,7 +3625,7 @@ mod tests {
         app.viewport.no_pixels = true;
         if gpu {
             // The callback is queued by egui; no device is needed to inspect scene updates.
-            app.viewport.gpu = Some(GpuTarget { format: egui_wgpu::wgpu::TextureFormat::Rgba8Unorm, depth: None, samples: 1 });
+            app.viewport.gpu = Some(GpuTarget { format: egui_wgpu::wgpu::TextureFormat::Rgba8Unorm, depth: None, samples: 1, tess: false });
         }
         app
     }

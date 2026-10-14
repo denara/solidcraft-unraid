@@ -135,7 +135,15 @@ fn insert(s: &mut Session, p: &Value, cmd: &str, svg: bool) -> Result<Value> {
         if let Geom2::Text { text, at, height, angle } = t {
             let mut doc = (*s.doc).clone();
             let mut sk = doc.sketch(id)?.clone();
-            if super::sketch_project::add_link(s, &doc, id, &mut sk, LinkKind::Text, LinkSource::Text { text, at, height, angle, font: None }).is_ok()
+            if super::sketch_project::add_link(
+                s,
+                &doc,
+                id,
+                &mut sk,
+                LinkKind::Text,
+                LinkSource::Text { text, at, height, angle, font: None, style: Default::default() },
+            )
+            .is_ok()
             {
                 *doc.sketch_mut(id)? = sk;
                 *s.doc_mut() = doc;

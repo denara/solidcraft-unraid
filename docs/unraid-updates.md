@@ -419,3 +419,70 @@ for rollback between builds that display the same 0.8.0 version. Unraid/nginx/DN
 unchanged by this development task; the daily 09:00 Europe/Berlin automation remains active.
 
 The final upstream check observed 16766bdbc79a4b9ec46bb8b9879587f38ce2994d; later movement is deferred to the next fixed-snapshot update.
+
+## 2026-10-14: upstream 8ea1fd64 (SolidCraft 0.10.0, format 20)
+
+Advanced from `be55a49b047eb516c88a1f8add5723818cd2b57d` to the fixed
+`8ea1fd643fb70cb17f8e335c57de23f03a3415a4` snapshot (PR #1043, confirmed merged),
+merging directly into `codex/unraid-mcp-web`. The 159 non-merge upstream commits include
+thin extrusions, surface modelling, material cards, GPU/display improvements, replay-script
+export, more localization and the independent browser's offline/update support.
+The inherited version is 0.10.0; no application release, version bump or release tag is created.
+Origin/main was an ancestor and the deployment branch matched its remote before integration.
+
+Resolved conflicts in Cargo.lock, attribution and generated license notices, preserving
+HTTP dependencies and all original/openly licensed assets. Regenerated notices retain the
+server license roots. The HTTP worker explicitly allows its files root under upstream's new
+native MCP path scope. A new --quiet option suppresses informational scope paths while retaining
+protocol output and confinement; a CLI regression test proves both. Existing token, font,
+stored-link, diagnostics, origin, session and logging protections remain active.
+
+The native container integration retains forbid(unsafe_code) and omits the new macOS-only
+unsafe Finder event bridge; normal command-line file opening and Linux behavior are retained.
+Upstream's JavaScript service worker is browser infrastructure, independent of HTTP MCP.
+Three small Clippy corrections preserve the affected finite geometry and corner predicates;
+the sheet correction is test-only. A test-only enum parser normalizes Windows CRLF before
+checking golden feature/reference fixtures; its two failures were not CAD behavior failures.
+
+Validation is scoped, without rerunning the complete test suite:
+
+- Formatting, workspace/all-target Clippy with warnings denied, attribution/assets, licenses,
+  layers and all eleven WebAssembly targets passed. The upstream wasm-only preview enum
+  still emits one harmless dead-code warning; native Clippy is clean.
+- 176 selected tests passed: gateway 13, stdio MCP 35, VFS confinement 8, design archives 20,
+  format migrations 27, renderer backend 9, GPU module 5, offline generator 6, CLI 10,
+  mesh-grid 4, linked designs 4, sheet regression 1, thin-extrude UI 3, reference walks 4,
+  sketch corners 13, material cards 8 and thin-extrude engine 6. GPU comparisons permit
+  adapter-unavailable skips; no physical GPU certification is claimed. Three existing
+  benchmarks remain ignored. Initial diagnostic logs and corrected test filters remain local.
+- Fresh isolated candidate passed 24000 mm3 modelling, PNG/STEP, authentication, origin,
+  path/font/diagnostic/stored-link confinement, independent sessions, restart persistence,
+  capacity/release/noise/privacy logs and the compatibility CLI alias.
+- Official SDK 1.32.1 reopened copied public 0.2.1, 0.3.2, 0.7.0/format16 and 0.8.0/format17
+  files at 24000 mm3, exported STEP, and saved/reopened format20. It rendered 4000 mm3,
+  used a confined uploaded font, checked compact output and named camera rendering, refreshed
+  a linked part from 6000 to 9000 mm3 and built/rendered a 2400 mm3 thin wall.
+- The actual browser independently rendered Sample Plate at 0.10.0. Root-absolute asset URLs
+  prevented the copied container site from starting in the upstream subpath test harness;
+  packaging now uses relative URLs, as upstream's default does. Final native CLI/server
+  SHA256 hashes are unchanged by this web fix; saved-design reopen passed on the final image.
+- Chromium with software graphics tested the final built site through all 19 offline/update
+  scenarios (21 launches): offline/slow start, subpath isolation, broken/overlapping downloads,
+  hash consistency, tab retirement, removed deployments and development worker retirement.
+  Offline caches contain only generated public web assets, never MCP or saved server designs.
+  The publishing workflow now verifies sw.js/build.json and tracks build-generator changes.
+
+Image: `solvecraft-unraid:upstream-8ea1fd64` (Linux amd64).
+Image ID: `sha256:461654a1a71877ce1e742f60f2a889df8d2203b66433e3cf3af420c30d065ede`.
+Archive: `target/solidcraft-unraid-upstream-8ea1fd64.tar` (93,068,800 bytes).
+SHA256: `33aed40bd5dfd5002432e419bec6af1472bd8cade91febb6aa188fad277ddefc`.
+Export manifest and expected tag were checked. Evidence remains under ignored
+`target/unraid-update-8ea1fd64/`, including the native thin-wall PNG.
+
+Public image publication and local runtime replacement/cleanup are verified separately below.
+The canonical CA template and original icon hashes match the public repository exactly, so
+no catalog commit or submission is needed. No Unraid/nginx/DNS changes are made. Before an
+Unraid update, back up server designs and separately export browser designs; format20 saves
+need this snapshot or newer for reading, including rollback. The daily 09:00 automation remains.
+Later upstream main moved to `54a8c807bf205a12b1c15d896e8325c2adfd2ae6`; its libraries and sheet
+perforations are deferred to the next fixed-snapshot run.

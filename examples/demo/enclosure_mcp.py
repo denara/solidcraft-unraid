@@ -19,6 +19,7 @@ import socket
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -63,10 +64,28 @@ class Mcp:
         self.p.wait(timeout=10)
 
 
+def control_token(port):
+    """The app's control token: SOLIDCRAFT_CONTROL_TOKEN, else the token file the app wrote for
+    this port (docs/control-protocol.md)."""
+    if os.environ.get("SOLIDCRAFT_CONTROL_TOKEN"):
+        return os.environ["SOLIDCRAFT_CONTROL_TOKEN"].strip()
+    if os.environ.get("SOLIDCRAFT_CONTROL_DIR"):
+        folder = Path(os.environ["SOLIDCRAFT_CONTROL_DIR"])
+    elif sys.platform == "win32":
+        folder = Path(os.environ["LOCALAPPDATA"]) / "SolidCraft" / "control"
+    elif sys.platform == "darwin":
+        folder = Path.home() / "Library/Application Support/SolidCraft/control"
+    else:
+        data = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local/share")
+        folder = Path(data) / "solidcraft" / "control"
+    return (folder / f"{port}.token").read_text().strip()
+
+
 def control(port, method, params=None):
     """One request on the app's control channel (camera moves)."""
     with socket.create_connection(("127.0.0.1", port)) as s:
-        s.sendall((json.dumps({"id": 1, "method": method, "params": params or {}}) + "\n").encode())
+        msg = {"id": 1, "method": method, "params": params or {}, "token": control_token(port)}
+        s.sendall((json.dumps(msg) + "\n").encode())
         buf = b""
         while not buf.endswith(b"\n"):
             chunk = s.recv(1 << 16)

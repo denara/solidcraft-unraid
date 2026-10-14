@@ -74,12 +74,21 @@ doesn't update automatically.
 
 The same app runs in the browser: [open SolidCraft on the web](../app/) (`?sample` opens the sample
 part, `?webgl` forces WebGL2 where WebGPU is missing). Designs are saved in the browser's private
-file storage, which needs HTTPS or localhost. To build it yourself:
+file storage, which needs HTTPS or localhost.
+
+After the first visit the web app works offline: the browser keeps a copy of it. Online, each
+launch gets the latest published build (the browser downloads it once when it changes); offline,
+when the network doesn't answer within a few seconds, or when a new build can't be downloaded
+whole, the kept copy starts (and the download carries on for the next launch). To build it
+yourself:
 
 ```sh
 rustup target add wasm32-unknown-unknown
-cd apps/solidcraft-web && trunk serve --release
+cd apps/solidcraft-web && trunk serve --release --no-autoreload
 ```
+
+Offline use needs `--no-autoreload`: Trunk's live reload changes the page as it serves it, so it
+no longer matches the build the browser would keep. Debug builds (`trunk serve`) never keep a copy.
 
 ## CLI
 
@@ -111,6 +120,23 @@ A command that fails stops the script. A feature can also fail later, when a par
 rebuilds it; `run` then exits with status 1, lists the failing features and writes none of
 its `--out` and `--save` files, because the bodies lack what those features should have made.
 `--allow-errors` writes them anyway.
+
+A design's history turns into a script that rebuilds it, which makes a bug that only shows
+on one design a one-file reproduction:
+
+```sh
+cargo run --release -p solidcraft-cli -- script part.solidcraft --out repro.json
+cargo run --release -p solidcraft-cli -- eval repro.json               # the same part
+```
+
+The script starts with the user parameters (`parameters.add`) and the design's units, sheet
+metal and plastic rules and materials, then adds each timeline feature with `timeline.add`,
+exactly as the design file holds it: same ids, names and parameter names, so later steps
+still find the sketches and bodies they use, and a feature that failed in the design fails
+the same way. Edit a step's values to try a change, or delete the steps after a feature to
+see the design as it was there. Appearances, folders, named views and configurations are
+left out (the CLI notes which), and designs with components or joints are not supported
+yet. In the app and over MCP the same script comes from `timeline.export_script`.
 
 Units are millimetres and degrees unless an expression says otherwise (`"1 in"`, `"30 deg"`),
 and Z is up.

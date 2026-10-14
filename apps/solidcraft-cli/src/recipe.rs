@@ -296,6 +296,17 @@ pub fn to_script(recipe: &Value) -> Result<Value, String> {
             Some("sketch") => sketch_cmds(f, &mut out)?,
             Some("extrude") => {
                 let mut p = json!({"sketch": profile_sketch(f), "profiles": profiles_of(f), "operation": op(f), "name": name, "body_names": bodies});
+                // Thin: {sketch, curves, thickness, side?, thickness2?} instead of profiles.
+                if let (Some(thin), Some(params)) = (f.get("thin"), p.as_object_mut()) {
+                    params.remove("profiles");
+                    params.insert("thin".into(), json!(true));
+                    params.insert("sketch".into(), thin.get("sketch").cloned().unwrap_or(Value::Null));
+                    for key in ["curves", "thickness", "side", "thickness2"] {
+                        if let Some(v) = thin.get(key) {
+                            params.insert(key.into(), v.clone());
+                        }
+                    }
+                }
                 extent(f, &mut p);
                 out.push(json!({"command": "solid.extrude", "params": p}));
             }
@@ -517,13 +528,15 @@ pub fn to_script(recipe: &Value) -> Result<Value, String> {
                 let mut p = json!({"edges": edge_points(f), "radius": f.get("radius"), "name": name});
                 // Constant radius (the default), chord length, or a radius varying along each edge
                 // (`radius` at the end nearest `start`, `radius2` at the other, `mid` between,
-                // `smooth`); `fit` for a radius too large for the geometry.
+                // `smooth`), or a B-spline along each edge (`radius` its first control radius,
+                // `radii` the rest, `knots`); `fit` for a radius too large for the geometry.
                 match f.get("type").and_then(Value::as_str) {
                     Some("chord_length") => p["type"] = json!("chord"),
                     Some("variable_radius") => p["type"] = json!("variable"),
+                    Some("spline_radius") => p["type"] = json!("spline"),
                     _ => {}
                 }
-                for key in ["radius2", "start", "mid", "smooth", "fit"] {
+                for key in ["radius2", "start", "mid", "smooth", "fit", "radii", "knots"] {
                     if let Some(v) = f.get(key) {
                         p[key] = v.clone();
                     }

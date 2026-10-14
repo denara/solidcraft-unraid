@@ -57,15 +57,12 @@ copy_docs() {
   done
 }
 
-# The app icon in every size a package needs, drawn by the CLI (no image files are committed):
-# $1 = the solidcraft-cli to run, $2 = output dir. Writes hicolor/<n>x<n>/apps/$APP_ID.png,
-# solidcraft.ico and solidcraft-1024.png.
+# Copy canonical package exports; $1 is retained for callers' CLI argument compatibility.
 make_icons() {
-  local cli="$1" out="$2" s
+  local out="$2" s
   for s in 16 24 32 48 64 128 256 512; do
     mkdir -p "$out/hicolor/${s}x${s}/apps"
-    "$cli" icon --size "$s" --out "$out/hicolor/${s}x${s}/apps/$APP_ID.png" >/dev/null
+    cp "$ROOT/assets/icons/app/linux/exports/hicolor/${s}x${s}/apps/$APP_ID.png" "$out/hicolor/${s}x${s}/apps/$APP_ID.png" || return
   done
-  "$cli" icon --out "$out/solidcraft.ico" >/dev/null
-  "$cli" icon --size 1024 --out "$out/solidcraft-1024.png" >/dev/null
+  cp "$ROOT/assets/icons/app/windows/exports/solidcraft.ico" "$out/solidcraft.ico"
 }

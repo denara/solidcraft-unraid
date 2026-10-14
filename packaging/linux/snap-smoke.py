@@ -17,6 +17,7 @@ import signal
 import socket
 import subprocess
 import sys
+import secrets
 import tempfile
 import time
 
@@ -26,8 +27,10 @@ flatpak_smoke = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(flatpak_smoke)
 
 PORTS = {"x11": 18839, "wayland": 18840}
+# The control channel's token (docs/control-protocol.md), given to the app so this client knows it.
+TOKEN = secrets.token_hex(32)
 REQUESTS = [
-    {"id": 1, "method": "ui.inspect", "params": {}},
+    {"id": 1, "method": "ui.inspect", "params": {}, "token": TOKEN},
     {"id": 2, "method": "engine.execute",
      "params": {"command": "solid.box", "params": {"length": 30, "width": 20, "height": 10}}},
     {"id": 3, "method": "document.inspect", "params": {"measure": True}},
@@ -67,7 +70,7 @@ def run_backend(backend, out):
     runtime = Path(f"/run/user/{os.getuid()}")
     if not runtime.is_dir():
         raise RuntimeError(f"{runtime} is missing: snaps expect the login session's runtime directory")
-    env = dict(os.environ, XDG_RUNTIME_DIR=str(runtime))
+    env = dict(os.environ, XDG_RUNTIME_DIR=str(runtime), SOLIDCRAFT_CONTROL_TOKEN=TOKEN)
     for name in ("WAYLAND_DISPLAY", "WAYLAND_SOCKET", "DISPLAY", "SOLIDCRAFT_WAYLAND", "SOLVECRAFT_WAYLAND"):
         env.pop(name, None)
     # The snap can write to the (non-hidden) home folder, not to the host's /tmp.

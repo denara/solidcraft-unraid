@@ -61,7 +61,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     let mut open = true;
     let mut report: Option<String> = None;
     let mut delete: Option<Option<String>> = None;
-    crate::frame::window(ctx, "Crash Reports", crate::frame::Width::Wide)
+    crate::frame::window(ctx, crate::i18n::tr_label("Crash Reports"), crate::frame::Width::Wide)
         .id(egui::Id::new("sc_crash_reports"))
         .open(&mut open)
         .default_size(vec2(620.0, 420.0))
@@ -84,7 +84,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
             }
             ui.separator();
             if app.crashes.reports.is_empty() {
-                ui.label("No crash reports.");
+                ui.label(crate::i18n::tr_label("No crash reports."));
             }
             egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
                 for r in &app.crashes.reports {
@@ -119,7 +119,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                 ui.label(RichText::new(&app.crashes.note).color(t.text_dim));
             }
             ui.separator();
-            if !app.crashes.reports.is_empty() && ui.button("Delete all").clicked() {
+            if !app.crashes.reports.is_empty() && ui.button(crate::i18n::tr_label("Delete all")).clicked() {
                 delete = Some(None);
             }
         });

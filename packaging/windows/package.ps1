@@ -88,20 +88,15 @@ New-Item -ItemType Directory -Force -Path $Stage | Out-Null
 Copy-Item (Join-Path $Bin 'solidcraft.exe'), (Join-Path $Bin 'solidcraft-cli.exe'), (Join-Path $Bin 'solvecraft-cli.exe') $Stage
 foreach ($f in 'LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE', 'THIRD-PARTY-LICENSES.txt') { Copy-Item (Join-Path $Root $f) $Stage }
 
-$HostArch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
-$CanRun = ($Arch -ne 'arm64' -or $HostArch -eq 'arm64')
-$Icon = if ($env:SOLIDCRAFT_ICONS) { Join-Path $env:SOLIDCRAFT_ICONS 'solidcraft.ico' } else { Join-Path $Stage 'solidcraft.ico' }
-if (-not (Test-Path $Icon)) {
-  if (-not $CanRun) { throw "no icon: set SOLIDCRAFT_ICONS to a folder with solidcraft.ico (an $Arch CLI can't run on this $HostArch machine)" }
-  Invoke-Native 'draw the icon' { & (Join-Path $Stage 'solidcraft-cli.exe') icon --out $Icon }
-}
+$Icon = if ($env:SOLIDCRAFT_ICONS) { Join-Path $env:SOLIDCRAFT_ICONS 'solidcraft.ico' } else { Join-Path $Root 'assets/icons/app/windows/exports/solidcraft.ico' }
+if (-not (Test-Path $Icon)) { throw "Missing package icon: $Icon" }
 
 # ---- MSI ---------------------------------------------------------------------------------------
 $Msi = Join-Path $Dist "solidcraft-$Version-windows-$Arch.msi"
 Invoke-Native 'wix build' {
-  wix build (Join-Path $PSScriptRoot 'solidcraft.wxs') -arch $Arch `
+  wix build (Join-Path $Root 'assets/platforms/windows/solidcraft.wxs') -arch $Arch `
     -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext `
-    -culture en-US -loc (Join-Path $PSScriptRoot 'solidcraft.en-us.wxl') `
+    -culture en-US -loc (Join-Path $Root 'assets/platforms/windows/solidcraft.en-us.wxl') `
     -d "Version=$MsiVersion" -d "DisplayVersion=$Version" -d "BinDir=$Stage" -d "IconPath=$Icon" `
     -o $Msi
 }

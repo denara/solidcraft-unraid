@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 use solidcraft_geom::Vec2;
-use solidcraft_sketch::CurveKind;
+use solidcraft_sketch::{ConstraintKind, CurveKind};
 
 use crate::Session;
 
@@ -500,7 +500,7 @@ fn text_takes_a_font_and_edit_text_keeps_or_changes_it() {
     // The repository's second font is BIZ UDPGothic. Its "I" is a polygon of two 606 x 145 bars and a 188 x 1369
     // stem in font units, with a capital height of 1567 units, so at 10 mm its area is
     // (2 x 606 x 145 + 188 x 1369) x (10 / 1567)^2 = 17.6385 mm². The built-in Liberation Sans "I" is 13.5557 mm².
-    let font = concat!(env!("CARGO_MANIFEST_DIR"), "/../../apps/solidcraft-web/fonts/BIZUDPGothic-Regular.ttf");
+    let font = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/fonts/biz-udp-gothic/BIZUDPGothic-Regular.ttf");
     let near = |s: &Session, want: f64| {
         let a = profiles(s);
         assert!(a.len() == 1 && (a[0] - want).abs() < 1e-3, "{a:?} against {want}");
@@ -721,6 +721,66 @@ fn offset_free_form_curves() {
     let e = ids(&run(&mut s, "sketch.ellipse", json!({"center": [100, 0], "major": [110, 0], "minor_radius": 5}))["curves"])[0].clone();
     let r = run(&mut s, "sketch.offset", json!({"curves": [e], "distance": 1, "side": [100, 20]}));
     assert_eq!(ids(&r["curves"]).len(), 1, "{r}");
+}
+
+#[test]
+fn irregular_closed_spline_offset_certificate_edits_undoes_and_reopens() {
+    // Public-safe reproduction of #971: the fit uses chord-length parameters,
+    // while its exact offset's speed varies across eight unequal source spans.
+    let mut s = new_sketch();
+    run(
+        &mut s,
+        "sketch.spline.fit_point",
+        json!({
+            "points":[[-17,15],[0,8],[17,13],[15,0],[5,-7],[-1,-14],[-9,-1],[-21,-1]],
+            "periodic":true
+        }),
+    );
+    let original = sketch(&s);
+    let before = s.doc.to_json();
+    let result = run(&mut s, "sketch.offset", json!({"curves":["s1"],"distance":2.0,"chain":true}));
+    let output = result["curves"][0].as_str().unwrap().to_string();
+    let parameter = result["param"].as_str().unwrap().to_string();
+    let point_ids = sketch(&s).curves[1].kind.point_ids();
+    let verify = |s: &Session, distance: f64| {
+        let state = s.world_state();
+        let sk = &state.sketch(1).unwrap().sketch;
+        assert_eq!(sk.curves[0], original.curves[0]);
+        assert_eq!(&sk.points[..original.points.len()], &original.points);
+        let index = sk.curve_index(&output).unwrap();
+        assert_eq!(sk.curves[index].kind.point_ids(), point_ids);
+        assert!(matches!(sk.curves[index].kind, CurveKind::Spline { periodic: true, .. }));
+        let exact = sk.exact_segs(0).unwrap();
+        let fitted = sk.exact_segs(index).unwrap();
+        let mut max_error = 0.0_f64;
+        for curve in &fitted {
+            for j in 0..=8 {
+                let p = curve.point_at(j as f64 / 8.0);
+                let normal_distance = exact.iter().map(|s| s.point_at(s.closest_param(p)).dist(p)).fold(f64::INFINITY, f64::min);
+                max_error = max_error.max((normal_distance - distance).abs());
+            }
+        }
+        assert!(max_error < solidcraft_sketch::OFFSET_TOLERANCE, "normal-distance error {max_error}");
+        eprintln!("#971 offset {distance} mm: maximum sampled normal-distance error {max_error} mm");
+        assert_eq!(sk.freeform_offsets.len(), 1);
+        assert_eq!(sk.freeform_offsets[0].divisions, 32);
+        sk.validate_freeform_offsets().unwrap();
+        sk.validate_periodic_splines().unwrap();
+        assert_eq!(state.sketch(1).unwrap().profiles.len(), 2);
+    };
+    verify(&s, 2.0);
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!(s.doc.to_json(), before);
+    run(&mut s, "edit.redo", json!({}));
+    verify(&s, 2.0);
+    run(&mut s, "parameters.change", json!({"name":parameter,"expression":"3 mm"}));
+    verify(&s, 3.0);
+    run(&mut s, "edit.undo", json!({}));
+    verify(&s, 2.0);
+    let mut reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    verify(&reopened, 2.0);
+    run(&mut reopened, "parameters.change", json!({"name":parameter,"expression":"3 mm"}));
+    verify(&reopened, 3.0);
 }
 
 #[test]
@@ -1017,4 +1077,408 @@ fn periodic_offset_extrusion_survives_post_extrude_span_changes_and_cold_reopen(
         assert_eq!(s.doc.to_json(), edited);
         run(&mut s, "edit.undo", json!({}));
     }
+}
+
+/// The bounding box of a set of sketch curves, from their polylines.
+fn bounds(sk: &solidcraft_sketch::Sketch, curves: &[String]) -> (Vec2, Vec2) {
+    let mut lo = Vec2::new(f64::INFINITY, f64::INFINITY);
+    let mut hi = Vec2::new(f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for id in curves {
+        let i = sk.curve_index(id).unwrap();
+        for p in sk.polyline(i) {
+            lo = Vec2::new(lo.x.min(p.x), lo.y.min(p.y));
+            hi = Vec2::new(hi.x.max(p.x), hi.y.max(p.y));
+        }
+    }
+    (lo, hi)
+}
+
+fn box_is(sk: &solidcraft_sketch::Sketch, curves: &[String], lo: [f64; 2], hi: [f64; 2]) -> bool {
+    let (a, b) = bounds(sk, curves);
+    a.dist(Vec2::new(lo[0], lo[1])) < 1e-6 && b.dist(Vec2::new(hi[0], hi[1])) < 1e-6
+}
+
+fn side_curves(v: &Value, i: usize) -> Vec<String> {
+    ids(&v["sides"][i]["curves"])
+}
+
+#[test]
+fn offset_symmetric_puts_the_same_distance_on_both_sides_of_a_chain() {
+    let mut s = new_sketch();
+    let r = run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [40, 30]}));
+    let l = ids(&r["curves"]);
+    // A 40 by 30 rectangle offset symmetrically by 5: one chain 5 inside (5,5)-(35,25), a
+    // 30 by 20 rectangle, and one 5 outside (-5,-5)-(45,35), a 50 by 40 rectangle.
+    let o = run(&mut s, "sketch.offset", json!({"curves": [l[0]], "distance": 5, "symmetric": true}));
+    assert_eq!(o["sides"].as_array().map(Vec::len), Some(2), "{o}");
+    assert_eq!(ids(&o["curves"]).len(), 8, "{o}");
+    let (a, b) = (side_curves(&o, 0), side_curves(&o, 1));
+    assert_eq!((a.len(), b.len()), (4, 4), "{o}");
+    let sk = sketch(&s);
+    // The chain's walk direction decides which side is first, so match on the sizes.
+    let inner = box_is(&sk, &a, [5.0, 5.0], [35.0, 25.0]) && box_is(&sk, &b, [-5.0, -5.0], [45.0, 35.0]);
+    let outer = box_is(&sk, &b, [5.0, 5.0], [35.0, 25.0]) && box_is(&sk, &a, [-5.0, -5.0], [45.0, 35.0]);
+    assert!(inner || outer, "{:?} {:?}", bounds(&sk, &a), bounds(&sk, &b));
+    // The two distances are equal and opposite.
+    let d: Vec<f64> = o["sides"].as_array().unwrap().iter().map(|x| x["distance"].as_f64().unwrap()).collect();
+    assert!(close(d[0], -d[1]) && close(d[0].abs(), 5.0), "{d:?}");
+    // Each side has four parallels and a persistent offset-distance driver.
+    assert_eq!(ids(&o["constraints"]).len(), 10, "{o}");
+    assert_eq!(sk.constraints.iter().filter(|c| matches!(c.kind, ConstraintKind::Parallel { .. })).count(), 8);
+    assert_eq!(sk.constraints.iter().filter(|c| matches!(c.kind, ConstraintKind::OffsetDistance { .. })).count(), 2);
+}
+
+#[test]
+fn offset_two_sides_takes_an_independent_distance_the_other_way() {
+    let mut s = new_sketch();
+    let r = run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [40, 30]}));
+    let l = ids(&r["curves"]);
+    // `side` sends `distance` 5 inward, so `distance2` 3 goes outward: (5,5)-(35,25), a 30 by
+    // 20 rectangle, and (-3,-3)-(43,33), a 46 by 36 one.
+    let o = run(&mut s, "sketch.offset", json!({"curves": [l[0]], "distance": 5, "distance2": 3, "side": [20, 15]}));
+    assert_eq!(o["sides"].as_array().map(Vec::len), Some(2), "{o}");
+    let sk = sketch(&s);
+    assert!(box_is(&sk, &side_curves(&o, 0), [5.0, 5.0], [35.0, 25.0]), "{:?}", bounds(&sk, &side_curves(&o, 0)));
+    assert!(box_is(&sk, &side_curves(&o, 1), [-3.0, -3.0], [43.0, 33.0]), "{:?}", bounds(&sk, &side_curves(&o, 1)));
+}
+
+#[test]
+fn offset_two_sides_of_one_curve_follows_the_sign_of_the_distance() {
+    let mut s = new_sketch();
+    let r = run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [40, 30]}));
+    let l = ids(&r["curves"]);
+    // The bottom edge runs (0,0)-(40,0). Chain off, distance -5 and distance2 3: one line at
+    // y = -5 and one at y = 3, each 40 long.
+    let f = run(&mut s, "sketch.offset", json!({"curves": [l[0]], "distance": -5, "distance2": 3, "chain": false}));
+    assert_eq!(f["sides"].as_array().map(Vec::len), Some(2), "{f}");
+    let sk = sketch(&s);
+    let (one, two) = (bounds(&sk, &side_curves(&f, 0)), bounds(&sk, &side_curves(&f, 1)));
+    assert!(close(one.0.y, one.1.y) && close(two.0.y, two.1.y), "{one:?} {two:?}");
+    assert!(close(one.0.y, -5.0) && close(two.0.y, 3.0), "{one:?} {two:?}");
+    assert!(close(one.1.x - one.0.x, 40.0) && close(two.1.x - two.0.x, 40.0), "{one:?} {two:?}");
+}
+
+#[test]
+fn offset_both_sides_of_a_rounded_boundary_keep_separate_associations() {
+    let mut s = new_sketch();
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [-38, -33], "p1": [38, 33]}));
+    run(&mut s, "sketch.fillet", json!({"points": ["l1.start", "l1.end", "l2.end", "l3.end"], "radius": "1 mm"}));
+    // A 76 by 66 boundary with 1 mm corners, offset symmetrically by 0.2: 75.6 by 65.6 with
+    // 0.8 mm corners inside, and 76.4 by 66.4 with 1.2 mm corners outside.
+    let o = run(&mut s, "sketch.offset", json!({"curves": ["l1"], "distance": 0.2, "symmetric": true}));
+    let sides = o["sides"].as_array().unwrap().clone();
+    assert_eq!(sides.len(), 2, "{o}");
+    // Each side is its own offset association; a single side still reports the one it always did.
+    let associations: Vec<&str> = sides.iter().filter_map(|x| x["association"].as_str()).collect();
+    assert_eq!(associations.len(), 2, "{o}");
+    assert_ne!(associations[0], associations[1], "{o}");
+    assert!(o["association"].is_null(), "two sides name no single association: {o}");
+    let sk = sketch(&s);
+    assert_eq!(sk.offsets.len(), 2);
+    for association in &associations {
+        assert_eq!(sk.offset_boundary(association).unwrap().len(), 8, "{association}");
+    }
+    let radii = |curves: &[String]| {
+        let mut r: Vec<f64> = curves
+            .iter()
+            .filter_map(|id| {
+                let CurveKind::Arc { c, a, .. } = sk.curves.get(sk.curve_index(id)?)?.kind else { return None };
+                Some(sk.point(c)?.dist(sk.point(a)?))
+            })
+            .collect();
+        r.sort_by(f64::total_cmp);
+        r
+    };
+    let (a, b) = (side_curves(&o, 0), side_curves(&o, 1));
+    let (ra, rb) = (radii(&a), radii(&b));
+    assert_eq!((ra.len(), rb.len()), (4, 4), "{ra:?} {rb:?}");
+    let shrunk = ra.iter().all(|r| close(*r, 0.8)) && rb.iter().all(|r| close(*r, 1.2));
+    let grown = rb.iter().all(|r| close(*r, 0.8)) && ra.iter().all(|r| close(*r, 1.2));
+    assert!(shrunk || grown, "{ra:?} {rb:?}");
+    let small = if shrunk { &a } else { &b };
+    let large = if shrunk { &b } else { &a };
+    assert!(box_is(&sk, small, [-37.8, -32.8], [37.8, 32.8]), "{:?}", bounds(&sk, small));
+    assert!(box_is(&sk, large, [-38.2, -33.2], [38.2, 33.2]), "{:?}", bounds(&sk, large));
+}
+
+#[test]
+fn offset_both_sides_of_a_circle_are_concentric() {
+    let mut s = new_sketch();
+    let c = ids(&run(&mut s, "sketch.circle.center", json!({"center": [0, 0], "radius": 10}))["curves"])[0].clone();
+    // Symmetric by 3 on a 10 mm circle: a 7 mm circle and a 13 mm one, both about the centre.
+    let o = run(&mut s, "sketch.offset", json!({"curves": [c], "distance": 3, "symmetric": true}));
+    let sk = sketch(&s);
+    let radius = |id: &str| match sk.curves.get(sk.curve_index(id).unwrap()).unwrap().kind {
+        CurveKind::Circle { c, r } => (sk.point(c).unwrap(), r),
+        _ => panic!("not a circle"),
+    };
+    let made = ids(&o["curves"]);
+    assert_eq!(made.len(), 2, "{o}");
+    let (p0, r0) = radius(&made[0]);
+    let (p1, r1) = radius(&made[1]);
+    assert!(p0.dist(Vec2::default()) < 1e-9 && p1.dist(Vec2::default()) < 1e-9);
+    assert!(close(r0, 7.0) && close(r1, 13.0), "{r0} {r1}");
+    // A circle whose inward side would be offset away to nothing is refused, both sides with it.
+    assert!(s.execute("sketch.offset", &json!({"curves": [c], "distance": 10, "symmetric": true})).is_err());
+}
+
+#[test]
+fn offset_refuses_the_combinations_that_would_be_guesswork() {
+    let mut s = new_sketch();
+    let r = run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [40, 30]}));
+    let l = ids(&r["curves"]);
+    let refused = |s: &mut Session, p: Value| s.execute("sketch.offset", &p).unwrap_err().to_string();
+    let e = refused(&mut s, json!({"curves": [l[0]], "distance": 5, "symmetric": true, "side": [20, 15]}));
+    assert!(e.contains("no side left to pick"), "{e}");
+    let e = refused(&mut s, json!({"curves": [l[0]], "distance": 5, "symmetric": true, "distance2": 3}));
+    assert!(e.contains("`distance2` or `symmetric`"), "{e}");
+    let e = refused(&mut s, json!({"curves": [l[0]], "distance": 5, "distance2": -3}));
+    assert!(e.contains("`distance2` must be a positive length"), "{e}");
+    let e = refused(&mut s, json!({"curves": [l[0]], "distance": 5, "distance2": 0}));
+    assert!(e.contains("`distance2` must be a positive length"), "{e}");
+    let e = refused(&mut s, json!({"curves": [l[0]], "distance": 5, "direction": "negative"}));
+    assert!(e.contains("no negative direction"), "{e}");
+    let e = refused(&mut s, json!({"curves": [l[0]], "distance": 5, "direction": "sideways"}));
+    assert!(e.contains("unknown direction"), "{e}");
+    // An inward side the shape cannot hold refuses the whole command, the outward side with it.
+    let e = refused(&mut s, json!({"curves": [l[0]], "distance": 20, "symmetric": true}));
+    assert!(e.contains("larger than the shape allows"), "{e}");
+    assert_eq!(sketch(&s).curves.len(), 4, "a refused offset leaves the sketch alone");
+    // `direction: symmetric` is the word `solid.extrude` uses, and it means the same here.
+    let o = run(&mut s, "sketch.offset", json!({"curves": [l[0]], "distance": 5, "direction": "symmetric"}));
+    assert_eq!(o["sides"].as_array().map(Vec::len), Some(2), "{o}");
+}
+
+#[test]
+fn offset_one_side_still_reports_one_set_of_curves_and_its_association() {
+    let mut s = new_sketch();
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [-38, -33], "p1": [38, 33]}));
+    run(&mut s, "sketch.fillet", json!({"points": ["l1.start", "l1.end", "l2.end", "l3.end"], "radius": "1 mm"}));
+    let o = run(&mut s, "sketch.offset", json!({"curves": ["l1"], "distance": 0.2, "side": [0, 0]}));
+    assert_eq!(o["sides"].as_array().map(Vec::len), Some(1), "{o}");
+    let association = o["association"].as_str().unwrap().to_string();
+    assert_eq!(o["sides"][0]["association"].as_str(), Some(association.as_str()), "{o}");
+    assert_eq!(ids(&o["curves"]), ids(&o["sides"][0]["curves"]), "{o}");
+    assert!(close(o["sides"][0]["distance"].as_f64().unwrap().abs(), 0.2), "{o}");
+}
+
+#[test]
+fn offset_driver_edits_reopens_and_undoes_without_moving_sources() {
+    let mut s = new_sketch();
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0":[0,0],"p1":[40,30]}));
+    let original = sketch(&s).points.clone();
+    let result = run(&mut s, "sketch.offset", json!({"curves":["l1"],"distance":"2 mm","side":[20,-10]}));
+    let param = result["param"].as_str().unwrap().to_string();
+    let outputs = ids(&result["curves"]);
+    let check = |s: &Session, distance: f64| {
+        let state = s.world_state();
+        let sk = &state.sketch(1).unwrap().sketch;
+        assert!((sk.offset_distance(&outputs[0]).unwrap().abs() - distance).abs() < 1e-8);
+        let constraint = sk.constraints.iter().find(|c| c.param.as_deref() == Some(&param)).unwrap();
+        assert!(solidcraft_sketch::dim_frame(sk, &constraint.kind).is_some());
+        for (a, b) in sk.points.iter().zip(&original) {
+            assert!(a.pos.dist(b.pos) < 1e-7);
+        }
+        let boundary =
+            outputs.iter().flat_map(|id| sk.segs(sk.curve_index(id).unwrap())).flat_map(|s| [s.point_at(0.0), s.point_at(1.0)]).collect::<Vec<_>>();
+        let min_x = boundary.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+        let max_x = boundary.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
+        let min_y = boundary.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
+        let max_y = boundary.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);
+        assert!((min_x + distance).abs() < 1e-7 && (max_x - 40.0 - distance).abs() < 1e-7);
+        assert!((min_y + distance).abs() < 1e-7 && (max_y - 30.0 - distance).abs() < 1e-7);
+    };
+    check(&s, 2.0);
+    run(&mut s, "parameters.change", json!({"name":param,"expression":"4 mm"}));
+    check(&s, 4.0);
+    run(&mut s, "edit.undo", json!({}));
+    check(&s, 2.0);
+    run(&mut s, "edit.redo", json!({}));
+    check(&s, 4.0);
+    let mut reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    check(&reopened, 4.0);
+    run(&mut reopened, "parameters.change", json!({"name":param,"expression":"3 mm"}));
+    check(&reopened, 3.0);
+}
+
+#[test]
+fn offset_driver_covers_disconnected_selections_and_refuses_bad_values_atomically() {
+    let mut s = new_sketch();
+    run(&mut s, "sketch.line", json!({"points":[[0,0],[10,0]]}));
+    run(&mut s, "sketch.circle.center", json!({"center":[30,0],"radius":10}));
+    let result = run(&mut s, "sketch.offset", json!({"curves":["l1","c1"],"distance":"2 mm","chain":false}));
+    assert_eq!(result["curves"].as_array().unwrap().len(), 2);
+    let param = result["param"].as_str().unwrap();
+    run(&mut s, "parameters.change", json!({"name":param,"expression":"3 mm"}));
+    assert!(sketch(&s).offsets.iter().all(|offset| (offset.distance.abs() - 3.0).abs() < 1e-8));
+    let before = s.doc.to_json();
+    let undo = s.undo.len();
+    for value in [json!(0), json!("0 mm"), json!("1 deg"), json!("1e20 mm")] {
+        assert!(s.execute("sketch.offset", &json!({"curves":["l1"],"distance":value})).is_err());
+        assert_eq!(s.doc.to_json(), before);
+        assert_eq!(s.undo.len(), undo);
+    }
+    assert!(s.execute("sketch.offset", &json!({"curves":["l1","missing"],"distance":1})).is_err());
+    assert_eq!(s.doc.to_json(), before);
+}
+
+#[test]
+fn offset_driver_delete_and_break_remove_annotation_and_preserve_geometry() {
+    for source in ["rectangle", "ellipse"] {
+        let mut s = new_sketch();
+        let id = if source == "rectangle" {
+            run(&mut s, "sketch.rectangle.two_point", json!({"p0":[0,0],"p1":[40,30]}));
+            "l1"
+        } else {
+            run(&mut s, "sketch.ellipse", json!({"center":[0,0],"major":[20,0],"minor_radius":10}));
+            "e1"
+        };
+        let result = run(&mut s, "sketch.offset", json!({"curves":[id],"distance":1}));
+        let outputs = ids(&result["curves"]);
+        let param = result["param"].as_str().unwrap();
+        run(&mut s, "sketch.offset.break", json!({"curve":outputs[0]}));
+        assert!(!sketch(&s).constraints.iter().any(|c| c.param.as_deref() == Some(param)));
+        assert!(s.doc.param(param).is_none());
+        assert!(outputs.iter().all(|id| sketch(&s).curve_index(id).is_some()));
+        run(&mut s, "edit.undo", json!({}));
+        assert!(sketch(&s).constraints.iter().any(|c| c.param.as_deref() == Some(param)));
+        run(&mut s, "sketch.delete", json!({"entities":outputs}));
+        assert!(s.doc.param(param).is_none());
+    }
+}
+
+#[test]
+fn offset_driver_uses_design_units_and_dimension_delete_freezes_current_distance() {
+    let mut s = new_sketch();
+    run(&mut s, "document.units", json!({"units":"in"}));
+    run(&mut s, "sketch.line", json!({"points":[[0,0],[100,0]]}));
+    let result = run(&mut s, "sketch.offset", json!({"curves":["l1"],"distance":"0.1","chain":false}));
+    let param = result["param"].as_str().unwrap();
+    assert!((sketch(&s).offsets[0].distance - 2.54).abs() < 1e-8);
+    run(&mut s, "parameters.change", json!({"name":param,"expression":"0.2 in"}));
+    let sk = sketch(&s);
+    let annotation = sk.constraints.iter().find(|c| c.param.as_deref() == Some(param)).unwrap().id.clone();
+    run(&mut s, "sketch.delete", json!({"entities":[annotation]}));
+    assert!((sketch(&s).offsets[0].distance - 5.08).abs() < 1e-8);
+    assert!(s.doc.param(param).is_none());
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    assert!((reopened.world_state().sketch(1).unwrap().sketch.offsets[0].distance - 5.08).abs() < 1e-8);
+}
+
+#[test]
+fn offset_driver_arc_first_retires_breaks_undoes_and_reopens() {
+    let mut s = new_sketch();
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0":[-20,-15],"p1":[20,15]}));
+    let fillet = run(&mut s, "sketch.fillet", json!({"points":["l1.start","l1.end","l2.end","l3.end"],"radius":"2 mm"}));
+    let arc = fillet["curves"][0].as_str().unwrap();
+    let result = run(&mut s, "sketch.offset", json!({"curves":[arc],"distance":"1 mm"}));
+    let param = result["param"].as_str().unwrap();
+    run(&mut s, "parameters.change", json!({"name":param,"expression":"3 mm"}));
+    let sk = sketch(&s);
+    let driver = sk.constraints.iter().find(|c| c.param.as_deref() == Some(param)).unwrap();
+    let solidcraft_sketch::ConstraintKind::OffsetDistance { output, .. } = &driver.kind else {
+        panic!("missing offset driver");
+    };
+    let record = sk.offsets.iter().find(|o| o.owns_output(output)).unwrap();
+    assert!(!record.outputs.contains(output), "the dimension's first output arc must be absent from the live boundary");
+    assert!(record.topology.as_ref().unwrap().roles.iter().any(|r| r.output == *output && r.retired));
+    let survivor = sk.offsets[0].outputs.first().unwrap().clone();
+    let before = sk.segs(sk.curve_index(&survivor).unwrap());
+    run(&mut s, "sketch.offset.break", json!({"curve":survivor}));
+    assert!(s.doc.param(param).is_none());
+    assert!(sketch(&s).offsets.is_empty());
+    assert_eq!(sketch(&s).segs(sketch(&s).curve_index(&survivor).unwrap()), before);
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    assert!(reopened.world_state().sketch(1).unwrap().sketch.offsets.is_empty());
+    run(&mut s, "edit.undo", json!({}));
+    assert!(s.doc.param(param).is_some());
+    run(&mut s, "edit.redo", json!({}));
+    assert!(s.doc.param(param).is_none());
+}
+
+#[test]
+fn offset_driver_symmetric_disconnected_sources_share_one_distance() {
+    let mut s = new_sketch();
+    run(&mut s, "sketch.line", json!({"points":[[0,0],[10,0]]}));
+    run(&mut s, "sketch.line", json!({"points":[[20,20],[30,20]]}));
+    let source = sketch(&s).points.clone();
+    let result = run(&mut s, "sketch.offset", json!({"curves":["l1","l2"],"distance":"2 mm","symmetric":true,"chain":false}));
+    assert_eq!(ids(&result["curves"]).len(), 4);
+    assert_eq!(result["sides"].as_array().unwrap().len(), 4);
+    let param = result["param"].as_str().unwrap();
+    assert!(result["sides"].as_array().unwrap().iter().all(|side| side["param"] == param));
+    run(&mut s, "parameters.change", json!({"name":param,"expression":"3 mm"}));
+    let sk = sketch(&s);
+    assert_eq!(sk.offsets.len(), 4);
+    assert!(sk.offsets.iter().all(|offset| (offset.distance.abs() - 3.0).abs() < 1e-8));
+    assert!(sk.points.iter().zip(&source).all(|(a, b)| a.pos.dist(b.pos) < 1e-8));
+    // Breaking one side keeps the shared parameter while another association uses it.
+    let first = result["curves"][0].as_str().unwrap();
+    run(&mut s, "sketch.offset.break", json!({"curve":first}));
+    assert!(s.doc.param(param).is_some());
+    run(&mut s, "parameters.change", json!({"name":param,"expression":"4 mm"}));
+    assert!(sketch(&s).offsets.iter().all(|offset| (offset.distance.abs() - 4.0).abs() < 1e-8));
+}
+
+#[test]
+fn offset_driver_two_sides_edit_independently_and_reopen() {
+    let mut s = new_sketch();
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0":[0,0],"p1":[40,30]}));
+    let result = run(&mut s, "sketch.offset", json!({"curves":["l1"],"distance":"2 mm","distance2":"1 mm","side":[20,15]}));
+    let primary = result["param"].as_str().unwrap();
+    let secondary = result["param2"].as_str().unwrap();
+    assert_ne!(primary, secondary);
+    let inside = side_curves(&result, 0);
+    let outside = side_curves(&result, 1);
+    run(&mut s, "parameters.change", json!({"name":primary,"expression":"4 mm"}));
+    assert!(box_is(&sketch(&s), &inside, [4.0, 4.0], [36.0, 26.0]));
+    assert!(box_is(&sketch(&s), &outside, [-1.0, -1.0], [41.0, 31.0]));
+    run(&mut s, "parameters.change", json!({"name":secondary,"expression":"3 mm"}));
+    let mut reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    run(&mut reopened, "sketch.edit", json!({"sketch":1}));
+    assert!(box_is(&sketch(&reopened), &inside, [4.0, 4.0], [36.0, 26.0]));
+    assert!(box_is(&sketch(&reopened), &outside, [-3.0, -3.0], [43.0, 33.0]));
+    run(&mut s, "edit.undo", json!({}));
+    assert!(box_is(&sketch(&s), &outside, [-1.0, -1.0], [41.0, 31.0]));
+    run(&mut s, "edit.redo", json!({}));
+    assert!(box_is(&sketch(&s), &outside, [-3.0, -3.0], [43.0, 33.0]));
+    let before = s.doc.to_json();
+    for second in [json!(0), json!(-1), json!("1 deg"), json!("1e20 mm")] {
+        assert!(s.execute("sketch.offset", &json!({"curves":["l1"],"distance":1,"distance2":second})).is_err());
+        assert_eq!(s.doc.to_json(), before);
+    }
+}
+
+#[test]
+fn offset_driver_later_groups_never_walk_outputs_created_by_earlier_groups() {
+    let mut s = new_sketch();
+    run(&mut s, "sketch.line", json!({"points":[[0,0],[10,0]]}));
+    run(&mut s, "sketch.line", json!({"points":[[10,2],[20,2]]}));
+    // The first offset ends exactly on the second source; it must not join its chain.
+    let result = run(&mut s, "sketch.offset", json!({"curves":["l1","l2"],"distance":2}));
+    assert_eq!(ids(&result["curves"]).len(), 2);
+    let sk = sketch(&s);
+    assert_eq!(sk.offsets.len(), 2);
+    assert_eq!(sk.offsets[0].sources, vec![("l1".into(), true)]);
+    assert_eq!(sk.offsets[1].sources, vec![("l2".into(), true)]);
+}
+
+#[test]
+fn offset_driver_format18_offsets_keep_fixed_distances_on_upgrade() {
+    let mut s = new_sketch();
+    run(&mut s, "sketch.line", json!({"points":[[0,0],[10,0]]}));
+    let result = run(&mut s, "sketch.offset", json!({"curves":["l1"],"distance":2}));
+    let param = result["param"].as_str().unwrap();
+    let mut doc = (*s.doc).clone();
+    doc.sketch_mut(1).unwrap().constraints.retain(|c| !matches!(c.kind, ConstraintKind::OffsetDistance { .. }));
+    doc.params.retain(|p| p.name != param);
+    let mut json: Value = serde_json::from_str(&doc.to_json()).unwrap();
+    json["format"] = json!("solidcraft/18");
+    let mut reopened = Session::new(solidcraft_doc::Document::from_json(&json.to_string()).unwrap());
+    assert_eq!(reopened.doc.format, "solidcraft/20");
+    run(&mut reopened, "sketch.edit", json!({"sketch":1}));
+    let sk = sketch(&reopened);
+    assert!((sk.offsets[0].distance - 2.0).abs() < 1e-8);
+    assert!(!sk.constraints.iter().any(|c| matches!(c.kind, ConstraintKind::OffsetDistance { .. })));
+    assert_eq!(ids(&result["curves"]).len(), sk.offsets[0].outputs.len());
 }

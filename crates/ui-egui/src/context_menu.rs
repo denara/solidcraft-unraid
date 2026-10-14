@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use solidcraft_engine::Sel;
 
 use crate::theme::Tokens;
+
 use crate::{SolveApp, icons};
 
 /// What a menu is about.
@@ -67,6 +68,8 @@ pub enum Target {
     Canvas {
         id: u64,
     },
+    /// The Section Analysis in the browser's Analysis folder.
+    Section,
     /// A component's Bodies, Sketches or Construction folder.
     Folder {
         component: u64,
@@ -174,6 +177,7 @@ pub enum RenameWhat {
     Feature(u64),
     Component(u64),
     Group(u64),
+    TimelineGroup(u64),
     Canvas(u64),
     View(String),
     Joint(u64),
@@ -184,7 +188,7 @@ pub struct Rename {
     pub what: RenameWhat,
     pub text: String,
     pub at: Pos2,
-    focused: bool,
+    pub(crate) focused: bool,
 }
 
 /// Radial slots, clockwise from the top.
@@ -207,6 +211,18 @@ fn sel_bodies(app: &SolveApp) -> Vec<String> {
         }
     }
     v
+}
+
+/// The sketch a selected sketch curve or point belongs to. Geometry of a sketch that is not
+/// being edited selects as `ExternalSketchCurve` or `ExternalSketchPoint`
+/// (`viewport::hit_candidate`). Those two carry the owning sketch's feature id. The entities of
+/// the sketch being edited are `SketchCurve` and `SketchPoint` instead. The sketch-editing menu
+/// already covers that case.
+fn sel_sketch(app: &SolveApp) -> Option<u64> {
+    app.session.selection.iter().find_map(|s| match s {
+        Sel::ExternalSketchCurve { sketch, .. } | Sel::ExternalSketchPoint { sketch, .. } => Some(*sketch),
+        _ => None,
+    })
 }
 
 /// Bodies the selection touches (bodies, and the bodies of selected faces and edges).
@@ -247,7 +263,8 @@ pub fn target_bodies(app: &SolveApp, target: &Target) -> Vec<String> {
         | Target::Toolbar
         | Target::Workspace
         | Target::NamedViews
-        | Target::NamedView { .. } => Vec::new(),
+        | Target::NamedView { .. }
+        | Target::Section => Vec::new(),
     }
 }
 
@@ -301,6 +318,7 @@ pub fn items(app: &SolveApp, target: &Target) -> Vec<Item> {
         Target::Canvas { id } => crate::browser::canvas_items(app, *id),
         Target::Origin => crate::browser::origin_items(app),
         Target::NamedViews => vec![act("ui.newView", "New Named View", "perspective")],
+        Target::Section => crate::browser::section_items(app),
         Target::Joint { id } => joint_items(app, *id),
         Target::ToolbarCommand { id } => crate::toolbar_custom::command_items(app, id),
         Target::Toolbar => crate::toolbar_custom::toolbar_items(app),
@@ -365,7 +383,16 @@ fn viewport_items(app: &SolveApp) -> Vec<Item> {
         v.push(cmd(app, "edit.redo", "Redo").on(!app.session.redo.is_empty()));
         return v;
     }
-    if has(|s| matches!(s, Sel::Face { .. })) {
+    // A sketch curve or point in the viewport gets the sketch's own menu, the one its browser row
+    // opens, with Edit Sketch among it. Solid geometry in the selection keeps the body menu: a
+    // right-click on a face still offers the face's commands. The picker already prefers a sketch
+    // curve to the face it lies on (`pick_hits` offers curves before faces). A right-click that
+    // resolved to a sketch curve therefore replaces any face in the selection with that curve.
+    // The menu then follows the pick.
+    let solid = has(|s| matches!(s, Sel::Face { .. } | Sel::Edge { .. } | Sel::Vertex { .. } | Sel::Body { .. }));
+    if let Some(sketch) = sel_sketch(app).filter(|_| !solid) {
+        v.extend(sketch_items(app, sketch));
+    } else if has(|s| matches!(s, Sel::Face { .. })) {
         let face = sel.iter().find_map(|s| if let Sel::Face { body, .. } = s { Some(body.clone()) } else { None }).unwrap_or_default();
         let (feature, sketch) = body_feature_and_sketch(app, &face);
         let hidden = app.session.visibility.hidden_bodies.contains(&face);
@@ -835,7 +862,12 @@ pub fn run_item(app: &mut SolveApp, item: &Item, at: Pos2) {
         "ui.tangentChain" => tangent_chain(app),
         "ui.origin" => app.ui.show_origin = !app.ui.show_origin,
         "ui.clear" => drop(app.run("select.clear", json!({}))),
-        "ui.unsection" => drop(app.run("inspect.section", json!({"clear": true}))),
+        "ui.unsection" => {
+            app.tree.hidden_section = None;
+            drop(app.run("inspect.section", json!({"clear": true})));
+        }
+        "ui.editSection" => app.start("inspect.section"),
+        "ui.sectionVisible" => crate::browser::set_section_visible(app, p.get("visible").and_then(Value::as_bool).unwrap_or(true)),
         "ui.fit" => app.animate_view("fit"),
         "ui.home" => app.animate_view("home"),
         // One command for the whole selection: all fixed unless all already are.
@@ -1136,6 +1168,7 @@ pub fn start_rename(app: &mut SolveApp, what: RenameWhat, at: Pos2) {
         RenameWhat::Component(0) => doc.name.clone(),
         RenameWhat::Component(c) => doc.components.iter().find(|x| x.id == *c).map(|x| x.name.clone()).unwrap_or_default(),
         RenameWhat::Group(g) => crate::browser::group_name(app, *g).unwrap_or_default(),
+        RenameWhat::TimelineGroup(g) => doc.timeline_groups.iter().find(|group| group.id == *g).map(|group| group.name.clone()).unwrap_or_default(),
         RenameWhat::Canvas(c) => doc.canvases.iter().find(|x| x.id == *c).map(|x| x.name.clone()).unwrap_or_default(),
         RenameWhat::View(v) => v.clone(),
         RenameWhat::Joint(j) => doc.assembly.joints.iter().find(|x| x.id == *j).map(|x| x.name.clone()).unwrap_or_default(),
@@ -1143,7 +1176,7 @@ pub fn start_rename(app: &mut SolveApp, what: RenameWhat, at: Pos2) {
     app.menu.rename = Some(Rename { what, text, at, focused: false });
 }
 
-fn commit_rename(app: &mut SolveApp, r: &Rename) {
+pub(crate) fn commit_rename(app: &mut SolveApp, r: &Rename) {
     let name = r.text.trim().to_string();
     if name.is_empty() {
         return;
@@ -1161,6 +1194,7 @@ fn commit_rename(app: &mut SolveApp, r: &Rename) {
         RenameWhat::Feature(f) => drop(app.run("timeline.rename", json!({ "feature": f, "name": name }))),
         RenameWhat::Component(c) => drop(app.run("component.rename", json!({ "component": c, "name": name }))),
         RenameWhat::Group(g) => crate::browser::group_action(app, "ui.renameGroup", &json!({ "group": g, "name": name })),
+        RenameWhat::TimelineGroup(g) => drop(app.run("timeline.rename_group", json!({ "group": g, "name": name }))),
         RenameWhat::Canvas(c) => drop(app.run("canvas.edit", json!({ "canvas": c, "name": name }))),
         RenameWhat::View(v) => drop(app.run("view.rename", json!({ "view": v, "name": name }))),
         RenameWhat::Joint(j) => drop(app.run("joint.edit", json!({ "joint": j, "name": name }))),
@@ -1405,16 +1439,8 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
             let painter = ui.painter_at(r.expand(4.0));
             let font = FontId::proportional(13.0);
             // Centre: a ring with a pointer toward the hot direction.
-            painter.circle(c, 15.0, t.panel.gamma_multiply(0.92), Stroke::new(1.0, t.border));
-            if let (Some(k), Some(p)) = (hot, pointer) {
-                let d = (p - c).normalized();
-                painter.line_segment(
-                    [c + d * 6.0, c + d * 15.0],
-                    Stroke::new(3.0, if radial.get(k).is_some_and(|i| i.enabled) { t.accent } else { t.border }),
-                );
-            } else {
-                painter.circle_filled(c, 3.0, t.text_dim);
-            }
+            let direction = hot.zip(pointer).map(|(k, p)| ((p - c).normalized(), radial.get(k).is_some_and(|i| i.enabled)));
+            crate::icons::glyphs::radial_centre(&painter, c, direction, t);
             for (k, item) in radial.iter().enumerate() {
                 let display_label = crate::i18n::tr_label(&item.label);
                 let galley = painter.layout_no_wrap(display_label.to_string(), font.clone(), if item.enabled { t.text } else { t.text_dim });
@@ -1566,13 +1592,18 @@ pub fn list_row_lit(ui: &mut egui::Ui, item: &Item, lit: bool) -> Option<Item> {
 }
 
 fn show_rename(app: &mut SolveApp, ctx: &egui::Context) {
+    // Feature-history folders own their editor inside the row. Keep the shared rename state so
+    // automation and keyboard handling still use the same path, but do not draw the floating box.
+    if app.preferences.timeline_left && matches!(app.menu.rename.as_ref().map(|rename| &rename.what), Some(RenameWhat::TimelineGroup(_))) {
+        return;
+    }
     let Some(mut r) = app.menu.rename.take() else { return };
     let t = Tokens::get();
     let mut done: Option<bool> = None;
     let resp = crate::frame::area(egui::Id::new("sc_rename")).fixed_pos(r.at).constrain(true).order(egui::Order::Foreground).show(ctx, |ui| {
         menu_frame(ui, |ui| {
             ui.add_space(2.0);
-            ui.label(egui::RichText::new("Rename").size(11.0).color(t.text_dim));
+            ui.label(egui::RichText::new(crate::i18n::tr_label("Rename")).size(11.0).color(t.text_dim));
             let te = ui.add(egui::TextEdit::singleline(&mut r.text).desired_width(200.0).id(egui::Id::new("sc_rename_text")));
             if !r.focused {
                 // Start with the whole name selected, ready to type over.
@@ -1629,27 +1660,27 @@ fn show_props(app: &mut SolveApp, ctx: &egui::Context) {
                 let total = &v["total"];
                 let bodies = v["bodies"].as_array().cloned().unwrap_or_default();
                 if let [b] = bodies.as_slice() {
-                    ui.label("Material");
+                    ui.label(crate::i18n::tr_label("Material"));
                     ui.label(b["material"].as_str().unwrap_or("Default"));
                     ui.end_row();
-                    ui.label("Density");
+                    ui.label(crate::i18n::tr_label("Density"));
                     ui.label(format!("{:.3} g/cm³", f(b, "density_g_cm3")));
                     ui.end_row();
                 }
-                ui.label("Mass");
+                ui.label(crate::i18n::tr_label("Mass"));
                 ui.label(format!("{:.3} g", f(total, "mass_g")));
                 ui.end_row();
-                ui.label("Volume");
+                ui.label(crate::i18n::tr_label("Volume"));
                 ui.label(crate::prefs::show_mm(app, f(total, "volume_mm3"), 3));
                 ui.end_row();
-                ui.label("Area");
+                ui.label(crate::i18n::tr_label("Area"));
                 ui.label(crate::prefs::show_mm(app, f(total, "area_mm2"), 2));
                 ui.end_row();
                 let geometry = if total.get("center_of_mass").is_some() { Some(total) } else { bodies.first().filter(|_| bodies.len() == 1) };
                 if let Some(b) = geometry {
                     if let Some(c) = b["center_of_mass"].as_array() {
                         let c: Vec<String> = c.iter().map(|x| crate::prefs::show_mm_bare(app, x.as_f64().unwrap_or(f64::NAN))).collect();
-                        ui.label("Center of mass");
+                        ui.label(crate::i18n::tr_label("Center of mass"));
                         ui.label(format!("({}) {}", c.join(", "), crate::prefs::unit_scale(&app.session.doc.units).1));
                         ui.end_row();
                     }
@@ -1660,12 +1691,12 @@ fn show_props(app: &mut SolveApp, ctx: &egui::Context) {
                             .zip(z)
                             .map(|(a, z)| crate::prefs::show_mm_bare(app, z.as_f64().unwrap_or(0.0) - a.as_f64().unwrap_or(0.0)))
                             .collect();
-                        ui.label("Bounding box");
+                        ui.label(crate::i18n::tr_label("Bounding box"));
                         ui.label(format!("{} {}", d.join(" × "), crate::prefs::unit_scale(&app.session.doc.units).1));
                         ui.end_row();
                     }
                 }
-                ui.label("Faces / edges / vertices");
+                ui.label(crate::i18n::tr_label("Faces / edges / vertices"));
                 ui.label(format!("{} / {} / {}", total["faces"], total["edges"], total["vertices"]));
                 ui.end_row();
             });

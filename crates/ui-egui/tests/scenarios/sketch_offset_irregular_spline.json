@@ -1,0 +1,22 @@
+[
+ {"note": "#971: a 2 mm offset of this closed irregular fit spline used to exhaust its node limit with an endpoint certificate error. Preview must succeed, Cancel must preserve the source, and OK must commit the preview."},
+ {"call": "engine.execute", "params": {"command": "sketch.create", "params": {"plane": "XY"}}},
+ {"call": "engine.execute", "params": {"command": "sketch.spline.fit_point", "params": {"points": [[-17,15],[0,8],[17,13],[15,0],[5,-7],[-1,-14],[-9,-1],[-21,-1]], "periodic": true}}},
+ {"call": "ui.view", "params": {"view": "top"}},
+ {"start": "sketch.offset"},
+ {"click": {"sketch": [0,8]}},
+ {"until": {"count": {"name": "sketch_preview_curves", "value": 1}}},
+ {"expect": {"dialog": "Offset", "sketch_curves": {"own": 1}, "errors": 0}},
+ {"key": "Escape"},
+ {"expect": {"dialog": null, "sketch_curves": {"own": 1}, "errors": 0}},
+ {"start": "sketch.offset"},
+ {"click": {"sketch": [0,8]}},
+ {"until": {"count": {"name": "sketch_preview_curves", "value": 1}}},
+ {"key": "Enter"},
+ {"expect": {"dialog": null, "sketch_curves": {"own": 2}, "errors": 0}},
+ {"expect": {"query": {"command": "sketch.inspect", "path": ["curves", 1, "periodic"], "value": true}}},
+ {"call": "engine.execute", "params": {"command": "edit.undo", "params": {}}},
+ {"expect": {"sketch_curves": {"own": 1}, "errors": 0}},
+ {"call": "engine.execute", "params": {"command": "edit.redo", "params": {}}},
+ {"expect": {"sketch_curves": {"own": 2}, "errors": 0}}
+]

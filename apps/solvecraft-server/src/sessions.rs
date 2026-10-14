@@ -207,6 +207,9 @@ impl Worker {
     fn start(config: &Config, slot: OwnedSemaphorePermit, mut lease: Lease) -> Result<Self, String> {
         let mut child = Command::new(&config.cli)
             .arg("mcp")
+            .arg("--allow-path")
+            .arg(&config.files)
+            .arg("--quiet")
             .current_dir(&config.files)
             .env_remove("SOLVECRAFT_MCP_TOKEN")
             .env("SOLIDCRAFT_LINK_ROOT", &config.files)

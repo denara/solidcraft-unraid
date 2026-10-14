@@ -3,6 +3,8 @@
 //! tools for free-form curves and slots, text placement, and constraint glyphs. Like `tools`,
 //! these are UI state only: every action runs a command.
 
+use crate::icons::markers::glyph_icon;
+use crate::icons::markers::glyph_letter;
 use std::cell::{Cell, RefCell};
 
 use egui::{Pos2, Stroke};
@@ -14,8 +16,6 @@ use crate::tools::{Kind, Tool};
 use crate::viewport::{Hit, Proj, pick, sketch_point_at};
 
 thread_local! {
-    /// A placed text waiting for its string (position, text so far).
-    static TEXT: RefCell<Option<(Vec2, String)>> = const { RefCell::new(None) };
     /// Shift held this frame.
     static SHIFT: Cell<bool> = const { Cell::new(false) };
     /// Glyphs drawn this frame (constraint id, screen centre) and the selected one.
@@ -337,8 +337,6 @@ enum Mode {
     Points(usize),
     /// Pick sketch entities; `n` run the command (0: until right-click).
     Entities(usize),
-    /// Pick entities until right-click, then one more pick or point (mirror line, centre).
-    EntitiesThen,
     /// Model faces / sketch curves in steps (see the command).
     Steps,
 }
@@ -357,12 +355,10 @@ fn mode(id: &str) -> Option<Mode> {
         "sketch.text" => Mode::Points(1),
         "sketch.edit_text" => Mode::Entities(1),
         "sketch.blend_curve" => Mode::Points(2),
-        "sketch.fillet" | "sketch.chamfer.equal_distance" | "sketch.chamfer.distance_angle" | "sketch.chamfer.two_distance" => Mode::Entities(1),
         "sketch.constraint.curvature" | "sketch.circle.two_tangent" => Mode::Entities(2),
         "sketch.circle.three_tangent" => Mode::Entities(3),
         "sketch.constrainer" | "sketch.constraint.polygon" => Mode::Entities(0),
         "sketch.centerline" => Mode::Entities(1),
-        "sketch.mirror" | "sketch.pattern.circular" | "sketch.pattern.rectangular" => Mode::EntitiesThen,
         "sketch.project_to_surface" | "sketch.intersection_curve" | "sketch.spun_profile" => Mode::Steps,
         _ => return None,
     })
@@ -414,19 +410,12 @@ pub fn hint(id: &str) -> Option<String> {
             "sketch.text" => "Text: click where the text starts",
             "sketch.edit_text" => "Edit Text: click a letter interior or outline",
             "sketch.blend_curve" => "Blend curve: click the ends of two curves",
-            "sketch.fillet" => "Fillet: click the corner of two lines",
-            "sketch.chamfer.equal_distance" | "sketch.chamfer.distance_angle" | "sketch.chamfer.two_distance" => {
-                "Chamfer: click the corner of two lines"
-            }
             "sketch.constraint.curvature" => "Curvature: click two curves that share an end",
             "sketch.circle.two_tangent" => "2-tangent circle: click two curves (the circle goes near the second click)",
             "sketch.circle.three_tangent" => "3-tangent circle: click three curves",
             "sketch.constrainer" => "Constrain: click one or two entities; right-click to apply",
             "sketch.constraint.polygon" => "Polygon: click the lines of a closed chain; right-click to apply",
             "sketch.centerline" => "Centerline: click lines",
-            "sketch.mirror" => "Mirror: click entities, right-click, then click the mirror line",
-            "sketch.pattern.circular" => "Circular pattern: click entities, right-click, then click the centre",
-            "sketch.pattern.rectangular" => "Rectangular pattern: click entities, right-click, then click two points (direction and spacing)",
             "sketch.project_to_surface" => "Project to surface: click curves of other sketches, right-click, then click the face",
             "sketch.intersection_curve" => "Intersection curve: click two faces",
             "sketch.spun_profile" => "Spun profile: click the body, then the axis line",
@@ -465,9 +454,30 @@ fn sketch_entity(app: &SolveApp, hits: &[Hit]) -> Option<(String, bool)> {
     })
 }
 
+/// The two editable curves that meet at sketch point `pi`, in curve order, which is the order
+/// the corner commands resolve them in from a `point` parameter. None unless exactly two meet
+/// there and each is one the command can work on: a line always, an arc only for a fillet.
+pub(crate) fn corner_curves(sk: &solidcraft_engine::sketch::Sketch, pi: usize, arcs_ok: bool) -> Option<(usize, usize)> {
+    use solidcraft_engine::sketch::CurveKind;
+    let curves: Vec<_> = sk
+        .curves
+        .iter()
+        .enumerate()
+        .filter(|(ci, c)| !sk.is_linked_curve(*ci) && c.kind.ends().is_some_and(|(a, b)| a == pi || b == pi))
+        .take(3)
+        .collect();
+    if curves.iter().any(|(_, c)| !(matches!(c.kind, CurveKind::Line { .. }) || arcs_ok && matches!(c.kind, CurveKind::Arc { .. }))) {
+        return None;
+    }
+    match curves[..] {
+        [(a, _), (b, _)] => Some((a, b)),
+        _ => None,
+    }
+}
+
 /// Corner tools accept endpoints shared by two editable curves. Pick among those endpoints
 /// directly so the origin, a circle centre or an overlapping loose point cannot hide a corner.
-pub(super) fn corner_point(app: &SolveApp, proj: &Proj, pos: Pos2, cmd: &str) -> Option<(Vec2, String)> {
+pub(crate) fn corner_point(app: &SolveApp, proj: &Proj, pos: Pos2, arcs_ok: bool) -> Option<(Vec2, String)> {
     let st = app.session.world_state();
     let ss = st.sketch(active_sketch(app)?)?;
     let sk = &ss.sketch;
@@ -479,21 +489,7 @@ pub(super) fn corner_point(app: &SolveApp, proj: &Proj, pos: Pos2, cmd: &str) ->
             if distance >= 8.0 {
                 return None;
             }
-            let curves: Vec<_> = sk
-                .curves
-                .iter()
-                .enumerate()
-                .filter(|(ci, c)| !sk.is_linked_curve(*ci) && c.kind.ends().is_some_and(|(a, b)| a == pi || b == pi))
-                .take(3)
-                .collect();
-            if curves.len() != 2
-                || curves.iter().any(|(_, c)| {
-                    !matches!(c.kind, solidcraft_engine::sketch::CurveKind::Line { .. })
-                        && (cmd != "sketch.fillet" || !matches!(c.kind, solidcraft_engine::sketch::CurveKind::Arc { .. }))
-                })
-            {
-                return None;
-            }
+            corner_curves(sk, pi, arcs_ok)?;
             Some((distance, point.pos, point.id.clone()))
         })
         .min_by(|a, b| a.0.total_cmp(&b.0))
@@ -516,21 +512,6 @@ fn curve_len(app: &SolveApp, id: &str) -> f64 {
     let st = app.session.world_state();
     let Some(ss) = active_sketch(app).and_then(|s| st.sketch(s)) else { return 10.0 };
     ss.sketch.curve_index(id).map(|c| ss.sketch.polyline(c).windows(2).map(|w| w[0].dist(w[1])).sum::<f64>()).unwrap_or(10.0)
-}
-
-/// Lines meeting at a sketch point.
-fn corner_len(app: &SolveApp, point: &str) -> f64 {
-    let st = app.session.world_state();
-    let Some(ss) = active_sketch(app).and_then(|s| st.sketch(s)) else { return 10.0 };
-    let sk = &ss.sketch;
-    let Some(q) = sk.resolve_point(point) else { return 10.0 };
-    sk.curves
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| c.kind.uses(q) && matches!(c.kind, solidcraft_engine::sketch::CurveKind::Line { .. }))
-        .map(|(i, _)| sk.polyline(i).windows(2).map(|w| w[0].dist(w[1])).sum::<f64>())
-        .fold(f64::INFINITY, f64::min)
-        .min(1e6)
 }
 
 fn round_nice(x: f64) -> f64 {
@@ -701,12 +682,6 @@ pub fn on_click(app: &mut SolveApp, tool: &mut Tool, proj: &Proj, pos: Pos2) {
             place_point(app, tool, p);
         }
         Mode::Entities(n) => {
-            if cmd == "sketch.fillet" || cmd.starts_with("sketch.chamfer.") {
-                if let Some((_, id)) = corner_point(app, proj, pos, cmd) {
-                    run_corner(app, cmd, &id);
-                }
-                return;
-            }
             if cmd == "sketch.edit_text" {
                 let selection = hits.first().and_then(|hit| match hit {
                     Hit::SketchCurve { sketch, id, .. } if Some(*sketch) == active_sketch(app) => {
@@ -735,45 +710,6 @@ pub fn on_click(app: &mut SolveApp, tool: &mut Tool, proj: &Proj, pos: Pos2) {
                 run_entities(app, tool);
                 tool.picks.clear();
                 tool.pts.clear();
-            }
-        }
-        Mode::EntitiesThen => {
-            // Stage 2 (after a right-click) is marked by a "|" pick.
-            if tool.picks.last().is_some_and(|x| x == "|") {
-                let ents: Vec<String> = tool.picks.iter().filter(|x| *x != "|").cloned().collect();
-                match cmd {
-                    "sketch.mirror" => {
-                        if let Some((line, false)) = sketch_entity(app, &hits) {
-                            let _ = app.run(cmd, json!({"entities": ents, "line": line}));
-                            tool.picks.clear();
-                        }
-                    }
-                    "sketch.pattern.circular" => {
-                        if let Some(p) = at {
-                            let _ = app.run(cmd, json!({"entities": ents, "center": arg(&p), "count": 6}));
-                            tool.picks.clear();
-                        }
-                    }
-                    _ => {
-                        if let Some(p) = at {
-                            tool.pts.push(p);
-                            if tool.pts.len() >= 2 {
-                                let d = tool.pts[1].0 - tool.pts[0].0;
-                                if d.len() > 1e-9 {
-                                    let _ = app.run(cmd, json!({"entities": ents, "dir": xy(d), "count": 3, "spacing": d.len()}));
-                                }
-                                tool.picks.clear();
-                                tool.pts.clear();
-                            }
-                        }
-                    }
-                }
-                return;
-            }
-            if let Some((id, _)) = sketch_entity(app, &hits)
-                && !tool.picks.contains(&id)
-            {
-                tool.picks.push(id);
             }
         }
         Mode::Steps => match cmd {
@@ -861,28 +797,12 @@ fn run_points(app: &mut SolveApp, t: &Tool) {
             _ => return,
         },
         ("sketch.text", [at]) => {
-            let at = at.0;
-            TEXT.with(|t| *t.borrow_mut() = Some((at, String::new())));
+            crate::sketch_text::place(app, at.0, round_nice(app.cam.half_height() * 0.1));
             return;
         }
         _ => return,
     };
     let _ = app.run(t.cmd, params);
-}
-
-fn run_corner(app: &mut SolveApp, cmd: &str, point: &str) {
-    let size = round_nice(corner_len(app, point) * 0.2);
-    let params = match cmd {
-        "sketch.fillet" => json!({"point": point, "radius": size}),
-        "sketch.chamfer.distance_angle" => json!({"point": point, "distance": size, "angle": 45}),
-        "sketch.chamfer.two_distance" => json!({"point": point, "distance": size, "distance2": size}),
-        _ => json!({"point": point, "distance": size}),
-    };
-    if let Ok(v) = app.run(cmd, params)
-        && let Some(p) = v["param"].as_str()
-    {
-        app.dialog = Some(crate::dialogs::Dialog::edit_param(&app.session, p));
-    }
 }
 
 fn run_entities(app: &mut SolveApp, t: &Tool) {
@@ -922,7 +842,7 @@ pub fn finish(app: &mut SolveApp, tool: &mut Tool) -> bool {
             tool.pts.clear();
             true
         }
-        Mode::EntitiesThen | Mode::Steps if !tool.picks.is_empty() && tool.picks.last().is_some_and(|x| x != "|") => {
+        Mode::Steps if !tool.picks.is_empty() && tool.picks.last().is_some_and(|x| x != "|") => {
             tool.picks.push("|".into());
             true
         }
@@ -1105,24 +1025,6 @@ fn glyphs(app: &SolveApp, painter: &egui::Painter, proj: &Proj, hover: Option<Po
     GLYPHS.with(|g| *g.borrow_mut() = drawn);
 }
 
-/// Toolbar icons used as glyphs (H and V stay letters, which tell them apart).
-fn glyph_icon(name: &str) -> Option<&'static str> {
-    Some(match name {
-        "Coincident" => "c_coincident",
-        "Parallel" => "c_parallel",
-        "Perpendicular" => "c_perpendicular",
-        "Collinear" => "c_collinear",
-        "Tangent" => "c_tangent",
-        "Smooth" => "c_smooth",
-        "Equal" => "c_equal",
-        "Concentric" => "c_concentric",
-        "MidPoint" => "c_midpoint",
-        "Symmetry" => "c_symmetry",
-        "Fix" => "c_fix",
-        _ => return None,
-    })
-}
-
 /// The curves and points a constraint ties together.
 fn constraint_entities(k: &solidcraft_engine::sketch::ConstraintKind) -> (Vec<usize>, Vec<usize>) {
     use solidcraft_engine::sketch::ConstraintKind::*;
@@ -1141,14 +1043,6 @@ fn constraint_entities(k: &solidcraft_engine::sketch::ConstraintKind) -> (Vec<us
         | Tangent { a, b }
         | Smooth { a, b } => (vec![a, b], vec![]),
         _ => (vec![], vec![]),
-    }
-}
-
-fn glyph_letter(name: &str) -> &'static str {
-    match name {
-        "Horizontal" => "H",
-        "Vertical" => "V",
-        _ => "?",
     }
 }
 
@@ -1203,7 +1097,7 @@ fn snap_hint(app: &SolveApp, painter: &egui::Painter, proj: &Proj) {
     painter.text(r.center(), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(10.0), tk.text);
 }
 
-/// Per frame, after the viewport is drawn: constraint glyphs and the text-entry box.
+/// Per frame, after the viewport is drawn: constraint glyphs, snap hints and analysis marks.
 pub fn show(app: &mut SolveApp, ui: &egui::Ui, painter: &egui::Painter, proj: &Proj) {
     SHIFT.with(|c| c.set(ui.input(|i| i.modifiers.shift)));
     glyphs(app, painter, proj, ui.input(|i| i.pointer.hover_pos()).filter(|_| ui.rect_contains_pointer(proj.rect)));
@@ -1214,39 +1108,6 @@ pub fn show(app: &mut SolveApp, ui: &egui::Ui, painter: &egui::Painter, proj: &P
     }
     marks(app, painter, proj);
     iso_lines(app, painter, proj);
-    text_entry(app, ui.ctx());
-}
-
-/// The text-entry box for a placed text.
-fn text_entry(app: &mut SolveApp, ctx: &egui::Context) {
-    let Some((at, mut text)) = TEXT.with(|t| t.borrow_mut().take()) else { return };
-    let mut done = None;
-    crate::frame::window(ctx, "Text", crate::frame::Width::Normal)
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-        .show(ctx, |ui| {
-            let r = ui.text_edit_singleline(&mut text);
-            r.request_focus();
-            ui.horizontal(|ui| {
-                if ui.button("OK").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    done = Some(true);
-                }
-                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    done = Some(false);
-                }
-            });
-        });
-    match done {
-        Some(true) => {
-            if !text.trim().is_empty() {
-                let h = round_nice(app.cam.half_height() * 0.1);
-                let _ = app.run("sketch.text", json!({"text": text, "at": xy(at), "height": h}));
-            }
-        }
-        Some(false) => {}
-        None => TEXT.with(|t| *t.borrow_mut() = Some((at, text))),
-    }
 }
 
 #[cfg(test)]

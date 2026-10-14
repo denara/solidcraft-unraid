@@ -308,6 +308,7 @@ mod tests {
         document
             .add_feature(
                 crate::FeatureKind::Extrude {
+                    thin: None,
                     sketch: feature,
                     profiles: selection.clone(),
                     extent: crate::Extent {
@@ -433,6 +434,7 @@ mod tests {
         document
             .add_feature(
                 crate::FeatureKind::Extrude {
+                    thin: None,
                     sketch: feature,
                     profiles: selection.clone(),
                     extent: crate::Extent {

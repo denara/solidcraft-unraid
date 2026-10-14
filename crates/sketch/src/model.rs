@@ -10,7 +10,7 @@ pub const MAX_CONSTRAINTS: usize = 40_000;
 pub const MAX_CURVES: usize = MAX_POINTS;
 
 /// Largest coordinate or dimension value (mm) a sketch accepts.
-pub(crate) const MAX_COORD: f64 = 1e9;
+pub const MAX_COORD: f64 = 1e9;
 
 /// A position a sketch accepts: finite and within [`MAX_COORD`].
 pub(crate) fn in_range(p: Vec2) -> bool {
@@ -310,6 +310,15 @@ pub enum ConstraintKind {
         l: usize,
         value: f64,
     },
+    /// Normal distance of an associative offset. Its output id remains stable
+    /// when a curved boundary retires a corner; refresh_offsets drives the geometry.
+    OffsetDistance {
+        output: String,
+        value: f64,
+        /// Keep the chosen side when the positive driving length is edited.
+        #[serde(default)]
+        reverse: bool,
+    },
 }
 
 impl ConstraintKind {
@@ -331,6 +340,7 @@ impl ConstraintKind {
             | Diameter { value, .. }
             | ArcLength { value, .. }
             | LinearDiameter { value, .. }
+            | OffsetDistance { value, .. }
             | Angle { value, .. } => Some(value),
             _ => None,
         }
@@ -350,6 +360,7 @@ impl ConstraintKind {
             | Diameter { value, .. }
             | ArcLength { value, .. }
             | LinearDiameter { value, .. }
+            | OffsetDistance { value, .. }
             | Angle { value, .. } => *value = v,
             _ => {}
         }
@@ -381,6 +392,7 @@ impl ConstraintKind {
             Smooth { .. } => "Smooth",
             ArcLength { .. } => "ArcLengthDimension",
             LinearDiameter { .. } => "LinearDiameterDimension",
+            OffsetDistance { .. } => "OffsetDimension",
         }
     }
     /// Does the constraint refer to point `p` (by index)?
@@ -406,6 +418,7 @@ impl ConstraintKind {
             Smooth { a, b } => (vec![], vec![a, b]),
             ArcLength { c, .. } => (vec![], vec![c]),
             LinearDiameter { p, l, .. } => (vec![p], vec![l]),
+            OffsetDistance { .. } => (vec![], vec![]),
         }
     }
     pub(crate) fn remap(&mut self, pmap: &dyn Fn(usize) -> Option<usize>, cmap: &dyn Fn(usize) -> Option<usize>) -> bool {
@@ -462,6 +475,7 @@ impl ConstraintKind {
                 fp(p);
                 fc(l);
             }
+            OffsetDistance { .. } => {}
         }
         ok && ok2
     }
@@ -499,6 +513,11 @@ pub struct SketchView {
     pub hide_constraints: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub hide_projected: bool,
+    /// Construction geometry (the `construction` line type) is not drawn and cannot be picked.
+    /// Centerlines are a line type of their own and keep showing; projected construction
+    /// geometry belongs to `hide_projected`, the way its colour already says it does.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub hide_construction: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub hide_grid: bool,
     /// Clicks don't snap to the grid.
@@ -862,6 +881,11 @@ impl Sketch {
             && (!v.is_finite() || v.abs() > MAX_COORD || (v < 0.0 && !k.is_angle()))
         {
             return Err(SketchError::Invalid(format!("dimension value {v}")));
+        }
+        if let OffsetDistance { output, value, .. } = k
+            && (*value <= 1e-9 || output.len() > 512 || self.offset_distance(output).is_none())
+        {
+            return Err(SketchError::Invalid("offset dimension needs a nonzero distance and an existing association".into()));
         }
         if let ArcSweep { value, .. } = *k
             && !(value.abs() > 1e-9 && value.abs() < std::f64::consts::TAU - 1e-9)

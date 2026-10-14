@@ -430,6 +430,7 @@ fn anchor(sk: &Sketch, k: &ConstraintKind) -> Option<Vec2> {
     };
     let pt = |p: usize| sk.point(p);
     match *k {
+        OffsetDistance { ref output, .. } => sk.offset_dimension_points(output).map(|(a, b)| (a + b) * 0.5),
         Coincident { p, .. } | Fix { p } | Midpoint { p, .. } => pt(p),
         PointOnCurve { p, .. } => pt(p),
         HorizontalPoints { p, q } | VerticalPoints { p, q } | Symmetric { p, q, .. } => Some((pt(p)? + pt(q)?) * 0.5),

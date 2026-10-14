@@ -17,7 +17,8 @@ use solidcraft_geom::Vec3;
 
 use crate::{DocError, Document, IDENTITY, Mat, ModelState, Result, apply_point, apply_vector, mat_inverse, mat_mul};
 
-const MAX_JOINTS: usize = 10_000;
+/// Joints the solver (and the URDF export) reads at most.
+pub const MAX_JOINTS: usize = 10_000;
 
 /// Where a joint origin sits on a component's geometry (component coordinates).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

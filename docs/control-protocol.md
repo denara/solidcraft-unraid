@@ -6,13 +6,58 @@ line `{"id": …, "ok": true, "result": …}` or `{"id": …, "ok": false, "erro
 handled on the UI thread between frames; pointer and keyboard input is injected as real egui
 events, one pointer event per frame.
 
+### Token
+
+Every connection must authenticate. At start the app makes a random 256-bit token for this
+launch and writes it, as one line of hex, to a file only the user can read:
+
+| System | Token file |
+|---|---|
+| Linux | `$XDG_DATA_HOME/solidcraft/control/PORT.token` (`~/.local/share/solidcraft/control/PORT.token`) |
+| macOS | `~/Library/Application Support/SolidCraft/control/PORT.token` |
+| Windows | `%LOCALAPPDATA%\SolidCraft\control\PORT.token` |
+
+On Unix the folder is `0700` and the file `0600`; on Windows the file's inherited permissions are
+replaced by a single entry for the user. `SOLIDCRAFT_CONTROL_DIR` moves the folder. The file is
+removed when the app exits, and the next launch writes a new token. The token file's path is
+printed to stderr at start-up.
+
+The first request on a connection must carry the token as a top-level `"token"` member
+(`{"id": 1, "method": "ui.inspect", "params": {}, "token": "…"}`); later requests on the same
+connection may leave it out. A first line without the right token is answered with
+`{"ok": false, "error": "unauthorized: …"}` and the connection is closed, without running
+anything. Tokens are compared in constant time.
+
+`solidcraft-cli mcp --connect 127.0.0.1:PORT` reads the token file for that port by itself
+(`--token T` or `SOLIDCRAFT_CONTROL_TOKEN` give one explicitly). For a test harness, or a
+sandboxed package whose data folder the client can't see, start the app with
+`SOLIDCRAFT_CONTROL_TOKEN` set to at least 32 hex characters (for example
+`openssl rand -hex 32`) and the app uses that token instead of making one; the file is still
+written. A one-line client in Python:
+
+```python
+token = (Path.home() / ".local/share/solidcraft/control/7878.token").read_text().strip()
+sock.sendall((json.dumps({"id": 1, "method": "ui.inspect", "params": {}, "token": token}) + "\n").encode())
+```
+
+### Limits
+
 The channel is untrusted input. A request line may be at most 16 MiB; a longer one is answered
 with `{"ok": false, "error": "request too large"}` and the connection is closed, as are
 connections that send eight lines that are not JSON. At most 16 connections are served at once
 (further ones get `{"ok": false, "error": "too many connections"}`), at most 64 queued requests
 run per frame so a flood cannot starve drawing, and a request that the UI thread has not
-answered within 60 seconds is replied to with `{"ok": false, "error": "timeout"}`. The same
-16 MiB line limit applies to the MCP server.
+answered within 60 seconds (3600 seconds for `engine.batch`) is replied to with
+`{"ok": false, "error": "timeout"}`. The same 16 MiB line limit applies to the MCP server.
+
+Any request's `params` may carry `allow_paths: ["/abs/folder", …]`: every file that request
+reads, writes or deletes (command paths such as `file.export`'s `path` or `doc.recovery_*`'s
+`dir`, `ui.render`, `ui.screenshot`) must then lie inside one of those folders after `..` and
+symlinks are resolved, or the request fails with `… outside the folders this agent may use …`.
+The app adds its own recovery folder and, when it lies safely inside the home folder and not in
+a hidden folder, the open design's folder (whose hidden files stay out of reach). The bridged
+MCP server sends its folders this way on every request ([mcp.md](mcp.md)). Without
+`allow_paths` file paths are not limited: a client holding the token can do what the user can.
 
 ## Engine
 
@@ -20,6 +65,7 @@ answered within 60 seconds is replied to with `{"ok": false, "error": "timeout"}
 |---|---|---|
 | `engine.execute` | `command`: command id, `params`: JSON object | the command's result |
 | `engine.script` | `commands`: `[{command, params}, …]` | results, stops at the first error |
+| `engine.batch` | `commands`: `[{command, params}, …]` (at most 10 000), `rollback?`: bool (default true) | `{completed, results, undone}`, plus `failed: {index, command, error}` when a step fails. Runs the steps in one request, so within one frame, each as `engine.execute` runs it. The first failure stops the batch, and with `rollback` the design goes back to how it was before it (`undone`: the steps taken back). Refused before anything runs, with an error starting `engine.batch unavailable`, while the agent cursor is shown or when a step loads a file (`doc.open`, `file.insert_step`, `file.insert_mesh`). Send such steps one by one. Answered when done, for up to 3600 s |
 | `engine.commands` | — | every command: id, label, tab, panel, icon, shortcut, params doc, enabled |
 | `document.inspect` | `measure?`: bool | parameters, timeline (errors, timings), bodies, sketches, selection |
 
@@ -77,7 +123,7 @@ unit regardless of the design, pass an expression with one: `"value": "50 mm"` o
 | `ui.home` | `open?`: bool; `sample?`: index | the start page: show or hide it, open a built-in sample (once built); returns `open` and the recent designs |
 | `ui.shortcut` | `command`, `key?`, `replace?` | a command's key, or rebinds it (`""` clears; a key another command uses is refused unless `replace`) |
 | `ui.help` | `item?`: `about`, `shortcuts` (read only), `report` (copies diagnostics), `crashes` (the Crash Reports window) | the version, commit, build date and diagnostic text |
-| `ui.prefs` | any of `default_units`, `nav` (`fusion`, `solidworks`, `inventor`, `alias`, `tinkercad`, `openscad`), `zoom_reverse`, `zoom_to_cursor`, `smooth_wheel_zoom` (default true), `trackpad_pan` (default true: two-finger scroll pans, pinch zooms), `orbit_cursor`, `look_at_anim`, `look_at_speed`, `middle_double_click` (`home` (default), `fit`, `off`), `msaa`, `length_decimals`, `angle_decimals`, `theme` (`dark`, `light`, `system`), `language` (`en`, `ja`; see [localization](localization.md)), `ui_scale`, `up_axis` (`z`, `y`), `offer_stand_up`; `open` (a page: General, Navigation, Keyboard Shortcuts, Design, Graphics, Sketch, Selection) opens the Preferences dialog there; `button`: `ok`, `cancel`, `apply`, `defaults`; `stand_up: true` stands up a just-opened Y-up file | sets preferences (kept between runs), returns them all plus `dialog` (the open page or null), `dark` and `stand_up_offer` |
+| `ui.prefs` | any of `default_units`, `nav` (`fusion`, `solidworks`, `inventor`, `alias`, `tinkercad`, `openscad`), `zoom_reverse`, `zoom_to_cursor`, `smooth_wheel_zoom` (default true), `trackpad_pan` (default true: two-finger scroll pans, pinch zooms), `orbit_cursor`, `look_at_anim`, `look_at_speed`, `middle_double_click` (`home` (default), `fit`, `off`), `msaa`, `length_decimals`, `angle_decimals`, `theme` (`dark`, `light`, `system`), `language` (`en`, `ja`, `de`, `ko`, `ru`, `zh`; see [localization](localization.md)), `ui_scale`, `up_axis` (`z`, `y`), `offer_stand_up`, `check_updates` (default true; [updates](book/src/guide/updates.md)); `open` (a page: General, Navigation, Keyboard Shortcuts, Design, Graphics, Sketch, Selection) opens the Preferences dialog there; `button`: `ok`, `cancel`, `apply`, `defaults`; `stand_up: true` stands up a just-opened Y-up file | sets preferences (kept between runs), returns them all plus `dialog` (the open page or null), `dark` and `stand_up_offer` |
 | `ui.capture` | `action?`: `capture`, `revert`, `cancel` | answers the Capture Position question (asked when a command starts or the design is saved while components were moved without capturing); without `action`, what waits |
 | `ui.window` | `action`: minimize, maximize, restore, toggle, close | what the title bar's caption buttons do (on Windows and Linux the application bar is the title bar); close asks about unsaved designs first |
 | `ui.agent_cursor` | `show` (bool), `speed`: a number from 1 to 5 (times the normal speed) or `"instant"` (no animation: the command runs at once and the pointer jumps to where it acted), `follow_camera` (bool); all optional | the settings. While the cursor is shown, `engine.execute` first glides to the command's toolbar button and to each pick, then runs and replies; later requests wait their turn. `"animate": false` on a call skips it |

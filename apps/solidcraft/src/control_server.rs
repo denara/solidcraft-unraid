@@ -9,18 +9,39 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use solidcraft_engine::MAX_LINE;
+use solidcraft_engine::control_auth;
 use solidcraft_ui_egui::ControlRequest;
 
-/// Connections served at once. The channel has no authentication beyond being bound to
-/// loopback, so a flood must not be able to spawn threads without end.
+/// Connections served at once, so a flood must not be able to spawn threads without end.
 const MAX_CONNECTIONS: usize = 16;
 /// Lines that are not JSON before the connection is closed, so garbage cannot loop forever.
 const MAX_BAD_LINES: usize = 8;
 
 static OPEN: AtomicUsize = AtomicUsize::new(0);
+/// The token file this launch wrote, removed when the app ends.
+static TOKEN_FILE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// A new random token: 32 bytes from the operating system, as hex.
+fn new_token() -> Option<String> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).ok()?;
+    Some(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Remove this launch's token file (at exit).
+pub fn remove_token_file() {
+    if let Some(p) = TOKEN_FILE.get() {
+        let _ = std::fs::remove_file(p);
+    }
+}
 
 pub fn start(port: u16, ctx: egui::Context) -> Receiver<ControlRequest> {
     let (tx, rx) = channel::<ControlRequest>();
+    // Every connection must show the token before anything runs (docs/control-protocol.md).
+    let Some(token) = control_auth::env_token().or_else(new_token) else {
+        eprintln!("solidcraft: control server not started: no random token available");
+        return rx;
+    };
     let listener = match TcpListener::bind(("127.0.0.1", port)) {
         Ok(l) => l,
         Err(e) => {
@@ -28,7 +49,23 @@ pub fn start(port: u16, ctx: egui::Context) -> Receiver<ControlRequest> {
             return rx;
         }
     };
-    eprintln!("solidcraft: control server listening on 127.0.0.1:{port}");
+    match control_auth::token_path(port) {
+        Some(path) => match control_auth::write_token_file(&path, &token) {
+            Ok(()) => {
+                eprintln!("solidcraft: control server listening on 127.0.0.1:{port} (token in {})", path.display());
+                let _ = TOKEN_FILE.set(path);
+            }
+            Err(e) => eprintln!(
+                "solidcraft: control server listening on 127.0.0.1:{port}, but its token file {} could not be written ({e}); \
+                 clients need SOLIDCRAFT_CONTROL_TOKEN",
+                path.display()
+            ),
+        },
+        None => {
+            eprintln!("solidcraft: control server listening on 127.0.0.1:{port}; no data folder for its token, clients need SOLIDCRAFT_CONTROL_TOKEN")
+        }
+    }
+    let token = std::sync::Arc::new(token);
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             if OPEN.fetch_add(1, Ordering::Relaxed) >= MAX_CONNECTIONS {
@@ -39,8 +76,9 @@ pub fn start(port: u16, ctx: egui::Context) -> Receiver<ControlRequest> {
             }
             let tx = tx.clone();
             let ctx = ctx.clone();
+            let token = token.clone();
             std::thread::spawn(move || {
-                serve(stream, tx, ctx);
+                serve(stream, &token, tx, ctx);
                 OPEN.fetch_sub(1, Ordering::Relaxed);
             });
         }
@@ -80,11 +118,28 @@ fn read_line(r: &mut impl BufRead, max: usize) -> std::io::Result<Option<Vec<u8>
     }
 }
 
-fn serve(stream: TcpStream, tx: Sender<ControlRequest>, ctx: egui::Context) {
+/// The reply to a connection that didn't show the token; the connection is then closed.
+fn unauthorized() -> Value {
+    json!({"ok": false, "error": "unauthorized: send the control token as \"token\" (see docs/control-protocol.md)"})
+}
+
+/// Refuse the connection: the reply, then the end of what we send, then what the client had
+/// already sent read and dropped (a little, briefly). Closing a socket with unread input resets
+/// the connection, and a reset can reach the client before it has read the refusal.
+fn refuse(out: &mut TcpStream, reader: &mut BufReader<TcpStream>) {
+    use std::io::Read;
+    let _ = writeln!(out, "{}", unauthorized());
+    let _ = out.shutdown(std::net::Shutdown::Write);
+    let _ = reader.get_ref().set_read_timeout(Some(Duration::from_millis(500)));
+    let _ = std::io::copy(&mut reader.by_ref().take(64 * 1024), &mut std::io::sink());
+}
+
+fn serve(stream: TcpStream, token: &str, tx: Sender<ControlRequest>, ctx: egui::Context) {
     let Ok(read) = stream.try_clone() else { return };
     let mut out = stream;
     let mut reader = BufReader::new(read);
     let mut bad = 0usize;
+    let mut authenticated = false;
     loop {
         let line = match read_line(&mut reader, MAX_LINE) {
             Ok(Some(l)) => String::from_utf8_lossy(&l).into_owned(),
@@ -99,19 +154,35 @@ fn serve(stream: TcpStream, tx: Sender<ControlRequest>, ctx: egui::Context) {
         }
         let reply = match serde_json::from_str::<Value>(&line) {
             Ok(msg) => {
+                // The first request must carry the token; later ones on the same connection may.
+                if !authenticated {
+                    match msg.get("token").and_then(Value::as_str) {
+                        Some(t) if control_auth::tokens_match(t, token) => authenticated = true,
+                        _ => {
+                            refuse(&mut out, &mut reader);
+                            break;
+                        }
+                    }
+                }
                 let id = msg.get("id").cloned().unwrap_or(Value::Null);
                 let method = msg.get("method").and_then(Value::as_str).unwrap_or("").to_string();
                 let params = msg.get("params").cloned().unwrap_or(json!({}));
+                // A batch replaces many short requests: the whole of it may take long (#743).
+                let wait = Duration::from_secs(if method == "engine.batch" { 3600 } else { 60 });
                 let (req, rrx) = ControlRequest::new(method, params);
                 if tx.send(req).is_err() {
                     break;
                 }
                 ctx.request_repaint();
-                let mut r = rrx.recv_timeout(Duration::from_secs(60)).unwrap_or_else(|_| json!({"ok": false, "error": "timeout"}));
+                let mut r = rrx.recv_timeout(wait).unwrap_or_else(|_| json!({"ok": false, "error": "timeout"}));
                 if let Some(o) = r.as_object_mut() {
                     o.insert("id".into(), id);
                 }
                 r
+            }
+            Err(_) if !authenticated => {
+                refuse(&mut out, &mut reader);
+                break;
             }
             Err(e) => {
                 bad += 1;
@@ -130,6 +201,62 @@ fn serve(stream: TcpStream, tx: Sender<ControlRequest>, ctx: egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #205: a connection runs nothing until a request carries the launch's token; a wrong or
+    /// missing token, or garbage, is refused and the connection closed. Once shown, the token
+    /// need not be repeated on that connection.
+    #[test]
+    fn requests_run_only_after_the_token() {
+        use std::io::Read;
+        let token = "0123456789abcdef0123456789abcdef";
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = channel::<ControlRequest>();
+        let ran = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = ran.clone();
+        std::thread::spawn(move || {
+            for req in rx {
+                seen.lock().unwrap().push(req.method.clone());
+                let _ = req.reply.send(json!({"ok": true, "result": null}));
+            }
+        });
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let tx = tx.clone();
+                std::thread::spawn(move || serve(stream, token, tx, egui::Context::default()));
+            }
+        });
+        let session = |lines: &[String]| {
+            let mut s = TcpStream::connect(addr).unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            for l in lines {
+                let _ = writeln!(s, "{l}");
+            }
+            let _ = s.shutdown(std::net::Shutdown::Write);
+            let mut text = String::new();
+            let _ = s.read_to_string(&mut text);
+            text.lines().map(|l| serde_json::from_str::<Value>(l).unwrap()).collect::<Vec<_>>()
+        };
+        for first in [
+            json!({"id": 1, "method": "app.quit", "params": {"force": true}}).to_string(),
+            json!({"id": 1, "method": "app.quit", "token": "0123456789abcdef0123456789abcdee"}).to_string(),
+            json!({"id": 1, "method": "app.quit", "token": "0123"}).to_string(),
+            json!({"id": 1, "method": "app.quit", "token": 7}).to_string(),
+            "not json".to_string(),
+        ] {
+            let replies = session(&[first.clone(), json!({"id": 2, "method": "app.quit", "token": token}).to_string()]);
+            assert_eq!(replies.len(), 1, "{first}: closed after refusing: {replies:?}");
+            assert!(replies[0]["error"].as_str().is_some_and(|e| e.starts_with("unauthorized")), "{first}: {replies:?}");
+        }
+        assert!(ran.lock().unwrap().is_empty(), "nothing ran without the token");
+        let replies = session(&[
+            json!({"id": 1, "method": "ui.inspect", "token": token}).to_string(),
+            json!({"id": 2, "method": "engine.commands"}).to_string(),
+        ]);
+        assert_eq!(replies.len(), 2, "{replies:?}");
+        assert!(replies.iter().all(|r| r["ok"] == true), "{replies:?}");
+        assert_eq!(*ran.lock().unwrap(), ["ui.inspect", "engine.commands"]);
+    }
 
     /// A request longer than the cap is refused instead of allocated.
     #[test]

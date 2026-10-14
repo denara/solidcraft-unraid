@@ -28,6 +28,15 @@ thread_local! {
     static VERSION: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
+// Codec features are unified across crates. Enabling bounded HDR preparation must
+// not route HDR through this synchronous whole-image canvas decoder.
+fn decode_reference(bytes: &[u8]) -> Option<image::DynamicImage> {
+    match image::guess_format(bytes).ok()? {
+        image::ImageFormat::Png | image::ImageFormat::Jpeg => image::load_from_memory(bytes).ok(),
+        _ => None,
+    }
+}
+
 fn pixels(c: &Canvas) -> Option<Decoded> {
     PIXELS.with(|m| {
         let mut m = m.borrow_mut();
@@ -36,7 +45,7 @@ fn pixels(c: &Canvas) -> Option<Decoded> {
         {
             return d.clone();
         }
-        let d = c.bytes().and_then(|b| image::load_from_memory(&b).ok()).map(|i| {
+        let d = c.bytes().and_then(|b| decode_reference(&b)).map(|i| {
             let i = if i.width() > MAX_SIDE || i.height() > MAX_SIDE { i.thumbnail(MAX_SIDE, MAX_SIDE) } else { i };
             let rgba = i.to_rgba8();
             let v = VERSION.with(|v| {
@@ -136,5 +145,21 @@ pub fn show(app: &SolveApp, ui: &egui::Ui, painter: &egui::Painter, proj: &Proj)
             }
         }
         painter.add(Shape::mesh(mesh));
+    }
+}
+
+#[cfg(test)]
+mod codec_tests {
+    use super::decode_reference;
+
+    #[test]
+    fn hdr_feature_does_not_enable_synchronous_canvas_hdr_decoding() {
+        let mut hdr = b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 1 +X 1\n".to_vec();
+        hdr.extend_from_slice(&[128, 64, 32, 129]);
+        assert!(image::load_from_memory(&hdr).is_ok());
+        assert!(decode_reference(&hdr).is_none());
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(1, 1).write_to(&mut png, image::ImageFormat::Png).unwrap();
+        assert!(decode_reference(png.get_ref()).is_some());
     }
 }

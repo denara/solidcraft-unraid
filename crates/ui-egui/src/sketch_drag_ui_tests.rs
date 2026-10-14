@@ -151,3 +151,96 @@ fn a_dragged_line_that_stops_short_stays_under_the_cursor_when_it_can_follow_aga
     assert!(start.dist(Vec2::new(x + 2.0, y)) < 0.1, "{start:?}");
     assert!(!h.app.session.model.is_stale());
 }
+
+#[test]
+fn associated_spline_offset_hides_fit_nodes_and_follows_a_source_drag_live() {
+    let mut h = Harness::new();
+    h.app.home.open = false;
+    run(&mut h, "sketch.create", json!({"plane":"XY"}));
+    run(
+        &mut h,
+        "sketch.spline.fit_point",
+        json!({
+            "points":[[-17,15],[0,8],[17,13],[15,0],[5,-7],[-1,-14],[-9,-1],[-21,-1]],
+            "periodic":true
+        }),
+    );
+    let output = h.app.run("sketch.offset", json!({"curves":["s1"],"distance":2,"chain":true})).unwrap()["curves"][0].as_str().unwrap().to_owned();
+    h.call("ui.view", json!({"view":"top"}));
+    h.app.cam.distance = 65.0;
+    h.frames(3);
+    let sid = h.app.session.active_sketch.unwrap();
+    let original = h.app.session.world_state().sketch(sid).unwrap().sketch.clone();
+    let source = original.curve_index("s1").unwrap();
+    let derived = original.curve_index(&output).unwrap();
+    let source_points = original.curves[source].kind.point_ids();
+    let derived_points = original.curves[derived].kind.point_ids();
+    assert!(derived_points.len() > 100, "exercise the crowded generated fit nodes");
+    for &i in &source_points {
+        assert!(solidcraft_engine::view::sketch_point_visible(&original, i));
+    }
+    let snaps = crate::dialogs::SnapPoints::of(&original);
+    for &i in &derived_points {
+        assert!(!solidcraft_engine::view::sketch_point_visible(&original, i));
+        assert!(!snaps.takes(&original.points[i]));
+    }
+    let p = original.points[derived_points[32]].pos;
+    let pos = screen(&mut h, p.x, p.y);
+    let proj = crate::viewport::projection(&h.app, h.app.viewport.rect.unwrap());
+    let hits = crate::viewport::pick_all(&h.app, &proj, pos);
+    assert!(hits.iter().any(|hit| matches!(hit, crate::viewport::Hit::SketchCurve {id,..} if id == &output)));
+    assert!(
+        !hits
+            .iter()
+            .any(|hit| matches!(hit, crate::viewport::Hit::SketchPoint {id,..} if derived_points.iter().any(|i| original.points[*i].id == *id)))
+    );
+    let snap = crate::drag_snap::find(&original, &[(source_points[1], p)], &source_points, 0.01);
+    assert!(
+        !matches!(snap.map(|s| s.target), Some(crate::drag_snap::Target::Point(id)) if derived_points.iter().any(|i| original.points[*i].id == id))
+    );
+    crate::drag_snap::clear();
+
+    let before = h.app.session.doc.to_json();
+    let undo = h.app.session.undo.len();
+    let a = screen(&mut h, 0.0, 8.0);
+    let b = screen(&mut h, 1.0, 9.0);
+    let c = screen(&mut h, 2.0, 10.0);
+    let mut path = vec![a];
+    path.extend(steps(a, b, 4));
+    press_and_move(&mut h, &path);
+    for (pos, target) in [(b, Vec2::new(1.0, 9.0)), (c, Vec2::new(2.0, 10.0))] {
+        h.app.synthetic.push(egui::Event::PointerMoved(pos));
+        play(&mut h);
+        assert!(h.app.viewport.point_drag.is_some());
+        assert!(h.app.session.model.is_stale(), "the drag has not been released");
+        let state = h.app.session.world_state();
+        let sk = &state.sketch(sid).unwrap().sketch;
+        assert!(sk.points[source_points[1]].pos.dist(target) < 0.1, "source follows the held pointer: {:?}", sk.points[source_points[1]].pos);
+        assert_ne!(sk.exact_segs(derived), original.exact_segs(derived), "the offset follows before release");
+        assert_eq!(sk.freeform_offsets[0].distance, 2.0);
+        sk.validate_freeform_offsets().unwrap();
+        let points = sk.curves[derived].kind.point_ids();
+        assert!(points.iter().all(|i| !solidcraft_engine::view::sketch_point_visible(sk, *i)));
+        for piece in sk.exact_segs(derived).unwrap() {
+            for t in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                let p = piece.point_at(t);
+                let distance = sk.exact_segs(source).unwrap().iter().map(|s| s.point_at(s.closest_param(p)).dist(p)).fold(f64::INFINITY, f64::min);
+                assert!((distance - 2.0).abs() < 0.002, "live offset normal distance {distance}");
+            }
+        }
+    }
+    release(&mut h, c);
+    assert!(!h.app.session.model.is_stale());
+    assert_eq!(h.app.session.undo.len(), undo + 1);
+    run(&mut h, "edit.undo", json!({}));
+    assert_eq!(h.app.session.doc.to_json(), before);
+    run(&mut h, "edit.redo", json!({}));
+    run(&mut h, "sketch.offset.break", json!({"curve":output}));
+    let state = h.app.session.world_state();
+    let sk = &state.sketch(sid).unwrap().sketch;
+    assert!(sk.curves[derived].kind.point_ids().iter().all(|i| solidcraft_engine::view::sketch_point_visible(sk, *i)));
+    run(&mut h, "edit.undo", json!({}));
+    let state = h.app.session.world_state();
+    let sk = &state.sketch(sid).unwrap().sketch;
+    assert!(sk.curves[derived].kind.point_ids().iter().all(|i| !solidcraft_engine::view::sketch_point_visible(sk, *i)));
+}

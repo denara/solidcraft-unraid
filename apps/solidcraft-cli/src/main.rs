@@ -3,13 +3,15 @@
 //! ```text
 //! solidcraft-cli run <script.json|design.solidcraft|part.step|mesh.3mf> [--in design|part.step|mesh.3mf] [--out FILE]... [--save FILE] [--quiet] [--allow-errors]
 //! solidcraft-cli eval <script.json|design.solidcraft|part.step> (alias: inspect) measurements as JSON
+//! solidcraft-cli script <design.solidcraft> [--out script.json]     the design's history as a command script
 //! solidcraft-cli bench-open <design.solidcraft | part.step> [--parse-only] loading timings as JSON lines
 //! solidcraft-cli snapshot <script|design> --out shot.png [--width W] [--height H] [--view iso|front|top|…]
 //! solidcraft-cli exec <command> [json-params]                 run one command on an empty design
 //! solidcraft-cli commands                                     the command registry as JSON
 //! solidcraft-cli recipe <recipe.json>                         translate an oracle recipe to a script
 //! solidcraft-cli oracle <case-dir>...                         replay recipes and compare with expected.json
-//! solidcraft-cli mcp [--in design|script] [--connect HOST:PORT] MCP server on stdio (docs/mcp.md)
+//! solidcraft-cli mcp [--in design|script] [--connect HOST:PORT [--token T]] [--allow-path DIR]... [--allow-any-path] [--quiet]
+//!                                                             MCP server on stdio (docs/mcp.md)
 //! solidcraft-cli licences                                     SolidCraft's licence and the third-party licences
 //! solidcraft-cli icon --out F.png|F.ico [--size N]             the app icon (packaging; drawn, not a file)
 //! ```
@@ -25,7 +27,7 @@ mod spatial;
 use std::process::ExitCode;
 
 use serde_json::{Value, json};
-#[path = "../../app_icon.rs"]
+#[path = "../../../assets/icons/app/shared/source/app_icon.rs"]
 mod app_icon;
 
 use solidcraft_engine::Session;
@@ -36,6 +38,8 @@ const USAGE: &str = "usage:
   solidcraft-cli run --in <design.solidcraft|part.step> [--out FILE]...
       (a timeline feature that fails fails the run and nothing is written; --allow-errors writes anyway)
   solidcraft-cli eval <script.json|design.solidcraft|part.step>     (alias: inspect; or --in FILE)
+  solidcraft-cli script <design.solidcraft|script.json> [--out script.json]
+      (the design's history as a command script that eval and run replay)
   solidcraft-cli bench-open <design.solidcraft | part.step> [--parse-only]
   solidcraft-cli snapshot <script|design> --out shot.png [--width W] [--height H] [--view iso|front|back|top|bottom|left|right]
   solidcraft-cli exec <command> [json-params]
@@ -43,7 +47,7 @@ const USAGE: &str = "usage:
   solidcraft-cli recipe <recipe.json>
   solidcraft-cli oracle <case-dir>... [--json]
   solidcraft-cli fuzz [--from N] [--count N] [--jobs J] [--timeout S] [--steps N] [--minimise] [--out DIR] [--report FILE]
-  solidcraft-cli mcp [--in design.solidcraft|script.json] [--connect 127.0.0.1:PORT]
+  solidcraft-cli mcp [--in design.solidcraft|script.json] [--connect 127.0.0.1:PORT [--token T]] [--allow-path DIR]... [--allow-any-path] [--quiet]
   solidcraft-cli crashes [list [--json] | show <id> | replay <id> | dir | clear [<id>]]
   solidcraft-cli licences
   solidcraft-cli icon --out icon.png [--size 256] | --out icon.ico
@@ -54,6 +58,7 @@ fn main() -> ExitCode {
     let r = match args.first().map(String::as_str) {
         Some("run") => cmd_run(&args[1..]),
         Some("eval" | "inspect") => cmd_eval(&args[1..]),
+        Some("script") => cmd_script(&args[1..]),
         Some("snapshot") => cmd_snapshot(&args[1..]),
         Some("exec") => cmd_exec(&args[1..]),
         Some("commands") => {
@@ -241,6 +246,23 @@ fn cmd_eval(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// A design's history as a command script (`timeline.export_script`): printed, or written to
+/// `--out`; what the script leaves out goes to stderr.
+fn cmd_script(args: &[String]) -> Result<(), String> {
+    let path = positional(args).ok_or_else(|| USAGE.to_string())?;
+    let s = &mut load(path)?;
+    let out = flag(args, "--out");
+    let r = s.execute("timeline.export_script", &json!({"path": out})).map_err(|e| e.to_string())?;
+    for what in r["omitted"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+        eprintln!("note: the script leaves out {what}");
+    }
+    match out {
+        Some(out) => eprintln!("{out}: {} steps", r["steps"]),
+        None => println!("{}", pretty(&r["script"])),
+    }
+    Ok(())
+}
+
 fn cmd_snapshot(args: &[String]) -> Result<(), String> {
     let path = args.first().ok_or_else(|| USAGE.to_string())?;
     let out = flag(args, "--out").ok_or("snapshot needs --out FILE.png")?;
@@ -312,11 +334,29 @@ fn cmd_exec(args: &[String]) -> Result<(), String> {
 }
 
 /// MCP server on stdio: headless (optionally starting from a design or script) or bridged to
-/// a running app's control port. stdout carries only protocol messages.
+/// a running app's control port. stdout carries only protocol messages. Files the agent's tool
+/// calls reach are confined to `solidcraft_mcp::agent_scope` unless `--allow-any-path` is given.
 fn cmd_mcp(args: &[String]) -> Result<(), String> {
+    let scope = (!args.iter().any(|a| a == "--allow-any-path"))
+        .then(|| solidcraft_mcp::agent_scope(flags(args, "--allow-path").into_iter().map(std::path::PathBuf::from)));
+    if !args.iter().any(|a| a == "--quiet")
+        && let Some(s) = &scope
+    {
+        let roots: Vec<String> = s.roots().iter().map(|r| r.display().to_string()).collect();
+        eprintln!(
+            "solidcraft mcp: files limited to {} and the open design's folder (--allow-path DIR adds one, --allow-any-path lifts the limit)",
+            roots.join(", ")
+        );
+        let design_dir = flag(args, "--in")
+            .and_then(|p| std::path::Path::new(p).parent())
+            .map(|d| if d.as_os_str().is_empty() { std::path::Path::new(".") } else { d });
+        if let Some(why) = design_dir.and_then(solidcraft_engine::io::vfs::design_folder_refusal) {
+            eprintln!("solidcraft mcp: the design's folder is left out because {why}; add it with --allow-path if you mean it");
+        }
+    }
     let backend: Box<dyn solidcraft_mcp::Backend> = match (flag(args, "--connect"), flag(args, "--in")) {
         (Some(_), Some(_)) => return Err("mcp: use either --connect or --in, not both".into()),
-        (Some(addr), None) => Box::new(solidcraft_mcp::Remote::connect(addr).map_err(|e| {
+        (Some(addr), None) => Box::new(solidcraft_mcp::Remote::connect_with_token(addr, flag(args, "--token")).map_err(|e| {
             let port = addr.rsplit(':').next().filter(|p| p.parse::<u16>().is_ok()).unwrap_or("PORT");
             format!(
                 "cannot connect to {addr}: {e}\nno SolidCraft app is listening there; start it with \
@@ -328,7 +368,7 @@ fn cmd_mcp(args: &[String]) -> Result<(), String> {
     };
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
-    solidcraft_mcp::Server::new(backend).serve(stdin.lock(), stdout.lock()).map_err(|e| e.to_string())
+    solidcraft_mcp::Server::new(backend).with_path_scope(scope).serve(stdin.lock(), stdout.lock()).map_err(|e| e.to_string())
 }
 
 /// `save-stress <path> <rounds>`: save a design of a few hundred kilobytes `rounds` times, its
@@ -393,10 +433,13 @@ fn cmd_bench_open(args: &[String]) -> Result<(), String> {
     let read_ms = t.elapsed().as_secs_f64() * 1000.0;
     println!("{}", json!({"step": "read", "ms": read_ms, "bytes": bytes.len()}));
     let t = std::time::Instant::now();
+    // The file as read, held until the timeline has evaluated it (as the import command does).
+    let mut read = None;
     let doc = if step {
         let imported = solidcraft_engine::io::step_import_feature(&bytes, path).map_err(|e| e.to_string())?;
         let mut doc = solidcraft_engine::doc::Document::new(&imported.name);
         doc.add_feature(imported.kind, Some(&imported.name)).map_err(|e| e.to_string())?;
+        read = Some(imported.import);
         doc
     } else {
         solidcraft_engine::io::read_design(&bytes).map_err(|e| e.to_string())?
@@ -408,12 +451,15 @@ fn cmd_bench_open(args: &[String]) -> Result<(), String> {
     }
     let t = std::time::Instant::now();
     let s = Session::new(doc);
+    drop(read);
     println!("{}", json!({"step": "evaluate", "ms": t.elapsed().as_secs_f64() * 1000.0}));
     for r in &s.model.results {
         println!("{}", json!({"step": "feature", "id": r.id, "name": r.name, "ms": r.ms, "error": r.error}));
     }
     let t = std::time::Instant::now();
     let st = s.world_state();
+    // As the desktop app prepares a design it opened.
+    st.warm_meshes(|| true);
     let triangles: usize = st.bodies.iter().map(|b| b.mesh().triangles.len()).sum();
     println!("{}", json!({"step": "mesh", "ms": t.elapsed().as_secs_f64() * 1000.0, "bodies": st.bodies.len(), "triangles": triangles}));
     Ok(())

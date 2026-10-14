@@ -528,9 +528,7 @@ pub fn show(app: &mut SolveApp, ui: &egui::Ui, painter: &egui::Painter, proj: &P
         }
         for (tip, dir) in &lay.arrows {
             if let (Some(t), Some(back)) = (to(*tip), to(*tip - *dir * px)) {
-                let d = (t - back).normalized();
-                let n = vec2(-d.y, d.x);
-                painter.add(Shape::convex_polygon(vec![t, t - d * 9.0 + n * 3.0, t - d * 9.0 - n * 3.0], col, Stroke::NONE));
+                crate::icons::markers::dimension_arrow(painter, t, back, col);
             }
         }
         let Some(tc) = to(lay.text) else { continue };

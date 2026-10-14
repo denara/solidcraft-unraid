@@ -104,17 +104,21 @@ fn paste(s: &mut Session, p: &Value) -> Result<Value> {
                 }
             }
         }
-        let outputs = if f.body_names.is_empty() {
-            s.model
-                .result(f.id)
-                .map(|result| result.state.bodies.iter().filter(|body| body.feature == f.id).map(|body| body.name.clone()).collect::<Vec<_>>())
-                .unwrap_or_default()
-        } else {
-            f.body_names.clone()
-        };
+        let built: Vec<String> = s
+            .model
+            .result(f.id)
+            .map(|result| result.state.bodies.iter().filter(|body| body.feature == f.id).map(|body| body.name.clone()).collect())
+            .unwrap_or_default();
+        let outputs = if f.body_names.is_empty() { built.clone() } else { f.body_names.clone() };
+        // A later feature names a body as the model shows it, and that is not always the name stored
+        // on the feature: solids that share a label are stored as `X`, `X`, `X` and shown as `X`,
+        // `X (2)`, `X (3)`, and a second import of a file shows `Aa (2)` for the stored `Aa`. The
+        // copies are found by the shown names; the stored ones only name the copies.
+        let shown = if built.len() == outputs.len() { built } else { outputs.clone() };
         let copied_names: Vec<_> = outputs
             .iter()
-            .map(|original| {
+            .zip(&shown)
+            .map(|(original, shown)| {
                 let base = format!("{original} (copy)");
                 let mut name = base.clone();
                 let mut suffix = 2usize;
@@ -122,7 +126,7 @@ fn paste(s: &mut Session, p: &Value) -> Result<Value> {
                     name = format!("{base} {suffix}");
                     suffix += 1;
                 }
-                bodies.insert(original.clone(), name.clone());
+                bodies.insert(shown.clone(), name.clone());
                 name
             })
             .collect();
@@ -167,7 +171,7 @@ fn paste(s: &mut Session, p: &Value) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use crate::Session;
 
@@ -212,6 +216,162 @@ mod tests {
     }
 
     #[test]
+    fn paste_at_a_marker_inside_a_timeline_folder_joins_the_folder() {
+        let mut s = Session::default();
+        for (name, body, x) in [("First", "FirstBody", 0), ("Second", "SecondBody", 20), ("Source", "SourceBody", 40)] {
+            run(
+                &mut s,
+                "solid.box",
+                json!({"length": 10, "width": 10, "height": 10, "corner": [x, 0, 0], "operation": "new_body", "name": name, "body_name": body}),
+            );
+        }
+        let group = run(&mut s, "timeline.group", json!({"name": "Pair", "features": ["First", "Second"]}))["group"].as_u64().unwrap();
+        run(&mut s, "timeline.copy", json!({"features": ["Source"]}));
+        run(&mut s, "timeline.roll_to", json!({"position": 1}));
+
+        let pasted = run(&mut s, "timeline.paste", json!({}))["pasted"][0]["id"].as_u64().unwrap();
+        let folder = s.doc.timeline_groups.iter().find(|folder| folder.id == group).unwrap();
+        let first = s.doc.find_feature("First").unwrap().id;
+        let second = s.doc.find_feature("Second").unwrap().id;
+        assert_eq!(folder.features, vec![first, pasted, second]);
+        assert!(solidcraft_doc::Document::from_json(&s.doc.to_json()).is_ok(), "pasting inside a folder must leave a reopenable design");
+    }
+
+    /// A STEP file of three boxes at x = 0, 30 and 60. With `shared` the three solids carry one
+    /// label (`X`), as the parts of many assembly files do; otherwise each has its own.
+    fn three_box_step(tag: &str, shared: bool) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("solidcraft-paste-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut s = Session::default();
+        for (i, label) in ["Aa", "Bb", "Cc"].iter().enumerate() {
+            let corner = [30.0 * i as f64, 0.0, 0.0];
+            run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10, "corner": corner, "operation": "new_body", "body_name": label}));
+        }
+        let path = dir.join("Three.step");
+        run(&mut s, "file.export", json!({"path": path.to_string_lossy()}));
+        if shared {
+            let mut text = std::fs::read_to_string(&path).unwrap();
+            for label in ["Aa", "Bb", "Cc"] {
+                assert!(text.contains(&format!("MANIFOLD_SOLID_BREP('{label}'")), "the file names its solids: {label}");
+                text = text.replace(&format!("MANIFOLD_SOLID_BREP('{label}'"), "MANIFOLD_SOLID_BREP('X'");
+            }
+            std::fs::write(&path, text).unwrap();
+        }
+        path
+    }
+
+    /// An OBJ file of three 10 mm cubes at x = 0, 30 and 60, every object called `X`.
+    fn three_cube_obj(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("solidcraft-paste-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let corners = [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]];
+        let faces =
+            [[0, 2, 1], [0, 3, 2], [4, 5, 6], [4, 6, 7], [0, 1, 5], [0, 5, 4], [3, 7, 6], [3, 6, 2], [0, 4, 7], [0, 7, 3], [1, 2, 6], [1, 6, 5]];
+        let mut text = String::new();
+        for i in 0..3 {
+            text += "o X\n";
+            for c in corners {
+                text += &format!("v {} {} {}\n", 30 * i + 10 * c[0], 10 * c[1], 10 * c[2]);
+            }
+            for f in faces {
+                text += &format!("f {} {} {}\n", 8 * i + f[0] + 1, 8 * i + f[1] + 1, 8 * i + f[2] + 1);
+            }
+        }
+        let path = dir.join("Three.obj");
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    fn body_names(s: &Session) -> Vec<String> {
+        s.model.state().bodies.iter().map(|b| b.name.clone()).collect()
+    }
+
+    /// Where every body is: the lowest corner of its bounding box, rounded, in model order.
+    fn corners(s: &mut Session) -> Vec<Vec<f64>> {
+        let m = run(s, "inspect.measure", json!({}));
+        let bodies = m["bodies"].as_array().cloned().unwrap_or_default();
+        bodies
+            .iter()
+            .map(|b| b["bbox"]["min"].as_array().map(|a| a.iter().filter_map(|v| v.as_f64().map(f64::round)).collect()).unwrap_or_default())
+            .collect()
+    }
+
+    /// Lifts the first of the three bodies of the import by 20 and the second by 50 (two features),
+    /// copies the import with both and pastes them: the copies must be lifted, the originals once.
+    fn paste_import_with_two_lifts(s: &mut Session, import: &Value, bodies: [&str; 3]) {
+        run(s, "solid.move", json!({"bodies": [bodies[0]], "translate": [0, 0, 20], "name": "Lift first"}));
+        run(s, "solid.move", json!({"bodies": [bodies[1]], "translate": [0, 0, 50], "name": "Lift second"}));
+        run(s, "timeline.copy", json!({"features": [import, "Lift first", "Lift second"]}));
+        let r = run(s, "timeline.paste", json!({}));
+        assert_eq!(r["errors"].as_array().map(Vec::len), Some(0), "{r}");
+    }
+
+    const LIFTED: [[f64; 3]; 3] = [[0.0, 0.0, 20.0], [30.0, 0.0, 50.0], [60.0, 0.0, 0.0]];
+
+    /// A control: three solids with labels of their own. The pasted features act on the pasted bodies.
+    #[test]
+    fn pasting_an_import_moves_the_copies_of_the_bodies_its_features_named() {
+        let path = three_box_step("distinct", false);
+        let mut s = Session::default();
+        let import = run(&mut s, "file.insert_step", json!({"path": path.to_string_lossy()}))["feature"].clone();
+        assert_eq!(body_names(&s), ["Aa", "Bb", "Cc"]);
+        paste_import_with_two_lifts(&mut s, &import, ["Aa", "Bb", "Cc"]);
+        assert_eq!(body_names(&s), ["Aa", "Bb", "Cc", "Aa (copy)", "Bb (copy)", "Cc (copy)"]);
+        let at: Vec<Vec<f64>> = LIFTED.iter().chain(&LIFTED).map(|c| c.to_vec()).collect();
+        assert_eq!(corners(&mut s), at);
+    }
+
+    /// Solids of a STEP file that share one label are built as `X`, `X (2)`, `X (3)`, and the features
+    /// made on them name them so. The pasted features act on the copies of those bodies, each on its
+    /// own: `X (2)` is not left on the original, and `X` does not go to the last copy.
+    #[test]
+    fn pasting_an_import_with_one_label_on_all_solids_moves_the_copy_of_each_body() {
+        let path = three_box_step("shared", true);
+        let mut s = Session::default();
+        let import = run(&mut s, "file.insert_step", json!({"path": path.to_string_lossy()}))["feature"].clone();
+        assert_eq!(body_names(&s), ["X", "X (2)", "X (3)"]);
+        paste_import_with_two_lifts(&mut s, &import, ["X", "X (2)", "X (3)"]);
+        let names = body_names(&s);
+        assert_eq!(names.len(), 6, "{names:?}");
+        let at: Vec<Vec<f64>> = LIFTED.iter().chain(&LIFTED).map(|c| c.to_vec()).collect();
+        assert_eq!(corners(&mut s), at, "{names:?}");
+        // The copies keep their names and their places when the design is saved and opened again.
+        let design = path.with_file_name("Three.solidcraft");
+        run(&mut s, "file.save_as", json!({"path": design.to_string_lossy()}));
+        let mut r = Session::default();
+        run(&mut r, "doc.open", json!({"path": design.to_string_lossy()}));
+        assert_eq!(body_names(&r), names);
+        assert_eq!(corners(&mut r), at);
+    }
+
+    /// The same for the objects of an OBJ file (3MF and STL files give the same kind of import).
+    #[test]
+    fn pasting_a_mesh_import_with_one_label_on_all_objects_moves_the_copy_of_each_body() {
+        let path = three_cube_obj("shared-obj");
+        let mut s = Session::default();
+        let import = run(&mut s, "file.insert_mesh", json!({"path": path.to_string_lossy()}))["feature"].clone();
+        assert_eq!(body_names(&s), ["X", "X (2)", "X (3)"]);
+        paste_import_with_two_lifts(&mut s, &import, ["X", "X (2)", "X (3)"]);
+        let at: Vec<Vec<f64>> = LIFTED.iter().chain(&LIFTED).map(|c| c.to_vec()).collect();
+        assert_eq!(corners(&mut s), at, "{:?}", body_names(&s));
+    }
+
+    /// No shared label is needed: a second import of the same file builds `Aa (2)`, `Bb (2)`, `Cc (2)`
+    /// from the labels `Aa`, `Bb`, `Cc`, and the features made on those bodies name them so.
+    #[test]
+    fn pasting_a_second_import_of_a_file_moves_the_copies_of_its_bodies() {
+        let path = three_box_step("twice", false);
+        let mut s = Session::default();
+        run(&mut s, "file.insert_step", json!({"path": path.to_string_lossy()}));
+        let second = run(&mut s, "file.insert_step", json!({"path": path.to_string_lossy()}))["feature"].clone();
+        assert_eq!(body_names(&s), ["Aa", "Bb", "Cc", "Aa (2)", "Bb (2)", "Cc (2)"]);
+        paste_import_with_two_lifts(&mut s, &second, ["Aa (2)", "Bb (2)", "Cc (2)"]);
+        let plain = [[0.0, 0.0, 0.0], [30.0, 0.0, 0.0], [60.0, 0.0, 0.0]];
+        let at: Vec<Vec<f64>> = plain.iter().chain(&LIFTED).chain(&LIFTED).map(|c| c.to_vec()).collect();
+        assert_eq!(corners(&mut s), at, "{:?}", body_names(&s));
+    }
+
+    #[test]
     fn pasted_fillet_rounds_the_copied_body_it_names() {
         let mut s = Session::default();
         run(&mut s, "sketch.create", json!({"plane": "XY", "name": "S"}));
@@ -230,5 +390,26 @@ mod tests {
         let m = run(&mut s, "inspect.measure", json!({}));
         assert_eq!(m["body_count"], 2, "{m}");
         assert!((volume(&mut s) - 2.0 * one).abs() < 1e-6, "both blocks are rounded: {m}");
+    }
+
+    /// A pasted coil that joins a body made by an earlier copy joins that copy, not the original.
+    #[test]
+    fn a_pasted_coil_joins_the_pasted_body() {
+        let mut s = Session::default();
+        run(&mut s, "solid.box", json!({"length": 30, "width": 30, "height": 5, "name": "Base", "body_name": "Plate"}));
+        run(
+            &mut s,
+            "solid.coil",
+            json!({"diameter": 16, "pitch": 6, "revolutions": 3, "section_size": 2, "base": [15, 15, 5], "operation": "join", "targets": ["Plate"], "name": "Spring"}),
+        );
+        run(&mut s, "timeline.copy", json!({"features": ["Base", "Spring"]}));
+        let r = run(&mut s, "timeline.paste", json!({"translate": [50, 0, 0]}));
+        assert_eq!(r["errors"].as_array().map(Vec::len), Some(0), "{r}");
+        let spring = r["pasted"][1]["name"].as_str().unwrap_or_default().to_string();
+        let def = run(&mut s, "timeline.inspect", json!({"feature": spring}));
+        assert_eq!(def["definition"]["targets"], json!(["Plate (copy)"]), "{def}");
+        let st = s.world_state();
+        let v = |name: &str| solidcraft_kernel::measure(&st.body(name).unwrap().body).unwrap().volume;
+        assert!((v("Plate") - v("Plate (copy)")).abs() < 1e-6, "each plate carries one spring: {} vs {}", v("Plate"), v("Plate (copy)"));
     }
 }

@@ -91,6 +91,55 @@ fn appearance_component_action_assigns_an_inherited_look() {
     assert!(app.session.doc.appearances.components.contains_key(&id));
 }
 
+/// A right-click on a sketch curve in the viewport reaches the sketch's own menu, the one the
+/// browser row opens, Edit Sketch among it.
+#[test]
+fn a_sketch_curve_in_the_viewport_offers_the_sketch_menu() {
+    let mut app = SolveApp::new(Session::default(), Services::default());
+    app.run("sketch.create", json!({"plane": "XY", "name": "Base"})).unwrap();
+    app.run("sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [40, 30]})).unwrap();
+    app.run("sketch.finish", json!({})).unwrap();
+    let (sketch, curve) = {
+        let st = app.session.world_state();
+        let ss = st.sketches.first().expect("the design has one sketch");
+        (ss.feature, ss.sketch.curves.first().expect("the rectangle drew curves").id.clone())
+    };
+    app.run("select.set", json!({"items": [{"type": "external_sketch_curve", "sketch": sketch, "id": curve}]})).unwrap();
+    let items = context_menu::items(&app, &Target::Viewport);
+    // Item for item the browser row's menu, with the viewport's Clear Selection after it.
+    let row = context_menu::items(&app, &Target::Sketch { id: sketch });
+    let labels = |v: &[Item]| v.iter().map(|i| i.label.clone()).collect::<Vec<_>>();
+    assert_eq!(labels(&items), [labels(&row), vec![String::new(), "Clear Selection".to_string()]].concat());
+    let edit = find(&items, "Edit Sketch");
+    assert_eq!(edit.id, "ui.editSketch");
+    assert_eq!(edit.params, Some(json!({"sketch": sketch})));
+    assert!(edit.enabled);
+    context_menu::run_item(&mut app, &edit, pos2(0.0, 0.0));
+    assert_eq!(app.session.active_sketch, Some(sketch), "Edit Sketch opens the sketch that was right-clicked");
+    // The sketch is open now: the viewport offers the sketch-editing menu, not a second Edit Sketch.
+    let editing = context_menu::items(&app, &Target::Viewport);
+    assert!(find(&editing, "Finish Sketch").enabled);
+    assert!(!editing.iter().any(|i| i.label == "Edit Sketch"), "{:?}", labels(&editing));
+}
+
+/// Solid geometry in the selection keeps the body menu: a right-click on a face offers the
+/// face's commands even when a sketch curve is selected as well.
+#[test]
+fn a_selected_face_keeps_the_body_menu_beside_a_sketch_curve() {
+    let mut app = sample_app();
+    let b = body(&app);
+    let sketch = app.session.world_state().sketches.first().expect("the sample design has sketches").feature;
+    let items = json!([
+        {"type": "face", "body": b, "index": 0, "point": [0, 0, 0]},
+        {"type": "external_sketch_curve", "sketch": sketch, "id": "l1"},
+    ]);
+    app.run("select.set", json!({"items": items})).unwrap();
+    let items = context_menu::items(&app, &Target::Viewport);
+    assert!(find(&items, "Press Pull").enabled);
+    assert!(find(&items, "Edit Profile Sketch").enabled);
+    assert!(!items.iter().any(|i| i.label == "Redefine Sketch Plane"), "the face menu, not the sketch menu");
+}
+
 #[test]
 fn face_menu_hides_and_finds_the_body() {
     let mut app = sample_app();

@@ -9,6 +9,28 @@ fn run(s: &mut Session, id: &str, params: Value) -> Value {
 }
 
 #[test]
+fn g2_fillet_survives_edit_undo_and_reopen() {
+    use solidcraft_doc::{Document, FeatureKind, FilletStyle};
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 20, "width": 20, "height": 20, "name": "Base"}));
+    run(&mut s, "solid.fillet", json!({"edges": [[20, 0, 10]], "radius": 2, "type": "g2", "name": "Smooth"}));
+    assert!(matches!(&s.doc.find_feature("Smooth").unwrap().kind, FeatureKind::Fillet { style: FilletStyle::Curvature, .. }));
+    let before = run(&mut s, "inspect.measure", json!({}))["total"]["volume_mm3"].as_f64().unwrap();
+    run(&mut s, "timeline.edit", json!({"feature": "Smooth", "set": {"radius": "3"}}));
+    let after = run(&mut s, "inspect.measure", json!({}))["total"]["volume_mm3"].as_f64().unwrap();
+    assert!(after < before);
+    run(&mut s, "edit.undo", json!({}));
+    let undo = run(&mut s, "inspect.measure", json!({}))["total"]["volume_mm3"].as_f64().unwrap();
+    assert!((undo - before).abs() < 1e-6);
+    run(&mut s, "edit.redo", json!({}));
+    let mut reopened = Session::new(Document::from_json(&s.doc.to_json()).unwrap());
+    assert!(matches!(&reopened.doc.find_feature("Smooth").unwrap().kind, FeatureKind::Fillet { style: FilletStyle::Curvature, .. }));
+    let volume = run(&mut reopened, "inspect.measure", json!({}))["total"]["volume_mm3"].as_f64().unwrap();
+    assert!((volume - after).abs() < 1e-6);
+    assert!(s.execute("solid.fillet", &json!({"edges": [[0, 0, 10]], "radius": 2, "type": "curvature", "fit": "reduce"})).is_err());
+}
+
+#[test]
 fn redefining_a_blend_replaces_persistent_edge_selection_and_survives_resize() {
     let mut s = Session::default();
     run(&mut s, "solid.box", json!({"length": 40, "width": 30, "height": 20, "name": "Base"}));
@@ -309,4 +331,164 @@ fn inserting_variable_fillet_control_preserves_parameters_at_existing_positions(
     let width = run(&mut s, "expr.evaluate", json!({"expression": parameters[3]}));
     assert_eq!(length["value"], 3.0);
     assert_eq!(width["value"], 4.0);
+}
+
+#[test]
+fn timeline_folders_are_command_backed_saved_undoable_and_follow_feature_ids() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10, "name": "Base"}));
+    run(&mut s, "solid.fillet", json!({"edges": [[10, 5, 10]], "radius": 1, "name": "Round"}));
+    let base = s.doc.find_feature("Base").unwrap().id;
+    let round = s.doc.find_feature("Round").unwrap().id;
+
+    let made = run(&mut s, "timeline.group", json!({"name": "Housing", "features": ["Base", round]}));
+    let group = made["group"].as_u64().unwrap();
+    assert_eq!(s.doc.timeline_groups[0].features, vec![base, round]);
+    run(&mut s, "timeline.rename", json!({"feature": base, "name": "Foundation"}));
+    assert_eq!(s.doc.timeline_groups[0].features, vec![base, round], "folders follow stable ids, not names");
+    run(&mut s, "timeline.rename_group", json!({"group": group, "name": "Main housing"}));
+    run(&mut s, "timeline.move_to_group", json!({"features": [round], "group": null}));
+    assert_eq!(s.doc.timeline_groups[0].features, vec![base]);
+
+    let reopened = solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap();
+    assert_eq!(reopened.timeline_groups, s.doc.timeline_groups);
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!(s.doc.timeline_groups[0].features, vec![base, round]);
+    run(&mut s, "timeline.delete", json!({"features": [base]}));
+    assert_eq!(s.doc.timeline_groups[0].features, vec![round], "deleted features leave folders cleanly");
+    run(&mut s, "timeline.ungroup", json!({"group": group}));
+    assert!(s.doc.timeline_groups.is_empty());
+}
+
+#[test]
+fn timeline_reorders_selected_features_as_one_block_and_removes_folders_in_one_step() {
+    let mut s = Session::default();
+    for (name, body, x) in [("First", "FirstBody", 0), ("Second", "SecondBody", 20), ("Third", "ThirdBody", 40)] {
+        run(
+            &mut s,
+            "solid.box",
+            json!({"length": 10, "width": 10, "height": 10, "corner": [x, 0, 0], "operation": "new_body", "name": name, "body_name": body}),
+        );
+    }
+    let names = |session: &Session| session.doc.features.iter().map(|feature| feature.name.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&s), vec!["First", "Second", "Third"]);
+
+    run(&mut s, "timeline.reorder_many", json!({"features": ["First", "Third"], "position": 3}));
+    assert_eq!(names(&s), vec!["Second", "First", "Third"], "selected features keep their relative order");
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!(names(&s), vec!["First", "Second", "Third"]);
+    run(&mut s, "edit.redo", json!({}));
+    assert_eq!(names(&s), vec!["Second", "First", "Third"]);
+    run(&mut s, "edit.undo", json!({}));
+
+    let first = run(&mut s, "timeline.group", json!({"name": "One", "features": ["First"]}))["group"].as_u64().unwrap();
+    run(&mut s, "edit.undo", json!({}));
+    assert!(s.doc.timeline_groups.is_empty(), "creating a folder is undoable");
+    run(&mut s, "edit.redo", json!({}));
+    assert_eq!(s.doc.timeline_groups.first().map(|group| group.id), Some(first));
+    let second = run(&mut s, "timeline.group", json!({"name": "Two", "features": ["Second"]}))["group"].as_u64().unwrap();
+    run(&mut s, "timeline.ungroup", json!({"groups": [first, second]}));
+    assert!(s.doc.timeline_groups.is_empty());
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!(s.doc.timeline_groups.len(), 2, "removing several folders is one undoable command");
+    run(&mut s, "edit.redo", json!({}));
+    assert!(s.doc.timeline_groups.is_empty(), "removing folders is redoable");
+}
+
+#[test]
+fn timeline_folders_refuse_unknown_non_contiguous_and_split_contents() {
+    let mut s = Session::default();
+    for (name, body, x) in [("First", "FirstBody", 0), ("Second", "SecondBody", 20), ("Third", "ThirdBody", 40)] {
+        run(
+            &mut s,
+            "solid.box",
+            json!({"length": 10, "width": 10, "height": 10, "corner": [x, 0, 0], "operation": "new_body", "name": name, "body_name": body}),
+        );
+    }
+    let before = s.doc.clone();
+    let error = s.execute("timeline.group", &json!({"features": ["First", "Third"]})).unwrap_err().to_string();
+    assert!(error.contains("contiguous"), "{error}");
+    assert_eq!(s.doc, before);
+
+    let group = run(&mut s, "timeline.group", json!({"name": "Pair", "features": ["First", "Second"]}))["group"].as_u64().unwrap();
+    let before = s.doc.clone();
+    let error = s.execute("timeline.reorder_many", &json!({"features": ["First"], "position": 3})).unwrap_err().to_string();
+    assert!(error.contains("contiguous"), "{error}");
+    assert_eq!(s.doc, before, "a refused reorder must not split the folder");
+
+    for params in [json!({"features": [999_u64], "group": group}), json!({"groups": [999_u64], "group": group})] {
+        let error = s.execute("timeline.move_to_group", &params).unwrap_err().to_string();
+        assert!(error.contains("no feature") || error.contains("no timeline folder"), "{error}");
+    }
+
+    let mut damaged: Value = serde_json::from_str(&s.doc.to_json()).unwrap();
+    let first = s.doc.find_feature("First").unwrap().id;
+    let third = s.doc.find_feature("Third").unwrap().id;
+    damaged["timeline_groups"] = json!([{"id": 1, "name": "Broken", "features": [first, third]}]);
+    let error = solidcraft_doc::Document::from_json(&damaged.to_string()).unwrap_err().to_string();
+    assert!(error.contains("not contiguous"), "{error}");
+}
+
+#[test]
+fn timeline_move_many_is_atomic_and_one_undo_step() {
+    let mut s = Session::default();
+    for (name, body, x) in [("First", "FirstBody", 0), ("Second", "SecondBody", 20), ("Third", "ThirdBody", 40)] {
+        run(
+            &mut s,
+            "solid.box",
+            json!({"length": 10, "width": 10, "height": 10, "corner": [x, 0, 0], "operation": "new_body", "name": name, "body_name": body}),
+        );
+    }
+    let group = run(&mut s, "timeline.group", json!({"name": "Pair", "features": ["First"]}))["group"].as_u64().unwrap();
+    let before = (*s.doc).clone();
+    run(&mut s, "timeline.move_many", json!({"features": ["Third"], "group": group, "position": 1}));
+    assert_eq!(s.doc.features.iter().map(|feature| feature.name.as_str()).collect::<Vec<_>>(), vec!["First", "Third", "Second"]);
+    assert_eq!(s.doc.timeline_groups[0].features.len(), 2);
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!(*s.doc, before, "one undo restores both order and folder membership");
+    run(&mut s, "edit.redo", json!({}));
+    assert_eq!(s.doc.timeline_groups[0].features.len(), 2);
+
+    let child = run(&mut s, "timeline.group", json!({"name": "Child", "features": ["Second"]}))["group"].as_u64().unwrap();
+    let before_parent = (*s.doc).clone();
+    let parent = run(&mut s, "timeline.group", json!({"name": "Parent", "groups": [group, child]}))["group"].as_u64().unwrap();
+    assert!(s.doc.timeline_groups.iter().filter(|folder| folder.parent == Some(parent)).count() == 2);
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!(*s.doc, before_parent, "creating a parent for selected folders is one undo step");
+}
+
+#[test]
+fn failed_timeline_move_many_keeps_folder_membership_and_order() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10, "name": "Base"}));
+    run(&mut s, "solid.fillet", json!({"edges": [[10, 5, 10]], "radius": 1, "name": "Round"}));
+    let group = run(&mut s, "timeline.group", json!({"name": "Destination"}))["group"].as_u64().unwrap();
+    let before = s.doc.clone();
+    let undo = s.undo.len();
+    let error = s.execute("timeline.move_many", &json!({"features": ["Base"], "group": group, "position": 2})).unwrap_err().to_string();
+    assert!(error.contains("breaks"), "{error}");
+    assert_eq!(s.doc, before);
+    assert_eq!(s.undo.len(), undo, "a refused atomic move adds no undo step");
+}
+
+#[test]
+fn timeline_folders_can_nest_and_reject_cycles() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10, "name": "Base"}));
+    let root = run(&mut s, "timeline.group", json!({"name": "Root"}))["group"].as_u64().unwrap();
+    let child = run(&mut s, "timeline.group", json!({"name": "Child", "parent": root}))["group"].as_u64().unwrap();
+    assert_eq!(s.doc.timeline_groups.iter().find(|group| group.id == child).unwrap().parent, Some(root));
+    run(&mut s, "timeline.move_to_group", json!({"groups": [child], "group": null}));
+    assert_eq!(s.doc.timeline_groups.iter().find(|group| group.id == child).unwrap().parent, None);
+    run(&mut s, "timeline.move_to_group", json!({"groups": [child], "group": root}));
+    let error = s.execute("timeline.move_to_group", &json!({"groups": [root], "group": child})).unwrap_err().to_string();
+    assert!(error.contains("itself") || error.contains("descendant"), "{error}");
+    let before = s.doc.clone();
+    let error = s.execute("timeline.move_many", &json!({"groups": [root], "group": child, "position": 0})).unwrap_err().to_string();
+    assert!(error.contains("itself") || error.contains("descendant"), "{error}");
+    assert_eq!(s.doc, before);
+    let reopened = solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap();
+    assert_eq!(reopened.timeline_groups, s.doc.timeline_groups);
+    run(&mut s, "timeline.ungroup", json!({"group": root}));
+    assert_eq!(s.doc.timeline_groups.iter().find(|group| group.id == child).unwrap().parent, None, "deleting a folder promotes its children");
 }

@@ -103,17 +103,17 @@ fn about(app: &mut SolveApp, ctx: &egui::Context) {
     }
     let t = Tokens::get();
     let mut open = true;
-    crate::frame::window(ctx, "About SolidCraft", crate::frame::Width::Normal)
+    crate::frame::window(ctx, crate::i18n::tr_label("About SolidCraft"), crate::frame::Width::Normal)
         .id(egui::Id::new("sc_about"))
         .open(&mut open)
         .default_size(vec2(440.0, 560.0))
         .show(ctx, |ui| {
             ui.label(RichText::new("SolidCraft").size(22.0).strong());
             ui.label(format!("Version {VERSION} · commit {COMMIT} · built {BUILD_DATE}"));
-            ui.label(RichText::new("Open-source parametric 3D CAD in Rust. Licensed MIT OR Apache-2.0.").color(t.text_dim));
+            ui.label(RichText::new(crate::i18n::tr_label("Open-source parametric 3D CAD in Rust. Licensed MIT OR Apache-2.0.")).color(t.text_dim));
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                if ui.button("Copy diagnostic information").clicked() {
+                if ui.button(crate::i18n::tr_label("Copy diagnostic information")).clicked() {
                     ctx.copy_text(diagnostics(app));
                 }
             });
@@ -136,7 +136,7 @@ fn about(app: &mut SolveApp, ctx: &egui::Context) {
                         ui.label(RichText::new(LICENSE_APACHE).monospace().size(11.0));
                     });
                     egui::CollapsingHeader::new("Third-party licences").show(ui, |ui| {
-                        if ui.button("Copy all licences").clicked() {
+                        if ui.button(crate::i18n::tr_label("Copy all licences")).clicked() {
                             ctx.copy_text(solidcraft_engine::licences::all());
                         }
                         third_party(ui);

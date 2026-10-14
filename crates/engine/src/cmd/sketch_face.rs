@@ -192,7 +192,8 @@ fn capture_impl(s: &Session, value: &Value, cmd: &str, internal: bool) -> Result
         {
             return Err(bad(
                 cmd,
-                "this face can't keep an attachment: it was merged from more than one feature's faces or reshaped by an edit. \
+                "this face can't keep an attachment: its history can't tell it apart from other faces (an edit reshaped it, \
+                 or more than one face could claim its name). \
                  Pick another face, or use a fixed plane here (fixed:true), which won't follow later changes to the face",
             ));
         }

@@ -54,6 +54,93 @@ fn shell_with_a_hole_through_a_curved_side() {
     ]));
 }
 
+/// A cut whose end only touches the plate's arc side (#897, robustness seed 14): the end lies
+/// tangent to the arc at its apex, the direct boolean fails, and the last-resort nudge used to
+/// push the end into the arc, leaving a sliver of it a tenth of a millimetre wide that a shell
+/// then couldn't offset. The nudge the other way parts them: the same faces as a cut clear of
+/// the apex, and seed 14 shells and fillets again.
+#[test]
+fn cut_whose_end_touches_an_arc_side_leaves_no_sliver() {
+    let plate = |x: f64| {
+        script(json!([
+            {"command": "sketch.create", "params": {"plane": "XY"}},
+            {"command": "sketch.line", "params": {"points": [[0, 0], [42.5, 0], [42.5, 20.0], [0, 20.0]]}},
+            {"command": "sketch.arc.three_point", "params": {"end": [0, 0], "start": [0, 20.0], "through": [-10.0, 10.0]}},
+            {"command": "sketch.finish", "params": {}},
+            {"command": "solid.extrude", "params": {"distance": 27.5}},
+            {"command": "solid.cylinder", "params": {"axis": [1.0, 0.0, 0.0], "base": [x, 12.5, 12.5], "height": 17.5, "operation": "cut", "radius": 5.0}}
+        ]))
+    };
+    let (touching, clear) = (plate(-10.0), plate(-10.1));
+    let faces = |s: &Session| s.model.state().bodies.iter().map(|b| b.body.face_count()).sum::<usize>();
+    assert_eq!(faces(&touching), faces(&clear), "a sliver face was left where the cut's end touches the arc");
+    let r = fuzz::run(14, 8);
+    let kinds: Vec<&str> = r.steps.iter().map(|s| s.kind).collect();
+    assert!(r.outcome.kind == "ok" && kinds.contains(&"shell"), "seed 14: {:?} {kinds:?}\n{}", r.outcome, r.script());
+}
+
+/// #827: a hinge barrel joined to a laptop lid through its mounting leaf. The barrel's top lies
+/// tangent to the lid's underside where the leaf ends, so the direct boolean fails, and the
+/// last-resort nudge pushed the barrel into the lid and failed too; the nudge the other way
+/// parts them and the join builds. The barrel adds three quarters of a cylinder (the quarter
+/// inside the leaf was there already).
+#[test]
+fn hinge_barrel_joins_a_filleted_lid() {
+    let all = json!([
+        {"command": "solid.box", "params": {"length": 320, "width": 220, "height": 6, "corner": [-160, 4, 21], "body_name": "Lid Housing"}},
+        {"command": "solid.fillet", "params": {"body": "Lid Housing", "edges": [[-160, 4, 24], [160, 4, 24], [-160, 224, 24], [160, 224, 24]], "radius": 5}},
+        {"command": "solid.fillet", "params": {"body": "Lid Housing", "edges": [[0, 4, 27], [0, 224, 27], [-160, 114, 27], [160, 114, 27]], "radius": 1}},
+        {"command": "solid.box", "params": {"length": 296, "width": 190, "height": 1.1, "corner": [-148, 17, 20.9], "operation": "cut", "targets": ["Lid Housing"]}},
+        {"command": "solid.box", "params": {"length": 14, "width": 10, "height": 6, "corner": [-123.5, 214, 16], "operation": "join", "targets": ["Lid Housing"]}},
+        {"command": "solid.cylinder", "params": {"radius": 5, "height": 14, "axis": "X", "base": [-123.5, 224, 16], "operation": "join", "targets": ["Lid Housing"]}}
+    ]);
+    let steps = all.as_array().unwrap();
+    let before = total_volume(&script(Value::Array(steps[..5].to_vec())));
+    let s = script(all.clone());
+    assert_eq!(s.model.state().bodies.len(), 1);
+    let added = total_volume(&s) - before;
+    let want = 0.75 * PI * 5.0 * 5.0 * 14.0;
+    assert!((added - want).abs() < want * 1e-3, "the barrel added {added} mm³, not {want}");
+}
+
+/// #871: the fillet from the report (its feature as saved) on a plate with a block on top and
+/// a window through both. Radius 1 on the window's edges and on the block's sides overlaps in
+/// the 1.26 mm wall between them; the result had openings in its end faces and was accepted.
+/// It is refused now, and the part is left as it was.
+#[test]
+fn fillet_that_would_open_the_surface_is_refused() {
+    let (a, b) = (12.74437365538526, 22.69275963366936);
+    let mut s = script(json!([
+        {"command": "solid.box", "params": {"length": 14, "width": 21.5, "height": 10, "corner": [9.5, 8, 0]}},
+        {"command": "solid.box", "params": {"length": 14, "width": b - a, "height": 10, "corner": [9.5, a, 10], "operation": "join", "targets": ["Body1"]}},
+        {"command": "solid.box", "params": {"length": 14, "width": 5.2, "height": 7.1, "corner": [9.5, 14, 7], "operation": "cut", "targets": ["Body1"]}}
+    ]));
+    let feature = json!({
+        "type": "fillet",
+        "edges": [
+            [23.5, 12.74437365538526, 15.0], [23.5, 10.37218682769263, 10.0], [23.5, 8.0, 5.0], [23.5, 18.75, 0.0],
+            [23.5, 29.5, 5.0], [23.5, 26.09637981683468, 10.0], [23.5, 22.69275963366936, 15.0], [23.5, 17.71856664452731, 20.0],
+            [23.5, 16.6, 7.0], [23.5, 14.0, 10.55], [23.5, 16.6, 14.100000000000001], [23.5, 19.200000000000003, 10.55],
+            [9.5, 17.71856664452731, 20.0], [9.5, 22.69275963366936, 15.0], [9.5, 26.09637981683468, 10.0], [9.5, 29.5, 5.0],
+            [9.5, 18.75, 0.0], [9.5, 8.0, 5.0], [9.5, 10.37218682769263, 10.0], [9.5, 12.74437365538526, 15.0],
+            [9.5, 19.200000000000003, 10.55], [9.5, 16.6, 14.100000000000001], [9.5, 14.0, 10.55], [9.5, 16.6, 7.0]
+        ],
+        "radius": "1"
+    });
+    let before = total_volume(&s);
+    let result = s.execute("solid.fillet", &json!({"edges": feature["edges"], "radius": feature["radius"]}));
+    assert!(result.is_err(), "a fillet with openings in the model was accepted");
+    assert!((total_volume(&s) - before).abs() < 1e-9);
+    for body in &s.model.state().bodies {
+        assert!(body.body.validity().is_empty() && body.body.crossed_face_loops().unwrap() == 0);
+    }
+    // At half the radius the rounds fit.
+    run(&mut s, "solid.fillet", json!({"edges": feature["edges"], "radius": "0.5"}));
+    for body in &s.model.state().bodies {
+        assert!(body.body.validity().is_empty() && body.body.crossed_face_loops().unwrap() == 0);
+    }
+}
+
 /// Shell of a body in two pieces (a cylinder joined clear of a ring): each piece is shelled.
 #[test]
 fn shell_of_a_body_in_two_pieces() {
@@ -350,5 +437,140 @@ fn lip_on_a_rounded_shelled_rim() {
         steps.push(json!({"command": "plastic.lip", "params": p}));
         let v = total_volume(&script(Value::Array(steps)));
         assert!((v - want).abs() < 1e-3 * want, "{extra}: {v} vs {want}");
+    }
+}
+
+/// The #851 part: a wall of radius 21 meets the front face square and runs out tangent into the
+/// back face, in a knife edge at (62⅙, 0). Its two blends below are checked against the volumes
+/// of the swept corner (the wall's angle integrated over the section), through the display plan.
+fn knife_edge_part() -> Session {
+    script(json!([
+        {"command": "sketch.create", "params": {"plane": "XY"}},
+        {"command": "sketch.rectangle.two_point", "params": {"p0": [0, 0], "p1": [41.5, -21]}},
+        {"command": "sketch.dimension", "params": {"entities": ["l2"], "text_at": [36.5, -8.5], "value": "21 mm"}},
+        {"command": "sketch.line", "params": {"infer": true, "points": ["p2", [61.5, -21]]}},
+        {"command": "sketch.dimension", "params": {"entities": ["l5"], "text_at": [54.5, -26.5], "value": "21"}},
+        {"command": "sketch.circle.center", "params": {"center": "l5.end", "radius": 21}},
+        {"command": "sketch.line", "params": {"infer": true, "points": ["p3", [62.166666666666664, 0]]}},
+        {"command": "sketch.constraint.tangent", "params": {"a": "c1", "b": "l6"}},
+        {"command": "sketch.finish", "params": {}},
+        {"command": "solid.extrude", "params": {"direction": "positive", "distance": "10 mm", "operation": "new", "profiles": [0, 1], "sketch": 1}}
+    ]))
+}
+
+/// The volume of the session's bodies through the display plan.
+fn planned_volume(s: &Session) -> f64 {
+    s.model.state().bodies.iter().map(|b| b.body.display_plan(2e-4).unwrap().evaluate().measure().volume).sum()
+}
+
+/// #851: the knife edge where the wall runs out has opposite normals on its two faces. It rounds
+/// to the ball that fits there and chamfers with the plane through that ball's contacts (the cusp
+/// area less the wall's sector and the ball's, or the chord triangle less the wall's segment,
+/// times the 10 mm height).
+#[test]
+fn blend_a_knife_edge_where_a_curved_wall_runs_out() {
+    let knife = json!([[62.1667, 0, 5]]);
+    for (command, params, removed) in
+        [("solid.fillet", json!({"edges": knife, "radius": 2}), 119.648_812), ("solid.chamfer", json!({"edges": knife, "distance": 2}), 159.236_451)]
+    {
+        let mut s = knife_edge_part();
+        let before = planned_volume(&s);
+        s.execute(command, &params).unwrap_or_else(|e| panic!("{command}: {e}"));
+        let after = planned_volume(&s);
+        assert!((before - after - removed).abs() < 0.5, "{command}: removed {}, expected {removed}", before - after);
+        for b in &s.model.state().bodies {
+            assert!(b.body.validity().is_empty(), "{command}: {:?}", b.body.validity());
+        }
+    }
+}
+
+/// #851: the arc's top edge runs out tangent to the back face at the knife edge's top. The blend
+/// is cut by that face along a curve that touches the wall's contact at the tip.
+#[test]
+fn blend_an_arc_edge_that_runs_out_tangent_to_a_face() {
+    let arc = json!([[47.3174, -6.1508, 10]]);
+    for (command, params, removed) in
+        [("solid.fillet", json!({"edges": arc, "radius": 2}), 25.506), ("solid.chamfer", json!({"edges": arc, "distance": 2}), 58.077)]
+    {
+        let mut s = knife_edge_part();
+        let before = planned_volume(&s);
+        s.execute(command, &params).unwrap_or_else(|e| panic!("{command}: {e}"));
+        let after = planned_volume(&s);
+        assert!((before - after - removed).abs() < 0.05, "{command}: removed {}, expected {removed}", before - after);
+        for b in &s.model.state().bodies {
+            assert!(b.body.validity().is_empty(), "{command}: {:?}", b.body.validity());
+        }
+    }
+}
+
+/// #851: every selection of the issue's table works, picked together or one after the other as
+/// the issue lists them, on the part with the wall that meets the front face square and runs out
+/// tangent into the back face (the top front edge, the arc's top edge, the front upright at the
+/// arc, the front-left upright and the knife edge at the tip). Each makes a sound solid the
+/// display plan can mesh, and takes less than its edges would one by one where they meet.
+#[test]
+fn blend_corners_where_edges_meet_on_a_curved_wall() {
+    let (tf, at, fu, fl, kn) =
+        (json!([20, -21, 10]), json!([47.3174, -6.1508, 10]), json!([41.1667, -21, 5]), json!([0, -21, 5]), json!([62.1667, 0, 5]));
+    let fillet = |edges: Value| json!({"command": "solid.fillet", "params": {"edges": edges, "radius": 2}});
+    let chamfer = |edges: Value| json!({"command": "solid.chamfer", "params": {"edges": edges, "distance": 2}});
+    let base = planned_volume(&knife_edge_part());
+    let rows: Vec<(&str, Vec<Value>)> = vec![
+        ("three at the corner", vec![fillet(json!([tf, at, fu]))]),
+        ("top front and arc", vec![fillet(json!([tf, at]))]),
+        ("arc and upright", vec![fillet(json!([at, fu]))]),
+        ("top front and upright", vec![fillet(json!([tf, fu]))]),
+        ("arc alone", vec![fillet(json!([at]))]),
+        ("top front, then the front-left upright", vec![fillet(json!([tf])), fillet(json!([fl]))]),
+        ("top front and front-left together", vec![fillet(json!([tf, fl]))]),
+        ("the knife edge", vec![fillet(json!([kn]))]),
+        ("chamfer: the knife edge", vec![chamfer(json!([kn]))]),
+        ("chamfer: the arc", vec![chamfer(json!([at]))]),
+        ("chamfer: the arc and the top front", vec![chamfer(json!([at, tf]))]),
+        ("arc, then top front", vec![fillet(json!([at])), fillet(json!([tf]))]),
+        ("top front, then upright", vec![fillet(json!([tf])), fillet(json!([fu]))]),
+    ];
+    for (name, steps) in rows {
+        let mut s = knife_edge_part();
+        for step in &steps {
+            let (c, p) = (step["command"].as_str().unwrap_or(""), &step["params"]);
+            s.execute(c, p).unwrap_or_else(|e| panic!("{name}: {c} {p}: {e}"));
+        }
+        for b in &s.model.state().bodies {
+            assert!(b.body.validity().is_empty(), "{name}: {:?}", b.body.validity());
+            assert!(b.body.display_plan(2e-4).is_ok(), "{name}: the display plan refuses the body");
+        }
+        let removed = base - planned_volume(&s);
+        assert!(removed > 0.0 && removed < 250.0, "{name}: removed {removed}");
+    }
+    // The three edges end in a sphere: the volume of the rounds and the ball's corner.
+    let mut s = knife_edge_part();
+    s.execute("solid.fillet", &fillet(json!([tf, at, fu]))["params"]).unwrap_or_else(|e| panic!("three at the corner: {e}"));
+    let removed = base - planned_volume(&s);
+    assert!((removed - 67.05).abs() < 0.15, "three at the corner: removed {removed}, expected 67.05");
+}
+
+/// Seed 20 cuts a patterned cylinder's holes through a filleted plate. The lenient retry of a
+/// face's parameter boundary (#970) searched the whole cylinder for a point and found it across
+/// the seam, half a turn away; the face was divided wrongly and the cut failed. Such a boundary
+/// is refused now, and the cut builds as before #970.
+#[test]
+fn a_boundary_found_across_a_seam_is_not_used() {
+    let r = fuzz::run(20, 8);
+    assert_eq!(r.outcome.kind, "ok", "seed 20: {:?}\n{}", r.outcome, r.script());
+}
+
+/// Seed 33 ends in a fillet on its second body (#854's corner blends build it differently from
+/// before). Its display plan and its measured volume agree for every body (on main before #854,
+/// that body read 4439.42 through the display plan and 4443.51 measured).
+#[test]
+fn seed_33_display_plan_and_measure_agree() {
+    let r = fuzz::run(33, 8);
+    assert_eq!(r.outcome.kind, "ok", "seed 33: {:?}\n{}", r.outcome, r.script());
+    let s = script(r.script());
+    for b in &s.model.state().bodies {
+        let planned = b.body.display_plan(2e-4).unwrap().evaluate().measure().volume;
+        let measured = solidcraft_kernel::measure(&b.body).unwrap().volume;
+        assert!((planned - measured).abs() < 2e-5 * measured, "{}: planned {planned}, measured {measured}", b.name);
     }
 }

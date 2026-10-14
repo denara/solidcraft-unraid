@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 pub mod cmd;
+pub mod control_auth;
 pub mod crash;
 pub mod frames;
 pub mod fuzz;
@@ -325,6 +326,14 @@ impl Session {
             evaluations: 0,
             crash_journal: false,
         }
+    }
+
+    /// Become `fresh` (another design opened, recovered or started), keeping the settings that
+    /// are the user's rather than the design's: `auto_project` is a preference (#680).
+    pub fn replace_design(&mut self, fresh: Session) {
+        let auto_project = self.auto_project;
+        *self = fresh;
+        self.auto_project = auto_project;
     }
 
     /// The design has changes not in its file: in the document, or in what is hidden.
@@ -810,6 +819,10 @@ mod display_mesh_tests;
 mod extent_tests;
 #[cfg(test)]
 mod hole_face_tests;
+#[cfg(test)]
+mod hole_matrix_tests;
+#[cfg(test)]
+mod large_assembly_tests;
 #[cfg(test)]
 mod naming_history_tests;
 #[cfg(test)]

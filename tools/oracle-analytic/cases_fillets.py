@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Closed-form expected values for the fillets whose radius varies along a straight edge
-(cases 77-80 of tests/oracle: variable, closing at a corner, chord length, taper to fit).
+(cases 77-81 of tests/oracle: variable, closing at a corner, chord length, taper to fit, a
+B-spline radius).
 
 Standalone, Python 3 stdlib only (it reuses the helpers of cases_features.py). Run from the
 worktree root:
@@ -96,6 +97,28 @@ def c79():
           1, box(0, 0, 0, 40, 30, 20) - cut, 5200 + da, [(0, 0, 0), (40, 30, 20)], faces=7)
 
 
+def bspline(degree, knots, ctrl, length):
+    """A clamped B-spline radius in u = x / length (the kernel's `RadiusSpline`): r(x), its slope
+    dr/dx (de Boor on the span holding u, the slope from the differenced controls) and the x
+    pieces between distinct knots, on which r is one polynomial."""
+    n = len(ctrl)
+
+    def deboor(p, kn, c, u):
+        k = max(i for i in range(p, len(c)) if kn[i] <= u) if u < kn[len(c)] else len(c) - 1
+        d = [c[j + k - p] for j in range(p + 1)]
+        for rr in range(1, p + 1):
+            for j in range(p, rr - 1, -1):
+                i = j + k - p
+                al = (u - kn[i]) / (kn[i + p + 1 - rr] - kn[i])
+                d[j] = (1 - al) * d[j - 1] + al * d[j]
+        return d[p]
+
+    dctrl = [degree * (ctrl[i + 1] - ctrl[i]) / (knots[i + degree + 1] - knots[i + 1]) for i in range(n - 1)]
+    breaks = sorted(set(knots))
+    pieces = [(length * a, length * b) for a, b in zip(breaks, breaks[1:])]
+    return (lambda x: deboor(degree, knots, ctrl, x / length)), (lambda x: deboor(degree - 1, knots[1:-1], dctrl, x / length) / length), pieces
+
+
 # The taper law (crates/kernel/src/blend_variable.rs `taper`): a clamped cubic B-spline in
 # u = x / L on 8 equal spans, its control radii min(R, 0.9 room) at the Greville abscissae.
 SPANS, SHARE = 8, 0.9
@@ -103,32 +126,9 @@ SPANS, SHARE = 8, 0.9
 
 def taper(radius, room, length):
     knots = [0.0] * 4 + [k / SPANS for k in range(1, SPANS)] + [1.0] * 4
-    n = SPANS + 3
-    greville = [sum(knots[j + 1:j + 4]) / 3 for j in range(n)]
+    greville = [sum(knots[j + 1:j + 4]) / 3 for j in range(SPANS + 3)]
     ctrl = [min(radius, SHARE * room(u)) for u in greville]
-
-    def at(u, deriv):
-        # de Boor on the span holding u; the derivative from the degree-2 differences.
-        k = min(max(i for i in range(3, n) if knots[i] <= u), n - 1)
-        if deriv:
-            q = [3 * (ctrl[i] - ctrl[i - 1]) / (knots[i + 3] - knots[i]) for i in range(k - 2, k + 1)]
-            d = q[:]
-            for rr in range(1, 3):
-                for j in range(2, rr - 1, -1):
-                    i = j + k - 2
-                    al = (u - knots[i]) / (knots[i + 3 - rr] - knots[i])
-                    d[j] = (1 - al) * d[j - 1] + al * d[j]
-            return d[2] / length
-        d = [ctrl[j + k - 3] for j in range(4)]
-        for rr in range(1, 4):
-            for j in range(3, rr - 1, -1):
-                i = j + k - 3
-                al = (u - knots[i]) / (knots[i + 4 - rr] - knots[i])
-                d[j] = (1 - al) * d[j - 1] + al * d[j]
-        return d[3]
-
-    pieces = [(length * s / SPANS, length * (s + 1) / SPANS) for s in range(SPANS)]
-    return (lambda x: at(x / length, False)), (lambda x: at(x / length, True)), pieces, ctrl
+    return (*bspline(3, knots, ctrl, length), ctrl)
 
 
 def c80():
@@ -145,7 +145,19 @@ def c80():
           1, extrude(reg, 0, 15) - cut, extrude_area(reg, 15) + da, [(0, 0, 0), (40, 20, 15)], faces=7)
 
 
-CASES = [c77, c78, c79, c80]
+def c81():
+    knots = [0.0, 0.0, 0.0, 0.0, 0.25, 0.6, 1.0, 1.0, 1.0, 1.0]
+    ctrl = [2.0, 5.0, 1.5, 4.0, 1.0, 3.0]
+    r, dr, pieces = bspline(3, knots, ctrl, 40.0)
+    cut, da = removed(r, dr, pieces, 20.0)
+    write("81-fillet-spline-radius",
+          "box 40x30x20 with its top front edge (y=0, z=20) rounded at a radius that is a clamped cubic B-spline in "
+          "u = x/40, knots 0,0,0,0,0.25,0.6,1,1,1,1, control radii 2, 5, 1.5, 4, 1, 3 (r(0) = 2, r(40) = 3). Sections are "
+          "quarter rounds; V, moments and areas integrated along the edge, exactly per knot span",
+          1, box(0, 0, 0, 40, 30, 20) - cut, 5200 + da, [(0, 0, 0), (40, 30, 20)], faces=7)
+
+
+CASES = [c77, c78, c79, c80, c81]
 
 if __name__ == "__main__":
     for fn in CASES:

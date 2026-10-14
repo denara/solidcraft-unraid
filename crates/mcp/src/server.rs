@@ -6,6 +6,8 @@ use serde_json::{Value, json};
 /// Longest accepted request line, shared with the control server.
 use solidcraft_engine::MAX_LINE;
 
+use solidcraft_engine::io::vfs::{self, PathScope};
+
 use crate::backend::Backend;
 use crate::tools::{call_tool, check_arguments, tool_definitions};
 
@@ -35,6 +37,7 @@ edge], radius}`, `solid.chamfer`, patterns, mirror, primitives). Use `batch` for
 pub struct Server {
     backend: Box<dyn Backend>,
     initialized: bool,
+    scope: Option<PathScope>,
 }
 
 fn response(id: Value, result: Value) -> Value {
@@ -46,7 +49,13 @@ fn error(id: Value, code: i64, message: impl Into<String>) -> Value {
 
 impl Server {
     pub fn new(backend: Box<dyn Backend>) -> Self {
-        Self { backend, initialized: false }
+        Self { backend, initialized: false, scope: None }
+    }
+    /// Confine the files tool calls may reach to `scope` (`None`: anywhere). `solidcraft-cli mcp`
+    /// always sets one unless started with `--allow-any-path` (docs/mcp.md).
+    pub fn with_path_scope(mut self, scope: Option<PathScope>) -> Self {
+        self.scope = scope;
+        self
     }
     pub fn backend(&mut self) -> &mut dyn Backend {
         self.backend.as_mut()
@@ -146,7 +155,10 @@ impl Server {
                     Some(a) => a.clone(),
                 };
                 check_arguments(name, &args).map_err(|e| (INVALID_PARAMS, e))?;
-                Ok(call_tool(self.backend.as_mut(), name, &args))
+                // The open design's folder counts as it is now (a save-as or open moves it).
+                let scope = self.scope.clone().map(|s| s.with_design(self.backend.design_path().as_deref()));
+                let backend = self.backend.as_mut();
+                Ok(vfs::scoped(scope, || call_tool(backend, name, &args)))
             }
             "resources/list" => Ok(json!({"resources": [
                 {"uri": "solidcraft://design", "name": "Active design", "description": "document.inspect with measurements", "mimeType": "application/json"},

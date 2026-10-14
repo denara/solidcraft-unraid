@@ -91,3 +91,39 @@ fn exported_binary_stl_with_a_bore_reconstructs_analytic_faces() {
     assert_eq!(body.faces(0.01).unwrap().len(), 10);
     std::fs::remove_file(path).unwrap();
 }
+
+/// #784: STL is closed as written where faces meet (a fillet, a bored hole): every edge of the
+/// file, keyed by its exact f32 ends, is shared by exactly two triangles, as in 3MF.
+#[test]
+fn stl_export_is_closed_where_faces_meet() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 30, "width": 20, "height": 10, "operation": "new", "body_name": "BoxFillet"}));
+    run(&mut s, "solid.fillet", json!({"body": "BoxFillet", "edges": [[15, 0, 10]], "radius": 2}));
+    run(&mut s, "solid.cylinder", json!({"diameter": 30, "height": 12, "base": [60, 0, 0], "operation": "new", "body_name": "CylHole"}));
+    run(&mut s, "solid.hole", json!({"position": [60, 0, 12], "diameter": 6}));
+    let state = s.model.state();
+    for name in ["BoxFillet", "CylHole"] {
+        let body = &state.bodies.iter().find(|b| b.name == name).unwrap().body;
+        let expected = solidcraft_kernel::measure(body).unwrap().volume;
+        for format in [solidcraft_io::Format::StlBinary, solidcraft_io::Format::StlAscii] {
+            let bytes = solidcraft_io::export(&state, &[name.to_string()], format, name).unwrap();
+            let tris = solidcraft_io::read_stl(&bytes).unwrap();
+            let key = |p: [f32; 3]| p.map(f32::to_bits);
+            let mut edges = std::collections::HashMap::new();
+            for t in &tris {
+                for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                    let (a, b) = (key(a), key(b));
+                    *edges.entry(if a < b { (a, b) } else { (b, a) }).or_insert(0) += 1;
+                }
+            }
+            let open = edges.values().filter(|n| **n != 2).count();
+            assert_eq!(open, 0, "{name} {format:?}: {open} edges not shared by exactly two triangles");
+            let p = |v: [f32; 3]| Vec3::new(v[0] as f64, v[1] as f64, v[2] as f64);
+            let v: f64 = tris.iter().map(|t| p(t[0]).dot(p(t[1]).cross(p(t[2]))) / 6.0).sum();
+            assert!((v - expected).abs() <= expected * 1e-3, "{name} {format:?}: STL volume {v}, body {expected}");
+            let mf = solidcraft_io::export(&state, &[name.to_string()], solidcraft_io::Format::ThreeMf, name).unwrap();
+            let (objs, _) = solidcraft_io::read_3mf(&mf).unwrap();
+            assert_eq!(tris.len(), objs.iter().map(|o| o.triangles.len()).sum::<usize>(), "{name} {format:?}: STL and 3MF triangles");
+        }
+    }
+}

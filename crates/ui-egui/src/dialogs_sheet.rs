@@ -33,8 +33,8 @@ const RULE_FIELDS: [(&str, &str); 8] = [
     ("gap", "Flange Gap"),
 ];
 /// The corner relief shapes the manager offers (the rule's `corner_relief_shape`) and their labels.
-const RELIEF_SHAPES: [&str; 3] = ["notch", "round", "rectangular"];
-const RELIEF_SHAPE_LABELS: [&str; 3] = ["Notch", "Round", "Rectangular"];
+const RELIEF_SHAPES: [&str; 4] = ["notch", "round", "rectangular", "tear"];
+const RELIEF_SHAPE_LABELS: [&str; 4] = ["Notch", "Round", "Rectangular", "Tear"];
 
 #[derive(Clone, Debug)]
 pub enum Sm {
@@ -216,7 +216,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Sm, inputs: &mut [Sel
                     combo(ui, "sm_pos", &POSITION_LABELS, position);
                     ui.end_row();
                     row_label(ui, "Bend Radius");
-                    let r = ui.add(egui::TextEdit::singleline(radius).hint_text("from the rule"));
+                    let r = ui.add(egui::TextEdit::singleline(radius).hint_text(crate::i18n::tr_label("from the rule")));
                     crate::params_dialog::complete(ui, &r, radius);
                     enter |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     ui.end_row();
@@ -225,7 +225,8 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Sm, inputs: &mut [Sel
                     let points = edge_point_list(inputs);
                     if points.len() > 1 || own.iter().any(|o| !(o.1.trim().is_empty() && o.2.trim().is_empty())) {
                         row_label(ui, "Per Edge");
-                        ui.label(RichText::new("angle, height").weak()).on_hover_text("An edge's own angle and height. Empty: the values above.");
+                        ui.label(RichText::new(crate::i18n::tr_label("angle, height")).weak())
+                            .on_hover_text("An edge's own angle and height. Empty: the values above.");
                         ui.end_row();
                         let w = ((ui.spacing().text_edit_width - ui.spacing().item_spacing.x) / 2.0).max(40.0);
                         for (n, p) in points.iter().enumerate() {
@@ -266,13 +267,13 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Sm, inputs: &mut [Sel
         }
         Sm::Hem { length, gap, flip } => {
             row_label(ui, "Type");
-            ui.label("Flat");
+            ui.label(crate::i18n::tr_label("Flat"));
             ui.end_row();
             row_label(ui, "Length");
             enter |= field(ui, length);
             ui.end_row();
             row_label(ui, "Gap");
-            let r = ui.add(egui::TextEdit::singleline(gap).hint_text("from the rule"));
+            let r = ui.add(egui::TextEdit::singleline(gap).hint_text(crate::i18n::tr_label("from the rule")));
             crate::params_dialog::complete(ui, &r, gap);
             enter |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             ui.end_row();
@@ -288,7 +289,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Sm, inputs: &mut [Sel
             enter |= field(ui, angle);
             ui.end_row();
             row_label(ui, "Bend Radius");
-            let r = ui.add(egui::TextEdit::singleline(radius).hint_text("from the rule"));
+            let r = ui.add(egui::TextEdit::singleline(radius).hint_text(crate::i18n::tr_label("from the rule")));
             crate::params_dialog::complete(ui, &r, radius);
             enter |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             ui.end_row();
@@ -347,7 +348,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Sm, inputs: &mut [Sel
             ui.end_row();
             if *pick < rules.len() && !app.session.doc.sheet.rules.is_empty() {
                 row_label(ui, "");
-                if ui.button("Delete rule").clicked() {
+                if ui.button(crate::i18n::tr_label("Delete rule")).clicked() {
                     let n = rules.get(*pick).map(|r| r.name.clone()).unwrap_or_default();
                     match app.run("sheet.manage_rules", json!({"name": n, "delete": true})) {
                         Ok(_) => {

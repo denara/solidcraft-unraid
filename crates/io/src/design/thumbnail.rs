@@ -60,6 +60,7 @@ pub fn read_design_thumbnail(bytes: &[u8]) -> Option<Vec<u8>> {
 pub fn read_design_thumbnail_file(path: &str) -> Option<Vec<u8>> {
     #[cfg(not(target_arch = "wasm32"))]
     let source = {
+        crate::vfs::check(path).ok()?;
         let metadata = std::fs::metadata(path).ok()?;
         if !metadata.is_file() || metadata.len() > MAX_DESIGN_BYTES as u64 {
             return None;

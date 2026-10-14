@@ -91,16 +91,65 @@
 //!   edited.
 //!   A fillet's `fit` can be `taper` (the radius follows the room along each edge it doesn't
 //!   fit). Fillets with `exact` or `reduce` save as before; 0.8.0 would refuse the unknown fit.
+//!   Feature-history folders are also first saved in 17 (`timeline_groups`: stable folder id,
+//!   name, optional parent folder and feature ids). Version 16 designs have no saved timeline
+//!   folders and open with the empty default.
 //!   A fillet's `type` can be `spline` (the radius along each edge a B-spline: `start`, `knots`,
 //!   and the control radii after `radius` in `radii`). Other fillets save as before; 0.8.0 would
 //!   refuse the unknown type.
+//!   Under the same version, a sheet metal rule's corner relief shape can also be `tear` (no
+//!   relief: each bend is cut straight from the bends' corner to where its flange's end
+//!   starts); a rule that says `notch`, `round` or `rectangular` builds what it did.
+//!   A sketch's view options can also say `hide_construction` (the Sketch Palette's
+//!   Construction Geometries); a sketch that shows its construction geometry saves as before.
+//!   A `SurfaceExtrude` feature (Surface Extrude: `sketch`, optional `profiles`, `curves` and
+//!   `extent`, walls only) is first saved in 17; 0.8.0 would refuse the unknown feature.
+//! - 18: surface features 0.9.0 doesn't know: `Unstitch` (a body's faces taken out as surface
+//!   bodies) and `ReverseNormal` (a surface body's faces turned over), each a `body` and
+//!   optional `faces` points. Version 17 designs need no transformation; the version stamp makes
+//!   0.9.0 (which reads up to 17) ask for an update instead of meeting a feature it can't read.
+//!   Under the same version, a sketch text's link source can carry a `style`: `bold` and
+//!   `italic` (the font's bold or italic face), `align` (`left`, `center` or `right`),
+//!   `letter_spacing` (mm), `line_spacing` (times the font's line distance), `path` (the id of a
+//!   curve of the same sketch the baseline follows) and `reverse`. A text without `style` is set
+//!   as it always was; 0.9.0 would drop the style and set the text plain, off its curve.
+//!   Under the same version, Delete Face can leave the gap open (`heal: false` on the feature:
+//!   the faces left are a surface body); a Delete Face without it heals, as it always did, and
+//!   saves as before. 0.9.0 would heal a gap the design leaves open.
+//!   A `SurfaceRevolve` feature (Surface Revolve: `sketch`, optional `profiles`, `curves`,
+//!   `axis`, `angle`, optional `angle2` and `symmetric`) is also first saved in 18.
+//!   A `SurfaceSweep` feature (Surface Sweep: `sketch`, optional `profiles` and `curves`,
+//!   `path_sketch`, `path`) is also first saved in 18.
+//!   A `SurfaceLoft` feature (Surface Loft: `sections`, each a `sketch` with optional `profiles`
+//!   and `curves`) is also first saved in 18.
+//!   A `SurfaceOffset` feature (Offset Surface: `faces` points, optional `body`, `distance`,
+//!   `chain` and `tolerance`) is also first saved in 18.
+//!   Nothing new is saved for holes, but a hole on a face is now drilled into the material: a
+//!   saved `direction` that leaves the face the hole starts on (designs up to 17 could save one,
+//!   taken from another face whose plane passed near the point, such as the far side of a thin
+//!   plate or a face of another body at the same height) is mirrored into that face when the
+//!   design is evaluated. Holes whose direction enters their face build as before.
+//!   Holes at sketch points can be flipped (`flip: true` in the hole's `points`): they drill away
+//!   from the side they would go into by themselves. Holes without it save as before; 0.9.0 would
+//!   drop the flip and drill the other way.
+
+//! - 19: editable associative offset-distance dimensions. Older offsets retain their saved
+//!   fixed distances; migration does not invent dimensions or change geometry.
+//!   Under the same version, a fillet's style can be `curvature` (a G2 quintic blend; `radius`
+//!   is the equivalent circular setback). Fillets of the other styles save as before; 0.9.0
+//!   would refuse the unknown style.
+//! - 20: an Extrude can be thin (`thin`: `curves`, `thickness`, optional `side` and
+//!   `thickness2`): a wall along sketch curves instead of its profiles. Version 19 designs need
+//!   no transformation, and an extrude without `thin` saves as before; the version stamp makes
+//!   0.10.0 (which reads up to 19) ask for an update instead of ignoring the wall and filling
+//!   the sketch's profiles.
 
 use serde_json::Value;
 
 use crate::{DocError, Document, Result};
 
 /// The format this build writes.
-pub const FORMAT: u32 = 17;
+pub const FORMAT: u32 = 20;
 
 pub fn format_string(n: u32) -> String {
     format!("solidcraft/{n}")
@@ -117,7 +166,7 @@ pub fn version_of(s: &str) -> Option<u32> {
 
 /// JSON-level upgrades: entry `i` turns format `i + 1` into `i + 2`.
 type JsonStep = fn(&mut Value) -> Result<()>;
-const JSON_STEPS: [JsonStep; 16] = [
+const JSON_STEPS: [JsonStep; 19] = [
     |_| Ok(()),
     v2_to_v3,
     v3_to_v4,
@@ -131,6 +180,9 @@ const JSON_STEPS: [JsonStep; 16] = [
     |_| Ok(()),
     |_| Ok(()),
     v13_to_v14,
+    |_| Ok(()),
+    |_| Ok(()),
+    |_| Ok(()),
     |_| Ok(()),
     |_| Ok(()),
     |_| Ok(()),
@@ -367,13 +419,53 @@ pub fn read(s: &str) -> Result<Document> {
     if d.features.len() > crate::document::MAX_FEATURES
         || d.params.len() > crate::document::MAX_PARAMS
         || d.components.len() > crate::document::MAX_FEATURES
+        || d.timeline_groups.len() > crate::document::MAX_FEATURES
+        || d.timeline_groups.iter().any(|group| group.features.len() > crate::document::MAX_FEATURES)
     {
         return Err(DocError::Invalid("document too large".into()));
+    }
+    let feature_ids: std::collections::BTreeSet<_> = d.features.iter().map(|feature| feature.id).collect();
+    let mut group_ids = std::collections::BTreeSet::new();
+    let mut grouped_features = std::collections::BTreeSet::new();
+    for group in &d.timeline_groups {
+        if group.name.trim().is_empty() || group.name.len() > 128 || !group_ids.insert(group.id) {
+            return Err(DocError::Invalid("damaged design: invalid timeline folder".into()));
+        }
+        if group.parent.is_some_and(|parent| parent == group.id) {
+            return Err(DocError::Invalid("damaged design: timeline folder cannot contain itself".into()));
+        }
+        if group.features.iter().any(|feature| !feature_ids.contains(feature) || !grouped_features.insert(*feature)) {
+            return Err(DocError::Invalid("damaged design: invalid feature in a timeline folder".into()));
+        }
+    }
+    for group in &d.timeline_groups {
+        if let Some(parent) = group.parent {
+            if !group_ids.contains(&parent) {
+                return Err(DocError::Invalid("damaged design: timeline folder has an unknown parent".into()));
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            let mut current = Some(parent);
+            while let Some(id) = current {
+                if !seen.insert(id) {
+                    return Err(DocError::Invalid("damaged design: cyclic timeline folders".into()));
+                }
+                current = d.timeline_groups.iter().find(|candidate| candidate.id == id).and_then(|candidate| candidate.parent);
+            }
+        }
+    }
+    if let Some(id) = crate::non_contiguous_timeline_group(&d.features, &d.timeline_groups) {
+        return Err(DocError::Invalid(format!("damaged design: timeline folder {id} is not contiguous")));
     }
     for o in &d.occurrences {
         if !rigid(&o.transform) {
             return Err(DocError::Invalid(format!("damaged design: occurrence `{}` has an invalid placement", o.name)));
         }
+    }
+    if !all_unique(d.features.iter().map(|f| f.id))
+        || !all_unique(d.components.iter().map(|c| c.id))
+        || !all_unique(d.occurrences.iter().map(|o| o.id))
+    {
+        return Err(DocError::Invalid("damaged design: duplicate feature, component or occurrence id".into()));
     }
     let component_ids: std::collections::BTreeSet<_> = d.components.iter().map(|component| component.id).chain(std::iter::once(0)).collect();
     for feature in &d.features {
@@ -396,8 +488,19 @@ pub fn read(s: &str) -> Result<Document> {
     // Fill in what older designs (and hand-edited files) may lack; a no-op otherwise.
     crate::format_offsets::validate_typed(&d)?;
     normalise(&mut d)?;
+    // `next_id` is trusted by nothing: a hand-edited or generated file may omit it or leave it stale,
+    // and the next feature, component or occurrence would then reuse an id that is already taken.
+    let largest =
+        d.features.iter().map(|f| f.id).chain(d.components.iter().map(|c| c.id)).chain(d.occurrences.iter().map(|o| o.id)).max().unwrap_or(0);
+    let floor = largest.checked_add(1).ok_or_else(|| DocError::Invalid("damaged design: the id space is exhausted".into()))?;
+    d.next_id = d.next_id.max(floor).max(1);
     d.format = format_string(FORMAT);
     Ok(d)
+}
+
+fn all_unique(ids: impl Iterator<Item = u64>) -> bool {
+    let mut seen = std::collections::BTreeSet::new();
+    ids.into_iter().all(|id| seen.insert(id))
 }
 
 /// The caps interactive editing enforces, applied to the raw JSON so an oversized sketch is
@@ -951,6 +1054,7 @@ mod tests {
         document
             .add_feature(
                 FeatureKind::Extrude {
+                    thin: None,
                     sketch,
                     profiles: ProfileSel::All,
                     extent: Extent {
@@ -1513,5 +1617,64 @@ mod tests {
             let error = read(&value.to_string()).unwrap_err().to_string();
             assert!(error.contains("sketch too large"), "{key}: {error}");
         }
+    }
+
+    fn two_components_one_occurrence() -> Document {
+        let mut d = Document::new("ids");
+        let a = d.add_component(None, 0).unwrap();
+        d.add_component(None, 0).unwrap();
+        d.add_occurrence(a, 0, crate::IDENTITY).unwrap();
+        d
+    }
+
+    fn edited(d: &Document, f: impl FnOnce(&mut Value)) -> String {
+        let mut v: Value = serde_json::from_str(&d.to_json()).unwrap();
+        f(&mut v);
+        v.to_string()
+    }
+
+    #[test]
+    fn missing_or_stale_next_id_does_not_reuse_existing_ids() {
+        let d = two_components_one_occurrence();
+        let largest = d.components.iter().map(|c| c.id).chain(d.occurrences.iter().map(|o| o.id)).max().unwrap();
+        for stale in [None, Some(0), Some(1)] {
+            let json = edited(&d, |v| {
+                let o = v.as_object_mut().unwrap();
+                match stale {
+                    Some(n) => o.insert("next_id".into(), n.into()),
+                    None => o.remove("next_id"),
+                };
+            });
+            let mut back = read(&json).unwrap();
+            assert!(back.next_id > largest, "next_id {} after load with {stale:?}", back.next_id);
+            let fresh = back.add_component(None, 0).unwrap();
+            assert!(fresh > largest, "new component reused id {fresh}");
+        }
+    }
+
+    #[test]
+    fn duplicate_component_or_occurrence_ids_are_a_damaged_design() {
+        let d = two_components_one_occurrence();
+        let dup_component = edited(&d, |v| v["components"][1]["id"] = v["components"][0]["id"].clone());
+        let dup_occurrence = edited(&d, |v| {
+            let first = v["occurrences"][0].clone();
+            v["occurrences"].as_array_mut().unwrap().push(first);
+        });
+        for json in [dup_component, dup_occurrence] {
+            let error = read(&json).unwrap_err().to_string();
+            assert!(error.contains("damaged design"), "{error}");
+        }
+    }
+
+    #[test]
+    fn exhausted_id_space_is_an_error_not_a_panic() {
+        let d = two_components_one_occurrence();
+        let json = edited(&d, |v| v["next_id"] = u64::MAX.into());
+        let mut back = read(&json).unwrap();
+        let before = back.components.len();
+        assert!(back.add_component(None, 0).is_err());
+        assert_eq!(back.components.len(), before);
+        let json = edited(&d, |v| v["components"][1]["id"] = u64::MAX.into());
+        assert!(read(&json).unwrap_err().to_string().contains("damaged design"));
     }
 }

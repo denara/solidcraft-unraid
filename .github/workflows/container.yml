@@ -6,6 +6,7 @@ on:
     paths:
       - 'apps/**'
       - 'crates/**'
+      - 'xtask/**'
       - 'vendor/**'
       - 'Cargo.*'
       - 'Dockerfile'
@@ -16,6 +17,7 @@ on:
     paths:
       - 'apps/**'
       - 'crates/**'
+      - 'xtask/**'
       - 'vendor/**'
       - 'Cargo.*'
       - 'Dockerfile'
@@ -89,7 +91,10 @@ jobs:
         shell: pwsh
         run: ./packaging/unraid/smoke-test.ps1 -Token disposable-container-proof-token-only -Reopen
       - name: Verify browser assets
-        run: curl -fsS http://localhost:8781/ | grep -q 'SolidCraft'
+        run: |
+          curl -fsS http://localhost:8781/ | grep -q 'SolidCraft'
+          curl -fsS http://localhost:8781/sw.js >/dev/null
+          curl -fsS http://localhost:8781/build.json | jq -e '.files | length > 0' >/dev/null
       - name: Verify operational logging and privacy
         shell: pwsh
         run: ./packaging/unraid/log-test.ps1 -Token disposable-container-proof-token-only

@@ -423,6 +423,7 @@ mod tests {
             document
                 .add_feature(
                     FeatureKind::Extrude {
+                        thin: None,
                         sketch: if missing_sketch { 999_999 } else { id },
                         profiles: ProfileSel::OffsetBoundaries { associations: vec!["deleted-o1".into()] },
                         extent: crate::Extent {

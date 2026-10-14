@@ -46,17 +46,47 @@ fn clamped<S: ParametricSurface>(surface: &S, (u, v): (f64, f64)) -> (f64, f64) 
     (c(u, ur, surface.u_period()), c(v, vr, surface.v_period()))
 }
 
-/// SolidCraft: a nearest-parameter search can run off a B-spline's domain and extrapolate to
-/// thousands of parameter units (meshing that grid never finishes). Outside the nominal domain
-/// keep the result only if it is really closer to the point than the clamped one (planes report
-/// a nominal unit range but extend for ever).
-fn sane<S: RobustMeshableSurface>(surface: &S, point: Point3, uv: (f64, f64)) -> (f64, f64) {
-    if in_domain(surface, uv) {
-        return uv;
-    }
+/// SolidCraft: exact and nearest searches can run off a B-spline's domain, especially at a
+/// collapsed edge. Prefer a bounded equivalent within the existing spatial search tolerance;
+/// otherwise retain extrapolation only when it is closer (planes have a nominal unit range
+/// but extend for ever). At most four boundary candidates are evaluated, with no new search.
+fn sane<S: ParametricSurface3D>(surface: &S, point: Point3, uv: (f64, f64)) -> (f64, f64) {
     let c = clamped(surface, uv);
     let d = |(u, v): (f64, f64)| surface.subs(u, v).distance2(point);
-    if d(uv) <= d(c) { uv } else { c }
+    let (mut best, mut error) = (uv, d(uv));
+    let dc = d(c);
+    let collapsed = |(u, v): (f64, f64), axis| {
+        let tangent = if axis == 0 { surface.vder(u, v) } else { surface.uder(u, v) };
+        tangent.magnitude2() <= TOLERANCE2
+    };
+    if !in_domain(surface, uv)
+        && (dc < error || (dc <= TOLERANCE2 && (collapsed(c, 0) || collapsed(c, 1)))) {
+        (best, error) = (c, dc);
+    }
+    // SolidCraft: at a collapsed boundary an exact search can return arbitrary,
+    // enormous parameters, or stop just inside the pole. Prefer an equivalent
+    // in-domain point and the exact boundary when it improves the spatial fit.
+    // A plane's nominal unit box must not clip genuinely unbounded geometry.
+    let (ur, vr) = surface.try_range_tuple();
+    for (axis, range, period) in [(0, ur, surface.u_period()), (1, vr, surface.v_period())] {
+        if period.is_some() { continue; }
+        if let Some((a, b)) = range {
+            for end in [a, b] {
+                if !end.is_finite() { continue; }
+                let coordinate = if axis == 0 { best.0 } else { best.1 };
+                let other = if end == a { b } else { a };
+                if (coordinate - end).abs() > (coordinate - other).abs() { continue; }
+                let candidate = if axis == 0 { (end, best.1) } else { (best.0, end) };
+                let distance = d(candidate);
+                // A closed spline seam has equivalent endpoints too, but moving
+                // between them changes the trim loop. Only canonicalize poles.
+                if distance <= TOLERANCE2 && distance < error && collapsed(candidate, axis) {
+                    (best, error) = (candidate, distance);
+                }
+            }
+        }
+    }
+    best
 }
 
 pub(super) fn by_search_parameter<S>(
@@ -83,8 +113,8 @@ where
     surface
         .search_parameter(point, hint, 100)
         .or_else(|| surface.search_parameter(point, None, 100))
-        .or_else(|| surface.search_nearest_parameter(point, hint, 100).map(|uv| sane(surface, point, uv)))
-        .or_else(|| surface.search_nearest_parameter(point, None, 100).map(|uv| sane(surface, point, uv)))
+        .or_else(|| surface.search_nearest_parameter(point, hint, 100))
+        .or_else(|| surface.search_nearest_parameter(point, None, 100))
 }
 
 /// Tessellates faces
@@ -393,7 +423,9 @@ impl PolyBoundaryPiece {
             .into_iter()
             .flat_map(|pt| {
                 let (mut u, mut v) = match sp(surface, pt, previous) {
-                    Some(hint) => hint,
+                    // SolidCraft: validate exact and nearest results alike, once per
+                    // boundary point, including the bounded provisional preview.
+                    Some(hint) => sane(surface, pt, hint),
                     None => return vec![None],
                 };
                 if let (Some(up), Some((u0, _))) = (up, previous) {
@@ -704,8 +736,8 @@ pub(super) fn preview_face<S: RobustMeshableSurface>(surface: &S, loops: &[Vec<P
     let search = |surface: &S, point, hint| {
         surface.search_parameter(point, hint, 16)
             .or_else(|| surface.search_parameter(point, None, 16))
-            .or_else(|| surface.search_nearest_parameter(point, hint, 16).map(|uv| sane(surface, point, uv)))
-            .or_else(|| surface.search_nearest_parameter(point, None, 16).map(|uv| sane(surface, point, uv)))
+            .or_else(|| surface.search_nearest_parameter(point, hint, 16))
+            .or_else(|| surface.search_nearest_parameter(point, None, 16))
     };
     let pieces = loops.iter().map(|w| {
         PolyBoundaryPiece::try_new(surface, std::iter::once(PolylineCurve(w.clone())), search)
@@ -755,7 +787,11 @@ fn insert_surface(
         (division(range.0), division(range.1))
     } else {
         let (u, v) = bounded_surface_division(&surface, range, tol, cap);
-        balanced_grid(&surface, u, v, cap)
+        let (u_ruled, v_ruled) = (u.len() <= 3, v.len() <= 3);
+        let (u, v) = balanced_grid(&surface, u, v, cap);
+        let v = with_ruling_vertices(v, polyline, 1, tol.rulings && v_ruled, u.len(), cap);
+        let u = with_ruling_vertices(u, polyline, 0, tol.rulings && u_ruled, v.len(), cap);
+        (u, v)
     };
     let insert_res: Vec<Vec<Option<_>>> = udiv
         .into_iter()
@@ -968,6 +1004,55 @@ fn balanced_grid(surface: &impl PreMeshableSurface, udiv: Vec<f64>, vdiv: Vec<f6
         (0..n).map(|i| d[i * (d.len() - 1) / (n - 1)]).collect()
     };
     (thin(u2), thin(v2))
+}
+
+/// SolidCraft: most grid lines added for vertices on a ruling edge.
+const MAX_RULING_LINES: usize = 64;
+
+/// SolidCraft: `div` (the grid along coordinate `axis`, 0 for u and 1 for v) with a line through
+/// every vertex that splits a boundary segment running along a ruling (a straight edge of a
+/// cylinder or cone split by a boolean). Without one, the triangulation fans out from such a
+/// vertex to the far ends of the face, and its triangles cut through the surface (the outer
+/// wall of a shelled cylinder came out cut off). Only a direction that needs no division of
+/// its own (`ruled`) gets them, while the grid stays within `cap`.
+fn with_ruling_vertices(div: Vec<f64>, polyline: &PolyBoundary, axis: usize, ruled: bool, other: usize, cap: usize) -> Vec<f64> {
+    let (Some(&first), Some(&last)) = (div.first(), div.last()) else { return div };
+    let span = last - first;
+    if !ruled || !(span.is_finite() && span > 0.0) {
+        return div;
+    }
+    let across = 1 - axis;
+    // The extent of the face across the rulings, to tell a segment along one.
+    let (lo, hi) = polyline.0.iter().flatten().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| (lo.min(p[across]), hi.max(p[across])));
+    let width = hi - lo;
+    if !(width.is_finite() && width > 0.0) {
+        return div;
+    }
+    let (same, apart) = (width * 1e-9, span * 1e-6);
+    let mut extra: Vec<f64> = Vec::new();
+    for w in &polyline.0 {
+        for (a, b) in w.iter().circular_tuple_windows() {
+            if (a[across] - b[across]).abs() > same {
+                continue;
+            }
+            for t in [a[axis], b[axis]] {
+                let inside = t > first + apart && t < last - apart;
+                if inside && t.is_finite() && div.iter().chain(&extra).all(|d| (d - t).abs() > apart) {
+                    extra.push(t);
+                }
+            }
+            if extra.len() > MAX_RULING_LINES {
+                return div;
+            }
+        }
+    }
+    if extra.is_empty() || (div.len() + extra.len()).saturating_mul(other) > cap {
+        return div;
+    }
+    let mut out = div;
+    out.extend(extra);
+    out.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    out
 }
 
 /// Converts triangulation into `PolygonMesh`.

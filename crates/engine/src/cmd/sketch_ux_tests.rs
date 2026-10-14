@@ -482,6 +482,63 @@ fn palette_options_are_kept_with_each_sketch() {
     assert!(!sketch(&s).view.hide_points);
 }
 
+/// Construction Geometries is a display option of one sketch, saved with it, and it changes
+/// nothing about the geometry: construction curves were already outside every profile, and
+/// they still are while hidden. Centerlines are a line type of their own and keep showing. A
+/// design written before the option existed carries no key for it and loads with construction
+/// geometry shown.
+#[test]
+fn hiding_construction_geometry_is_per_sketch_saved_and_leaves_profiles_and_centerlines_alone() {
+    use crate::view::sketch_curve_visible;
+    let mut s = new_sketch();
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [40, 30]}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 45], [40, 45]], "connect": false, "infer": false}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 55], [40, 55]], "connect": false, "infer": false}));
+    run(&mut s, "sketch.construction", json!({"curves": ["l5"], "value": true}));
+    run(&mut s, "sketch.centerline", json!({"curves": ["l6"], "value": true}));
+    let (rect, construction, centerline) = (0, 4, 5);
+    let profiles = run(&mut s, "sketch.inspect", json!({}))["profiles"].clone();
+    assert_eq!(profiles.as_array().map(Vec::len), Some(1), "the rectangle is one profile: {profiles}");
+
+    assert_eq!(run(&mut s, "sketch.options", json!({}))["options"]["show_construction"], true);
+    let o = run(&mut s, "sketch.options", json!({"show_construction": false}));
+    assert_eq!(o["options"]["show_construction"], false);
+    let sk = sketch(&s);
+    assert!(sk.view.hide_construction);
+    assert!(!sketch_curve_visible(&sk, construction), "construction geometry is hidden");
+    assert!(sketch_curve_visible(&sk, centerline), "a centerline is its own line type");
+    assert!(sketch_curve_visible(&sk, rect), "ordinary geometry stays");
+    // Hiding is display only: the curves, their line types and the profiles are untouched.
+    let after = run(&mut s, "sketch.inspect", json!({}));
+    assert_eq!(after["profiles"], profiles);
+    assert_eq!(after["curves"][construction]["construction"], true);
+    assert!(sketch(&s).curves[centerline].centerline, "the centerline keeps its line type");
+    // Undo puts the option back.
+    run(&mut s, "edit.undo", json!({}));
+    assert!(!sketch(&s).view.hide_construction);
+    run(&mut s, "sketch.options", json!({"show_construction": false}));
+
+    // Another sketch shows construction geometry; the first keeps the option after finishing.
+    let first = s.active_sketch.expect("sketch");
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "sketch.create", json!({"plane": "XZ"}));
+    assert_eq!(run(&mut s, "sketch.options", json!({}))["options"]["show_construction"], true);
+    assert_eq!(run(&mut s, "sketch.options", json!({"sketch": first}))["options"]["show_construction"], false);
+
+    // Saved with the design.
+    let text = serde_json::to_string(s.doc.sketch(first).expect("first")).expect("json");
+    assert!(text.contains("hide_construction"), "{text}");
+    let back: Sketch = serde_json::from_str(&text).expect("parse");
+    assert!(back.view.hide_construction);
+
+    // An older design file has no `hide_construction` key at all: `SketchView`'s serde default
+    // fills it in, and construction geometry shows, the way it did before the option existed.
+    let older = r#"{"points":[{"id":"origin","pos":[0.0,0.0],"fixed":true}],"curves":[],"constraints":[],
+        "view":{"hide_projected":true,"slice":true}}"#;
+    let old: Sketch = serde_json::from_str(older).expect("an older sketch still loads");
+    assert!(old.view.hide_projected && old.view.slice && !old.view.hide_construction);
+}
+
 // ---------------------------------------------------------------------------------------------
 // Dragging
 

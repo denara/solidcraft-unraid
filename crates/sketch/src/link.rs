@@ -81,6 +81,9 @@ pub enum LinkSource {
         angle: f64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         font: Option<String>,
+        /// Bold or italic, alignment, spacing and the curve the text follows.
+        #[serde(default, skip_serializing_if = "crate::text::TextStyle::is_plain")]
+        style: crate::text::TextStyle,
     },
 }
 
@@ -353,6 +356,44 @@ fn same_geometry(a: &[(LCurve, Vec<Vec2>)], b: &[(LCurve, Vec<Vec2>)]) -> bool {
 }
 
 /// The point indices a layout curve uses, in order.
+/// Is `fresh` the boundary `old` was, with only the stations along its straight lines gone
+/// (#1049: straight edges that booleans left split at vertices nothing else used are now one
+/// edge)? Every old line lies along exactly one fresh line and the old pieces cover it end to
+/// end; every other curve is unchanged. A link saved with the stations keeps its pieces then:
+/// the region they bound is the same, and the features that name them by id still find them.
+fn only_stations_gone(old: &[(LCurve, Vec<Vec2>)], fresh: &[(LCurve, Vec<Vec2>)]) -> bool {
+    const TOL: f64 = 1e-6;
+    let is_line = |c: &&(LCurve, Vec<Vec2>)| matches!(c.0, LCurve::Line(..));
+    let ends = |c: &(LCurve, Vec<Vec2>)| match c.1.as_slice() {
+        [a, b] => Some((*a, *b)),
+        _ => None,
+    };
+    let (old_lines, old_rest): (Vec<_>, Vec<_>) = old.iter().partition(is_line);
+    let (fresh_lines, fresh_rest): (Vec<_>, Vec<_>) = fresh.iter().partition(is_line);
+    if fresh_lines.len() >= old_lines.len() || old_lines.len() > 512 {
+        return false;
+    }
+    let rest = |xs: Vec<&(LCurve, Vec<Vec2>)>| xs.into_iter().cloned().collect::<Vec<_>>();
+    if !same_geometry(&rest(old_rest), &rest(fresh_rest)) {
+        return false;
+    }
+    let Some(fresh_segs) = fresh_lines.iter().map(|c| ends(c)).collect::<Option<Vec<_>>>() else { return false };
+    let mut covered = vec![0.0; fresh_segs.len()];
+    for c in &old_lines {
+        let Some((p, q)) = ends(c) else { return false };
+        let on = |x: Vec2, (a, b): (Vec2, Vec2)| {
+            let ab = b - a;
+            let t = ((x - a).dot(ab) / ab.dot(ab).max(f64::MIN_POSITIVE)).clamp(0.0, 1.0);
+            x.dist(a + ab * t) <= TOL * (1.0 + a.len().max(b.len()))
+        };
+        let Some(k) = fresh_segs.iter().position(|seg| on(p, *seg) && on(q, *seg)) else { return false };
+        if let Some(slot) = covered.get_mut(k) {
+            *slot += p.dist(q);
+        }
+    }
+    fresh_segs.iter().zip(&covered).all(|((a, b), len)| (a.dist(*b) - len).abs() <= TOL * (1.0 + a.len().max(b.len())))
+}
+
 fn curve_points(c: &LCurve) -> Vec<usize> {
     match *c {
         LCurve::Line(a, b) => vec![a, b],
@@ -674,9 +715,8 @@ impl Sketch {
             let lone_old: Vec<Vec2> = points.iter().filter_map(|pi| pos(*pi)).collect();
             if let (Some(old), Some(fresh)) = (old, fresh)
                 && lay.lone.is_empty()
-                && points.len() == lay.pts.len()
                 && lone_old.len() == points.len()
-                && same_geometry(&old, &fresh)
+                && (points.len() == lay.pts.len() && same_geometry(&old, &fresh) || only_stations_gone(&old, &fresh))
             {
                 return Ok(false);
             }

@@ -5,7 +5,7 @@ members = ["crates/*", "apps/*", "xtask"]
 exclude = ["vendor"]
 
 [workspace.package]
-version = "0.8.0"
+version = "0.10.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.95"
@@ -18,6 +18,7 @@ solidcraft-geom = { path = "crates/geom" }
 solidcraft-sketch = { path = "crates/sketch" }
 solidcraft-kernel = { path = "crates/kernel" }
 solidcraft-render = { path = "crates/render" }
+solidcraft-gpu = { path = "crates/gpu" }
 solidcraft-doc = { path = "crates/doc" }
 solidcraft-io = { path = "crates/io" }
 solidcraft-engine = { path = "crates/engine" }
@@ -30,6 +31,7 @@ serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 log = "0.4"
 sha2 = "0.10"
+semver = "1"
 
 # geometry kernel (Apache-2.0; see plan/adr/0001-geometry-kernel.md). Only crates/kernel uses it.
 truck-modeling = "0.6"
@@ -37,6 +39,10 @@ truck-shapeops = { version = "0.4", default-features = false }
 truck-meshalgo = { version = "0.4", default-features = false, features = ["tessellation", "analyzers"] }
 truck-stepio = { version = "0.3", default-features = false }
 truck-topology = "0.6"
+# constrained Delaunay + Ruppert refinement for trimmed faces (MIT OR Apache-2.0); already in the
+# tree through truck-meshalgo.
+spade = { version = "2.15", default-features = false, features = ["std"] }
+rayon = "1.12"
 
 # packages (3MF)
 zip = { version = "3", default-features = false, features = ["deflate"] }
@@ -46,7 +52,7 @@ quick-xml = "0.41"
 ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
 
 # images
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "hdr"] }
 
 # ui
 egui = "0.36"
@@ -54,6 +60,10 @@ eframe = { version = "0.36", default-features = false, features = ["persistence"
 # Instant/SystemTime that also work in the browser (std panics on wasm32-unknown-unknown).
 web-time = "1"
 egui-wgpu = "0.36"
+# the wgpu egui-wgpu uses, for compute (crates/gpu); backends come from the apps' features
+wgpu = { version = "30", default-features = false, features = ["std", "wgsl"] }
+naga = { version = "30", default-features = false }
+pollster = "0.4"
 rfd = "0.17"
 
 [workspace.lints.rust]

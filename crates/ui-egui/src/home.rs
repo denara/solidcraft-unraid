@@ -357,7 +357,7 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("SolidCraft").size(26.0).strong().color(t.text));
                 ui.add_space(12.0);
-                ui.label(RichText::new("Start").size(16.0).color(t.text_dim));
+                ui.label(RichText::new(crate::i18n::tr_label("Start")).size(16.0).color(t.text_dim));
             });
             ui.add_space(16.0);
             ui.horizontal(|ui| {
@@ -418,7 +418,7 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
             ui.add_space(16.0);
             section(ui, "Recent");
             if recent.is_empty() {
-                ui.label(RichText::new("Designs you open or save appear here.").color(t.text_dim));
+                ui.label(RichText::new(crate::i18n::tr_label("Designs you open or save appear here.")).color(t.text_dim));
             } else {
                 grid(ui, recent.len(), |ui, i| {
                     let Some(p) = recent.get(i) else { return };
@@ -451,12 +451,12 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
                         .on_hover_text(p.as_str());
                     crate::scenario::publish_handle(&format!("home:recent:{i}"), response.rect.center());
                     response.context_menu(|ui| {
-                        if ui.button("Remove from list").clicked() {
+                        if ui.button(crate::i18n::tr_label("Remove from list")).clicked() {
                             app.home.recent.retain(|x| x != p);
                             app.home.opened_at.remove(p);
                             ui.close();
                         }
-                        if !cfg!(target_arch = "wasm32") && ui.button("Show in folder").clicked() {
+                        if !cfg!(target_arch = "wasm32") && ui.button(crate::i18n::tr_label("Show in folder")).clicked() {
                             if let Some(show) = &app.services.show_in_folder {
                                 show(p);
                             }

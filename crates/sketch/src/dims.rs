@@ -50,6 +50,10 @@ pub fn dim_frame(sk: &Sketch, k: &ConstraintKind) -> Option<DimFrame> {
     use ConstraintKind::*;
     let unit = |v: Vec2, or: Vec2| v.normalized().unwrap_or(or);
     Some(match *k {
+        OffsetDistance { ref output, .. } => {
+            let (p0, p1) = sk.offset_dimension_points(output)?;
+            DimFrame::Linear { p0, p1, dir: unit(p1 - p0, Vec2::X) }
+        }
         Distance { p, q, .. } => {
             let (a, b) = (sk.point(p)?, sk.point(q)?);
             DimFrame::Linear { p0: a, p1: b, dir: unit(b - a, Vec2::X) }

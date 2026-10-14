@@ -7,8 +7,17 @@ license.workspace = true
 publish = false
 default-run = "solidcraft"
 
-[lints]
-workspace = true
+# The workspace lints, except unsafe_code: denied, not forbidden, so that src/open_documents.rs can
+# allow it (macOS file-open events have no safe API). Keep the rest in sync with [workspace.lints].
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+too_many_arguments = "allow"
+type_complexity = "allow"
+neg_cmp_op_on_partial_ord = "allow"
 
 [dependencies]
 solidcraft-engine = { workspace = true }
@@ -18,12 +27,23 @@ egui = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
 rfd = { workspace = true }
+getrandom = "0.3"
+# The update check (docs/updates.md): HTTPS with rustls, certificates from the operating system.
+ureq = { version = "3.4", default-features = false, features = ["rustls-no-provider", "platform-verifier"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
 quick-xml = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 hidapi = { version = "2.6.7", default-features = false, features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Files opened from Finder and the Dock (src/open_documents.rs); all already come with eframe and rfd.
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "NSArray", "NSNotification", "NSOperation", "NSString", "NSURL"] }
+block2 = "0.6"
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 winit = { version = "0.30", default-features = false, features = ["x11"] }

@@ -829,6 +829,7 @@ impl Sketch {
             }
         }
         candidate.offsets.remove(index);
+        candidate.constraints.retain(|c| !matches!(&c.kind, crate::ConstraintKind::OffsetDistance { output, .. } if record.owns_output(output)));
         for point in owned {
             if point != 0
                 && candidate.curves.iter().all(|c| !c.kind.uses(point) || outputs.contains(c.id.as_str()))

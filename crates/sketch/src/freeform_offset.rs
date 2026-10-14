@@ -1,7 +1,9 @@
 //! Persistent free-form offsets with a whole-span normal-distance error certificate.
 //! The certificate bounds the second derivative of the exact normal offset and of
 //! the actual cubic interpolant (natural for legacy output, periodic for new closed output). The endpoint interpolation theorem then
-//! bounds their distance everywhere, rather than just at selected samples.
+//! bounds their distance everywhere, rather than just at selected samples. At the
+//! node limit, interior splits align the curves geometrically instead of requiring
+//! identical parameter speeds; stored nodes and interpolation remain unchanged.
 use crate::{CurveKind, Sketch, SketchError, fit_beziers_mode};
 use serde::{Deserialize, Serialize};
 use solidcraft_geom::{Seg2, Vec2};
@@ -13,6 +15,11 @@ const MAX_OFFSET_WORK: usize = 1_048_576;
 struct Fit {
     tolerance: f64,
     periodic: bool,
+}
+#[derive(Clone, Copy)]
+struct Certificate {
+    tolerance: f64,
+    align_midpoints: bool,
 }
 type Result<T> = std::result::Result<T, SketchError>;
 fn bad(message: &str) -> SketchError {
@@ -202,7 +209,8 @@ impl H {
 /// Subdivision tightens the proof, not the stored geometry. Endpoint discrepancies
 /// are measured against the exact rational normal, then the second derivative
 /// interpolation bound certifies the full intervening interval.
-fn certify(h: &H, cubic: &[Vec2; 4], distance: f64, tolerance: f64, depth: u8, budget: &mut usize) -> Result<()> {
+fn certify(h: &H, cubic: &[Vec2; 4], distance: f64, proof: Certificate, depth: u8, budget: &mut usize) -> Result<()> {
+    let tolerance = proof.tolerance;
     if *budget == 0 {
         return Err(bad("offset certificate work limit exceeded"));
     }
@@ -220,13 +228,24 @@ fn certify(h: &H, cubic: &[Vec2; 4], distance: f64, tolerance: f64, depth: u8, b
     }
     let (left, right) = h.split(0.5);
     let curve = Seg2::Cubic { p0: cubic[0], p1: cubic[1], p2: cubic[2], p3: cubic[3] };
-    let (a, b) = curve.split_half();
+    // A chord-length fit need not have the source's parameter speed. When node
+    // refinement is exhausted, pair the exact offset midpoint with a point on
+    // the fitted cubic instead of assuming its parameter is 0.5. Each interior
+    // split defines an increasing, piecewise-affine correspondence. The same
+    // endpoint/second-derivative theorem applies on every pair of restricted
+    // spans, proving a whole-curve distance bound in both directions. Projection
+    // only chooses the split; its accuracy is checked by the certificate itself.
+    let split = if proof.align_midpoints { curve.closest_param(left.normal_end(true, distance)?) } else { 0.5 };
+    if !split.is_finite() || !(1e-9..=1.0 - 1e-9).contains(&split) {
+        return Err(bad("offset spline has no interior certificate correspondence"));
+    }
+    let (a, b) = curve.split_at(split);
     let controls = |s: Seg2| match s {
         Seg2::Cubic { p0, p1, p2, p3 } => Ok([p0, p1, p2, p3]),
         _ => Err(bad("invalid cubic certificate")),
     };
-    certify(&left, &controls(a)?, distance, tolerance, depth + 1, budget)?;
-    certify(&right, &controls(b)?, distance, tolerance, depth + 1, budget)
+    certify(&left, &controls(a)?, distance, proof, depth + 1, budget)?;
+    certify(&right, &controls(b)?, distance, proof, depth + 1, budget)
 }
 
 fn normal_point(seg: &Seg2, t: f64, d: f64) -> Result<Vec2> {
@@ -345,7 +364,12 @@ fn geometry(sk: &Sketch, source: usize, forward: bool, d: f64, divisions: usize,
     let cubics = fit_beziers_mode(&points, periodic && closed)?;
     let allowance = (*work).min(65_536);
     let mut budget = allowance;
-    let result = restricted.iter().zip(&cubics).try_for_each(|(h, c)| certify(h, c, d, tolerance, 0, &mut budget));
+    let mut result =
+        restricted.iter().zip(&cubics).try_for_each(|(h, c)| certify(h, c, d, Certificate { tolerance, align_midpoints: false }, 0, &mut budget));
+    if result.is_err() && (divisions == 256 || pieces.len().saturating_mul(divisions.saturating_mul(2)) >= crate::MAX_SPLINE_POINTS) {
+        result =
+            restricted.iter().zip(&cubics).try_for_each(|(h, c)| certify(h, c, d, Certificate { tolerance, align_midpoints: true }, 0, &mut budget));
+    }
     *work -= allowance - budget;
     result?;
     verify_simple(&points, &cubics, closed)?;
@@ -566,6 +590,66 @@ impl Sketch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn certified_offset_irregular_closed_spline_at_node_limit() {
+        let mut sk = Sketch::new();
+        let pts = [(-17.0, 15.0), (0.0, 8.0), (17.0, 13.0), (15.0, 0.0), (5.0, -7.0), (-1.0, -14.0), (-9.0, -1.0), (-21.0, -1.0), (-17.0, 15.0)]
+            .into_iter()
+            .map(|(x, y)| sk.add_point(Vec2::new(x, y), None).unwrap())
+            .collect();
+        let source = sk.add_curve(CurveKind::Spline { pts, control: false, degree: 3, periodic: true }, None).unwrap();
+        let original = sk.clone();
+        for (forward, distance) in [(true, 2.0), (false, -2.0)] {
+            let mut sk = original.clone();
+            let output = sk.add_freeform_offset(source, forward, distance).unwrap();
+            assert_eq!(sk.freeform_offsets[0].divisions, 32);
+            assert_eq!(&sk.points[..original.points.len()], &original.points);
+            assert_eq!(sk.curves[source], original.curves[source]);
+            let exact = sk.exact_segs(source).unwrap();
+            let fitted = sk.exact_segs(output).unwrap();
+            assert_eq!(fitted.first().unwrap().start(), fitted.last().unwrap().end());
+            let mut max_error = 0.0_f64;
+            for (i, piece) in exact.iter().enumerate() {
+                for j in 0..=128 {
+                    let t = j as f64 / 128.0;
+                    let want = piece.point_at(t) + piece.derivative(t).normalized().unwrap().perp() * 2.0;
+                    let span = i * 32 + (j / 4).min(31);
+                    let span = if forward { span } else { fitted.len() - 1 - span };
+                    let curve = fitted[span];
+                    max_error = max_error.max(curve.point_at(curve.closest_param(want)).dist(want));
+                }
+            }
+            assert!(max_error < OFFSET_TOLERANCE, "normal-offset error {max_error}");
+            for curve in &fitted {
+                for j in 0..=8 {
+                    let p = curve.point_at(j as f64 / 8.0);
+                    let distance = exact.iter().map(|s| s.point_at(s.closest_param(p)).dist(p)).fold(f64::INFINITY, f64::min);
+                    assert!((distance - 2.0).abs() < OFFSET_TOLERANCE, "normal distance {distance}");
+                }
+            }
+            let saved = serde_json::to_string(&sk).unwrap();
+            let mut reopened: Sketch = serde_json::from_str(&saved).unwrap();
+            reopened.refresh_offsets().unwrap();
+            assert_eq!(reopened, sk);
+        }
+    }
+
+    #[test]
+    fn geometric_certificate_aligns_speed_but_keeps_error_regularity_and_work_limits() {
+        let source = H::from_seg(&Seg2::Line { a: Vec2::ZERO, b: Vec2::X }).unwrap();
+        // Analytically identical straight lines, traversed at different speeds.
+        let cubic = [Vec2::new(0.0, 2.0), Vec2::new(0.1, 2.0), Vec2::new(0.2, 2.0), Vec2::new(1.0, 2.0)];
+        let mut budget = 65_536;
+        assert!(certify(&source, &cubic, 2.0, Certificate { tolerance: OFFSET_TOLERANCE, align_midpoints: false }, 0, &mut budget).is_err());
+        let proof = Certificate { tolerance: OFFSET_TOLERANCE, align_midpoints: true };
+        certify(&source, &cubic, 2.0, proof, 0, &mut budget).unwrap();
+        assert!(certify(&source, &cubic, 2.0, proof, 0, &mut 0).is_err());
+        let bowed = [cubic[0], cubic[1] + Vec2::Y, cubic[2] + Vec2::Y, cubic[3]];
+        assert!(certify(&source, &bowed, 2.0, proof, 0, &mut budget).is_err());
+        let stationary = H::from_seg(&Seg2::Line { a: Vec2::ZERO, b: Vec2::ZERO }).unwrap();
+        assert!(certify(&stationary, &cubic, 2.0, proof, 0, &mut budget).is_err());
+    }
 
     fn ellipse() -> (Sketch, usize) {
         let mut sketch = Sketch::new();

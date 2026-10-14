@@ -40,6 +40,31 @@ and 444 MB either way, so two runs each do not resolve it: there the conversion 
 dominates the per-item copy. An item that keeps every conversion - an assembly, or a file over the
 work budget - is unchanged.
 
+## Display tessellation plans (#303, 2026-10-12)
+
+`Body::display_mesh` meshes from a `TessPlan` (`crates/kernel/src/tess`): every edge is
+sampled once and both faces use those nodes exactly (watertight by construction); planar
+faces are a constrained Delaunay triangulation of their edge nodes alone; faces bounded by
+their parameter box are structured grids zipped to the edge nodes; other four-cornered faces
+are Coons grids; only genuinely trimmed curved faces (holes, more than four corners) use
+spade's constrained Delaunay with sag and Ruppert refinement. A body the planner cannot
+handle is meshed by truck-meshalgo as before, which also still meshes for modelling
+(booleans, measure, provenance). Evaluating a plan (surface points and normals) runs on the
+CPU (`TessPlan::evaluate`) or in a compute shader (`solidcraft-gpu`).
+
+Release build, Apple M4 Max, medians of five. 400-hole plate (200 × 200 × 5 mm, 806
+faces), `cargo test --release -p solidcraft-gpu bench_plate -- --ignored --nocapture`:
+
+| Tolerance | Reference mesher | Plan | CPU evaluation | GPU evaluation | Triangles (reference / plan) |
+|---|---:|---:|---:|---:|---:|
+| 0.3 mm | 23.3 ms | 11.9 ms | 1.1 ms | 1.1 ms | 20,812 / 20,812 |
+| 0.03 mm | 54.2 ms | 31.6 ms | 2.5 ms | 1.9 ms | 76,812 / 52,812 |
+| 0.006 mm | 118.9 ms | 65.1 ms | 5.3 ms | 3.1 ms | 302,412 / 104,012 |
+
+Planning (edge sampling, parameter projection, triangulation) dominates; evaluation is a
+few milliseconds either way, so GPU evaluation saves little until planning is cheaper. The
+GPU timing includes upload and read-back.
+
 ## Parallel STEP body preparation (2026-10-12)
 
 Profiling an original 48-cylinder STEP fixture before changing the importer measured
@@ -453,7 +478,7 @@ every row's place.
 expression, undo and redo. Each cell is before → after the evaluation cache, with the number of
 features recomputed in parentheses. Release build, on a machine shared with other build jobs (load average about 45; the
 times vary by ±50 % run to run, so compare the recompute counts and the zeros). "Early" edits a parameter of the
-first sketch or feature, "late" one of the last feature.
+first sketch or feature, "late" one of the last features.
 
 | Design | Edit | Build | Edit | Set back | Undo | Redo |
 |---|---|---|---|---|---|---|

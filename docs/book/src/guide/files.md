@@ -7,6 +7,8 @@
 | STEP (AP203, AP214, AP242) | solids, assemblies, units, names, colours | AP242 with names, colours and the component tree |
 | IGES 5.3 | manifold solids, or trimmed surfaces sewn into solids | manifold solids with names and colours |
 | 3MF, STL, OBJ | mesh bodies | yes |
+| 3MF with face tags | as 3MF | each triangle tagged with its B-rep face, exact coordinates |
+| URDF | | the assembly as a robot: links with meshes, mass and inertia, joints from the assembly's joints |
 | DXF, SVG | into a sketch | sketches and flat patterns as DXF |
 | PNG, JPEG | canvases and decals | |
 
@@ -28,8 +30,21 @@ tapers, stepped parts and organic scans are refused by this first reconstruction
 method; it does not silently substitute a faceted solid. Conversion currently
 accepts at most 50,000 triangles and a bounded number of boundary segments.
 
+**File → Export 3MF with Face Tags** (`file.export` with `format: "3mf-tagged"`) writes an
+ordinary 3MF in which every triangle also names the B-rep face it lies on and every coordinate
+is the tessellation's own double-precision value. Meshing and analysis tools can use the tags to
+keep a model's faces (for loads, boundary conditions or feature edges); other 3MF readers ignore
+them. The format is specified in [`docs/formats/3mf-face-tags.md`](https://github.com/bherbruck/solidcraft/blob/main/docs/formats/3mf-face-tags.md).
+
+**File → Export URDF…** (`file.export` with a `.urdf` path) writes the assembly for robot
+simulators and ROS: a link per component placement with its mesh, mass and inertia, and the
+assembly's joints, so the parts move in the simulator as they do in SolidCraft. The meshes are
+written as STL files next to the `.urdf`. See [`docs/urdf.md`](https://github.com/bherbruck/solidcraft/blob/main/docs/urdf.md).
+
 Saves are atomic: a crash at any moment leaves either the old file or the new one, and the
-replaced version is kept as `<file>.bak`. Unsaved changes are autosaved to a recovery folder,
+replaced version is kept as `<file>.bak`. A save keeps the file's permissions, and a design
+opened through a symbolic link (a synced folder linked into a project) is saved into the file the
+link points to, so the link stays. Unsaved changes are autosaved to a recovery folder,
 and the next launch offers to recover them. Older design files are upgraded on open, and files
 from a newer version are refused with a message.
 
@@ -58,7 +73,7 @@ is available. Missing or incompatible pictures use the usual thumbnail generatio
 The default `cache: false` omits the portable thumbnail too.
 The repository's `docs/design-container.md` describes limits and encoding details.
 
-Current designs use format 17, including face anchors on a piece of a face by its own name, sheet metal rims and bend ends, bend edges for Convert to Sheet Metal, the names of projected edges, physical materials defined in the design, the font of sketch text, sheet metal corner relief shapes, sketch face anchors on cylinder caps, sketch axis
+Current designs use format 20, including thin extrudes, editable associative offset-distance dimensions, the style of sketch text (bold, italic, alignment, spacing and the curve it follows), face anchors on a piece of a face by its own name, sheet metal rims and bend ends, bend edges for Convert to Sheet Metal, the tear corner relief of sheet metal rules, the names of projected edges, physical materials defined in the design, the font of sketch text, sheet metal corner relief shapes, sketch face anchors on cylinder caps, sketch axis
 links, persistent
 names from exact face history, exact planar shell-face anchors, persistent analytic offset boundary roles and
 association profile references, durable sketch face anchors, periodic fit splines and versioned

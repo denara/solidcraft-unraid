@@ -118,6 +118,47 @@ impl RadiusSpline {
         }
     }
 
+    /// The same radius with one more control radius: the knot `u` inserted (Boehm), which leaves
+    /// the curve as it was. None for `u` at or beyond an end, on an existing knot, or a spline
+    /// already at 100 control radii.
+    pub fn insert(&self, u: f64) -> Option<RadiusSpline> {
+        let (n, p) = (self.radii.len(), self.degree);
+        if !(u > 1e-6 && u < 1.0 - 1e-6) || n >= 100 || self.knots.iter().any(|k| (k - u).abs() < 1e-6) {
+            return None;
+        }
+        // The span holding u: knots[k] <= u < knots[k + 1], p <= k < n.
+        let k = (p..n).rev().find(|i| self.knots.get(*i).is_some_and(|x| *x <= u))?;
+        let mut radii = Vec::with_capacity(n + 1);
+        radii.extend_from_slice(self.radii.get(..=k - p)?);
+        for i in k - p + 1..=k {
+            let (lo, hi) = (*self.knots.get(i)?, *self.knots.get(i + p)?);
+            let a = (u - lo) / (hi - lo);
+            radii.push((1.0 - a) * self.radii.get(i - 1)? + a * self.radii.get(i)?);
+        }
+        radii.extend_from_slice(self.radii.get(k..)?);
+        let mut knots = self.knots.clone();
+        knots.insert(k + 1, u);
+        Some(RadiusSpline { degree: self.degree, knots, radii })
+    }
+
+    /// The same spline without control radius `j` and the inner knot nearest its position: the
+    /// curve changes around it, the ends stay. None for an end radius or a spline with no inner
+    /// knot to remove.
+    pub fn remove(&self, j: usize) -> Option<RadiusSpline> {
+        let (n, p) = (self.radii.len(), self.degree);
+        if j == 0 || j + 1 >= n || n <= p + 1 {
+            return None;
+        }
+        let at = *self.greville().get(j)?;
+        let inner = p + 1..n;
+        let drop = inner.min_by(|a, b| (self.knots[*a] - at).abs().total_cmp(&(self.knots[*b] - at).abs()))?;
+        let mut knots = self.knots.clone();
+        knots.remove(drop);
+        let mut radii = self.radii.clone();
+        radii.remove(j);
+        Some(RadiusSpline { degree: self.degree, knots, radii })
+    }
+
     /// Refused unless it is a clamped B-spline from 0 to 1 of degree 1 to 3 with 2 to 100 control
     /// radii, positive along the edge and zero at most at one end.
     fn check(&self) -> Result<()> {
@@ -571,6 +612,34 @@ mod tests {
         (a - b).abs() / b.abs().max(1e-9)
     }
 
+    /// Inserting a knot keeps the curve and adds one control radius; removing a control radius
+    /// takes out one inner knot and keeps the ends.
+    #[test]
+    fn radius_spline_knot_insertion_and_removal() {
+        let law =
+            RadiusSpline { degree: 3, knots: vec![0.0, 0.0, 0.0, 0.0, 0.25, 0.6, 1.0, 1.0, 1.0, 1.0], radii: vec![2.0, 5.0, 1.5, 4.0, 1.0, 3.0] };
+        for u in [0.1, 0.25 + 1e-3, 0.4, 0.9] {
+            let more = law.insert(u).unwrap();
+            assert_eq!((more.radii.len(), more.knots.len()), (7, 11));
+            assert!(more.check().is_ok());
+            let worst = (0..=400).map(|i| f64::from(i) / 400.0).map(|t| (more.eval(t) - law.eval(t)).abs()).fold(0.0, f64::max);
+            assert!(worst < 1e-12, "insert {u}: off by {worst}");
+            // Removing the control radius just added drops a knot again.
+            let j = more.greville().iter().enumerate().min_by(|a, b| (a.1 - u).abs().total_cmp(&(b.1 - u).abs())).unwrap().0;
+            let less = more.remove(j).unwrap();
+            assert_eq!((less.radii.len(), less.knots.len()), (6, 10));
+            assert!(less.check().is_ok());
+        }
+        // Not at an end, on a knot, or outside.
+        assert!(law.insert(0.0).is_none() && law.insert(0.6).is_none() && law.insert(1.2).is_none());
+        // Ends stay, and a single cubic span has no inner knot to give up.
+        assert!(law.remove(0).is_none() && law.remove(5).is_none());
+        let bare = RadiusSpline { degree: 3, knots: vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0], radii: vec![2.0, 3.0, 3.0, 2.0] };
+        assert!(bare.remove(1).is_none());
+        let less = law.remove(2).unwrap();
+        assert_eq!((less.eval(0.0), less.eval(1.0)), (2.0, 3.0));
+    }
+
     /// The material a variable fillet removes from a right-angled edge of length L, radius
     /// running r0 → r1: ∫ (1 − π/4) r(t)² dt = (1 − π/4) L (r0² + r0 r1 + r1²) / 3.
     #[test]
@@ -750,3 +819,7 @@ mod tests {
         assert!(rel(measure(&f).unwrap().volume, measure(&k).unwrap().volume) < 1e-9);
     }
 }
+
+#[cfg(test)]
+#[path = "taper_mesh_tests.rs"]
+mod taper_mesh_tests;

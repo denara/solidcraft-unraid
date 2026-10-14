@@ -23,6 +23,10 @@ pub struct ShortcutBox {
     index: usize,
     /// What is typed.
     pub text: String,
+    /// Ask the field for focus on the next frame. Set when the box opens, then cleared.
+    /// Requesting focus on every frame restarts the text edit's held key, so a Wayland
+    /// repeat never sees the release and the key keeps repeating after the app loses focus (#724).
+    focus: bool,
     /// Most recent first.
     pub recent: Vec<String>,
     pub pinned: Vec<String>,
@@ -119,6 +123,7 @@ pub fn open(app: &mut SolveApp, at: Option<Pos2>) {
     app.sbox.at = at;
     app.sbox.index = 0;
     app.sbox.text.clear();
+    app.sbox.focus = true;
 }
 
 fn run(app: &mut SolveApp, id: &str) {
@@ -132,10 +137,15 @@ fn run(app: &mut SolveApp, id: &str) {
 pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     if !app.ui.palette_open {
         app.sbox.at = None;
+        app.sbox.focus = false;
         return;
     }
     let t = Tokens::get();
     let screen = ctx.content_rect();
+    // Opened without `open` (a feature edit that falls through to the box): focus once.
+    if app.sbox.at.is_none() {
+        app.sbox.focus = true;
+    }
     let at = *app.sbox.at.get_or_insert_with(|| ctx.input(|i| i.pointer.latest_pos()).unwrap_or(screen.center()));
     let list = search(app, &app.sbox.text);
     let (up, down, enter, esc) = ctx.input(|i| {
@@ -176,15 +186,20 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                 ui.separator();
             }
             let te = ui.add(
-                egui::TextEdit::singleline(&mut app.sbox.text).hint_text("Search commands").desired_width(W - 20.0).id(egui::Id::new("sc_sbox_text")),
+                egui::TextEdit::singleline(&mut app.sbox.text)
+                    .hint_text(crate::i18n::tr_label("Search commands"))
+                    .desired_width(W - 20.0)
+                    .id(egui::Id::new("sc_sbox_text")),
             );
-            te.request_focus();
+            if std::mem::take(&mut app.sbox.focus) {
+                te.request_focus();
+            }
             if te.changed() {
                 app.sbox.index = 0;
             }
             ui.add_space(4.0);
             if app.sbox.text.trim().is_empty() && !app.sbox.recent.is_empty() {
-                ui.label(egui::RichText::new("RECENT").size(10.0).color(t.text_dim));
+                ui.label(egui::RichText::new(crate::i18n::tr_label("RECENT")).size(10.0).color(t.text_dim));
             }
             egui::ScrollArea::vertical().max_height(h - 90.0).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
@@ -276,6 +291,35 @@ mod tests {
         assert!(score("pres", "Press Pull") > score("ppl", "Press Pull"));
         assert!(score("ppl", "Press Pull") > 0);
         assert_eq!(score("xyz", "Extrude"), 0);
+    }
+
+    fn frame(app: &mut SolveApp, ctx: &egui::Context) {
+        let raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))), ..Default::default() };
+        let mut out = ctx.run_ui(raw, |ui| show(app, ui.ctx()));
+        out.textures_delta.clear();
+    }
+
+    /// The field takes focus when the box opens and is not asked again on later frames: asking on
+    /// every frame restarts the text edit's held key, which kept a Wayland key repeat running (#724).
+    #[test]
+    fn the_search_field_asks_for_focus_once_per_opening() {
+        let mut app = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
+        let ctx = egui::Context::default();
+        let field = egui::Id::new("sc_sbox_text");
+        open(&mut app, None);
+        frame(&mut app, &ctx);
+        frame(&mut app, &ctx);
+        assert!(ctx.memory(|m| m.has_focus(field)), "the field has focus once the box opens");
+        ctx.memory_mut(|m| m.surrender_focus(field));
+        frame(&mut app, &ctx);
+        frame(&mut app, &ctx);
+        assert!(!ctx.memory(|m| m.has_focus(field)), "the field asked for focus again while open");
+        app.ui.palette_open = false;
+        frame(&mut app, &ctx);
+        open(&mut app, None);
+        frame(&mut app, &ctx);
+        frame(&mut app, &ctx);
+        assert!(ctx.memory(|m| m.has_focus(field)), "reopening the box focuses the field again");
     }
 
     #[test]

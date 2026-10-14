@@ -324,6 +324,55 @@ fn boundary_hits(face: &mt::Face, g: &Field) -> Vec<Hit> {
     out
 }
 
+/// The exact boundary crossings each open chain runs between (`None` for closed chains and
+/// for chains whose ends have no crossing of their own).
+///
+/// A chain ends where the zero set crosses the boundary of the face's mesh, whose sides are
+/// chords up to `mesh_tol` inside a curved boundary: the true crossing lies further along the
+/// zero set, by the chord's sag over the sine of the angle the two meet at. A fixed snap
+/// distance below the sag drops splits depending on where the mesh's vertices fall (a wall
+/// crossing a disc's rim 0.06 mm past the last chord on a 50 mm part). Ends are matched within
+/// a few sags (crossings at 15° or steeper), one crossing to one end, nearest pairs first, so
+/// a wider reach never lets two ends share a crossing.
+fn chain_ends(chains: &[Chain], hits: &[Hit], mesh_tol: f64) -> Vec<Option<(Hit, Hit)>> {
+    let reach = 4.0 * mesh_tol;
+    // (distance, end slot: chain * 2 + 0 for the first point, 1 for the last; hit index)
+    let mut pairs: Vec<(f64, usize, usize)> = Vec::new();
+    for (c, ch) in chains.iter().enumerate() {
+        if ch.closed {
+            continue;
+        }
+        for (k, end) in [ch.pts.first(), ch.pts.last()].into_iter().enumerate() {
+            let Some(&(p, _)) = end else { continue };
+            for (h, hit) in hits.iter().enumerate() {
+                let d = hit.p.distance(p);
+                if d <= reach {
+                    pairs.push((d, c * 2 + k, h));
+                }
+            }
+        }
+    }
+    pairs.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let mut slot: Vec<Option<usize>> = vec![None; chains.len() * 2];
+    let mut taken = vec![false; hits.len()];
+    for (_, end, h) in pairs {
+        if slot.get(end).is_some_and(Option::is_none) && taken.get(h).is_some_and(|t| !*t) {
+            if let Some(s) = slot.get_mut(end) {
+                *s = Some(h);
+            }
+            if let Some(t) = taken.get_mut(h) {
+                *t = true;
+            }
+        }
+    }
+    (0..chains.len())
+        .map(|c| match (slot.get(c * 2).copied().flatten(), slot.get(c * 2 + 1).copied().flatten()) {
+            (Some(a), Some(b)) => Some((hits.get(a)?.clone(), hits.get(b)?.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
 /// A curve through points: a line when they are collinear, else a cubic through every point
 /// (Catmull-Rom tangents; `closed` when the last point repeats the first).
 pub(crate) fn fit(pts: &[mt::Point3], scale: f64) -> Result<mt::Curve> {
@@ -565,13 +614,13 @@ fn split_one(faces: &mut Vec<mt::Face>, fi: usize, g: &Field, size: f64, new_edg
         return Ok((0, 1));
     }
     let tol = size * 1e-7 + 1e-9;
-    let snap = size * 1e-3;
     let hits = boundary_hits(&face, g);
+    let ends = chain_ends(&chains, &hits, trace_tol(&face, size));
     // Pieces of the original face as they are split.
     let mut pieces: Vec<mt::Face> = vec![face.clone()];
     let mut all_cuts: Vec<(mt::Edge, (mt::Edge, mt::Edge))> = Vec::new();
     let mut made = 0;
-    for ch in chains {
+    for (ch, end) in chains.into_iter().zip(ends) {
         if ch.closed {
             // A closed line inside the face: a new face inside it and a hole in the piece that holds it.
             let mut pts: Vec<mt::Point3> = ch.pts.iter().map(|x| x.0).collect();
@@ -620,10 +669,7 @@ fn split_one(faces: &mut Vec<mt::Face>, fi: usize, g: &Field, size: f64, new_edg
             continue;
         }
         // An open line: it must end on the boundary at two crossings.
-        let (Some(&(pa, _)), Some(&(pb, _))) = (ch.pts.first(), ch.pts.last()) else { continue };
-        let near =
-            |p: mt::Point3| hits.iter().filter(|h| h.p.distance(p) <= snap).min_by(|x, y| x.p.distance(p).total_cmp(&y.p.distance(p))).cloned();
-        let (Some(ha), Some(hb)) = (near(pa), near(pb)) else { continue };
+        let Some((ha, hb)) = end else { continue };
         // Cut the boundary edges (an edge may already have been cut by an earlier line).
         let vert = |h: &Hit, cuts: &mut Vec<(mt::Edge, (mt::Edge, mt::Edge))>| -> Result<mt::Vertex> {
             // The current edge holding the hit: the original, or a piece of it.

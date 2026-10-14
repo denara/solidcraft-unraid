@@ -33,6 +33,31 @@ fn round_as_tall_as_a_disc_uses_up_its_wall() {
     assert!(rel(volume(&mut s), expect) < 2e-4, "{} vs {expect}", volume(&mut s));
 }
 
+/// #783: an edge pick far from every edge (beside the body, above it, inside it, or on another
+/// body than the one named) is refused and adds nothing, instead of rounding the nearest edge;
+/// a pick on an edge, or a little off it as a click lands, still works.
+#[test]
+fn edge_picks_far_from_every_edge_are_refused() {
+    let mut s = Session::default();
+    for (name, x) in [("A", 0), ("B", 40), ("C", 80), ("D", 120)] {
+        run(&mut s, "solid.box", json!({"length": 20, "width": 20, "height": 10, "corner": [x, 0, 0], "operation": "new", "body_name": name}));
+    }
+    run(&mut s, "solid.fillet", json!({"body": "A", "edges": [[10, 0, 10]], "radius": 1}));
+    run(&mut s, "solid.fillet", json!({"body": "B", "edges": [[50, 0.4, 10.3]], "radius": 1}));
+    let features = s.doc.features.len();
+    for (id, p, far) in [
+        ("solid.fillet", json!({"body": "B", "edges": [[50, -15, 10]], "radius": 1}), "15.0"),
+        ("solid.chamfer", json!({"body": "C", "edges": [[90, 10, 40]], "distance": 1}), "31.623 mm"),
+        ("solid.fillet", json!({"edges": [[130, 10, 5]], "radius": 1}), "11.180 mm"),
+        ("solid.fillet", json!({"body": "C", "edges": [[10, 20, 10]], "radius": 1}), "mm away"),
+        ("solid.press_pull", json!({"edges": [[50, -15, 10]], "distance": 1}), "15.0"),
+    ] {
+        let err = s.execute(id, &p).expect_err(&format!("{id} {p}")).to_string();
+        assert!(err.contains("no edge at") && err.contains(far), "{id} {p}: {err}");
+    }
+    assert_eq!(s.doc.features.len(), features);
+}
+
 #[test]
 fn fillet_as_wide_as_a_face_rounds_it_off() {
     // #199: 14 x 6 x 10 box, the four vertical edges at r = 3 (half the 6 mm end faces).
@@ -170,11 +195,96 @@ fn join_meeting_nothing_keeps_the_first_body() {
     assert!(rel(volume(&mut s), 1064.0) < 1e-6);
 }
 
+/// Two spheres of one size: the join's contact test tried every pair of their finely meshed
+/// triangles and refused the join as too much work (#232).
+#[test]
+fn join_of_two_overlapping_equal_spheres_is_not_refused() {
+    let mut s = Session::default();
+    run(&mut s, "solid.sphere", json!({"radius": 10, "center": [0, 0, 0], "body_name": "A"}));
+    run(&mut s, "solid.sphere", json!({"radius": 10, "center": [12, 0, 0], "body_name": "B"}));
+    run(&mut s, "solid.combine", json!({"target": "A", "tools": ["B"], "operation": "join"}));
+    assert_eq!(s.model.state().bodies.len(), 1);
+    // Two spheres less the lens they share: 2 * 4/3 pi r^3 - pi (4r + d) (2r - d)^2 / 12.
+    let (r, d) = (10.0, 12.0);
+    let want = 2.0 * 4.0 / 3.0 * PI * r * r * r - PI * (4.0 * r + d) * (2.0 * r - d) * (2.0 * r - d) / 12.0;
+    let got = volume(&mut s);
+    assert!(rel(got, want) < 1e-3, "{got} vs {want}");
+}
+
+/// Area two discs of radii `r1`, `r2` with centres `d` apart have in common.
+fn disc_overlap(r1: f64, r2: f64, d: f64) -> f64 {
+    if d >= r1 + r2 {
+        return 0.0;
+    }
+    if d <= (r1 - r2).abs() {
+        return PI * r1.min(r2) * r1.min(r2);
+    }
+    let a = ((d * d + r1 * r1 - r2 * r2) / (2.0 * d * r1)).acos();
+    let b = ((d * d + r2 * r2 - r1 * r1) / (2.0 * d * r2)).acos();
+    r1 * r1 * a + r2 * r2 * b - 0.5 * ((-d + r1 + r2) * (d + r1 - r2) * (d - r1 + r2) * (d + r1 + r2)).sqrt()
+}
+
+/// Two thick rings 11 mm apart: their walls cross, and the join was refused as too much work (#232).
+#[test]
+fn join_of_two_overlapping_rings_is_not_refused() {
+    let mut s = Session::default();
+    for (name, x) in [("RingA", 0.0), ("RingB", 11.0)] {
+        run(
+            &mut s,
+            "solid.cylinder",
+            json!({"diameter": 120, "height": 60, "base": [x, 0, 0], "operation": "new", "name": format!("{name}Outer"), "body_name": name}),
+        );
+        run(
+            &mut s,
+            "solid.cylinder",
+            json!({"diameter": 96, "height": 60, "base": [x, 0, 0], "operation": "cut", "targets": [name], "name": format!("{name}Bore")}),
+        );
+    }
+    run(&mut s, "solid.combine", json!({"target": "RingA", "tools": ["RingB"], "operation": "join"}));
+    assert_eq!(s.model.state().bodies.len(), 1);
+    // Union of the two rings' plan areas: both less what they share, which is the overlap of the
+    // two outer discs less the two bores (each inside the other's outer disc) plus the bores' own overlap.
+    let (outer, bore, d) = (60.0, 48.0, 11.0);
+    let ring = PI * (outer * outer - bore * bore);
+    let shared = disc_overlap(outer, outer, d) - 2.0 * disc_overlap(bore, outer, d) + disc_overlap(bore, bore, d);
+    let want = (2.0 * ring - shared) * 60.0;
+    let got = volume(&mut s);
+    assert!(rel(got, want) < 1e-3, "{got} vs {want}");
+}
+
+/// A disc with a lobe on its rim, patterned six times about its centre: every copy shares the
+/// whole disc with the target, and joining them was refused as too much contact work (#1029).
+#[test]
+fn join_of_a_lobed_disc_pattern_is_not_refused() {
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY"}));
+    run(&mut s, "sketch.circle.center", json!({"center": [0, 0], "diameter": 15}));
+    run(&mut s, "sketch.circle.center", json!({"center": [0, 7.5], "diameter": 5}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"distance": 10, "profiles": "all", "operation": "new", "body_name": "Disc"}));
+    run(&mut s, "solid.pattern.circular", json!({"bodies": ["Disc"], "axis": "Z", "count": 6}));
+    let tools: Vec<String> = s.model.state().bodies.iter().map(|b| b.name.clone()).filter(|n| n != "Disc").collect();
+    assert_eq!(tools.len(), 5);
+    run(&mut s, "solid.combine", json!({"target": "Disc", "tools": tools, "operation": "join"}));
+    assert_eq!(s.model.state().bodies.len(), 1);
+    // The disc plus six lobes, each less the part inside the disc; neighbouring lobes stay apart.
+    let (disc, lobe) = (7.5, 2.5);
+    let want = (PI * disc * disc + 6.0 * (PI * lobe * lobe - disc_overlap(disc, lobe, disc))) * 10.0;
+    let got = volume(&mut s);
+    assert!(rel(got, want) < 1e-3, "{got} vs {want}");
+}
+
+mod blend_fit;
 mod boolean_diagnostics;
 mod component_frames;
+mod large_step_import;
+mod loft_cut;
 mod mirror_planes;
+mod path_scope;
 mod primitive_points;
 mod robustness;
+mod robustness_goldens;
+mod spiral_join;
 mod xz_plane;
 
 /// Plan area a round of radius `r` fills at the concave corner `x` where circles (c1, r1) and
@@ -493,7 +603,7 @@ fn script_runs_commands() {
     assert!(s.run_script(&json!([{"command": "Nope"}])).is_err());
 }
 
-fn hostile_values() -> Vec<Value> {
+pub(crate) fn hostile_values() -> Vec<Value> {
     vec![
         Value::Null,
         json!(true),
@@ -642,8 +752,8 @@ fn hostile_params_never_panic() {
                     while let Some(&id) = ids.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) {
                         for v in hostile_values() {
                             for k in keys {
-                                if k == "path" && id.starts_with("parameters.") {
-                                    continue; // parameter files: covered by their own tests (no stray files)
+                                if k == "path" && (id.starts_with("parameters.") || id == "timeline.export_script") {
+                                    continue; // parameter and script files: covered by their own tests (no stray files)
                                 }
                                 let mut s = Session::default();
                                 // A model with a sketch, a body and an active sketch, so most commands get far.
@@ -873,6 +983,36 @@ fn step_open_then_model_on_it() {
     let mut s2 = Session::default();
     run(&mut s2, "doc.open", json!({"path": design.to_string_lossy()}));
     assert!(rel(volume(&mut s2), before) < 1e-6);
+}
+
+/// A join onto an imported body of thousands of planar faces (a converted mesh, say): each face of
+/// the result was compared with every planar face of the inputs whose source is unknown, and the
+/// join was refused past the comparison budget.
+#[test]
+fn join_onto_a_finely_faceted_import() {
+    let dir = std::env::temp_dir().join(format!("solidcraft-step-faceted-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let n = 4000;
+    let mut pts: Vec<[f64; 2]> =
+        (0..n).map(|i| std::f64::consts::TAU * f64::from(i) / f64::from(n)).map(|a| [20.0 * a.cos(), 20.0 * a.sin()]).collect();
+    pts.push(pts[0]);
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "P"}));
+    run(&mut s, "sketch.line", json!({"points": pts}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"sketch": "P", "distance": 10}));
+    let p = dir.join("Faceted.step");
+    run(&mut s, "file.export", json!({"path": p.to_string_lossy()}));
+    let prism = volume(&mut s);
+
+    let mut d = Session::default();
+    run(&mut d, "file.insert_step", json!({"path": p.to_string_lossy()}));
+    run(&mut d, "sketch.create", json!({"plane": "XY", "name": "Pin"}));
+    run(&mut d, "sketch.rectangle.two_point", json!({"p0": [-5, -5], "p1": [5, 5]}));
+    run(&mut d, "sketch.finish", json!({}));
+    run(&mut d, "solid.extrude", json!({"sketch": "Pin", "distance": 25, "operation": "join"}));
+    assert_eq!(d.model.state().bodies.len(), 1);
+    assert!(rel(volume(&mut d), prism + 10.0 * 10.0 * 15.0) < 1e-6, "{}", volume(&mut d));
 }
 
 /// Shell an imported body; insert STEP into an existing design; extension case; bad files.
@@ -1167,6 +1307,14 @@ fn threemf_export_open_insert() {
     let p = dir.join("Parts.3MF");
     run(&mut s, "file.export", json!({"path": p.to_string_lossy()}));
     let want = volume(&mut s);
+    // With face tags it is still a 3MF any reader opens, with the same bodies.
+    let tagged = dir.join("tagged.3mf");
+    let r = run(&mut s, "file.export", json!({"path": tagged.to_string_lossy(), "format": "3mf-tagged"}));
+    assert_eq!(r["format"], "ThreeMfTagged", "{r}");
+    let mut t = Session::default();
+    let r = run(&mut t, "doc.open", json!({"path": tagged.to_string_lossy()}));
+    assert_eq!(r["bodies"].as_array().unwrap().len(), 2, "{r}");
+    assert!(rel(volume(&mut t), want) < 2e-3, "{} vs {want}", volume(&mut t));
 
     let mut m = Session::default();
     let r = run(&mut m, "doc.open", json!({"path": p.to_string_lossy()}));
@@ -2753,6 +2901,67 @@ fn renaming_a_pattern_copy_keeps_the_other_copies_names() {
     run(&mut s, "body.rename", json!({"body": "X (3)", "name": "Third"}));
     let names: Vec<String> = s.model.state().bodies.iter().map(|b| b.name.clone()).collect();
     assert_eq!(names, ["X", "Second", "Third"]);
+}
+
+/// Three solids in one STEP file that carry the same label: the file written for three boxes, each
+/// named `X`.
+fn step_three_solids_labelled_x(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("solidcraft-step-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut s = Session::default();
+    for (i, label) in ["Aa", "Bb", "Cc"].iter().enumerate() {
+        let corner = [30.0 * i as f64, 0.0, 0.0];
+        run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10, "corner": corner, "operation": "new_body", "body_name": label}));
+    }
+    let p = dir.join("Three.step");
+    run(&mut s, "file.export", json!({"path": p.to_string_lossy()}));
+    let mut text = std::fs::read_to_string(&p).unwrap();
+    for label in ["Aa", "Bb", "Cc"] {
+        assert!(text.contains(&format!("MANIFOLD_SOLID_BREP('{label}'")), "the file names its solids: {label}");
+        text = text.replace(&format!("MANIFOLD_SOLID_BREP('{label}'"), "MANIFOLD_SOLID_BREP('X'");
+    }
+    std::fs::write(&p, text).unwrap();
+    p
+}
+
+/// Renaming one of several imported bodies that share a label leaves the names of the others alone:
+/// the model lists them as `X`, `X (2)`, `X (3)`, and `X (3)` is still there after `X (2)` is renamed.
+#[test]
+fn renaming_an_imported_body_keeps_the_names_of_its_duplicates() {
+    let p = step_three_solids_labelled_x("duplicate-labels");
+    let mut s = Session::default();
+    run(&mut s, "file.insert_step", json!({"path": p.to_string_lossy()}));
+    let names = |s: &Session| s.model.state().bodies.iter().map(|b| b.name.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&s), ["X", "X (2)", "X (3)"]);
+    let x_of =
+        |s: &mut Session, body: &str| run(s, "inspect.measure", json!({"bodies": [body]}))["bodies"][0]["bbox"]["min"][0].as_f64().map(f64::round);
+    assert_eq!(x_of(&mut s, "X (3)"), Some(60.0));
+    run(&mut s, "body.rename", json!({"body": "X (2)", "name": "Second"}));
+    assert_eq!(names(&s), ["X", "Second", "X (3)"]);
+    assert_eq!(x_of(&mut s, "X (3)"), Some(60.0), "X (3) is still the solid at x = 60");
+    run(&mut s, "body.rename", json!({"body": "X (3)", "name": "Third"}));
+    assert_eq!(names(&s), ["X", "Second", "Third"]);
+    assert_eq!(x_of(&mut s, "Third"), Some(60.0));
+    // The names survive a rebuild and a reopen of the saved design.
+    let design = p.with_file_name("Three.solidcraft");
+    run(&mut s, "file.save_as", json!({"path": design.to_string_lossy()}));
+    let mut r = Session::default();
+    run(&mut r, "doc.open", json!({"path": design.to_string_lossy()}));
+    assert_eq!(names(&r), ["X", "Second", "Third"]);
+}
+
+/// The same when the first of the three is renamed: `X (2)` and `X (3)` do not slide down to `X` and
+/// `X (2)`, and what is set on one of them (a material) stays with it.
+#[test]
+fn renaming_the_first_imported_duplicate_keeps_the_numbers_of_the_others() {
+    let p = step_three_solids_labelled_x("duplicate-labels-first");
+    let mut s = Session::default();
+    run(&mut s, "file.insert_step", json!({"path": p.to_string_lossy()}));
+    run(&mut s, "material.assign", json!({"bodies": ["X (3)"], "material": "Steel"}));
+    run(&mut s, "body.rename", json!({"body": "X", "name": "First"}));
+    let names: Vec<String> = s.model.state().bodies.iter().map(|b| b.name.clone()).collect();
+    assert_eq!(names, ["First", "X (2)", "X (3)"]);
+    assert!(s.doc.materials.contains_key("X (3)"), "the material is still on X (3): {:?}", s.doc.materials.keys().collect::<Vec<_>>());
 }
 
 /// Parameters that work are listed in the command's params doc, which is all agents see (#271).

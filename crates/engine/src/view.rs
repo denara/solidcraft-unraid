@@ -107,7 +107,7 @@ pub fn sketch_lines_with_sampler(
 ) -> Vec<(Vec<Vec3>, Rgb, bool)> {
     let mut out = Vec::new();
     for (i, c) in sk.curves.iter().enumerate() {
-        if c.link.is_some() && sk.view.hide_projected && !sk.is_text_curve(i) {
+        if !sketch_curve_visible(sk, i) {
             continue;
         }
         let col = if c.link.is_some() && !sk.is_text_curve(i) {
@@ -151,13 +151,59 @@ pub fn sketch_lines_with_sampler(
     out
 }
 
-/// Should sketch point `i` be drawn? Text outlines' points are not (they are not picked or
-/// constrained individually).
-pub fn sketch_point_visible(sk: &Sketch, i: usize) -> bool {
-    match sk.points.get(i).and_then(|p| p.link.as_deref()) {
-        Some(l) => sk.link(l).is_none_or(|l| l.kind != solidcraft_sketch::LinkKind::Text),
-        None => true,
+/// Should sketch curve `i` be drawn and picked? The Sketch Palette's two geometry toggles each
+/// hide one category, and a curve belongs to the category its colour already names in
+/// [`sketch_lines_with_sampler`]: a linked curve is projected reference geometry (Projected
+/// Geometries), anything else carrying the `construction` line type is construction geometry
+/// (Construction Geometries). Text outlines are linked curves that the Text feature draws, so
+/// they are never reference geometry and always show. Centerlines are their own line type and
+/// no toggle hides them.
+///
+/// Drawing and picking share this one answer so they cannot drift: geometry that is not on
+/// screen is never clickable, and geometry on screen always is.
+pub fn sketch_curve_visible(sk: &Sketch, i: usize) -> bool {
+    let Some(c) = sk.curves.get(i) else { return false };
+    if c.link.is_some() && !sk.is_text_curve(i) {
+        return !sk.view.hide_projected;
     }
+    !(c.construction && sk.view.hide_construction)
+}
+
+/// Point roles shown and picked individually. Associated offsets keep their generated
+/// fit nodes private until their association is broken. Build once per sketch/frame.
+pub struct SketchPointVisibility<'a> {
+    hidden: std::collections::HashSet<&'a str>,
+}
+
+impl<'a> SketchPointVisibility<'a> {
+    pub fn new(sk: &'a Sketch) -> Self {
+        let outputs: std::collections::HashSet<&str> = sk.freeform_offsets.iter().map(|o| o.output.as_str()).collect();
+        // A repeated link ID names its first link, as Sketch::link does.
+        let mut seen = std::collections::HashSet::new();
+        let text: std::collections::HashSet<&str> = sk
+            .links
+            .iter()
+            .filter(|l| seen.insert(l.id.as_str()))
+            .filter(|l| l.kind == solidcraft_sketch::LinkKind::Text)
+            .map(|l| l.id.as_str())
+            .collect();
+        let mut hidden: std::collections::HashSet<&str> =
+            sk.points.iter().filter(|p| p.link.as_deref().is_some_and(|l| text.contains(l))).map(|p| p.id.as_str()).collect();
+        for curve in sk.curves.iter().filter(|c| outputs.contains(c.id.as_str())) {
+            hidden.extend(curve.kind.point_ids().into_iter().filter_map(|i| sk.points.get(i).map(|p| p.id.as_str())));
+        }
+        Self { hidden }
+    }
+
+    pub fn takes(&self, point: &solidcraft_sketch::SPoint) -> bool {
+        !self.hidden.contains(point.id.as_str())
+    }
+}
+
+/// Should sketch point `i` be drawn or picked individually? Text outlines and derived
+/// offset fit nodes are private. Batch callers use [`SketchPointVisibility`].
+pub fn sketch_point_visible(sk: &Sketch, i: usize) -> bool {
+    sk.points.get(i).is_some_and(|p| SketchPointVisibility::new(sk).takes(p))
 }
 
 /// The scene for a headless render, cut by the session's section.

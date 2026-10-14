@@ -20,9 +20,9 @@ New designs are saved as `.solidcraft`. Files with the old extension still open 
 | Open dialog filters (desktop) | `apps/solidcraft/src/main.rs` (`services`) |
 | Drag-drop, recent files, `doc.open`, MCP `open`, CLI `eval`/`run` | go through the same format detection in `solidcraft_io` |
 | Browser file picker | `apps/solidcraft-web/src/files.rs` (`accept`) |
-| Windows | `packaging/windows/solidcraft.wxs`: the `.solvecraft` extension on the design ProgId and in `SupportedTypes` |
-| macOS | `packaging/macos/Info.plist.in`: `solvecraft` in the design document type's extensions |
-| Linux / FreeBSD / Flatpak | `packaging/linux/ai.storyteller.solidcraft.mime.xml`: `*.solvecraft` glob and the `application/x-solvecraft` alias |
+| Windows | `assets/platforms/windows/solidcraft.wxs`: the `.solvecraft` extension on the design ProgId and in `SupportedTypes` |
+| macOS | `assets/platforms/macos/Info.plist.in`: `solvecraft` in the design document type's extensions |
+| Linux / FreeBSD / Flatpak | `assets/platforms/linux/ai.storyteller.solidcraft.mime.xml`: `*.solvecraft` glob and the `application/x-solvecraft` alias |
 
 Recent-files entries that point at a `.solvecraft` file keep working: they are plain paths and
 open through the same detection. The browser app also lists designs it stored under the old
@@ -126,8 +126,8 @@ everywhere (Flatpak, deb, rpm, AppImage, Snap, FreeBSD, Nix). The shims:
 | Shim | Where | What it does |
 |---|---|---|
 | End-of-life rebase in the Flatpak repository | `packaging/flatpak-site.sh` | Each release's Pages deploy keeps the old `app/ai.storyteller.solvecraft/<arch>/stable` refs (mirrored from the previous deploy) and marks them once with `flatpak build-commit-from --end-of-life-rebase=ai.storyteller.solvecraft=ai.storyteller.solidcraft`. `flatpak update` then says the old app is end-of-life and offers to replace it with the new one; accepting installs `ai.storyteller.solidcraft`, uninstalls the old app, and Flatpak moves `~/.var/app/ai.storyteller.solvecraft` to the new id's folder (leaving a symlink at the old path) on the first launch, so settings and autosaves come along unchanged. |
-| AppStream `<replaces>` / `<provides>` | `packaging/linux/ai.storyteller.solidcraft.metainfo.xml.in` | Software centres treat the new id as the successor of the old one and of `ai.storyteller.solvecraft.desktop`. |
-| `X-Flatpak-RenamedFrom` | `packaging/linux/ai.storyteller.solidcraft.desktop` | Desktops that honour it (GNOME Shell) keep favourites and pinned launchers pointing at the renamed entry. |
+| AppStream `<replaces>` / `<provides>` | `assets/platforms/linux/ai.storyteller.solidcraft.metainfo.xml.in` | Software centres treat the new id as the successor of the old one and of `ai.storyteller.solvecraft.desktop`. |
+| `X-Flatpak-RenamedFrom` | `assets/platforms/linux/ai.storyteller.solidcraft.desktop` | Desktops that honour it (GNOME Shell) keep favourites and pinned launchers pointing at the renamed entry. |
 | Read-only access to the old Flatpak data folder | `--filesystem=~/.var/app/ai.storyteller.solvecraft:ro` in `packaging/linux/flatpak/ai.storyteller.solidcraft.bundle.yml`; `solidcraft_io::legacy_flatpak_path`, used by `adopt_legacy_settings` and `recovery::default_dir` | When the new app was installed next to the old one (for example from a `.flatpak` bundle, which has no update feed) instead of through the rebase, its first launch copies settings and autosaves from the old app's folder, as in section 4. The old folder is not changed. |
 | The old window `app_id` as eframe's legacy storage key | `adopt_legacy_settings` (`LEGACY_APP_ID`) | Window state that releases before the settings rename kept under `~/.local/share/ai.storyteller.solvecraft` is still copied (section 4). |
 | Old AppImage menu entries | `packaging/linux/AppRun` | An AppImage's first run removes the `ai.storyteller.solvecraft.desktop` entry and icons that an AppImage up to 0.7 installed in `~/.local/share`, so the menu doesn't show the app twice. |

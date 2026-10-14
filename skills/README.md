@@ -8,6 +8,7 @@ description that tell the agent when to load it, and an optional supporting refe
 |---|---|
 | [`solidcraft-modeling`](solidcraft-modeling/SKILL.md) | builds a new part (enclosure, bracket, plate, flange, …) |
 | [`solidcraft-editing`](solidcraft-editing/SKILL.md) | changes, fixes or extends an existing design |
+| [`solidcraft-checking`](solidcraft-checking/SKILL.md) | builds, changes or ports a design, next to the two above: parameter ranges, every allowed value, exact STEP comparison, regression tests, designs kept in git |
 
 They teach the agent to:
 - plan the part as numbers
@@ -44,5 +45,6 @@ Copy-Item -Recurse solidcraft\skills\solidcraft-* $HOME\.claude\skills\
 - The worked example in `solidcraft-modeling/reference.md` runs in CI. `skill_reference_example_builds_as_documented` in `crates/mcp/src/tests.rs` builds it, checks the documented volume, changes a parameter and checks it again.
 - The sketch-plane table is covered by `sketch_plane_axes_match_the_skill_reference` in the same file.
 - `skills_name_only_real_tools_and_commands` checks that every tool and command the skills call exists.
+- `solidcraft-checking/scripts/tests` checks that skill's helpers, its traps and conventions, and the facts behind the corrections in `solidcraft-modeling`: `PYTHONDONTWRITEBYTECODE=1 uv run --no-project --with pytest --with build123d pytest -p no:cacheprovider skills/solidcraft-checking/scripts/tests`. The tests run the `solidcraft-cli` on `PATH`, not the workspace build, and CI does not run them.
 - When a command, a parameter name or a behaviour that these files describe changes, update them in the same PR.
 - Facts that describe current limitations, such as edge picks without a distance limit, should go once the limitation is fixed.

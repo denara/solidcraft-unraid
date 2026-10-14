@@ -31,11 +31,14 @@ pub fn validate_body_transfer(doc: &Document, bodies: &[String], from: u64, to: 
     Ok(())
 }
 
+/// Moves the bodies in `st`, which the evaluator discards when this fails (so it is changed in
+/// place rather than copied: a copy of every body for each moved one was most of the cost).
 pub(crate) fn evaluate(doc: &Document, st: &mut ModelState, bodies: &[String], from: u64, to: u64, transform: Mat) -> Result<()> {
     validate_body_transfer(doc, bodies, from, to, &transform)?;
-    let mut next = st.clone();
+    let mut moved = Vec::with_capacity(bodies.len());
     for name in bodies {
-        let old = st.body(name).ok_or_else(|| DocError::Unknown(format!("transferred body `{name}`")))?;
+        let (slot, old) =
+            st.bodies.iter().enumerate().find(|(_, b)| b.name == *name).ok_or_else(|| DocError::Unknown(format!("transferred body `{name}`")))?;
         if doc.model_body_component(old) != from {
             return Err(DocError::Invalid(format!("body `{name}` no longer belongs to transfer source component {from}")));
         }
@@ -47,12 +50,14 @@ pub(crate) fn evaluate(doc: &Document, st: &mut ModelState, bodies: &[String], f
         body.source_transform = crate::mat_mul(&transform, &old.source_transform);
         body.imported = old.imported.clone();
         body.names = crate::naming::NameCell::same(old);
-        let slot = next.bodies.iter_mut().find(|b| b.name == *name).ok_or_else(|| DocError::Unknown(format!("transferred body `{name}`")))?;
-        *slot = body;
+        moved.push((slot, body));
     }
-    crate::body_transfer_sheet::remap_sheet_metadata(&mut next, bodies, &transform)?;
-    *st = next;
-    Ok(())
+    for (slot, body) in moved {
+        if let Some(b) = st.bodies.get_mut(slot) {
+            *b = body;
+        }
+    }
+    crate::body_transfer_sheet::remap_sheet_metadata(st, bodies, &transform)
 }
 
 #[cfg(test)]

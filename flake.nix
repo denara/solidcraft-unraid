@@ -135,14 +135,14 @@
 
           postInstall = ''
             ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
-              install -Dm644 packaging/linux/ai.storyteller.solidcraft.desktop \
+              install -Dm644 assets/platforms/linux/ai.storyteller.solidcraft.desktop \
                 $out/share/applications/ai.storyteller.solidcraft.desktop
-              install -Dm644 packaging/linux/ai.storyteller.solidcraft.mime.xml \
+              install -Dm644 assets/platforms/linux/ai.storyteller.solidcraft.mime.xml \
                 $out/share/mime/packages/ai.storyteller.solidcraft.xml
               for size in 16 24 32 48 64 128 256 512; do
                 icon=$out/share/icons/hicolor/''${size}x''${size}/apps/ai.storyteller.solidcraft.png
                 mkdir -p "$(dirname "$icon")"
-                $out/bin/solidcraft-cli icon --size "$size" --out "$icon" >/dev/null
+                cp assets/icons/app/linux/exports/hicolor/''${size}x''${size}/apps/ai.storyteller.solidcraft.png "$icon" >/dev/null
               done
             ''}
           '';

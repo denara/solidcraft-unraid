@@ -101,7 +101,12 @@ fn overlap(
         let bx = inner.bounds();
         let s = bx.size();
         let (mut n, mut hit) = (0usize, 0usize);
-        for i in 1..=2000 {
+        // A slender body lying across its box (a long hole tool drilled at an angle) fills
+        // little of it: the samples go on past the first 2000 until enough land inside.
+        for i in 1..=64_000 {
+            if i > 2000 && n >= 50 {
+                break;
+            }
             let p = bx.min + Vec3::new(s.x * halton(i, 2), s.y * halton(i, 3), s.z * halton(i, 5));
             if !inner_i.contains(p) {
                 continue;
@@ -432,7 +437,26 @@ fn prism_result(a: &Body, b: &Body, op: BoolOp, size: f64, counts: &[(usize, usi
         })
     })
 }
+/// Walls swept along splines have flat B-spline tops and bottoms. With those made planes the
+/// operands are prisms, and two of them (same height, one direction) are decided in 2D: fast, and
+/// with no intersection of spline surfaces, which is what fails on them. The outlines are fitted
+/// by arcs within a micron (`prism_boolean_free_form`). `None` when the operands have no such
+/// face, are not such prisms, or the answer is implausible: the general boolean then takes over.
+fn swept_prism(a: &Body, b: &Body, op: BoolOp) -> Option<Body> {
+    let (pa, pb) = (crate::planar_faces::planarized(a), crate::planar_faces::planarized(b));
+    if pa.is_none() && pb.is_none() {
+        return None;
+    }
+    let (ra, rb) = (pa.as_ref().unwrap_or(a), pb.as_ref().unwrap_or(b));
+    let Some(Ok(Some(body))) = crate::prism::prism_boolean_free_form(ra, rb, op) else { return None };
+    let (va, vb) = (volume(a), volume(b));
+    plausible(volume(&body), op, va, vb, 2e-3 * (va + vb) + 1e-9).then_some(body)
+}
+
 fn boolean_whole(a: &Body, b: &Body, op: BoolOp) -> Result<Option<Body>> {
+    if let Some(body) = swept_prism(a, b, op) {
+        return Ok(Some(body));
+    }
     a.require_brep("a boolean")?;
     b.require_brep("a boolean")?;
     let size = a.size().max(b.size());
@@ -558,6 +582,8 @@ fn boolean_whole(a: &Body, b: &Body, op: BoolOp) -> Result<Option<Body>> {
     // Coincident planar faces: push them apart (exactly). Tried once, before the general
     // boolean; why it failed is reported if everything else fails too.
     let mut apart_failed = String::new();
+    // The exact polygon boolean's answer, when it was asked for early.
+    let mut planar = None;
     if !APART.with(|c| c.get()) {
         APART.with(|c| c.set(true));
         let (r, diagnostics) = capture_boolean_diagnostics(|| crate::coplanar::boolean_apart(a, b, op));
@@ -576,6 +602,22 @@ fn boolean_whole(a: &Body, b: &Body, op: BoolOp) -> Result<Option<Body>> {
             }
             Some(Err(e)) => apart_failed = format!("; {e}"),
             Some(Ok(None)) | None => {}
+        }
+        // A face with no room to move would take or add what it moves through. The exact
+        // polygon boolean takes the bodies as they lie (bodies with only planar faces, or a
+        // planar tool clear of the other body's curved faces): it is asked now, before the
+        // general boolean has its tries at faces lying in each other.
+        if apart_failed.contains(crate::coplanar::NO_ROOM) {
+            // What its own booleans report counts only when its result is taken.
+            let (exact, diagnostics) = capture_boolean_diagnostics(|| crate::polybool::planar_boolean(a, b, op));
+            match exact {
+                Ok(Some(body)) if check(&body).0 => {
+                    merge(diagnostics);
+                    record(BooleanFallback::new(BooleanStrategy::PlanarFallback));
+                    return Ok(Some(body));
+                }
+                other => planar = Some(other),
+            }
         }
     }
     // A face standing wholly inside a coincident face of the other body, back to back, and no
@@ -611,6 +653,61 @@ fn boolean_whole(a: &Body, b: &Body, op: BoolOp) -> Result<Option<Body>> {
     let mut empty_votes = 0;
     let mut empty_diagnostics = crate::BooleanDiagnostics::default();
     let keep: Vec<Vec<Vec3>> = a.split_keep().iter().chain(b.split_keep()).cloned().collect();
+    // The tolerances below follow the larger body. Where the bodies meet in a region much
+    // smaller than that (a hole a few millimetres across drilled through a long part, whose tool
+    // is longer still), they are as coarse as the tool itself: its intersection curves are
+    // traced at a step wider than the hole, and the cut comes out empty or fails. When those
+    // tries fail, the same boolean is asked again at tolerances (and shifts) scaled to where the
+    // bodies meet. Its result is checked as the others are, and held to the retry guard.
+    // Bodies in several shells are retried a piece at a time (see [`boolean`]), where each
+    // piece gets this pass of its own.
+    let fine_tols: Vec<f64> = match &meshes {
+        (Some(ma), Some(mb)) if a.solid.boundaries().len() == 1 && b.solid.boundaries().len() == 1 => {
+            let (ba, bb) = (ma.bounds(), mb.bounds());
+            let s = solidcraft_geom::Aabb3 { min: ba.min.max(bb.min), max: ba.max.min(bb.max) }.size();
+            // The thinner operand's thickness (twice its volume over its area: a plate's
+            // thickness, a rod's radius) bounds what the tolerance must resolve as well.
+            let thickness = |m: &solidcraft_geom::Mesh| {
+                let x = m.measure();
+                if x.area > 0.0 { 2.0 * x.volume.abs() / x.area } else { f64::INFINITY }
+            };
+            let feature = s.x.min(s.y).min(s.z).min(thickness(ma)).min(thickness(mb)).max(size * 1e-4);
+            if feature > 0.0 && feature * 2e-3 < size * 2.5e-4 { vec![(feature * 2e-3).max(1e-6), (feature * 5e-4).max(1e-6)] } else { Vec::new() }
+        }
+        _ => Vec::new(),
+    };
+    let fine = |last: &mut String| -> Option<Body> {
+        let feature = fine_tols.first().map(|t| t / 2e-3)?;
+        // Unshifted, then once shifted: each try at these tolerances costs many coarser ones.
+        for (attempt, j) in JITTER.iter().enumerate().take(2) {
+            let shift = mt::Vector3::new(j[0], j[1], j[2]) * (feature * 0.01);
+            for &tol in &fine_tols {
+                match truck_boolean(a, b, op, if attempt > 0 { Some(shift) } else { None }, tol) {
+                    Ok((s, _)) if s.boundaries().is_empty() || s.face_iter().next().is_none() => *last = "empty result".into(),
+                    Ok((s, h)) => match guard("boolean result", || recorded::truck_result(s, h, size, &keep, &counts)) {
+                        Ok(body) => {
+                            let (ok, v) = check(&body);
+                            if ok {
+                                let mut event = BooleanFallback::new(if attempt > 0 {
+                                    BooleanStrategy::ShiftedOperands
+                                } else {
+                                    BooleanStrategy::RefinedTolerance
+                                });
+                                event.translation_mm = Vec3::new(j[0], j[1], j[2]).len() * (feature * 0.01);
+                                event.tolerance_mm = tol;
+                                record(event);
+                                return Some(body);
+                            }
+                            *last = format!("implausible result volume {v:.4}");
+                        }
+                        Err(e) => *last = e.to_string(),
+                    },
+                    Err(e) => *last = e.to_string(),
+                }
+            }
+        }
+        None
+    };
     for (attempt, j) in JITTER.iter().enumerate() {
         let shift = mt::Vector3::new(j[0], j[1], j[2]) * (size * 0.01);
         for k in [2e-3, 5e-4] {
@@ -656,6 +753,9 @@ fn boolean_whole(a: &Body, b: &Body, op: BoolOp) -> Result<Option<Body>> {
             }
         }
         if empty_votes >= 2 && op != BoolOp::Union {
+            if let Some(body) = fine(&mut last) {
+                return Ok(Some(body));
+            }
             merge(empty_diagnostics);
             return Ok(None);
         }
@@ -663,7 +763,7 @@ fn boolean_whole(a: &Body, b: &Body, op: BoolOp) -> Result<Option<Body>> {
     last.push_str(&apart_failed);
     // Coincident faces defeat the B-rep boolean; bodies with only planar faces have an exact
     // polygon fallback.
-    match crate::polybool::planar_boolean(a, b, op) {
+    match planar.unwrap_or_else(|| crate::polybool::planar_boolean(a, b, op)) {
         Ok(Some(body)) => {
             let (ok, v) = check(&body);
             if ok {
@@ -685,9 +785,33 @@ fn boolean_whole(a: &Body, b: &Body, op: BoolOp) -> Result<Option<Body>> {
         APART.with(|c| c.set(true));
         let c = b.solid.vertex_iter().fold(Vec3::ZERO, |acc, v| acc + from_p3(v.point())) * (1.0 / b.solid.vertex_iter().count().max(1) as f64);
         let translation = Vec3::new(0.61, -0.37, 0.71) * (size * 2e-6);
-        let (r, diagnostics) = capture_boolean_diagnostics(|| {
-            transform(b, translation, c, Vec3::new(0.27, 0.83, -0.49), 2e-6).and_then(|nb| Ok(boolean(a, &nb, op)?.map(|r| nudged(r, &nb, &counts))))
-        });
+        let nudge = |sign: f64| {
+            capture_boolean_diagnostics(|| {
+                transform(b, translation * sign, c, Vec3::new(0.27, 0.83, -0.49), 2e-6 * sign)
+                    .and_then(|nb| Ok(boolean(a, &nb, op)?.map(|r| nudged(r, &nb, &counts))))
+            })
+        };
+        let (mut r, mut diagnostics) = nudge(1.0);
+        // A nudge that pushes a face into a curved face it only touched (a cut whose end lies
+        // tangent to a round side) leaves a sliver of that face behind, a fraction of a
+        // millimetre wide, which later features (a shell, a fillet) can't work with. The
+        // opposite nudge parts them instead. It is tried when this one failed or left more
+        // slivers than the operands brought (a thin wall or a small round is no reason to run
+        // another boolean), and taken when it works with fewer; an empty result stays as it is.
+        let slivers = match &r {
+            Ok(Some(body)) if check(body).0 => Some(sliver_faces(body, size)),
+            _ => None,
+        };
+        let made = slivers.is_none_or(|n| n > 0 && n > sliver_faces(a, size).saturating_add(sliver_faces(b, size)));
+        if !matches!(r, Ok(None)) && made {
+            let (r2, diagnostics2) = nudge(-1.0);
+            if let Ok(Some(body)) = &r2
+                && slivers.is_none_or(|n| sliver_faces(body, size) < n)
+                && check(body).0
+            {
+                (r, diagnostics) = (r2, diagnostics2);
+            }
+        }
         APART.with(|c| c.set(false));
         match r {
             Ok(Some(body)) => {
@@ -713,6 +837,11 @@ fn boolean_whole(a: &Body, b: &Body, op: BoolOp) -> Result<Option<Body>> {
             Err(e) => last = format!("{last}; nudged: {e}"),
         }
     }
+    // The tries at the meeting region's scale come last, after every strategy that answered
+    // before them, so a result any of those gave is kept as it was.
+    if let Some(body) = fine(&mut last) {
+        return Ok(Some(body));
+    }
     match doubted {
         Some(r) => {
             let mut event = BooleanFallback::new(BooleanStrategy::UnverifiedShortcut);
@@ -722,6 +851,34 @@ fn boolean_whole(a: &Body, b: &Body, op: BoolOp) -> Result<Option<Body>> {
         }
         None => Err(KernelError::Failed(format!("boolean {op:?}: {last}"))),
     }
+}
+
+/// Faces of `b` narrower than 1/200 of `size` (twice their area over their boundary's
+/// length): the slivers a nudged tool leaves where it was pushed into a face it touched.
+fn sliver_faces(b: &Body, size: f64) -> usize {
+    use std::collections::HashMap;
+    let Ok(m) = b.tessellate((size * 1e-3).max(1e-4)) else { return usize::MAX };
+    let q = (size * 1e-7).max(1e-12);
+    let key = |p: Vec3| ((p.x / q).round() as i64, (p.y / q).round() as i64, (p.z / q).round() as i64);
+    // Per face: its area, and how many of its triangles use each mesh edge (its boundary once).
+    let mut area: HashMap<u32, f64> = HashMap::new();
+    let mut sides: HashMap<(u32, (i64, i64, i64), (i64, i64, i64)), (u32, f64)> = HashMap::new();
+    for (t, f) in m.triangles.iter().zip(&m.tri_face) {
+        let Some([a, b, c]) = m.tri(t) else { continue };
+        *area.entry(*f).or_default() += (b - a).cross(c - a).len() * 0.5;
+        for (p, r) in [(a, b), (b, c), (c, a)] {
+            let (kp, kr) = (key(p), key(r));
+            let k = if kp <= kr { (*f, kp, kr) } else { (*f, kr, kp) };
+            sides.entry(k).or_insert((0, p.dist(r))).0 += 1;
+        }
+    }
+    let mut boundary: HashMap<u32, f64> = HashMap::new();
+    for ((f, _, _), (n, len)) in &sides {
+        if *n == 1 {
+            *boundary.entry(*f).or_default() += len;
+        }
+    }
+    area.iter().filter(|(f, a)| boundary.get(f).is_some_and(|l| *l > 0.0 && 2.0 * **a / l < size * 5e-3)).count()
 }
 
 /// `r`, a boolean of the target and `nb` (the tool nudged), with its history over the target and
@@ -864,6 +1021,17 @@ pub fn union_apart(bodies: &[Body]) -> Result<Option<Body>> {
                 return Ok(None);
             }
         }
+    }
+    join_apart(bodies)
+}
+
+/// Bodies the caller knows are apart (no two meet or touch), as one body of several pieces,
+/// without any intersection work: [`union_apart`] without its check, for tools whose making
+/// shows they are apart (profiles apart in their sketch, extruded alike). `None` for fewer than
+/// two bodies or a mesh.
+pub fn join_apart(bodies: &[Body]) -> Result<Option<Body>> {
+    if bodies.len() < 2 || bodies.len() > 10_000 || bodies.iter().any(Body::is_mesh) {
+        return Ok(None);
     }
     // The pieces stay as they are, side by side: each face and edge of the result is its piece's
     // own (the history over `bodies`).

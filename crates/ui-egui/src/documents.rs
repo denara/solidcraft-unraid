@@ -101,6 +101,8 @@ fn swap_in(app: &mut SolveApp, slot: DocSlot) -> DocSlot {
         view: take_view(app),
     };
     put_view(app, slot.view);
+    // Preferences the session holds go with the user, not the tab (#680).
+    app.session.auto_project = out.session.auto_project;
     // Views cache by revision: the incoming design must not look unchanged.
     app.session.invalidate_view(out_rev);
     app.ui.tab = if app.session.active_sketch.is_some() { "SKETCH".into() } else { "SOLID".into() };
@@ -153,7 +155,7 @@ pub fn adopt(app: &mut SolveApp, session: Session) {
         app.tool = None;
         app.menu.props = None;
         crate::sketch_attachment_ui::clear(app);
-        app.session = session;
+        app.session.replace_design(session);
         app.sketch_choices = crate::sketch_families::Choices::default();
         app.session.invalidate_view(rev);
         app.cam = Camera::default();
@@ -201,7 +203,7 @@ pub fn close(app: &mut SolveApp, i: usize, force: bool) {
         let rev = app.session.revision;
         crate::dialogs::cancel(app);
         app.tool = None;
-        app.session = Session::default();
+        app.session.replace_design(Session::default());
         app.session.revision = rev + 1;
         app.cam = Camera::default();
         app.fit_view();
@@ -396,7 +398,7 @@ pub fn tabs(app: &mut SolveApp, ui: &mut egui::Ui, r: Rect, x0: f32, x1: f32) {
         }
         ui.painter().text(mr.center(), egui::Align2::CENTER_CENTER, format!("»{}", n - shown), FontId::proportional(12.0), t.app_bar_text);
         let id = egui::Id::new("sc_doc_more");
-        if mresp.clone().on_hover_text("All open designs").clicked() {
+        if mresp.clone().on_hover_text(crate::i18n::tr_label("All open designs")).clicked() {
             ui.ctx().data_mut(|d| d.insert_temp(id, !d.get_temp::<bool>(id).unwrap_or(false)));
         }
         if ui.ctx().data(|d| d.get_temp::<bool>(id).unwrap_or(false)) {
@@ -681,6 +683,34 @@ mod tests {
         answer_prompt(&mut a, Answer::Save);
         assert!(a.quit_requested && file.exists());
         let _ = std::fs::remove_file(&file);
+    }
+
+    /// #680: "Project face edges into new sketches" is a preference: it holds in new tabs, in
+    /// the tab switched to, in a design adopted over a blank one and after the last tab closes,
+    /// and it is what the preferences file keeps.
+    #[test]
+    fn auto_project_follows_the_user_across_tabs() {
+        let mut a = app();
+        a.run("solid.box", json!({"length": 10, "width": 10, "height": 10})).unwrap();
+        a.run("sketch.auto_project", json!({"value": false})).unwrap();
+        new_design(&mut a);
+        assert_eq!(a.docs.count(), 2);
+        assert!(!a.session.auto_project, "a new tab");
+        a.run("solid.box", json!({"length": 5, "width": 5, "height": 5})).unwrap();
+        a.run("sketch.auto_project", json!({"value": true})).unwrap();
+        switch(&mut a, 0);
+        assert!(a.session.auto_project, "the tab switched to");
+        a.run("sketch.auto_project", json!({"value": false})).unwrap();
+        switch(&mut a, 1);
+        assert!(!a.session.auto_project);
+        let prefs: Value = serde_json::from_str(&a.prefs()).unwrap();
+        assert_eq!(prefs["auto_project"], false);
+        close(&mut a, 1, true);
+        close(&mut a, 0, true);
+        assert!(active_is_blank(&a) && !a.session.auto_project, "after the last tab closes");
+        adopt(&mut a, Session::default());
+        assert_eq!(a.docs.count(), 1);
+        assert!(!a.session.auto_project, "a design adopted over a blank one");
     }
 
     /// A design built elsewhere replaces a blank one and gets a tab otherwise.

@@ -10,6 +10,7 @@ not (
     (package(solidcraft-engine) & (
         test(=tests::hostile_params_never_panic)
         | test(/^tests::robustness::/)
+        | test(/^tests::robustness_goldens::/)
         | test(=pattern_suppress_tests::enclosure_arc_extinction_keeps_a_real_sharp_inner_lip_after_resize_and_reopen)
         | test(=pattern_suppress_tests::enclosure_datums_follow_wall_height_and_board_depth_with_material_proofs)
         | test(=cmd::plastic::tests::enclosure_snap_fit_follows_resized_front_wall)
@@ -27,3 +28,10 @@ slow-timeout = { period = "60s" }
 
 [profile.ci.junit]
 path = "junit.xml"
+
+# The action matrix sample runs its designs in parallel worker processes, one per CPU. Run with
+# other tests beside it (the heavy ones on main), a pi-case hole that takes 8 s alone (#952 makes
+# it a real hole) went past the matrix's 90 s action limit. It runs on its own.
+[[profile.ci.overrides]]
+filter = "binary(action_matrix) & test(=action_matrix_sample)"
+threads-required = "num-cpus"

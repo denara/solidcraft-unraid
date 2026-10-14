@@ -3,23 +3,61 @@
 //! The UI's Latin font always comes first; a CJK font (then a Hangul font) is only ever appended as
 //! a fallback, so English text renders exactly as before and only glyphs the Latin font lacks use
 //! the CJK face. The Hangul fallback covers Korean where the CJK font found (Meiryo, Hiragino)
-//! lacks Hangul.
+//! lacks Hangul. The order of the CJK and Chinese faces follows the UI language
+//! (see [`fallback_order`]): one face drawing a whole word keeps its glyphs on one baseline.
 
 use std::sync::Arc;
 
 /// Name of the CJK fallback entry in [`egui::FontDefinitions`].
 pub const CJK_FALLBACK: &str = "cjk_fallback";
 
-/// Name of the Hangul fallback entry in [`egui::FontDefinitions`], after [`CJK_FALLBACK`].
+/// Name of the Chinese fallback entry in [`egui::FontDefinitions`], after [`CJK_FALLBACK`].
+/// A Japanese-only CJK font (Meiryo, Hiragino Gothic) lacks simplified characters, so
+/// Chinese falls through to this one per glyph.
+pub const CHINESE_FALLBACK: &str = "chinese_fallback";
+
+/// Name of the Hangul fallback entry in [`egui::FontDefinitions`], last.
 pub const HANGUL_FALLBACK: &str = "hangul_fallback";
 
 /// UI languages whose text needs the CJK font. The web app's bundled font covers Japanese only;
 /// add Chinese or Korean here together with a font that covers them.
-pub const CJK_LANGUAGES: &[&str] = &["ja"];
+pub const CJK_LANGUAGES: &[&str] = &["ja", "zh", "ko"];
 
 /// Whether the UI language needs a CJK font (the web app fetches one only then).
 pub fn needs_cjk_font(language: &str) -> bool {
     CJK_LANGUAGES.contains(&language)
+}
+
+/// Whether `text` has characters only the CJK fallback draws: kana, CJK ideographs and their
+/// punctuation, and full-width forms. Hangul is left out: the web app's font has none.
+pub fn has_cjk(text: &str) -> bool {
+    text.chars().any(|c| {
+        matches!(u32::from(c),
+            0x3000..=0x30FF // CJK punctuation, Hiragana, Katakana
+            | 0x31F0..=0x31FF // Katakana phonetic extensions
+            | 0x3400..=0x4DBF // CJK Extension A
+            | 0x4E00..=0x9FFF // CJK Unified Ideographs
+            | 0xF900..=0xFAFF // CJK Compatibility Ideographs
+            | 0xFF00..=0xFFEF // Half-width and full-width forms
+        )
+    })
+}
+
+/// Whether any text painted so far this frame has CJK characters (see [`has_cjk`]). The web app
+/// calls it after drawing the UI, until its CJK font is loaded, so a Japanese design name, file
+/// name or typed text fetches the font whatever the UI language (#720).
+pub fn painted_cjk(ctx: &egui::Context) -> bool {
+    let mut layers: Vec<egui::LayerId> = ctx.memory(|m| m.layer_ids().collect());
+    layers.push(egui::LayerId::background());
+    ctx.graphics(|g| layers.iter().filter_map(|l| g.get(*l)).any(|list| list.all_entries().any(|c| shape_has_cjk(&c.shape))))
+}
+
+fn shape_has_cjk(shape: &egui::Shape) -> bool {
+    match shape {
+        egui::Shape::Text(t) => has_cjk(&t.galley.job.text),
+        egui::Shape::Vec(shapes) => shapes.iter().any(shape_has_cjk),
+        _ => false,
+    }
 }
 
 /// `fonts` with `bytes` appended as the last fallback of the Proportional and Monospace
@@ -81,6 +119,34 @@ pub fn is_cjk_font_name(file_name: &str) -> bool {
     CJK_FONT_KEYWORDS.iter().any(|k| name.contains(k))
 }
 
+/// Lower-case file-name fragments that identify fonts covering simplified Chinese. Deliberately
+/// separate from [`CJK_FONT_KEYWORDS`]: many Japanese fonts (Hiragino Gothic, Meiryo, Yu Gothic)
+/// match those but lack simplified characters, so a Chinese fallback searches these instead.
+pub const CHINESE_FONT_KEYWORDS: &[&str] = &[
+    "pingfang",
+    "hiragino sans gb",
+    "stheiti",
+    "songti",
+    "arial unicode",
+    "msyh",
+    "yahei",
+    "simhei",
+    "simsun",
+    "wqy",
+    "wenquanyi",
+    "notosanscjk",
+    "notosanssc",
+    "droidsansfallback",
+    "sourcehanss",
+    "siyuan",
+];
+
+/// Whether a font file name looks like a font covering simplified Chinese.
+pub fn is_chinese_font_name(file_name: &str) -> bool {
+    let name = file_name.to_ascii_lowercase();
+    CHINESE_FONT_KEYWORDS.iter().any(|k| name.contains(k))
+}
+
 /// Session state of the web app's on-demand CJK font. Pure state so it can be tested off the web:
 /// the shell does the fetch when [`CjkFontLoader::tick`] asks for it.
 #[derive(Debug, Default)]
@@ -126,6 +192,22 @@ impl CjkFontLoader {
             }
             CjkFontStatus::Loading | CjkFontStatus::Installed => false,
         }
+    }
+
+    /// CJK text is on screen (whatever the UI language). Returns true when the font fetch should
+    /// start now: once, and never again after a failed load (the UI language stays as it is).
+    pub fn text_needs_font(&mut self) -> bool {
+        if self.status == CjkFontStatus::Unloaded {
+            self.status = CjkFontStatus::Loading;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Whether the session still watches painted text for CJK characters.
+    pub fn watching_text(&self) -> bool {
+        self.status == CjkFontStatus::Unloaded
     }
 
     /// Record the outcome of the fetch and install.
@@ -208,6 +290,30 @@ const HANGUL_FONT_CANDIDATES: &[&str] = &[
     "/usr/share/fonts/nanum/NanumGothic.ttf",
 ];
 
+/// Fonts covering simplified Chinese, appended after the CJK fallback so Chinese renders even
+/// when the CJK font found is a Japanese one without simplified characters (Hiragino Gothic,
+/// Meiryo, Yu Gothic).
+#[cfg(not(target_arch = "wasm32"))]
+const CHINESE_FONT_CANDIDATES: &[&str] = &[
+    // Windows: Microsoft YaHei
+    "C:\\Windows\\Fonts\\msyh.ttc",
+    "C:\\Windows\\Fonts\\msyh.ttf",
+    // macOS: PingFang SC, Hiragino Sans GB, Songti SC, STHeiti, Arial Unicode MS
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    "/System/Library/Fonts/STHeiti Light.ttc",
+    "/System/Library/Fonts/STHeiti Medium.ttc",
+    "/System/Library/Fonts/Supplemental/Songti.ttc",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    "/Library/Fonts/Arial Unicode.ttf",
+    // Linux: Noto Sans CJK SC
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+];
+
 #[cfg(not(target_arch = "wasm32"))]
 fn try_read_font(path: &std::path::Path) -> Option<Vec<u8>> {
     if let Ok(bytes) = std::fs::read(path)
@@ -219,9 +325,9 @@ fn try_read_font(path: &std::path::Path) -> Option<Vec<u8>> {
     }
 }
 
-/// Recursively search for matching CJK font files up to a bounded depth.
+/// Recursively search for matching font files up to a bounded depth, testing names with `matches`.
 #[cfg(not(target_arch = "wasm32"))]
-fn scan_dir_for_font(dir: &std::path::Path, depth_remaining: usize) -> Option<Vec<u8>> {
+fn scan_dir_for_font(dir: &std::path::Path, depth_remaining: usize, matches: fn(&str) -> bool) -> Option<Vec<u8>> {
     if depth_remaining == 0 {
         return None;
     }
@@ -234,7 +340,7 @@ fn scan_dir_for_font(dir: &std::path::Path, depth_remaining: usize) -> Option<Ve
             let name = p.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
             let is_font = name.ends_with(".ttc") || name.ends_with(".ttf") || name.ends_with(".otf");
             if is_font
-                && is_cjk_font_name(&name)
+                && matches(&name)
                 && let Some(bytes) = try_read_font(&p)
             {
                 return Some(bytes);
@@ -245,7 +351,7 @@ fn scan_dir_for_font(dir: &std::path::Path, depth_remaining: usize) -> Option<Ve
     }
 
     for sub in subdirs {
-        if let Some(bytes) = scan_dir_for_font(&sub, depth_remaining.saturating_sub(1)) {
+        if let Some(bytes) = scan_dir_for_font(&sub, depth_remaining.saturating_sub(1), matches) {
             return Some(bytes);
         }
     }
@@ -288,7 +394,7 @@ fn find_system_cjk_font() -> Option<Vec<u8>> {
         }
         if let Ok(local) = std::env::var("LOCALAPPDATA") {
             let user_fonts = std::path::PathBuf::from(local).join("Microsoft").join("Windows").join("Fonts");
-            if let Some(bytes) = scan_dir_for_font(&user_fonts, 2) {
+            if let Some(bytes) = scan_dir_for_font(&user_fonts, 2, is_cjk_font_name) {
                 return Some(bytes);
             }
         }
@@ -298,7 +404,7 @@ fn find_system_cjk_font() -> Option<Vec<u8>> {
     {
         let dirs = ["/System/Library/Fonts", "/System/Library/Fonts/Supplemental", "/Library/Fonts"];
         for d in dirs {
-            if let Some(bytes) = scan_dir_for_font(std::path::Path::new(d), 2) {
+            if let Some(bytes) = scan_dir_for_font(std::path::Path::new(d), 2, is_cjk_font_name) {
                 return Some(bytes);
             }
         }
@@ -308,13 +414,13 @@ fn find_system_cjk_font() -> Option<Vec<u8>> {
     {
         let search_dirs = [std::path::PathBuf::from("/usr/share/fonts"), std::path::PathBuf::from("/usr/local/share/fonts")];
         for dir in &search_dirs {
-            if let Some(bytes) = scan_dir_for_font(dir, 3) {
+            if let Some(bytes) = scan_dir_for_font(dir, 3, is_cjk_font_name) {
                 return Some(bytes);
             }
         }
         if let Ok(home) = std::env::var("HOME") {
             let user_fonts = std::path::PathBuf::from(home).join(".local/share/fonts");
-            if let Some(bytes) = scan_dir_for_font(&user_fonts, 2) {
+            if let Some(bytes) = scan_dir_for_font(&user_fonts, 2, is_cjk_font_name) {
                 return Some(bytes);
             }
         }
@@ -323,27 +429,78 @@ fn find_system_cjk_font() -> Option<Vec<u8>> {
     None
 }
 
-/// Configure font definitions with system CJK and Hangul fallbacks where available.
+/// The fallback entries in the order they join each family for a UI language.
+///
+/// Chinese goes first for `zh`: a Japanese font (Meiryo, Yu Gothic) lacks the simplified
+/// characters, so the rest of the word falls through to the Chinese font per glyph — and
+/// epaint centres each face's own line height in the row, so glyphs from two faces of very
+/// different height (Meiryo ≈ 2.0 em, Microsoft YaHei ≈ 1.4 em) sit at different heights
+/// inside one word. One face for the whole word keeps them on one baseline.
+pub fn fallback_order(language: &str) -> [&'static str; 3] {
+    if language == "zh" { [CHINESE_FALLBACK, CJK_FALLBACK, HANGUL_FALLBACK] } else { [CJK_FALLBACK, CHINESE_FALLBACK, HANGUL_FALLBACK] }
+}
+
+/// Configure font definitions with system CJK, Chinese and Hangul fallbacks where available,
+/// ordered for the UI language (see [`fallback_order`]).
 #[cfg(not(target_arch = "wasm32"))]
-pub fn setup_fonts(ctx: &egui::Context) {
+pub fn setup_fonts_for(ctx: &egui::Context, language: &str) {
+    let cjk = find_system_cjk_font();
+    let chinese = find_system_chinese_font().filter(|bytes| cjk.as_ref() != Some(bytes));
+    let hangul = HANGUL_FONT_CANDIDATES.iter().find_map(|path| try_read_font(std::path::Path::new(path)));
     let mut fonts = egui::FontDefinitions::default();
     let mut found = false;
-    if let Some(cjk) = find_system_cjk_font().and_then(|bytes| with_cjk_fallback(fonts.clone(), bytes)) {
-        fonts = cjk;
-        found = true;
-    }
-    let hangul = HANGUL_FONT_CANDIDATES.iter().find_map(|path| try_read_font(std::path::Path::new(path)));
-    if let Some(with_hangul) = hangul.and_then(|bytes| with_fallback(fonts.clone(), HANGUL_FALLBACK, bytes)) {
-        fonts = with_hangul;
-        found = true;
+    for name in fallback_order(language) {
+        let bytes = match name {
+            CJK_FALLBACK => cjk.clone(),
+            CHINESE_FALLBACK => chinese.clone(),
+            _ => hangul.clone(),
+        };
+        if let Some(bytes) = bytes
+            && let Some(with_fallback) = with_fallback(fonts.clone(), name, bytes)
+        {
+            fonts = with_fallback;
+            found = true;
+        }
     }
     if found {
         ctx.set_fonts(fonts);
     }
 }
 
+/// Configure font definitions with system fallbacks for an English UI (all fallbacks are
+/// installed whatever the language, so CJK text in a design still renders; only their order
+/// follows the language, see [`setup_fonts_for`]).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn setup_fonts(ctx: &egui::Context) {
+    setup_fonts_for(ctx, "en");
+}
+
+/// Find a font covering simplified Chinese in the known candidate paths or by scanning the
+/// system font directories for [`CHINESE_FONT_KEYWORDS`] names.
+#[cfg(not(target_arch = "wasm32"))]
+fn find_system_chinese_font() -> Option<Vec<u8>> {
+    for path in CHINESE_FONT_CANDIDATES {
+        if let Some(bytes) = try_read_font(std::path::Path::new(path)) {
+            return Some(bytes);
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let dirs = ["/System/Library/Fonts", "/System/Library/Fonts/Supplemental", "/Library/Fonts"];
+        for d in dirs {
+            if let Some(bytes) = scan_dir_for_font(std::path::Path::new(d), 2, is_chinese_font_name) {
+                return Some(bytes);
+            }
+        }
+    }
+    None
+}
+
 /// On web, setup_fonts does not perform synchronous disk reads.
 /// Use asynchronous loading through [`solidcraft_web`] or host scripts.
+#[cfg(target_arch = "wasm32")]
+pub fn setup_fonts_for(_ctx: &egui::Context, _language: &str) {}
+
 #[cfg(target_arch = "wasm32")]
 pub fn setup_fonts(_ctx: &egui::Context) {}
 
@@ -373,6 +530,24 @@ mod tests {
             assert_eq!(list.last().map(String::as_str), Some(CJK_FALLBACK), "CJK is the last fallback");
         }
         assert!(with_cjk_fallback(defaults, b"not a font".to_vec()).is_none());
+    }
+
+    #[test]
+    fn a_chinese_ui_puts_the_chinese_face_before_the_japanese_one() {
+        assert_eq!(fallback_order("zh"), [CHINESE_FALLBACK, CJK_FALLBACK, HANGUL_FALLBACK]);
+        for lang in ["en", "ja", "ko", "de"] {
+            assert_eq!(fallback_order(lang), [CJK_FALLBACK, CHINESE_FALLBACK, HANGUL_FALLBACK], "{lang} keeps the Japanese font first");
+        }
+        let defaults = egui::FontDefinitions::default();
+        let mut fonts = defaults.clone();
+        for name in fallback_order("zh") {
+            fonts = with_fallback(fonts, name, latin_font_bytes()).unwrap();
+        }
+        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            let list = &fonts.families[&family];
+            assert_eq!(list.first(), defaults.families[&family].first(), "the Latin UI font stays first");
+            assert_eq!(&list[list.len() - 3..], [CHINESE_FALLBACK, CJK_FALLBACK, HANGUL_FALLBACK]);
+        }
     }
 
     #[test]
@@ -421,6 +596,58 @@ mod tests {
         loader.finished(true, &mut language);
         assert_eq!(loader.status(), CjkFontStatus::Installed);
         assert_eq!(language, "ja");
+    }
+
+    #[test]
+    fn cjk_text_is_recognised() {
+        for cjk in ["テスト", "ひらがな", "部品", "ﾃｽﾄ", "Bracket（改）", "Plate 板"] {
+            assert!(has_cjk(cjk), "{cjk} has CJK characters");
+        }
+        for other in ["", "Bracket", "Ø12 × 3 mm", "Größe", "Привет", "한국어", "émoji ✓"] {
+            assert!(!has_cjk(other), "{other} has no CJK characters the fallback draws");
+        }
+    }
+
+    /// An English UI fetches the font once CJK text is painted (#720), and a failed fetch leaves
+    /// the language alone.
+    #[test]
+    fn cjk_text_fetches_the_font_with_an_english_ui() {
+        let mut loader = CjkFontLoader::default();
+        let mut language = "en".to_owned();
+        assert!(!loader.tick(&mut language));
+        assert!(loader.watching_text());
+        assert!(loader.text_needs_font(), "CJK text starts the fetch");
+        assert!(!loader.text_needs_font(), "the fetch starts once");
+        assert!(!loader.tick(&mut language), "no second fetch from the language");
+        assert!(!loader.watching_text());
+        loader.finished(false, &mut language);
+        assert_eq!(loader.status(), CjkFontStatus::Failed);
+        assert_eq!(language, "en");
+        assert!(!loader.text_needs_font(), "no retry loop after a failure");
+
+        let mut loader = CjkFontLoader::default();
+        assert!(loader.text_needs_font());
+        loader.finished(true, &mut language);
+        assert_eq!(loader.status(), CjkFontStatus::Installed);
+        // Switching to Japanese afterwards needs no second fetch.
+        let mut ja = "ja".to_owned();
+        assert!(!loader.tick(&mut ja));
+    }
+
+    /// The painted-text check finds CJK in the frame's labels and nothing else.
+    #[test]
+    fn painted_cjk_sees_labels_in_the_frame() {
+        let ctx = egui::Context::default();
+        let run = |text: &'static str| {
+            let mut seen = false;
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.label(text);
+                seen = painted_cjk(ui.ctx());
+            });
+            seen
+        };
+        assert!(!run("Untitled"));
+        assert!(run("テスト"));
     }
 
     #[test]

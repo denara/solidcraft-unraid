@@ -29,11 +29,11 @@ These are the shapes of the commands a part build needs, so an agent rarely has 
 - **Curves:** `l1`, `c1`, `a1`.
 - **Points:** `p1`, `l1.start`, `l1.end`, `c1.center`, `a1.center`, and the sketch origin `"origin"`.
 - **Rectangles:** `sketch.rectangle.*` also returns `sides {bottom,right,top,left}` and `corners {bottom_left,...}`.
-  - `rectangle.center` adds 2 construction diagonals, so each corner joins 3 lines.
+  - `rectangle.center` adds 2 construction diagonals, so each corner joins 3 lines. Its centre point is `p5`.
   - `sketch.fillet {point}` therefore fails on its corners. Use `{a:"l1", b:"l4", radius}` or the 3D `solid.fillet`.
 - **Slots:** `sketch.slot.overall` and `sketch.slot.center_to_center` create curves `l1, a1, l2, a2` and points `p1`-`p4`, `a1.center`, `a2.center`.
   - The `length` role of `slot.overall` is the overall length. The arc centres are at ±(length/2 - width/2).
-  - After `length` and `width`, 3 dof remain. To remove them, dimension `origin` to `a1.center` horizontally and vertically, and `origin` to `a2.center` vertically.
+  - After `length` and `width`, 3 dof remain. To remove them, dimension `origin` to `a1.center` horizontally and vertically, and `origin` to `a2.center` vertically. For a slot along Y the solver refuses that last dimension as over-constraining; dimension `a2.center` horizontally instead.
   - `sketch.slot.center_point` creates no centre point. Dimension an arc centre instead.
 - **Circles:** `sketch.circle.center` creates `c1` and `c1.center`, and no `p` point.
 - **Dimensions** share the `k` counter with constraints.
@@ -74,7 +74,7 @@ Distances are unsigned. Draw the geometry on the correct side first, and the dim
 | `solid.cylinder` | `radius` or `diameter`, `height` | `base` is the centre of the bottom (default origin), `axis` defaults to `Z`. Expressions work in `base`. Always pass `operation`. |
 | `sketch.slot.overall` / `sketch.slot.center_to_center` | `p0`, `p1` (overall ends / arc centres), `width` | Ids and dof are in the "Ids" section above. |
 | `solid.fillet` / `solid.chamfer` | `edges:[[x,y,z]]`, `radius` / `distance` | The pick snaps to the **nearest** edge, with no distance limit and no error, so check that the face count changed. One pick takes the whole tangent chain: a rounded rim needs 1 point, not 8. |
-| `solid.shell` | `faces:[[x,y,z]]`, `thickness` | A point on each face to remove. Fillet first. |
+| `solid.shell` | `faces:[[x,y,z]]`, `thickness` | A point on each face to remove. Fillet first, except an edge of a removed face (see Order in `SKILL.md`). |
 | `solid.hole` | `position:[x,y,z]` on a face + `diameter`, or `sketch` (+ `points`) | `clearance:"M3"`. `depth` defaults to through all. `type` is one of simple/drilled/counterbore/countersink. A `countersink` needs `cs_diameter` and `cs_angle`; a `counterbore` needs `cb_diameter` and `cb_depth`. `position` is a fixed point. |
 | `solid.pattern.rectangular` | `features`, `dir1`, `count1`, `spacing1` (+ `dir2`, `count2`, `spacing2`) | Spacing takes expressions and follows parameters. |
 | `solid.pattern.circular` | `features`, `axis` (`"Z"` or `{origin, dir}`), `count` | `angle` defaults to 360 deg. A full pattern keeps the COM on the axis, so check its radius with a top-view screenshot. |
@@ -122,10 +122,10 @@ After `set_parameter L=120` the volume is 35335.2 mm³, and the holes stay in th
 
 ## Reading `measure`
 
-- **Tolerance:** analytic and measured volumes agree to about 0.001-0.01%, so treat a gap that small as a match.
+- **Tolerance:** analytic and measured volumes agree to about 0.001-0.01%, so treat a gap that small as a match. Long shallow arcs measure worse, about 0.1% (R 1000 mm over 20 degrees).
 - **Face counts:** compare the logical `faces`, not the larger `kernel.faces`.
 - **Reply types:** `set_parameter` returns `recomputed` as a number. A batch reply echoes every step.
-- **Boolean warning:** a feature `warning` such as `Boolean retry: temporary coincident-face separation up to 2.050000e0 mm per face` means the kernel nudged faces that coincide. Examples are a hole floor on another floor, or a join flush on a face. When the volume still matches your number the warning is harmless.
+- **Boolean warning:** a feature `warning` such as `Boolean retry: temporary coincident-face separation up to 2.050000e0 mm per face` means the kernel nudged faces that coincide. Examples are a join flush on a face, such as a cylinder joined onto the floor of a shelled box, or a tapered cut that starts on a face. When the volume still matches your number the warning is harmless. When it does not, the retry may have left the geometry wrong, with no error. Seen: on a box with filleted corners, a shell and a rounded rim, a standoff joined and its pilot hole cut as two cylinders, patterned 2x2, left material in the holes at some standoff heights. A boss with its hole as one ring profile (two concentric circles, extrude the ring) built correctly at every height tried (3 to 20 mm). Another kind, `tool displacement`, moves a tool by about 2e-4 mm.
 
 ## Reply cost (0.8, plate example)
 

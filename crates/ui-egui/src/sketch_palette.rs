@@ -2,9 +2,9 @@
 //! command dialog. Feature Options: the modes of the creation tool that is running, as icon
 //! buttons. Options: the line type of the selected curves (normal, construction, centerline),
 //! Look At, and the display toggles kept with the sketch (grid, snap, slice, profiles, points,
-//! dimensions, constraints, projected geometry, 3D sketch); the sketch's degrees of freedom;
-//! Finish Sketch. Toggles run `sketch.options`, line types `sketch.construction` /
-//! `sketch.centerline`.
+//! dimensions, constraints, projected geometry, construction geometry, 3D sketch); the sketch's
+//! degrees of freedom; Finish Sketch. Toggles run `sketch.options`, line types
+//! `sketch.construction` / `sketch.centerline`.
 //!
 //! The line type is also a drawing mode: with nothing selected, Construction (or X) makes what
 //! is drawn next construction geometry until it is switched back.
@@ -33,7 +33,7 @@ const WIDTH: f32 = 236.0;
 /// The display toggles: option key and label. Plain nouns throughout, no "Show " prefix: the
 /// checkbox itself already says whether each one is on.
 ///
-/// Seven of these pass their English source text directly, like the rest of this file's
+/// Eight of these pass their English source text directly, like the rest of this file's
 /// `app.tr_label(...)` calls: `Locale::label` looks up a literal English string against every
 /// other English catalog entry to find its id. "Profile" and "Points" cannot do that safely:
 /// both already name something else under that same lookup (`SelInput::new("Profile", ...)` /
@@ -56,7 +56,7 @@ const WIDTH: f32 = 236.0;
 /// before the id fallback ever runs). Nobody writes UI copy that looks like a dotted id, so
 /// this is a remote hazard, not a likely one, but it is why these two ids are spelled out here
 /// rather than reused anywhere else.
-pub const TOGGLES: [(&str, &str); 9] = [
+pub const TOGGLES: [(&str, &str); 10] = [
     ("grid", "Sketch Grid"),
     ("snap", "Snap"),
     ("slice", "Slice"),
@@ -65,6 +65,7 @@ pub const TOGGLES: [(&str, &str); 9] = [
     ("show_dimensions", "Dimensions"),
     ("show_constraints", "Constraints"),
     ("show_projected", "Projected Geometries"),
+    ("show_construction", "Construction Geometries"),
     ("sketch_3d", "3D Sketch"),
 ];
 
@@ -218,6 +219,34 @@ pub fn set_linetype(app: &mut SolveApp, kind: u8) {
     }
 }
 
+/// The palette's content width in `vp`; it gives way to the viewport on narrow views.
+fn width(vp: egui::Rect) -> f32 {
+    WIDTH.min((vp.width() * 0.46 - 16.0).max(120.0))
+}
+
+/// The viewport the palette docks into.
+fn viewport(app: &SolveApp, ctx: &egui::Context) -> egui::Rect {
+    app.viewport.rect.unwrap_or_else(|| ctx.content_rect())
+}
+
+/// Is a sketch being edited? That is the palette's own condition.
+pub fn editing(app: &SolveApp) -> bool {
+    app.session.active_sketch.and_then(|s| app.session.world_state().sketch(s).map(|_| ())).is_some()
+}
+
+/// Has the viewport room for the palette and a command dialog side by side? A narrow view has
+/// not, and there the dialog keeps the right edge on its own.
+pub fn fits_beside_a_dialog(app: &SolveApp, ctx: &egui::Context) -> bool {
+    let vp = viewport(app, ctx);
+    vp.width() >= width(vp) + crate::frame::DIALOG_MIN_W + 40.0
+}
+
+/// Is the palette on screen? It stays for as long as a sketch is being edited, a command dialog
+/// open or not: the dialog takes the left edge of the viewport and the palette keeps the right.
+pub fn visible(app: &SolveApp, ctx: &egui::Context) -> bool {
+    editing(app) && (app.dialog.is_none() || fits_beside_a_dialog(app, ctx))
+}
+
 /// A small disclosure triangle for the Options section: pointing right when collapsed, down
 /// when open. Kept separate from the palette's own "−"/"+" fold, which stays a plain glyph.
 fn disclosure_triangle(p: &egui::Painter, c: egui::Pos2, open: bool, col: Color32) {
@@ -291,11 +320,11 @@ fn feature_row(app: &SolveApp, ui: &mut egui::Ui, width: f32, family: &crate::sk
     start
 }
 
-/// Draw the palette (while sketching and no command dialog is open).
+/// Draw the palette (while a sketch is being edited).
 pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     app.viewport.palette_rect = None;
     let _language = crate::i18n::scope(&app.preferences.language);
-    if app.dialog.is_some() {
+    if !visible(app, ctx) {
         return;
     }
     let (opts, dof_line, ok) = {
@@ -304,16 +333,12 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
         (ss.sketch.view.clone(), dof_text(ss.report.dof, ss.report.ok()), ss.report.ok() && ss.report.dof == 0)
     };
     let t = Tokens::get();
-    let vp = app.viewport.rect.unwrap_or_else(|| ctx.content_rect());
+    let vp = viewport(app, ctx);
     let bottom = vp.bottom().min(ctx.content_rect().bottom()) - 8.0;
     // Prefer the space below Axis View, but reclaim it on short/HiDPI views.
     let top = (vp.top() + crate::viewport::AXIS_VIEW_CLEARANCE).min((bottom - 360.0).max(vp.top()));
     let anchor = egui::pos2(vp.right(), top);
-    let frame = egui::Frame::window(&ctx.global_style())
-        .fill(t.dialog_bg)
-        .stroke(Stroke::new(1.0, t.dialog_border))
-        .corner_radius(egui::CornerRadius { nw: 4, sw: 4, ne: 0, se: 0 })
-        .shadow(egui::Shadow { offset: [-2, 2], blur: 8, spread: 0, color: Color32::from_black_alpha(40) });
+    let frame = crate::frame::dock_frame(ctx, crate::frame::Side::Right);
     let shown = |k: &str| match k {
         "grid" => !opts.hide_grid,
         "snap" => !opts.no_snap,
@@ -323,6 +348,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
         "show_dimensions" => !opts.hide_dimensions,
         "show_constraints" => !opts.hide_constraints,
         "show_projected" => !opts.hide_projected,
+        "show_construction" => !opts.hide_construction,
         "sketch_3d" => opts.three_d,
         _ => false,
     };
@@ -344,7 +370,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     )
     .frame(frame)
     .show(ctx, |ui| {
-        let width = WIDTH.min((vp.width() * 0.46 - 16.0).max(120.0));
+        let width = width(vp);
         ui.set_width(width);
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
         let line = ui.text_style_height(&egui::TextStyle::Body);
@@ -616,6 +642,39 @@ mod tests {
         }
     }
 
+    /// A command dialog opened while sketching used to hide the palette outright. The two now
+    /// share the viewport, the dialog at the left edge and the palette at the right, and a view
+    /// too narrow for both keeps the dialog alone.
+    #[test]
+    fn a_dialog_opened_while_sketching_keeps_the_palette_beside_it() {
+        FOLDED.with(|v| v.set(false));
+        OPTIONS_FOLDED.with(|v| v.set(false));
+        let mut h = crate::scenario::Harness::new();
+        h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+        h.app.run("sketch.rectangle.two_point", json!({"p0":[0,0],"p1":[40,30]})).unwrap();
+        h.call("ui.resize", json!({"width":1400,"height":900}));
+        h.settle();
+        assert!(h.app.viewport.palette_rect.is_some(), "the palette is there while sketching");
+        h.app.start("inspect.measure");
+        h.settle();
+        assert!(h.app.dialog.is_some(), "the command opens a dialog");
+        let palette = h.app.viewport.palette_rect.expect("the palette stays on screen while a dialog is open");
+        let dialog = h.app.viewport.dialog_rect.unwrap();
+        assert!(!palette.intersect(dialog).is_positive(), "palette {palette:?} overlaps dialog {dialog:?}");
+        assert!(dialog.left() < palette.left(), "the dialog takes the left edge: {dialog:?}, {palette:?}");
+        let finish = crate::scenario::rect_of("sketch_palette:finish").expect("Finish Sketch stays reachable");
+        assert!(palette.contains_rect(finish));
+        // Neither panel ever covers the other, however narrow the view gets.
+        for width in [1200.0, 1000.0, 860.0, 720.0, 600.0] {
+            h.call("ui.resize", json!({"width":width,"height":800}));
+            h.settle();
+            if let (Some(p), Some(d)) = (h.app.viewport.palette_rect, h.app.viewport.dialog_rect) {
+                assert!(!p.intersect(d).is_positive(), "width {width}: palette {p:?} overlaps dialog {d:?}");
+            }
+            assert!(h.app.dialog.is_some(), "width {width}: the dialog stays open");
+        }
+    }
+
     #[test]
     fn linetype_buttons_follow_the_selection_and_fall_back_to_the_mode() {
         let mut h = crate::scenario::Harness::new();
@@ -743,7 +802,7 @@ mod tests {
         h.app.start("sketch.rectangle.two_point");
         h.settle();
         let rect = crate::sketch_families::family("sketch.rectangle.two_point").unwrap();
-        assert_eq!(rect.commands.len(), 3);
+        assert_eq!(rect.commands.len(), 4);
         assert_eq!(pressed_modes(&h, rect), ["sketch.rectangle.two_point"]);
         assert!(crate::scenario::handle_at("sketch_palette:feature:sketch.circle.center").is_none(), "only the running family is shown");
     }

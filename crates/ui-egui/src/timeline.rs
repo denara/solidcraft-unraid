@@ -1,16 +1,24 @@
 //! The timeline (bottom): features in order, the rollback marker, errors and warnings.
 
-use egui::{Color32, Rect, Sense, Stroke, UiBuilder, pos2, vec2};
+pub(crate) use crate::icons::glyphs::transport_glyph;
+use egui::{Rect, Sense, Stroke, UiBuilder, pos2, vec2};
 use serde_json::json;
 use solidcraft_engine::doc::FeatureKind;
 
 use crate::theme::Tokens;
 use crate::{SolveApp, icons};
 
-fn icon_of(k: &FeatureKind) -> &'static str {
+pub(crate) fn icon_of(k: &FeatureKind) -> &'static str {
     match k {
         FeatureKind::Sketch { .. } => "sketch",
         FeatureKind::Extrude { .. } => "extrude",
+        FeatureKind::SurfaceExtrude { .. } => "surface_extrude",
+        FeatureKind::Unstitch { .. } => "unstitch",
+        FeatureKind::ReverseNormal { .. } => "reverse_normal",
+        FeatureKind::SurfaceRevolve { .. } => "surface_revolve",
+        FeatureKind::SurfaceSweep { .. } => "surface_sweep",
+        FeatureKind::SurfaceLoft { .. } => "surface_loft",
+        FeatureKind::SurfaceOffset { .. } => "surface_offset",
         FeatureKind::Revolve { .. } => "revolve",
         FeatureKind::Fillet { .. } => "fillet",
         FeatureKind::Chamfer { .. } => "chamfer",
@@ -37,8 +45,7 @@ fn icon_of(k: &FeatureKind) -> &'static str {
     }
 }
 
-/// What a drag in the timeline is moving.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum Drag {
     Marker,
     Feature(u64),
@@ -57,16 +64,24 @@ fn slot_at(xs: &[f32], end: f32, x: f32) -> usize {
 }
 
 /// Ask before deleting a feature others depend on; delete right away otherwise.
-fn delete_feature(app: &mut SolveApp, id: u64) {
-    let deps = app.session.execute("timeline.dependents", &json!({ "feature": id })).unwrap_or_default();
-    let list = |k: &str| -> Vec<String> {
-        deps.get(k).and_then(|v| v.as_array()).into_iter().flatten().filter_map(|x| x.as_str().map(String::from)).collect()
-    };
-    let (with, fail) = (list("deleted_with_it"), list("would_fail"));
+pub(crate) fn delete_feature(app: &mut SolveApp, id: u64) {
+    delete_features(app, vec![id]);
+}
+
+pub(crate) fn delete_features(app: &mut SolveApp, ids: Vec<u64>) {
+    let mut with = std::collections::BTreeSet::new();
+    let mut fail = std::collections::BTreeSet::new();
+    for id in &ids {
+        let deps = app.session.execute("timeline.dependents", &json!({ "feature": id })).unwrap_or_default();
+        for (key, output) in [("deleted_with_it", &mut with), ("would_fail", &mut fail)] {
+            output
+                .extend(deps.get(key).and_then(|value| value.as_array()).into_iter().flatten().filter_map(|value| value.as_str().map(String::from)));
+        }
+    }
     if with.is_empty() && fail.is_empty() {
-        let _ = app.run("timeline.delete", json!({ "features": [id.to_string()] }));
+        let _ = app.run("timeline.delete", json!({ "features": ids }));
     } else {
-        app.dialog = Some(crate::dialogs::Dialog::confirm_delete(id, with, fail));
+        app.dialog = Some(crate::dialogs::Dialog::confirm_delete_many(ids, with.into_iter().collect(), fail.into_iter().collect()));
     }
 }
 
@@ -229,17 +244,17 @@ pub fn timeline(app: &mut SolveApp, ui: &mut egui::Ui) {
                         _ => None,
                     };
                     resp.context_menu(|ui| {
-                        if ui.button("Edit Feature").clicked() {
+                        if ui.button(crate::i18n::tr_label("Edit Feature")).clicked() {
                             edit = Some(*id);
                             ui.close();
                         }
                         if let Some(sk) = sketch_of
-                            && ui.button("Edit Profile Sketch").clicked()
+                            && ui.button(crate::i18n::tr_label("Edit Profile Sketch")).clicked()
                         {
                             app.edit_sketch(sk);
                             ui.close();
                         }
-                        if ui.button("Rename").clicked() {
+                        if ui.button(crate::i18n::tr_label("Rename")).clicked() {
                             app.dialog = Some(crate::dialogs::Dialog::rename(*id, name));
                             ui.close();
                         }
@@ -247,11 +262,11 @@ pub fn timeline(app: &mut SolveApp, ui: &mut egui::Ui) {
                             let _ = app.run("timeline.suppress", json!({"feature": id}));
                             ui.close();
                         }
-                        if ui.button("Roll History Marker Here").clicked() {
+                        if ui.button(crate::i18n::tr_label("Roll History Marker Here")).clicked() {
                             let _ = app.run("timeline.roll_to", json!({ "feature": id }));
                             ui.close();
                         }
-                        if ui.button("Find in Browser").clicked() {
+                        if ui.button(crate::i18n::tr_label("Find in Browser")).clicked() {
                             find_in_browser(app, *id);
                             ui.close();
                         }
@@ -281,12 +296,12 @@ pub fn timeline(app: &mut SolveApp, ui: &mut egui::Ui) {
                 // The scroll range follows the drawn content (the buttons don't take layout space themselves).
                 ui.allocate_exact_size(vec2((content_end - origin).max(0.0), r.height()), Sense::hover());
                 // Drag feedback, and the drop.
-                if let (Some(dg), Some(pp)) = (drag, pointer) {
+                if let (Some(dg), Some(pp)) = (drag.as_ref(), pointer) {
                     let slot = slot_at(&xs, end, pp.x);
                     let sx = xs.get(slot).copied().unwrap_or(end) - 4.0;
                     p.line_segment(
                         [pos2(sx, r.top() + 3.0), pos2(sx, r.bottom() - 3.0)],
-                        Stroke::new(2.0, if dg == Drag::Marker { t.accent } else { t.sketch_accent }),
+                        Stroke::new(2.0, if matches!(dg, Drag::Marker) { t.accent } else { t.sketch_accent }),
                     );
                 }
                 let released = ui.input(|i| i.pointer.any_released());
@@ -312,7 +327,7 @@ pub fn timeline(app: &mut SolveApp, ui: &mut egui::Ui) {
                 }
                 ui.data_mut(|d| match drag {
                     Some(dg) => {
-                        d.insert_temp(drag_id, dg);
+                        d.insert_temp(drag_id, dg.clone());
                     }
                     None => d.remove::<Drag>(drag_id),
                 });
@@ -331,25 +346,4 @@ fn find_in_browser(app: &mut SolveApp, id: u64) {
     let bodies: Vec<serde_json::Value> = st.bodies.iter().filter(|b| b.feature == id).map(|b| json!({"type": "body", "name": b.name})).collect();
     let items = if bodies.is_empty() { vec![json!({"type": "feature", "id": id})] } else { bodies };
     let _ = app.run("select.set", json!({ "items": items }));
-}
-
-/// Transport buttons drawn as shapes (the UI font has no media glyphs).
-fn transport_glyph(p: &egui::Painter, c: egui::Pos2, what: &str, col: Color32) {
-    let tri = |dir: f32, dx: f32| {
-        let pts = vec![pos2(c.x + dx - 4.0 * dir, c.y - 5.0), pos2(c.x + dx + 4.0 * dir, c.y), pos2(c.x + dx - 4.0 * dir, c.y + 5.0)];
-        p.add(egui::Shape::convex_polygon(pts, col, Stroke::NONE));
-    };
-    let bar = |dx: f32| p.line_segment([pos2(c.x + dx, c.y - 5.0), pos2(c.x + dx, c.y + 5.0)], Stroke::new(1.6, col));
-    match what {
-        "first" => {
-            bar(-5.0);
-            tri(-1.0, 1.0);
-        }
-        "back" => tri(-1.0, 0.0),
-        "forward" => tri(1.0, 0.0),
-        _ => {
-            tri(1.0, -1.0);
-            bar(5.0);
-        }
-    }
 }

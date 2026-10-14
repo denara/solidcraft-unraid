@@ -8,7 +8,7 @@ use solidcraft_doc::Document;
 use solidcraft_io::Format;
 
 use super::CommandSpec;
-use crate::params::{bad, bool_, str_, string_list};
+use crate::params::{bad, bool_, num, str_, string_list};
 use crate::{EngineError, Result, Session};
 
 pub static COMMANDS: &[CommandSpec] = &[
@@ -45,13 +45,13 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("file.export", "Export", export)
         .icon("export")
         .noundo()
-        .params("path; format?: stl|stla|obj|step|3mf|json (default from extension); bodies?: [names] (JSON exports the complete design)"),
+        .params("path; format?: stl|stla|obj|step|3mf|3mf-tagged|urdf|json (default from extension; 3mf-tagged: 3MF whose triangles carry their B-rep face, at full precision, for meshing and analysis tools; docs/formats/3mf-face-tags.md; urdf: the whole assembly as a robot, with STL meshes written next to it; docs/urdf.md); bodies?: [names] (JSON and URDF export the complete design); urdf only: mesh_prefix? (before each mesh file name, e.g. package://robot/meshes/), effort? (default 1000), velocity? (default 10)"),
     CommandSpec::new("file.save_mesh", "Save As Mesh", save_stl).icon("export").noundo().params("path; bodies?: [names]; ascii?: bool"),
 ];
 
 fn new_doc(s: &mut Session, p: &Value) -> Result<Value> {
     let name = str_(p, "name").unwrap_or("Untitled");
-    *s = Session::new(Document::new(name));
+    s.replace_design(Session::new(Document::new(name)));
     Ok(json!({"name": name}))
 }
 
@@ -130,7 +130,7 @@ fn open(s: &mut Session, p: &Value) -> Result<Value> {
         let mut fresh = Session::new(Document::new(&stem));
         let r = if solidcraft_io::is_step_path(path) { add_step(&mut fresh, path, None)? } else { add_mesh(&mut fresh, path, None)? };
         fresh.undo.clear();
-        *s = fresh;
+        s.replace_design(fresh);
         let errors = s.model.results.iter().filter(|r| r.error.is_some()).count();
         return Ok(json!({"path": path, "features": s.doc.features.len(), "errors": errors, "bodies": r["bodies"], "warnings": r["warnings"]}));
     }
@@ -138,7 +138,7 @@ fn open(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(stem) = default_name_for(&doc.name, path) {
         doc.name = stem;
     }
-    *s = Session::new(doc);
+    s.replace_design(Session::new(doc));
     s.path = Some(path.to_string());
     let errors = s.model.results.iter().filter(|r| r.error.is_some()).count();
     Ok(json!({"path": path, "features": s.doc.features.len(), "errors": errors, "name": s.doc.name}))
@@ -170,6 +170,7 @@ fn rename_design(s: &mut Session, from: &str, to: &str) {
 }
 
 fn write(s: &mut Session, path: &str, format: &str, compression: &str, preview: bool, cache: bool) -> Result<Value> {
+    solidcraft_io::vfs::check(path).map_err(|e| EngineError::Other(e.to_string()))?;
     // Saving an unnamed design names it after its file (not an undoable edit).
     let renamed = default_name_for(&s.doc.name, path).map(|stem| (s.doc.name.clone(), stem));
     if let Some((from, to)) = &renamed {
@@ -327,7 +328,68 @@ fn export_to(s: &Session, path: &str, format: Format, bodies: &[String]) -> Resu
 fn export(s: &mut Session, p: &Value) -> Result<Value> {
     let path = path_arg(p, "file.export")?;
     let format = Format::from_name(str_(p, "format").unwrap_or(path))?;
+    if format == Format::Urdf {
+        return export_urdf(s, path, p);
+    }
     export_to(s, path, format, &string_list(p, "bodies"))
+}
+
+/// The assembly as a URDF and its meshes next to it (docs/urdf.md). Every path is checked before
+/// anything is written; the meshes go first and the `.urdf` last.
+fn export_urdf(s: &Session, path: &str, p: &Value) -> Result<Value> {
+    let cmd = "file.export";
+    if !string_list(p, "bodies").is_empty() {
+        return Err(bad(cmd, "urdf exports the whole assembly; omit bodies"));
+    }
+    let positive = |k: &str| match p.get(k) {
+        None | Some(Value::Null) => Ok(None),
+        Some(_) => num(p, k).filter(|x| *x > 0.0).map(Some).ok_or_else(|| bad(cmd, format!("`{k}` must be a positive number"))),
+    };
+    // `io::urdf` refuses a prefix XML cannot hold.
+    let mesh_prefix = str_(p, "mesh_prefix").unwrap_or("").to_string();
+    let options = solidcraft_io::UrdfOptions { mesh_prefix, effort: positive("effort")?, velocity: positive("velocity")? };
+    let file = std::path::Path::new(path);
+    let stem = file.file_stem().map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|| s.doc.name.clone());
+    // Occurrences where they are shown, uncaptured moves included, except those the joint solver
+    // places: it puts them back as soon as a joint moves, so the move must not become part of
+    // their links.
+    let st = s.model.state();
+    let mut held = Vec::new();
+    let doc = if s.pending_moves.is_empty() {
+        std::borrow::Cow::Borrowed(&*s.doc)
+    } else {
+        let placed = solidcraft_doc::joints::solve(&s.doc, &st).world;
+        let mut doc = (*s.doc).clone();
+        for o in &mut doc.occurrences {
+            match s.pending_moves.get(&o.id) {
+                Some(_) if placed.contains_key(&o.id) => held.push(o.name.clone()),
+                Some(t) => o.transform = *t,
+                None => {}
+            }
+        }
+        std::borrow::Cow::Owned(doc)
+    };
+    let mut pkg = solidcraft_io::urdf(&doc, &doc.painted(&st), &stem, &options)?;
+    for name in held {
+        pkg.warnings.push(format!("`{name}` was moved but the move is not captured: exported where its joints place it"));
+    }
+    let dir = file.parent().unwrap_or(std::path::Path::new(""));
+    let mut targets: Vec<(String, &[u8])> = pkg.meshes.iter().map(|(n, b)| (dir.join(n).to_string_lossy().to_string(), b.as_slice())).collect();
+    targets.push((path.to_string(), pkg.xml.as_bytes()));
+    for (t, _) in &targets {
+        solidcraft_io::vfs::check(t).map_err(|e| EngineError::Other(format!("{t}: {e}")))?;
+    }
+    let mut written: Vec<String> = Vec::new();
+    for (t, bytes) in &targets {
+        if let Err(e) = solidcraft_io::vfs::write(t, bytes) {
+            let before = if written.is_empty() { "none".to_string() } else { written.join(", ") };
+            return Err(EngineError::Other(format!("{t}: {e} (this file may be incomplete; written before it: {before})")));
+        }
+        written.push(t.clone());
+    }
+    Ok(
+        json!({"path": path, "format": "Urdf", "files": written, "links": pkg.model.links.len(), "joints": pkg.model.joints.len(), "warnings": pkg.warnings}),
+    )
 }
 
 fn save_stl(s: &mut Session, p: &Value) -> Result<Value> {
@@ -337,10 +399,13 @@ fn save_stl(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn recovery_dir(p: &Value, cmd: &str) -> Result<std::path::PathBuf> {
-    match str_(p, "dir").filter(|d| !d.trim().is_empty() && d.len() < 4096) {
-        Some(d) => Ok(d.into()),
-        None => crate::recovery::default_dir().ok_or_else(|| bad(cmd, "no recovery folder on this system (give `dir`)")),
-    }
+    let dir = match str_(p, "dir").filter(|d| !d.trim().is_empty() && d.len() < 4096) {
+        Some(d) => d.into(),
+        None => crate::recovery::default_dir().ok_or_else(|| bad(cmd, "no recovery folder on this system (give `dir`)"))?,
+    };
+    // An agent's commands reach the recovery folder only when it is one of their folders.
+    solidcraft_io::vfs::check(&dir.to_string_lossy()).map_err(|e| EngineError::Other(e.to_string()))?;
+    Ok(dir)
 }
 
 fn recovery_list(_s: &mut Session, p: &Value) -> Result<Value> {
@@ -356,11 +421,11 @@ fn recover(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(stem) = entry.path.as_deref().and_then(|path| default_name_for(&doc.name, path)) {
         doc.name = stem;
     }
-    *s = Session::new(doc);
+    s.replace_design(Session::new(doc));
     s.path = entry.path.clone();
     s.mark_unsaved();
     if bool_(p, "discard").unwrap_or(false) {
-        crate::recovery::remove(&dir, id);
+        crate::recovery::remove(&dir, id)?;
     }
     let errors = s.model.results.iter().filter(|r| r.error.is_some()).count();
     Ok(json!({"id": id, "path": entry.path, "name": entry.name, "features": s.doc.features.len(), "errors": errors}))
@@ -375,10 +440,14 @@ fn recovery_discard(_s: &mut Session, p: &Value) -> Result<Value> {
         vec![str_(p, "id").ok_or_else(|| bad(cmd, "`id` or `all` is required"))?.to_string()]
     };
     for id in &ids {
-        crate::recovery::remove(&dir, id);
+        crate::recovery::remove(&dir, id)?;
     }
     Ok(json!({"discarded": ids}))
 }
+
+#[cfg(test)]
+#[path = "urdf_tests.rs"]
+mod urdf_tests;
 
 #[cfg(test)]
 mod tests {

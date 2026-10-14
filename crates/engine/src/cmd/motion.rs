@@ -589,6 +589,7 @@ fn export(s: &mut Session, p: &Value) -> Result<Value> {
         } else {
             serde_json::to_string_pretty(&out).unwrap_or_default()
         };
+        solidcraft_io::vfs::check(path).map_err(|e| EngineError::Other(e.to_string()))?;
         solidcraft_io::write_atomic(std::path::Path::new(path), text.as_bytes(), false).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
         return Ok(json!({"path": path, "samples": rows.len()}));
     }

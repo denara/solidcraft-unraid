@@ -21,8 +21,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
-  # Every push to main gets its full run; a new PR push replaces the old run.
+  # A new PR push replaces the old run. Only one run per group may wait, so a busy main would
+  # cancel the waiting nightly (or a Run workflow) before it starts: they get groups of their own.
+  group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -47,6 +48,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       native: ${{ steps.paths.outputs.native }}
+      kernel: ${{ steps.paths.outputs.kernel }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -59,12 +61,14 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           native=false
+          kernel=false
           if [ "$EVENT_NAME" != pull_request ]; then
             native=true
           else
             # Compare both old and new paths of renames; unknown paths run native checks.
             git diff --no-renames --name-only -z "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/ci-paths"
             while IFS= read -r -d '' path; do
+              case "$path" in crates/kernel/*|vendor/truck-*) kernel=true ;; esac
               case "$path" in
                 .github/workflows/ci.yml) native=true ;;
                 *.rs|Cargo.toml|Cargo.lock|*/Cargo.toml|.cargo/*|rust-toolchain*) native=true ;;
@@ -74,6 +78,7 @@ jobs:
             done < "$RUNNER_TEMP/ci-paths"
           fi
           echo "native=$native" >> "$GITHUB_OUTPUT"
+          echo "kernel=$kernel" >> "$GITHUB_OUTPUT"
 
   checks:
     name: Format and repository checks
@@ -95,6 +100,8 @@ jobs:
         run: cargo xtask licences --check
       - name: Dependency layers
         run: cargo xtask layers
+      - name: Web app offline use and updates (headless Chrome)
+        run: cargo xtask web-offline-test
 
   clippy:
     name: Native Linux Clippy
@@ -150,7 +157,7 @@ jobs:
 
   tests:
     name: Native Linux tests (${{ matrix.shard }}/4)
-    needs: build-tests
+    needs: [changes, build-tests]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
@@ -177,6 +184,16 @@ jobs:
           # the build job's path, which is the same checkout path here.
           cargo nextest run --archive-file tests.tar.zst --workspace-remap . --extract-to . --extract-overwrite \
             --profile ci --partition "slice:$SHARD/4" "${all[@]}"
+      - name: Robustness goldens sample (pull requests that touch the kernel)
+        # Every 8th seed of tests/robustness/goldens.json, a quarter per shard; pushes to main and
+        # the nightly run every seed in the step above.
+        if: github.event_name == 'pull_request' && needs.changes.outputs.kernel == 'true'
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          cargo nextest run --archive-file tests.tar.zst --workspace-remap . --extract-to . --extract-overwrite \
+            --profile ci --ignore-default-filter \
+            -E "package(solidcraft-engine) & test(=tests::robustness_goldens::sample_$((SHARD - 1)))"
       - name: Upload test timings
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -269,9 +286,31 @@ jobs:
           name: oracle-report
           path: docs/oracle.md
 
+  # D3D12's older shader compiler (FXC, used where dxcompiler.dll is absent) is stricter than
+  # DXC, Vulkan and Metal: a shader it cannot compile once crashed the app at startup. Build the
+  # GPU tessellation pipeline with FXC on the runner's WARP software adapter and compare its
+  # results with the CPU.
+  windows-fxc:
+    name: Windows D3D12 FXC shaders
+    needs: changes
+    if: needs.changes.outputs.native == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      WGPU_BACKEND: dx12
+      WGPU_DX12_COMPILER: fxc
+      SOLIDCRAFT_REQUIRE_GPU: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: windows-fxc
+      - run: cargo test -p solidcraft-gpu --profile ci --locked
+
   # Preserve the existing check name for branch protection, including docs-only PRs.
   ci:
-    needs: [changes, checks, clippy, build-tests, tests, doc-tests, oracle]
+    needs: [changes, checks, clippy, build-tests, tests, doc-tests, oracle, windows-fxc]
     if: always()
     runs-on: ubuntu-24.04
     steps:
@@ -285,6 +324,7 @@ jobs:
           TESTS: ${{ needs.tests.result }}
           DOCS: ${{ needs.doc-tests.result }}
           ORACLE: ${{ needs.oracle.result }}
+          WINDOWS_FXC: ${{ needs.windows-fxc.result }}
         run: |
           test "$CHANGES" = success
           test "$CHECKS" = success
@@ -294,6 +334,7 @@ jobs:
             test "$TESTS" = success
             test "$DOCS" = success
             test "$ORACLE" = success
+            test "$WINDOWS_FXC" = success
           fi
 
   wasm:

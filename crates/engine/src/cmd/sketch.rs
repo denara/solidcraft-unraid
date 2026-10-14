@@ -52,6 +52,11 @@ pub static COMMANDS: &[CommandSpec] = &[
         .icon("rect3")
         .enabled(in_sketch)
         .params(concat!("p0, p1: first edge; p2: point on the opposite edge", connect_doc!(), created_doc!())),
+    CommandSpec::new("sketch.rectangle.rounded", "Rounded Rectangle", rect_rounded)
+        .at("SKETCH", "CREATE")
+        .icon("rect_rounded")
+        .enabled(in_sketch)
+        .params(concat!("p0, p1: opposite corners [x,y]; radius: expr (the corner radius, less than half the shorter side); construction?. A 2-point rectangle whose four corners are filleted alike: one radius dimension (`param`), the other arcs equal to it. Returns sides {bottom, right, top, left} (line ids) and arcs (the corner arcs: bottom-left, bottom-right, top-right, top-left)", connect_doc!(), created_doc!())),
     CommandSpec::new("sketch.rectangle.center", "Center Rectangle", rect_center)
         .at("SKETCH", "CREATE")
         .icon("rect_center")
@@ -183,7 +188,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .enabled(in_sketch)
         .params("dimension: constraint id or parameter name; at: [x,y] text centre (sketch coordinates) | reset: true (default place)"),
     CommandSpec::new("sketch.options", "Sketch Palette Options", sketch_options).icon("sketch").params(
-        "sketch?: id|name (default active); any of show_profile, show_points, show_dimensions, show_constraints, show_projected, grid, snap, slice, sketch_3d: bool. Returns them all",
+        "sketch?: id|name (default active); any of show_profile, show_points, show_dimensions, show_constraints, show_projected, show_construction, grid, snap, slice, sketch_3d: bool. Returns them all",
     ),
     CommandSpec::new("sketch.chain", "Chain", chain_cmd)
         .enabled(in_sketch)
@@ -928,6 +933,60 @@ fn rect_two_point(s: &mut Session, p: &Value) -> Result<Value> {
         Ok(((ids_of(sk, &l), cons), rect_names(sk, &l, &pts)))
     })?;
     Ok(rect_result(out, names, info))
+}
+
+/// A 2-point rectangle with its corners filleted, as one undo step: the rectangle and the
+/// fillet run in a scratch session that replaces the design only when both succeed.
+fn rect_rounded(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "sketch.rectangle.rounded";
+    let (a, b) = (req_vec2(cmd, p, "p0")?, req_vec2(cmd, p, "p1")?);
+    let r_expr = expr(p, "radius").ok_or_else(|| bad(cmd, "`radius` must be a number or an expression"))?;
+    let r = s.doc.eval(&r_expr, Kind::Length).map_err(|e| bad(cmd, format!("radius: {e}")))?;
+    if !(r > 1e-9 && r < 1e8) {
+        return Err(bad(cmd, "radius must be positive"));
+    }
+    let half = 0.5 * (a.x - b.x).abs().min((a.y - b.y).abs());
+    if half > 1e-9 && r >= half - 1e-9 {
+        return Err(bad(cmd, format!("the radius must be less than half the shorter side ({half:.3} mm)")));
+    }
+    let mut rect = p.clone();
+    if let Some(o) = rect.as_object_mut() {
+        o.remove("radius");
+    }
+    let mut scratch = s.scratch();
+    let mut out = scratch.execute("sketch.rectangle.two_point", &rect)?;
+    let corners: Vec<Value> = ["bottom_left", "bottom_right", "top_right", "top_left"]
+        .iter()
+        .filter_map(|k| out["corners"].get(*k).filter(|v| v.is_string()).cloned())
+        .collect();
+    if corners.len() != 4 {
+        return Err(bad(cmd, "the rectangle's corners are missing"));
+    }
+    let mut fillet = json!({"points": corners, "radius": r_expr});
+    if let Some(sketch) = p.get("sketch") {
+        fillet["sketch"] = sketch.clone();
+    }
+    let rounded = scratch.execute("sketch.fillet", &fillet)?;
+    // Session::execute records the wrapper's before snapshot. Nested history must not leak.
+    scratch.undo.clear();
+    s.accept_computed(scratch);
+    let arcs = rounded.get("curves").cloned().unwrap_or_else(|| json!([]));
+    if let Some(o) = out.as_object_mut() {
+        // The sharp corners are gone (the lines end at the arcs now).
+        o.remove("corners");
+        if let (Some(Value::Array(curves)), Value::Array(extra)) = (o.get_mut("curves"), &arcs) {
+            curves.extend(extra.iter().cloned());
+        }
+        if let (Some(Value::Array(cons)), Some(Value::Array(extra))) = (o.get_mut("constraints"), rounded.get("constraints")) {
+            cons.extend(extra.iter().cloned());
+        }
+        o.insert("arcs".into(), arcs);
+        o.insert("param".into(), rounded.get("param").cloned().unwrap_or(Value::Null));
+        if let Some(info) = rounded.get("sketch") {
+            o.insert("sketch".into(), info.clone());
+        }
+    }
+    Ok(out)
 }
 
 fn rect_center(s: &mut Session, p: &Value) -> Result<Value> {
@@ -2145,6 +2204,13 @@ fn sketch_delete(s: &mut Session, p: &Value) -> Result<Value> {
                 return Err(bad(cmd, "break the offset association before deleting only part of its curved boundary"));
             }
         }
+        if sk.constraints.iter().any(|c| cons.contains(&c.id) && matches!(c.kind, ConstraintKind::OffsetDistance { .. })) {
+            let report = solve_current(sk, doc)?;
+            if !report.keeps_orientation() {
+                return Err(bad(cmd, "cannot remove an offset dimension from a conflicting sketch"));
+            }
+            sk.refresh_offsets()?;
+        }
         sk.constraints.retain(|c| !cons.contains(&c.id));
         let pids: Vec<String> = points.iter().filter_map(|q| sk.points.get(*q).map(|x| x.id.clone())).collect();
         sk.remove_curves(&curves);
@@ -2252,6 +2318,7 @@ fn options_json(v: &solidcraft_sketch::SketchView) -> Value {
         "show_dimensions": !v.hide_dimensions,
         "show_constraints": !v.hide_constraints,
         "show_projected": !v.hide_projected,
+        "show_construction": !v.hide_construction,
         "grid": !v.hide_grid,
         "snap": !v.no_snap,
         "slice": v.slice,
@@ -2261,7 +2328,18 @@ fn options_json(v: &solidcraft_sketch::SketchView) -> Value {
 
 fn sketch_options(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "sketch.options";
-    let keys = ["show_profile", "show_points", "show_dimensions", "show_constraints", "show_projected", "grid", "snap", "slice", "sketch_3d"];
+    let keys = [
+        "show_profile",
+        "show_points",
+        "show_dimensions",
+        "show_constraints",
+        "show_projected",
+        "show_construction",
+        "grid",
+        "snap",
+        "slice",
+        "sketch_3d",
+    ];
     if let Some(o) = p.as_object()
         && let Some(k) = o.keys().find(|k| *k != "sketch" && !keys.contains(&k.as_str()))
     {
@@ -2284,6 +2362,7 @@ fn sketch_options(s: &mut Session, p: &Value) -> Result<Value> {
         put("show_dimensions", &mut v.hide_dimensions, true);
         put("show_constraints", &mut v.hide_constraints, true);
         put("show_projected", &mut v.hide_projected, true);
+        put("show_construction", &mut v.hide_construction, true);
         put("grid", &mut v.hide_grid, true);
         put("snap", &mut v.no_snap, true);
         put("slice", &mut v.slice, false);
@@ -2311,6 +2390,10 @@ fn solve_cmd(s: &mut Session, p: &Value) -> Result<Value> {
 #[cfg(test)]
 #[path = "sketch_rect_tests.rs"]
 mod rect_tests;
+
+#[cfg(test)]
+#[path = "sketch_rounded_rect_tests.rs"]
+mod rounded_rect_tests;
 
 #[cfg(test)]
 #[path = "sketch_ux_tests.rs"]

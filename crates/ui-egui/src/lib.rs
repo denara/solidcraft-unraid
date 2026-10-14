@@ -4,7 +4,7 @@
 //! commands ([`SolveApp::run`]). Nothing here owns design data. The layout follows the familiar
 //! parametric-CAD desktop: application bar, a toolbar of workspace tabs and panels, the browser
 //! on the left, the 3D viewport with an axis view and navigation bar, the command dialog on the
-//! right of the viewport, the command palette and the timeline at the bottom.
+//! right of the viewport, the command palette and a bottom or left-sidebar feature timeline.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
@@ -36,9 +36,13 @@ pub mod gizmo;
 pub mod gpu;
 pub mod help;
 #[cfg(test)]
+mod hole_direction_ui_tests;
+#[cfg(test)]
 mod hole_placement_ui_tests;
 pub mod home;
 pub mod i18n;
+#[cfg(test)]
+mod i18n_menu_tests;
 #[cfg(test)]
 mod i18n_ui_tests;
 pub mod icons;
@@ -47,6 +51,8 @@ pub mod issue_report;
 pub mod keymap;
 #[cfg(test)]
 mod menu_tests;
+#[cfg(test)]
+mod surface_clamp_tests;
 #[cfg(test)]
 mod status_tests {
     #[test]
@@ -107,20 +113,27 @@ mod sketch_drag_ui_tests;
 #[cfg(test)]
 mod sketch_edit_tests;
 mod sketch_families;
+#[cfg(test)]
+mod sketch_guidance_ui_tests;
 pub mod sketch_modify_ui;
 #[cfg(test)]
 mod sketch_modify_ui_tests;
 pub mod sketch_palette;
 pub(crate) mod sketch_text;
+mod sketch_text_handles;
 mod sketch_text_move;
 pub mod sketch_tools;
 pub mod stand_up;
 pub mod theme;
+#[cfg(test)]
+mod thin_extrude_tests;
 pub mod timeline;
+pub mod timeline_left;
 pub mod titlebar;
 pub mod toolbar;
 pub mod toolbar_custom;
 pub mod tools;
+pub mod update;
 pub mod viewport;
 mod viewport_layout;
 pub mod workspace;
@@ -202,6 +215,10 @@ pub struct Services {
     pub show_in_folder: Option<Box<dyn Fn(&str)>>,
     /// Where the host reads the anti-aliasing preference at start (a small JSON file).
     pub graphics_path: Option<String>,
+    /// HTTPS GET for the update check (`update`); None: never check (browser, tests).
+    pub http_get: Option<update::HttpGet>,
+    /// HTTPS download to a file, with progress, for one-click updates (`update::install`).
+    pub http_download: Option<update::install::HttpDownload>,
 }
 
 pub struct SolveApp {
@@ -238,6 +255,8 @@ pub struct SolveApp {
     pub issue_report: issue_report::ReportState,
     /// The Crash Reports window.
     pub crashes: crash_ui::CrashUi,
+    /// The update check and its window (`update`).
+    pub updater: update::Updater,
     /// Toolbar buttons the user pinned, removed or reordered.
     pub toolbar_custom: toolbar_custom::ToolbarCustom,
     pub sketch_choices: sketch_families::Choices,
@@ -290,6 +309,9 @@ pub struct SolveApp {
     pub file_load: file_load::FileLoad,
     /// The other open designs (tabs).
     pub docs: documents::Documents,
+    /// The language the installed font fallback chain is ordered for (`fonts::fallback_order`);
+    /// changing `preferences.language` re-installs the fonts on the next frame.
+    applied_fonts_language: String,
 }
 
 impl SolveApp {
@@ -315,6 +337,7 @@ impl SolveApp {
             help: help::HelpState::default(),
             issue_report: issue_report::ReportState::default(),
             crashes: crash_ui::CrashUi::default(),
+            updater: update::Updater::default(),
             toolbar_custom: toolbar_custom::ToolbarCustom::default(),
             sketch_choices: sketch_families::Choices::default(),
             preferences: prefs::Prefs::default(),
@@ -348,6 +371,7 @@ impl SolveApp {
             home: home::HomeState::default(),
             file_load: file_load::FileLoad::default(),
             docs: documents::Documents::default(),
+            applied_fonts_language: "en".into(),
         }
     }
 
@@ -490,7 +514,13 @@ impl SolveApp {
         }
         match &r {
             Ok(_) => {
-                self.session.echo(format!("{} done", command_label(id)));
+                // Programmatic callers (the control channel, scripts) run outside a render
+                // language scope, so resolve the echo from the saved preference instead of the
+                // thread-local scope. The command's own label is translated too, so the echo
+                // reads the same way the toolbar button it came from does.
+                let language = i18n::Locale::for_language(&self.preferences.language);
+                let label = language.label(command_label(id));
+                self.session.echo(language.format("ui.command_done", &[("command", label)]));
                 if matches!(id, "file.new" | "doc.open" | "doc.recover") {
                     self.sketch_choices = sketch_families::Choices::default();
                     dim_view::cancel();
@@ -1009,6 +1039,7 @@ impl SolveApp {
             toolbar::shortcuts(self, ctx);
         }
         recovery_ui::tick(self);
+        update::tick(self, ctx);
         if self.issue_report.draft.is_none() {
             for f in ctx.input(|i| i.raw.dropped_files.clone()) {
                 let p = f.path().to_string_lossy().to_string();
@@ -1050,6 +1081,10 @@ impl SolveApp {
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         expression_complete::begin_frame(ui.ctx());
         let t0 = now_ms();
+        if self.preferences.language != self.applied_fonts_language {
+            self.applied_fonts_language.clone_from(&self.preferences.language);
+            crate::fonts::setup_fonts_for(ui.ctx(), &self.preferences.language);
+        }
         let _language = crate::i18n::scope(&self.preferences.language);
         let mut report_input = None;
         issue_report::CadInput::block(self, ui, &mut report_input);
@@ -1068,6 +1103,7 @@ impl SolveApp {
         issue_report::CadInput::block(self, ui, report_input);
         file_load::show(self, ui.ctx());
         documents::prompt(self, ui.ctx());
+        update::show(self, ui.ctx());
         if self.home.open {
             home::show(self, ui);
             if self.home.open {
@@ -1077,12 +1113,19 @@ impl SolveApp {
             }
         }
         toolbar::toolbar(self, ui);
-        if self.ui.show_timeline {
+        let left_timeline = self.ui.show_timeline && self.preferences.timeline_left;
+        if self.ui.show_timeline && !left_timeline {
             timeline::timeline(self, ui);
         }
         palette::palette_bar(self, ui);
         if self.ui.show_browser {
-            browser::browser(self, ui);
+            if left_timeline {
+                browser::browser_below_timeline(self, ui);
+            } else {
+                browser::browser(self, ui);
+            }
+        } else if left_timeline {
+            timeline_left::left_panel(self, ui);
         }
         preview::update(self, ui.ctx());
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
@@ -1125,7 +1168,7 @@ impl SolveApp {
             let Some(req) = held.or_else(|| rx.try_recv().ok()) else { break };
             // A file is loading: commands that change the design wait for it (the window,
             // inspection and screenshots still answer).
-            if self.file_load.busy() && matches!(req.method.as_str(), "engine.execute" | "command" | "engine.script") {
+            if self.file_load.busy() && matches!(req.method.as_str(), "engine.execute" | "command" | "engine.script" | "engine.batch") {
                 if self.control_held.len() < MAX_HELD {
                     self.control_held.push_back(req);
                 } else {

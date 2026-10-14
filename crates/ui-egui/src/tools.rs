@@ -53,6 +53,7 @@ impl Tool {
             "sketch.line" => ("sketch.line", Kind::Draw(0)),
             "sketch.rectangle.two_point" => ("sketch.rectangle.two_point", Kind::Draw(2)),
             "sketch.rectangle.center" => ("sketch.rectangle.center", Kind::Draw(2)),
+            "sketch.rectangle.rounded" => ("sketch.rectangle.rounded", Kind::Draw(2)),
             "sketch.rectangle.three_point" => ("sketch.rectangle.three_point", Kind::Draw(3)),
             "sketch.circle.center" => ("sketch.circle.center", Kind::Draw(2)),
             "sketch.circle.two_point" => ("sketch.circle.two_point", Kind::Draw(2)),
@@ -98,6 +99,7 @@ pub fn hint(id: &str) -> String {
         "sketch.line" => "Line: click points; right-click or Esc to finish".into(),
         "sketch.rectangle.two_point" => "Rectangle: click two opposite corners".into(),
         "sketch.rectangle.center" => "Center rectangle: click the centre, then a corner".into(),
+        "sketch.rectangle.rounded" => "Rounded rectangle: click two opposite corners (Tab to the radius box to type the corner radius)".into(),
         "sketch.rectangle.three_point" => "3-point rectangle: click two points of one edge, then the width".into(),
         "sketch.circle.center" => "Circle: click the centre, then a point on the circle".into(),
         "sketch.arc.three_point" => "Arc: click start, end, then a point on the arc".into(),
@@ -125,8 +127,6 @@ pub fn on_hover(app: &mut SolveApp, proj: &Proj, pos: Pos2) {
     crate::sketch3d::on_hover(app, proj, pos);
     let h = if let Some(point) = app.tool.as_ref().and_then(|tool| crate::sketch_tools::periodic_start_snap(app, tool, proj, pos)) {
         Some((point, Some("Close smooth loop".into())))
-    } else if let Some(tool) = app.tool.as_ref().filter(|t| t.cmd == "sketch.fillet" || t.cmd.starts_with("sketch.chamfer.")) {
-        crate::sketch_tools::corner_point(app, proj, pos, tool.cmd).map(|(at, id)| (at, Some(id)))
     } else {
         sketch_point_at(app, proj, pos)
     };
@@ -265,7 +265,10 @@ pub fn place(app: &mut SolveApp, p: (Vec2, Option<String>)) {
     let Some(mut tool) = app.tool.take() else { return };
     if tool.kind == Kind::Ext {
         crate::sketch_tools::place_point(app, &mut tool, p);
-        app.tool = Some(tool);
+        // A placed text opens Edit Text, which ends the tool.
+        if !crate::sketch_text::editing(app) {
+            app.tool = Some(tool);
+        }
         return;
     }
     let Kind::Draw(n) = tool.kind else {
@@ -346,6 +349,9 @@ fn run_shape(app: &mut SolveApp, t: &Tool) -> Result<Vec<String>, String> {
     let params = match t.cmd {
         "sketch.rectangle.two_point" => json!({"p0": xy(&p[0]), "p1": xy(&p[1])}),
         "sketch.rectangle.center" => json!({"center": xy(&p[0]), "corner": xy(&p[1])}),
+        "sketch.rectangle.rounded" => {
+            json!({"p0": xy(&p[0]), "p1": xy(&p[1]), "radius": crate::sketch_dims::rounded_radius_value(app, t, p[0].0, p[1].0)})
+        }
         "sketch.rectangle.three_point" => json!({"p0": xy(&p[0]), "p1": xy(&p[1]), "p2": xy(&p[2])}),
         "sketch.circle.center" => json!({"center": arg(&p[0]), "radius": d(0, 1)}),
         "sketch.circle.two_point" => json!({"p0": xy(&p[0]), "p1": xy(&p[1])}),
@@ -728,6 +734,11 @@ pub fn preview(app: &SolveApp, t: &Tool, painter: &egui::Painter, proj: &Proj) {
             line(h, c);
             line(c, *a);
         }
+        ("sketch.rectangle.rounded", [a]) => {
+            let r = crate::sketch_dims::rounded_radius(app, t, *a, h);
+            let outline: Vec<_> = rounded_outline(*a, h, r).into_iter().map(|q| ss.plane.to_world(q)).collect();
+            paint_sketch_path(&outline, crate::sketch_palette::mode(app), painter, proj, stroke);
+        }
         ("sketch.rectangle.center", [c]) => {
             let d = h - *c;
             let k =
@@ -743,4 +754,29 @@ pub fn preview(app: &SolveApp, t: &Tool, painter: &egui::Painter, proj: &Proj) {
         }
         _ => {}
     }
+}
+
+/// The closed outline of the rectangle with corners `a`, `b` and corner radius `r` (clamped to
+/// fit), as points for a preview: counter-clockwise, arcs sampled, first point repeated last.
+pub(crate) fn rounded_outline(a: Vec2, b: Vec2, r: f64) -> Vec<Vec2> {
+    let (lo, hi) = (Vec2::new(a.x.min(b.x), a.y.min(b.y)), Vec2::new(a.x.max(b.x), a.y.max(b.y)));
+    let r = if r.is_finite() { r.clamp(0.0, 0.5 * (hi.x - lo.x).min(hi.y - lo.y)) } else { 0.0 };
+    let q = std::f64::consts::FRAC_PI_2;
+    // Corner centres and the angle each arc starts at, CCW from the bottom-right corner.
+    let corners = [
+        (Vec2::new(hi.x - r, lo.y + r), -q),
+        (Vec2::new(hi.x - r, hi.y - r), 0.0),
+        (Vec2::new(lo.x + r, hi.y - r), q),
+        (Vec2::new(lo.x + r, lo.y + r), 2.0 * q),
+    ];
+    let mut pts = Vec::with_capacity(4 * 9 + 1);
+    for (c, a0) in corners {
+        for i in 0..=8 {
+            pts.push(c + Vec2::from_angle(a0 + q * f64::from(i) / 8.0) * r);
+        }
+    }
+    if let Some(first) = pts.first().copied() {
+        pts.push(first);
+    }
+    pts
 }

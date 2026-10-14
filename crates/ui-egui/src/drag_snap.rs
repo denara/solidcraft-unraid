@@ -90,7 +90,9 @@ pub fn find(sk: &Sketch, moving: &[(usize, Vec2)], exclude: &[usize], mm_px: f64
         return keep(None);
     }
     let id = |i: usize| sk.points.get(i).map(|p| p.id.clone()).unwrap_or_default();
-    let targets: Vec<(usize, Vec2)> = sk.points.iter().enumerate().filter(|(i, _)| !exclude.contains(i)).map(|(i, p)| (i, p.pos)).collect();
+    let visible = solidcraft_engine::view::SketchPointVisibility::new(sk);
+    let targets: Vec<(usize, Vec2)> =
+        sk.points.iter().enumerate().filter(|(i, p)| !exclude.contains(i) && visible.takes(p)).map(|(i, p)| (i, p.pos)).collect();
     let free_curves: Vec<usize> =
         (0..sk.curves.len()).filter(|&c| sk.curves.get(c).is_some_and(|cu| !exclude.iter().any(|&p| cu.kind.uses(p)))).collect();
     let mut best: Option<(f64, Snap)> = None;

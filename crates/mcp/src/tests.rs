@@ -103,6 +103,24 @@ fn handshake_and_tools_list() {
     assert_eq!(call(&mut s, 8, "nope/nope", json!({}))["error"]["code"], -32601);
 }
 
+/// A URDF goes through `export` with its own options (#719).
+#[test]
+fn export_tool_writes_a_urdf_package() {
+    let mut s = server();
+    tool(&mut s, "execute", json!({"command": "solid.box", "params": {"length": 10, "width": 10, "height": 10}}));
+    let dir = std::env::temp_dir().join(format!("solidcraft-mcp-urdf-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let urdf = dir.join("robot.urdf");
+    let r = tool(&mut s, "export", json!({"path": urdf.to_string_lossy(), "mesh_prefix": "package://robot/meshes/"}));
+    assert_eq!(r["format"], "Urdf", "{r}");
+    assert!(std::fs::read_to_string(&urdf).unwrap().contains(r#"filename="package://robot/meshes/robot-base.stl""#));
+    assert!(dir.join("robot-base.stl").exists());
+    // effort and velocity reach file.export, which refuses a bad one.
+    let r = raw_tool(&mut s, "export", json!({"path": urdf.to_string_lossy(), "effort": -1}));
+    assert_eq!(r["result"]["isError"], json!(true), "{r}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Box → fillet → hole in one batch, then verify with measure / inspect_design and look at it.
 #[test]
 fn agent_builds_box_fillet_hole() {
@@ -439,6 +457,189 @@ fn legacy_design_files_and_resource_uris() {
     assert!(d["result"]["contents"][0]["text"].as_str().unwrap().contains("timeline"));
 }
 
+/// The default folders (#205): the recovery folder works out of the box, `screenshot` without a
+/// `path` uses the server's own scratch folder, and the open design's folder counts while the
+/// design is open there, without its hidden files. The working folder doesn't count at all.
+#[test]
+fn the_default_folders_are_the_designs_the_recovery_folder_and_the_scratch_folder() {
+    let base = solidcraft_engine::io::vfs::temp_dir().join(format!("solidcraft-mcp-defaults-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let (proj, other, recovery) = (base.join("proj"), base.join("other"), base.join("recovery"));
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(proj.join(".env"), "TOKEN=secret").unwrap();
+    let at = |d: &std::path::Path, f: &str| d.join(f).to_string_lossy().to_string();
+    let scope = crate::agent_scope_with(Some(recovery.clone()), []);
+    let cwd = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+    assert!(!scope.roots().contains(&cwd), "the working folder is not a default folder: {scope:?}");
+    assert!(scope.roots().contains(&std::fs::canonicalize(&recovery).unwrap()), "{scope:?}");
+    assert!(scope.roots().contains(&std::fs::canonicalize(crate::scratch_dir().unwrap()).unwrap()), "{scope:?}");
+
+    let mut session = solidcraft_engine::Session::default();
+    session.execute("solid.box", &json!({"length": 10, "width": 10, "height": 10})).unwrap();
+    session.execute("file.save_as", &json!({"path": at(&proj, "part.solidcraft")})).unwrap();
+    let mut s = Server::new(Box::new(Headless::new(session))).with_path_scope(Some(scope));
+    // Legitimate work in the design's folder: export, save, open, screenshots, the recovery folder.
+    tool(&mut s, "export", json!({"path": at(&proj, "part.step")}));
+    tool(&mut s, "execute", json!({"command": "parameters.export", "params": {"path": at(&proj, "params.csv")}}));
+    tool(&mut s, "save", json!({"path": at(&proj, "copy.solidcraft")}));
+    tool(&mut s, "open", json!({"path": at(&proj, "part.solidcraft")}));
+    tool(&mut s, "screenshot", json!({"width": 32, "height": 32}));
+    tool(&mut s, "execute", json!({"command": "doc.recovery_list", "params": {"dir": recovery.to_string_lossy()}}));
+    assert!(proj.join("part.step").exists() && proj.join("copy.solidcraft").exists());
+    // Hidden files in it, and folders beside it, stay out of reach.
+    for (name, args) in [
+        ("export", json!({"path": at(&proj, ".env")})),
+        ("execute", json!({"command": "parameters.import", "params": {"path": at(&proj, ".env")}})),
+        ("export", json!({"path": at(&proj, ".git/x.step")})),
+        ("export", json!({"path": at(&other, "x.step")})),
+    ] {
+        let r = raw_tool(&mut s, name, args);
+        assert_eq!(r["result"]["isError"], json!(true), "{name}: {r}");
+    }
+    assert_eq!(std::fs::read_to_string(proj.join(".env")).unwrap(), "TOKEN=secret");
+    assert_eq!(std::fs::read_dir(&other).unwrap().count(), 0);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Tool calls reach files only inside the server's folders (#205): the usual workflow (save,
+/// export, open, screenshots) works there; a path outside, directly, through `..` or through a
+/// symlink that leads out, is refused with a clear error and nothing is written.
+#[test]
+fn tool_calls_stay_inside_the_agents_folders() {
+    use solidcraft_engine::io::vfs::PathScope;
+    let base = solidcraft_engine::io::vfs::temp_dir().join(format!("solidcraft-mcp-scope-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let (root, out) = (base.join("root"), base.join("out"));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&out).unwrap();
+    let at = |d: &std::path::Path, f: &str| d.join(f).to_string_lossy().to_string();
+    let defaults = crate::agent_scope_with(None, [root.clone()]);
+    assert!(defaults.roots().contains(&std::fs::canonicalize(&root).unwrap()), "{defaults:?}");
+    assert!(!defaults.roots().contains(&std::fs::canonicalize(std::env::temp_dir()).unwrap()), "{defaults:?}");
+    // Only `root` here, to tell inside from outside within the temporary folder.
+    let mut s = Server::new(Box::new(Headless::default())).with_path_scope(Some(PathScope::new([root.clone()])));
+    tool(&mut s, "execute", json!({"command": "solid.box", "params": {"length": 10, "width": 10, "height": 10}}));
+    tool(&mut s, "save", json!({"path": at(&root, "part.solidcraft")}));
+    tool(&mut s, "export", json!({"path": at(&root, "part.step")}));
+    tool(&mut s, "open", json!({"path": at(&root, "part.solidcraft")}));
+    tool(&mut s, "screenshot", json!({"path": at(&root, "shot.png"), "width": 64, "height": 64}));
+    let mut escapes = vec![at(&out, "x.step"), at(&root, "../out/x.step")];
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&out, root.join("link")).unwrap();
+        escapes.push(at(&root, "link/x.step"));
+    }
+    for p in escapes {
+        for (name, args) in [
+            ("export", json!({"path": p})),
+            ("save", json!({"path": p})),
+            ("open", json!({"path": p})),
+            ("screenshot", json!({"path": p, "width": 64, "height": 64})),
+            ("execute", json!({"command": "file.save_as", "params": {"path": p}})),
+            ("batch", json!({"commands": [{"command": "file.export", "params": {"path": p}}]})),
+        ] {
+            let r = raw_tool(&mut s, name, args);
+            assert_eq!(r["result"]["isError"], json!(true), "{name} {p}: {r}");
+            assert!(r.to_string().contains("outside the folders this agent may use"), "{name} {p}: {r}");
+        }
+    }
+    assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0, "nothing written outside");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// The short (8.3) spelling of an existing `path` as `cmd` gives it (`NAME~1.XYZ`), or `None`
+/// when it has no short name (the volume makes none).
+#[cfg(windows)]
+fn short_spelling(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    use std::os::windows::process::CommandExt;
+    let out = std::process::Command::new("cmd").raw_arg(format!("/d /c for %I in (\"{}\") do @echo %~sI", path.display())).output().ok()?;
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .filter(|s| solidcraft_engine::io::vfs::windows_refusal(s).is_some_and(|why| why.contains("8.3")))
+        .map(Into::into)
+}
+
+/// On Windows the temporary folder's path often has a short (8.3) name (the user folder's
+/// `NAME~1.XYZ` when its name is long). The server's own folders are spelled with long names
+/// there, so `screenshot` without a `path` (the scratch folder) and `doc.recovery_list` (the
+/// recovery folder) work; on such a machine both were refused as short names. Run in a child
+/// process whose `TMP`, `TEMP` and `SOLIDCRAFT_RECOVERY_DIR` are short spellings.
+#[cfg(windows)]
+#[test]
+fn the_servers_own_folders_work_when_the_temporary_folder_has_a_short_name() {
+    let base = solidcraft_engine::io::vfs::temp_dir().join(format!("solidcraft-mcp-short-names-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let (temp, recovery) = (base.join("temporary"), base.join("recovery folder"));
+    std::fs::create_dir_all(&temp).unwrap();
+    std::fs::create_dir_all(&recovery).unwrap();
+    let (Some(short_temp), Some(short_recovery)) = (short_spelling(&temp), short_spelling(&recovery)) else {
+        eprintln!("skipped: {} has no short (8.3) name on this volume", base.display());
+        let _ = std::fs::remove_dir_all(&base);
+        return;
+    };
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "tests::short_names_child", "--test-threads=1", "--nocapture"])
+        .env("TMP", &short_temp)
+        .env("TEMP", &short_temp)
+        .env("SOLIDCRAFT_RECOVERY_DIR", &short_recovery)
+        .env("SOLIDCRAFT_MCP_SHORT_NAMES_CHILD", "1")
+        .output()
+        .unwrap();
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success() && text.contains("short names: ok"), "{text}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// The child process of the test above; does nothing on its own.
+#[cfg(windows)]
+#[test]
+fn short_names_child() {
+    if std::env::var_os("SOLIDCRAFT_MCP_SHORT_NAMES_CHILD").is_none() {
+        return;
+    }
+    use solidcraft_engine::io::vfs::windows_refusal;
+    let temp = std::env::temp_dir();
+    assert!(windows_refusal(&temp.to_string_lossy()).is_some_and(|why| why.contains("8.3")), "{}", temp.display());
+    let mut s = Server::new(Box::new(Headless::default())).with_path_scope(Some(crate::agent_scope([])));
+    tool(&mut s, "execute", json!({"command": "solid.box", "params": {"length": 10, "width": 10, "height": 10}}));
+    tool(&mut s, "screenshot", json!({"width": 32, "height": 32}));
+    tool(&mut s, "execute", json!({"command": "doc.recovery_list", "params": {}}));
+    // An agent's own short spelling of the scratch folder stays refused.
+    let scratch = crate::scratch_dir().unwrap();
+    let short = std::env::temp_dir().join(scratch.file_name().unwrap()).join("shot.png");
+    let r = raw_tool(&mut s, "screenshot", json!({"path": short.to_string_lossy(), "width": 32, "height": 32}));
+    assert!(r.to_string().contains("short (8.3) names"), "{r}");
+    println!("short names: ok");
+}
+
+/// A bridged server sends the agent's folders with every request, so the app confines the
+/// request's files the same way (`allow_paths`, crates/ui-egui/src/control.rs).
+#[test]
+fn a_bridged_request_carries_the_agents_folders() {
+    use std::io::{BufRead, BufReader, Write};
+
+    use solidcraft_engine::io::vfs::{PathScope, scoped};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let echo = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        BufReader::new(stream.try_clone().unwrap()).read_line(&mut line).unwrap();
+        let req: Value = serde_json::from_str(&line).unwrap();
+        let mut result = req["params"].clone();
+        result["sent_token"] = req["token"].clone();
+        writeln!(&stream, "{}", json!({"id": req["id"], "ok": true, "result": result})).unwrap();
+    });
+    // The app's control token goes with the request too (#205).
+    let mut b = crate::Remote::connect_with_token(&addr, Some("0123456789abcdef0123456789abcdef")).unwrap();
+    let dir = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+    let got = scoped(Some(PathScope::new([dir.clone()])), || crate::Backend::call(&mut b, "engine.execute", json!({"command": "file.new"}))).unwrap();
+    assert_eq!(got["allow_paths"], json!([dir.to_string_lossy()]), "{got}");
+    assert_eq!(got["command"], "file.new");
+    assert_eq!(got["sent_token"], "0123456789abcdef0123456789abcdef");
+    echo.join().unwrap();
+}
+
 /// #528: an agent saves the angle of a product photo as a named view once, then renders the
 /// model from that view after each change. The render must use the saved camera, not a
 /// standard view.
@@ -704,6 +905,8 @@ fn skills_name_only_real_tools_and_commands() {
         include_str!("../../../skills/solidcraft-modeling/SKILL.md"),
         include_str!("../../../skills/solidcraft-modeling/reference.md"),
         include_str!("../../../skills/solidcraft-editing/SKILL.md"),
+        include_str!("../../../skills/solidcraft-checking/SKILL.md"),
+        include_str!("../../../skills/solidcraft-checking/reference/porting.md"),
     ];
     let mut s = server();
     let tools: Vec<String> = tool_definitions().iter().filter_map(|t| t["name"].as_str()).map(str::to_owned).collect();
@@ -746,4 +949,183 @@ fn instructions_name_only_real_tools() {
     for name in named {
         assert!(tools.iter().any(|t| t == name), "the instructions name `{name}`, which is not a tool");
     }
+}
+
+/// A fake app that records what it is asked and answers `engine.batch` as configured.
+struct Recorder {
+    calls: Vec<(String, Value)>,
+    batch: Result<Value, String>,
+}
+
+impl crate::backend::Backend for Recorder {
+    fn call(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        self.calls.push((method.to_string(), params.clone()));
+        match method {
+            "engine.batch" => self.batch.clone(),
+            "engine.execute" => match params["command"].as_str() {
+                Some("edit.checkpoint") => Ok(json!({"checkpoint": 3})),
+                Some(c) => Ok(json!({"ran": c})),
+                None => Err("missing `command`".into()),
+            },
+            "document.inspect" => Ok(json!({"undo": 0})),
+            other => Err(format!("unknown method `{other}`")),
+        }
+    }
+    fn has_ui(&self) -> bool {
+        true
+    }
+    fn describe(&self) -> String {
+        "recorder".into()
+    }
+}
+
+fn recorded_batch(batch: Result<Value, String>, args: Value) -> (Recorder, Value, bool) {
+    let mut b = Recorder { calls: Vec::new(), batch };
+    let r = crate::tools::call_tool(&mut b, "batch", &args);
+    let body = serde_json::from_str(r["content"][0]["text"].as_str().unwrap()).unwrap_or_else(|_| r["content"][0]["text"].clone());
+    let is_error = r["isError"] == json!(true);
+    (b, body, is_error)
+}
+
+fn methods(b: &Recorder) -> Vec<&str> {
+    b.calls.iter().map(|(m, _)| m.as_str()).collect()
+}
+
+/// #743: bridged to an app that has `engine.batch`, a batch is one control request.
+#[test]
+fn batch_is_one_engine_batch_call() {
+    let reply = json!({"completed": 2, "results": [{"feature": 1, "bodies": ["B"], "created_bodies": ["B"]}, {"x": 2}], "undone": 0});
+    let steps = json!([{"command": "a.one", "params": {"v": 1}}, {"command": "a.two"}]);
+    let (b, body, is_error) = recorded_batch(Ok(reply.clone()), json!({"commands": steps}));
+    assert_eq!(methods(&b), ["engine.batch"]);
+    assert_eq!(b.calls[0].1, json!({"commands": steps, "rollback": true}));
+    assert!(!is_error);
+    assert_eq!(body, json!({"ok": true, "completed": 2, "results": reply["results"]}));
+    // `verbose: false` compacts each step's result as the per-step path does.
+    let (_, body, _) = recorded_batch(Ok(reply), json!({"commands": steps, "verbose": false}));
+    assert_eq!(body["results"][0], json!({"feature": 1, "created_bodies": ["B"]}), "{body}");
+}
+
+#[test]
+fn batch_reports_a_failed_engine_batch_like_before() {
+    let reply = json!({"completed": 1, "results": [{"x": 1}], "failed": {"index": 1, "command": "a.two", "error": "boom"}, "undone": 1});
+    let (b, body, is_error) = recorded_batch(Ok(reply), json!({"commands": [{"command": "a.one"}, {"command": "a.two"}]}));
+    assert_eq!(methods(&b), ["engine.batch"]);
+    assert!(is_error);
+    assert_eq!(
+        body,
+        json!({"ok": false, "completed": 1, "failed": {"index": 1, "command": "a.two", "error": "boom"}, "rolled_back": true, "undone": 1, "results": [{"x": 1}]})
+    );
+}
+
+#[test]
+fn batch_falls_back_when_the_app_lacks_engine_batch() {
+    let (b, body, is_error) =
+        recorded_batch(Err("unknown method `engine.batch`".into()), json!({"commands": [{"command": "a.one"}, {"command": "a.two"}]}));
+    assert!(!is_error, "{body}");
+    let ran: Vec<&str> = b.calls.iter().filter(|(m, _)| m == "engine.execute").map(|(_, p)| p["command"].as_str().unwrap_or("")).collect();
+    assert!(ran.contains(&"a.one") && ran.contains(&"a.two"), "{ran:?}");
+    assert_eq!(body["results"], json!([{"ran": "a.one"}, {"ran": "a.two"}]));
+}
+
+#[test]
+fn batch_falls_back_while_the_agent_cursor_is_shown() {
+    let (b, body, is_error) =
+        recorded_batch(Err("engine.batch unavailable: the agent cursor is shown".into()), json!({"commands": [{"command": "a.one"}]}));
+    assert!(!is_error, "{body}");
+    assert!(b.calls.iter().any(|(m, p)| m == "engine.execute" && p["command"] == "a.one"), "{:?}", b.calls);
+}
+
+/// The app may have run the batch: sending the steps again would apply them twice.
+#[test]
+fn batch_does_not_resend_after_a_transport_error() {
+    let (b, body, is_error) =
+        recorded_batch(Err("SolidCraft at 127.0.0.1:1: timed out".into()), json!({"commands": [{"command": "a.one"}, {"command": "a.two"}]}));
+    assert_eq!(methods(&b), ["engine.batch"]);
+    assert!(is_error);
+    assert!(body.as_str().is_some_and(|t| t.contains("may have run") && t.contains("timed out")), "{body}");
+}
+
+/// A batch longer than one control line goes step by step instead of being refused unrun.
+#[test]
+fn batch_too_large_for_one_control_line_goes_per_step() {
+    let big = "x".repeat(solidcraft_engine::MAX_LINE);
+    let (b, body, is_error) = recorded_batch(Ok(json!({})), json!({"commands": [{"command": "a.one", "params": {"text": big}}]}));
+    assert!(!is_error, "{body}");
+    assert!(!methods(&b).contains(&"engine.batch"), "{:?}", methods(&b));
+    assert!(b.calls.iter().any(|(m, p)| m == "engine.execute" && p["command"] == "a.one"));
+}
+
+/// A fake app on a loopback port: counts connections and `engine.batch` lines, never replies to
+/// them (`close_first`: close a connection as soon as it is accepted).
+fn silent_app(close_first: bool) -> (String, std::sync::Arc<std::sync::Mutex<(usize, usize)>>) {
+    use std::io::BufRead;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new((0usize, 0usize)));
+    let counts = seen.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            counts.lock().unwrap().0 += 1;
+            let counts = counts.clone();
+            std::thread::spawn(move || {
+                if close_first && counts.lock().unwrap().0 > 1 {
+                    return;
+                }
+                let mut r = std::io::BufReader::new(stream);
+                let mut line = String::new();
+                while r.read_line(&mut line).is_ok_and(|n| n > 0) {
+                    if line.contains("engine.batch") {
+                        counts.lock().unwrap().1 += 1;
+                        return;
+                    }
+                    line.clear();
+                }
+            });
+        }
+    });
+    (addr, seen)
+}
+
+#[test]
+fn remote_engine_batch_is_not_resent_after_a_lost_reply() {
+    use crate::backend::Backend;
+    for close_first in [false, true] {
+        let (addr, seen) = silent_app(close_first);
+        let mut remote = crate::Remote::connect(&addr).unwrap();
+        let r = remote.call("engine.batch", json!({"commands": [{"command": "solid.box"}]}));
+        assert!(r.is_err(), "{r:?}");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let (connections, batches) = *seen.lock().unwrap();
+        // The connection from `connect`, and one fresh one for the batch: no resend.
+        assert_eq!(connections, 2, "close_first {close_first}: {connections} connections");
+        assert!(batches <= 1, "close_first {close_first}: the batch arrived {batches} times");
+        if !close_first {
+            assert_eq!(batches, 1);
+        }
+    }
+}
+
+/// Tool annotations never understate what a tool may do (#205): `screenshot` writes a file when
+/// given a `path`, and `execute`, `batch`, `save`, `export` and `open` can overwrite or delete
+/// files, so none of them is read-only and all are destructive and reach the file system.
+#[test]
+fn tool_annotations_tell_the_whole_truth() {
+    let tools = crate::tool_definitions();
+    let hints = |name: &str| {
+        let t = tools.iter().find(|t| t["name"] == name).unwrap_or_else(|| panic!("no tool {name}"));
+        let a = &t["annotations"];
+        (a["readOnlyHint"].as_bool().unwrap(), a["destructiveHint"].as_bool().unwrap(), a["openWorldHint"].as_bool().unwrap())
+    };
+    for name in ["execute", "batch", "save", "export", "open", "screenshot"] {
+        assert_eq!(hints(name), (false, true, true), "{name}");
+    }
+    for name in ["list_commands", "inspect_design", "measure", "body_topology", "crash_reports"] {
+        assert_eq!(hints(name), (true, false, false), "{name}");
+    }
+    assert_eq!(hints("new_design"), (false, true, false));
+    for name in ["set_parameter", "undo", "redo"] {
+        assert_eq!(hints(name), (false, false, false), "{name}");
+    }
+    assert!(tools.iter().all(|t| t["annotations"]["readOnlyHint"].is_boolean()), "every tool is annotated");
 }

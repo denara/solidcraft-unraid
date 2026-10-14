@@ -17,6 +17,11 @@ struct SurfaceState {
     alpha_mode: wgpu::CompositeAlphaMode,
     width: u32,
     height: u32,
+    /// SolidCraft: the window's size in pixels, which `width`/`height` may be clamped down from.
+    requested: (u32, u32),
+    /// SolidCraft: `width / requested.0` (1 unless clamped); egui is drawn at this scale so the
+    /// whole window still fits in the smaller surface.
+    scale: f32,
     resizing: bool,
     needs_reconfigure: bool,
     needs_recreate: bool,
@@ -117,16 +122,21 @@ impl Painter {
         let width = surface_state.width;
         let height = surface_state.height;
 
+        // SolidCraft: an unsupported surface is logged, not a panic.
+        let Some(default_config) = surface_state
+            .surface
+            .get_default_config(&render_state.adapter, width, height)
+        else {
+            log::error!("The surface isn't supported by this adapter");
+            return;
+        };
         let mut surf_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: render_state.target_format,
             present_mode,
             alpha_mode: surface_state.alpha_mode,
             view_formats: vec![render_state.target_format],
-            ..surface_state
-                .surface
-                .get_default_config(&render_state.adapter, width, height)
-                .expect("The surface isn't supported by this adapter")
+            ..default_config
         };
 
         if let Some(desired_maximum_frame_latency) = desired_maximum_frame_latency {
@@ -158,8 +168,8 @@ impl Painter {
         self.install_surface(
             surface,
             viewport_id,
-            old_state.width,
-            old_state.height,
+            old_state.requested.0,
+            old_state.requested.1,
             old_state.resizing,
         );
         Ok(())
@@ -296,6 +306,8 @@ impl Painter {
                 surface,
                 width,
                 height,
+                requested: (width, height),
+                scale: 1.0,
                 alpha_mode,
                 resizing,
                 needs_reconfigure: false,
@@ -332,14 +344,32 @@ impl Painter {
     ) {
         profiling::function_scope!();
 
-        let width = width_in_pixels.get();
-        let height = height_in_pixels.get();
+        // SolidCraft: no unwraps, and a window larger than the device's largest texture (a
+        // transient size while a window moves between monitors of different scale, or a window
+        // spanning several monitors) gets a surface clamped to it instead of a validation panic.
+        let (Some(render_state), Some(surface_state)) = (
+            self.render_state.as_ref(),
+            self.surfaces.get_mut(&viewport_id),
+        ) else {
+            log::warn!("Resize before the surface and render state exist; ignored");
+            return;
+        };
 
-        let render_state = self.render_state.as_ref().unwrap();
-        let surface_state = self.surfaces.get_mut(&viewport_id).unwrap();
+        let max_side = render_state.device.limits().max_texture_dimension_2d;
+        let requested = (width_in_pixels.get(), height_in_pixels.get());
+        let (width, height, scale) = crate::clamp_surface_extent(requested.0, requested.1, max_side);
+        if scale < 1.0 {
+            log::warn!(
+                "Window of {}x{} pixels is larger than the largest texture ({max_side}); drawing at {width}x{height}",
+                requested.0,
+                requested.1
+            );
+        }
 
         surface_state.width = width;
         surface_state.height = height;
+        surface_state.requested = requested;
+        surface_state.scale = scale;
 
         Self::configure_surface(surface_state, render_state, &self.config.surface);
 
@@ -560,9 +590,10 @@ impl Painter {
                 });
 
         // Upload all resources for the GPU.
+        // SolidCraft: a clamped surface draws the whole window at a smaller scale.
         let screen_descriptor = renderer::ScreenDescriptor {
             size_in_pixels: [surface_state.width, surface_state.height],
-            pixels_per_point,
+            pixels_per_point: pixels_per_point * surface_state.scale,
         };
 
         let user_cmd_bufs = {

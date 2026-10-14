@@ -198,6 +198,46 @@ fn circle_span(c: &[H], center: Vec2, radius: f64, tol: f64, source_error: f64, 
     (a.signum() == b.signum()).then_some(a + b)
 }
 
+/// [`segment`], except that a spline that is neither a line nor a circular arc comes back as lines
+/// and arcs that stay within `fit` of it (the walls of a body swept along a spline). `None` where
+/// [`segment`] refuses for another reason: not in the plane, not finite, over the work budget,
+/// or a rational spline.
+pub(super) fn segment_fitted(e: &mt::Edge, plane: &Plane, tol: f64, fit: f64, work: &mut usize) -> Option<Vec<Seg2>> {
+    if let Some(exact) = segment(e, plane, tol, work) {
+        return Some(exact);
+    }
+    if !tol.is_finite() || tol <= 0. || !fit.is_finite() || fit <= 0. {
+        return None;
+    }
+    let mut c = e.curve();
+    preflight(&c, work)?;
+    if !e.orientation() {
+        c.invert();
+    }
+    let (t0, t1) = c.range_tuple();
+    if !(t0.is_finite() && t1.is_finite() && t1 > t0) {
+        return None;
+    }
+    let (a3, b3) = (from_p3(c.subs(t0)), from_p3(c.subs(t1)));
+    if !a3.is_finite() || !b3.is_finite() || a3.dist(from_p3(e.front().point())) > tol || b3.dist(from_p3(e.back().point())) > tol {
+        return None;
+    }
+    let (spans, _) = controls(&c, plane, plane.height(a3), tol)?;
+    let mut out = Vec::new();
+    for span in spans {
+        if span.iter().any(|p| (p[2] - 1.).abs() > 1e-9) {
+            return None;
+        }
+        charge(work, 64)?;
+        let points: Vec<Vec2> = span.iter().map(|p| point(*p)).collect();
+        out.extend(solidcraft_geom::bezier(&points)?.fit_arcs(fit)?);
+        if out.len() > MAX_CONTROLS {
+            return None;
+        }
+    }
+    Some(out)
+}
+
 pub(super) fn segment(e: &mt::Edge, plane: &Plane, tol: f64, work: &mut usize) -> Option<Vec<Seg2>> {
     if !tol.is_finite() || tol <= 0. {
         return None;

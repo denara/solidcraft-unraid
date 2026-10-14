@@ -350,6 +350,15 @@ fn rules_dialog_picks_the_corner_relief_shape() {
     h.step(&json!({"start": "sheet.manage_rules"})).unwrap();
     h.frames(3);
     assert_eq!(shown(&h.app), Some(1), "the dialog shows the rule's shape");
+    // The tear: no relief in the base, both ends of all four bends torn.
+    h.step(&json!({"click": {"handle": "dialog:Corner Relief Shape"}})).unwrap();
+    h.step(&json!({"click": {"handle": "dialog:Corner Relief Shape:Tear"}})).unwrap();
+    assert_eq!(shown(&h.app), Some(3));
+    h.step(&json!({"widget": "OK"})).unwrap();
+    assert!(h.app.dialog.is_none(), "{:?}", h.app.dialog);
+    assert_eq!(h.app.session.doc.sheet_rule(None).corner_relief_shape, "tear");
+    let torn = h.app.session.model.state().sheets.last().map(|s| s.flanges.iter().filter(|f| f.tear == (true, true)).count());
+    assert_eq!((rounds(&h.app), torn), (Some(0), Some(4)));
 }
 
 #[test]

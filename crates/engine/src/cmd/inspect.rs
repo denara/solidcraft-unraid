@@ -66,7 +66,12 @@ fn measure(s: &mut Session, p: &Value) -> Result<Value> {
     let want = string_list(p, "bodies");
     let st = s.world_state();
     let selected: Vec<_> = st.bodies.iter().filter(|b| want.is_empty() || want.contains(&b.name)).collect();
-    let mut bodies: Vec<Value> = selected.iter().map(|b| measure_json(b)).collect();
+    // Each body is measured on its own: on all cores, in body order.
+    let mut bodies: Vec<Value> = solidcraft_kernel::map_on_threads(&selected, 16, |b| measure_json(b))
+        .into_iter()
+        .zip(&selected)
+        .map(|(m, b)| m.unwrap_or_else(|| json!({"name": b.name, "error": "measuring this body failed"})))
+        .collect();
     // Mass from each body's material.
     for (b, body) in bodies.iter_mut().zip(selected) {
         if let Some(v) = b["volume_mm3"].as_f64() {

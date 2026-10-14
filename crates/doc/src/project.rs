@@ -255,7 +255,11 @@ fn resolve_uncached(
         LinkSource::SketchAxis { name } => {
             vec![solidcraft_sketch::sketch_axis_geom(name).ok_or_else(|| DocError::Unknown(format!("sketch axis `{name}`")))?]
         }
-        LinkSource::Text { text, at, height, angle, font } => solidcraft_sketch::text_geometry_in(font.as_deref(), text, *at, *height, *angle)?,
+        LinkSource::Text { text, at, height, angle, font, style } if style.path.is_none() => {
+            solidcraft_sketch::text_geometry_styled(font.as_deref(), text, *at, *height, *angle, style, None)?
+        }
+        // Its path is a curve of its own sketch: set with the sketch (`Sketch::text_source_geometry`).
+        LinkSource::Text { .. } => return Err(DocError::Invalid("a text on a path is set with its sketch".into())),
         LinkSource::Plane { name } => {
             let pr =
                 if Plane::named(name).is_some() { PlaneRef::Origin { name: name.clone() } } else { PlaneRef::Construction { name: name.clone() } };
@@ -586,7 +590,15 @@ fn refresh_links_in(
                 }
             }
         }
-        let resolved = if l.auto_face {
+        let resolved = if matches!(source, LinkSource::Text { .. }) {
+            // A text needs nothing outside its sketch; one on a path follows a curve of it.
+            sk.text_source_geometry(&source).map_err(DocError::from).and_then(|geom| {
+                if geom.is_empty() {
+                    return Err(DocError::Invalid(format!("the {} makes no outline", source.describe())));
+                }
+                Ok(Resolved { geom, wires: Vec::new(), source: source.clone(), moved: false, face_index: None, edge_index: None })
+            })
+        } else if l.auto_face {
             anchor
                 .filter(|anchor| {
                     l.face_name.as_ref() == Some(&anchor.target.name) && matches!(&l.source,LinkSource::Face {body,..} if *body==anchor.target.body)
@@ -970,20 +982,32 @@ pub(crate) fn section(plane: &Plane, m: &Mesh, face: Option<u32>) -> Vec<LinkGeo
     let size = m.bounds().diagonal().max(1e-9);
     let q = size * 1e-7;
     let key = |p: Vec3| ((p.x / q).round() as i64, (p.y / q).round() as i64, (p.z / q).round() as i64);
-    // Surface normal at each mesh vertex where the surface is smooth (None at creases).
-    let mut normals: BTreeMap<(i64, i64, i64), Option<Vec3>> = BTreeMap::new();
-    for (t, _) in m.triangles.iter().zip(&m.tri_face) {
+    // Surface normal at each mesh vertex where the surface is smooth (None at creases), over
+    // all faces and per face.
+    type Key = (i64, i64, i64);
+    let mut normals: BTreeMap<Key, Option<Vec3>> = BTreeMap::new();
+    let mut face_normals: BTreeMap<(u32, Key), Option<Vec3>> = BTreeMap::new();
+    // Faces on either side of each mesh edge.
+    let mut edge_faces: BTreeMap<(Key, Key), Vec<u32>> = BTreeMap::new();
+    let merge = |e: &mut Option<Vec3>, n: Vec3| {
+        if e.is_some_and(|o| o.dot(n) < 1.0 - 1e-6) {
+            *e = None;
+        }
+    };
+    for (t, f) in m.triangles.iter().zip(&m.tri_face) {
         for k in t {
             let (Some(p), Some(n)) = (m.positions.get(*k as usize), m.normals.get(*k as usize)) else { continue };
             let Some(n) = n.normalized() else { continue };
-            normals
-                .entry(key(*p))
-                .and_modify(|e| {
-                    if e.is_some_and(|o| o.dot(n) < 1.0 - 1e-6) {
-                        *e = None;
-                    }
-                })
-                .or_insert(Some(n));
+            normals.entry(key(*p)).and_modify(|e| merge(e, n)).or_insert(Some(n));
+            face_normals.entry((*f, key(*p))).and_modify(|e| merge(e, n)).or_insert(Some(n));
+        }
+        for (i, j) in [(0usize, 1usize), (1, 2), (2, 0)] {
+            let (Some(a), Some(b)) = (t.get(i).and_then(|k| m.positions.get(*k as usize)), t.get(j).and_then(|k| m.positions.get(*k as usize)))
+            else {
+                continue;
+            };
+            let (ka, kb) = (key(*a), key(*b));
+            edge_faces.entry(if ka <= kb { (ka, kb) } else { (kb, ka) }).or_default().push(*f);
         }
     }
     // Where the plane crosses a mesh edge: on a cubic through the end points whose end
@@ -997,8 +1021,16 @@ pub(crate) fn section(plane: &Plane, m: &Mesh, face: Option<u32>) -> Vec<LinkGeo
             return None;
         }
         let d = b - a;
+        // An edge inside one face takes that face's normals (its ends may lie on the face's
+        // boundary, a crease for the whole mesh); an edge between faces, the merged ones, so
+        // both faces agree on the crossing.
+        let inside = edge_faces.get(&(key(a), key(b))).and_then(|fs| fs.first().filter(|f| fs.len() == 2 && fs.iter().all(|x| x == *f)).copied());
+        let normal = |p: Vec3| match inside {
+            Some(f) => face_normals.get(&(f, key(p))).copied().flatten(),
+            None => normals.get(&key(p)).copied().flatten(),
+        };
         // Tangent length: the arc length of a circle through both ends with these normals.
-        let (na, nb) = (normals.get(&key(a)).copied().flatten(), normals.get(&key(b)).copied().flatten());
+        let (na, nb) = (normal(a), normal(b));
         let l = match (na, nb) {
             (Some(x), Some(y)) => {
                 let half = 0.5 * x.dot(y).clamp(-1.0, 1.0).acos();
