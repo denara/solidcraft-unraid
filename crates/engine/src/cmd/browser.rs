@@ -38,8 +38,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     ),
     CommandSpec::new("browser.order", "Order Browser Items", order).params("folder, component?, order: [keys] (the folder's items in display order)"),
     CommandSpec::new("browser.visibility", "Show/Hide", visibility).icon("eye").noundo().params(
-        "visible: bool; items?: [sketch id or name | body name | construction name | O|X|Y|Z|XY|XZ|YZ]; \
-         or folder?: bodies|sketches|construction|origin (all of it); or paths?: [[occurrence ids]] (exact placements and descendants), isolate?: bool (requires paths and visible:true). Saved with the design; not an undo step",
+        "visible: bool; items?: [sketch id or name | body name | construction name | joint name | O|X|Y|Z|XY|XZ|YZ]; \
+         or joints?: [joint id or name] (their glyphs; they still constrain and move parts); \
+         or folder?: bodies|sketches|construction|origin|joints (all of it); or paths?: [[occurrence ids]] (exact placements and descendants), isolate?: bool (requires paths and visible:true). Saved with the design; not an undo step",
     ),
 ];
 
@@ -170,6 +171,8 @@ enum Shown {
     Body(String),
     /// Origin items and construction geometry, by name.
     Origin(String),
+    /// An assembly joint's glyph, by joint id.
+    Joint(u64),
 }
 
 fn is_construction(k: &FeatureKind) -> bool {
@@ -187,6 +190,9 @@ fn shown_item(s: &Session, key: &str) -> Option<Shown> {
     }
     if s.world_state().bodies.iter().any(|b| b.name == key) {
         return Some(Shown::Body(key.to_string()));
+    }
+    if let Some(j) = s.doc.assembly.joints.iter().find(|j| j.name == key) {
+        return Some(Shown::Joint(j.id));
     }
     ORIGIN.iter().find(|o| o.eq_ignore_ascii_case(key)).map(|o| Shown::Origin(o.to_string()))
 }
@@ -255,12 +261,24 @@ fn visibility(s: &mut Session, p: &Value) -> Result<Value> {
         return Ok(json!({"visible":visible,"changed":paths.len(),"visibility":s.visibility}));
     }
     let items: Vec<Shown> = match (str_(p, "folder"), p.get("items")) {
+        _ if p.get("joints").is_some() => {
+            if p.get("items").is_some() || p.get("folder").is_some() {
+                return Err(bad(cmd, "give `joints`, `items` or `folder`, not several"));
+            }
+            let list = p
+                .get("joints")
+                .and_then(Value::as_array)
+                .filter(|a| !a.is_empty() && a.len() <= 10_000)
+                .ok_or_else(|| bad(cmd, "`joints` must list 1..10000 joint ids or names"))?;
+            list.iter().map(|j| super::joints::joint_id(s, Some(j), cmd).map(Shown::Joint)).collect::<Result<_>>()?
+        }
         (Some(_), Some(_)) => return Err(bad(cmd, "give `items` or `folder`, not both")),
         (Some("bodies"), None) => s.world_state().bodies.iter().map(|b| Shown::Body(b.name.clone())).collect(),
         (Some("sketches"), None) => s.model.state().sketches.iter().map(|x| Shown::Sketch(x.feature)).collect(),
         (Some("construction"), None) => s.doc.features.iter().filter(|f| is_construction(&f.kind)).map(|f| Shown::Origin(f.name.clone())).collect(),
         (Some("origin"), None) => ORIGIN.iter().map(|o| Shown::Origin(o.to_string())).collect(),
-        (Some(f), None) => return Err(bad(cmd, format!("unknown folder `{f}` (bodies, sketches, construction, origin)"))),
+        (Some("joints"), None) => s.doc.assembly.joints.iter().map(|j| Shown::Joint(j.id)).collect(),
+        (Some(f), None) => return Err(bad(cmd, format!("unknown folder `{f}` (bodies, sketches, construction, origin, joints)"))),
         (None, Some(_)) => {
             let keys = keys(p, "items", cmd)?;
             if keys.is_empty() {
@@ -268,7 +286,7 @@ fn visibility(s: &mut Session, p: &Value) -> Result<Value> {
             }
             // Every item is found before anything changes.
             keys.iter()
-                .map(|k| shown_item(s, k).ok_or_else(|| bad(cmd, format!("no sketch, body or construction item `{k}`"))))
+                .map(|k| shown_item(s, k).ok_or_else(|| bad(cmd, format!("no sketch, body, construction item or joint `{k}`"))))
                 .collect::<Result<_>>()?
         }
         (None, None) => return Err(bad(cmd, "`items` or `folder` is required")),
@@ -294,6 +312,12 @@ fn visibility(s: &mut Session, p: &Value) -> Result<Value> {
                 v.hidden_origin.retain(|x| x != n);
                 if !visible {
                     v.hidden_origin.push(n.clone());
+                }
+            }
+            Shown::Joint(id) => {
+                v.hidden_joints.retain(|x| x != id);
+                if !visible {
+                    v.hidden_joints.push(*id);
                 }
             }
         }
@@ -496,7 +520,33 @@ fn rename_body(s: &mut Session, p: &Value) -> Result<Value> {
     let fid = b.feature;
     let siblings: Vec<String> = st.bodies.iter().filter(|x| x.feature == fid).map(|x| x.name.clone()).collect();
     let k = siblings.iter().position(|n| *n == old).unwrap_or(0);
+    // A body numbered by the counter (`BodyN`) gives its number back once it has a name of its
+    // own, and every counted body after it would move down one (`Body3` becoming `Body1`) and
+    // break what names it. Those later features keep the names they made too (#1109): each one's
+    // own result holds them, also for bodies a later feature joins away.
+    let counted = |f: &solidcraft_doc::Feature, i: usize| {
+        let first = f.body_names.first().is_some_and(|n| !n.trim().is_empty());
+        f.body_names.get(i).is_none_or(|n| n.trim().is_empty()) && (f.shell_piece_order || i < f.body_names.len() || !first)
+    };
+    let later: Vec<(u64, Vec<String>)> = match s.doc.features.iter().position(|f| f.id == fid) {
+        Some(at) if s.doc.features.get(at).is_some_and(|f| counted(f, k)) => s
+            .doc
+            .features
+            .iter()
+            .skip(at + 1)
+            .filter_map(|f| {
+                let made: Vec<String> = s.model.result(f.id)?.state.bodies.iter().filter(|x| x.feature == f.id).map(|x| x.name.clone()).collect();
+                (0..made.len()).any(|i| counted(f, i)).then_some((f.id, made))
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
     let d = s.doc_mut();
+    for (id, made) in &later {
+        if let Some(f) = d.feature_mut(*id) {
+            f.body_names.clone_from(made);
+        }
+    }
     let f = d.feature_mut(fid).ok_or_else(|| bad(cmd, "the body's feature is gone"))?;
     while f.body_names.len() < siblings.len().max(k + 1) {
         let i = f.body_names.len();
@@ -511,6 +561,11 @@ fn rename_body(s: &mut Session, p: &Value) -> Result<Value> {
     // Later features refer to bodies by name.
     let mut failed = None;
     for f in d.features.iter_mut().filter(|f| f.id != fid) {
+        // The bodies a join/cut/intersect may change (a primitive's `targets`) are kept beside
+        // the feature's kind, not in it (#1108).
+        for b in f.participants.iter_mut().filter(|b| **b == old) {
+            *b = name.to_string();
+        }
         if let FeatureKind::Sketch { plane, .. } = &mut f.kind {
             solidcraft_doc::sheet::rename_plane_sheet_body(plane, &old, name);
         }
@@ -709,6 +764,59 @@ mod tests {
         assert!(s.execute("body.rename", &json!({"body": "Lid", "name": " "})).is_err());
         run(&mut s, "edit.undo", json!({}));
         assert_eq!(names(&s)[1], b);
+    }
+
+    /// #1108: a primitive's `targets` are its participants, kept beside its kind; a rename
+    /// follows them, as it follows the names inside the kind (a combine's target and tools).
+    #[test]
+    fn renamed_body_keeps_the_primitives_that_target_it() {
+        let mut s = Session::default();
+        let total = |s: &mut Session| run(s, "inspect.measure", json!({}))["total"]["volume_mm3"].as_f64().unwrap();
+        run(&mut s, "solid.box", json!({"length": 20, "width": 20, "height": 10, "name": "Block", "body_name": "A"}));
+        run(&mut s, "solid.cylinder", json!({"diameter": 5, "height": 12, "base": [5, 5, -1], "operation": "cut", "targets": ["A"], "name": "Hole"}));
+        run(&mut s, "solid.box", json!({"length": 5, "width": 5, "height": 5, "corner": [20, 0, 0], "operation": "new", "body_name": "Tab"}));
+        run(&mut s, "solid.combine", json!({"target": "A", "tools": ["Tab"], "operation": "join", "name": "Joined"}));
+        let want = total(&mut s);
+        run(&mut s, "body.rename", json!({"body": "A", "name": "B"}));
+        assert!(
+            s.model.results.iter().all(|r| r.error.is_none()),
+            "{:?}",
+            s.model.results.iter().filter_map(|r| r.error.clone()).collect::<Vec<_>>()
+        );
+        assert_eq!(s.doc.find_feature("Hole").unwrap().participants, vec!["B".to_string()]);
+        assert!((total(&mut s) - want).abs() < 1e-6);
+        run(&mut s, "edit.undo", json!({}));
+        assert_eq!(s.doc.find_feature("Hole").unwrap().participants, vec!["A".to_string()]);
+    }
+
+    /// #1109: renaming counted bodies (`Body1`, `Body2` of one pattern) leaves the counted bodies
+    /// of later features as they were (`Body3`, `Body4`), and what names them keeps working.
+    #[test]
+    fn renaming_counted_bodies_keeps_later_counted_names() {
+        let mut s = Session::default();
+        run(&mut s, "solid.box", json!({"length": 5, "width": 5, "height": 5, "center": [0, 0, 2.5], "name": "B1", "body_name": "First"}));
+        run(&mut s, "solid.pattern.rectangular", json!({"features": ["B1"], "dir1": [1, 0, 0], "count1": 3, "spacing1": 10, "name": "P1"}));
+        run(&mut s, "solid.box", json!({"length": 5, "width": 5, "height": 5, "center": [0, 20, 2.5], "name": "B2", "body_name": "Second"}));
+        run(&mut s, "solid.pattern.rectangular", json!({"features": ["B2"], "dir1": [1, 0, 0], "count1": 3, "spacing1": 10, "name": "P2"}));
+        run(&mut s, "solid.box", json!({"length": 5, "width": 5, "height": 5, "center": [10, 25, 2.5], "operation": "new", "name": "Bar"}));
+        let before = names(&s);
+        assert!(["Body1", "Body2", "Body3", "Body4", "Body5"].iter().all(|n| before.contains(&n.to_string())), "{before:?}");
+        run(&mut s, "solid.combine", json!({"target": "Body3", "tools": ["Body5"], "operation": "join", "name": "Joined"}));
+        // Renaming a body that already has a name of its own stores nothing elsewhere.
+        run(&mut s, "body.rename", json!({"body": "Second", "name": "Row"}));
+        assert!(s.doc.find_feature("P2").unwrap().body_names.is_empty());
+        run(&mut s, "body.rename", json!({"body": "Body1", "name": "FirstCopyA"}));
+        run(&mut s, "body.rename", json!({"body": "Body2", "name": "FirstCopyB"}));
+        assert!(
+            s.model.results.iter().all(|r| r.error.is_none()),
+            "{:?}",
+            s.model.results.iter().filter_map(|r| r.error.clone()).collect::<Vec<_>>()
+        );
+        let after = names(&s);
+        assert!(after.contains(&"Body3".to_string()) && after.contains(&"Body4".to_string()), "{after:?}");
+        assert!(!after.contains(&"Body1".to_string()) && !after.contains(&"Body5".to_string()), "{after:?}");
+        run(&mut s, "edit.undo", json!({}));
+        assert!(names(&s).contains(&"Body2".to_string()) && names(&s).contains(&"Body4".to_string()), "{:?}", names(&s));
     }
 
     #[test]

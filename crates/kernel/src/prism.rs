@@ -1866,11 +1866,13 @@ fn stack_tagged(b: &Body, d: Vec3, plane: &Plane, tol: f64, index: &LazyIndex) -
 
 #[cfg(test)]
 fn stack_boolean(a: &Body, b: &Body, op: BoolOp) -> Option<Result<Option<Body>>> {
-    stack_indexed(a, b, op, [&LazyIndex::new(a, 0), &LazyIndex::new(b, 1)])
+    stack_indexed(a, b, op, [&LazyIndex::new(a, 0), &LazyIndex::new(b, 1)], true)
 }
 
-/// [`prism_boolean`] of stepped prisms, the operands' indexes given.
-fn stack_indexed(a: &Body, b: &Body, op: BoolOp, [ia, ib]: [&LazyIndex; 2]) -> Option<Result<Option<Body>>> {
+/// [`prism_boolean`] of stepped prisms, the operands' indexes given. A union is taken of
+/// operands that end at a common level when `common_cap` is set, else of those that don't (see
+/// [`prism_union_between_caps`]).
+fn stack_indexed(a: &Body, b: &Body, op: BoolOp, [ia, ib]: [&LazyIndex; 2], common_cap: bool) -> Option<Result<Option<Body>>> {
     // Common-cap joins and overlapping partial-depth cuts of aligned stepped prisms can
     // retain their exact section boundaries instead of intersecting meshes.
     // Nonaligned bodies retain their existing B-rep path.
@@ -1901,8 +1903,9 @@ fn stack_indexed(a: &Body, b: &Body, op: BoolOp, [ia, ib]: [&LazyIndex; 2]) -> O
         let pa = stack_tagged(a, d, &plane, tol, ia)?;
         let pb = stack_tagged(b, d, &plane, tol, ib)?;
         let (ea, eb) = (ends(&pa), ends(&pb));
+        let shared = (ea.0 - eb.0).abs() < tol || (ea.1 - eb.1).abs() < tol;
         match op {
-            BoolOp::Union if (ea.0 - eb.0).abs() >= tol && (ea.1 - eb.1).abs() >= tol => return None,
+            BoolOp::Union if shared != common_cap => return None,
             // A cut tool may extend past a cap into empty space. Exact slab sections
             // discard that space rather than intersecting coincident cylinder walls.
             BoolOp::Cut if ea.1 <= eb.0 + tol || eb.1 <= ea.0 + tol => return None,
@@ -1982,7 +1985,19 @@ pub(crate) fn prism_boolean_free_form(a: &Body, b: &Body, op: BoolOp) -> Option<
 pub(crate) fn prism_boolean(a: &Body, b: &Body, op: BoolOp) -> Option<Result<Option<Body>>> {
     // Each operand's index is built once, and only if it is read as a prism.
     let index = [&LazyIndex::new(a, 0), &LazyIndex::new(b, 1)];
-    crate::guard("prism boolean", || Ok(simple_prism_indexed(a, b, op, index).or_else(|| stack_indexed(a, b, op, index)))).ok().flatten()
+    crate::guard("prism boolean", || Ok(simple_prism_indexed(a, b, op, index).or_else(|| stack_indexed(a, b, op, index, true)))).ok().flatten()
+}
+
+/// [`prism_boolean`] of a union of stepped prisms along one direction that end at different
+/// levels (a barrel joined between two faces of a wider part, its ends flush with them), which
+/// that route leaves to the B-rep boolean: for when that boolean has failed. `None` for other
+/// operations and operands.
+pub(crate) fn prism_union_between_caps(a: &Body, b: &Body, op: BoolOp) -> Option<Result<Option<Body>>> {
+    if op != BoolOp::Union {
+        return None;
+    }
+    let index = [&LazyIndex::new(a, 0), &LazyIndex::new(b, 1)];
+    crate::guard("prism boolean", || Ok(stack_indexed(a, b, op, index, false))).ok().flatten()
 }
 
 #[cfg(test)]

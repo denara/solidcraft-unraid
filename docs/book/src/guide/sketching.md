@@ -57,6 +57,11 @@ geometry cannot identify one text: use **Select Other** to choose its outline in
 Change the text, font, baseline X/Y, height or angle, then confirm with **OK**; **Cancel**
 keeps the original text. Position and height use the document's units.
 
+A text can follow a curve of its sketch (its **Path**). That curve becomes construction: the
+letters stand on it and their descenders cross it, so as a normal curve it would cut them into
+pieces, and picking the text would pick those pieces. Taking the text off the curve leaves it
+construction; **Normal/Construction** turns it back.
+
 Drag a text outline to move all its letters together. Let go to finish in one undo step,
 or press **Esc** during the drag to restore the original text. The text stays editable.
 For an exact displacement, select an outline and choose **Move/Copy** from its context menu.
@@ -240,6 +245,17 @@ while the window is open. Sketch modify tools take geometry from the sketch bein
 Proposed sketch geometry appears **green** before confirmation. Change the inputs or values to
 update the preview, then press **OK**. **Cancel** discards the preview. A circular pattern centre
 can be an existing point or a position clicked in empty sketch space.
+
+Sketch patterns keep each instance related to the seed geometry: moving the seed updates the
+copies, and a copy cannot deform independently. Circle and ellipse radii follow the seed too.
+Choose a circle's centre point to keep a circular pattern centred on that circle. A centre
+placed in empty space becomes a sketch point that can be dimensioned or made coincident.
+Double-click the pattern badge (at the circular centre or beside the rectangular seed), or
+right-click a seed or copy and choose **Edit Sketch Pattern**, to change quantity, spacing,
+direction or total angle. Confirmed edits preserve surviving instance ids; Cancel discards
+the preview. Pattern settings survive save/reopen and undo/redo. Deleting a seed, copy or
+pattern relation breaks that association and leaves the remaining geometry independent.
+Patterns saved by older versions remain independent copies; recreate them to add associations.
 
 Offset distances are editable driving dimensions: double-click a dimension or change its model
 parameter to resize the offset without moving its source curves. The selected side, distance,

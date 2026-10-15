@@ -196,6 +196,34 @@ fn agent_builds_box_fillet_hole() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `open` hands `up` and `names` to the STEP import, and the tool's schema refuses other values.
+#[test]
+fn open_stands_a_y_up_step_file_up() {
+    let mut s = server();
+    tool(&mut s, "execute", json!({"command": "solid.box", "params": {"length": 10, "width": 40, "height": 5}}));
+    let dir = std::env::temp_dir().join(format!("solidcraft-mcp-up-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let step = dir.join("tall.step").to_string_lossy().to_string();
+    tool(&mut s, "export", json!({"path": step}));
+    let height = |s: &mut Server| {
+        let bbox = tool(s, "measure", json!({}))["bodies"][0]["bbox"].clone();
+        bbox["max"][2].as_f64().unwrap() - bbox["min"][2].as_f64().unwrap()
+    };
+
+    let r = tool(&mut s, "open", json!({"path": step}));
+    assert_eq!(r["features"], 1, "{r}");
+    assert!((height(&mut s) - 5.0).abs() < 1e-6, "as written");
+    let r = tool(&mut s, "open", json!({"path": step, "up": "y", "names": "product"}));
+    assert_eq!(r["features"], 2, "the import and the turn: {r}");
+    assert!((height(&mut s) - 40.0).abs() < 1e-6, "Y became Z");
+
+    for args in [json!({"path": step, "up": "x"}), json!({"path": step, "names": "label"}), json!({"path": step, "up": 1})] {
+        let r = raw_tool(&mut s, "open", args.clone());
+        assert_eq!(r["error"]["code"], -32602, "{args}: {r}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn save_selects_container_or_json_and_reopens_by_contents() {
     let mut s = server();
@@ -240,6 +268,18 @@ fn parameters_drive_the_design() {
     assert!(rel(volume(&mut s), 50.0 * 30.0 * 25.0) < 1e-9);
     let d = tool(&mut s, "inspect_design", json!({"measure": false, "sketches": false}));
     assert!(d["params"].as_array().unwrap().iter().any(|p| p["name"] == "len" && p["value"] == 50.0), "{d}");
+}
+
+/// Design properties (#1015) are set through `execute` and come back in `inspect_design`.
+#[test]
+fn design_properties_show_in_inspect_design() {
+    let mut s = server();
+    let d = tool(&mut s, "inspect_design", json!({"measure": false, "sketches": false}));
+    assert_eq!(d["metadata"], json!({}), "{d}");
+    let params = json!({"values": {"author": "Agent", "com.example.agent": {"session": 7}}});
+    tool(&mut s, "execute", json!({"command": "document.metadata.set", "params": params}));
+    let d = tool(&mut s, "inspect_design", json!({"measure": false, "sketches": false}));
+    assert_eq!(d["metadata"], json!({"author": "Agent", "com.example.agent": {"session": 7}}), "{d}");
 }
 
 #[test]
@@ -524,7 +564,9 @@ fn tool_calls_stay_inside_the_agents_folders() {
     tool(&mut s, "export", json!({"path": at(&root, "part.step")}));
     tool(&mut s, "open", json!({"path": at(&root, "part.solidcraft")}));
     tool(&mut s, "screenshot", json!({"path": at(&root, "shot.png"), "width": 64, "height": 64}));
-    let mut escapes = vec![at(&out, "x.step"), at(&root, "../out/x.step")];
+    let escapes = vec![at(&out, "x.step"), at(&root, "../out/x.step")];
+    #[cfg(unix)]
+    let mut escapes = escapes;
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(&out, root.join("link")).unwrap();
@@ -661,6 +703,97 @@ fn screenshot_renders_a_saved_named_view() {
     let direct = tool(&mut s, "screenshot", json!({"camera": camera, "width": 96, "height": 64}));
     assert_eq!(direct["data"].as_str().unwrap_or_default(), photo);
     assert_eq!(shot(&mut s, "iso"), iso);
+}
+
+/// The ground grid lies on Z 0 and cuts through a part that straddles it: `grid: false` and
+/// `axes: false` leave it and the origin's axes out of the render. An axis hidden with
+/// `browser.visibility` stays out whatever `axes` says.
+#[test]
+fn screenshot_can_leave_the_grid_and_the_axes_out() {
+    let mut s = server();
+    tool(&mut s, "execute", json!({"command": "solid.box", "params": {"length": 40, "width": 30, "height": 20, "corner": [10, -15, -10]}}));
+    let shot = |s: &mut Server, extra: Value| {
+        let mut args = json!({"view": "front", "width": 96, "height": 64});
+        args.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        tool(s, "screenshot", args)["data"].as_str().unwrap_or_default().to_string()
+    };
+    let all = shot(&mut s, json!({}));
+    let no_grid = shot(&mut s, json!({"grid": false}));
+    let no_axes = shot(&mut s, json!({"axes": false}));
+    let bare = shot(&mut s, json!({"grid": false, "axes": false}));
+    assert!(all.starts_with("iVBORw0KGgo"), "not a PNG");
+    let pictures = [&all, &no_grid, &no_axes, &bare];
+    for (i, a) in pictures.iter().enumerate() {
+        for b in &pictures[i + 1..] {
+            assert_ne!(a, b, "two of the pictures are the same");
+        }
+    }
+    // Asking for them is the default.
+    assert_eq!(shot(&mut s, json!({"grid": true, "axes": true})), all);
+    // Hiding the origin leaves the axes out, with or without `axes`; the grid is not the origin.
+    tool(&mut s, "execute", json!({"command": "browser.visibility", "params": {"folder": "origin", "visible": false}}));
+    assert_eq!(shot(&mut s, json!({})), no_axes);
+    assert_eq!(shot(&mut s, json!({"axes": true})), no_axes);
+    assert_eq!(shot(&mut s, json!({"grid": false})), bare);
+    // Other than booleans are schema errors.
+    for bad in [json!({"grid": "no"}), json!({"axes": 0})] {
+        assert_eq!(raw_tool(&mut s, "screenshot", bad)["error"]["code"], -32602);
+    }
+}
+
+/// Bridged to an app, `grid` and `axes` ask for a model render and travel with it; without them
+/// the window is captured as before; the window cannot be asked to leave things out.
+#[test]
+fn bridged_screenshots_with_grid_or_axes_are_model_renders() {
+    struct App {
+        calls: Vec<(String, Value)>,
+    }
+    impl crate::backend::Backend for App {
+        fn call(&mut self, method: &str, params: Value) -> Result<Value, String> {
+            self.calls.push((method.to_string(), params.clone()));
+            match method {
+                "ui.render" | "ui.screenshot" => {
+                    let path = params["path"].as_str().ok_or("missing `path`")?;
+                    std::fs::write(path, b"\x89PNG").map_err(|e| e.to_string())?;
+                    Ok(json!({"path": path, "width": 64, "height": 48}))
+                }
+                other => Err(format!("unknown method `{other}`")),
+            }
+        }
+        fn has_ui(&self) -> bool {
+            true
+        }
+        fn describe(&self) -> String {
+            "app".into()
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("solidcraft-mcp-guides-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("shot.png").to_string_lossy().to_string();
+    let shoot = |extra: Value| {
+        let mut args = json!({"path": path, "width": 64, "height": 48});
+        args.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        let mut app = App { calls: Vec::new() };
+        let r = crate::tools::call_tool(&mut app, "screenshot", &args);
+        (app.calls, r)
+    };
+    let (calls, r) = shoot(json!({}));
+    assert!(r["isError"] != json!(true), "{r}");
+    assert_eq!(calls.iter().map(|(m, _)| m.as_str()).collect::<Vec<_>>(), ["ui.screenshot"]);
+    let (calls, r) = shoot(json!({"grid": false, "axes": false}));
+    assert!(r["isError"] != json!(true), "{r}");
+    assert_eq!(calls, [("ui.render".to_string(), json!({"path": path, "width": 64, "height": 48, "grid": false, "axes": false}))]);
+    let (calls, _) = shoot(json!({"axes": true}));
+    assert_eq!(calls, [("ui.render".to_string(), json!({"path": path, "width": 64, "height": 48, "axes": true}))]);
+    let (calls, r) = shoot(json!({"source": "model", "grid": false}));
+    assert!(r["isError"] != json!(true), "{r}");
+    assert_eq!(calls, [("ui.render".to_string(), json!({"path": path, "width": 64, "height": 48, "grid": false}))]);
+    // The window shows what it shows: nothing is called, and the error says what to ask for.
+    let (calls, r) = shoot(json!({"source": "window", "grid": false, "view": "top"}));
+    assert_eq!(r["isError"], json!(true), "{r}");
+    assert!(r["content"][0]["text"].as_str().unwrap().contains("source"), "{r}");
+    assert!(calls.is_empty(), "{calls:?}");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// #530: in a design with many bodies every feature result lists all of them, so a batch reply
@@ -897,6 +1030,58 @@ fn sketch_plane_axes_match_the_skill_reference() {
     }
 }
 
+/// The worked example in `skills/solidcraft-mechanisms/reference.md` is what agents copy: the
+/// actuator has to follow the hinge with the stroke the file computes, the mirrored panel its link,
+/// and the drive has to stop where the rod reaches its limit.
+#[test]
+fn mechanisms_skill_example_moves_as_documented() {
+    let doc = include_str!("../../../skills/solidcraft-mechanisms/reference.md");
+    let start = doc.find("{\"commands\":[").expect("the reference has a worked example");
+    let end = start + doc[start..].find("```").expect("the example's code block ends");
+    let example: Value = serde_json::from_str(&doc[start..end]).expect("the example is JSON");
+    let mut s = server();
+    tool(&mut s, "batch", example);
+    let exec = |s: &mut Server, command: &str, params: Value| tool(s, "execute", json!({"command": command, "params": params}));
+    let value = |list: &Value, joint: &str| {
+        let j = list["joints"].as_array().unwrap().iter().find(|j| j["name"] == joint).unwrap_or_else(|| panic!("no joint {joint}: {list}"));
+        j["values"][0]["value"].as_f64().unwrap()
+    };
+    let com = |s: &mut Server, occurrence: &str| -> Vec<f64> {
+        let p = exec(s, "occurrence.properties", json!({"occurrence": occurrence}));
+        p["total"]["center_of_mass"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect()
+    };
+    // Frame 0, the panels and the actuator one motion between them; nothing open.
+    let list = exec(&mut s, "joint.list", json!({}));
+    assert_eq!(list["conflicts"], json!([]), "{list}");
+    let mut dof: Vec<u64> = list["dof"].as_array().unwrap().iter().map(|d| d["dof"].as_u64().unwrap()).collect();
+    dof.sort_unstable();
+    assert_eq!(dof, [0, 0, 1, 1, 1, 1], "root, Frame, then Wing, Wing 2, barrel and rod: {list}");
+    let near = |got: &[f64], want: [f64; 3]| got.iter().zip(want).all(|(g, w)| (g - w).abs() < 1e-3);
+    let wing = com(&mut s, "Wing:1");
+    assert!(near(&wing, [0.0, 20.0, 1.5]), "joined where it was modelled: {wing:?}");
+
+    // The tip at (0, 30 cos θ, 30 sin θ), the root at (0, 0, -40): L² = 2500 + 2400 sin θ.
+    let stroke = |deg: f64| (2500.0 + 2400.0 * deg.to_radians().sin()).sqrt() - 50.0;
+    assert!((stroke(20.0) - 7.6268).abs() < 5e-5, "the reference states {}", stroke(20.0));
+    exec(&mut s, "joint.drive", json!({"joint": "Hinge", "value": 20}));
+    let list = exec(&mut s, "joint.list", json!({}));
+    assert!((value(&list, "Stroke") - stroke(20.0)).abs() < 1e-6, "{list}");
+    assert!((value(&list, "Hinge 2") + 20.0).abs() < 1e-9, "{list}");
+    let (wing, wing2) = (com(&mut s, "Wing:1"), com(&mut s, "Wing 2:1"));
+    assert!(near(&wing, [0.0, 18.281, 8.250]), "{wing:?}");
+    assert!(near(&wing2, [0.0, -18.281, 8.250]), "{wing2:?}");
+
+    // The rod reaches +10 mm where L = 60: sin θ = 11/24.
+    let stop = (11.0f64 / 24.0).asin().to_degrees();
+    assert!((stop - 27.280).abs() < 5e-4, "the reference states {stop}");
+    let r = exec(&mut s, "joint.drive", json!({"joint": "Hinge", "value": 45}));
+    assert_eq!(r["stopped_by_loop"]["joint"], "Stroke", "{r}");
+    let list = exec(&mut s, "joint.list", json!({}));
+    let hinge = value(&list, "Hinge");
+    assert!((hinge - stop).abs() < 0.01, "stopped at {hinge}, the rod's limit is at {stop}");
+    assert!(value(&list, "Stroke") <= 10.0 + 1e-6 && (value(&list, "Stroke") - stroke(hinge)).abs() < 1e-6, "{list}");
+}
+
 /// Every tool and command the agent skills call exists, so a rename or removal can't leave the
 /// skills sending agents to names the server no longer has.
 #[test]
@@ -907,6 +1092,8 @@ fn skills_name_only_real_tools_and_commands() {
         include_str!("../../../skills/solidcraft-editing/SKILL.md"),
         include_str!("../../../skills/solidcraft-checking/SKILL.md"),
         include_str!("../../../skills/solidcraft-checking/reference/porting.md"),
+        include_str!("../../../skills/solidcraft-mechanisms/SKILL.md"),
+        include_str!("../../../skills/solidcraft-mechanisms/reference.md"),
     ];
     let mut s = server();
     let tools: Vec<String> = tool_definitions().iter().filter_map(|t| t["name"].as_str()).map(str::to_owned).collect();
@@ -1104,6 +1291,63 @@ fn remote_engine_batch_is_not_resent_after_a_lost_reply() {
             assert_eq!(batches, 1);
         }
     }
+}
+
+/// A bridge made before the app runs keeps its tools (#270): calls say the app is not running and
+/// how to start it (a batch was never sent, so it may not "have run"), and reach the app once it
+/// listens.
+#[test]
+fn a_bridge_made_before_the_app_runs_connects_once_it_does() {
+    use std::io::{BufRead, BufReader, Write};
+
+    use crate::backend::Backend;
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut remote = crate::Remote::new(&addr, Some("0123456789abcdef0123456789abcdef"));
+    // Still "connected to the SolidCraft app", which the skills read as bridged.
+    assert!(remote.describe().starts_with("connected to the SolidCraft app") && remote.describe().contains("not running"), "{}", remote.describe());
+    let e = remote.call("engine.execute", json!({"command": "inspect.measure"})).unwrap_err();
+    assert!(e.starts_with(crate::backend::NOT_RUNNING) && e.contains(&format!("solidcraft --control {port}")), "{e}");
+    let batch = crate::call_tool(&mut remote, "batch", &json!({"commands": [{"command": "solid.box"}]}));
+    let text = batch["content"][0]["text"].as_str().unwrap_or_default();
+    assert_eq!(batch["isError"], true);
+    assert!(text.starts_with(crate::backend::NOT_RUNNING) && !text.contains("may have run"), "{text}");
+
+    let listener = std::net::TcpListener::bind(&addr).unwrap();
+    let app = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        BufReader::new(stream.try_clone().unwrap()).read_line(&mut line).unwrap();
+        let req: Value = serde_json::from_str(&line).unwrap();
+        writeln!(&stream, "{}", json!({"id": req["id"], "ok": true, "result": {"answered": req["params"]["command"]}})).unwrap();
+    });
+    let got = remote.call("engine.execute", json!({"command": "inspect.measure"})).unwrap();
+    assert_eq!(got["answered"], "inspect.measure");
+    assert!(remote.describe().starts_with("connected") && !remote.describe().contains("not running"), "{}", remote.describe());
+    app.join().unwrap();
+}
+
+/// An app that quits while it runs a request may have applied it: the retry then finds nothing
+/// listening, and the error says the call may have run, not just that the app is not running.
+#[test]
+fn an_app_that_quits_during_a_call_may_have_run_it() {
+    use std::io::{BufRead, BufReader};
+
+    use crate::backend::Backend;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let app = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        BufReader::new(stream.try_clone().unwrap()).read_line(&mut line).unwrap();
+        // Quit without answering: the port closes first, so the retry is refused.
+        drop(listener);
+        drop(stream);
+    });
+    let mut remote = crate::Remote::connect(&addr).unwrap();
+    let e = remote.call("engine.execute", json!({"command": "solid.box"})).unwrap_err();
+    app.join().unwrap();
+    assert!(!e.starts_with(crate::backend::NOT_RUNNING) && e.contains("may have quit") && e.contains("Inspect the design"), "{e}");
 }
 
 /// Tool annotations never understate what a tool may do (#205): `screenshot` writes a file when

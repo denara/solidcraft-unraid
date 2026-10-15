@@ -57,6 +57,8 @@ pub struct TreeState {
     pub picked_components: Vec<u64>,
     /// Canvases picked in the tree.
     pub picked_canvases: Vec<u64>,
+    /// Joints picked in the tree (a hidden one shows highlighted while it is picked).
+    pub picked_joints: Vec<u64>,
     /// Folders picked in the feature history (features use the engine selection).
     pub picked_timeline_groups: Vec<u64>,
     /// Last feature-history item clicked, for Shift ranges (`f:<id>` or `g:<id>`).
@@ -216,6 +218,7 @@ pub fn selection_group(app: &SolveApp, target: &Target) -> Option<Value> {
             (b.component, "bodies")
         }
         Target::Sketch { id } => (app.session.doc.feature(*id)?.component, "sketches"),
+        Target::Plane { id } => (app.session.doc.feature(*id)?.component, "construction"),
         _ => return None,
     };
     let sel = selected_keys(app, comp, folder);
@@ -265,6 +268,9 @@ pub(crate) struct Row<'a> {
     pub(crate) eye: Option<bool>,
     pub(crate) icon: &'a str,
     pub(crate) label: &'a str,
+    /// The label is a name someone gave (a body, sketch, component, …): it is shown as typed,
+    /// not translated when it happens to match a UI label.
+    pub(crate) name: bool,
     pub(crate) selected: bool,
     pub(crate) dim: bool,
     pub(crate) color: Option<Color32>,
@@ -372,7 +378,7 @@ pub(crate) fn draw_row(ui: &mut egui::Ui, id: egui::Id, row: &Row) -> RowResp {
         x += 21.0;
     }
     let col = row.color.unwrap_or(if row.dim { t.text_dim } else { t.text });
-    let label_display = crate::i18n::tr_dyn(row.label);
+    let label_display = if row.name { crate::i18n::tr_name(row.label) } else { crate::i18n::tr_dyn(row.label) };
     let galley = ui.painter().layout_no_wrap(label_display, FontId::proportional(12.5), col);
     let lw = galley.size().x;
     ui.painter().galley(pos2(x, cy - galley.size().y / 2.0), galley, col);
@@ -428,6 +434,7 @@ fn click_select(app: &mut SolveApp, ui: &egui::Ui, key: String, sel: Option<Sel>
         }
     } else {
         app.tree.picked_components.clear();
+        app.tree.picked_joints.clear();
         let _ = app.run("select.set", json!({ "items": [sel] }));
     }
 }
@@ -592,6 +599,7 @@ fn component_rows(app: &mut SolveApp, ui: &mut egui::Ui, id: u64, depth: usize, 
         eye: (id != 0).then_some(visible),
         icon: "component",
         label: &name,
+        name: true,
         selected: app.tree.picked_components.contains(&id),
         dim: faded,
         radio: Some(active),
@@ -695,6 +703,7 @@ fn occurrence_rows(app: &mut SolveApp, ui: &mut egui::Ui, path: Vec<u64>, depth:
             eye: Some(own_visible),
             icon: "component",
             label: &placement.name,
+            name: true,
             selected,
             dim: faded || !visible,
             radio: Some(active),
@@ -794,6 +803,11 @@ fn doc_settings(app: &mut SolveApp, ui: &mut egui::Ui, depth: usize) {
     if draw_row(ui, ui.id().with("params"), &Row { depth: depth + 1, icon: "params", label: &params, ..Default::default() }).clicked {
         app.start("parameters.change");
     }
+    if draw_row(ui, ui.id().with("design_properties"), &Row { depth: depth + 1, icon: "settings", label: "Design Properties", ..Default::default() })
+        .clicked
+    {
+        app.start("document.metadata");
+    }
 }
 
 fn origin_rows(app: &mut SolveApp, ui: &mut egui::Ui, depth: usize) {
@@ -882,7 +896,11 @@ fn named_view_rows(app: &mut SolveApp, ui: &mut egui::Ui, depth: usize, acts: &m
     }
     let names: Vec<String> = app.session.doc.named_views.iter().map(|v| v.name.clone()).collect();
     for name in names {
-        let r = draw_row(ui, ui.id().with(("view", &name)), &Row { depth: depth + 1, icon: "perspective", label: &name, ..Default::default() });
+        let r = draw_row(
+            ui,
+            ui.id().with(("view", &name)),
+            &Row { depth: depth + 1, icon: "perspective", label: &name, name: true, ..Default::default() },
+        );
         if r.double {
             restore_view(app, &name);
         }
@@ -1022,7 +1040,7 @@ fn canvas_rows(app: &mut SolveApp, ui: &mut egui::Ui, depth: usize, acts: &mut A
         let r = draw_row(
             ui,
             ui.id().with(("canvas", id)),
-            &Row { depth: depth + 1, eye: Some(visible), icon: "canvas", label: &name, selected, dim: !visible, ..Default::default() },
+            &Row { depth: depth + 1, eye: Some(visible), icon: "canvas", label: &name, name: true, selected, dim: !visible, ..Default::default() },
         );
         if r.eye {
             let _ = app.run("canvas.edit", json!({ "canvas": id, "visible": !visible }));
@@ -1031,6 +1049,7 @@ fn canvas_rows(app: &mut SolveApp, ui: &mut egui::Ui, depth: usize, acts: &mut A
             if !ui.input(|i| i.modifiers.command || i.modifiers.ctrl) {
                 app.tree.picked_canvases.clear();
                 app.tree.picked_components.clear();
+                app.tree.picked_joints.clear();
                 let _ = app.run("select.clear", json!({}));
             }
             if selected {
@@ -1287,7 +1306,7 @@ fn entries(app: &SolveApp, comp: u64, folder: &str) -> Vec<Entry> {
                 color: None,
                 locked: false,
                 sel: Some(Sel::Plane { name: f.name.clone() }),
-                target: None,
+                target: Some(Target::Plane { id: f.id }),
                 bodies: Vec::new(),
             })
             .collect(),
@@ -1373,9 +1392,15 @@ fn folder_rows_at(app: &mut SolveApp, ui: &mut egui::Ui, comp: u64, path: Option
     let prefix = path.map(occurrence_key).unwrap_or_else(|| format!("c{comp}"));
     if let Some(path) = path {
         let Ok(placement) = app.session.occurrence_placement(path) else { return };
+        // Each row's placed body by its definition's name (a search per row was quadratic in a
+        // component's bodies, every frame).
+        let mut placed: std::collections::HashMap<&str, &_> = std::collections::HashMap::with_capacity(placement.bodies.len());
+        for b in &placement.bodies {
+            placed.entry(b.source.as_str()).or_insert(b);
+        }
         for e in &mut all {
             if folder == "bodies" {
-                let Some(body) = placement.bodies.iter().find(|b| b.source == e.key) else { continue };
+                let Some(body) = placed.get(e.key.as_str()) else { continue };
                 e.sel = Some(Sel::Body { name: body.world.clone() });
                 e.target = Some(Target::Body { name: body.world.clone() });
                 e.bodies = vec![body.world.clone()];
@@ -1445,7 +1470,16 @@ fn folder_rows_at(app: &mut SolveApp, ui: &mut egui::Ui, comp: u64, path: Option
         let r = draw_row(
             ui,
             ui.id().with(&gkey),
-            &Row { depth: depth + 1, fold: Some(gopen), eye: Some(gvis), icon: "folder", label: &label, dim: !gvis, ..Default::default() },
+            &Row {
+                depth: depth + 1,
+                fold: Some(gopen),
+                eye: Some(gvis),
+                icon: "folder",
+                label: &label,
+                name: true,
+                dim: !gvis,
+                ..Default::default()
+            },
         );
         if r.fold || r.clicked {
             toggle(app, &gkey, true);
@@ -1501,6 +1535,7 @@ fn entry_row(
             eye: Some(e.visible),
             icon: e.icon,
             label: &e.label,
+            name: true,
             selected: e.selected,
             dim: !e.visible,
             color: e.color,

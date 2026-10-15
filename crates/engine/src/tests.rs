@@ -195,6 +195,35 @@ fn join_meeting_nothing_keeps_the_first_body() {
     assert!(rel(volume(&mut s), 1064.0) < 1e-6);
 }
 
+/// A 1 mm floor extruded into a through hole, from the sketch the plate was extruded from: the
+/// disc's wall lies on the hole's and its foot in the plate's bottom face. A wedge extruded
+/// sideways on top keeps the plate from being a prism along Z (the 2D route would take it
+/// otherwise), and the join failed with "boolean Union: the operation failed: no result".
+#[test]
+fn join_a_floor_into_a_through_hole() {
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Plate"}));
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [100, 60]}));
+    run(&mut s, "sketch.circle.center", json!({"center": [60, 30], "radius": 20}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"sketch": "Plate", "profiles": [{"point": [5, 5]}], "distance": 10}));
+    run(&mut s, "sketch.create", json!({"plane": "XZ", "name": "Wedge"}));
+    run(&mut s, "sketch.line", json!({"points": [[5, -10], [25, -10], [5, -16]], "closed": true}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"sketch": "Wedge", "distance": 40, "operation": "join"}));
+    let before = volume(&mut s);
+    run(&mut s, "solid.extrude", json!({"sketch": "Plate", "profiles": [{"point": [60, 30]}], "distance": 1, "operation": "join"}));
+    let st = s.model.state();
+    assert_eq!(st.bodies.len(), 1);
+    assert_eq!(st.bodies[0].body.lumps().unwrap().len(), 1);
+    assert!(st.bodies[0].body.validity().is_empty(), "{:?}", st.bodies[0].body.validity());
+    // Exact: the disc isn't moved to get the bodies to intersect, so the feature has no warning.
+    let warning = s.model.results.last().and_then(|r| r.warning.clone());
+    assert!(warning.is_none(), "{warning:?}");
+    let added = volume(&mut s) - before;
+    assert!(rel(added, PI * 400.0) < 1e-3, "{added}");
+}
+
 /// Two spheres of one size: the join's contact test tried every pair of their finely meshed
 /// triangles and refused the join as too much work (#232).
 #[test]
@@ -277,14 +306,19 @@ fn join_of_a_lobed_disc_pattern_is_not_refused() {
 mod blend_fit;
 mod boolean_diagnostics;
 mod component_frames;
+mod curved_seam_round;
 mod large_step_import;
 mod loft_cut;
+mod loft_ring;
+mod loft_spacing;
 mod mirror_planes;
 mod path_scope;
 mod primitive_points;
+mod rim_cut;
 mod robustness;
 mod robustness_goldens;
 mod spiral_join;
+mod step_import_options;
 mod xz_plane;
 
 /// Plan area a round of radius `r` fills at the concave corner `x` where circles (c1, r1) and
@@ -804,6 +838,20 @@ fn only_own_ids_name_commands() {
     }
 }
 
+/// An unknown command's error names the ids it was probably meant to be: a typo's, or the
+/// command that ends in the same word.
+#[test]
+fn unknown_commands_suggest_the_closest_ids() {
+    let mut s = Session::default();
+    let mut msg = |id: &str| s.execute(id, &serde_json::json!({})).unwrap_err().to_string();
+    assert_eq!(msg("file.open"), "unknown command `file.open` (did you mean `doc.open`?)");
+    assert!(msg("solid.extrud").starts_with("unknown command `solid.extrud` (did you mean `solid.extrude`"), "{}", msg("solid.extrud"));
+    assert!(msg("Extrude").contains("`solid.extrude`"), "{}", msg("Extrude"));
+    assert_eq!(msg("FusionFilletEdgesCommand"), "unknown command `FusionFilletEdgesCommand`");
+    let long = "x".repeat(10_000);
+    assert_eq!(msg(&long), format!("unknown command `{long}`"));
+}
+
 #[test]
 fn sample_design_builds() {
     let mut s = Session::default();
@@ -1117,6 +1165,9 @@ fn extrude_auto_operation() {
     assert!(rel(volume(&mut s), 40.0 * 30.0 * 15.0) < 1e-6);
     // Pulled out, it joins.
     assert_eq!(auto_operation(&s, &json!({"face": [20, 15, 15], "distance": 5})), Some("join"));
+    // Pushed in far past the bottom (halfway is below the box), it still cuts (#1257).
+    assert_eq!(auto_operation(&s, &json!({"face": [20, 15, 15], "distance": -50})), Some("cut"));
+    assert_eq!(auto_operation(&s, &json!({"face": [20, 15, 15], "distance": 50, "direction": "negative"})), Some("cut"));
     // A sketch on XY under the box: up goes into it (cut), down grows out of it (join), and a
     // profile beside the box still defaults to Join (New Body remains explicit).
     run(&mut s, "sketch.create", json!({"plane": "XY"}));
@@ -2387,6 +2438,21 @@ fn lip_after_boss() {
             assert!((volume(&mut s) - v0).abs() > 1.0, "boss {i} lip {j}");
         }
     }
+}
+
+/// A lip on a rim with a face elsewhere in line with the pick: a notch under the floor whose
+/// wall lies in the plane y = 25 through the picked point. The pick is the rim's, the face the
+/// point lies on, not the first face whose plane runs through it.
+#[test]
+fn lip_on_a_rim_in_line_with_another_face() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 80, "width": 50, "height": 30}));
+    run(&mut s, "solid.shell", json!({"faces": [[40, 25, 30]], "thickness": 2}));
+    run(&mut s, "solid.box", json!({"length": 20, "width": 10, "height": 1, "corner": [30, 25, 0], "operation": "cut", "targets": ["Body1"]}));
+    let v0 = volume(&mut s);
+    run(&mut s, "plastic.lip", json!({"face": [1, 25, 30], "width": 1, "height": 2}));
+    // The band inside the rim, 1 wide and 2 high: (78 × 48 − 76 × 46) × 2.
+    assert!(rel(volume(&mut s) - v0, 496.0) < 1e-6, "{}", volume(&mut s) - v0);
 }
 
 /// A drilled hole as deep as the plate: the drill point breaks through the bottom.

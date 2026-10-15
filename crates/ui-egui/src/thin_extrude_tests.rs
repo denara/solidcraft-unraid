@@ -62,9 +62,12 @@ fn editing_a_thin_extrude_keeps_its_wall() {
 
 #[test]
 fn the_thin_rows_are_translated() {
-    for (lang, thin, location, outside) in
-        [("ja", "薄肉押し出し", "壁の位置", "外側の厚さ"), ("de", "Dünnwandig extrudieren", "Wandlage", "Dicke außen")]
-    {
+    let cases = [
+        ("ja", "薄肉押し出し", "壁の位置", "外側の厚さ"),
+        ("de", "Dünnwandig extrudieren", "Wandlage", "Dicke außen"),
+        ("uk", "Тонке видавлювання", "Розташування стінки", "Товщина назовні"),
+    ];
+    for (lang, thin, location, outside) in cases {
         let mut h = Harness::new();
         h.app.preferences.language = lang.into();
         rectangle(&mut h);

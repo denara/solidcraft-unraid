@@ -485,11 +485,18 @@ fn expand(e: &mt::Edge, cuts: &[(mt::Edge, (mt::Edge, mt::Edge))], out: &mut Vec
     }
 }
 
+/// The parameter of the point of `c` nearest `q`, searched from the nearest of points along it (a
+/// long arc's search from its middle can settle on the far side).
+fn nearest(c: &mt::Curve, q: mt::Point3) -> Option<f64> {
+    let (t0, t1) = c.range_tuple();
+    let hint = (0..=16).map(|k| t0 + (t1 - t0) * k as f64 / 16.0).min_by(|x, y| c.subs(*x).distance2(q).total_cmp(&c.subs(*y).distance2(q)));
+    c.search_nearest_parameter(q, hint, 100)
+}
+
 /// `body` with its edges cut at the given points where they pass through them (not at their
 /// ends): the faces either side keep the same region, bounded by the pieces. Used to give two
 /// faces that cover the same region the same vertices before they are glued (#674).
 pub(crate) fn split_edges_at(body: &Body, points: &[Vec3]) -> Result<Body> {
-    use mt::SearchNearestParameter;
     let size = body.size();
     let tol = size * 1e-7 + 1e-9;
     guard("split edges", || {
@@ -512,11 +519,11 @@ pub(crate) fn split_edges_at(body: &Body, points: &[Vec3]) -> Result<Body> {
                 }
                 let c = e.curve();
                 let (t0, t1) = c.range_tuple();
-                c.search_nearest_parameter(q, None, 100).is_some_and(|t| t > t0.min(t1) && t < t0.max(t1) && c.subs(t).distance(q) <= tol * 10.0)
+                nearest(&c, q).is_some_and(|t| t > t0.min(t1) && t < t0.max(t1) && c.subs(t).distance(q) <= tol * 10.0)
             });
             let Some(k) = hit else { continue };
             let (e, root) = current.swap_remove(k);
-            let Some(t) = e.curve().search_nearest_parameter(q, None, 100) else { continue };
+            let Some(t) = nearest(&e.curve(), q) else { continue };
             let (_, cut) = cut_edge(&e, t, q, tol)?;
             if let Some((a, b)) = cut {
                 rec.piece(&a, &root);
@@ -558,6 +565,7 @@ pub(crate) fn split_edges_at(body: &Body, points: &[Vec3]) -> Result<Body> {
             splits: body.splits.clone(),
             face_sources: None,
             history: None,
+            display_of: None,
             regularization_protected: true,
         };
         Ok(crate::record::rebuilt_body(split, &[&body.solid], &rec))
@@ -895,9 +903,25 @@ pub(crate) fn analytic_field(s: &mt::Surface) -> Option<Analytic> {
 
 /// Which side of a tool a point is on.
 pub(crate) fn side_of_point(tool: &SplitTool, p: Vec3) -> Result<f64> {
-    let f = fields(tool)?;
-    let [g] = f.as_slice() else { return Err(KernelError::Invalid("one tool at a time".into())) };
-    Ok(g.eval(p))
+    Ok(ToolSide::of(tool)?.at(p))
+}
+
+/// Which side of a tool points are on, the tool's field built once for many points.
+pub(crate) struct ToolSide(Field);
+
+impl ToolSide {
+    pub(crate) fn of(tool: &SplitTool) -> Result<ToolSide> {
+        let mut f = fields(tool)?;
+        match (f.pop(), f.is_empty()) {
+            (Some(g), true) => Ok(ToolSide(g)),
+            _ => Err(KernelError::Invalid("one tool at a time".into())),
+        }
+    }
+
+    /// The side of `p`: its sign says which, zero on the tool (NaN where it can't be told).
+    pub(crate) fn at(&self, p: Vec3) -> f64 {
+        self.0.eval(p)
+    }
 }
 
 /// Which side of a tool a face lies on (its field well inside it).
@@ -1053,6 +1077,7 @@ pub(crate) fn split_any(body: &Body, faces: &[usize], tool: &SplitTool) -> Resul
             splits: body.splits.clone(),
             face_sources: None,
             history: None,
+            display_of: None,
             regularization_protected: true,
         };
         Ok((crate::record::rebuilt_body(split, &[&body.solid], &imp.rec), imp))

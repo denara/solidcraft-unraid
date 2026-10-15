@@ -57,6 +57,7 @@ pub fn panels(tab: &str) -> &'static [&'static str] {
         "MESH" => &["CREATE", "PREPARE", "MODIFY", "ASSEMBLE", "CONSTRUCT", "INSPECT", "INSERT", "SELECT"],
         "SHEET METAL" => &["CREATE", "MODIFY", "ASSEMBLE", "CONSTRUCT", "INSPECT", "INSERT", "SELECT"],
         "PLASTIC" => &["CREATE", "MODIFY", "ASSEMBLE", "CONSTRUCT", "INSPECT", "INSERT", "SELECT"],
+        "RENDER" => &["SCENE"],
         _ => &["MAKE", "ADD-INS", "UTILITY", "INSPECT", "SELECT"],
     }
 }
@@ -145,12 +146,28 @@ fn menu_commands(
     out
 }
 
-fn report_rect(bar: Rect, captions: f32, tabs_start: f32) -> (Rect, bool) {
-    let right = bar.right() - captions - 90.0;
-    let labeled = right - tabs_start >= 340.0;
-    let width = if labeled { 124.0 } else { 28.0 };
+/// What the right-hand group keeps clear between Report a bug and the window's caption buttons:
+/// Help, Preferences and the version.
+const RIGHT_GROUP: f32 = 120.0;
+
+/// The centre of the Help (?) button: left of Preferences.
+fn help_x(bar: Rect, captions: f32) -> f32 {
+    bar.right() - captions - 101.0
+}
+
+/// The Report a bug button: labelled when there is room for its text (`label_width`, measured in
+/// the current language), otherwise just the icon.
+fn report_rect(bar: Rect, captions: f32, tabs_start: f32, label_width: f32) -> (Rect, bool) {
+    let right = bar.right() - captions - RIGHT_GROUP;
+    // Icon, text and a margin; never narrower than the English button.
+    let full = (REPORT_TEXT_X + label_width + 10.0).max(124.0);
+    let labeled = right - tabs_start >= 216.0 + full;
+    let width = if labeled { full } else { 28.0 };
     (Rect::from_min_size(pos2(right - width, bar.top() + 4.0), vec2(width, 26.0)), labeled)
 }
+
+/// Where the Report a bug text starts, from the button's left edge.
+const REPORT_TEXT_X: f32 = 29.0;
 
 /// The application bar's height: the window's title bar on desktop builds.
 pub const APP_BAR_HEIGHT: f32 = 34.0;
@@ -176,80 +193,90 @@ pub fn app_bar(app: &mut SolveApp, ui: &mut egui::Ui) {
             ui.painter().text(pos2(left + 36.0, r.center().y), Align2::LEFT_CENTER, "SolidCraft", FontId::proportional(14.0), t.app_bar_text);
         }
         let mut x = left + if compact_actions { 60.0 } else { 128.0 };
+        // While a file loads the design waits: no menus or commands from the bar.
+        let idle = !app.file_load.busy();
+        // The File menu: a text button (New, Open, Save, Save As, Export…). Its handle keeps the
+        // old `appbar:folder` name too, for scripts written against the folder button.
+        let file = {
+            let label = app.tr("ui.file").to_string();
+            let galley = ui.painter().layout_no_wrap(label.clone(), FontId::proportional(13.0), t.app_bar_text);
+            let br = Rect::from_min_size(pos2(x - 13.0, r.center().y - 13.0), vec2(galley.size().x + 16.0, 26.0));
+            x = br.right() + 17.0;
+            let resp = ui.interact(br, ui.id().with(("ab", "file")), if idle { Sense::click() } else { Sense::hover() });
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, idle, &label));
+            crate::scenario::publish_handle("appbar:file", br.center());
+            crate::scenario::publish_handle("appbar:folder", br.center());
+            let open = ui.ctx().data(|d| d.get_temp::<bool>(egui::Id::new("sc_file_menu")).unwrap_or(false));
+            if idle && (resp.hovered() || open) {
+                ui.painter().rect_filled(br, 4.0, t.app_bar_hover);
+            }
+            let ink = if idle { t.app_bar_text } else { t.app_bar_text.gamma_multiply(0.35) };
+            ui.painter().galley(pos2(br.left() + 8.0, br.center().y - galley.size().y / 2.0), galley, ink);
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("sc_file_menu_x"), br.left()));
+            idle && resp.clicked()
+        };
         // A disabled button is dimmed and ignores clicks (its tooltip still shows).
-        let mut click = |ui: &mut egui::Ui, icon: &str, tip: &str, enabled: bool| -> bool {
+        let click = |ui: &mut egui::Ui, at: f32, icon: &str, tip: &str, enabled: bool| -> bool {
             let width = if compact_actions { 22.0 } else { 26.0 };
-            let br = Rect::from_center_size(pos2(x, r.center().y), vec2(width, 26.0));
-            x += if compact_actions { 22.0 } else { 30.0 };
+            let br = Rect::from_center_size(pos2(at, r.center().y), vec2(width, 26.0));
             let resp = ui.interact(br, ui.id().with(("ab", icon)), if enabled { Sense::click() } else { Sense::hover() });
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, tip));
             crate::scenario::publish_handle(&format!("appbar:{icon}"), br.center());
             if enabled && resp.hovered() {
                 ui.painter().rect_filled(br, 4.0, Color32::from_white_alpha(30));
             }
             let dim = |c: Color32| if enabled { c } else { c.gamma_multiply(0.35) };
-            icons::paint(
-                ui.painter(),
-                br.shrink(5.0),
-                icon,
-                dim(Color32::from_rgb(225, 230, 238)),
-                dim(Color32::from_rgb(120, 140, 170)),
-                dim(Color32::from_rgb(120, 190, 255)),
-            );
+            icons::paint(ui.painter(), br.shrink(5.0), icon, dim(t.app_bar_icon[0]), dim(t.app_bar_icon[1]), dim(t.app_bar_icon[2]));
             let clicked = resp.on_hover_text(tip).clicked();
             enabled && clicked
         };
-        // While a file loads the design waits: no menus or commands from the bar.
-        let idle = !app.file_load.busy();
-        let file = click(ui, "folder", app.tr("ui.file"), idle);
-        // Save, Undo and Redo act on the design, which Home hides.
+        let step = if compact_actions { 22.0 } else { 30.0 };
+        // Undo and Redo act on the design, which Home hides. Save lives in the File menu (Ctrl+S).
         let shown = design_shown(app) && idle;
         let tip = |id: &str, key: &str| {
             let label = app.tr(id);
             if shown { format!("{label} ({key})") } else { crate::i18n::format("ui.needs_design", &[("command", label)]) }
         };
-        let (save_tip, undo_tip, redo_tip) = (tip("ui.save", "Ctrl+S"), tip("ui.undo", "Ctrl+Z"), tip("ui.redo", "Ctrl+Y"));
-        if click(ui, "save", &save_tip, shown) {
-            save(app);
-        }
-        if click(ui, "undo", &undo_tip, shown) {
-            let _ = app.run("edit.undo", json!({}));
-        }
-        if click(ui, "redo", &redo_tip, shown) {
-            let _ = app.run("edit.redo", json!({}));
-        }
-        if click(ui, "home", app.tr("ui.home"), idle) {
-            let rev = app.session.revision;
-            app.home.show(rev);
-        }
-        let theme_tip = if app.ui.dark { app.tr("ui.light") } else { app.tr("ui.dark") };
-        if !compact_actions && click(ui, if app.ui.dark { "sun" } else { "moon" }, theme_tip, true) {
-            app.ui.dark = !app.ui.dark;
-            app.preferences.theme = if app.ui.dark { "dark" } else { "light" }.into();
-        }
-        if click(ui, "help", app.tr("ui.help"), true) {
-            app.help.menu = !app.help.menu;
-            let at = ui.ctx().input(|i| i.pointer.latest_pos()).map_or(300.0, |p| p.x);
-            ui.ctx().data_mut(|d| {
-                d.insert_temp(egui::Id::new("sc_help_opened"), true);
-                d.insert_temp(egui::Id::new("sc_help_anchor"), at);
-            });
+        let (undo_tip, redo_tip) = (tip("ui.undo", "Ctrl+Z"), tip("ui.redo", "Ctrl+Y"));
+        // A very narrow window keeps its room for the tabs (Home first); Ctrl+Z and Ctrl+Y still undo and redo.
+        if !compact_actions {
+            if click(ui, x, "undo", &undo_tip, shown) {
+                let _ = app.run("edit.undo", json!({}));
+            }
+            x += step;
+            if click(ui, x, "redo", &redo_tip, shown) {
+                let _ = app.run("edit.redo", json!({}));
+            }
+            x += step;
         }
         if file {
             app.ui.palette_open = false;
             let ctx = ui.ctx().clone();
             let open = ctx.data(|d| d.get_temp::<bool>(egui::Id::new("sc_file_menu")).unwrap_or(false));
             let pass = ctx.cumulative_pass_nr();
-            // The folder button toggles the menu. Remember the pass it opened on so the same
+            // The File button toggles the menu. Remember the pass it opened on so the same
             // click isn't also treated as a click outside the menu (which would close it at once).
             ctx.data_mut(|d| {
                 d.insert_temp(egui::Id::new("sc_file_menu"), !open);
                 d.insert_temp(egui::Id::new("sc_file_menu_opened"), pass);
             });
         }
-        // Document tabs.
+        // Document tabs (Home first), on the left after File, Undo and Redo.
         let captions = if app.custom_titlebar { crate::titlebar::WIDTH } else { 0.0 };
-        let tabs_start = x + 16.0;
-        let (report, report_label) = report_rect(r, captions, tabs_start);
+        let tabs_start = x - step + 25.0;
+        let report_text = crate::i18n::tr("ui.report_a_bug");
+        let report_font = FontId::proportional(13.0);
+        let label_width = ui.painter().layout_no_wrap(report_text.to_string(), report_font.clone(), t.app_bar_text).size().x;
+        let (report, report_label) = report_rect(r, captions, tabs_start, label_width);
+        // Help, on the right between Report a bug and Preferences.
+        if click(ui, help_x(r, captions), "help", app.tr("ui.help"), true) {
+            app.help.menu = !app.help.menu;
+            let at = help_x(r, captions);
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(egui::Id::new("sc_help_opened"), true);
+                d.insert_temp(egui::Id::new("sc_help_anchor"), at);
+            });
+        }
         // A newer release: its Update button, left of Report a bug (`update`).
         let update = crate::update::button(app, ui, report.left() - 6.0, report.top(), report_label);
         let tabs_end = update.map_or(report.left(), |u| u.left()) - 8.0;
@@ -260,7 +287,6 @@ pub fn app_bar(app: &mut SolveApp, ui: &mut egui::Ui) {
         tabs_ui.set_clip_rect(tabs_rect.intersect(ui.clip_rect()));
         crate::documents::tabs(app, &mut tabs_ui, r, tabs_start, tabs_end);
         let response = ui.interact(report, ui.id().with("sc_report_button"), Sense::click());
-        let report_text = crate::i18n::tr("ui.report_a_bug");
         response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), report_text));
         crate::scenario::publish_handle("titlebar:report", report.center());
         ui.painter().rect_filled(report, 4.0, if response.hovered() || response.has_focus() { t.hover } else { t.app_bar });
@@ -268,13 +294,7 @@ pub fn app_bar(app: &mut SolveApp, ui: &mut egui::Ui) {
         let icon = Rect::from_center_size(pos2(report.left() + 14.0, report.center().y), vec2(18.0, 18.0));
         icons::paint(ui.painter(), icon, "bug_report", t.app_bar_text, t.app_bar_text, t.app_bar);
         if report_label {
-            ui.painter().text(
-                pos2(report.left() + 29.0, report.center().y),
-                Align2::LEFT_CENTER,
-                report_text,
-                FontId::proportional(13.0),
-                t.app_bar_text,
-            );
+            ui.painter().text(pos2(report.left() + REPORT_TEXT_X, report.center().y), Align2::LEFT_CENTER, report_text, report_font, t.app_bar_text);
         }
         if response.on_hover_text(crate::i18n::tr_label("Report a bug — review a screenshot and open a GitHub draft")).clicked() {
             crate::help::run(app, &ui.ctx().clone(), "report");
@@ -318,7 +338,7 @@ fn file_menu(app: &mut SolveApp, ctx: &egui::Context) {
     }
     let mut close = false;
     let resp = crate::frame::area(egui::Id::new("sc_file_area"))
-        .fixed_pos(pos2(100.0 + if app.integrated_titlebar { crate::titlebar::TRAFFIC_LIGHTS } else { 0.0 }, 34.0))
+        .fixed_pos(pos2(ctx.data(|d| d.get_temp::<f32>(egui::Id::new("sc_file_menu_x"))).unwrap_or(100.0), 34.0))
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
@@ -337,9 +357,11 @@ fn file_menu(app: &mut SolveApp, ctx: &egui::Context) {
                     close = true;
                 }
                 if item(ui, &format!("{}…", app.tr("ui.open")), "Ctrl+O") {
-                    if let Some(p) = app.services.pick_open.as_ref().and_then(|f| f()) {
-                        app.open_path_async(&p);
-                    }
+                    app.pick_open(|app, path| {
+                        if let Some(path) = path {
+                            app.open_path_async(&path);
+                        }
+                    });
                     close = true;
                 }
                 ui.menu_button(app.tr("ui.open_recent"), |ui| {
@@ -410,6 +432,11 @@ fn file_menu(app: &mut SolveApp, ctx: &egui::Context) {
                     close = true;
                 }
                 ui.separator();
+                if item_if(ui, &format!("{}…", app.tr_label("Design Properties")), "", shown) {
+                    app.start("document.metadata");
+                    close = true;
+                }
+                ui.separator();
                 if item(ui, &format!("{}…", app.tr("ui.preferences")), "") {
                     app.prefs_window.open = true;
                     close = true;
@@ -455,9 +482,12 @@ fn save_as(app: &mut SolveApp) {
 
 fn save_as_with_extension(app: &mut SolveApp, extension: &str) {
     let name = format!("{}.{extension}", app.session.doc.name);
-    if let Some(p) = app.services.pick_save.as_ref().and_then(|f| f(&name, &[solidcraft_engine::io::DESIGN_EXT, "json"])) {
-        let _ = app.run("file.save_as", json!({"path": p}));
-    }
+    app.pick_save(&name, &[solidcraft_engine::io::DESIGN_EXT, "json"], |app, path| {
+        if let Some(path) = path {
+            let _ = app.run("file.save_as", json!({"path": path}));
+        }
+        crate::documents::saved_for_close(app);
+    });
 }
 
 fn export(app: &mut SolveApp, ext: &str) {
@@ -467,14 +497,17 @@ fn export(app: &mut SolveApp, ext: &str) {
 /// Export to a file with extension `ext`, in `format` when the extension alone doesn't name it.
 fn export_as(app: &mut SolveApp, ext: &str, format: Option<&str>) {
     let name = format!("{}.{ext}", app.session.doc.name);
-    let Some(p) = app.services.pick_save.as_ref().and_then(|f| f(&name, &[ext])) else { return };
-    let params = match format {
-        Some(f) => json!({"path": p, "format": f}),
-        None => json!({"path": p}),
-    };
-    if app.run("file.export", params).is_ok() {
-        app.set_status(format!("Exported {p}"), false);
-    }
+    let format = format.map(str::to_string);
+    app.pick_save(&name, &[ext], move |app, path| {
+        let Some(path) = path else { return };
+        let mut params = json!({"path": path});
+        if let Some(format) = format {
+            params["format"] = json!(format);
+        }
+        if app.run("file.export", params).is_ok() {
+            app.set_status(format!("Exported {path}"), false);
+        }
+    });
 }
 
 pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
@@ -499,7 +532,7 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
         painter.text(
             pos2(ws.center().x - 5.0, ws.top() + 52.0),
             Align2::CENTER_CENTER,
-            app.tr_label(crate::toolbar_custom::WORKSPACE),
+            app.tr_label(if crate::render_workspace::active(app) { "RENDER" } else { crate::toolbar_custom::WORKSPACE }),
             FontId::proportional(12.0),
             t.text,
         );
@@ -515,7 +548,11 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
         if sketching {
             tabs.push("SKETCH");
         }
-        tabs.extend(TABS.iter());
+        if crate::render_workspace::active(app) {
+            tabs.push("RENDER");
+        } else {
+            tabs.extend(TABS.iter());
+        }
         for tab in tabs {
             let display_tab = app.tr_label(tab);
             let text_width = painter.layout_no_wrap(display_tab.to_string(), FontId::proportional(12.0), t.text).size().x;
@@ -1152,9 +1189,11 @@ pub fn shortcuts(app: &mut SolveApp, ctx: &egui::Context) {
                 Key::N => crate::documents::new_design(app),
                 Key::Comma => crate::prefs::open_at(app, 0),
                 Key::O => {
-                    if let Some(p) = app.services.pick_open.as_ref().and_then(|f| f()) {
-                        app.open_path_async(&p);
-                    }
+                    app.pick_open(|app, path| {
+                        if let Some(path) = path {
+                            app.open_path_async(&path);
+                        }
+                    });
                 }
                 _ if !shown => {}
                 Key::Z => drop(app.run("edit.undo", json!({}))),
@@ -1180,6 +1219,7 @@ pub fn shortcuts(app: &mut SolveApp, ctx: &egui::Context) {
                 } else if app.dialog.is_some() {
                     crate::dialogs::cancel(app);
                 } else if !app.session.selection.is_empty() || app.session.active_sketch.is_none() {
+                    app.tree.picked_joints.clear();
                     let _ = app.run("select.clear", json!({}));
                 } else {
                     // Nothing left to cancel: Esc finishes the sketch.
@@ -1215,7 +1255,8 @@ mod header_report_tests {
         let mut h = crate::scenario::Harness::new();
         h.app.run("solid.box", json!({"length":2,"width":3,"height":4})).unwrap();
         let dir = h.dir.clone();
-        h.app.services.pick_save = Some(Box::new(move |name, _extensions| Some(dir.join(name).to_string_lossy().into_owned())));
+        h.app.services.pick_save =
+            Some(Box::new(move |name, _extensions| Box::pin(std::future::ready(Some(dir.join(name).to_string_lossy().into_owned())))));
         h.frames(3);
         h.step(&json!({"click":{"handle":"appbar:folder"}})).unwrap();
         h.step(&json!({"widget":"Save As JSON…"})).unwrap();
@@ -1265,15 +1306,75 @@ mod header_report_tests {
                 let width = physical_width / scale;
                 let bar = Rect::from_min_size(egui::Pos2::ZERO, vec2(width, 34.0));
                 for captions in [0.0, crate::titlebar::WIDTH] {
-                    let (report, labeled) = report_rect(bar, captions, 354.0);
-                    assert!(bar.contains_rect(report));
-                    let prefs = Rect::from_center_size(pos2(width - captions - 70.0, 17.0), vec2(24.0, 24.0));
-                    assert!(!report.intersects(prefs));
-                    assert!(report.right() < width - captions - 82.0);
-                    assert_eq!(labeled, width - captions - 90.0 - 354.0 >= 340.0);
+                    // The English label, and a longer one (Russian is about 125 px).
+                    for label_width in [80.0, 125.0] {
+                        let (report, labeled) = report_rect(bar, captions, 354.0, label_width);
+                        assert!(bar.contains_rect(report));
+                        let prefs = Rect::from_center_size(pos2(width - captions - 70.0, 17.0), vec2(24.0, 24.0));
+                        let help = Rect::from_center_size(pos2(help_x(bar, captions), 17.0), vec2(26.0, 26.0));
+                        assert!(!report.intersects(prefs) && !report.intersects(help) && !help.intersects(prefs));
+                        assert!(report.right() < help.left() && help.right() < prefs.left());
+                        let full = (REPORT_TEXT_X + label_width + 10.0).max(124.0);
+                        assert_eq!(labeled, width - captions - RIGHT_GROUP - 354.0 >= 216.0 + full);
+                        if labeled {
+                            assert!(REPORT_TEXT_X + label_width < report.width(), "{label_width}: the text overruns its button");
+                        }
+                    }
                 }
             }
         }
+    }
+
+    /// The title bar: the File menu, Undo, Redo and every tab on the left; Help, Report a bug,
+    /// Preferences and the window's buttons on the right. Home is a tab and the theme a
+    /// preference, so neither has a button of its own, and Save is in the File menu (Ctrl+S).
+    #[test]
+    fn title_bar_keeps_tabs_left_and_help_right() {
+        let mut h = crate::scenario::Harness::new();
+        h.app.home.open = false;
+        h.app.custom_titlebar = true;
+        h.app.run("solid.box", json!({"length":10,"width":10,"height":10})).unwrap();
+        h.call("ui.resize", json!({"width":1400,"height":720}));
+        h.frames(3);
+        for gone in ["appbar:home", "appbar:sun", "appbar:moon", "appbar:save"] {
+            assert!(crate::scenario::handle_at(gone).is_none(), "{gone} is no longer in the title bar");
+        }
+        let at = |name: &str| crate::scenario::handle_at(name).unwrap_or_else(|| panic!("{name}")).x;
+        let [report, _] = h.widget("Report a bug").unwrap();
+        let file = h.widget("File").expect("the File menu has a label");
+        assert_eq!(file[0] as f32, at("appbar:file"));
+        assert!(at("appbar:file") < at("appbar:undo") && at("appbar:undo") < at("appbar:redo"));
+        assert!(at("appbar:redo") < at("tab:home") && at("tab:home") < at("tab:design:0"));
+        assert!((at("tab:design:0") as f64) < report && report < at("appbar:help") as f64);
+        assert!(at("appbar:help") < at("titlebar:preferences"));
+        h.step(&json!({"click":{"handle":"appbar:help"}})).unwrap();
+        assert!(h.app.help.menu, "? opens the Help menu");
+        h.step(&json!({"key":"Escape"})).unwrap();
+        h.step(&json!({"click":{"handle":"tab:home"}})).unwrap();
+        assert!(h.app.home.open, "the Home tab shows the start page");
+        let dark = h.app.ui.dark;
+        h.call("ui.prefs", json!({"theme": if dark { "light" } else { "dark" }}));
+        h.frames(2);
+        assert_ne!(h.app.ui.dark, dark, "the theme is a preference");
+    }
+
+    #[test]
+    fn header_report_button_widens_for_a_longer_translation() {
+        let width_in = |language: &str| {
+            let mut h = crate::scenario::Harness::new();
+            h.app.home.open = false;
+            h.app.custom_titlebar = true;
+            h.app.preferences.language = language.into();
+            h.call("ui.resize", json!({"width":1400.0,"height":720}));
+            h.frames(3);
+            let center = crate::scenario::handle_at("titlebar:report").expect("the report button is drawn");
+            // The button's right edge is fixed; its width is twice the distance to its centre.
+            2.0 * (1400.0 - crate::titlebar::WIDTH - RIGHT_GROUP - center.x)
+        };
+        let (en, ru) = (width_in("en"), width_in("ru"));
+        assert!((en - 124.0).abs() < 0.5, "{en}");
+        // "Сообщить об ошибке" needs more than the English button's 124 px.
+        assert!(ru > 124.0 + 10.0, "{ru}");
     }
 
     #[test]
@@ -1301,8 +1402,8 @@ mod header_report_tests {
             }
             h.step(&json!({"widget":"Close draft"})).unwrap();
             assert!(h.app.issue_report.draft.is_none(), "width {width}: review closes through its actual button");
-            h.step(&json!({"click":{"handle":"appbar:home"}})).unwrap();
-            assert!(h.app.home.open, "width {width}: Home remains reachable beside Report");
+            h.step(&json!({"click":{"handle":"tab:home"}})).unwrap();
+            assert!(h.app.home.open, "width {width}: the Home tab remains reachable beside Report");
             assert_eq!(before, (h.app.session.doc.to_json(), h.app.session.undo.len(), h.app.session.revision));
         }
     }
@@ -1348,7 +1449,7 @@ mod header_report_tests {
 mod home_tests {
     use super::*;
 
-    /// Home hides the design: its Save, Undo and Redo buttons, the File menu's Insert, Save
+    /// Home hides the design: its Undo and Redo buttons, the File menu's Insert, Save
     /// and Export, and the design's keyboard shortcuts leave it alone. They work again once
     /// the design is back.
     #[test]
@@ -1390,7 +1491,7 @@ mod home_tests {
             h.call("ui.click", json!({"x": at.x, "y": at.y}));
         };
         let mut actions: Vec<(String, Box<dyn Fn(&mut crate::scenario::Harness)>)> = Vec::new();
-        for icon in ["save", "undo", "redo"] {
+        for icon in ["undo", "redo"] {
             actions.push((format!("{icon} button"), Box::new(move |h| click(h, &format!("appbar:{icon}")))));
         }
         for (key, cmd) in [("S", true), ("Z", true), ("Y", true), ("Delete", false), ("V", false), ("E", false), ("S", false)] {
@@ -1429,8 +1530,9 @@ mod home_tests {
         h.call("ui.key", json!({"key": "Z", "cmd": true}));
         h.settle();
         assert_eq!(h.app.session.redo.len(), 1, "Ctrl+Z works once Home is closed");
-        let at = crate::scenario::handle_at("appbar:save").unwrap();
-        h.call("ui.click", json!({"x": at.x, "y": at.y}));
+        h.ctx.data_mut(|d| d.insert_temp(egui::Id::new("sc_file_menu"), false));
+        click(&mut h, "appbar:file");
+        h.step(&json!({"widget": "Save"})).unwrap();
         h.settle();
         assert!(h.app.session.path.is_some() && !h.app.session.is_dirty(), "the design saves once Home is closed");
     }

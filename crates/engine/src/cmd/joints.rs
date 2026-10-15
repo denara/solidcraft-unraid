@@ -3,6 +3,8 @@
 //! joint graph and moves the occurrences it places; the session re-solves after any edit too,
 //! so joints follow the geometry their origins snap to.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde_json::{Value, json};
 use solidcraft_doc::expr::Kind;
 use solidcraft_doc::joints::{self, Joint, JointKind, JointOrigin, MotionLink, NamedOrigin, Snap};
@@ -18,14 +20,21 @@ pub static COMMANDS: &[CommandSpec] = &[
     ),
     CommandSpec::new("joint.create", "Joint", joint).at("SOLID", "ASSEMBLE").icon("joint").key("J").params(
         "type: rigid|revolute|slider|cylindrical|pin_slot|planar|ball; a, b: joint origins ({occurrence, face|circle|point: [x,y,z] in world} | origin name); \
-         values?: [angles in deg or expressions, distances]; limits?: [[min, max] | null…]; flip?: bool; offset?; angle?; name?",
+         values?: [angles in deg or expressions, distances]; limits?: [[min, max] | null…]; flip?: bool (default false: the origins are mated, \
+         b's z against a's as two faces meet; true: b's z along a's, so two origins given at one point with the same z stay as they are); \
+         offset?; angle?; name?; quiet?: bool (leave out dof and fixed)",
     ),
     CommandSpec::new("joint.as_built", "As-Built Joint", as_built).at("SOLID", "ASSEMBLE").icon("as_built").params(
-        "type, a: occurrence, b: occurrence (stay where they are); at?: joint origin (default: b's origin) — the joint's frame",
+        "type, a: occurrence, b: occurrence (stay where they are); at?: joint origin (default: b's origin) — the joint's frame; \
+         name?; limits?: [[min, max] | null…]; quiet?: bool",
     ),
     CommandSpec::new("joint.rigid_group", "Rigid Group", rigid_group).at("SOLID", "ASSEMBLE").icon("rigid_group").params("occurrences: [ids or names] (move together, as they are)"),
     CommandSpec::new("joint.drive", "Drive Joints", drive).at("SOLID", "ASSEMBLE").icon("drive").params(
-        "joint: id|name; value | values: [angles in deg or expressions, distances] (clamped to the limits)",
+        "joint: id|name; value | values: [angles in deg or expressions, distances] (values not given keep theirs; clamped to the limits; the other joints of a \
+         closed loop follow, and the motion stops where the loop can no longer close → stopped_by_loop); quiet?: bool (leave out dof \
+         and fixed) → values: [{name, value, unit: deg|mm, limits}] as joint.list gives them; moved: whether any occurrence moved; \
+         reason: why the joint can move nothing (suppressed, its origins lost, or its chain joined to nothing grounded → unconnected: \
+         the occurrence named)",
     ),
     CommandSpec::new("joint.motion_link", "Motion Link", motion_link)
         .at("SOLID", "ASSEMBLE")
@@ -34,7 +43,10 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("joint.limits", "Joint Limits", limits).params("joint; index?: value index (default 0); min?, max? (omit both to clear)"),
     CommandSpec::new("joint.edit", "Edit Joint", edit).params("joint; type?, flip?, offset?, angle?, suppressed?, name?"),
     CommandSpec::new("joint.delete", "Delete Joint", delete).params("joint: id|name (or origin: name, link: index)"),
-    CommandSpec::new("joint.list", "List Joints", list).noundo().params("→ joints (type, occurrences, values, limits), origins, links, degrees of freedom, conflicts"),
+    CommandSpec::new("joint.list", "List Joints", list).noundo().params(
+        "→ joints (type, occurrences, values, limits), origins, links, degrees of freedom, conflicts, floating: [{occurrences, joints}] \
+         (joint chains joined to nothing grounded: the solver places none of them, so driving them moves nothing)",
+    ),
     CommandSpec::new("joint.solve", "Solve Joints", solve_cmd).params("re-place the occurrences from the joints → conflicts, errors, dof"),
     CommandSpec::new("inspect.interference", "Interference", interference).at("SOLID", "INSPECT").icon("interference").noundo().params(
         "bodies?: [names] (default: all, in world placement) → interferences: pairs that overlap with the overlap volume, area, bounding box and centre; unchecked: pairs that could not be checked, with the reason. Bodies are pruned by bounding box first, so any number of bodies is fine; at most 20000 pairs whose boxes overlap are intersected per call (truncated: true and skipped_pairs: n say when more were left out)",
@@ -43,8 +55,14 @@ pub static COMMANDS: &[CommandSpec] = &[
 
 /// Re-solve the joints and move the occurrences they place (after any edit).
 pub fn resolve(s: &mut Session) -> joints::Solution {
+    resolve_holding(s, &BTreeMap::new())
+}
+
+/// Re-solve the joints, keeping the `held` values (the ones being driven, mapped to the values
+/// they move from) where loops are closed.
+pub fn resolve_holding(s: &mut Session, held: &joints::Held) -> joints::Solution {
     let st = s.model.state();
-    let sol = joints::solve(&s.doc, &st);
+    let sol = joints::solve_holding(&s.doc, &st, held);
     if !sol.world.is_empty() {
         let mut next = (*s.doc).clone();
         if next.apply_joint_solution(&sol) {
@@ -55,13 +73,93 @@ pub fn resolve(s: &mut Session) -> joints::Solution {
     sol
 }
 
-fn sol_json(sol: &joints::Solution) -> Value {
-    json!({
+/// A solve's answer; `quiet: true` in the command's params leaves out the per-occurrence lists.
+fn sol_json(sol: &joints::Solution, p: &Value) -> Value {
+    let mut out = json!({
         "conflicts": sol.conflicts.iter().map(|(id, n, w)| json!({"joint": id, "name": n, "why": w})).collect::<Vec<_>>(),
         "errors": sol.errors.iter().map(|(id, n, w)| json!({"joint": id, "name": n, "why": w})).collect::<Vec<_>>(),
-        "dof": sol.dof.iter().map(|(o, d)| json!({"occurrence": o, "dof": d})).collect::<Vec<_>>(),
-        "fixed": sol.fixed,
-    })
+    });
+    if !bool_(p, "quiet").unwrap_or(false) {
+        out["dof"] = sol.dof.iter().map(|(o, d)| json!({"occurrence": o, "dof": d})).collect();
+        out["fixed"] = json!(sol.fixed);
+    }
+    out
+}
+
+/// A joint's values as `joint.list` gives them: degrees for angles, mm for distances, each with
+/// its name and limits.
+pub(crate) fn named_values(j: &Joint, q: &[f64]) -> Vec<Value> {
+    j.kind
+        .dofs()
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            let (v, angle) = (q.get(i).copied().unwrap_or(0.0), j.kind.is_angle(i));
+            json!({"name": n, "value": if angle { v.to_degrees() } else { v }, "unit": if angle { "deg" } else { "mm" },
+                "limits": j.limits.get(i).copied().flatten().map(|(a, b)| if angle { [a.to_degrees(), b.to_degrees()] } else { [a, b] })})
+        })
+        .collect()
+}
+
+fn occurrence_name(s: &Session, id: u64) -> String {
+    s.doc.occurrences.iter().find(|o| o.id == id).map(|o| o.name.clone()).unwrap_or_else(|| id.to_string())
+}
+
+/// Why driving joint `id` moves nothing whatever its values (`None`: it places what it joins),
+/// with the occurrence that is joined to nothing grounded when that is the reason.
+pub(crate) fn cannot_move(s: &Session, sol: &joints::Solution, id: u64) -> Option<(String, Option<String>)> {
+    let j = s.doc.assembly.joints.iter().find(|j| j.id == id)?;
+    // Its value carries through motion links to joints that may move (a suppressed dial too).
+    if s.doc.assembly.links.iter().any(|l| l.a == id || l.b == id) {
+        return None;
+    }
+    if j.suppressed {
+        return Some((format!("{} is suppressed", j.name), None));
+    }
+    if let Some((_, _, why)) = sol.errors.iter().find(|e| e.0 == id) {
+        return Some((why.clone(), None));
+    }
+    // The solver places what it reaches from the root and grounded occurrences.
+    let placed = |o: u64| o == 0 || sol.world.contains_key(&o);
+    if placed(j.a.occurrence) || placed(j.b.occurrence) {
+        return None;
+    }
+    let name = occurrence_name(s, j.a.occurrence);
+    Some((format!("{name} is not connected to anything grounded (ground it, or join it to a grounded part)"), Some(name)))
+}
+
+/// Joint chains joined to nothing grounded, which the solver places none of: each chain's
+/// occurrences and joints, by name.
+fn floating_chains(s: &Session, sol: &joints::Solution) -> Vec<Value> {
+    let placed = |o: u64| o == 0 || sol.world.contains_key(&o);
+    let errors: BTreeSet<u64> = sol.errors.iter().map(|e| e.0).collect();
+    let mut next: BTreeMap<u64, Vec<(u64, &Joint)>> = BTreeMap::new();
+    for j in s.doc.assembly.joints.iter().filter(|j| !j.suppressed && !errors.contains(&j.id)) {
+        if !placed(j.a.occurrence) && !placed(j.b.occurrence) {
+            next.entry(j.a.occurrence).or_default().push((j.b.occurrence, j));
+            next.entry(j.b.occurrence).or_default().push((j.a.occurrence, j));
+        }
+    }
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for &start in next.keys() {
+        if !seen.insert(start) {
+            continue;
+        }
+        let (mut occs, mut js, mut todo) = (vec![start], BTreeSet::new(), vec![start]);
+        while let Some(o) = todo.pop() {
+            for (other, j) in next.get(&o).into_iter().flatten() {
+                js.insert((j.id, j.name.as_str()));
+                if seen.insert(*other) {
+                    occs.push(*other);
+                    todo.push(*other);
+                }
+            }
+        }
+        out.push(json!({"occurrences": occs.iter().map(|o| occurrence_name(s, *o)).collect::<Vec<_>>(),
+            "joints": js.iter().map(|(_, n)| *n).collect::<Vec<_>>()}));
+    }
+    out
 }
 
 pub(crate) fn occurrence_id(s: &Session, v: Option<&Value>, cmd: &str) -> Result<u64> {
@@ -216,7 +314,7 @@ fn next_joint_id(s: &Session) -> u64 {
     s.doc.assembly.joints.iter().map(|j| j.id).max().unwrap_or(0) + 1
 }
 
-fn add_joint(s: &mut Session, j: Joint) -> Result<Value> {
+fn add_joint(s: &mut Session, j: Joint, p: &Value) -> Result<Value> {
     if s.doc.assembly.joints.len() >= 10_000 {
         return Err(EngineError::Other("too many joints".into()));
     }
@@ -225,9 +323,11 @@ fn add_joint(s: &mut Session, j: Joint) -> Result<Value> {
     }
     let id = j.id;
     let name = j.name.clone();
+    // A new joint can take a deleted one's id; it starts shown.
+    s.visibility.hidden_joints.retain(|h| *h != id);
     s.doc_mut().assembly.joints.push(j);
     let sol = resolve(s);
-    let mut out = sol_json(&sol);
+    let mut out = sol_json(&sol, p);
     out["joint"] = json!(id);
     out["name"] = json!(name);
     Ok(out)
@@ -281,7 +381,7 @@ fn joint(s: &mut Session, p: &Value) -> Result<Value> {
         angle,
         suppressed: false,
     };
-    add_joint(s, j)
+    add_joint(s, j, p)
 }
 
 fn as_built(s: &mut Session, p: &Value) -> Result<Value> {
@@ -314,7 +414,7 @@ fn as_built(s: &mut Session, p: &Value) -> Result<Value> {
         angle: 0.0,
         suppressed: false,
     };
-    add_joint(s, j)
+    add_joint(s, j, p)
 }
 
 fn rigid_group(s: &mut Session, p: &Value) -> Result<Value> {
@@ -346,20 +446,32 @@ fn drive(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let doc = s.doc_mut();
     let Some(j) = doc.assembly.joints.iter_mut().find(|j| j.id == id) else { return Err(bad(cmd, "joint")) };
-    // Values not given keep theirs.
-    if let Some(Value::Array(a)) = p.get("values") {
-        for (i, v) in q.iter_mut().enumerate().skip(a.len()) {
-            *v = j.values.get(i).copied().unwrap_or(*v);
-        }
+    // Values not given (after `value`'s first, or past the end of `values`) keep theirs.
+    let given = match p.get("values") {
+        Some(Value::Array(a)) => a.len(),
+        _ => 1,
+    };
+    for (i, v) in q.iter_mut().enumerate().skip(given) {
+        *v = j.values.get(i).copied().unwrap_or(*v);
     }
     joints::clamp(j, &mut q);
-    // Moved as far toward `q` as contact sets allow.
-    let r = super::motion::drive_joint(s, id, q)?;
+    // Moved as far toward `q` as contact sets and closed loops allow. Values left out of
+    // `values` are not driven: in a closed loop they follow.
+    let before = super::motion::positions(s);
+    let r = super::motion::drive_joint(s, id, q, given)?;
     let sol = joints::solve(&s.doc, &s.model.state());
-    let mut out = sol_json(&sol);
+    let mut out = sol_json(&sol, p);
     out["joint"] = json!(id);
-    out["values"] = json!(s.doc.assembly.joints.iter().find(|j| j.id == id).map(|j| j.values.clone()));
+    out["values"] = json!(s.doc.assembly.joints.iter().find(|j| j.id == id).map(|j| named_values(j, &j.values)));
     out["stopped_by_contact"] = r["stopped_by_contact"].clone();
+    out["stopped_by_loop"] = r["stopped_by_loop"].clone();
+    out["moved"] = json!(super::motion::moved(&before, &super::motion::positions(s)).next().is_some());
+    if let Some((why, unconnected)) = cannot_move(s, &sol, id) {
+        out["reason"] = json!(why);
+        if let Some(o) = unconnected {
+            out["unconnected"] = json!(o);
+        }
+    }
     Ok(out)
 }
 
@@ -378,7 +490,7 @@ fn motion_link(s: &mut Session, p: &Value) -> Result<Value> {
     let offset = num(p, "offset").unwrap_or(0.0);
     s.doc_mut().assembly.links.push(MotionLink { a, ia, b, ib, ratio, offset });
     let sol = resolve(s);
-    Ok(sol_json(&sol))
+    Ok(sol_json(&sol, p))
 }
 
 fn limits(s: &mut Session, p: &Value) -> Result<Value> {
@@ -405,7 +517,7 @@ fn limits(s: &mut Session, p: &Value) -> Result<Value> {
     joints::clamp(j, &mut q);
     j.values = q;
     let sol = resolve(s);
-    Ok(sol_json(&sol))
+    Ok(sol_json(&sol, p))
 }
 
 fn edit(s: &mut Session, p: &Value) -> Result<Value> {
@@ -446,7 +558,7 @@ fn edit(s: &mut Session, p: &Value) -> Result<Value> {
         j.name = n.to_string();
     }
     let sol = resolve(s);
-    Ok(sol_json(&sol))
+    Ok(sol_json(&sol, p))
 }
 
 fn delete(s: &mut Session, p: &Value) -> Result<Value> {
@@ -475,12 +587,12 @@ fn delete(s: &mut Session, p: &Value) -> Result<Value> {
     doc.assembly.joints.retain(|j| j.id != id);
     doc.assembly.links.retain(|l| l.a != id && l.b != id);
     let sol = resolve(s);
-    let mut out = sol_json(&sol);
+    let mut out = sol_json(&sol, p);
     out["deleted"] = json!(id);
     Ok(out)
 }
 
-fn list(s: &mut Session, _p: &Value) -> Result<Value> {
+fn list(s: &mut Session, p: &Value) -> Result<Value> {
     let st = s.model.state();
     let sol = joints::solve(&s.doc, &st);
     let vals = joints::joint_values(&s.doc.assembly);
@@ -490,36 +602,26 @@ fn list(s: &mut Session, _p: &Value) -> Result<Value> {
         .joints
         .iter()
         .map(|j| {
-            let q = vals.get(&j.id).cloned().unwrap_or_default();
-            let named: Vec<Value> = j
-                .kind
-                .dofs()
-                .iter()
-                .enumerate()
-                .map(|(i, n)| {
-                    let v = q.get(i).copied().unwrap_or(0.0);
-                    json!({"name": n, "value": if j.kind.is_angle(i) { v.to_degrees() } else { v }, "unit": if j.kind.is_angle(i) { "deg" } else { "mm" },
-                        "limits": j.limits.get(i).copied().flatten().map(|(a, b)| if j.kind.is_angle(i) { [a.to_degrees(), b.to_degrees()] } else { [a, b] })})
-                })
-                .collect();
+            let named = named_values(j, vals.get(&j.id).map(Vec::as_slice).unwrap_or_default());
             let world = |o: &JointOrigin| s.doc.origin_world(&st, o).ok().map(|m| json!({"origin": [m[3][0], m[3][1], m[3][2]], "z": [m[2][0], m[2][1], m[2][2]]}));
             json!({"id": j.id, "name": j.name, "type": j.kind, "a": j.a.occurrence, "b": j.b.occurrence, "values": named,
-                "flip": j.flip, "offset": j.offset, "suppressed": j.suppressed, "frame_a": world(&j.a), "frame_b": world(&j.b)})
+                "flip": j.flip, "offset": j.offset, "suppressed": j.suppressed, "visible": s.joint_visible(j.id), "frame_a": world(&j.a), "frame_b": world(&j.b)})
         })
         .collect();
     let links: Vec<Value> =
         s.doc.assembly.links.iter().map(|l| json!({"a": l.a, "ia": l.ia, "b": l.b, "ib": l.ib, "ratio": l.ratio, "offset": l.offset})).collect();
     let origins: Vec<Value> = s.doc.assembly.origins.iter().map(|o| json!({"name": o.name, "occurrence": o.origin.occurrence})).collect();
-    let mut out = sol_json(&sol);
+    let mut out = sol_json(&sol, p);
     out["joints"] = json!(js);
     out["links"] = json!(links);
     out["origins"] = json!(origins);
+    out["floating"] = json!(floating_chains(s, &sol));
     Ok(out)
 }
 
-fn solve_cmd(s: &mut Session, _p: &Value) -> Result<Value> {
+fn solve_cmd(s: &mut Session, p: &Value) -> Result<Value> {
     let sol = resolve(s);
-    Ok(sol_json(&sol))
+    Ok(sol_json(&sol, p))
 }
 
 fn interference(s: &mut Session, p: &Value) -> Result<Value> {

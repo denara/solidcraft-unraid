@@ -22,12 +22,13 @@ mod decompose;
 mod dims;
 mod fonts;
 mod freeform_offset;
-mod linalg;
+pub mod linalg;
 mod link;
 mod loci;
 mod model;
 mod offset;
 mod offset_topology;
+mod pattern;
 mod periodic;
 mod profiles;
 mod shape;
@@ -43,7 +44,7 @@ pub use curves::{
 };
 pub use decompose::Budget;
 pub use dims::{DimFrame, DimLayout, chain_centres, default_text, dim_frame, dim_layout, encode_text};
-pub use fonts::{DEFAULT_FONT_FAMILY, FontData, families_in, find_style_in, font_data, font_data_styled, font_file_path, installed_families};
+pub use fonts::{DEFAULT_FONT_FAMILY, FontData, families_in, find_style_in, font_data, font_data_styled, installed_families, set_font_file_check};
 pub use freeform_offset::{FreeformOffset, OFFSET_TOLERANCE};
 pub use link::{Link, LinkGeom, LinkKind, LinkSource, MAX_LINK_ENTITIES, SKETCH_AXIS_HALF, sketch_axis_geom};
 pub use model::{
@@ -51,6 +52,7 @@ pub use model::{
 };
 pub use offset::OffsetChain;
 pub use offset_topology::{OffsetCreated, OffsetRole, OffsetRoleFlags, OffsetRoleKind, OffsetTopology};
+pub use pattern::{PatternInstance, SketchPattern, SketchPatternKind};
 pub use periodic::periodic_beziers;
 pub use profiles::{
     CurvePick, Profile, distinct_curves, find_drawn_profiles, find_profiles, merge_regions, profile_at_point, profile_by_curves,

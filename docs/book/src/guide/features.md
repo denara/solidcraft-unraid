@@ -19,9 +19,12 @@ choose **New Body** explicitly to keep an addition separate. Changing the defaul
 operations already saved in a design.
 
 A taper slopes the sides of any profile, sketch text included: lines, arcs and spline or conic
-curves move in or out together, and a flat tip shorter than the taper closes to a point. A
-taper steeper than the profile's details (a stroke, a curve or a gap narrower than it) is
-refused with that reason; a smaller taper or distance builds.
+curves move in or out together, and a flat tip shorter than the taper closes to a point. On
+spline and conic sides the slope is approximate: the moved outline is a curve of the same kind
+within 2 % of the taper's offset (or 10 µm) of the true one, a curve that turns too much for
+that being cut into pieces first; where a curve bends tighter than the offset, the offset folds
+and is smoothed over. A taper steeper than the profile's details (a stroke, a curve or a gap
+narrower than it) is refused with that reason; a smaller taper or distance builds.
 
 **Thin Extrude** (`thin: true` on `solid.extrude`, the Thin Extrude box in its dialog) builds a
 wall of constant thickness along sketch curves instead of filling profiles: open chains (a single
@@ -51,6 +54,13 @@ intersected or ambiguous boundary cannot satisfy that whole-source reference; ch
 hole identities also makes it lost. Older curve-span selections retain their exact stored
 multisets. If an older feature has already lost its profile after subdivision changed, edit
 the feature and reselect the intended current region to capture the new identity.
+
+New symmetric solid extrusions treat the entered distance as the total thickness and split it evenly
+around the start plane: 10 mm spans -5 to +5 mm on an XY sketch. Switching from One Side to
+Symmetric keeps the entered total thickness. Through All still reaches targets in both
+directions, and Two Sides retains its independent distances. Symmetric extrusions saved before
+this change keep their original per-side distances when reopened or edited. Selecting another direction
+in the feature editor uses the current total-distance convention.
 
 New symmetric revolves split the entered angle evenly around the sketch profile, regardless
 of which way the selected axis points. Two Sides measures the second angle backward and the
@@ -151,6 +161,16 @@ still be added through `set`. The fields of the common features:
 | Mirror | `plane`, `features`, `bodies`, `combine` |
 
 For any other feature, `timeline.inspect` shows the fields.
+
+Where a command takes a face as a point (`face.delete`, `solid.shell`, `solid.draft`,
+`solid.offset_face`, `solid.split_face`, the `faces` of `solid.replace_face`, and the `face` of
+`sheet.convert`), a script can give the face's name instead, as `model.faces` lists it:
+`{"command": "face.delete", "params": {"faces": ["F2:side#1", "F2:side#2"], "body": "Plate"}}`.
+`model.faces` also lists a `point` on each face that picks it (the centroid of a face with a hole
+in it is in the hole, that of a half cylinder inside the cylinder) and, for a cylindrical face,
+its `cylinder`: `origin` and `axis` of its axis, and `radius`. A name that is more than one face
+(the pieces of a split face, or one face of several bodies) is refused; `body` says which body to
+look on.
 
 Press **Delete** on anything selected (bodies, faces, sketches, features, planes, components,
 canvases). It runs as one undoable step and lists the features that would go with it or fail.

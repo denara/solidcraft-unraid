@@ -48,6 +48,21 @@ impl Default for DriverMapping {
     }
 }
 
+impl DriverMapping {
+    /// The mapping used when no 3DxWare profile is found. On Linux there is no 3DxWare, so it is
+    /// what the driver applies by default in object mode (#1172): the physical Ry and Rz swapped
+    /// and reversed, so a tilt left/right rolls and a twist spins. Elsewhere the driver writes a
+    /// profile, and the raw axes are used until it does.
+    fn without_profile() -> Self {
+        let mut mapping = Self::default();
+        if cfg!(target_os = "linux") {
+            mapping.axes[4] = AxisRule { output: 5, enabled: true, reversed: true, scale: 1.0 };
+            mapping.axes[5] = AxisRule { output: 4, enabled: true, reversed: true, scale: 1.0 };
+        }
+        mapping
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Motion {
     translation: [f64; 3],
@@ -377,7 +392,12 @@ impl SpaceMouse {
         if let Err(error) = std::thread::Builder::new().name("solidcraft-3d-mouse".into()).spawn(move || reader(worker_ctx, worker_state)) {
             log::warn!("3D mouse: reader could not start: {error}");
         }
-        Self { shared, last_frame: now, driver_mapping: load_driver_mapping().unwrap_or_default(), mapping_checked_at: now }
+        Self {
+            shared,
+            last_frame: now,
+            driver_mapping: load_driver_mapping().unwrap_or_else(DriverMapping::without_profile),
+            mapping_checked_at: now,
+        }
     }
 
     pub fn tick(&mut self, app: &mut SolveApp, ctx: &Context) {
@@ -385,7 +405,7 @@ impl SpaceMouse {
         let seconds = now.duration_since(self.last_frame).as_secs_f64().min(0.05);
         self.last_frame = now;
         if now.duration_since(self.mapping_checked_at) >= RETRY_AFTER {
-            let updated = load_driver_mapping().unwrap_or_default();
+            let updated = load_driver_mapping().unwrap_or_else(DriverMapping::without_profile);
             if updated != self.driver_mapping {
                 log::info!("3D mouse: applying updated 3DxWare axis profile");
                 self.driver_mapping = updated;
@@ -578,6 +598,51 @@ mod tests {
         let motion = mapping.apply(Axes { translation: [350, 0, 350], rotation: [350, 0, 350] });
         assert_eq!(motion.translation, [1.0, -1.0, 0.0]);
         assert_eq!(motion.rotation, [1.0, -1.0, 0.0]);
+    }
+
+    #[test]
+    fn without_a_profile_linux_uses_the_drivers_object_mode_axes() {
+        // 3DxWare's object-mode mapping, as a profile (#1172: confirmed on a SpaceMouse Compact).
+        let object_mode = br#"
+            <AppCfg><Devices><Device><AxisBank>
+              <Axis><Enabled>true</Enabled><Input><ActionID>HIDMultiAxis_X</ActionID></Input><Output><ActionID>HIDMultiAxis_X</ActionID><Reversed>false</Reversed></Output></Axis>
+              <Axis><Enabled>true</Enabled><Input><ActionID>HIDMultiAxis_Y</ActionID></Input><Output><ActionID>HIDMultiAxis_Y</ActionID><Reversed>false</Reversed></Output></Axis>
+              <Axis><Enabled>true</Enabled><Input><ActionID>HIDMultiAxis_Z</ActionID></Input><Output><ActionID>HIDMultiAxis_Z</ActionID><Reversed>false</Reversed></Output></Axis>
+              <Axis><Enabled>true</Enabled><Input><ActionID>HIDMultiAxis_Rx</ActionID></Input><Output><ActionID>HIDMultiAxis_Rx</ActionID><Reversed>false</Reversed></Output></Axis>
+              <Axis><Enabled>true</Enabled><Input><ActionID>HIDMultiAxis_Ry</ActionID></Input><Output><ActionID>HIDMultiAxis_Rz</ActionID><Reversed>true</Reversed></Output></Axis>
+              <Axis><Enabled>true</Enabled><Input><ActionID>HIDMultiAxis_Rz</ActionID></Input><Output><ActionID>HIDMultiAxis_Ry</ActionID><Reversed>true</Reversed></Output></Axis>
+            </AxisBank></Device></Devices></AppCfg>
+        "#;
+        let profile = parse_driver_mapping(object_mode).expect("valid 3DxWare profile");
+        if cfg!(target_os = "linux") {
+            assert_eq!(DriverMapping::without_profile(), profile);
+            // Tilting the cap rolls the view and twisting it spins it, as with the driver.
+            let before = Camera::default();
+            let mut tilt = before;
+            navigate(
+                &mut tilt,
+                DriverMapping::without_profile().apply(Axes { translation: [0; 3], rotation: [0, 350, 0] }),
+                0.02,
+                600.0,
+                false,
+                false,
+            );
+            assert_eq!((tilt.yaw, tilt.pitch), (before.yaw, before.pitch));
+            assert_ne!(tilt.roll, before.roll);
+            let mut twist = before;
+            navigate(
+                &mut twist,
+                DriverMapping::without_profile().apply(Axes { translation: [0; 3], rotation: [0, 0, 350] }),
+                0.02,
+                600.0,
+                false,
+                false,
+            );
+            assert_ne!(twist.yaw, before.yaw);
+            assert_eq!(twist.roll, before.roll);
+        } else {
+            assert_eq!(DriverMapping::without_profile(), DriverMapping::default());
+        }
     }
 
     #[test]

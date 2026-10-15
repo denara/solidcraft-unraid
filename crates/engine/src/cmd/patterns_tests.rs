@@ -346,3 +346,59 @@ fn one_extrude_of_many_sketch_circles_scales_linearly() {
         panic!("32 circles, then 128, took {missed}");
     }
 }
+
+/// A bar with sawtooth teeth cut along one side (#400): the tooth profile drawn once, or all
+/// `teeth` in one sketch. Each tooth's slope starts on the previous tooth's wall.
+fn sawtooth_bar(teeth: usize, pattern: bool) -> (Session, Option<u64>) {
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Bar"}));
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [-10, 0], "p1": [10, 200]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"sketch": "Bar", "distance": 4, "operation": "new", "body_name": "Bar"}));
+    run(&mut s, "sketch.create", json!({"plane": "YZ", "name": "Tooth"}));
+    if pattern {
+        run(&mut s, "sketch.line", json!({"points": [[9, 4.375], [14, 2.5], [14, 4.375]], "closed": true}));
+    } else {
+        let mut pts = vec![json!([9, 4.375])];
+        for k in 0..teeth {
+            pts.push(json!([14 + 4 * k, 2.5]));
+            pts.push(json!([14 + 4 * k, if k + 1 == teeth { 4.375 } else { 4.0 }]));
+        }
+        run(&mut s, "sketch.line", json!({"points": pts, "closed": true}));
+    }
+    run(&mut s, "sketch.finish", json!({}));
+    // Total thickness 16 mm keeps the sawtooth cut spanning 8 mm on each side of YZ.
+    run(&mut s, "solid.extrude", json!({"sketch": "Tooth", "distance": 16, "direction": "symmetric", "operation": "cut", "name": "Tooth cut"}));
+    let id = pattern.then(|| {
+        let r = run(&mut s, "solid.pattern.rectangular", json!({"features": ["Tooth cut"], "dir1": [0, 1, 0], "count1": teeth, "spacing1": 4}));
+        r["feature"].as_u64().unwrap()
+    });
+    (s, id)
+}
+
+/// A feature pattern of a cut whose copies touch (#400): every copy went through the planar
+/// fallback, each left split edges the next copy had to cut through (2110 kernel edges for 333),
+/// and 40 teeth took 6.5 s where one sketch of all of them took 0.04 s. The pattern must build
+/// what the single cut builds, with no retry and no leftover topology.
+#[test]
+fn pattern_of_touching_cuts_needs_no_fallback() {
+    let (mut s, id) = sawtooth_bar(40, true);
+    let result = s.model.result(id.unwrap()).unwrap();
+    assert!(result.error.is_none() && result.warning.is_none(), "{result:?}");
+    assert!(result.boolean_diagnostics.events.is_empty(), "{:?}", result.boolean_diagnostics);
+    let m = run(&mut s, "inspect.measure", json!({}));
+    let (mut one, _) = sawtooth_bar(40, false);
+    let single = run(&mut one, "inspect.measure", json!({}));
+    // Bar less 40 teeth: in the bar each is a triangle 4 long and 1.5 deep (the slope leaves the
+    // top at y = 10), cut 8 mm to each side.
+    let want = 20.0 * 200.0 * 4.0 - 40.0 * 0.5 * 4.0 * 1.5 * 16.0;
+    for m in [&m, &single] {
+        let b = &m["bodies"][0];
+        assert!(rel(b["volume_mm3"].as_f64().unwrap(), want) < 1e-9, "{b}");
+        assert_eq!(b["kernel"]["edges"], b["edges"], "{b}");
+        assert_eq!(b["kernel"]["vertices"], b["vertices"], "{b}");
+    }
+    for k in ["faces", "edges", "vertices"] {
+        assert_eq!(m["bodies"][0][k], single["bodies"][0][k], "{k}");
+    }
+}

@@ -39,6 +39,65 @@ pub mod colors {
     pub const SECTION_CAP: Rgb = solidcraft_render::SECTION_CAP;
 }
 
+/// The colours a headless scene is drawn in. [`Palette::DEFAULT`] is [`colors`], the light
+/// theme's look, which `solidcraft-cli snapshot`, MCP screenshots and thumbnails keep; the app
+/// passes its theme's for `ui.render` and its CPU viewport, so they match the window. Only these
+/// defaults change: a body's appearance and a face's own look are the design's, drawn as they are.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Palette {
+    /// The background gradient, top and bottom.
+    pub background: (Rgb, Rgb),
+    pub grid: Rgb,
+    pub grid_major: Rgb,
+    /// Body edges, and the outline where the section cuts a body.
+    pub edge: Rgb,
+    /// A body without an appearance of its own.
+    pub body: Rgb,
+    pub body_selected: Rgb,
+    /// Sketch curves: under-constrained, fully constrained (in the active sketch), in a finished
+    /// sketch, fixed, projected, with a lost link, construction, centerline.
+    pub sketch: Rgb,
+    pub sketch_fixed: Rgb,
+    pub sketch_done: Rgb,
+    pub sketch_locked: Rgb,
+    pub sketch_projected: Rgb,
+    pub sketch_lost: Rgb,
+    pub sketch_construction: Rgb,
+    pub sketch_centerline: Rgb,
+    /// The origin axes: X, Y, Z.
+    pub axes: [Rgb; 3],
+    /// What the section cap is tinted toward.
+    pub cap: Rgb,
+}
+
+impl Palette {
+    /// [`colors`].
+    pub const DEFAULT: Palette = Palette {
+        background: (colors::BG_TOP, colors::BG_BOTTOM),
+        grid: colors::GRID,
+        grid_major: colors::GRID_MAJOR,
+        edge: colors::EDGE,
+        body: colors::BODY,
+        body_selected: colors::BODY_SELECTED,
+        sketch: colors::SKETCH,
+        sketch_fixed: colors::SKETCH_FIXED,
+        sketch_done: colors::SKETCH_DONE,
+        sketch_locked: colors::SKETCH_LOCKED,
+        sketch_projected: colors::SKETCH_PROJECTED,
+        sketch_lost: colors::SKETCH_LOST,
+        sketch_construction: colors::SKETCH_CONSTRUCTION,
+        sketch_centerline: colors::SKETCH_CENTERLINE,
+        axes: [colors::AXIS_X, colors::AXIS_Y, colors::AXIS_Z],
+        cap: colors::SECTION_CAP,
+    };
+}
+
+impl Default for Palette {
+    fn default() -> Self {
+        Palette::DEFAULT
+    }
+}
+
 /// Bounds of everything visible now, in world space: shown bodies where their occurrences,
 /// joints and moves place them, and the sketches the view draws (not ones used by a feature,
 /// hidden ones, or ones in hidden components). What Home, Fit and the orbit pivot frame.
@@ -88,7 +147,8 @@ pub fn sketch_lines(sk: &Sketch, plane: &Plane, active: bool, determined: &[bool
     sketch_lines_with_sampler(sk, plane, active, determined, world_curve_parts)
 }
 
-fn world_curve_parts(sk: &Sketch, i: usize, plane: &Plane) -> Vec<Vec<Vec3>> {
+/// A sketch curve as world polylines: the sampler of [`scene`] and [`sketch_lines`].
+pub fn world_curve_parts(sk: &Sketch, i: usize, plane: &Plane) -> Vec<Vec<Vec3>> {
     sk.segs(i).into_iter().map(|seg| seg.polyline(0.02).iter().map(|p| plane.to_world(*p)).collect()).collect()
 }
 
@@ -103,7 +163,19 @@ pub fn sketch_lines_with_sampler(
     plane: &Plane,
     active: bool,
     determined: &[bool],
+    sampler: impl FnMut(&Sketch, usize, &Plane) -> Vec<Vec<Vec3>>,
+) -> Vec<(Vec<Vec3>, Rgb, bool)> {
+    sketch_lines_in(sk, plane, active, determined, sampler, &Palette::DEFAULT)
+}
+
+/// [`sketch_lines_with_sampler`] in the colours of `p`.
+fn sketch_lines_in(
+    sk: &Sketch,
+    plane: &Plane,
+    active: bool,
+    determined: &[bool],
     mut sampler: impl FnMut(&Sketch, usize, &Plane) -> Vec<Vec<Vec3>>,
+    p: &Palette,
 ) -> Vec<(Vec<Vec3>, Rgb, bool)> {
     let mut out = Vec::new();
     for (i, c) in sk.curves.iter().enumerate() {
@@ -111,19 +183,19 @@ pub fn sketch_lines_with_sampler(
             continue;
         }
         let col = if c.link.is_some() && !sk.is_text_curve(i) {
-            if sk.is_lost_curve(i) { colors::SKETCH_LOST } else { colors::SKETCH_PROJECTED }
+            if sk.is_lost_curve(i) { p.sketch_lost } else { p.sketch_projected }
         } else if c.fixed {
-            colors::SKETCH_LOCKED
+            p.sketch_locked
         } else if c.centerline {
-            colors::SKETCH_CENTERLINE
+            p.sketch_centerline
         } else if c.construction {
-            colors::SKETCH_CONSTRUCTION
+            p.sketch_construction
         } else if !active {
-            colors::SKETCH_DONE
+            p.sketch_done
         } else if determined.get(i).copied().unwrap_or(false) {
-            colors::SKETCH_FIXED
+            p.sketch_fixed
         } else {
-            colors::SKETCH
+            p.sketch
         };
         for part in sampler(sk, i, plane) {
             out.push((part, col, c.construction || c.centerline));
@@ -133,18 +205,18 @@ pub fn sketch_lines_with_sampler(
     // curves to the corner, like construction geometry.
     for (_, ext) in sk.virtual_corners() {
         for (a, b) in ext {
-            out.push((vec![plane.to_world(a), plane.to_world(b)], colors::SKETCH_CONSTRUCTION, true));
+            out.push((vec![plane.to_world(a), plane.to_world(b)], p.sketch_construction, true));
         }
     }
     // 3D curves are in world coordinates already.
     for w in sk.wires.iter().filter(|w| !w.fit.is_empty() || !sk.view.hide_projected) {
         // Curves drawn in a 3D sketch look like the sketch's own; included ones are references.
         let col = if w.fit.is_empty() {
-            colors::SKETCH_PROJECTED
+            p.sketch_projected
         } else if active {
-            colors::SKETCH
+            p.sketch
         } else {
-            colors::SKETCH_DONE
+            p.sketch_done
         };
         out.push((w.pts.clone(), col, false));
     }
@@ -215,7 +287,29 @@ pub fn scene(s: &Session, cam: &Camera) -> Scene {
 /// the app passes the cut its viewport shows (an open Section Analysis dialog's preview, a
 /// sketch's Slice), so model renders match the window.
 pub fn scene_with_section(s: &Session, cam: &Camera, section: Option<(Vec3, Vec3)>) -> Scene {
-    scene_with_section_and_sketch_sampler(s, cam, section, world_curve_parts)
+    scene_with_guides(s, cam, section, Guides::default())
+}
+
+/// What a headless render draws besides the model: the ground grid and the origin's axes.
+/// Both are on by default; the grid lies on Z 0, so it cuts through a model that straddles it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Guides {
+    /// The ground grid.
+    pub grid: bool,
+    /// The origin's axes. An axis hidden with `browser.visibility` (`X`, `Y`, `Z`, or the whole
+    /// `origin` folder) stays hidden whatever this says, as in the viewport.
+    pub axes: bool,
+}
+
+impl Default for Guides {
+    fn default() -> Self {
+        Guides { grid: true, axes: true }
+    }
+}
+
+/// [`scene_with_section`] with the grid and the axes shown or left out.
+pub fn scene_with_guides(s: &Session, cam: &Camera, section: Option<(Vec3, Vec3)>, guides: Guides) -> Scene {
+    scene_with_palette_and_guides(s, cam, section, world_curve_parts, &Palette::DEFAULT, guides)
 }
 
 /// A headless scene using supplied display paths for its visible sketch curves.
@@ -230,44 +324,78 @@ pub fn scene_with_section_and_sketch_sampler(
     s: &Session,
     cam: &Camera,
     section: Option<(Vec3, Vec3)>,
+    sampler: impl FnMut(&Sketch, usize, &Plane) -> Vec<Vec<Vec3>>,
+) -> Scene {
+    scene_with_palette(s, cam, section, sampler, &Palette::DEFAULT)
+}
+
+/// [`scene_with_section_and_sketch_sampler`] in the colours of `p` (the app's theme).
+pub fn scene_with_palette(
+    s: &Session,
+    cam: &Camera,
+    section: Option<(Vec3, Vec3)>,
+    sampler: impl FnMut(&Sketch, usize, &Plane) -> Vec<Vec<Vec3>>,
+    p: &Palette,
+) -> Scene {
+    build_scene(s, cam, section, Guides::default(), sampler, p)
+}
+
+/// [`scene_with_palette`] with the ground grid and the origin's axes shown or left out.
+pub fn scene_with_palette_and_guides(
+    s: &Session,
+    cam: &Camera,
+    section: Option<(Vec3, Vec3)>,
+    sampler: impl FnMut(&Sketch, usize, &Plane) -> Vec<Vec<Vec3>>,
+    p: &Palette,
+    guides: Guides,
+) -> Scene {
+    build_scene(s, cam, section, guides, sampler, p)
+}
+
+fn build_scene(
+    s: &Session,
+    cam: &Camera,
+    section: Option<(Vec3, Vec3)>,
+    guides: Guides,
     mut sampler: impl FnMut(&Sketch, usize, &Plane) -> Vec<Vec<Vec3>>,
+    p: &Palette,
 ) -> Scene {
     let st = s.world_state();
     let section = section.filter(|(o, n)| o.is_finite() && n.is_finite() && n.len() > 1e-9);
-    let mut sc = Scene {
-        background: Some((colors::BG_TOP, colors::BG_BOTTOM)),
-        clip: section.map(|(o, n)| (n, n.dot(o))),
-        cap: Some(colors::SECTION_CAP),
-        ..Default::default()
-    };
+    let mut sc = Scene { background: Some(p.background), clip: section.map(|(o, n)| (n, n.dot(o))), cap: Some(p.cap), ..Default::default() };
     let b = bounds(s);
     sc.radius = (b.diagonal() * 0.5).max(cam.half_height()).max(10.0) + b.center().dist(cam.target);
     // Grid on the ground plane (XY with Z up, XZ with Y up).
-    let (minor, major) = grid_step(cam.half_height());
-    let ext = (cam.half_height() * 3.0 / major).ceil() * major;
-    let tf = cam.to_frame(cam.target);
-    let c = Vec3::new((tf.x / major).round() * major, (tf.y / major).round() * major, 0.0);
-    let w = |p: Vec3| cam.from_frame(p);
-    let n = ((ext / minor) as i64).clamp(1, 400);
-    for i in -n..=n {
-        let t = i as f64 * minor;
-        let col = if (t / major).fract().abs() < 1e-9 { colors::GRID_MAJOR } else { colors::GRID };
-        sc.lines.push(SceneLine {
-            points: vec![w(c + Vec3::new(t, -ext, 0.0)), w(c + Vec3::new(t, ext, 0.0))],
-            color: col,
-            width: 0.6,
-            on_top: false,
-        });
-        sc.lines.push(SceneLine {
-            points: vec![w(c + Vec3::new(-ext, t, 0.0)), w(c + Vec3::new(ext, t, 0.0))],
-            color: col,
-            width: 0.6,
-            on_top: false,
-        });
+    if guides.grid {
+        let (minor, major) = grid_step(cam.half_height());
+        let ext = (cam.half_height() * 3.0 / major).ceil() * major;
+        let tf = cam.to_frame(cam.target);
+        let c = Vec3::new((tf.x / major).round() * major, (tf.y / major).round() * major, 0.0);
+        let w = |p: Vec3| cam.from_frame(p);
+        let n = ((ext / minor) as i64).clamp(1, 400);
+        for i in -n..=n {
+            let t = i as f64 * minor;
+            let col = if (t / major).fract().abs() < 1e-9 { p.grid_major } else { p.grid };
+            sc.lines.push(SceneLine {
+                points: vec![w(c + Vec3::new(t, -ext, 0.0)), w(c + Vec3::new(t, ext, 0.0))],
+                color: col,
+                width: 0.6,
+                on_top: false,
+            });
+            sc.lines.push(SceneLine {
+                points: vec![w(c + Vec3::new(-ext, t, 0.0)), w(c + Vec3::new(ext, t, 0.0))],
+                color: col,
+                width: 0.6,
+                on_top: false,
+            });
+        }
     }
+    // The origin's axes, each unless hidden one by one (`browser.visibility`), as in the viewport.
     let axis = cam.half_height() * 0.25;
-    for (d, col) in [(Vec3::X, colors::AXIS_X), (Vec3::Y, colors::AXIS_Y), (Vec3::Z, colors::AXIS_Z)] {
-        sc.lines.push(SceneLine { points: vec![Vec3::ZERO, d * axis], color: col, width: 1.6, on_top: false });
+    for ((name, d), col) in [("X", Vec3::X), ("Y", Vec3::Y), ("Z", Vec3::Z)].into_iter().zip(p.axes) {
+        if guides.axes && !s.visibility.hidden_origin.iter().any(|h| h == name) {
+            sc.lines.push(SceneLine { points: vec![Vec3::ZERO, d * axis], color: col, width: 1.6, on_top: false });
+        }
     }
     let selected_occurrences: Vec<String> = s
         .selection
@@ -284,8 +412,7 @@ pub fn scene_with_section_and_sketch_sampler(
         // The body's appearance (or imported colour) and faces with looks of their own, as in
         // the viewport.
         let to8 = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u8;
-        let color =
-            if selected { colors::BODY_SELECTED } else { s.doc.body_color(body).map_or(colors::BODY, |[r, g, b]| Rgb(to8(r), to8(g), to8(b))) };
+        let color = if selected { p.body_selected } else { s.doc.body_color(body).map_or(p.body, |[r, g, b]| Rgb(to8(r), to8(g), to8(b))) };
         let face_colors = if selected {
             Vec::new()
         } else {
@@ -296,12 +423,12 @@ pub fn scene_with_section_and_sketch_sampler(
             if !mesh.shaded_edge_visible(i) {
                 continue;
             }
-            sc.lines.push(SceneLine { points: e.clone(), color: colors::EDGE, width: 1.2, on_top: false });
+            sc.lines.push(SceneLine { points: e.clone(), color: p.edge, width: 1.2, on_top: false });
         }
         // The outline of the body where the section cuts it.
         if let Some((o, n)) = section {
             for (a, b) in section_segments(&mesh, o, n) {
-                sc.lines.push(SceneLine { points: vec![a, b], color: colors::EDGE, width: 1.6, on_top: false });
+                sc.lines.push(SceneLine { points: vec![a, b], color: p.edge, width: 1.6, on_top: false });
             }
         }
     }
@@ -310,7 +437,7 @@ pub fn scene_with_section_and_sketch_sampler(
         if !sketch_shown(s, ss.feature) {
             continue;
         }
-        for (pts, col, cons) in sketch_lines_with_sampler(&ss.sketch, &ss.plane, active, &ss.report.curve_determined, &mut sampler) {
+        for (pts, col, cons) in sketch_lines_in(&ss.sketch, &ss.plane, active, &ss.report.curve_determined, &mut sampler, p) {
             sc.lines.push(SceneLine { points: pts, color: col, width: if cons { 1.0 } else { 1.6 }, on_top: active });
         }
     }
@@ -474,6 +601,56 @@ mod tests {
         assert!(img.rgba.chunks(4).any(|p| p[1] > 120 && p[0] < 90 && p[2] < 110), "no green pixels");
     }
 
+    /// A render can leave out the ground grid and the origin's axes (a box straddling Z 0 is cut
+    /// through by the grid), each on its own; the body's own lines stay.
+    #[test]
+    fn guides_leave_the_grid_and_the_axes_out() {
+        let mut s = Session::default();
+        s.execute("solid.box", &json!({"length": 40, "width": 30, "height": 20, "corner": [10, -15, -10]})).unwrap();
+        let cam = home_camera(&s);
+        let grid = [colors::GRID, colors::GRID_MAJOR];
+        let axes = [colors::AXIS_X, colors::AXIS_Y, colors::AXIS_Z];
+        let count = |sc: &Scene, colours: &[Rgb]| sc.lines.iter().filter(|l| colours.contains(&l.color)).count();
+        let all = scene(&s, &cam);
+        let (grid_lines, edges) = (count(&all, &grid), count(&all, &[colors::EDGE]));
+        assert!(grid_lines > 20 && edges >= 12, "{grid_lines} grid lines, {edges} edges");
+        assert_eq!(count(&all, &axes), 3);
+        assert_eq!(all.lines.len(), scene_with_guides(&s, &cam, s.section, Guides::default()).lines.len());
+        let render = |g: Guides| scene_with_guides(&s, &cam, s.section, g);
+        let no_grid = render(Guides { grid: false, axes: true });
+        assert_eq!((count(&no_grid, &grid), count(&no_grid, &axes), count(&no_grid, &[colors::EDGE])), (0, 3, edges));
+        let no_axes = render(Guides { grid: true, axes: false });
+        assert_eq!((count(&no_axes, &grid), count(&no_axes, &axes), count(&no_axes, &[colors::EDGE])), (grid_lines, 0, edges));
+        let bare = render(Guides { grid: false, axes: false });
+        assert_eq!(bare.lines.len(), edges);
+        // The picture changes with each.
+        let png = |sc: &Scene| solidcraft_render::render_png(sc, &cam, 160, 100);
+        assert!(png(&all) != png(&no_grid) && png(&all) != png(&no_axes) && png(&no_grid) != png(&bare));
+    }
+
+    /// An origin axis hidden with `browser.visibility` stays out of headless renders, as it does
+    /// out of the viewport, whatever the render's own switch says; the grid is not the origin.
+    #[test]
+    fn hidden_origin_axes_stay_out_of_renders() {
+        let mut s = Session::default();
+        s.execute("solid.box", &json!({"length": 40, "width": 30, "height": 20})).unwrap();
+        let cam = home_camera(&s);
+        let axes = [colors::AXIS_X, colors::AXIS_Y, colors::AXIS_Z];
+        let shown = |s: &Session| -> Vec<Rgb> {
+            let sc = scene(s, &cam);
+            axes.into_iter().filter(|c| sc.lines.iter().any(|l| l.color == *c)).collect()
+        };
+        assert_eq!(shown(&s), axes);
+        s.execute("browser.visibility", &json!({"items": ["Y"], "visible": false})).unwrap();
+        assert_eq!(shown(&s), [colors::AXIS_X, colors::AXIS_Z]);
+        s.execute("browser.visibility", &json!({"folder": "origin", "visible": false})).unwrap();
+        assert!(shown(&s).is_empty());
+        let sc = scene_with_guides(&s, &cam, None, Guides { grid: true, axes: true });
+        assert!(sc.lines.iter().any(|l| l.color == colors::GRID), "the grid is not part of the origin");
+        s.execute("browser.visibility", &json!({"folder": "origin", "visible": true})).unwrap();
+        assert_eq!(shown(&s), axes);
+    }
+
     /// Curved surfaces get a dark silhouette line in snapshots where they turn away.
     #[test]
     fn snapshots_draw_silhouettes_on_curved_surfaces() {
@@ -531,3 +708,7 @@ mod tests {
 #[cfg(test)]
 #[path = "view_display_tests.rs"]
 mod display_tests;
+
+#[cfg(test)]
+#[path = "view_palette_tests.rs"]
+mod palette_tests;

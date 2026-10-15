@@ -3,13 +3,6 @@
 
 use egui::{Color32, Mesh, Painter, Pos2, Rect, Shape, Stroke, pos2, vec2};
 
-/// Surface sheets: a sheet, a second sheet beside it, a lighter sheet (an opening, a blend or
-/// round strip), and the iso lines and comb teeth drawn on sheets.
-const SHEET: Color32 = Color32::from_rgb(170, 200, 240);
-const SHEET_2: Color32 = Color32::from_rgb(150, 185, 235);
-const SHEET_LIGHT: Color32 = Color32::from_rgb(214, 229, 248);
-const SHEET_LINE: Color32 = Color32::from_rgb(127, 166, 218);
-
 /// `n + 1` points along the cubic Bézier curve with control points `c`.
 fn bezier(c: [(f32, f32); 4], n: usize) -> Vec<(f32, f32)> {
     (0..=n)
@@ -127,6 +120,12 @@ fn line_type_dot_radius(r: Rect) -> f32 {
 
 /// Paint the icon `name` into `r`. `accent` highlights the "action" part.
 pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, accent: Color32) {
+    paint_with(p, r, name, ink, fill, accent, &crate::theme::Tokens::get().icons);
+}
+
+/// [`paint`] with the colours an icon draws of its own given (`theme::IconColors`).
+pub(crate) fn paint_with(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, accent: Color32, ic: &crate::theme::IconColors) {
+    let ic = *ic;
     let pen = Pen { p, r, ink, fill, accent, w: (r.width() / 24.0 * 1.4).max(1.0) };
     let a = pen.accent;
     match name {
@@ -164,7 +163,7 @@ pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, acce
         "sphere" => {
             pen.circle(12.0, 12.0, 8.5, pen.fill, ink);
             pen.arc(12.0, 12.0, 8.5, 3.3, 6.1, ink.gamma_multiply(0.5));
-            p.circle_filled(pen.at(9.0, 8.5), 2.0 * pen.s(), Color32::from_white_alpha(160));
+            p.circle_filled(pen.at(9.0, 8.5), 2.0 * pen.s(), ic.glint);
         }
         "torus" => {
             let pts: Vec<Pos2> =
@@ -172,7 +171,7 @@ pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, acce
             p.add(Shape::convex_polygon(pts, pen.fill, Stroke::new(pen.w, ink)));
             let pts: Vec<Pos2> =
                 (0..40).map(|i| i as f32 / 40.0 * std::f32::consts::TAU).map(|t| pen.at(12.0 + 3.5 * t.cos(), 11.0 + 1.8 * t.sin())).collect();
-            p.add(Shape::convex_polygon(pts, Color32::WHITE, Stroke::new(pen.w, ink)));
+            p.add(Shape::convex_polygon(pts, ic.highlight, Stroke::new(pen.w, ink)));
         }
         "fillet" => {
             pen.poly(&[(4.0, 20.0), (4.0, 4.0), (10.0, 4.0), (10.0, 14.0), (20.0, 14.0), (20.0, 20.0)], pen.fill, Color32::TRANSPARENT);
@@ -214,7 +213,7 @@ pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, acce
             pen.poly(&[(3.0, 8.0), (21.0, 8.0), (21.0, 20.0), (3.0, 20.0)], pen.fill, ink);
             let pts: Vec<Pos2> =
                 (0..32).map(|i| i as f32 / 32.0 * std::f32::consts::TAU).map(|t| pen.at(12.0 + 5.0 * t.cos(), 8.0 + 2.0 * t.sin())).collect();
-            p.add(Shape::convex_polygon(pts, Color32::WHITE, Stroke::new(pen.w, a)));
+            p.add(Shape::convex_polygon(pts, ic.highlight, Stroke::new(pen.w, a)));
             pen.line(&[(7.0, 8.0), (7.0, 16.0)], a);
             pen.line(&[(17.0, 8.0), (17.0, 16.0)], a);
         }
@@ -231,7 +230,7 @@ pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, acce
         }
         "shell" => {
             pen.iso_box(3.0, 9.0, 10.0, 8.0, 9.0);
-            pen.poly(&[(6.0, 9.0), (13.0, 5.5), (18.0, 8.0), (11.0, 11.5)], Color32::WHITE, a);
+            pen.poly(&[(6.0, 9.0), (13.0, 5.5), (18.0, 8.0), (11.0, 11.5)], ic.highlight, a);
         }
         "draft" => {
             pen.poly(&[(4.0, 20.0), (20.0, 20.0), (17.0, 5.0), (7.0, 5.0)], pen.fill, ink);
@@ -478,7 +477,7 @@ pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, acce
         "c_coincident" => {
             pen.line(&[(3.0, 18.0), (12.0, 12.0)], ink);
             pen.line(&[(12.0, 12.0), (21.0, 16.0)], ink);
-            pen.circle(12.0, 12.0, 2.6, Color32::WHITE, a);
+            pen.circle(12.0, 12.0, 2.6, ic.highlight, a);
         }
         "c_tangent" => {
             pen.circle(12.0, 14.0, 6.0, Color32::TRANSPARENT, ink);
@@ -525,7 +524,7 @@ pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, acce
             pen.arrow((x1 + (x0 - x1) * 0.15, 9.0), (x1, 9.0), ink);
         }
         "new" => {
-            pen.poly(&[(6.0, 3.0), (15.0, 3.0), (19.0, 7.0), (19.0, 21.0), (6.0, 21.0)], Color32::WHITE, ink);
+            pen.poly(&[(6.0, 3.0), (15.0, 3.0), (19.0, 7.0), (19.0, 21.0), (6.0, 21.0)], ic.highlight, ink);
             pen.line(&[(15.0, 3.0), (15.0, 7.0), (19.0, 7.0)], ink);
         }
         "open" => {
@@ -533,7 +532,7 @@ pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, acce
         }
         "save" => {
             pen.poly(&[(4.0, 4.0), (17.0, 4.0), (20.0, 7.0), (20.0, 20.0), (4.0, 20.0)], pen.fill, ink);
-            pen.poly(&[(8.0, 4.0), (16.0, 4.0), (16.0, 9.0), (8.0, 9.0)], Color32::WHITE, ink);
+            pen.poly(&[(8.0, 4.0), (16.0, 4.0), (16.0, 9.0), (8.0, 9.0)], ic.highlight, ink);
         }
         "export" => {
             pen.poly(&[(4.0, 10.0), (4.0, 20.0), (16.0, 20.0), (16.0, 10.0)], pen.fill, ink);
@@ -572,7 +571,7 @@ pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, acce
             }
         }
         "zoom" => {
-            pen.circle(10.0, 10.0, 6.0, Color32::WHITE, ink);
+            pen.circle(10.0, 10.0, 6.0, ic.highlight, ink);
             pen.line(&[(14.5, 14.5), (20.0, 20.0)], ink);
         }
         "perspective" => {
@@ -590,13 +589,13 @@ pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, acce
             pen.iso_box(2.0, 13.0, 9.0, 6.0, 6.0);
             pen.iso_box(9.0, 6.0, 5.0, 4.0, 4.0);
         }
-        "folder" => pen.poly(&[(3.0, 7.0), (9.0, 7.0), (11.0, 9.0), (21.0, 9.0), (21.0, 19.0), (3.0, 19.0)], Color32::from_rgb(236, 200, 110), ink),
+        "folder" => pen.poly(&[(3.0, 7.0), (9.0, 7.0), (11.0, 9.0), (21.0, 9.0), (21.0, 19.0), (3.0, 19.0)], ic.folder, ink),
         "origin" => {
-            pen.arrow((6.0, 18.0), (20.0, 18.0), Color32::from_rgb(210, 60, 60));
-            pen.arrow((6.0, 18.0), (6.0, 4.0), Color32::from_rgb(60, 100, 220));
-            pen.arrow((6.0, 18.0), (15.0, 9.0), Color32::from_rgb(60, 160, 60));
+            pen.arrow((6.0, 18.0), (20.0, 18.0), ic.axes[0]);
+            pen.arrow((6.0, 18.0), (6.0, 4.0), ic.axes[2]);
+            pen.arrow((6.0, 18.0), (15.0, 9.0), ic.axes[1]);
         }
-        "plane" => pen.poly(&[(3.0, 15.0), (12.0, 8.0), (21.0, 11.0), (12.0, 18.0)], Color32::from_rgb(244, 214, 150), ink),
+        "plane" => pen.poly(&[(3.0, 15.0), (12.0, 8.0), (21.0, 11.0), (12.0, 18.0)], ic.plane, ink),
         "axis" => {
             pen.line(&[(4.0, 20.0), (20.0, 4.0)], ink);
             pen.circle(4.0, 20.0, 2.0, ink, ink);
@@ -825,8 +824,8 @@ pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, acce
             }
         }
         "accessibility" => {
-            pen.poly(&[(2.0, 20.0), (22.0, 20.0), (22.0, 15.0), (2.0, 15.0)], Color32::from_rgb(70, 180, 90), ink);
-            pen.poly(&[(8.0, 15.0), (16.0, 15.0), (16.0, 17.5), (8.0, 17.5)], Color32::from_rgb(220, 70, 60), Color32::TRANSPARENT);
+            pen.poly(&[(2.0, 20.0), (22.0, 20.0), (22.0, 15.0), (2.0, 15.0)], ic.access[0], ink);
+            pen.poly(&[(8.0, 15.0), (16.0, 15.0), (16.0, 17.5), (8.0, 17.5)], ic.access[1], Color32::TRANSPARENT);
             pen.poly(&[(6.0, 10.0), (18.0, 10.0), (18.0, 12.5), (6.0, 12.5)], pen.fill, ink);
             pen.arrow((4.0, 2.0), (4.0, 13.0), a);
             pen.arrow((20.0, 2.0), (20.0, 13.0), a);
@@ -834,10 +833,10 @@ pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, acce
         "environment_map" => {
             let pts: Vec<Pos2> =
                 (0..32).map(|i| i as f32 / 32.0 * std::f32::consts::TAU).map(|t| pen.at(12.0 + 9.0 * t.cos(), 12.0 + 9.0 * t.sin())).collect();
-            p.add(Shape::convex_polygon(pts, Color32::from_rgb(190, 205, 230), Stroke::new(pen.w, ink)));
-            pen.poly(&[(3.6, 13.0), (20.4, 13.0), (18.5, 17.5), (5.5, 17.5)], Color32::from_rgb(60, 62, 70), Color32::TRANSPARENT);
-            pen.line(&[(3.2, 12.6), (20.8, 12.6)], Color32::WHITE);
-            p.circle_filled(pen.at(9.0, 8.0), 2.2 * pen.s(), Color32::WHITE);
+            p.add(Shape::convex_polygon(pts, ic.sky, Stroke::new(pen.w, ink)));
+            pen.poly(&[(3.6, 13.0), (20.4, 13.0), (18.5, 17.5), (5.5, 17.5)], ic.floor, Color32::TRANSPARENT);
+            pen.line(&[(3.2, 12.6), (20.8, 12.6)], ic.highlight);
+            p.circle_filled(pen.at(9.0, 8.0), 2.2 * pen.s(), ic.highlight);
             pen.circle(12.0, 12.0, 9.0, Color32::TRANSPARENT, ink);
         }
         "zebra" | "draft_analysis" | "curvature_map" => {
@@ -845,27 +844,23 @@ pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, acce
                 (0..32).map(|i| i as f32 / 32.0 * std::f32::consts::TAU).map(|t| pen.at(12.0 + 9.0 * t.cos(), 12.0 + 9.0 * t.sin())).collect();
             match name {
                 "zebra" => {
-                    p.add(Shape::convex_polygon(pts, Color32::WHITE, Stroke::new(pen.w, ink)));
+                    p.add(Shape::convex_polygon(pts, ic.highlight, Stroke::new(pen.w, ink)));
                     for k in 0..3 {
                         let y = 6.5 + k as f32 * 4.5;
                         let h = (81.0 - (y + 1.0 - 12.0) * (y + 1.0 - 12.0)).max(0.0).sqrt();
-                        pen.poly(
-                            &[(12.0 - h, y), (12.0 + h, y), (12.0 + h, y + 2.2), (12.0 - h, y + 2.2)],
-                            Color32::from_gray(30),
-                            Color32::TRANSPARENT,
-                        );
+                        pen.poly(&[(12.0 - h, y), (12.0 + h, y), (12.0 + h, y + 2.2), (12.0 - h, y + 2.2)], ic.stripe, Color32::TRANSPARENT);
                     }
                     pen.circle(12.0, 12.0, 9.0, Color32::TRANSPARENT, ink);
                 }
                 "draft_analysis" => {
-                    pen.poly(&[(4.0, 20.0), (20.0, 20.0), (17.0, 5.0), (7.0, 5.0)], Color32::from_rgb(70, 180, 90), ink);
-                    pen.poly(&[(7.0, 5.0), (17.0, 5.0), (16.0, 9.0), (8.0, 9.0)], Color32::from_rgb(235, 200, 50), Color32::TRANSPARENT);
+                    pen.poly(&[(4.0, 20.0), (20.0, 20.0), (17.0, 5.0), (7.0, 5.0)], ic.draft[0], ink);
+                    pen.poly(&[(7.0, 5.0), (17.0, 5.0), (16.0, 9.0), (8.0, 9.0)], ic.draft[1], Color32::TRANSPARENT);
                     pen.arrow((12.0, 16.0), (12.0, 1.5), a);
                 }
                 _ => {
-                    p.add(Shape::convex_polygon(pts, Color32::from_rgb(60, 110, 230), Stroke::new(pen.w, ink)));
-                    pen.circle(14.0, 10.0, 5.0, Color32::from_rgb(70, 190, 90), Color32::TRANSPARENT);
-                    pen.circle(15.5, 8.5, 2.2, Color32::from_rgb(225, 60, 45), Color32::TRANSPARENT);
+                    p.add(Shape::convex_polygon(pts, ic.curvature[0], Stroke::new(pen.w, ink)));
+                    pen.circle(14.0, 10.0, 5.0, ic.curvature[1], Color32::TRANSPARENT);
+                    pen.circle(15.5, 8.5, 2.2, ic.curvature[2], Color32::TRANSPARENT);
                 }
             }
         }
@@ -983,13 +978,13 @@ pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, acce
         }
         "patch" => {
             // A wire loop with a surface spanned across it.
-            pen.poly(&[(4.0, 16.0), (9.0, 6.0), (19.0, 5.0), (20.0, 15.0), (12.0, 20.0)], SHEET, ink);
+            pen.poly(&[(4.0, 16.0), (9.0, 6.0), (19.0, 5.0), (20.0, 15.0), (12.0, 20.0)], ic.sheet, ink);
             pen.line(&[(4.0, 16.0), (9.0, 6.0), (19.0, 5.0), (20.0, 15.0), (12.0, 20.0), (4.0, 16.0)], a);
         }
         "stitch" => {
             // Two surface patches sewn along their shared edge.
-            pen.poly(&[(3.0, 18.0), (11.0, 14.0), (11.0, 4.0), (3.0, 8.0)], SHEET, ink);
-            pen.poly(&[(13.0, 14.0), (21.0, 18.0), (21.0, 8.0), (13.0, 4.0)], SHEET_2, ink);
+            pen.poly(&[(3.0, 18.0), (11.0, 14.0), (11.0, 4.0), (3.0, 8.0)], ic.sheet, ink);
+            pen.poly(&[(13.0, 14.0), (21.0, 18.0), (21.0, 8.0), (13.0, 4.0)], ic.sheet_2, ink);
             for y in [6.0, 9.0, 12.0] {
                 pen.line(&[(10.0, y), (14.0, y + 1.5)], a);
             }
@@ -999,7 +994,7 @@ pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, acce
             let f = [(2.0, 12.5), (7.0, 9.5), (12.0, 15.5), (17.0, 12.5)];
             let b = [(6.4, 8.9), (11.4, 5.9), (16.4, 11.9), (21.4, 8.9)];
             let d = f.map(|(x, y)| (x, y + 6.0));
-            pen.band(&bezier(b, 16), &bezier(f, 16), SHEET);
+            pen.band(&bezier(b, 16), &bezier(f, 16), ic.sheet);
             pen.band(&bezier(f, 16), &bezier(d, 16), pen.fill.gamma_multiply(0.85));
             pen.poly(&[(17.0, 12.5), (21.4, 8.9), (21.4, 14.9), (17.0, 18.5)], pen.fill.gamma_multiply(0.7), ink);
             pen.line(&[(2.0, 12.5), (2.0, 18.5)], ink);
@@ -1042,7 +1037,7 @@ pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, acce
             // An open profile (accent) pulled up into a sheet.
             let top = [(4.0, 11.0), (8.0, 8.0), (13.0, 14.0), (20.0, 10.0)];
             let bottom = [(4.0, 20.0), (8.0, 17.0), (13.0, 23.0), (20.0, 19.0)];
-            pen.band(&bezier(top, 16), &bezier(bottom, 16), SHEET);
+            pen.band(&bezier(top, 16), &bezier(bottom, 16), ic.sheet);
             pen.line(&[(4.0, 11.0), (4.0, 20.0)], ink);
             pen.line(&[(20.0, 10.0), (20.0, 19.0)], ink);
             pen.curve(top, ink);
@@ -1053,13 +1048,13 @@ pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, acce
             // An open profile (accent) turned about the axis into a hollow band.
             let left = [(5.0, 6.0), (7.0, 10.0), (5.0, 14.0), (6.0, 18.0)];
             let right = [(19.0, 6.0), (17.0, 10.0), (19.0, 14.0), (18.0, 18.0)];
-            pen.band(&bezier(left, 16), &bezier(right, 16), SHEET);
+            pen.band(&bezier(left, 16), &bezier(right, 16), ic.sheet);
             let front = ellipse(12.0, 18.0, 6.0, 2.2, 0.0, std::f32::consts::PI, 16);
-            pen.poly(&front, SHEET, Color32::TRANSPARENT);
+            pen.poly(&front, ic.sheet, Color32::TRANSPARENT);
             // A closed fill takes each point once: a repeated end point spikes `poly`'s edge.
             let mut opening = ellipse(12.0, 6.0, 7.0, 2.2, 0.0, std::f32::consts::TAU, 32);
             opening.pop();
-            pen.poly(&opening, SHEET_LIGHT, ink);
+            pen.poly(&opening, ic.sheet_light, ink);
             pen.line(&front, ink);
             pen.curve(left, ink);
             pen.line(&[(12.0, 1.5), (12.0, 3.8)], ink);
@@ -1070,7 +1065,7 @@ pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, acce
             // A straight profile (accent) carried along a curved path: a ribbon.
             let near = [(4.0, 13.0), (8.0, 5.0), (14.0, 5.0), (20.0, 9.0)];
             let far = [(4.0, 20.0), (8.0, 12.0), (14.0, 12.0), (20.0, 16.0)];
-            pen.band(&bezier(near, 16), &bezier(far, 16), SHEET);
+            pen.band(&bezier(near, 16), &bezier(far, 16), ic.sheet);
             pen.curve(near, ink);
             pen.curve(far, ink);
             pen.line(&[(4.0, 13.0), (4.0, 20.0)], a);
@@ -1080,7 +1075,7 @@ pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, acce
             // Two open sections (accent) joined by a sheet.
             let top = [(5.0, 6.0), (9.0, 3.0), (14.0, 8.0), (19.0, 5.0)];
             let bottom = [(3.0, 19.0), (8.0, 15.0), (14.0, 22.0), (21.0, 18.0)];
-            pen.band(&bezier(top, 16), &bezier(bottom, 16), SHEET);
+            pen.band(&bezier(top, 16), &bezier(bottom, 16), ic.sheet);
             pen.line(&[(5.0, 6.0), (3.0, 19.0)], ink);
             pen.line(&[(19.0, 5.0), (21.0, 18.0)], ink);
             pen.curve(top, a);
@@ -1090,7 +1085,7 @@ pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, acce
             // A wavy sheet and its offset copy (dashed), the distance shown by the arrow.
             let back = [(6.0, 14.0), (10.0, 11.0), (15.0, 17.0), (21.0, 14.0)];
             let front = [(3.0, 20.0), (7.0, 17.0), (12.0, 23.0), (18.0, 20.0)];
-            pen.band(&bezier(back, 16), &bezier(front, 16), SHEET);
+            pen.band(&bezier(back, 16), &bezier(front, 16), ic.sheet);
             pen.curve(back, ink);
             pen.curve(front, ink);
             pen.line(&[(6.0, 14.0), (3.0, 20.0)], ink);
@@ -1104,7 +1099,7 @@ pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, acce
         "ruled" => {
             // A strip hanging off a block's edge (accent), ruled by straight lines.
             pen.poly(&[(2.0, 12.0), (12.0, 12.0), (12.0, 22.0), (2.0, 22.0)], pen.fill, ink);
-            pen.poly(&[(12.0, 12.0), (21.0, 4.0), (21.0, 14.0), (12.0, 22.0)], SHEET, ink);
+            pen.poly(&[(12.0, 12.0), (21.0, 4.0), (21.0, 14.0), (12.0, 22.0)], ic.sheet, ink);
             pen.line(&[(15.0, 9.3), (15.0, 19.3)], a);
             pen.line(&[(18.0, 6.7), (18.0, 16.7)], a);
             pen.line(&[(12.0, 12.0), (12.0, 22.0)], a);
@@ -1140,13 +1135,13 @@ pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, acce
                 })
                 .collect();
             for (lo, hi) in rows.iter().zip(rows.iter().skip(1)) {
-                pen.band(lo, hi, SHEET);
+                pen.band(lo, hi, ic.sheet);
             }
             for j in [n / 3, 2 * n / 3] {
                 if let Some(r) = rows.get(j) {
-                    pen.line(r, SHEET_LINE);
+                    pen.line(r, ic.sheet_line);
                 }
-                pen.line(&rows.iter().filter_map(|r| r.get(j).copied()).collect::<Vec<_>>(), SHEET_LINE);
+                pen.line(&rows.iter().filter_map(|r| r.get(j).copied()).collect::<Vec<_>>(), ic.sheet_line);
             }
             for c in [left, top, right, bottom] {
                 pen.curve(c, a);
@@ -1160,29 +1155,29 @@ pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, acce
             // leaves both edges tangent.
             let near = [(13.0, 20.0), (8.5, 20.0), (10.5, 11.0), (6.0, 11.0)];
             let far = near.map(|(x, y)| (x + 4.4, y - 3.6));
-            pen.poly(&[(2.0, 11.0), (6.0, 11.0), (10.4, 7.4), (6.4, 7.4)], SHEET, ink);
-            pen.band(&bezier(near, 16), &bezier(far, 16), SHEET_LIGHT);
+            pen.poly(&[(2.0, 11.0), (6.0, 11.0), (10.4, 7.4), (6.4, 7.4)], ic.sheet, ink);
+            pen.band(&bezier(near, 16), &bezier(far, 16), ic.sheet_light);
             pen.curve(far, a);
-            pen.poly(&[(13.0, 20.0), (17.0, 20.0), (21.4, 16.4), (17.4, 16.4)], SHEET, ink);
+            pen.poly(&[(13.0, 20.0), (17.0, 20.0), (21.4, 16.4), (17.4, 16.4)], ic.sheet, ink);
             pen.curve(near, a);
         }
         "untrim" => {
             // A trimmed sheet whose hole (dashed, accent) is filled back in.
-            pen.poly(&[(3.0, 17.0), (9.0, 5.0), (21.0, 7.0), (16.0, 20.0)], SHEET, ink);
+            pen.poly(&[(3.0, 17.0), (9.0, 5.0), (21.0, 7.0), (16.0, 20.0)], ic.sheet, ink);
             let hole = ellipse(12.2, 12.3, 4.2, 3.2, 0.0, std::f32::consts::TAU, 32);
-            pen.poly(hole.get(1..).unwrap_or_default(), SHEET_LIGHT, Color32::TRANSPARENT);
+            pen.poly(hole.get(1..).unwrap_or_default(), ic.sheet_light, Color32::TRANSPARENT);
             pen.dashed(&hole, a);
         }
         "unstitch" => {
             // Two sheets pulled apart from their shared edge.
-            pen.poly(&[(2.0, 18.0), (9.0, 14.0), (9.0, 4.0), (2.0, 8.0)], SHEET, ink);
-            pen.poly(&[(15.0, 14.0), (22.0, 18.0), (22.0, 8.0), (15.0, 4.0)], SHEET_2, ink);
+            pen.poly(&[(2.0, 18.0), (9.0, 14.0), (9.0, 4.0), (2.0, 8.0)], ic.sheet, ink);
+            pen.poly(&[(15.0, 14.0), (22.0, 18.0), (22.0, 8.0), (15.0, 4.0)], ic.sheet_2, ink);
             pen.arrow((10.8, 11.0), (7.0, 11.0), a);
             pen.arrow((13.2, 11.0), (17.0, 11.0), a);
         }
         "reverse_normal" => {
             // A sheet with its old normal (faded) and the flipped one (accent).
-            pen.poly(&[(2.0, 14.0), (14.0, 10.0), (22.0, 13.0), (10.0, 18.0)], SHEET, ink);
+            pen.poly(&[(2.0, 14.0), (14.0, 10.0), (22.0, 13.0), (10.0, 18.0)], ic.sheet, ink);
             pen.arrow((12.0, 14.0), (12.0, 3.5), ink.gamma_multiply(0.5));
             pen.arrow((12.0, 14.0), (12.0, 22.5), a);
         }
@@ -1190,10 +1185,10 @@ pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, acce
             // A wall sheet and a floor sheet joined by a round strip (accent edges).
             let near = [(3.0, 16.0), (3.0, 18.8), (5.2, 21.0), (8.0, 21.0)];
             let far = near.map(|(x, y)| (x + 4.4, y - 3.6));
-            pen.poly(&[(3.0, 16.0), (3.0, 8.0), (7.4, 4.4), (7.4, 12.4)], SHEET_2, ink);
-            pen.poly(&[(8.0, 21.0), (16.0, 21.0), (20.4, 17.4), (12.4, 17.4)], SHEET, ink);
-            pen.band(&bezier(near, 16), &bezier(far, 16), SHEET_LIGHT);
-            pen.line(&[(4.5, 19.5), (8.9, 15.9)], SHEET_LINE);
+            pen.poly(&[(3.0, 16.0), (3.0, 8.0), (7.4, 4.4), (7.4, 12.4)], ic.sheet_2, ink);
+            pen.poly(&[(8.0, 21.0), (16.0, 21.0), (20.4, 17.4), (12.4, 17.4)], ic.sheet, ink);
+            pen.band(&bezier(near, 16), &bezier(far, 16), ic.sheet_light);
+            pen.line(&[(4.5, 19.5), (8.9, 15.9)], ic.sheet_line);
             pen.curve(far, a);
             pen.curve(near, a);
         }
@@ -1209,11 +1204,11 @@ pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, acce
                 let h = 0.8 + 4.2 * i as f32 / 10.0;
                 let tip = (x + (y1 - y) / len * h, y - (x1 - x) / len * h);
                 if i % 2 == 0 {
-                    pen.line(&[(*x, *y), tip], SHEET_LINE);
+                    pen.line(&[(*x, *y), tip], ic.sheet_line);
                 }
                 tips.push(tip);
             }
-            pen.line(&tips, SHEET_LINE);
+            pen.line(&tips, ic.sheet_line);
             pen.curve(c, a);
             pen.dot(12.0, 13.0, a);
         }
@@ -1256,7 +1251,7 @@ pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, acce
         }
         "interference" => {
             pen.closed(&[(3.0, 5.0), (14.0, 5.0), (14.0, 16.0), (3.0, 16.0)], ink);
-            pen.poly(&[(9.0, 10.0), (14.0, 10.0), (14.0, 16.0), (9.0, 16.0)], Color32::from_rgb(225, 70, 60), Color32::from_rgb(225, 70, 60));
+            pen.poly(&[(9.0, 10.0), (14.0, 10.0), (14.0, 16.0), (9.0, 16.0)], ic.interference, ic.interference);
             pen.closed(&[(9.0, 10.0), (21.0, 10.0), (21.0, 20.0), (9.0, 20.0)], ink);
         }
         // Sheet metal: thin plates (fill), the made or changed part in the accent.
@@ -1283,7 +1278,7 @@ pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, acce
         "fold" => {
             pen.line(&[(2.0, 18.0), (12.0, 18.0)], ink);
             pen.line(&[(12.0, 18.0), (19.0, 6.0)], a);
-            pen.line(&[(9.0, 21.0), (15.0, 15.0)], Color32::from_rgb(130, 140, 160));
+            pen.line(&[(9.0, 21.0), (15.0, 15.0)], ic.fold);
             pen.arc(12.0, 18.0, 6.0, 0.2, 1.0, a);
             pen.arrow((18.0, 16.0), (17.0, 12.5), a);
         }
@@ -1358,15 +1353,22 @@ pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, fill: Color32, acce
         // Appearance: a shaded ball with three paint dabs.
         "appearance" => {
             pen.circle(10.0, 13.0, 7.5, pen.fill, ink);
-            pen.arc(10.0, 13.0, 4.5, 1.8, 3.2, Color32::WHITE);
-            pen.circle(18.0, 5.0, 2.6, Color32::from_rgb(220, 70, 60), ink);
-            pen.circle(20.5, 11.0, 2.6, Color32::from_rgb(70, 150, 230), ink);
-            pen.circle(19.0, 17.5, 2.6, Color32::from_rgb(240, 200, 60), ink);
+            pen.arc(10.0, 13.0, 4.5, 1.8, 3.2, ic.highlight);
+            pen.circle(18.0, 5.0, 2.6, ic.paint[0], ink);
+            pen.circle(20.5, 11.0, 2.6, ic.paint[1], ink);
+            pen.circle(19.0, 17.5, 2.6, ic.paint[2], ink);
         }
         "warning" => {
-            pen.poly(&[(12.0, 3.0), (21.0, 20.0), (3.0, 20.0)], Color32::from_rgb(250, 200, 60), ink);
+            pen.poly(&[(12.0, 3.0), (21.0, 20.0), (3.0, 20.0)], ic.warning, ink);
             pen.line(&[(12.0, 9.0), (12.0, 14.0)], ink);
             pen.dot(12.0, 17.0, ink);
+        }
+        // A failed feature: a disc with a cross, a different shape from the warning's triangle, so
+        // it reads without colour (#972). Drawn in the caller's colours only.
+        "error" => {
+            pen.circle(12.0, 12.0, 10.0, pen.fill, ink);
+            pen.line(&[(8.0, 8.0), (16.0, 16.0)], ink);
+            pen.line(&[(16.0, 8.0), (8.0, 16.0)], ink);
         }
         _ => {
             pen.poly(&[(5.0, 5.0), (19.0, 5.0), (19.0, 19.0), (5.0, 19.0)], pen.fill, ink);

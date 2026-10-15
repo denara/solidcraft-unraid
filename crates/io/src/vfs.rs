@@ -232,15 +232,52 @@ impl PathScope {
         {
             return Err(windows(why));
         }
-        let resolved = resolve(std::path::Path::new(path)).map_err(|_| refused())?;
+        let resolved = match resolve(std::path::Path::new(path)) {
+            Ok(r) => r,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Err(self.missing_folder(path).unwrap_or_else(refused)),
+            Err(_) => return Err(refused()),
+        };
         // Judged again once resolved: a link or junction inside an allowed folder may lead to a
         // network share or a device even though the path given looked local.
         if cfg!(windows) && !local_drive_path(&resolved) {
             return Err(windows("only paths on a local drive"));
         }
-        let inside_design =
-            || self.design_roots.iter().any(|r| resolved.strip_prefix(r).is_ok_and(|rel| !rel.components().any(|c| hidden(c.as_os_str()))));
-        if self.roots.iter().any(|r| resolved.starts_with(r)) || inside_design() { Ok(()) } else { Err(refused()) }
+        if self.contains(&resolved) { Ok(()) } else { Err(refused()) }
+    }
+
+    /// Whether the resolved path `p` lies inside one of the folders.
+    fn contains(&self, p: &std::path::Path) -> bool {
+        let inside_design = || self.design_roots.iter().any(|r| p.strip_prefix(r).is_ok_and(|rel| !rel.components().any(|c| hidden(c.as_os_str()))));
+        self.roots.iter().any(|r| p.starts_with(r)) || inside_design()
+    }
+
+    /// The "folder does not exist" error for a path whose folder is missing, but only when the
+    /// nearest folder that does exist is one of the scope's own: telling the user which folder is
+    /// missing must not become a way to probe the disk outside it.
+    fn missing_folder(&self, path: &str) -> Option<Error> {
+        let given = std::path::Path::new(path);
+        // A dangling link (the path itself, or in its folders) is not a missing folder: it leads
+        // somewhere, and that is refused.
+        let mut missing = given.parent()?;
+        let existing = loop {
+            let here = if missing.as_os_str().is_empty() { std::path::Path::new(".") } else { missing };
+            if let Ok(c) = std::fs::canonicalize(here) {
+                break c;
+            }
+            if std::fs::symlink_metadata(here).is_ok() {
+                return None;
+            }
+            missing = missing.parent()?;
+        };
+        if std::fs::symlink_metadata(given).is_ok() {
+            return None;
+        }
+        self.contains(&existing).then(|| {
+            Error::new(
+                ErrorKind::NotFound,
+                format!("{path}: its folder does not exist (nothing exists below {}); create the folder first", existing.display()),
+            )
+        })
     }
 }
 
@@ -369,6 +406,8 @@ pub fn scoped<T>(scope: Option<PathScope>, f: impl FnOnce() -> T) -> T {
             SCOPE.with(|s| *s.borrow_mut() = prev);
         }
     }
+    // Sketch text reads the font files a design names, below this crate: it asks here first.
+    solidcraft_doc::sketch::set_font_file_check(|p| check(&p.to_string_lossy()).map_err(|e| e.to_string()));
     let _restore = Restore(SCOPE.with(|s| s.replace(scope)));
     f()
 }
@@ -474,6 +513,8 @@ mod tests {
                 assert!(super::write(&p, b"x").is_err() && super::remove(&p).is_err() && super::len(&p).is_err() && !super::exists(&p), "{p}");
             }
             assert!(super::write(&s(out.join("new.txt")), b"x").is_err());
+            let e = super::check(&s(root.join("dangling/x.txt"))).unwrap_err();
+            assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied, "{e}");
             assert!(super::check(&s(root.join("sub/../sub/b.txt"))).is_ok(), "`..` that stays inside is fine");
         });
         assert_eq!(std::fs::read_to_string(out.join("secret.txt")).unwrap(), "secret");
@@ -501,9 +542,16 @@ mod tests {
         let scope = PathScope::new([a.clone()]);
         let s = |p: std::path::PathBuf| p.to_string_lossy().to_string();
         assert!(scope.check(&s(a.join("new.txt"))).is_ok());
-        for refused in [ab.join("x.txt"), a.join("missing/x.txt"), a.join("link/new.txt")] {
+        for refused in [ab.join("x.txt"), a.join("link/new.txt"), base.join("missing/x.txt")] {
             let e = scope.check(&s(refused.clone())).unwrap_err();
             assert!(e.to_string().contains("outside the folders this agent may use"), "{}: {e}", refused.display());
+        }
+        // A folder that is missing inside an allowed one is reported as missing (#1077), not as
+        // out of scope: widening `--allow-path` would not help. Nothing is created.
+        for missing in [a.join("missing/x.txt"), a.join("missing/deeper/x.txt")] {
+            let e = scope.check(&s(missing.clone())).unwrap_err();
+            assert_eq!(e.kind(), std::io::ErrorKind::NotFound, "{}: {e}", missing.display());
+            assert!(e.to_string().contains("its folder does not exist") && !e.to_string().contains("--allow-path"), "{e}");
         }
         super::scoped(Some(scope), || assert!(super::write(&s(a.join("link/new.txt")), b"x").is_err()));
         assert!(!out.join("new.txt").exists() && !a.join("missing").exists());

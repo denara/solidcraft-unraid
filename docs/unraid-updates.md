@@ -512,3 +512,74 @@ Before updating through Unraid's normal Docker action, back up server and separa
 designs, retain the existing token/settings/data mapping and reload the browser afterward.
 New format20 designs require this snapshot or newer. The final upstream check observed
 `805ea45be6db658061cb44d13fcc4d532bb04f5e`; later changes are left to the next fixed-snapshot run.
+
+## 2026-10-15: upstream b3df2c38 (SolidCraft 0.11.0, format 21)
+
+Advanced the validated and publicly distributed baseline from
+`8ea1fd643fb70cb17f8e335c57de23f03a3415a4` to the single fixed snapshot
+`b3df2c382b5cc600e42273ed6c21466bab181a71` (PR #1313, confirmed merged).
+The 100 non-merge upstream commits add headless CPU render jobs, screenshot cameras and
+optional grid/axes, local material/appearance libraries, model metadata, improved joints,
+sheet conversion/perforations, sketch patterns, asynchronous UI evaluation and original
+rendering work. The inherited main-branch application version is 0.11.0 and design format 21;
+this integration does not create an application release or release tag.
+
+The branch was clean and synchronized with origin/codex/unraid-mcp-web; origin/main was
+an ancestor. Merged directly into the sole deployment branch. Conflicts were resolved in
+AGENTS.md, CLAUDE.md, ATTRIBUTION.md, native main and kernel coplanar handling. Kept strict
+fork privacy/unsafe rules, all original asset attribution and the upstream GrownBoss union
+branch. Removed a duplicated historical icon row from the vendored-source table while
+retaining its canonical original-asset attribution. Gateway dependencies and compatibility
+names are preserved; the workspace lock advances the server's inherited version only.
+Generated license notices remain current and include the HTTP adapter.
+
+The Linux container fork also omits the new Windows-only unsafe native exception bridge,
+as it already omits the macOS Finder bridge; Rust crash/recovery and safe startup handling
+remain present. No unsafe exception is introduced. Three behavior-preserving lint adjustments
+make new pattern validation, seam predicates and the generic Option/Vec/array walks compile
+under warning-denied checks. Golden expression/reference/geometry and targeted regression
+checks cover the walks and the resolved geometric behavior.
+
+Validation was change-scoped; the complete test suite was not rerun:
+
+- Formatting and warning-denied workspace/all-target Clippy passed, alongside all 87
+  attributed assets, dependency layering (16 crates), license notices and eleven-target
+  WebAssembly compatibility. The wasm build reports an unused scope field in upstream's
+  off-thread UI request; native Clippy is clean. The new proc-macro crate also builds/tests;
+  it declares no standalone unit tests and is exercised by document golden fixtures.
+- 247 selected tests passed: 191 in the main MCP/VFS/archive/format/catalog/reference-walk,
+  render admission/job/texture, library/link and CLI checks; 40 joint, periodic seam and
+  asynchronous UI regressions; 16 direct path/font, sketch-pattern, watertight primitive and
+  coplanar/Boss-union tests. Two existing archive benchmarks remain ignored. Initial lint
+  diagnostics and corrected zero-match filters are preserved privately under target.
+- The release Linux amd64 container and independent WASM app built. A fresh test volume,
+  loopback port and disposable credential passed 24000 mm3 sketch/extrusion, PNG/STEP,
+  auth/origin/file/font/diagnostic/stored-link confinement, independent sessions, restart
+  reopen, compatibility alias and logging capacity/release/noise/privacy proofs.
+- Official MCP SDK 1.32.1 reopened copied public 0.2.1, 0.3.2, 0.7.0/format16,
+  0.8.0/format17 and 0.10.0/format20 files at 24000 mm3, exported STEP and roundtripped
+  the current native design. It also rendered 4000 mm3, used a confined uploaded font,
+  checked compact replies and a named camera, refreshed a link from 6000 to 9000 mm3,
+  and rendered a 2400 mm3 thin wall.
+- New behavior was exercised on that actual image: a guides-free native screenshot,
+  library export/inspect with forbidden outside paths, CPU render.start/status/export to
+  a valid PNG, and rejection of another session's render-job identity. No real saved file
+  or token was used for these probes. Native proof PNGs were inspected.
+- The actual browser independently rendered Sample Plate at 0.11.0. Chromium with software
+  graphics ran the built site through all 19 offline/update scenarios (21 launches),
+  including failed/overlapping downloads, tab retirement, subpath isolation and offline
+  startup. No physical GPU, Windows hardware or native macOS behavior is certified here.
+
+Image: `solvecraft-unraid:upstream-b3df2c38` (Linux amd64).
+Image ID: `sha256:a3cd06061800ee47caae8b6f9f2b5d49cfa9182a076a111de09234617a362723`.
+Archive: `target/solidcraft-unraid-upstream-b3df2c38.tar` (97,716,224 bytes).
+SHA256: `239eaf0630ee9e359bb0e5e32023d524772441e5b9e6afdce36f940a0c1e8518`.
+The export manifest has the expected tag. Logs and public-safe visual evidence stay in
+ignored target/unraid-update-b3df2c38, outside Git and the container build context.
+
+Registry publication and the authorized local replacement/cleanup are verified separately
+below. The canonical CA template and original icon hashes still match the public catalog
+repository; no metadata commit or new submission is needed. No Unraid/nginx/DNS changes
+are made. Keep server and separate browser-design backups before updating: format21 saves
+need this snapshot or a newer build, including during rollback. Upstream main still matched
+the selected b3df2c38 snapshot at the pre-publication fetch.

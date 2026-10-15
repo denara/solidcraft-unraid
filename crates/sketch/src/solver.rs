@@ -400,6 +400,14 @@ fn line_dist(p: Vec2, a: Vec2, b: Vec2) -> f64 {
 fn residuals(s: &State, k: &ConstraintKind, out: &mut Vec<f64>) {
     use ConstraintKind::*;
     match *k {
+        PatternPoint { p, q, center, angle, offset } => {
+            let c = center.map(|c| s.p(c)).unwrap_or(Vec2::ZERO);
+            let d = s.p(p) - c;
+            let (sin, cos) = angle.sin_cos();
+            let delta = s.p(q) - c - Vec2::new(d.x * cos - d.y * sin, d.x * sin + d.y * cos) - offset;
+            out.extend([delta.x, delta.y]);
+        }
+        PatternRadius { a, b } => out.push(s.radius_of(a) - s.radius_of(b)),
         // Offset distances drive derived geometry in refresh_offsets, never source DOFs.
         OffsetDistance { .. } => {}
         Coincident { p, q } => {
@@ -767,6 +775,8 @@ fn block_refs(sk: &Sketch, b: &Block) -> Vec<Ref> {
         Block::Closure { a, b } => vec![P(*a), P(*b)],
         Block::Arc { c, a, b } => vec![P(*c), P(*a), P(*b)],
         Block::User(_, k) => match **k {
+            PatternPoint { p, q, center, .. } => vec![P(p), P(q)].into_iter().chain(center.map(P)).collect(),
+            PatternRadius { a, b } => vec![C(a), C(b)],
             Coincident { p, q }
             | HorizontalPoints { p, q }
             | VerticalPoints { p, q }
@@ -1772,6 +1782,8 @@ fn solve_inner(
     old_values: Option<&[Option<f64>]>,
     budget: &mut Budget,
 ) -> SolveReport {
+    sk.prune_patterns();
+    sk.refresh_pattern_shapes();
     let mut orientation_before = Vec::new();
     for constraint in &sk.constraints {
         if !constraint.driven

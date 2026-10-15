@@ -132,3 +132,41 @@ fn legacy_extension_and_format_tag_still_open() {
     let reopened = solidcraft_engine::io::read_design(&std::fs::read(&resaved).unwrap()).unwrap();
     assert!(reopened.to_json().contains("\"solidcraft/"));
 }
+
+/// `snapshot` starts from `--in` as `run` does (its script runs on that design), and refuses an
+/// option it doesn't take rather than ignoring it.
+#[test]
+fn snapshot_runs_its_script_on_the_in_design() {
+    let dir = Scratch::new();
+    let base = dir.0.join("base.solidcraft");
+    json_output(cli().arg("run").arg(dir.script()).arg("--save").arg(&base).output().unwrap());
+    let shifted = dir.0.join("shifted.json");
+    std::fs::write(
+        &shifted,
+        json!({"commands": [{"command": "solid.box", "params": {"length": 2, "width": 3, "height": 4, "corner": [10, 0, 0]}}]}).to_string(),
+    )
+    .unwrap();
+    let shot = |name: &str, args: &[&std::ffi::OsStr]| {
+        let png = dir.0.join(name);
+        json_output(cli().arg("snapshot").args(args).arg("--out").arg(&png).args(["--width", "64", "--height", "48"]).output().unwrap());
+        std::fs::read(&png).unwrap()
+    };
+    let alone = shot("alone.png", &[shifted.as_os_str()]);
+    let on_base = shot("on_base.png", &[shifted.as_os_str(), "--in".as_ref(), base.as_os_str()]);
+    let base_only = shot("base.png", &["--in".as_ref(), base.as_os_str()]);
+    assert_ne!(alone, on_base, "the script ran on the --in design");
+    assert_ne!(base_only, on_base);
+    for (bad, says) in [(["--frobnicate", "1"], "doesn't take --frobnicate"), (["--width", "wide"], "--width must be 16 to 8192")] {
+        let output = cli().arg("snapshot").arg(&base).arg("--out").arg(dir.0.join("x.png")).args(bad).output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&output.stderr).contains(says), "{}", String::from_utf8_lossy(&output.stderr));
+    }
+}
+
+/// An unknown command's error suggests the id that was meant.
+#[test]
+fn unknown_command_suggests_the_closest_id() {
+    let output = cli().args(["exec", "file.open"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("did you mean `doc.open`?"), "{}", String::from_utf8_lossy(&output.stderr));
+}

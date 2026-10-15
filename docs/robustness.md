@@ -56,8 +56,11 @@ The changed seeds and the reason are added to the file's `notes`; say why in the
 
 ## Successful Boolean retries
 
-When an accepted Boolean result needs a numerical retry, the feature shows a
-warning in the timeline. `timeline.inspect` and `doc.inspect` expose its
+When an accepted Boolean result needs a retry that can make it differ from the
+exact one (a tool nudge, or the unverified shortcut), the feature shows a
+warning in the timeline. Every other retry works on temporary geometry or
+tolerances and leaves the exact result, so it is recorded but not warned about.
+`timeline.inspect` and `doc.inspect` expose every retry in the feature's
 `boolean_diagnostics`, including the strategy and the applied translation,
 rotation, face offset and tessellation tolerance in millimetres/radians.
 
@@ -77,7 +80,7 @@ Exact planar and piecewise fallbacks report zero displacement. The existing
 volume and spatial acceptance checks still apply to all results.
 
 The command that adds a feature carries the same `warning` in its reply, so a
-script or an agent sees a retry without asking the timeline.
+script or an agent sees such a retry without asking the timeline.
 
 A join or a cut that needed any retry is then held to what it can do at all
 (`crates/kernel/src/boolean_guard.rs`, #616): the result is closed, a join

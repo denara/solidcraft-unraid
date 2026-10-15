@@ -116,10 +116,12 @@ fn flat_exports_use_the_save_picker() {
     let captured = picks.clone();
     app.services.pick_save = Some(Box::new(move |name, extensions| {
         captured.lock().unwrap().push((name.to_string(), extensions.iter().map(|x| x.to_string()).collect::<Vec<_>>()));
-        None
+        Box::pin(std::future::ready(None))
     }));
-    assert_eq!(export_flat(&mut app, "Base", "csv"), "Export cancelled");
-    assert_eq!(export_flat(&mut app, "Base", "dxf"), "Export cancelled");
+    assert_eq!(export_flat(&mut app, "Base", "csv"), "Choose an export file…");
+    crate::file_picker::tick(&mut app, &egui::Context::default());
+    assert_eq!(export_flat(&mut app, "Base", "dxf"), "Choose an export file…");
+    crate::file_picker::tick(&mut app, &egui::Context::default());
     let picks = picks.lock().unwrap();
     assert!(picks[0].0.ends_with("-Base.csv"));
     assert_eq!(picks[0].1, vec!["csv"]);
@@ -275,7 +277,7 @@ fn pocket_export_button_uses_the_picker_and_preserves_depth_layers() {
     h.app.services.pick_save = Some(Box::new(move |name, extensions| {
         assert!(name.ends_with("-Body1.dxf"));
         assert_eq!(extensions, &["dxf"]);
-        Some(chosen.clone())
+        Box::pin(std::future::ready(Some(chosen.clone())))
     }));
     h.app.start("sheet.flat_pattern");
     h.settle();
@@ -300,10 +302,12 @@ fn bend_table_picker_writes_the_current_body() {
     let chosen = output.clone();
     app.services.pick_save = Some(Box::new(move |_, extensions| {
         assert_eq!(extensions, &["csv"]);
-        Some(chosen.clone())
+        Box::pin(std::future::ready(Some(chosen.clone())))
     }));
     let undo = app.session.undo.len();
-    assert_eq!(export_flat(&mut app, &body, "csv"), format!("Saved {output}"));
+    assert_eq!(export_flat(&mut app, &body, "csv"), "Choose an export file…");
+    crate::file_picker::tick(&mut app, &egui::Context::default());
+    assert_eq!(app.status.as_ref().map(|s| &s.0), Some(&format!("Exported {output}")));
     let contents = std::fs::read_to_string(&path).unwrap();
     std::fs::remove_file(&path).unwrap();
     assert_eq!(contents.lines().count(), 2);

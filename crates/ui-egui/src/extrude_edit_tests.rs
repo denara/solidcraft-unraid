@@ -46,6 +46,7 @@ fn unchanged_actual_editor_preserves_all_extents_and_parameter_identities() {
         json!({"direction":"negative","distance":"10"}),
         json!({"direction":"negative","distance":"-10 mm"}),
         json!({"direction":"symmetric","distance":"5 mm"}),
+        json!({"direction":"symmetric","distance":"5 mm","convention":"legacy_per_side"}),
         json!({"distance":"10 mm","distance2":"3 mm"}),
         json!({"from":[0,0,5],"start_offset":"0 mm"}),
         json!({"to":[0,0,10],"to_offset":"3 mm"}),
@@ -294,4 +295,69 @@ fn dragging_to_update_value_reselects_whole_value_box_text() {
     let Some(crate::dialogs::Dialog { kind: crate::dialogs::Kind::Extrude { distance, .. }, .. }) = &h.app.dialog else { panic!("extrude dialog") };
     assert_eq!(distance, "15 mm");
     assert_eq!(selection(&h), (0, 5), "the drag grew the text length; the selection must cover all of it");
+}
+
+#[test]
+fn symmetric_total_distance_preview_handle_drag_apply_and_reopen_agree() {
+    for (convention, cap, total_after_drag) in [("total_distance", 50.0, 120.0), ("legacy_per_side", 100.0, 60.0)] {
+        let mut h = make(json!({"direction":"symmetric","distance":"100 mm","convention":convention}));
+        h.call("ui.view", json!({"view":"fit"}));
+        h.frames(4);
+        open(&mut h);
+        let expected_tip = h.at(&json!({"world":[5,5,cap]})).unwrap();
+        let handle = h.at(&json!({"handle":"arrow"})).unwrap();
+        assert!((handle[0] - expected_tip[0]).hypot(handle[1] - expected_tip[1]) < 1.0, "{convention}: {handle:?} expected {expected_tip:?}");
+        h.step(&json!({"drag":[{"handle":"arrow"},{"world":[5,5,60]}]})).unwrap();
+        let d = h.app.dialog.as_ref().unwrap();
+        let crate::dialogs::Kind::Extrude { distance, .. } = &d.kind else { panic!("extrude") };
+        assert_eq!(h.app.session.doc.eval(distance, solidcraft_engine::doc::expr::Kind::Length).unwrap(), total_after_drag);
+        let commands = crate::dialogs::apply_commands(&h.app, d).unwrap();
+        let preview = h.app.session.preview(&commands).unwrap();
+        let preview_bounds = preview.after.body("Main").unwrap().mesh().bounds();
+        assert!((preview_bounds.min.z + 60.0).abs() < 1e-7 && (preview_bounds.max.z - 60.0).abs() < 1e-7);
+        h.step(&json!({"widget":"OK"})).unwrap();
+        assert_eq!(h.app.session.world_state().body("Main").unwrap().mesh().bounds(), preview_bounds);
+        let path = h.dir.join("symmetric.solidcraft");
+        h.app.run("file.save_as", json!({"path":path})).unwrap();
+        h.app.run("doc.open", json!({"path":path})).unwrap();
+        assert_eq!(h.app.session.world_state().body("Main").unwrap().mesh().bounds(), preview_bounds);
+        open(&mut h);
+        h.step(&json!({"widget":"OK"})).unwrap();
+        assert_eq!(h.app.session.world_state().body("Main").unwrap().mesh().bounds(), preview_bounds);
+    }
+}
+
+#[test]
+fn switching_one_side_to_symmetric_in_actual_editor_keeps_total_thickness() {
+    for convention in ["total_distance", "legacy_per_side"] {
+        let mut h = make(json!({"convention":convention}));
+        open(&mut h);
+        h.step(&json!({"widget":"One Side"})).unwrap();
+        h.step(&json!({"widget":"Symmetric"})).unwrap();
+        let commands = crate::dialogs::apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap();
+        let preview = h.app.session.preview(&commands).unwrap();
+        let bounds = preview.after.body("Main").unwrap().mesh().bounds();
+        assert!((bounds.min.z + 5.0).abs() < 1e-7 && (bounds.max.z - 5.0).abs() < 1e-7);
+        h.step(&json!({"widget":"OK"})).unwrap();
+        assert_eq!(h.app.session.world_state().body("Main").unwrap().mesh().bounds(), bounds);
+        assert_eq!(extent(&h).convention, solidcraft_engine::doc::ExtrudeConvention::TotalDistance);
+    }
+}
+
+#[test]
+fn symmetric_through_all_handle_drag_switches_to_total_distance() {
+    let mut h = Harness::new();
+    h.app.run("solid.box", json!({"length":10,"width":10,"height":100,"corner":[0,0,-50],"body_name":"Reference"})).unwrap();
+    let mut h = make_in(h, json!({"direction":"symmetric","through_all":true}));
+    h.call("ui.view", json!({"view":"fit"}));
+    h.frames(4);
+    open(&mut h);
+    h.step(&json!({"drag":[{"handle":"arrow"},{"world":[5,5,60]}]})).unwrap();
+    let d = h.app.dialog.as_ref().unwrap();
+    let crate::dialogs::Kind::Extrude { distance, all, .. } = &d.kind else { panic!("extrude") };
+    assert!(!all);
+    assert_eq!(h.app.session.doc.eval(distance, solidcraft_engine::doc::expr::Kind::Length).unwrap(), 120.0);
+    h.step(&json!({"widget":"OK"})).unwrap();
+    let bounds = h.app.session.world_state().body("Main").unwrap().mesh().bounds();
+    assert!((bounds.min.z + 60.0).abs() < 1e-7 && (bounds.max.z - 60.0).abs() < 1e-7);
 }

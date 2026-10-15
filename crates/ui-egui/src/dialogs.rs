@@ -42,6 +42,8 @@ pub enum Kind {
         /// Into a body: cut; additions: join when a solid exists, otherwise new.
         /// until the user picks one.
         auto_op: bool,
+        /// The direction from the picked side and the latched operation (#1257).
+        smart: crate::smart_extrude::Smart,
         /// The other side's distance (two sides).
         distance2: String,
         /// Taper angle (empty or zero: none).
@@ -316,6 +318,61 @@ pub struct Dialog {
     pub then_start: Option<&'static str>,
 }
 
+/// OK computing off the window thread: the dialog's commands evaluated on a scratch copy of the
+/// session, which leaves the feature in the evaluation cache the session shares. Once that is
+/// in, OK runs them for real and finds the feature there; meanwhile the window stays live and
+/// the dialog says it is computing.
+pub struct Applying {
+    pub(crate) done: std::sync::mpsc::Receiver<()>,
+    /// When OK was pressed (ms).
+    pub(crate) started: f64,
+    /// The commands being computed.
+    pub(crate) cmds: Vec<(String, Value)>,
+}
+
+impl Applying {
+    /// The evaluation is in (or its worker ended).
+    fn finished(&self) -> bool {
+        !matches!(self.done.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty))
+    }
+}
+
+/// How long the desktop app's OK waits for its evaluation before it lets the window go on and
+/// shows that it is computing ([`SolveApp::apply_off_thread`]): a feature quicker than this
+/// applies at once, as it always did.
+pub const APPLY_AT_ONCE: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// Start OK's evaluation off the window thread, for a feature dialog. `None` when OK should
+/// just run: not a feature, not asked for ([`SolveApp::apply_off_thread`]), no threads (the
+/// web), or done within the wait.
+#[cfg(not(target_arch = "wasm32"))]
+fn begin_applying(app: &SolveApp, d: &Dialog) -> Option<Applying> {
+    let wait = app.apply_off_thread?;
+    if !d.previews() {
+        return None;
+    }
+    let cmds = apply_commands(app, d).ok()?;
+    let scratch = app.session.scratch();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let computed = cmds.clone();
+    std::thread::Builder::new()
+        .name("apply".into())
+        .spawn(move || {
+            let _ = scratch.preview(&computed);
+            let _ = tx.send(());
+        })
+        .ok()?;
+    match rx.recv_timeout(wait) {
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Some(Applying { done: rx, started: crate::now_ms(), cmds }),
+        _ => None,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn begin_applying(_app: &SolveApp, _d: &Dialog) -> Option<Applying> {
+    None
+}
+
 /// The commands a dialog's inputs make (or why they make none), its picks, and the design's
 /// revision (a parameter the commands name can change without changing them).
 #[derive(Clone, Debug, PartialEq)]
@@ -384,6 +441,7 @@ impl Dialog {
                     direction: 0,
                     operation: usize::from(has_bodies),
                     auto_op: true,
+                    smart: Default::default(),
                     distance2: "10 mm".into(),
                     taper: "0 deg".into(),
                     taper_present: false,
@@ -1742,21 +1800,54 @@ fn measure_rows(app: &SolveApp, ui: &mut egui::Ui, r: Option<&Value>) {
     }
 }
 
-/// Keep an automatic extrude operation in step with the geometry.
+/// Smart Extrude (#1257, see [`crate::smart_extrude`]): a new pick sets the direction from the
+/// side it was picked from, and the automatic operation follows the geometry, latched per side.
 fn auto_operation(app: &SolveApp, d: &mut Dialog) {
+    let Kind::Extrude { smart, .. } = &d.kind else { return };
+    let picked = d.inputs.first().map(|i| i.items.as_slice()).unwrap_or_default();
+    if smart.picked != picked {
+        let new_first = smart.picked.first() != picked.first();
+        let picked = picked.to_vec();
+        let side_of_pick = if new_first && !smart.manual_dir { picked.first().and_then(|first| picked_side(app, d, first)) } else { None };
+        let Kind::Extrude { direction, smart, .. } = &mut d.kind else { return };
+        smart.picked = picked;
+        smart.latch = None;
+        if *direction < 2
+            && let Some(dir) = side_of_pick
+        {
+            *direction = dir;
+        }
+    }
+    let Kind::Extrude { direction, distance, .. } = &d.kind else { return };
+    let Ok(dist) = app.session.doc.eval(distance, solidcraft_engine::doc::expr::Kind::Length) else { return };
+    let side = crate::smart_extrude::side(dist, *direction);
     if !matches!(d.kind, Kind::Extrude { auto_op: true, .. }) {
         return;
     }
-    let Some(op) =
-        dialog_commands(app, d).ok().and_then(|c| c.into_iter().next()).and_then(|(_, p)| solidcraft_engine::auto_operation(&app.session, &p))
+    let Some(fresh) = dialog_commands(app, d)
+        .ok()
+        .and_then(|c| c.into_iter().next())
+        .and_then(|(_, p)| solidcraft_engine::auto_operation(&app.session, &p))
+        .and_then(|op| OPS.iter().position(|o| *o == op))
     else {
         return;
     };
-    if let Kind::Extrude { operation, .. } = &mut d.kind
-        && let Some(i) = OPS.iter().position(|o| *o == op)
-    {
-        *operation = i;
+    if let Kind::Extrude { operation, smart, .. } = &mut d.kind {
+        *operation = crate::smart_extrude::operation(fresh, *operation, side, &mut smart.latch);
     }
+}
+
+/// The one-side direction a new extrude takes for its first pick: toward the side of a sketch
+/// profile (or curve) the camera looks from; None for picks that keep their own way.
+fn picked_side(app: &SolveApp, d: &Dialog, first: &Sel) -> Option<usize> {
+    let normal = match first {
+        Sel::Profile { sketch, .. } => crate::canvas::profile_plane(app, *sketch)?.normal(),
+        Sel::SketchCurve { id } => app.session.world_state().sketches.iter().rev().find(|ss| ss.sketch.curve_index(id).is_some())?.plane.normal(),
+        Sel::Face { .. } => return Some(0),
+        _ => return None,
+    };
+    let (at, _) = crate::canvas::anchor(app, d)?;
+    Some(crate::smart_extrude::picked_direction(crate::smart_extrude::view_ray(&app.cam, at), normal, false))
 }
 
 /// Show the active dialog (if any), docked flush to an edge of the viewport just below the axis
@@ -1881,6 +1972,10 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
         let footer_height = ui.spacing().interact_size.y.max(24.0) + 6.0 + ui.spacing().item_spacing.y;
         let fields_height = (vp.bottom() - anchor.y - 8.0 - vertical_frame - ui.min_rect().height() - footer_height).max(1.0);
         egui::ScrollArea::vertical().id_salt("feature_fields").min_scrolled_height(fields_height).max_height(fields_height).show(ui, |ui| {
+            // While OK computes, its inputs hold: what is applied is what was asked.
+            if app.applying.is_some() {
+                ui.disable();
+            }
             // Configuration tables own their column widths and scrolling; the two-column form
             // grid would squeeze their row names and action buttons into a label-sized cell.
             if let Kind::Motion(k @ crate::dialogs_motion::Mo::Configurations { .. }) = &mut d.kind {
@@ -1936,6 +2031,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                         direction,
                         operation,
                         auto_op,
+                        smart,
                         distance2,
                         taper,
                         taper_present,
@@ -1991,6 +2087,11 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                         combo(ui, "ex_dir", &["One Side", "Two Sides", "Symmetric"], &mut pos);
                         if pos != order.iter().position(|o| o == direction).unwrap_or(0) {
                             *direction = order.get(pos).copied().unwrap_or(0);
+                            // Selecting Symmetric applies the current total-distance semantics.
+                            d.extra.insert("convention".into(), json!(solidcraft_engine::doc::ExtrudeConvention::TotalDistance));
+                            // An explicit direction ends the automatic choices (#1257).
+                            smart.manual_dir = true;
+                            *auto_op = false;
                         }
                         ui.end_row();
                         if *direction < 2 {
@@ -1998,6 +2099,9 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                             let mut reverse = *direction == 1;
                             if ui.checkbox(&mut reverse, tr("Reverse Direction")).changed() {
                                 *direction = usize::from(reverse);
+                                // An explicit direction ends the automatic choices (#1257).
+                                smart.manual_dir = true;
+                                *auto_op = false;
                             }
                             ui.end_row();
                         }
@@ -2616,7 +2720,12 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
             // the automatic ids of OK and Cancel, and a click pressed in one frame and
             // released in the next would be lost (an animating preview toggles it often).
             let (sr, sresp) = ui.allocate_exact_size(vec2(14.0, 14.0), egui::Sense::hover());
-            if app.preview.busy {
+            if let Some(job) = &app.applying {
+                egui::Spinner::new().size(14.0).paint_at(ui, sr);
+                let seconds = ((crate::now_ms() - job.started) / 1000.0).floor().max(0.0);
+                ui.label(RichText::new(crate::i18n::format("dialog.computing", &[("seconds", &format!("{seconds:.0}"))])).color(t.text_dim));
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            } else if app.preview.busy {
                 egui::Spinner::new().size(14.0).paint_at(ui, sr);
                 sresp.on_hover_text(tr("Updating the preview"));
             }
@@ -2636,7 +2745,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                         .fill(if valid { t.accent } else { Color32::TRANSPARENT })
                         .wrap_mode(egui::TextWrapMode::Extend)
                         .min_size(vec2(ok_width, 24.0));
-                    let r = ui.add_enabled(valid, b);
+                    let r = ui.add_enabled(valid && app.applying.is_none(), b);
                     crate::scenario::publish_handle(&format!("dialog:{raw_label}"), r.rect.center());
                     if r.clicked() {
                         ok = true;
@@ -2661,7 +2770,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     let enter_applies = !matches!(d.kind, Kind::Sketch | Kind::Params { .. } | Kind::Measure { .. } | Kind::ConfirmDelete { .. })
         && !matches!(&d.kind, Kind::Motion(k) if k.wide());
     let report_active = app.issue_report.draft.is_some();
-    if !report_active && enter_applies && (enter || canvas_enter || (enter_free && nothing_focused)) {
+    if !report_active && enter_applies && app.applying.is_none() && (enter || canvas_enter || (enter_free && nothing_focused)) {
         ok = true;
     }
     if !report_active && esc && !app.esc_handled {
@@ -2682,19 +2791,49 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
             Err(error) => d.refuse(app, error),
         }
     }
-    if ok {
+    if ok && app.applying.is_none() {
         // Edit Text applies its own way: its live changes and OK are one undo step.
         let run = match &mut d.kind {
-            Kind::Text(k) => crate::sketch_text::apply(app, k),
-            _ => run_dialog(app, &d),
+            Kind::Text(k) => Some(crate::sketch_text::apply(app, k)),
+            _ => match begin_applying(app, &d) {
+                // Computing: the dialog stays, saying so, until it is in.
+                Some(job) => {
+                    app.applying = Some(job);
+                    None
+                }
+                None => Some(run_dialog(app, &d)),
+            },
         };
         match run {
-            Ok(()) => {
+            Some(Ok(())) => {
                 cancel = true;
                 applied = true;
             }
-            Err(e) => d.refuse(app, e),
+            Some(Err(e)) => d.refuse(app, e),
+            None => {}
         }
+    }
+    // OK's evaluation is in: run it, the feature taken from the cache. Inputs changed meanwhile
+    // (nothing should change them) are computed in turn, off the window thread too: run here,
+    // they would hold the window for the whole boolean.
+    if app.applying.as_ref().is_some_and(Applying::finished) && !cancel {
+        let computed = app.applying.take().map(|job| job.cmds);
+        let current = apply_commands(app, &d).ok();
+        let again = if current.is_some() && current != computed { begin_applying(app, &d) } else { None };
+        match again {
+            Some(job) => app.applying = Some(job),
+            None => match run_dialog(app, &d) {
+                Ok(()) => {
+                    cancel = true;
+                    applied = true;
+                }
+                Err(e) => d.refuse(app, e),
+            },
+        }
+    }
+    // Cancel while computing: the result goes (its worker runs on to its end).
+    if cancel && !applied {
+        app.applying = None;
     }
     if !keep || cancel {
         crate::dialogs_motion::closed(app, &mut d, applied);
@@ -2724,6 +2863,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
 
 /// Close the dialog without applying it (Esc, Cancel). An edit puts the timeline marker back.
 pub fn cancel(app: &mut SolveApp) {
+    app.applying = None;
     if let Some(mut d) = app.dialog.take() {
         crate::dialogs_motion::closed(app, &mut d, false);
         if let Kind::Text(k) = &mut d.kind {
@@ -3030,21 +3170,29 @@ fn sels(d: &Dialog, i: usize) -> &[Sel] {
     d.inputs.get(i).map(|x| x.items.as_slice()).unwrap_or(&[])
 }
 
-fn run_dialog(app: &mut SolveApp, d: &Dialog) -> Result<(), String> {
+pub(crate) fn run_dialog(app: &mut SolveApp, d: &Dialog) -> Result<(), String> {
     let commands = apply_commands(app, d)?;
-    // The live preview may be computing these very commands: OK takes its result.
-    crate::preview::settle(app, &commands);
     if let Some((_, marker)) = d.editing {
         // Record the actual pre-edit timeline state in the command's undo snapshot.
         roll_marker(app, marker)?;
     }
     for (cmd, params) in commands {
-        if let Err(error) = app.run(&cmd, params) {
-            if let Some((id, _)) = d.editing {
-                let position = app.session.doc.feature_index(id);
-                let _ = roll_marker(app, position);
+        match app.run(&cmd, params) {
+            Ok(reply) => {
+                // A drive that stopped short says where, and why.
+                if cmd == "joint.drive"
+                    && let Some(why) = crate::dialogs_assembly::drive_stop(&reply)
+                {
+                    app.set_status(why, false);
+                }
             }
-            return Err(error);
+            Err(error) => {
+                if let Some((id, _)) = d.editing {
+                    let position = app.session.doc.feature_index(id);
+                    let _ = roll_marker(app, position);
+                }
+                return Err(error);
+            }
         }
     }
     Ok(())
@@ -4036,6 +4184,7 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
                 },
                 operation: op_index(operation),
                 auto_op: false,
+                smart: crate::smart_extrude::Smart { manual_dir: true, ..Default::default() },
                 distance2: extent.distance2.clone().unwrap_or_else(|| "10 mm".into()),
                 taper: extent.taper.clone().unwrap_or_else(|| "0 deg".into()),
                 taper_present: extent.taper.is_some(),
@@ -4047,6 +4196,7 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
                 wall_side: thin.as_ref().map_or(0, |t| WALL_SIDES.iter().position(|w| ThinSide::parse(w) == Some(t.side)).unwrap_or(0)),
                 wall2: thin.as_ref().and_then(|t| t.thickness2.clone()).unwrap_or_else(|| "1 mm".into()),
             };
+            d.extra.insert("convention".into(), json!(extent.convention));
             // Extent references belong to the extrude's authoring frame, including free
             // points. They are not body-local picks (a reference may be on another body).
             let frame = feature_frame(s, f.component);

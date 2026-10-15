@@ -244,6 +244,12 @@ sheet_hem
     Length = hem.length (Length)
     Gap = hem.gap (Length)
   expressions: hem.length, hem.gap
+sheet_perforate
+  inputs:
+    Diameter = perforate.diameter (Length)
+    Pitch = perforate.pitch (Length)
+    Margin = perforate.margin (Length)
+  expressions: perforate.diameter, perforate.pitch, perforate.margin
 sheet_fold
   inputs:
     Angle = fold.angle (Angle)
@@ -319,10 +325,26 @@ surface_offset
   expressions: soff.distance, soff.tolerance
 unstitch
 reverse_normal
+surface_untrim
 surface_extend
   inputs:
     Distance = extend.distance (Length)
   expressions: extend.distance
+surface_extend_to_plane
+  inputs:
+    Distance = extend.distance (Length)
+    Angle = extend.angle (Angle)
+    Offset = extend.offset (Length)
+  expressions: extend.distance, extend.angle, extend.offset
+surface_extend_to_face
+  inputs:
+    Distance = extend.distance (Length)
+  expressions: extend.distance
+surface_ruled
+  inputs:
+    Distance = ruled.distance (Length)
+    Angle = ruled.angle (Angle)
+  expressions: ruled.distance, ruled.angle
 surface_trim
   inputs:
     Angle = trim.angle (Angle)

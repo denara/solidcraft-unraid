@@ -31,7 +31,7 @@ fn placed_step_body_uses_imported_opacity_until_a_design_look_overrides_it() {
     assert!((appearance.opacity - 0.4).abs() < 1e-6);
     assert_eq!(appearance.color, [51, 153, 204]);
     crate::dialogs::cancel(&mut app);
-    let scene = build_scene(&app);
+    let scene = build_scene(&app).merged();
     assert!(!scene.glass.is_empty());
     assert!(
         scene.tris.is_empty(),

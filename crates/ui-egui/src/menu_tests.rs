@@ -660,10 +660,50 @@ fn toolbar_pins_removes_reorders_and_keeps_its_layout() {
 }
 
 #[test]
-fn the_workspace_menu_lists_design_and_greys_the_rest() {
+fn the_workspace_menu_lists_design_and_render_and_greys_future_workspaces() {
     let app = sample_app();
     let items = context_menu::items(&app, &Target::Workspace);
     assert!(find(&items, "Design").enabled);
-    assert!(!find(&items, "Render").enabled && find(&items, "Render").shortcut == "coming later");
+    assert!(find(&items, "Render").enabled);
+    assert!(!find(&items, "Animation").enabled);
     assert!(!items.iter().any(|i| i.label.contains("Generative")));
+}
+
+/// A right-click on a construction plane's browser row opens its menu, like a body's or a
+/// sketch's row, and the menu's items act on that plane.
+#[test]
+fn construction_plane_row_opens_its_menu() {
+    let mut h = crate::scenario::Harness::new();
+    h.app.run("solid.box", json!({"length": 40, "width": 40, "height": 10, "body_name": "Block"})).unwrap();
+    h.app.run("construct.plane.offset", json!({"base": "XY", "offset": 25, "name": "Cut"})).unwrap();
+    let id = h.app.session.doc.find_feature("Cut").map(|f| f.id).unwrap();
+    h.app.run("select.clear", json!({})).unwrap();
+    h.frames(3);
+    let at = crate::scenario::handle_at("row:Cut").expect("the plane has a browser row");
+    h.call("ui.click", json!({"x": at.x, "y": at.y, "button": "right"}));
+    h.frames(2);
+    let menu = h.call("ui.menu", json!({}));
+    let menu = &menu["result"];
+    assert_eq!(menu["open"], true, "{menu}");
+    assert_eq!(menu["target"], json!({"type": "plane", "id": id}), "{menu}");
+    let labels: Vec<&str> = menu["items"].as_array().unwrap().iter().filter_map(|i| i["label"].as_str()).filter(|l| !l.is_empty()).collect();
+    assert_eq!(labels, ["Edit Feature", "Delete", "Rename", "Show/Hide", "Find in Timeline"]);
+    assert_eq!(h.app.session.selection, vec![solidcraft_engine::Sel::Plane { name: "Cut".into() }], "the right-click picks the plane");
+    context_menu::close(&mut h.app);
+
+    let t = Target::Plane { id };
+    act(&mut h.app, &t, "Show/Hide");
+    assert!(h.app.session.visibility.hidden_origin.contains(&"Cut".to_string()));
+    act(&mut h.app, &t, "Show/Hide");
+    assert!(!h.app.session.visibility.hidden_origin.contains(&"Cut".to_string()));
+    act(&mut h.app, &t, "Rename");
+    assert!(context_menu::finish_rename(&mut h.app, Some("Section"), true));
+    assert!(h.app.session.doc.find_feature("Section").is_some_and(|f| f.id == id));
+    act(&mut h.app, &t, "Find in Timeline");
+    assert_eq!(h.app.session.selection, vec![solidcraft_engine::Sel::Feature { id }]);
+    act(&mut h.app, &t, "Edit Feature");
+    assert!(h.app.dialog.is_some(), "Edit Feature opens the plane's dialog");
+    h.app.dialog = None;
+    act(&mut h.app, &t, "Delete");
+    assert!(h.app.session.doc.feature(id).is_none(), "nothing depends on the plane: it goes at once");
 }

@@ -9,7 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::expr::{self, Kind, ParamDef, Value};
-use crate::{DocError, Document, FeatureKind, HoleKind, MAX_PARAMS, PatternKind, PlaneRef, Result};
+use crate::walk::Walk;
+use crate::{DocError, Document, FeatureKind, MAX_PARAMS, Result};
 
 /// Whether an expression of a feature is one of its inputs, which become model parameters named
 /// in walk order (`dN`), or a coordinate of a primitive's placement point, which gets no name and
@@ -20,369 +21,11 @@ pub(crate) enum ExprRole {
     Placement,
 }
 
-/// The offsets and angles of a plane, outermost first, for `&` and `&mut` (`$m` is `mut` or
-/// nothing). Nesting is capped like every walk over a plane.
-macro_rules! plane_walk {
-    ($name:ident $(, $m:tt)?) => {
-        fn $name<'a>(mut p: &'a $($m)? PlaneRef, f: &mut impl FnMut(&'static str, &'a $($m)? String, Kind, ExprRole)) {
-            for _ in 0..64 {
-                match p {
-                    PlaneRef::Offset { base, distance } => {
-                        f("Offset", distance, Kind::Length, ExprRole::Input);
-                        p = base;
-                    }
-                    PlaneRef::AtAngle { base, angle, .. } => {
-                        f("Angle", angle, Kind::Angle, ExprRole::Input);
-                        p = base;
-                    }
-                    PlaneRef::AlongPath { t, .. } => {
-                        f("Distance (0 to 1)", t, Kind::Unitless, ExprRole::Input);
-                        break;
-                    }
-                    _ => break,
-                }
-            }
-        }
-    };
-}
-
-plane_walk!(plane_exprs);
-plane_walk!(plane_exprs_mut, mut);
-
-/// Every expression of a feature with its label, kind and role, in a fixed order (the inputs'
-/// order names their parameters), written once for `&` and `&mut`: `$plane` is the matching plane
-/// walk, `$refs` the matching `refs`/`refs_mut`, `$m` is `mut` or nothing.
-macro_rules! feature_walk {
-    ($name:ident, $plane:ident, $refs:ident $(, $m:tt)?) => {
-        pub(crate) fn $name<'a>(&'a $($m)? self, f: &mut impl FnMut(&'static str, &'a $($m)? String, Kind, ExprRole)) {
-            use ExprRole::{Input as I, Placement as P};
-            use Kind::{Angle as A, Length as L, Unitless as U};
-            const XYZ: [&str; 3] = ["X", "Y", "Z"];
-            match self {
-                FeatureKind::Sketch { plane, .. }
-                | FeatureKind::ConstructionPlane { plane }
-                | FeatureKind::Split { plane, .. }
-                | FeatureKind::SplitFace { plane, .. }
-                | FeatureKind::Mirror { plane, .. } => $plane(plane, f),
-                FeatureKind::ConstructionAxis { def } => {
-                    for r in def.$refs() {
-                        if let crate::construct::GeoRef::Plane { plane } = r {
-                            $plane(plane, f);
-                        }
-                    }
-                }
-                FeatureKind::ConstructionPoint { def } => match def {
-                    crate::construct::PointDef::AlongPath { t, .. } => f("Distance (0 to 1)", t, U, I),
-                    other => {
-                        for r in other.$refs() {
-                            if let crate::construct::GeoRef::Plane { plane } = r {
-                                $plane(plane, f);
-                            }
-                        }
-                    }
-                },
-                FeatureKind::Extrude { extent, thin, .. } => {
-                    f("Distance", & $($m)? extent.distance, L, I);
-                    if let Some(d) = & $($m)? extent.distance2 {
-                        f("Distance 2", d, L, I);
-                    }
-                    if let Some(d) = & $($m)? extent.start_offset {
-                        f("Start offset", d, L, I);
-                    }
-                    if let Some(d) = & $($m)? extent.taper {
-                        f("Taper angle", d, A, I);
-                    }
-                    if let Some(d) = & $($m)? extent.to_offset {
-                        f("To offset", d, L, I);
-                    }
-                    if let Some(thin) = thin {
-                        f("Thickness", & $($m)? thin.thickness, L, I);
-                        if let Some(t) = & $($m)? thin.thickness2 {
-                            f("Thickness 2", t, L, I);
-                        }
-                    }
-                }
-                FeatureKind::SurfaceExtrude { extent, .. } => {
-                    f("Distance", & $($m)? extent.distance, L, I);
-                    if let Some(d) = & $($m)? extent.distance2 {
-                        f("Distance 2", d, L, I);
-                    }
-                    if let Some(d) = & $($m)? extent.start_offset {
-                        f("Start offset", d, L, I);
-                    }
-                    if let Some(d) = & $($m)? extent.taper {
-                        f("Taper angle", d, A, I);
-                    }
-                    if let Some(d) = & $($m)? extent.to_offset {
-                        f("To offset", d, L, I);
-                    }
-                }
-                FeatureKind::Revolve { angle, angle2, .. } | FeatureKind::SurfaceRevolve { angle, angle2, .. } => {
-                    f("Angle", angle, A, I);
-                    if let Some(a) = angle2 {
-                        f("Angle 2", a, A, I);
-                    }
-                }
-                FeatureKind::Fillet { radius, style, .. } => match style {
-                    crate::FilletStyle::Constant => f("Radius", radius, L, I),
-                    crate::FilletStyle::Curvature => f("Equivalent radius", radius, L, I),
-                    crate::FilletStyle::Chord => f("Chord length", radius, L, I),
-                    crate::FilletStyle::Variable { radius2, mid, .. } => {
-                        f("Start radius", radius, L, I);
-                        f("End radius", radius2, L, I);
-                        for (_, r) in mid {
-                            f("Mid radius", r, L, I);
-                        }
-                    }
-                    crate::FilletStyle::Spline { radii, .. } => {
-                        f("Start radius", radius, L, I);
-                        let n = radii.len();
-                        for (i, r) in radii.into_iter().enumerate() {
-                            f(if i + 1 == n { "End radius" } else { "Control radius" }, r, L, I);
-                        }
-                    }
-                },
-                FeatureKind::Chamfer { distance, distance2, angle, .. } => {
-                    f("Distance", distance, L, I);
-                    if let Some(d) = distance2 {
-                        f("Distance 2", d, L, I);
-                    }
-                    if let Some(a) = angle {
-                        f("Angle", a, A, I);
-                    }
-                }
-                FeatureKind::Box { length, width, height, corner, .. } => {
-                    f("Length", length, L, I);
-                    f("Width", width, L, I);
-                    f("Height", height, L, I);
-                    for (l, c) in XYZ.into_iter().zip(corner) {
-                        f(l, c, L, P);
-                    }
-                }
-                FeatureKind::Cylinder { radius, height, base, .. } => {
-                    f("Radius", radius, L, I);
-                    f("Height", height, L, I);
-                    for (l, c) in XYZ.into_iter().zip(base) {
-                        f(l, c, L, P);
-                    }
-                }
-                FeatureKind::Sphere { radius, center, .. } => {
-                    f("Radius", radius, L, I);
-                    for (l, c) in XYZ.into_iter().zip(center) {
-                        f(l, c, L, P);
-                    }
-                }
-                FeatureKind::Torus { major, minor, center, .. } => {
-                    f("Major radius", major, L, I);
-                    f("Minor radius", minor, L, I);
-                    for (l, c) in XYZ.into_iter().zip(center) {
-                        f(l, c, L, P);
-                    }
-                }
-                FeatureKind::Pattern { pattern, .. } => match pattern {
-                    PatternKind::Rectangular { count1, spacing1, count2, spacing2, .. } => {
-                        f("Quantity", count1, U, I);
-                        f("Spacing", spacing1, L, I);
-                        if let Some(c) = count2 {
-                            f("Quantity 2", c, U, I);
-                        }
-                        if let Some(sp) = spacing2 {
-                            f("Spacing 2", sp, L, I);
-                        }
-                    }
-                    PatternKind::Path { count, spacing, .. } => {
-                        f("Quantity", count, U, I);
-                        f("Distance", spacing, L, I);
-                    }
-                    PatternKind::Circular { count, angle, .. } => {
-                        f("Quantity", count, U, I);
-                        f("Total angle", angle, A, I);
-                    }
-                },
-                FeatureKind::Shell { thickness, .. } => f("Thickness", thickness, L, I),
-                FeatureKind::Draft { angle, neutral, .. } => {
-                    f("Angle", angle, A, I);
-                    $plane(neutral, f);
-                }
-                FeatureKind::Hole { diameter, depth, hole, .. } => {
-                    f("Diameter", diameter, L, I);
-                    if let Some(d) = depth {
-                        f("Depth", d, L, I);
-                    }
-                    match hole {
-                        HoleKind::Simple => {}
-                        HoleKind::Drilled { tip_angle } => f("Tip angle", tip_angle, A, I),
-                        HoleKind::Counterbore { cb_diameter, cb_depth } => {
-                            f("Counterbore diameter", cb_diameter, L, I);
-                            f("Counterbore depth", cb_depth, L, I);
-                        }
-                        HoleKind::Countersink { cs_diameter, cs_angle } => {
-                            f("Countersink diameter", cs_diameter, L, I);
-                            f("Countersink angle", cs_angle, A, I);
-                        }
-                    }
-                }
-                FeatureKind::Thread { length, .. } => {
-                    if let Some(l) = length {
-                        f("Length", l, L, I);
-                    }
-                }
-                FeatureKind::Scale { factor, factors, .. } => {
-                    f("Scale factor", factor, U, I);
-                    if let Some([x, y, z]) = factors {
-                        f("X scale", x, U, I);
-                        f("Y scale", y, U, I);
-                        f("Z scale", z, U, I);
-                    }
-                }
-                FeatureKind::OffsetFace { distance, .. } => f("Distance", distance, L, I),
-                FeatureKind::BoundingSolid { margin, .. } => f("Margin", margin, L, I),
-                FeatureKind::Pipe { diameter, wall, .. } => {
-                    f("Diameter", diameter, L, I);
-                    if let Some(w) = wall {
-                        f("Wall", w, L, I);
-                    }
-                }
-                FeatureKind::Move { translate, angle, .. } => {
-                    let [x, y, z] = translate;
-                    f("X distance", x, L, I);
-                    f("Y distance", y, L, I);
-                    f("Z distance", z, L, I);
-                    if let Some(a) = angle {
-                        f("Angle", a, A, I);
-                    }
-                }
-                FeatureKind::Emboss { depth, .. } => f("Depth", depth, L, I),
-                FeatureKind::Boss { diameter, height, hole_diameter, hole_depth, draft, fillet, ribs, rib_thickness, rib_length, rib_offset, .. } => {
-                    f("Diameter", diameter, L, I);
-                    f("Height", height, L, I);
-                    for (l, o, k) in [
-                        ("Hole diameter", hole_diameter, L),
-                        ("Hole depth", hole_depth, L),
-                        ("Draft angle", draft, A),
-                        ("Root fillet", fillet, L),
-                        ("Ribs", ribs, U),
-                        ("Rib thickness", rib_thickness, L),
-                        ("Rib length", rib_length, L),
-                        ("Rib offset", rib_offset, L),
-                    ] {
-                        if let Some(e) = o {
-                            f(l, e, k, I);
-                        }
-                    }
-                }
-                FeatureKind::Lip { width, height, gap, .. } => {
-                    f("Width", width, L, I);
-                    f("Height", height, L, I);
-                    if let Some(g) = gap {
-                        f("Gap", g, L, I);
-                    }
-                }
-                FeatureKind::Rest { width, length, height, draft, thickness, .. } => {
-                    f("Width", width, L, I);
-                    f("Height", height, L, I);
-                    for (l, o, k) in [("Length", length, L), ("Draft angle", draft, A), ("Wall thickness", thickness, L)] {
-                        if let Some(e) = o {
-                            f(l, e, k, I);
-                        }
-                    }
-                }
-                FeatureKind::SnapFit { length, thickness, width, catch_depth, catch_length, .. } => {
-                    f("Length", length, L, I);
-                    f("Thickness", thickness, L, I);
-                    f("Width", width, L, I);
-                    f("Catch depth", catch_depth, L, I);
-                    f("Catch length", catch_length, L, I);
-                }
-                FeatureKind::SheetContour { distance, .. } => f("Distance", distance, L, I),
-                FeatureKind::SheetFlange { edges, height, angle, radius, .. } => {
-                    f("Height", height, L, I);
-                    f("Angle", angle, A, I);
-                    if let Some(r) = radius {
-                        f("Bend radius", r, L, I);
-                    }
-                    // The edges' own values come last, so the inputs above keep their names.
-                    for e in edges {
-                        if let Some(a) = & $($m)? e.angle {
-                            f("Edge angle", a, A, I);
-                        }
-                        if let Some(h) = & $($m)? e.height {
-                            f("Edge height", h, L, I);
-                        }
-                    }
-                }
-                FeatureKind::SheetFold { angle, radius, .. } => {
-                    f("Angle", angle, A, I);
-                    if let Some(r) = radius {
-                        f("Bend radius", r, L, I);
-                    }
-                }
-                FeatureKind::SheetHem { length, gap, .. } => {
-                    f("Length", length, L, I);
-                    if let Some(g) = gap {
-                        f("Gap", g, L, I);
-                    }
-                }
-                FeatureKind::Coil { diameter, pitch, turns, section_size, start_angle, base, .. } => {
-                    f("Diameter", diameter, L, I);
-                    f("Pitch", pitch, L, I);
-                    f("Revolutions", turns, U, I);
-                    f("Section size", section_size, L, I);
-                    if let Some(a) = start_angle {
-                        f("Start angle", a, A, I);
-                    }
-                    for (l, c) in XYZ.into_iter().zip(base) {
-                        f(l, c, L, P);
-                    }
-                }
-                FeatureKind::Rib { thickness, depth, .. } => {
-                    f("Thickness", thickness, L, I);
-                    if let Some(d) = depth {
-                        f("Depth", d, L, I);
-                    }
-                }
-                FeatureKind::ReplaceFace { target, .. } => $plane(target, f),
-                FeatureKind::Stitch { tolerance, .. } => f("Tolerance", tolerance, L, I),
-                FeatureKind::MeshConvert { tolerance, .. } => f("Tolerance", tolerance, L, I),
-                FeatureKind::Thicken { thickness, .. } => f("Thickness", thickness, L, I),
-                FeatureKind::SurfaceTrim { plane, .. } => $plane(plane, f),
-                FeatureKind::SurfaceExtend { distance, .. } => f("Distance", distance, L, I),
-                FeatureKind::Unstitch { .. } | FeatureKind::ReverseNormal { .. } => {}
-                FeatureKind::SurfaceOffset { distance, tolerance, .. } => {
-                    f("Distance", distance, L, I);
-                    if let Some(t) = tolerance {
-                        f("Tolerance", t, L, I);
-                    }
-                }
-                FeatureKind::Patch { .. } => {}
-                FeatureKind::Combine { .. }
-                | FeatureKind::SheetBase { .. }
-                | FeatureKind::SheetUnfold { .. }
-                | FeatureKind::SheetConvert { .. }
-                | FeatureKind::Align { .. }
-                | FeatureKind::Remove { .. }
-                | FeatureKind::DeleteFace { .. }
-                | FeatureKind::BoundaryFill { .. }
-                | FeatureKind::Loft { .. }
-                | FeatureKind::Sweep { .. }
-                | FeatureKind::SurfaceSweep { .. }
-                | FeatureKind::SurfaceLoft { .. }
-                | FeatureKind::Import { .. }
-                | FeatureKind::MeshImport { .. }
-                | FeatureKind::BodyTransfer { .. } => {}
-            }
-        }
-    };
-}
-
 impl FeatureKind {
-    feature_walk!(walk_exprs, plane_exprs, refs);
-    feature_walk!(walk_exprs_mut, plane_exprs_mut, refs_mut, mut);
-
     /// The feature's numeric inputs: (label, expression, kind), in a fixed order.
     pub fn inputs_mut(&mut self) -> Vec<(&'static str, &mut String, Kind)> {
         let mut v = Vec::new();
-        self.walk_exprs_mut(&mut |label, e, kind, role| {
+        self.walk_exprs_mut(&mut |(label, e, kind, role)| {
             if role == ExprRole::Input {
                 v.push((label, e, kind));
             }
@@ -393,7 +36,7 @@ impl FeatureKind {
     /// Read-only view of [`FeatureKind::inputs_mut`]: (label, expression, kind).
     pub fn inputs(&self) -> Vec<(&'static str, String, Kind)> {
         let mut v = Vec::new();
-        self.walk_exprs(&mut |label, e, kind, role| {
+        self.walk_exprs(&mut |(label, e, kind, role)| {
             if role == ExprRole::Input {
                 v.push((label, e.clone(), kind));
             }
@@ -403,35 +46,13 @@ impl FeatureKind {
 
     /// Every expression the feature uses: its inputs, then a primitive's placement coordinates.
     pub fn expressions(&self) -> Vec<&str> {
-        let mut v = Vec::new();
-        self.walk_exprs(&mut |_, e, _, _| v.push(e.as_str()));
-        v
-    }
-
-    /// A primitive's placement point (length expressions). Its coordinates are not inputs:
-    /// they get no parameter names and keep bare numbers in mm whatever the design's units, as
-    /// every other position does; renames and users still find them.
-    pub fn point_expr_mut(&mut self) -> Option<&mut crate::PointExpr> {
-        match self {
-            FeatureKind::Box { corner: p, .. }
-            | FeatureKind::Cylinder { base: p, .. }
-            | FeatureKind::Sphere { center: p, .. }
-            | FeatureKind::Torus { center: p, .. }
-            | FeatureKind::Coil { base: p, .. } => Some(p),
-            _ => None,
-        }
-    }
-
-    /// Read-only view of [`FeatureKind::point_expr_mut`].
-    pub fn point_expr(&self) -> Option<&crate::PointExpr> {
-        match self {
-            FeatureKind::Box { corner: p, .. }
-            | FeatureKind::Cylinder { base: p, .. }
-            | FeatureKind::Sphere { center: p, .. }
-            | FeatureKind::Torus { center: p, .. }
-            | FeatureKind::Coil { base: p, .. } => Some(p),
-            _ => None,
-        }
+        let (mut inputs, mut placement) = (Vec::new(), Vec::new());
+        self.walk_exprs(&mut |(_, e, _, role)| match role {
+            ExprRole::Input => inputs.push(e.as_str()),
+            ExprRole::Placement => placement.push(e.as_str()),
+        });
+        inputs.extend(placement);
+        inputs
     }
 }
 
@@ -486,10 +107,14 @@ impl Document {
 
     /// The next free `dN` name.
     pub fn next_d_name(&self) -> String {
+        // Every taken name at once: asking `name_taken` for d1, d2, … searched the whole
+        // design once per number, quadratic in the number of named inputs.
+        let taken: std::collections::HashSet<&str> =
+            self.params.iter().map(|p| p.name.as_str()).chain(self.features.iter().flat_map(|f| f.param_names.iter().map(String::as_str))).collect();
         let mut n = 1;
         loop {
             let c = format!("d{n}");
-            if !self.name_taken(&c) {
+            if !taken.contains(c.as_str()) {
                 return c;
             }
             n += 1;
@@ -676,7 +301,15 @@ impl Document {
         let (vals, errs) = self.param_values();
         let all = self.all_param_exprs();
         let refs: BTreeMap<String, Vec<String>> = all.iter().map(|(n, e, _)| (n.clone(), expr::references(e))).collect();
-        let used_by = |n: &str| -> Vec<String> { refs.iter().filter(|(_, r)| r.iter().any(|x| x == n)).map(|(k, _)| k.clone()).collect() };
+        // Who uses each name, in name order: one pass over the references (a design an agent
+        // built names every feature input, so a search per row was quadratic).
+        let mut users: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+        for (k, r) in &refs {
+            for x in r {
+                users.entry(x.as_str()).or_default().push(k.clone());
+            }
+        }
+        let used_by = |n: &str| -> Vec<String> { users.get(n).cloned().unwrap_or_default() };
         let value = |n: &str, k: Kind| vals.get(n).and_then(|v| v.to_kind(k).ok()).map(|x| if k == Kind::Angle { x.to_degrees() } else { x });
         let mut rows = Vec::new();
         for p in &self.params {

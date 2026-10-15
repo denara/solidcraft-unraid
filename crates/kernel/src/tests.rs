@@ -514,6 +514,58 @@ fn tapered_extrude_of_conics() {
     assert!((m.bbox.max.x - r).abs() < 1e-6 && (m.bbox.max.z - h).abs() < 1e-6, "{:?}", m.bbox);
 }
 
+/// A circle drawn as four cubics (as splines and text come) tapered inward. A cubic's control
+/// polygon moved in is only close to the cubic's true offset, so the solid is checked against
+/// the offset's volume within a tolerance: the section at depth d of a convex smooth loop has
+/// area A₀ − P·d + π·d² (Steiner), so the volume is A₀·h − P·t·h²/2 + π·t²·h³/3.
+#[test]
+fn tapered_extrude_of_cubics_is_close_to_the_true_offset() {
+    let (r, h, a) = (10.0, 12.0, 8f64.to_radians());
+    let k = r * 0.552_284_749_830_793_4;
+    let p = |x: f64, y: f64| Vec2::new(x, y);
+    let disc = Loop2 {
+        segs: vec![
+            Seg2::Cubic { p0: p(r, 0.0), p1: p(r, k), p2: p(k, r), p3: p(0.0, r) },
+            Seg2::Cubic { p0: p(0.0, r), p1: p(-k, r), p2: p(-r, k), p3: p(-r, 0.0) },
+            Seg2::Cubic { p0: p(-r, 0.0), p1: p(-r, -k), p2: p(-k, -r), p3: p(0.0, -r) },
+            Seg2::Cubic { p0: p(0.0, -r), p1: p(k, -r), p2: p(r, -k), p3: p(r, 0.0) },
+        ],
+    };
+    let (area, perimeter) = (disc.signed_area().abs(), disc.segs.iter().map(|s| s.length()).sum::<f64>());
+    let b = extrude_tapered(&Plane::XY, &Region2 { outer: disc, holes: vec![] }, h, 1.0, -a).unwrap();
+    let t = a.tan();
+    let v = area * h - perimeter * t * h * h / 2.0 + PI * t * t * h.powi(3) / 3.0;
+    let m = measure(&b).unwrap();
+    assert!(rel(m.volume, v) < 5e-4, "{} vs {v}", m.volume);
+}
+
+/// An S-shaped cubic (one curve turning both ways) has no moved cubic close to its offset: it is
+/// cut into pieces until each piece's moved curve stays within 2 % of the offset of the true
+/// one (or 10 µm), both ways.
+#[test]
+fn a_tapered_s_curve_is_cut_into_pieces_that_follow_its_offset() {
+    let s_curve = Seg2::Cubic { p0: Vec2::new(0.0, 0.0), p1: Vec2::new(5.0, 10.0), p2: Vec2::new(10.0, -10.0), p3: Vec2::new(15.0, 0.0) };
+    let d = 0.5;
+    assert!(crate::build::offset_error(&s_curve, d).unwrap() > 0.05 * d, "one piece is far off");
+    let lp = Loop2 {
+        segs: vec![
+            s_curve,
+            Seg2::Line { a: Vec2::new(15.0, 0.0), b: Vec2::new(15.0, -20.0) },
+            Seg2::Line { a: Vec2::new(15.0, -20.0), b: Vec2::new(0.0, -20.0) },
+            Seg2::Line { a: Vec2::new(0.0, -20.0), b: Vec2::new(0.0, 0.0) },
+        ],
+    };
+    let (cut, from) = crate::build::offset_splits(&lp, d);
+    let pieces: Vec<&Seg2> = cut.segs.iter().zip(&from).filter(|(_, i)| **i == 0).map(|(s, _)| s).collect();
+    assert!(pieces.len() > 1 && from.iter().filter(|i| **i > 0).count() == 3, "{} pieces", pieces.len());
+    for p in pieces {
+        for d in [d, -d] {
+            let e = crate::build::offset_error(p, d).unwrap();
+            assert!(e <= crate::build::offset_tolerance(d) + 1e-9, "{e}");
+        }
+    }
+}
+
 /// A wedge whose tip is a flat line far shorter than the taper moves its sides in: the tip line
 /// goes, the two long sides meet, and its side is the flat triangle up to there. The solid is a
 /// prismatoid, its volume h/6 · (A₀ + 4·A_mid + A₁).

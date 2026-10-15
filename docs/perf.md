@@ -1,5 +1,92 @@
 # Design loading
 
+## STEP assemblies: a repeated part is meshed once (2026-10-14)
+
+The reader already converts each B-rep item once and keeps it for the instances that list it
+again. Every instance still became a body of its own geometry (it has to: features cut and join
+it where it is), and each of those bodies made its own display mesh: tessellation, seam and
+tangent flags, the most expensive step of opening a large assembly. A board with 60 of each
+resistor meshed the same resistor 60 times.
+
+A later instance of an item now shows its first instance's display mesh, placed by the
+difference of the two placements: the same triangles, faces and edge flags, moved. The mesh is
+made once, by whichever instance is drawn first. Only a rotation and translation is shared
+this way (anything else meshes itself), and anything that changes what a body shows (split
+lines; any operation, which makes a new body) drops the link. Measurements, booleans and export
+read the instance's own geometry as before, so `solidcraft-cli eval` of an assembly is unchanged.
+
+Two generated assemblies (SolidCraft designs with placed copies of components, exported as STEP
+AP214 assemblies), `solidcraft-cli bench-open`, release build, shared 16-core Linux box:
+
+| file | bodies | mesh phase before | after | CPU before | after | peak RSS before | after |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 4 parts, 500 instances (bolts with a torus ring, brackets) | 901 | 2,215 ms | 139 ms | 28.4 s | 4.1 s | 918 MB | 749 MB |
+| 10 filleted parts with 8 pins, 600 instances | 5,401 | 1,028 ms | 85 ms | 16.7 s | 6.0 s | 1,095 MB | 783 MB |
+
+Both import to the same triangle counts (4,404,412 and 4,316,412). Each instance's display plan
+(the GPU viewport draws bodies from plans) is still made per instance; sharing those the same
+way is the next step.
+## Designs built by agents: work per command that grew with the design (2026-10-14)
+
+A design an agent builds over MCP is made of many small commands: a cylinder per spoke, a box
+per chain plate, one part built at the origin and its component moved into place. Each command
+did work over the whole design, so the 1,000th command cost far more than the first and a
+1,300-body design took minutes to build and to show. `solidcraft-cli bench-agent` builds such a
+design (a generated bicycle: about 1,260 commands, 1,280 bodies, 1,250 features, wheels built at
+the origin and moved), timing each command and then what a window needs to draw its result (the
+world state and its display meshes), and finally opens the saved design like `bench-open`. The
+script is generated, so it needs no fixture; `--scale` changes the counts and `--script-out`
+writes the commands for replaying elsewhere (`engine.execute` one by one over the control
+channel reproduces the desktop case).
+
+What grew with the design, per command:
+
+- **Moved components were placed again after every change.** `world_state` transformed every
+  body of a component whose occurrence is moved and gave it a new, empty display mesh, so every
+  command meshed all those bodies again (the two wheels: 150 bodies and two tori, 130-190 ms per
+  command). It now keeps the bodies it placed and reuses each one whose definition (same body,
+  same display cell) and placement are unchanged.
+- **A free `dN` name searched the design once per number** (`next_d_name`), quadratic in the
+  number of named inputs, for every new feature input.
+- **Every expression evaluated every parameter** (`Document::eval`), several times per
+  feature command (each coordinate, each size). Parameters are now evaluated only when the
+  expression names one.
+- **The parameter table's `used_by` searched all parameters for each one** (quadratic); it is
+  one pass now. The desktop also stops gathering expression completions (eleven parameter
+  tables) on every change while no text box has focus.
+
+`solidcraft-cli bench-agent`, release build, 16-core Linux shared with other builds (load
+average 15-20), one run each:
+
+| per command, by design size | before: command | before: display | after: command | after: display |
+|---|---:|---:|---:|---:|
+| 200 commands (227 bodies) | 6.0 ms | 129 ms | 1.8 ms | 2.7 ms |
+| 600 commands (621 bodies) | 19.9 ms | 169 ms | 4.9 ms | 2.4 ms |
+| 1,000 commands (1,021 bodies) | 45.1 ms | 187 ms | 9.8 ms | 4.5 ms |
+| 1,200 commands (1,221 bodies) | 56.8 ms | 194 ms | 12.5 ms | 5.6 ms |
+| whole build (1,260 commands) | 241 s | | 16.3 s | |
+
+The command column still grows (the timeline's fingerprints and parameter values are walked
+once per command), but slowly. `solidcraft-cli eval` output for the design corpus, the examples,
+the regression scripts, the generated bicycle and a 3,300-feature agent-built design is
+unchanged apart from the timings.
+
+The viewport rebuilt its whole model scene after every change and uploaded all of it again
+(every body's triangles and edges, 60 MB for the bicycle where bodies are built on the CPU). It
+now builds the scene in blocks of a few bodies, cut where a body's own key says so that adding
+or removing a body changes only its block, and keeps each block's bytes and GPU buffers while
+the block comes back unchanged. The bodies' boxes (fit, picking, the ground shadow) are kept per
+mesh the same way. Built command by command over the control channel (`engine.execute`, then
+`ui.inspect`) in the desktop app under Xvfb with software GL:
+
+| desktop, bicycle built over the control channel | main | with #1148 and this |
+|---|---:|---:|
+| UI work per change at ~1,000 bodies (`frame_ms`) | 1,374 ms | 18 ms |
+| model scene build at ~1,000 bodies (`build_ms`) | 41 ms | 1.4 ms |
+| whole build | 1,409 s | 210 s |
+
+Most of what is left there is software rendering of 770k triangles per frame.
+
 ## STEP import: shells and item solids without copies (2026-10-13)
 
 A file that lists one product definition many times (a bolt used 70 times, a panel in several

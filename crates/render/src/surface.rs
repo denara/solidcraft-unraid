@@ -25,6 +25,7 @@ pub enum SurfaceError {
     Roughness,
     DielectricIor,
     Direction,
+    Radiance,
 }
 
 impl std::fmt::Display for SurfaceError {
@@ -35,6 +36,7 @@ impl std::fmt::Display for SurfaceError {
             Self::Roughness => "perceptual roughness must be finite and in [0.045, 1]",
             Self::DielectricIor => "dielectric IOR must be finite and in [1, 3]",
             Self::Direction => "surface directions must be finite and nonzero",
+            Self::Radiance => "radiance must be finite and nonnegative",
         })
     }
 }
@@ -81,15 +83,15 @@ impl OpaqueSurface {
     /// No incident radiance, cosine weight, exposure or display transfer is included.
     /// Back-facing/tangent directions return zero; malformed directions are errors.
     pub fn brdf(self, normal: Vec3, view: Vec3, light: Vec3) -> Result<Vec3, SurfaceError> {
-        let n = unit(normal)?;
-        let v = unit(view)?;
-        let l = unit(light)?;
+        let n = unit_direction(normal)?;
+        let v = unit_direction(view)?;
+        let l = unit_direction(light)?;
         let nv = n.dot(v).clamp(-1.0, 1.0);
         let nl = n.dot(l).clamp(-1.0, 1.0);
         if nv <= 0.0 || nl <= 0.0 {
             return Ok(Vec3::ZERO);
         }
-        let h = unit(v + l)?;
+        let h = unit_direction(v + l)?;
         let nh = n.dot(h).clamp(0.0, 1.0);
         let vh = v.dot(h).clamp(0.0, 1.0);
         let alpha = self.roughness * self.roughness;
@@ -122,7 +124,8 @@ pub fn srgb8_to_linear(channel: u8) -> f64 {
     if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
 }
 
-fn unit(v: Vec3) -> Result<Vec3, SurfaceError> {
+/// Normalize finite directions without overflow or an arbitrary magnitude threshold.
+pub fn unit_direction(v: Vec3) -> Result<Vec3, SurfaceError> {
     if !v.is_finite() {
         return Err(SurfaceError::Direction);
     }

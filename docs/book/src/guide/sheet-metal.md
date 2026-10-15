@@ -127,14 +127,37 @@ keeps its envelope and the flat pattern is the outside lengths less a bend deduc
 2·(R + T)·tan(θ/2) − θ·(R + K·T). A bend can be picked on either skin of a shell; bends turn
 either way, follow one another and take any angle (the walls of a tapered tray at 72°). An
 edge between two faces of the sheet that is no bend is cut open, each side half the rule's
-**gap** from the plane halfway between the two, like the corners of a tray. The result is an
+**gap** from the plane halfway between the two, like the corners of a tray. A bend drawn as a
+chamfer (a flat strip between two faces, the chord of the bend's arc, as models without bend
+radii draw one) is picked in the middle of the strip: the two faces then meet at their virtual
+sharp in one bend of the rule's radius, and the strip is no face of the sheet. A bend modelled
+with its radius (a cylinder between two flat faces tangent to it, as sheet metal parts from
+other systems come, or a filleted edge) is picked anywhere on its cylinder, on either skin, and
+converts the same way: the sheet is bent there with the rule's radius and K-factor, not the
+modelled radius, so the flat pattern is the one the rule makes. The result is an
 ordinary sheet body: edge flanges, cuts, Unfold, the flat pattern and its exports work on it,
 and it follows the solid when a parameter changes (the edges and the fixed face are found by
-their names). Without bend edges Convert expects a plate, as before; its round walls (holes, slot
-ends, rounded corners) stay circles and arcs in the flat pattern and the DXF, also where a STEP
-file writes one in pieces. Not converted yet: curved faces (rolled sheet, a filleted edge as a
-bend), faces with holes or curved edges in a body with bend edges (cut them after converting)
-and bends that close a ring.
+their names). Without bend edges Convert expects a plate, as before. Either way round walls
+(holes, slot ends, rounded corners, notches) stay circles and arcs in the flat pattern and the
+DXF, also where a STEP file writes one in pieces, and the holes and slots of every face of the
+sheet are its cut-outs, where the bends put them. An engraving in a face of the sheet (a recess
+with a flat floor, at most half the thickness deep) becomes a pocket of it, as a plate's does
+(below), on either skin of a shell. Not converted yet: curved faces other than bends (rolled
+sheet), with bend edges a hole or an engraving that reaches into a bend or a pocket deeper than
+half the thickness (cut them after converting), and bends that close a ring.
+
+A plate may carry recesses in one of its faces, such as an engraved label or a counterbore: a
+recess with a flat floor and walls square to the plate, at most half the plate's thickness
+deep. Each becomes a pocket of the sheet (see the pockets below), so the converted part keeps
+it: the sheet is as thick as the plate, the flat pattern is the whole plate with the recess
+listed under `pockets` (its outline, side and depth), and the DXF draws its outline on the
+pocket layer of its depth, apart from the cut contours, for a laser to mark rather than cut.
+The face the recesses are in can be the one picked or the other. A recess deeper than half the
+thickness, recesses in both faces, and a plate whose recesses are larger than the face around
+them (a thinner plate with raised parts) are refused with the reason. A recess lies in an
+opening of the face it is cut into, so the faces of a bent part's legs are none: a bent part is
+refused as no plate, and converts with its bend edges. A bend across a pocket is refused as for
+any pocket, so fold or flange clear of an engraving.
 
 ```json
 {"command":"solid.box","params":{"length":100,"width":60,"height":30,"body_name":"Tray"}}
@@ -142,6 +165,10 @@ and bends that close a ring.
 {"command":"sheet.convert","params":{"body":"Tray","face":[50,30,0],
  "bends":[[50,0,0],[100,30,0],[50,60,0],[0,30,0]]}}
 ```
+
+The `face` can also be the name `model.faces` lists for it (`"face":"F1:+z"`), which saves
+computing a point on a face with holes or a curved outline: `model.faces` gives every face a
+`point` that lies on it.
 
 For a shop drawing or spreadsheet, `sheet.export_bend_table` returns CSV by default; choose
 `format: "json"` for structured data. It includes the sheet rule, thickness, bend angles,
@@ -158,15 +185,20 @@ consume an undo step.
 {"command":"sheet.export_dxf","params":{"path":"bracket-flat.dxf"}}
 ```
 
-DXF cutout geometry preserves lines, circles and circular arcs; other curves are sampled
-adaptively. The `OUTLINE`, `BEND_UP` and `BEND_DOWN` layers separate cuts from bend centres.
+The DXF is an AutoCAD 2000 (`AC1015`) drawing in millimetres. The `OUTLINE`, `BEND_UP` and
+`BEND_DOWN` layers separate cuts from bend centres. A round hole is a `CIRCLE`, a circular arc an
+`ARC`, a whole ellipse one `ELLIPSE` and an arc of an ellipse an elliptical `ELLIPSE`; the pieces
+of a spline, the outlines of text and the other conics are `SPLINE`s of their own degree, so no
+curve is written as chords. For a machine that reads only lines and arcs, pass
+`"curves": "arcs"` to `sheet.export_dxf`: the free-form curves are then tangent arcs and lines
+within 0.001 mm.
 
 Base-flange profiles keep their interior holes. Through cuts that cross a sheet edge become
 notches in the flat outline; overlapping and repeated cuts remove their combined area once.
 The flat preview, DXF and unfolded solid use the same material boundaries. Lines and circular
 arcs remain exact. An ellipse, a spline or text stays the curve it was drawn as in the flat
 pattern and the unfolded solid; the folded solid follows it with tangent arcs within 0.001 mm,
-and the DXF and the point lists write it as chords within 0.001 mm.
+and the point lists write it as chords within 0.001 mm (the DXF keeps the curve, see above).
 Flat-pattern JSON lists each cut-out twice, in the same order: as points (`cutouts`), and
 exactly (`cutout_shapes`): a round hole as `{"circle": {"center", "radius"}}`, any other as its
 `line`, `arc` (centre, radius, start and sweep in degrees) and `polyline` segments (one

@@ -73,6 +73,12 @@ mod web {
             if self.files.ctx.borrow().is_none() {
                 *self.files.ctx.borrow_mut() = Some(ctx.clone());
             }
+            // A ready picker answer is consumed in app.logic later in this frame. Keep
+            // incoming files queued until then so they cannot replace its target design.
+            if self.app.file_picker_busy() {
+                ctx.request_repaint();
+                return;
+            }
             files::flush(&self.files);
             for (text, error) in self.files.messages.borrow_mut().drain(..) {
                 self.app.set_status(text, error);
@@ -434,12 +440,12 @@ mod web {
                             // Open shows the browser's files (and the computer's, from there).
                             pick_open: Some(Box::new(move || {
                                 panel.panel.set(true);
-                                None
+                                Box::pin(std::future::ready(None))
                             })),
                             // Designs are kept in the browser; everything else is downloaded.
                             pick_save: Some(Box::new(|name: &str, exts: &[&str]| {
                                 let design = exts.contains(&solidcraft_engine::io::DESIGN_EXT);
-                                Some(format!("{}{name}", if design { files::OPFS } else { files::DOWNLOADS }))
+                                Box::pin(std::future::ready(Some(format!("{}{name}", if design { files::OPFS } else { files::DOWNLOADS }))))
                             })),
                             ..Default::default()
                         };
@@ -459,6 +465,9 @@ mod web {
                             app.session.mark_saved();
                         }
                         if !query().contains("sample") {
+                            // The empty design takes Units of new designs (#1205). The sample
+                            // part is built in millimetres and is left that way.
+                            solidcraft_ui_egui::prefs::apply_new_design(&mut app);
                             let rev = app.session.revision;
                             app.home.show(rev);
                         }

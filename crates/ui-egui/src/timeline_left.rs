@@ -5,7 +5,7 @@ use serde_json::json;
 use solidcraft_engine::doc::FeatureKind;
 
 use crate::theme::Tokens;
-use crate::timeline::{delete_feature, delete_features, icon_of, transport_glyph};
+use crate::timeline::{clipboard_buttons, delete_feature, delete_features, icon_of, message_button, selected_feature_ids, transport_glyph};
 use crate::{SolveApp, icons};
 
 const FOLDER_INDENT: f32 = 14.0;
@@ -207,18 +207,6 @@ fn vertical_marker(app: &mut SolveApp, ui: &mut egui::Ui, drag: &mut Option<Drag
 
 fn group_for(groups: &[solidcraft_engine::doc::TimelineGroup], feature: u64) -> Option<u64> {
     groups.iter().find(|group| group.features.contains(&feature)).map(|group| group.id)
-}
-
-fn selected_feature_ids(app: &SolveApp) -> Vec<u64> {
-    app.session
-        .doc
-        .features
-        .iter()
-        .filter(|feature| {
-            app.session.selection.iter().any(|selection| matches!(selection, solidcraft_engine::Sel::Feature { id } if *id == feature.id))
-        })
-        .map(|feature| feature.id)
-        .collect()
 }
 
 fn selected_drag_items(app: &SolveApp, origin_x: f32, source_group: Option<u64>) -> DragItems {
@@ -731,6 +719,11 @@ fn vertical_features(app: &mut SolveApp, ui: &mut egui::Ui) {
             egui::FontId::proportional(12.0),
             text_colour,
         );
+        // A failed feature has a mark of its own, not only its colour (#972).
+        if error.is_some() {
+            let at = Rect::from_min_size(pos2(rect.right() - 15.0, rect.center().y - 6.0), vec2(12.0, 12.0));
+            icons::paint(ui.painter(), at, "error", t.panel, t.error, t.error);
+        }
         if warning.is_some() && error.is_none() {
             icons::paint(
                 ui.painter(),
@@ -796,6 +789,9 @@ fn vertical_features(app: &mut SolveApp, ui: &mut egui::Ui) {
                 let _ = app.run("timeline.roll_to", json!({"feature": id}));
                 ui.close();
             }
+            ui.separator();
+            clipboard_buttons(app, ui, *id);
+            message_button(app, ui, *id);
             ui.separator();
             selection_actions(app, ui, &groups);
             ui.separator();

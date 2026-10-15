@@ -73,7 +73,7 @@ is available. Missing or incompatible pictures use the usual thumbnail generatio
 The default `cache: false` omits the portable thumbnail too.
 The repository's `docs/design-container.md` describes limits and encoding details.
 
-Current designs use format 20, including thin extrudes, editable associative offset-distance dimensions, the style of sketch text (bold, italic, alignment, spacing and the curve it follows), face anchors on a piece of a face by its own name, sheet metal rims and bend ends, bend edges for Convert to Sheet Metal, the tear corner relief of sheet metal rules, the names of projected edges, physical materials defined in the design, the font of sketch text, sheet metal corner relief shapes, sketch face anchors on cylinder caps, sketch axis
+Current designs use format 21, including design properties, named render setups, opaque PBR looks, thin extrudes, sheet metal perforation fields, associative editable sketch patterns, editable associative offset-distance dimensions, the style of sketch text (bold, italic, alignment, spacing and the curve it follows), face anchors on a piece of a face by its own name, sheet metal rims and bend ends, bend edges for Convert to Sheet Metal, the tear corner relief of sheet metal rules, the names of projected edges, physical materials defined in the design, the font of sketch text, sheet metal corner relief shapes, sketch face anchors on cylinder caps, sketch axis
 links, persistent
 names from exact face history, exact planar shell-face anchors, persistent analytic offset boundary roles and
 association profile references, durable sketch face anchors, periodic fit splines and versioned
@@ -85,6 +85,61 @@ their producer's coordinate-space marker without changing any saved points; deta
 retain world coordinates. A lost cross-component association refreshed by an older build may
 need an explicit relink or refresh when its source returns. Loading never guesses a numerical
 correction. Association records, coordinate arrays and placements are bounded and checked.
+
+## Design properties
+
+**File → Design Properties…** (also under **Document Settings** in the Browser, and on the
+top component's right-click menu) records who made a design and what it is: project, part
+number, revision, author, organization, description and licence. **OK** applies the changes as
+one undo step. Scripts and agents use the same commands: `document.metadata` reads them,
+`document.metadata.set` (`key` and `value`, or `values: {key: value, …}`) and
+`document.metadata.remove` (`key` or `keys`) change them. `document.inspect` and the MCP
+`inspect_design` tool include them.
+
+Exports carry them where the format has a place for them:
+
+| Format | Written |
+|---|---|
+| STEP | `author` and `organization` in `FILE_NAME`, `description` in `FILE_DESCRIPTION` (on one line) |
+| IGES | `author` and `organization` in the global section |
+| 3MF | `project` as `Title`, `author` as `Designer`, `description` as `Description`, `license` as `LicenseTerms` |
+
+The part number and revision have no standard place in these formats and stay in the design.
+
+In the file they are one optional top-level `metadata` object; a design without properties has
+none, and is saved exactly as before:
+
+```json
+"metadata": {
+  "project": "ACME enclosures",
+  "part_number": "ACME-1042",
+  "revision": "B",
+  "author": "Jane Doe",
+  "organization": "ACME",
+  "description": "Vented case for Raspberry Pi 4",
+  "license": "CC-BY-4.0",
+  "com.acme.description": { "shop_id": 88123 },
+  "org.printfarm": { "slicer_profile": "PETG-0.2", "internal_id": 4 }
+}
+```
+
+- **SolidCraft's keys are unprefixed** and hold text. Every other unprefixed key is reserved for
+  later SolidCraft versions.
+- **Other tools keep their data under one reverse-DNS key** of their own (`com.example.tool`:
+  two or more dot-separated labels of letters, digits, `-` and `_`), holding an object. A tool
+  writes only under its own key and leaves the others alone.
+- **SolidCraft keeps every key as it is** through open, edit and save, in both the container
+  and plain JSON, and never checks what another tool wrote: a well-known key holding something
+  other than text (`"author": 42`) is kept, reads as absent, and never stops the design from
+  opening. Typing over it in Design Properties replaces it.
+- **Other tools' keys are never exported**; Design Properties lists them read-only.
+- **Keep values small**: `document.metadata.set` refuses text over 4 KiB, an object over 64 KiB
+  or nested more than 32 levels deep, and more than 256 keys or 256 KiB in all. Binary data
+  belongs in a file next to the design.
+
+Design properties are first saved in format 21. Inserting or linking another design doesn't
+copy its properties; Save As keeps them. A command script of the design
+(`timeline.export_script`) sets them in one step.
 
 ## Saving in the web app
 

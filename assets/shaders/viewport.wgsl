@@ -10,6 +10,10 @@ struct U {
     acc_u: vec4<f32>,  // accessibility map axes (xyz, offset)
     acc_v: vec4<f32>,
     eye: vec4<f32>,    // eye position, w = 1 for perspective (0: orthographic, looking along -back)
+    // analysis colours (`theme::AnalysisColors`): draft positive, between, negative; reachable,
+    // blocked; curvature flat, middle, tight
+    ana_c: array<vec4<f32>, 8>,
+    ana_f: vec4<f32>,  // x = 1: stripe the negative draft and blocked faces
 };
 
 @group(1) @binding(2) var acc_t: texture_2d<f32>;
@@ -150,8 +154,8 @@ fn analysis(i: TOut, k: f32) -> vec4<f32> {
         // Slack of a pixel and a half, more on slopes (the map holds the pixel's highest point).
         let slack = u.ana.y * (1.0 + sqrt(max(1.0 - cn * cn, 0.0)) / max(cn, 0.05));
         let clear = dot(i.wp, d) >= top - slack;
-        var c = vec3<f32>(0.85, 0.22, 0.20);
-        if (facing && clear) { c = vec3<f32>(0.20, 0.75, 0.30); }
+        var c = u.ana_c[4].rgb;
+        if (facing && clear) { c = u.ana_c[3].rgb; } else { c = stripe(i, c); }
         return out_color(vec4<f32>(c * lit, 1.0));
     }
     if (u.ana.x > 3.5) {
@@ -171,21 +175,34 @@ fn analysis(i: TOut, k: f32) -> vec4<f32> {
     }
     if (u.ana.x < 2.5) {
         let a = degrees(asin(clamp(dot(normalize(i.n), normalize(u.pull.xyz)), -1.0, 1.0)));
-        var c = vec3<f32>(0.95, 0.80, 0.15);
-        if (a >= u.ana.y) { c = vec3<f32>(0.20, 0.75, 0.30); }
-        if (a <= -u.ana.y) { c = vec3<f32>(0.85, 0.22, 0.20); }
+        var c = u.ana_c[1].rgb;
+        if (a >= u.ana.y) { c = u.ana_c[0].rgb; }
+        if (a <= -u.ana.y) { c = stripe(i, u.ana_c[2].rgb); }
         return out_color(vec4<f32>(c * lit, 1.0));
     }
     // Curvature from how fast the normal turns across the pixel.
     let t = clamp(k * u.ana.y, 0.0, 1.0);
-    let c = select(mix(vec3<f32>(0.10, 0.80, 0.25), vec3<f32>(0.90, 0.15, 0.10), t * 2.0 - 1.0),
-                   mix(vec3<f32>(0.15, 0.35, 0.95), vec3<f32>(0.10, 0.80, 0.25), t * 2.0), t < 0.5);
+    let c = select(mix(u.ana_c[6].rgb, u.ana_c[7].rgb, t * 2.0 - 1.0), mix(u.ana_c[5].rgb, u.ana_c[6].rgb, t * 2.0), t < 0.5);
     return out_color(vec4<f32>(c * lit, 1.0));
+}
+
+/// A "bad" analysis face (negative draft, blocked): with the stripes on (colour vision modes), the
+/// section cap's 45 degree hatch over it, so colour is not the only cue.
+fn stripe(i: TOut, c: vec3<f32>) -> vec3<f32> {
+    if (u.ana_f.x < 0.5) { return c; }
+    let h = fract((i.pos.x + i.pos.y) / 9.0);
+    return select(c, c * 0.6, h < 0.22);
 }
 
 @fragment
 fn fs_tri(i: TOut) -> @location(0) vec4<f32> {
     if (clipped(i.wp)) { discard; }
+    return shade(i);
+}
+
+/// Reference planes: shaded like `fs_tri`, but never cut by the section plane.
+@fragment
+fn fs_tri_all(i: TOut) -> @location(0) vec4<f32> {
     return shade(i);
 }
 

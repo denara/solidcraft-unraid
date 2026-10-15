@@ -33,6 +33,7 @@ fn plate_doc() -> (Document, u64) {
             sketch: s,
             profiles: ProfileSel::All,
             extent: Extent {
+                convention: crate::ExtrudeConvention::LegacyPerSide,
                 distance: "20".into(),
                 direction: Direction::Positive,
                 distance2: None,
@@ -125,6 +126,7 @@ fn box_fillet_cut_timeline() {
             sketch: s2,
             profiles: ProfileSel::Points { points: vec![Vec2::new(20.0, 15.0)] },
             extent: Extent {
+                convention: crate::ExtrudeConvention::LegacyPerSide,
                 distance: "20".into(),
                 direction: Direction::Positive,
                 distance2: None,

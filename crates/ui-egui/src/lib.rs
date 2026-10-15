@@ -12,13 +12,19 @@ pub mod access;
 pub mod agent_cursor;
 pub mod browser;
 pub mod canvas;
+#[cfg(test)]
+mod colour_tokens_tests;
+#[cfg(test)]
+mod colour_vision_tests;
 pub mod context_menu;
 pub mod control;
 pub mod crash_ui;
 pub mod delete;
+pub mod design_properties;
 pub mod dialogs;
 pub mod dialogs_appearance;
 pub mod dialogs_assembly;
+pub mod dialogs_library;
 pub mod dialogs_motion;
 pub mod dialogs_move;
 pub mod dialogs_parts;
@@ -54,6 +60,8 @@ mod menu_tests;
 #[cfg(test)]
 mod surface_clamp_tests;
 #[cfg(test)]
+mod timeline_marks_tests;
+#[cfg(test)]
 mod status_tests {
     #[test]
     fn the_status_bar_names_commands_by_label() {
@@ -70,10 +78,14 @@ mod status_tests {
         assert!(app.session.log.last().is_some_and(|l| l.starts_with("Redo: ") && !l.contains("edit.redo")), "{:?}", app.session.log.last());
     }
 }
+#[cfg(test)]
+mod apply_off_thread_tests;
 mod expression_complete;
 #[cfg(test)]
 mod extrude_edit_tests;
 mod file_load;
+mod file_picker;
+pub use file_picker::FilePickerFuture;
 #[cfg(test)]
 mod file_load_ui_tests;
 #[cfg(test)]
@@ -88,6 +100,7 @@ pub mod preview;
 mod primitive_units_tests;
 pub mod recovery_ui;
 pub mod ref_images;
+pub mod render_workspace;
 #[cfg(test)]
 mod revolve_edit_tests;
 #[cfg(test)]
@@ -123,6 +136,9 @@ pub(crate) mod sketch_text;
 mod sketch_text_handles;
 mod sketch_text_move;
 pub mod sketch_tools;
+pub mod smart_extrude;
+#[cfg(test)]
+mod smart_extrude_ui_tests;
 pub mod stand_up;
 pub mod theme;
 #[cfg(test)]
@@ -207,11 +223,11 @@ impl Default for UiState {
     }
 }
 
-/// Host services (file pickers) injected by the app so this crate stays portable.
+/// Host services injected by the app so this crate stays portable.
 #[derive(Default)]
 pub struct Services {
-    pub pick_open: Option<Box<dyn Fn() -> Option<String>>>,
-    pub pick_save: Option<Box<dyn Fn(&str, &[&str]) -> Option<String>>>,
+    pub pick_open: Option<Box<dyn Fn() -> FilePickerFuture>>,
+    pub pick_save: Option<Box<dyn Fn(&str, &[&str]) -> FilePickerFuture>>,
     pub show_in_folder: Option<Box<dyn Fn(&str)>>,
     /// Where the host reads the anti-aliasing preference at start (a small JSON file).
     pub graphics_path: Option<String>,
@@ -235,11 +251,15 @@ pub struct SolveApp {
     /// restores it.
     pub pre_sketch_marker: Option<Option<usize>>,
     pub services: Services,
+    file_picker: Option<file_picker::Pending>,
     pub viewport: viewport::ViewportState,
+    pub render_workspace: render_workspace::State,
     pub tool: Option<tools::Tool>,
     pub dialog: Option<dialogs::Dialog>,
     /// The Change Parameters window, when open.
     pub params: Option<params_dialog::ParamsDialog>,
+    /// The Design Properties window, when open.
+    pub design_properties: Option<design_properties::DesignProperties>,
     pub palette: palette::Palette,
     /// Context menus, rename box and Properties window.
     pub menu: context_menu::MenuState,
@@ -264,6 +284,11 @@ pub struct SolveApp {
     pub preferences: prefs::Prefs,
     pub prefs_window: prefs::PrefsWindow,
     pub preview: preview::PreviewState,
+    /// OK pressed on a feature that takes a while: its evaluation runs off the window thread.
+    pub applying: Option<dialogs::Applying>,
+    /// How long OK waits for a feature before computing it off the window thread, saying so;
+    /// `None`: it waits as long as it takes (headless use, tests). The desktop app sets it.
+    pub apply_off_thread: Option<std::time::Duration>,
     /// The last command started interactively (id, label), for Repeat.
     pub last_command: Option<(String, String)>,
     /// Esc was already acted on this frame (by the shortcuts), so later handlers skip it.
@@ -289,6 +314,9 @@ pub struct SolveApp {
     pub custom_titlebar: bool,
     /// macOS: the traffic lights sit over the application bar's left end.
     pub integrated_titlebar: bool,
+    /// Build bodies' display meshes on the CPU even where the GPU could (safe mode). Read by
+    /// [`SolveApp::set_wgpu`].
+    pub cpu_meshing: bool,
     pub frame_ms: f64,
     pub synthetic: Vec<egui::Event>,
     /// The modifiers of the synthetic press in progress (a Ctrl-drag keeps Ctrl while it moves).
@@ -315,7 +343,16 @@ pub struct SolveApp {
 }
 
 impl SolveApp {
-    pub fn new(session: Session, services: Services) -> Self {
+    pub fn new(mut session: Session, services: Services) -> Self {
+        #[cfg(test)]
+        let image_host = Some(solidcraft_engine::render::job::CpuHost::cooperative());
+        #[cfg(not(test))]
+        let image_host = solidcraft_engine::render::job::CpuHost::for_platform().map_err(|e| log::error!("render image host: {e}")).ok();
+        if let Err(e) = session.set_render_job_host(image_host.clone()) {
+            log::error!("render image host: {e}");
+        }
+        let mut render_workspace = render_workspace::State::default();
+        render_workspace.image_host = image_host;
         SolveApp {
             session,
             ui: UiState::default(),
@@ -325,10 +362,13 @@ impl SolveApp {
             pre_sketch_cam: None,
             pre_sketch_marker: None,
             services,
+            file_picker: None,
             viewport: viewport::ViewportState::default(),
+            render_workspace,
             tool: None,
             dialog: None,
             params: None,
+            design_properties: None,
             palette: palette::Palette::default(),
             menu: context_menu::MenuState::default(),
             tree: browser::TreeState::default(),
@@ -343,6 +383,8 @@ impl SolveApp {
             preferences: prefs::Prefs::default(),
             prefs_window: prefs::PrefsWindow::default(),
             preview: preview::PreviewState::default(),
+            applying: None,
+            apply_off_thread: None,
             last_command: None,
             esc_handled: false,
             status: None,
@@ -356,6 +398,7 @@ impl SolveApp {
             autosave_minutes: 5.0,
             custom_titlebar: false,
             integrated_titlebar: false,
+            cpu_meshing: false,
             frame_ms: 0.0,
             synthetic: Vec::new(),
             synthetic_mods: egui::Modifiers::default(),
@@ -388,7 +431,20 @@ impl SolveApp {
     /// Draw the viewport on the GPU (eframe's wgpu render state, with the app's depth and
     /// stencil buffer bits and MSAA sample count). Without it the viewport renders on the CPU.
     pub fn set_wgpu(&mut self, rs: &egui_wgpu::RenderState, depth_bits: u8, stencil_bits: u8, samples: u32) {
-        self.viewport.gpu = Some(gpu::install(rs, depth_bits, stencil_bits, samples));
+        self.viewport.gpu = Some(gpu::install(rs, depth_bits, stencil_bits, samples, !self.cpu_meshing));
+        render_workspace::invalidate_scene(self);
+        self.render_workspace.host = match render_workspace::host_executor(
+            rs.device.limits().max_texture_dimension_2d,
+            self.viewport.gpu.is_some_and(|g| g.depth.is_some()),
+            samples.max(1),
+        ) {
+            Ok(executor) => Some(executor),
+            Err(error) => {
+                self.set_status(error, true);
+                None
+            }
+        };
+        render_workspace::sync_backend(self);
         self.msaa_supported = rs.msaa_supported.clone();
         let info = rs.adapter.get_info();
         self.help.gpu = Some(format!("{} ({:?}, {:?})", info.name.trim(), info.backend, info.device_type));
@@ -467,7 +523,7 @@ impl SolveApp {
         if let Some(t) = v.get("toolbar") {
             self.toolbar_custom.load(t);
         }
-        if let Some(mut p) = v.get("preferences").and_then(|p| serde_json::from_value::<prefs::Prefs>(p.clone()).ok()) {
+        if let Some(mut p) = v.get("preferences").filter(|p| p.is_object()).map(prefs::lenient) {
             if !prefs::MSAA.contains(&p.msaa) {
                 p.msaa = prefs::Prefs::default().msaa;
             }
@@ -492,7 +548,7 @@ impl SolveApp {
 
     /// Run a command programmatically (JSON parameters, no dialogs).
     pub fn run(&mut self, id: &str, params: Value) -> Result<Value, String> {
-        if self.file_load.busy() {
+        if self.file_load.busy() || self.file_picker.is_some() {
             return Err("a file operation is in progress".into());
         }
         let t0 = now_ms();
@@ -501,7 +557,10 @@ impl SolveApp {
         if let Ok(v) = &r {
             if id == "view.navigate" {
                 let to: Camera = serde_json::from_value(v.get("camera").cloned().unwrap_or_default()).map_err(|e| e.to_string())?;
-                if v.get("fit").and_then(Value::as_bool).unwrap_or(false) {
+                if v.get("continuous").and_then(Value::as_bool).unwrap_or(false) {
+                    self.cancel_view_animation();
+                    self.cam = to;
+                } else if v.get("fit").and_then(Value::as_bool).unwrap_or(false) {
                     let bounds = solidcraft_engine::view::bounds(&self.session);
                     self.animate_to(self.fitted(to));
                     self.pending_fit = Some((to, bounds, true));
@@ -513,15 +572,22 @@ impl SolveApp {
             sketch_palette::apply_mode(self, id, v);
         }
         match &r {
-            Ok(_) => {
+            Ok(v) => {
                 // Programmatic callers (the control channel, scripts) run outside a render
                 // language scope, so resolve the echo from the saved preference instead of the
                 // thread-local scope. The command's own label is translated too, so the echo
                 // reads the same way the toolbar button it came from does.
                 let language = i18n::Locale::for_language(&self.preferences.language);
                 let label = language.label(command_label(id));
-                self.session.echo(language.format("ui.command_done", &[("command", label)]));
+                if !(id == "view.navigate" && v.get("continuous").and_then(Value::as_bool) == Some(true)) {
+                    self.session.echo(language.format("ui.command_done", &[("command", label)]));
+                }
+                if id == "file.new" {
+                    // `file.new` starts from millimetres. Units of new designs still apply (#1205).
+                    prefs::apply_new_design(self);
+                }
                 if matches!(id, "file.new" | "doc.open" | "doc.recover") {
+                    render_workspace::reset_document(self);
                     self.sketch_choices = sketch_families::Choices::default();
                     dim_view::cancel();
                     self.menu.props = None;
@@ -562,7 +628,7 @@ impl SolveApp {
     /// that have them, otherwise run it with defaults.
     pub fn start(&mut self, id: &str) {
         // A file is loading: the design waits for it.
-        if self.file_load.busy() {
+        if self.file_load.busy() || self.file_picker.is_some() {
             return;
         }
         // A disabled command starts nothing, however it was reached. The toolbar greys its
@@ -595,15 +661,15 @@ impl SolveApp {
         self.tool = None;
         self.home.open = false;
         if matches!(id, "sketch.insert_dxf" | "sketch.insert_svg") {
-            if let Some(path) = self.services.pick_open.as_ref().and_then(|f| f()) {
-                let _ = self.run(id, json!({"path": path}));
-            }
+            self.pick_open_command(id, json!({}));
             return;
         }
         if matches!(id, "file.insert_step" | "file.insert_mesh") {
-            if let Some(p) = self.services.pick_open.as_ref().and_then(|f| f()) {
-                self.insert_path_async(&p);
-            }
+            self.pick_open(|app, path| {
+                if let Some(path) = path {
+                    app.insert_path_async(&path);
+                }
+            });
             return;
         }
         if !sketch_tools::start_hook(self, id) {
@@ -614,6 +680,10 @@ impl SolveApp {
         }
         if id == "parameters.change" {
             params_dialog::open(self);
+            return;
+        }
+        if matches!(id, "document.metadata" | "document.metadata.set") {
+            design_properties::open(self);
             return;
         }
         if id == "sketch.finish" {
@@ -859,12 +929,30 @@ impl SolveApp {
     }
 
     pub fn fit_view(&mut self) {
+        if render_workspace::active(self) {
+            self.cancel_view_animation();
+            match solidcraft_engine::product_scene::extract(&self.session) {
+                Ok(scene) if !scene.bounds.is_empty() => self.cam.fit(&scene.bounds),
+                Err(e) => self.set_status(e.to_string(), true),
+                _ => {}
+            }
+            return;
+        }
         self.cam_anim = None;
         self.viewport.orbit_snap = None;
         self.viewport.orbit_free = None;
         let bounds = viewport::view_bounds(self);
         self.pending_fit = Some((self.cam, bounds, false));
         self.cam = self.fitted(self.cam);
+    }
+
+    /// Frame `bounds` at once, keeping the view direction (programmatic use).
+    pub fn fit_bounds(&mut self, bounds: solidcraft_engine::geom::Aabb3) {
+        self.cancel_view_animation();
+        self.viewport.orbit_snap = None;
+        self.viewport.orbit_free = None;
+        self.pending_fit = Some((self.cam, bounds, false));
+        self.cam = self.fitted_bounds(self.cam, &bounds);
     }
 
     /// `cam` moved to frame the whole model.
@@ -937,6 +1025,13 @@ impl SolveApp {
 
     /// Animated view changes for the axis view and navigation bar.
     pub fn animate_view(&mut self, v: &str) {
+        if render_workspace::active(self) && matches!(v, "fit" | "home") {
+            if v == "home" {
+                self.cam.set_view(StandardView::Iso);
+            }
+            self.fit_view();
+            return;
+        }
         self.pending_fit = None;
         let mut to = self.cam;
         match v {
@@ -970,7 +1065,11 @@ impl SolveApp {
     /// change, or at once (control requests, so a screenshot right after shows it).
     pub fn follow_view_request(&mut self, animate: bool) {
         let Some(mut to) = self.session.camera.take() else { return };
-        to.up = self.cam.up;
+        if render_workspace::active(self) {
+            self.ui.up_axis = to.up;
+        } else {
+            to.up = self.cam.up;
+        }
         if animate {
             self.animate_to(to);
         } else if to.is_valid() {
@@ -1009,11 +1108,15 @@ impl SolveApp {
 
     /// Per-frame logic before layout.
     pub fn logic(&mut self, ctx: &egui::Context) {
+        file_picker::tick(self, ctx);
+        render_workspace::sync_backend(self);
+        render_workspace::tick(self, ctx);
         file_load::tick(self, ctx);
         self.esc_handled = false;
         prefs::apply(self, ctx);
-        if !self.styled || theme::is_dark() != self.ui.dark {
+        if !self.styled || theme::is_dark() != self.ui.dark || theme::vision() != self.preferences.color_vision {
             theme::set_dark(self.ui.dark);
+            theme::set_vision(self.preferences.color_vision);
             theme::apply(ctx);
             self.styled = true;
         }
@@ -1035,12 +1138,12 @@ impl SolveApp {
         issue_report::tick(self, ctx);
         self.collect_screenshots(ctx);
         self.issue_screenshots(ctx);
-        if self.issue_report.draft.is_none() {
+        if self.issue_report.draft.is_none() && self.file_picker.is_none() {
             toolbar::shortcuts(self, ctx);
         }
         recovery_ui::tick(self);
         update::tick(self, ctx);
-        if self.issue_report.draft.is_none() {
+        if self.issue_report.draft.is_none() && self.file_picker.is_none() {
             for f in ctx.input(|i| i.raw.dropped_files.clone()) {
                 let p = f.path().to_string_lossy().to_string();
                 if !p.is_empty() {
@@ -1055,26 +1158,36 @@ impl SolveApp {
         if self.synthetic.is_empty() {
             return;
         }
-        let n = match self.synthetic.first() {
-            Some(egui::Event::PointerMoved(_) | egui::Event::PointerButton { .. } | egui::Event::MouseWheel { .. }) => 1,
-            _ => self.synthetic.iter().position(|e| matches!(e, egui::Event::Key { pressed: false, .. })).map_or(self.synthetic.len(), |i| i + 1),
-        };
-        if let Some(egui::Event::PointerMoved(p) | egui::Event::PointerButton { pos: p, .. }) = self.synthetic.first() {
-            raw.events.push(egui::Event::PointerMoved(*p));
-        }
-        // egui keeps the modifier keys as input state, changed by their own event.
-        match self.synthetic.first() {
-            Some(egui::Event::PointerButton { modifiers, pressed, .. }) => {
-                // A drag keeps its press's modifiers until the release.
-                self.synthetic_mods = if *pressed { *modifiers } else { egui::Modifiers::default() };
-                raw.events.push(egui::Event::ModifiersChanged(*modifiers))
+        // Text and modifier prefixes may precede a pointer event. Never drain past that event.
+        let n = self
+            .synthetic
+            .iter()
+            .position(|e| {
+                matches!(
+                    e,
+                    egui::Event::PointerMoved(_)
+                        | egui::Event::PointerButton { .. }
+                        | egui::Event::PointerGone
+                        | egui::Event::MouseWheel { .. }
+                        | egui::Event::Key { pressed: false, .. }
+                )
+            })
+            .map_or(self.synthetic.len(), |i| i + 1);
+        for event in self.synthetic.drain(..n) {
+            match &event {
+                egui::Event::ModifiersChanged(modifiers) => self.synthetic_mods = *modifiers,
+                egui::Event::PointerButton { pos, modifiers, pressed, .. } => {
+                    raw.events.push(egui::Event::PointerMoved(*pos));
+                    raw.events.push(egui::Event::ModifiersChanged(*modifiers));
+                    // A drag keeps its press's modifiers until the release.
+                    self.synthetic_mods = if *pressed { *modifiers } else { egui::Modifiers::NONE };
+                }
+                egui::Event::Key { modifiers, .. } => raw.events.push(egui::Event::ModifiersChanged(*modifiers)),
+                egui::Event::PointerMoved(_) => raw.events.push(egui::Event::ModifiersChanged(self.synthetic_mods)),
+                _ => {}
             }
-            Some(egui::Event::Key { modifiers, .. }) => raw.events.push(egui::Event::ModifiersChanged(*modifiers)),
-            Some(egui::Event::PointerMoved(_)) => raw.events.push(egui::Event::ModifiersChanged(self.synthetic_mods)),
-            _ => {}
+            raw.events.push(event);
         }
-        let n = n.min(self.synthetic.len());
-        raw.events.extend(self.synthetic.drain(..n));
     }
 
     /// Lay out the whole window.
@@ -1090,9 +1203,14 @@ impl SolveApp {
         issue_report::CadInput::block(self, ui, &mut report_input);
         self.cad_ui(ui, &mut report_input);
         drop(report_input);
-        issue_report::show(self, ui.ctx());
+        if self.file_picker.is_none() {
+            issue_report::show(self, ui.ctx());
+        }
         if !self.home.open {
             agent_cursor::paint(self, ui.ctx());
+        }
+        if self.file_picker_busy() {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
         }
         self.frame_ms = now_ms() - t0;
     }
@@ -1113,8 +1231,9 @@ impl SolveApp {
             }
         }
         toolbar::toolbar(self, ui);
-        let left_timeline = self.ui.show_timeline && self.preferences.timeline_left;
-        if self.ui.show_timeline && !left_timeline {
+        let show_timeline = self.ui.show_timeline && !render_workspace::active(self);
+        let left_timeline = show_timeline && self.preferences.timeline_left;
+        if show_timeline && !left_timeline {
             timeline::timeline(self, ui);
         }
         palette::palette_bar(self, ui);
@@ -1127,15 +1246,23 @@ impl SolveApp {
         } else if left_timeline {
             timeline_left::left_panel(self, ui);
         }
+        if render_workspace::active(self) {
+            render_workspace::panel(self, ui);
+        }
         preview::update(self, ui.ctx());
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
-            viewport::show(self, ui);
+            if render_workspace::active(self) {
+                render_workspace::show(self, ui);
+            } else {
+                viewport::show(self, ui);
+            }
         });
         dialogs::show(self, ui.ctx());
         issue_report::CadInput::block(self, ui, report_input);
         sketch_palette::show(self, ui.ctx());
         self.resolve_fit(ui.ctx());
         params_dialog::show(self, ui.ctx());
+        design_properties::show(self, ui.ctx());
         recovery_ui::show(self, ui.ctx());
         stand_up::show(self, ui.ctx());
         prefs::show_reset_notice(self, ui.ctx());
@@ -1164,11 +1291,14 @@ impl SolveApp {
                 break;
             }
             // Held requests go first, in order, once the file is in.
-            let held = if self.file_load.busy() { None } else { self.control_held.pop_front() };
+            let held = if self.file_load.busy() || self.file_picker.is_some() { None } else { self.control_held.pop_front() };
             let Some(req) = held.or_else(|| rx.try_recv().ok()) else { break };
             // A file is loading: commands that change the design wait for it (the window,
             // inspection and screenshots still answer).
-            if self.file_load.busy() && matches!(req.method.as_str(), "engine.execute" | "command" | "engine.script" | "engine.batch") {
+            if ((self.file_load.busy() || self.file_picker.is_some())
+                && matches!(req.method.as_str(), "engine.execute" | "command" | "engine.script" | "engine.batch"))
+                || (self.file_picker_busy() && matches!(req.method.as_str(), "ui.file" | "ui.home"))
+            {
                 if self.control_held.len() < MAX_HELD {
                     self.control_held.push_back(req);
                 } else {
@@ -1269,3 +1399,6 @@ pub fn now_ms() -> f64 {
     use web_time::{SystemTime, UNIX_EPOCH};
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64() * 1000.0).unwrap_or(0.0)
 }
+
+#[cfg(test)]
+mod picker_test_support;

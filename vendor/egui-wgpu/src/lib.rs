@@ -41,6 +41,35 @@ use std::sync::Arc;
 
 use epaint::mutex::RwLock;
 
+/// SolidCraft: what [`set_startup_hook`] is told before each step of getting the graphics
+/// device and the window's surface up, so a crash inside the driver (with no Rust panic) can
+/// still say which step it died in. `detail` is empty except for [`STEP_ADAPTER_CHOSEN`].
+pub type StartupHook = fn(step: &'static str, detail: &str);
+
+static STARTUP_HOOK: std::sync::OnceLock<StartupHook> = std::sync::OnceLock::new();
+
+/// SolidCraft: the steps [`StartupHook`] is told about, in order.
+pub const STEP_INSTANCE: &str = "graphics instance";
+pub const STEP_SURFACE: &str = "window surface";
+pub const STEP_ADAPTER: &str = "adapter request";
+/// The adapter was picked; `detail` names it, its backend and driver.
+pub const STEP_ADAPTER_CHOSEN: &str = "adapter chosen";
+pub const STEP_DEVICE: &str = "device creation";
+pub const STEP_RENDERER: &str = "egui renderer (shader compile)";
+pub const STEP_SURFACE_CONFIGURE: &str = "surface configure";
+pub const STEP_FIRST_PRESENT: &str = "first frame (present)";
+
+/// SolidCraft: install the startup hook (once; later calls are ignored).
+pub fn set_startup_hook(hook: StartupHook) {
+    let _ = STARTUP_HOOK.set(hook);
+}
+
+pub(crate) fn startup_step(step: &'static str, detail: &str) {
+    if let Some(hook) = STARTUP_HOOK.get() {
+        hook(step, detail);
+    }
+}
+
 /// An error produced by egui-wgpu.
 #[derive(thiserror::Error, Debug)]
 pub enum WgpuError {
@@ -226,6 +255,7 @@ impl RenderState {
                 wgpu::Backends::all()
             };
 
+            startup_step(STEP_ADAPTER, ""); // SolidCraft
             instance.enumerate_adapters(backends).await
         };
 
@@ -257,6 +287,16 @@ impl RenderState {
                     }
                 }?;
 
+                // SolidCraft: name the adapter before the driver is asked for a device.
+                let info = adapter.get_info();
+                startup_step(
+                    STEP_ADAPTER_CHOSEN,
+                    &format!(
+                        "{:?} {} ({:?}, driver {} {})",
+                        info.backend, info.name, info.device_type, info.driver, info.driver_info
+                    ),
+                );
+                startup_step(STEP_DEVICE, "");
                 let (device, queue) = {
                     profiling::scope!("request_device");
                     adapter
@@ -303,6 +343,7 @@ impl RenderState {
             msaa_samples,
             ..options
         };
+        startup_step(STEP_RENDERER, ""); // SolidCraft
         let renderer = Renderer::new(&device, target_format, options);
 
         // On wasm, depending on feature flags, wgpu objects may or may not implement sync.

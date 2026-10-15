@@ -47,6 +47,24 @@ impl EdgeSpec {
         }
     }
 
+    /// The way the edge leaves its start (`None` when that cannot be told).
+    fn start_dir(&self) -> Option<Vec3> {
+        let d = match self {
+            EdgeSpec::Line { a, b } => *b - *a,
+            // The circle through a, mid and b, inverted about a, is the line through the images
+            // of mid and b, which runs along the circle's tangent at a.
+            EdgeSpec::Arc { a, b, mid } => {
+                let (m, e) = (*mid - *a, *b - *a);
+                m * (1.0 / m.len2()) - e * (1.0 / e.len2())
+            }
+            EdgeSpec::Chain { ctrl } => {
+                let first = *ctrl.first()?;
+                ctrl.iter().skip(1).map(|p| *p - first).find(|d| d.len() > 1e-12)?
+            }
+        };
+        d.normalized()
+    }
+
     /// The same edge, run the other way.
     pub fn reversed(&self) -> EdgeSpec {
         match self {
@@ -106,6 +124,81 @@ type Key = (i64, i64, i64);
 fn key(p: Vec3) -> Key {
     let q = |x: f64| (x * 1e6).round() as i64;
     (q(p.x), q(p.y), q(p.z))
+}
+
+/// How near (mm) two edge ends weld into one vertex wherever they fall on the grid of [`key`].
+/// The grid alone joins the ends in one of its cells, but not two ends a hair apart on either
+/// side of a cell's border: a corner at x = 84.0764335 lies on a border, and the same corner
+/// worked out again through a bend can land 1e-14 mm to the other side, leaving its face's loop
+/// open. The planar booleans close loops over gaps up to 1e-6 mm, so the weld reaches as far.
+const WELD: f64 = 1e-6;
+
+/// The faces with every edge end within [`WELD`] of an end met earlier in a neighbouring cell of
+/// the grid moved onto that end, so that [`key`] finds one vertex for both; `None` when no end
+/// moves. Ends in one cell stay as they are (the grid already joins them).
+fn welded(faces: &[FaceSpec]) -> Option<Vec<FaceSpec>> {
+    // The end each cell's ends weld to: the first met in it, or a nearer one in a neighbour.
+    let mut at: HashMap<Key, Vec3> = HashMap::new();
+    let mut moves = false;
+    for f in faces {
+        // A ruled surface's chains end on the vertices of its boundary.
+        let ruled: Vec<&EdgeSpec> = match &f.surface {
+            SurfSpec::Ruled { a, b } => vec![a, b],
+            _ => Vec::new(),
+        };
+        for e in f.loops.iter().flatten().chain(ruled) {
+            let (a, b) = e.ends();
+            for p in [a, b] {
+                let k = key(p);
+                if !p.is_finite() || at.contains_key(&k) {
+                    continue;
+                }
+                let mut near = None;
+                for (dx, dy, dz) in (-1i64..=1).flat_map(|x| (-1i64..=1).flat_map(move |y| (-1i64..=1).map(move |z| (x, y, z)))) {
+                    let n = (k.0.saturating_add(dx), k.1.saturating_add(dy), k.2.saturating_add(dz));
+                    if n != k
+                        && let Some(q) = at.get(&n).filter(|q| q.dist(p) < WELD)
+                    {
+                        near = Some(*q);
+                        break;
+                    }
+                }
+                moves |= near.is_some();
+                at.insert(k, near.unwrap_or(p));
+            }
+        }
+    }
+    if !moves {
+        return None;
+    }
+    let weld = |p: Vec3| if p.is_finite() { at.get(&key(p)).copied().filter(|q| key(*q) != key(p)).unwrap_or(p) } else { p };
+    let edge = |e: &EdgeSpec| match e {
+        EdgeSpec::Line { a, b } => EdgeSpec::Line { a: weld(*a), b: weld(*b) },
+        EdgeSpec::Arc { a, b, mid } => EdgeSpec::Arc { a: weld(*a), b: weld(*b), mid: *mid },
+        EdgeSpec::Chain { ctrl } => {
+            let mut ctrl = ctrl.to_vec();
+            let n = ctrl.len();
+            for i in [0, n.saturating_sub(1)] {
+                if let Some(p) = ctrl.get_mut(i) {
+                    *p = weld(*p);
+                }
+            }
+            EdgeSpec::Chain { ctrl: ctrl.into() }
+        }
+    };
+    Some(
+        faces
+            .iter()
+            .map(|f| FaceSpec {
+                loops: f.loops.iter().map(|l| l.iter().map(edge).collect()).collect(),
+                surface: match &f.surface {
+                    SurfSpec::Ruled { a, b } => SurfSpec::Ruled { a: edge(a), b: edge(b) },
+                    s => s.clone(),
+                },
+                probe: f.probe,
+            })
+            .collect(),
+    )
 }
 
 #[derive(Default)]
@@ -172,6 +265,14 @@ pub fn sew(faces: &[FaceSpec]) -> Result<Body> {
     sew_impl(faces, false, None).map(|(body, _)| body)
 }
 
+/// Sew the faces into a closed solid that may touch itself: where four faces meet along a
+/// straight edge (a cut-out's corner on the outline of a plate), each two of them get an edge of
+/// their own (see [`touching_sheets`]), and where faces meet at a point in fans joined by no edge
+/// (a hole's corner on its face's outline), each fan gets a vertex of its own.
+pub fn sew_touching(faces: &[FaceSpec]) -> Result<Body> {
+    sew_impl(faces, true, None).map(|(body, _)| body)
+}
+
 /// Separate boundary sheets at a shared geometric edge without moving it.
 /// Optional transient sources follow only unchanged produced face identities.
 /// Also reports the face each face of the body was built from (by its place in `faces`; `None`
@@ -191,8 +292,8 @@ const SAME_WAY: f64 = 1e-6;
 
 /// Where more than two faces meet along a straight edge (bodies touching along a line, or a wall
 /// of no thickness), which faces bound each sheet of it (each sheet gets its own edge), and the
-/// vertex fans that follow from that (see [`corner_fans`]). Only edges on planes and on the walls
-/// of extruded arcs are looked at.
+/// vertex fans that follow from that (see [`corner_fans`]). Only edges on planes, on the walls
+/// of extruded arcs and on ruled walls are looked at.
 ///
 /// Each sheet bounds a wedge of material, so that pieces of material meeting along an edge stay
 /// apart, except where that would make a face touch itself: a hole touching the outline from
@@ -204,7 +305,7 @@ const SAME_WAY: f64 = 1e-6;
 fn touching_sheets(faces: &[FaceSpec]) -> Result<(HashMap<EdgeUse, usize>, HashMap<Corner, usize>)> {
     let mut uses: HashMap<(Key, Key), Vec<(EdgeUse, Vec3, Vec3)>> = HashMap::new();
     for (fi, face) in faces.iter().enumerate() {
-        if !matches!(face.surface, SurfSpec::Plane | SurfSpec::Extruded { .. }) {
+        if !matches!(face.surface, SurfSpec::Plane | SurfSpec::Extruded { .. } | SurfSpec::Ruled { .. }) {
             continue;
         }
         for (li, lp) in face.loops.iter().enumerate() {
@@ -289,7 +390,7 @@ fn edge_sheets(faces: &[FaceSpec], group: &[(EdgeUse, Vec3, Vec3)]) -> Result<[[
     let mut reference = None;
     for (u, a, b) in group {
         let face = faces.get(u.0).ok_or_else(|| fail("edge contact"))?;
-        let (into, turn, ccw) = leaving(face, *a, *b, t).ok_or_else(|| fail("unsupported edge contact"))?;
+        let (into, turn, ccw) = leaving(face, *u, *a, *b, t).ok_or_else(|| fail("unsupported edge contact"))?;
         let r: Vec3 = *reference.get_or_insert(into);
         let angle = r.cross(into).dot(t).atan2(r.dot(into)).rem_euclid(std::f64::consts::TAU);
         rays.push((*u, key(*a), turn, ccw, if angle > std::f64::consts::TAU - SAME_WAY { 0.0 } else { angle }));
@@ -328,12 +429,12 @@ fn edge_sheets(faces: &[FaceSpec], group: &[(EdgeUse, Vec3, Vec3)]) -> Result<[[
     Ok([pairs(true)?, pairs(false)?])
 }
 
-/// How a face leaves the straight edge `a`→`b` it bounds, seen along the edge's direction `t`:
-/// the way into the face square to the edge, how fast it turns from that way (its curvature,
-/// positive counter-clockwise about `t`; 0 for a plane), and whether its material is on its
-/// counter-clockwise side. None for other faces, and for an extruded wall the edge is not a
-/// ruling of.
-fn leaving(face: &FaceSpec, a: Vec3, b: Vec3, t: Vec3) -> Option<(Vec3, f64, bool)> {
+/// How a face leaves the straight edge `a`→`b` it bounds (its use `u`), seen along the edge's
+/// direction `t`: the way into the face square to the edge, how fast it turns from that way (its
+/// curvature, positive counter-clockwise about `t`; 0 for a plane or a ruled wall), and whether
+/// its material is on its counter-clockwise side. None for other faces, and for an extruded wall
+/// the edge is not a ruling of.
+fn leaving(face: &FaceSpec, u: EdgeUse, a: Vec3, b: Vec3, t: Vec3) -> Option<(Vec3, f64, bool)> {
     let along = (b - a).normalized()?;
     // The outward normal along the edge, and the centre of curvature (with its curvature).
     let (outward, centre) = match &face.surface {
@@ -352,6 +453,15 @@ fn leaving(face: &FaceSpec, a: Vec3, b: Vec3, t: Vec3) -> Option<(Vec3, f64, boo
             let (p, out) = face.probe?;
             let side = if radial(p).dot(out) < 0.0 { -1.0 } else { 1.0 };
             (r.normalized()? * side, Some((centre, 1.0 / r.len())))
+        }
+        // A ruled wall (a cut-out's wall across a bend, ruled between its traces on the bend's
+        // two faces), standing on the edge: its normal there is square to the edge and to the way
+        // the next edge leaves the edge's end into the wall, as a wall's top or bottom edge leaves
+        // its upright one.
+        SurfSpec::Ruled { .. } => {
+            let lp = face.loops.get(u.1)?;
+            let v = lp.get((u.2 + 1) % lp.len())?.start_dir()?;
+            (along.cross(v - along * v.dot(along)).normalized()?, None)
         }
         _ => return None,
     };
@@ -650,6 +760,12 @@ fn sew_impl(faces: &[FaceSpec], touching: bool, sources: Option<&[Option<crate::
             if edge_uses > 500_000 {
                 return Err(KernelError::Invalid("sew: edge budget exceeded".into()));
             }
+        }
+    }
+    let welded = welded(faces);
+    let faces = welded.as_deref().unwrap_or(faces);
+    for f in faces {
+        for l in &f.loops {
             for e in l {
                 let (a, b) = e.ends();
                 // Ends that weld to one vertex would make truck panic on a zero-length edge (#268).
@@ -935,6 +1051,32 @@ mod tests {
         assert!((m.volume - 24.0).abs() < 1e-9, "{}", m.volume);
         assert_eq!(body.face_count(), 6);
         assert!(sew(&faces[..5]).is_err());
+    }
+
+    /// A 2.0000005 x 3 x 4 box: x = 2.0000005 mm is a border between two cells of the 1e-6 mm
+    /// grid vertices are found on. The bottom face's edges meet at its corner (x, 3, 0) 2e-9 mm
+    /// to either side of the border, as an arc's end and the end of the line it meets can: the
+    /// ends weld and the box closes. Ends 3e-6 mm apart stay apart.
+    #[test]
+    fn edge_ends_a_hair_apart_across_a_grid_border_weld() {
+        let x = 2.0000005;
+        let p = |x: f64, y: f64, z: f64| Vec3::new(x, y, z);
+        let (a, b, c, d) = (p(0., 0., 0.), p(x, 0., 0.), p(x, 3., 0.), p(0., 3., 0.));
+        let (e, f, g, h) = (p(0., 0., 4.), p(x, 0., 4.), p(x, 3., 4.), p(0., 3., 4.));
+        let line = |a, b| EdgeSpec::Line { a, b };
+        let faces = |into: Vec3, from: Vec3| {
+            let bottom = FaceSpec { loops: vec![vec![line(a, d), line(d, into), line(from, b), line(b, a)]], surface: SurfSpec::Plane, probe: None };
+            vec![bottom, quad(e, f, g, h), quad(a, b, f, e), quad(b, c, g, f), quad(c, d, h, g), quad(d, a, e, h)]
+        };
+        let (lo, hi) = (p(x - 2e-9, 3., 0.), p(x + 2e-9, 3., 0.));
+        assert_ne!(key(lo), key(hi));
+        for (into, from) in [(lo, hi), (hi, lo), (lo, c), (hi, c)] {
+            let body = sew(&faces(into, from)).unwrap_or_else(|e| panic!("{into:?} {from:?}: {e}"));
+            assert!(body.validity().is_empty(), "{:?}", body.validity());
+            let v = crate::measure(&body).unwrap().volume;
+            assert!((v - x * 12.0).abs() < 1e-6, "{v}");
+        }
+        assert!(sew(&faces(p(x - 2e-6, 3., 0.), p(x + 1e-6, 3., 0.))).is_err());
     }
 
     /// A 4 × 3 × 2 box whose +x wall bulges out as the cubic (4,0) (5,0) (5,3) (4,3), given as a

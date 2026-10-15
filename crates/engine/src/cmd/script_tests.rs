@@ -141,6 +141,23 @@ fn units_materials_and_rules_come_back() {
 }
 
 #[test]
+fn design_properties_come_back_and_odd_keys_are_listed() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10}));
+    run(&mut s, "document.metadata.set", json!({"values": {"author": "Jane", "description": "two\nlines", "com.acme.tool": {"id": [1, 2]}}}));
+    // Keys another tool wrote that the command would refuse.
+    s.doc_mut().metadata.0.insert("revision".into(), json!(3));
+    s.doc_mut().metadata.0.insert("org.other".into(), json!("text"));
+    let r = run(&mut s, "timeline.export_script", json!({}));
+    assert!(r["omitted"].to_string().contains("(org.other, revision)"), "{r}");
+    let t = replay(&script(&mut s));
+    assert_eq!(
+        serde_json::to_value(&t.doc.metadata).unwrap(),
+        json!({"author": "Jane", "description": "two\nlines", "com.acme.tool": {"id": [1, 2]}})
+    );
+}
+
+#[test]
 fn what_the_script_leaves_out_is_listed_and_components_are_refused() {
     let mut s = Session::default();
     run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10, "body_name": "B"}));

@@ -435,17 +435,27 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Sm, inputs: &mut [Sel
 
 fn export_flat(app: &mut SolveApp, body: &str, extension: &str) -> String {
     let name = format!("{}-{body}.{extension}", app.session.doc.name);
-    let Some(path) = app.services.pick_save.as_ref().and_then(|f| f(&name, &[extension])) else {
-        return "Export cancelled".into();
-    };
+    let body = body.to_string();
     let command = if extension == "csv" { "sheet.export_bend_table" } else { "sheet.export_dxf" };
-    match app.run(command, json!({"body": body, "path": path})) {
-        Ok(_) => {
-            app.set_status(format!("Exported {path}"), false);
-            format!("Saved {path}")
+    app.pick_save(&name, &[extension], move |app, path| {
+        let message = if let Some(path) = path {
+            match app.run(command, json!({"body": body, "path": path})) {
+                Ok(_) => {
+                    app.set_status(format!("Exported {path}"), false);
+                    format!("Saved {path}")
+                }
+                Err(e) => e,
+            }
+        } else {
+            "Export cancelled".into()
+        };
+        if let Some(d) = app.dialog.as_mut()
+            && let Kind::Sheet(Sm::FlatPattern { status, .. }) = &mut d.kind
+        {
+            *status = Some(message);
         }
-        Err(e) => e,
-    }
+    });
+    "Choose an export file…".into()
 }
 
 // ---- commands ----
@@ -789,13 +799,11 @@ pub fn arrow(app: &SolveApp, d: &Dialog) -> Option<Vec3> {
     Some(if flip { -n } else { n })
 }
 
-/// Bend line colours: up and down (legible on either theme).
+/// Bend line colours: up and down (theme tokens, legible on either theme and in every colour
+/// vision mode).
 fn bend_colors() -> (Color32, Color32) {
-    if crate::theme::is_dark() {
-        (Color32::from_rgb(110, 200, 120), Color32::from_rgb(240, 150, 80))
-    } else {
-        (Color32::from_rgb(30, 140, 50), Color32::from_rgb(200, 90, 20))
-    }
+    let t = crate::theme::Tokens::get();
+    (t.bend_up, t.bend_down)
 }
 
 /// The flat pattern view: the outline, cut-outs and bend lines (up and down in their colours)

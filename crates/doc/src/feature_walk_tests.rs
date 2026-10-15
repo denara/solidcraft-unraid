@@ -4,7 +4,9 @@
 //!   parameters) and `expressions` (every expression, placement points included). Each
 //!   expression field holds its own name, so a moved, missing or relabelled input shows;
 //! - references: the sketches a feature is built from, and the fields `remap_refs` and
-//!   `remap_bodies` rewrite when everything is copied under new ids and names.
+//!   `remap_bodies` rewrite when everything is copied under new ids and names;
+//! - geometry: the fields `transform_geometry` moves, the face points, the profile selections and
+//!   the placement point.
 //!
 //! The records live in `feature_walk_tests/*.txt`; to record an intended change, run the tests
 //! with `FEATURE_WALK_BLESS=1`.
@@ -13,7 +15,7 @@ mod fixtures;
 
 use std::collections::BTreeMap;
 
-use fixtures::{changed, fixtures, with_refs};
+use fixtures::{changed, fixtures, with_points, with_refs};
 
 use crate::FeatureKind;
 
@@ -75,6 +77,42 @@ fn ref_record() -> String {
 /// points or loft sections) must report it from `input_sketches`, or deleting the sketch leaves
 /// the feature broken. New variants are caught by the walk's exhaustive match; this catches a
 /// sketch field added to an existing variant (its fixture has to set it).
+/// Per fixture (with every reference and position set): the fields `transform_geometry` changes
+/// under a turn and a shift (every point, direction and plane it maps), the face points that name
+/// faces, the profile selections with their sketches, and a primitive's placement point.
+fn geometry_record() -> String {
+    // x → y → z → x, then (1, 2, 3): every point and every direction of the fixtures changes.
+    let m = [[0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [1.0, 0.0, 0.0, 0.0], [1.0, 2.0, 3.0, 1.0]];
+    let mut out = String::new();
+    for (name, v) in fixtures() {
+        let kind: FeatureKind = serde_json::from_value(with_points(name, with_refs(name, v))).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let mut moved = kind.clone();
+        moved.transform_geometry(&m);
+        let mut paths = Vec::new();
+        changed(&serde_json::to_value(&kind).unwrap(), &serde_json::to_value(&moved).unwrap(), "", &mut paths);
+        out += &format!("{name}\n");
+        if !paths.is_empty() {
+            out += &format!("  moves: {}\n", paths.join(", "));
+        }
+        let faces: Vec<String> = kind.face_points().iter().map(|p| format!("[{}, {}, {}]", p.x, p.y, p.z)).collect();
+        if !faces.is_empty() {
+            out += &format!("  face points: {}\n", faces.join(", "));
+        }
+        let profiles: Vec<String> = kind
+            .profile_sels()
+            .iter()
+            .map(|(sketch, sel)| format!("{sketch} {}", serde_json::to_value(sel).unwrap()["type"].as_str().unwrap_or("?")))
+            .collect();
+        if !profiles.is_empty() {
+            out += &format!("  profiles: {}\n", profiles.join(", "));
+        }
+        if let Some(p) = kind.point_expr() {
+            out += &format!("  placement: {}\n", p.join(", "));
+        }
+    }
+    out
+}
+
 /// Compares `got` with the golden file `name` in `feature_walk_tests/`, line by line. With
 /// `FEATURE_WALK_BLESS` set it rewrites the file instead, for an intended change (say why in the
 /// pull request).
@@ -92,6 +130,10 @@ fn check_golden(name: &str, want: &str, got: &str) {
 
 /// Recorded from the hand-written `inputs_mut` and `expressions` the walk replaced.
 const GOLDEN_EXPRS: &str = include_str!("feature_walk_tests/golden_exprs.txt");
+
+/// Recorded from the hand-written `transform_geometry`, `face_points`, `profile_sels` and
+/// `point_expr` the walk replaced.
+const GOLDEN_GEOMETRY: &str = include_str!("feature_walk_tests/golden_geometry.txt");
 
 /// Recorded from the hand-written `input_sketches`, `remap_refs` and `remap_bodies` the walk
 /// replaced, with two fixes: a coil's `targets` and a surface trim's plane are remapped too.
@@ -123,6 +165,11 @@ fn input_sketches_lists_every_variant_with_a_sketch_field() {
         });
         assert!(uses, "FeatureKind::{v} has a sketch field but input_sketches reports no sketch for its fixtures");
     }
+}
+
+#[test]
+fn geometry_matches_the_golden_record() {
+    check_golden("golden_geometry.txt", GOLDEN_GEOMETRY, &geometry_record());
 }
 
 #[test]

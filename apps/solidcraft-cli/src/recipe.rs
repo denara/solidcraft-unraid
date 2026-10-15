@@ -92,7 +92,7 @@ fn extent(f: &Value, p: &mut Value) {
         "symmetric" => {
             let full = e.get("is_full_length").and_then(Value::as_bool).unwrap_or(false);
             p["direction"] = json!("symmetric");
-            p["distance"] = if full { json!(format!("({}) / 2", expr_text(&dist))) } else { dist };
+            p["distance"] = if full { dist } else { json!(format!("({}) * 2", expr_text(&dist))) };
         }
         "two_sides" => {
             p["distance"] = e.get("side1").cloned().unwrap_or(Value::Null);

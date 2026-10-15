@@ -337,7 +337,9 @@ fn round_faces_of_every_kind_are_divided_by_the_angle() {
     let check = |name: &str, b: &Body| {
         let coarse = b.display_mesh(3.0).unwrap();
         let round = b.display_mesh_angular(3.0, DISPLAY_ANGLE).unwrap();
-        assert!(turn(b, &coarse) > 2.0 * DISPLAY_ANGLE, "{name}: the chord tolerance leaves facets of {} degrees", turn(b, &coarse).to_degrees());
+        // The chord tolerance alone leaves facets coarser than the angle (the size rules' longest
+        // side and aspect limit already keep them near 40°), so the angle has work to do.
+        assert!(turn(b, &coarse) > 1.5 * DISPLAY_ANGLE, "{name}: the chord tolerance leaves facets of {} degrees", turn(b, &coarse).to_degrees());
         // A side crosses at most one facet in each direction.
         assert!(turn(b, &round) <= 1.5 * DISPLAY_ANGLE, "{name}: a side turns {} degrees", turn(b, &round).to_degrees());
         assert_eq!(open_sides(&round, 1e-6), 0, "{name}");

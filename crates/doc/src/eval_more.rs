@@ -157,16 +157,25 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
     }
 }
 
-/// Unit outward normal of the planar face through `p`.
+/// Unit outward normal of the planar face through `p`: of the planar faces whose plane runs
+/// through it, the one nearest it. A face elsewhere in such a plane (the wall of a notch, the end
+/// of a rib, in line with a rim) is no pick of `p`, though its plane runs through it as exactly.
 fn planar_normal_at(b: &Body, p: Vec3) -> Option<Vec3> {
     let tol = (b.size() * 2e-3).max(1e-3);
     let faces = b.faces(tol).ok()?;
+    let mesh = b.tessellate(tol).ok()?;
+    let mut near = vec![f64::INFINITY; faces.len()];
+    for (t, f) in mesh.triangles.iter().zip(&mesh.tri_face) {
+        if let (Some([u, v, w]), Some(d)) = (mesh.tri(t), near.get_mut(*f as usize)) {
+            *d = d.min(crate::appearance::closest_on_triangle(p, u, v, w).dist(p));
+        }
+    }
     faces
         .iter()
-        .filter_map(|f| f.plane_normal.map(|n| (n, ((p - f.centroid).dot(n)).abs())))
-        .filter(|(_, d)| *d < tol * 5.0)
-        .min_by(|a, b| a.1.total_cmp(&b.1))
-        .map(|(n, _)| n)
+        .filter_map(|f| f.plane_normal.map(|n| (n, ((p - f.centroid).dot(n)).abs(), near.get(f.index).copied().unwrap_or(f64::INFINITY))))
+        .filter(|(_, d, _)| *d < tol * 5.0)
+        .min_by(|a, b| a.2.total_cmp(&b.2).then(a.1.total_cmp(&b.1)))
+        .map(|(n, _, _)| n)
 }
 
 /// The curves of a chain as one polyline in sketch coordinates, in order.
@@ -485,6 +494,32 @@ pub(super) fn sheet_eval(
             tag_flanges(sh, n0, f.id);
             rebuild_sheet(st, i)
         }
+        FeatureKind::SheetPerforate { diameter, pitch, margin, pattern, body } => {
+            // Without a body name the field goes on the newest sheet, as the command's own body lookup does.
+            let i = match body {
+                Some(_) => sheet_for(st, body, None)?,
+                None => st.sheets.len().checked_sub(1).ok_or_else(|| DocError::Invalid("there is no sheet metal body".into()))?,
+            };
+            let d = val(vals, diameter, Kind::Length)?;
+            let pitch = val(vals, pitch, Kind::Length)?;
+            let margin = match margin {
+                Some(e) => val(vals, e, Kind::Length)?,
+                None => d,
+            };
+            let square = match pattern.as_deref() {
+                None | Some("staggered") => false,
+                Some("square") => true,
+                Some(o) => return Err(DocError::Invalid(format!("perforation pattern {o:?}: use \"staggered\" or \"square\""))),
+            };
+            if !(d > 0.0 && pitch > d && margin >= 0.0) {
+                return Err(DocError::Invalid(format!(
+                    "perforation needs diameter > 0, pitch > diameter and margin >= 0 (diameter {d}, pitch {pitch}, margin {margin})"
+                )));
+            }
+            let sh = st.sheets.get_mut(i).ok_or_else(|| DocError::Invalid("sheet".into()))?;
+            sh.perforations.push(crate::sheet::SheetPerforation { feature: f.id, diameter: d, pitch, margin, square });
+            Ok(())
+        }
         FeatureKind::SheetHem { edges, length, gap, flip, body } => {
             let i = sheet_for(st, body, edges.first().copied())?;
             let l = val(vals, length, Kind::Length)?;
@@ -611,16 +646,18 @@ pub(super) fn sheet_eval(
             // along a round wall an arc of the wall's circle (not chords: the plate check below
             // compares its area with the exact volume).
             let plane = Plane::from_normal(*face + n * lo, n * -1.0).ok_or_else(|| DocError::Invalid("face".into()))?;
+            // Recesses in one face (an engraved label) become pockets; the outline is the other face's.
+            let recesses = plate_recesses(&mb.body, &mesh, &plane, *face, n, (lo, hi), tol)?;
             let mut walls = std::collections::HashMap::new();
-            let mut wall = |f: u32| *walls.entry(f).or_insert_with(|| round_wall(&mb.body, &plane, n, f));
+            let mut wall = |f: u32| *walls.entry(f).or_insert_with(|| sheet::round_wall(&mb.body, &plane, n, f));
             let mut loops: Vec<Loop2> =
-                face_outline(&mesh, &plane, *face, n, lo, tol).iter().map(|l| outline_loop(l, &mut wall, tol * 1e-2)).collect();
+                face_outline(&mesh, &plane, *face, n, recesses.level, tol).iter().map(|l| sheet::outline_loop(l, &mut wall, tol * 1e-2)).collect();
             loops.sort_by(|a, b| b.signed_area().abs().total_cmp(&a.signed_area().abs()));
             let mut it = loops.into_iter();
             let outer = it.next().ok_or_else(|| DocError::Invalid("no outline on that face".into()))?.ccw();
             let region = Region2 { outer, holes: it.map(|l| l.ccw().reversed()).collect() };
             let area = region.area().abs();
-            let vol = kernel::measure(&mb.body)?.volume;
+            let vol = kernel::measure(&mb.body)?.volume + recesses.volume;
             if (area * t - vol).abs() > 1e-3 * vol.max(1.0) {
                 return Err(DocError::Invalid(
                     "not supported yet: converting bodies that are not a plate of even thickness without bend edges (`bends`)".into(),
@@ -631,6 +668,10 @@ pub(super) fn sheet_eval(
             rv.thickness = t;
             let mut sh = sheet::base_flange(body, &r.name, &rv, plane, Region2 { outer: region.outer.clone(), holes: Vec::new() });
             sh.holes = region.holes.iter().map(|h| Region2 { outer: h.ccw(), holes: Vec::new() }).collect();
+            let mut work = sheet::FlatWork::new();
+            for (pocket, z0, z1) in recesses.pockets {
+                sh.record_pocket(pocket, z0, z1, &mut work)?;
+            }
             put_sheet(st, sh)
         }
         _ => Err(DocError::Invalid(format!("{} is not a sheet metal feature", f.name))),
@@ -694,7 +735,11 @@ fn sheet_tool_span(body: &Body, source: &Plane) -> Option<(f64, f64, f64, Option
             }
             // Bound floating point projection separately from model geometry tolerance.
             let roundoff = 128.0 * f64::EPSILON * (plane.origin.len() + current.origin.len() + source.origin.len()).max(1.0);
-            if roundoff > 1e-7 || (current.origin - plane.origin).dot(n).abs() > roundoff {
+            // The cap's current point lies off the recorded plane by the noise of evaluating
+            // its edges, which its fitted tilt shows across the distance between the two points
+            // (8e-12 over 2.4 mm on a 45° flange's drill, #1255; none on axis-aligned caps).
+            let noise = current.normal().cross(n).len() * (current.origin - plane.origin).len();
+            if roundoff > 1e-7 || (current.origin - plane.origin).dot(n).abs() > roundoff + noise {
                 return None;
             }
             projection_roundoff = projection_roundoff.max(roundoff);
@@ -1095,18 +1140,8 @@ fn face_loops(mesh: &solidcraft_geom::Mesh, plane: &Plane, at: Vec3, n: Vec3, le
 fn face_outline(mesh: &solidcraft_geom::Mesh, plane: &Plane, at: Vec3, n: Vec3, level: f64, tol: f64) -> Vec<Vec<(Vec2, Option<u32>)>> {
     let on_plane = |t: &[u32; 3]| t.iter().all(|k| mesh.positions.get(*k as usize).is_some_and(|p| ((*p - at).dot(n) - level).abs() < tol));
     let on: Vec<[u32; 3]> = mesh.triangles.iter().copied().filter(on_plane).collect();
-    // Boundary edges by position (meshes may repeat vertices per triangle).
     let pos = |k: u32| mesh.positions.get(k as usize).copied().unwrap_or_default();
     let q = |p: Vec3| ((p.x * 1e6).round() as i64, (p.y * 1e6).round() as i64, (p.z * 1e6).round() as i64);
-    let key = |a: Vec3, b: Vec3| {
-        let (ka, kb) = (q(a), q(b));
-        (ka.min(kb), ka.max(kb))
-    };
-    let mut count: std::collections::HashMap<((i64, i64, i64), (i64, i64, i64)), i32> = Default::default();
-    let edges: Vec<(Vec3, Vec3)> = on.iter().flat_map(|t| [(pos(t[0]), pos(t[1])), (pos(t[1]), pos(t[2])), (pos(t[2]), pos(t[0]))]).collect();
-    for (a, b) in &edges {
-        *count.entry(key(*a, *b)).or_insert(0) += 1;
-    }
     // The faces off the plane at each point on it, by position to a millionth of a millimetre
     // either way (a neighbouring face's mesh may round a shared point differently).
     let mut touch: std::collections::HashMap<(i64, i64, i64), Vec<u32>> = Default::default();
@@ -1130,6 +1165,34 @@ fn face_outline(mesh: &solidcraft_geom::Mesh, plane: &Plane, at: Vec3, n: Vec3, 
         let at_b = near(b);
         near(a).into_iter().find(|f| at_b.contains(f))
     };
+    chain_loops(mesh, plane, &on, across)
+}
+
+/// The loops (in `plane` coordinates) that bound the triangles `on` of the mesh.
+fn boundary_loops(mesh: &solidcraft_geom::Mesh, plane: &Plane, on: &[[u32; 3]]) -> Vec<Vec<Vec2>> {
+    chain_loops(mesh, plane, on, |_, _| None).into_iter().map(|l| l.into_iter().map(|(p, _)| p).collect()).collect()
+}
+
+/// The loops (in `plane` coordinates) that bound the triangles `on` of the mesh, each point with
+/// `across(it, next)`: the face the outline runs along from it to the next point.
+fn chain_loops(
+    mesh: &solidcraft_geom::Mesh,
+    plane: &Plane,
+    on: &[[u32; 3]],
+    across: impl Fn(Vec3, Vec3) -> Option<u32>,
+) -> Vec<Vec<(Vec2, Option<u32>)>> {
+    // Boundary edges by position (meshes may repeat vertices per triangle).
+    let pos = |k: u32| mesh.positions.get(k as usize).copied().unwrap_or_default();
+    let q = |p: Vec3| ((p.x * 1e6).round() as i64, (p.y * 1e6).round() as i64, (p.z * 1e6).round() as i64);
+    let key = |a: Vec3, b: Vec3| {
+        let (ka, kb) = (q(a), q(b));
+        (ka.min(kb), ka.max(kb))
+    };
+    let mut count: std::collections::HashMap<((i64, i64, i64), (i64, i64, i64)), i32> = Default::default();
+    let edges: Vec<(Vec3, Vec3)> = on.iter().flat_map(|t| [(pos(t[0]), pos(t[1])), (pos(t[1]), pos(t[2])), (pos(t[2]), pos(t[0]))]).collect();
+    for (a, b) in &edges {
+        *count.entry(key(*a, *b)).or_insert(0) += 1;
+    }
     let mut boundary: Vec<(Vec3, Vec3)> = edges.into_iter().filter(|(a, b)| count.get(&key(*a, *b)) == Some(&1)).collect();
     // Chain into loops (plane coordinates).
     let mut loops: Vec<Vec<(Vec2, Option<u32>)>> = Vec::new();
@@ -1168,60 +1231,162 @@ fn face_outline(mesh: &solidcraft_geom::Mesh, plane: &Plane, at: Vec3, n: Vec3, 
     loops
 }
 
-/// The circle (centre in `plane` coordinates, radius) of face `f` when it is a round wall
-/// standing square on the plane: a cylinder about the plane's normal `n`.
-fn round_wall(body: &Body, plane: &Plane, n: Vec3, f: u32) -> Option<(Vec2, f64)> {
-    match kernel::face_surface(body, f as usize)? {
-        kernel::FaceSurface::Cylinder { origin, axis, radius } if axis.cross(n).len() < 1e-6 => Some((plane.to_local(origin), radius)),
-        _ => None,
-    }
+/// What the recesses of a plate (an engraved label, a counterbore) take out of it, for Convert
+/// to Sheet Metal: each becomes a pocket of the sheet, from its floor to the face it opens on.
+struct Recesses {
+    /// The level (along the picked face's normal) of the plate's face without recesses, whose
+    /// outline the sheet takes.
+    level: f64,
+    /// Pockets in flat coordinates, with their depth interval in the sheet (0 to its thickness).
+    pockets: Vec<(Region2, f64, f64)>,
+    /// The material they take out.
+    volume: f64,
 }
 
-/// A loop of [`face_outline`] as segments: each run along one round wall (`wall` gives a face's
-/// circle) is an arc of that circle, the rest stays straight. Coaxial cylinders of one radius are
-/// one wall, however many faces it comes in (many systems write a round hole's wall as two
-/// half-cylinders), so such a hole is one circle. `eps`: how far off its circle a point may be.
-fn outline_loop(pts: &[(Vec2, Option<u32>)], wall: &mut impl FnMut(u32) -> Option<(Vec2, f64)>, eps: f64) -> Loop2 {
-    use std::f64::consts::{PI, TAU};
-    let m = pts.len();
-    let point = |i: usize| pts.get(i % m).map(|x| x.0).unwrap_or_default();
-    // The circle each segment runs along: its wall's, when both its ends lie on it.
-    let circles: Vec<Option<(Vec2, f64)>> = (0..m)
-        .map(|i| {
-            let (c, r) = wall(pts.get(i)?.1?)?;
-            ((point(i).dist(c) - r).abs() <= eps && (point(i + 1).dist(c) - r).abs() <= eps).then_some((c, r))
-        })
-        .collect();
-    let circle = |i: usize| circles.get(i % m).copied().flatten();
-    let same = |i: usize, (c, r): (Vec2, f64)| circle(i).is_some_and(|(d, s)| d.dist(c) <= eps && (s - r).abs() <= eps);
-    // Start where no arc runs on across the start (anywhere when the whole loop is one circle).
-    let start = (0..m).find(|i| circle(*i + m - 1).is_none_or(|c| !same(*i, c))).unwrap_or(0);
-    let mut segs = Vec::new();
-    let mut i = 0;
-    while i < m {
-        let k = start + i;
-        let Some((c, r)) = circle(k) else {
-            segs.push(Seg2::Line { a: point(k), b: point(k + 1) });
-            i += 1;
+/// A planar face of the mesh parallel to the plate: its lowest and highest level, whether its
+/// outward normal is the picked face's (it faces up), its area, a point on it, and its
+/// triangles' centres and areas.
+struct LevelFace {
+    lo: f64,
+    hi: f64,
+    up: bool,
+    area: f64,
+    at: Vec3,
+    tris: Vec<(Vec3, f64)>,
+}
+
+/// The recesses of a plate lying between levels `lo` and `hi` along `n` (measured from `at`),
+/// whose sheet is built in `plane`. A recess's floor is a face parallel to the plate inside its
+/// thickness, lying in an opening of the face it is cut into, and its walls are square to the
+/// plate (walls that are not show as material the plate's volume doesn't account for). A body
+/// that is no plate once its recesses are filled has none, so the plate check refuses it as
+/// before: a bent part, whose legs' faces lie inside its extent. Recesses are taken in one face
+/// only, up to half the thickness deep, and no larger than the face they are cut into (a plate
+/// raised in places is no plate of the raised thickness).
+fn plate_recesses(body: &Body, mesh: &Mesh, plane: &Plane, at: Vec3, n: Vec3, (lo, hi): (f64, f64), tol: f64) -> Result<Recesses> {
+    let t = hi - lo;
+    let eps = t * 1e-3;
+    let level = |p: Vec3| (p - at).dot(n);
+    let mut faces: BTreeMap<u32, Option<LevelFace>> = BTreeMap::new();
+    for (tri, f) in mesh.triangles.iter().zip(&mesh.tri_face) {
+        let Some([a, b, c]) = mesh.tri(tri) else { continue };
+        let cr = (b - a).cross(c - a);
+        let len = cr.len();
+        if !(len > 1e-12) {
             continue;
-        };
-        let mut j = i + 1;
-        while j < m && same(start + j, (c, r)) {
-            j += 1;
         }
-        let sweep: f64 = (i..j)
-            .map(|s| {
-                let d = (point(start + s + 1) - c).angle() - (point(start + s) - c).angle();
-                (d + PI).rem_euclid(TAU) - PI
-            })
-            .sum();
-        // Arcs of up to half a turn each.
-        let pieces = ((sweep.abs() / PI - 1e-9).ceil() as usize).clamp(1, 4);
-        let (a0, step) = ((point(k) - c).angle(), sweep / pieces as f64);
-        segs.extend((0..pieces).map(|p| Seg2::Arc { center: c, radius: r, start: a0 + step * p as f64, sweep: step }));
-        i = j;
+        let up = cr.dot(n) > 0.0;
+        let entry = faces.entry(*f).or_insert(Some(LevelFace { lo: f64::MAX, hi: f64::MIN, up, area: 0.0, at: a, tris: Vec::new() }));
+        match entry {
+            Some(face) if face.up == up && cr.dot(n).abs() >= len * (1.0 - 1e-6) => {
+                for p in [a, b, c] {
+                    face.lo = face.lo.min(level(p));
+                    face.hi = face.hi.max(level(p));
+                }
+                face.area += len / 2.0;
+                face.tris.push(((a + b + c) / 3.0, len / 2.0));
+            }
+            _ => *entry = None,
+        }
     }
-    Loop2 { segs }
+    // The floors (face index, level, the face), and the areas of the plate's two faces (at `lo`
+    // and at `hi`).
+    let mut floors: Vec<(usize, f64, &LevelFace)> = Vec::new();
+    let (mut bottom, mut top) = (0.0, 0.0);
+    for (f, face) in faces.iter().filter_map(|(f, face)| Some((*f as usize, face.as_ref()?))) {
+        let d = (face.lo + face.hi) / 2.0;
+        if face.hi - face.lo > eps {
+            continue;
+        } else if (d - hi).abs() <= eps && face.up {
+            top += face.area;
+        } else if (d - lo).abs() <= eps && !face.up {
+            bottom += face.area;
+        } else if d > lo + eps && d < hi - eps {
+            floors.push((f, d, face));
+        }
+    }
+    let none = || Recesses { level: lo, pockets: Vec::new(), volume: 0.0 };
+    if floors.is_empty() {
+        return Ok(none());
+    }
+    // A floor is a recess's where (most of) it lies in an opening of the face it is cut into:
+    // inside that face's outline and in a hole of it, not on an island in the hole. (Its
+    // triangles are those at its level within `eps`: `tol` may exceed a recess's depth.)
+    let loops_at = |level: f64| -> Vec<Loop2> { face_loops(mesh, plane, at, n, level, eps).into_iter().map(|l| Loop2::polygon(&l)).collect() };
+    let (top_loops, bottom_loops) = (loops_at(hi), loops_at(lo));
+    floors.retain(|(_, _, face)| {
+        let loops = if face.up { &top_loops } else { &bottom_loops };
+        let open = |p: Vec2| {
+            let k = loops.iter().filter(|l| l.contains(p)).count();
+            k >= 2 && k.is_multiple_of(2)
+        };
+        face.tris.iter().filter(|(c, _)| open(plane.to_local(*c))).map(|(_, a)| a).sum::<f64>() > face.area / 2.0
+    });
+    let Some(&(_, _, first)) = floors.first() else { return Ok(none()) };
+    // Filled, the recesses leave a plate: its outline as large at `lo` as at `hi` once their
+    // openings count, and its volume with theirs the outline times the thickness. Else (a bent
+    // part) they are none.
+    let depth_in = |d: f64, up: bool| if up { hi - d } else { d - lo };
+    let opened = |up: bool| floors.iter().filter(|f| f.2.up == up).map(|f| f.2.area).sum::<f64>();
+    let outline = bottom + opened(false);
+    let removed: f64 = floors.iter().map(|f| f.2.area * depth_in(f.1, f.2.up)).sum();
+    let volume = kernel::measure(body)?.volume;
+    if (outline - top - opened(true)).abs() > 1e-3 * outline || (outline * t - volume - removed).abs() > 1e-3 * volume.max(1.0) {
+        return Ok(none());
+    }
+    let pt = |p: Vec3| format!("({:.3}, {:.3}, {:.3})", p.x, p.y, p.z);
+    let up = first.up;
+    if let Some(other) = floors.iter().find(|f| f.2.up != up) {
+        return Err(DocError::Invalid(format!(
+            "not supported yet: converting a plate with recesses in both faces (at {} and {}); recesses in one face become pockets",
+            pt(first.at),
+            pt(other.2.at)
+        )));
+    }
+    let depth_of = |d: f64| depth_in(d, up);
+    if let Some(deep) = floors.iter().find(|f| depth_of(f.1) > t / 2.0 + eps) {
+        return Err(DocError::Invalid(format!(
+            "not supported yet: the recess at {} is {:.3} mm deep, more than half the plate's {:.3} mm; shallower recesses (an engraving, a label) become pockets",
+            pt(deep.2.at),
+            depth_of(deep.1),
+            t
+        )));
+    }
+    let face_area = if up { top } else { bottom };
+    if floors.iter().map(|f| f.2.area).sum::<f64>() > face_area {
+        return Err(DocError::Invalid(format!(
+            "not supported yet: converting a plate whose recesses are larger than the face they are in (a plate thinner than {t:.3} mm, raised in places)"
+        )));
+    }
+    // The floors' outlines, from a mesh fine enough to mark them by.
+    let fine = body.tessellate((t * 1e-2).min(tol).max(1e-4))?;
+    floors.sort_by(|a, b| depth_of(a.1).total_cmp(&depth_of(b.1)));
+    // Floors at one depth are one pocket where they meet.
+    let mut groups: Vec<(f64, Vec<Region2>)> = Vec::new();
+    for (f, d, ..) in &floors {
+        let on: Vec<[u32; 3]> = fine.triangles.iter().zip(&fine.tri_face).filter(|(_, g)| **g as usize == *f).map(|(tri, _)| *tri).collect();
+        let mut loops = boundary_loops(&fine, plane, &on);
+        loops.sort_by(|a, b| poly_area(b).abs().total_cmp(&poly_area(a).abs()));
+        let mut it = loops.into_iter();
+        let Some(outline) = it.next() else { continue };
+        let region = Region2 { outer: Loop2::polygon(&outline).ccw(), holes: it.map(|l| Loop2::polygon(&l).ccw().reversed()).collect() };
+        match groups.last_mut() {
+            Some((depth, regions)) if depth_of(*d) - *depth <= eps => regions.push(region),
+            _ => groups.push((depth_of(*d), vec![region])),
+        }
+    }
+    // The sheet's z starts from the picked face when its plane faces away from that face.
+    let from_zero = up == (plane.normal().dot(n) < 0.0);
+    let mut work = sheet::FlatWork::new();
+    let (mut pockets, mut volume) = (Vec::new(), 0.0);
+    for (depth, regions) in groups {
+        let (z0, z1) = if from_zero { (0.0, depth) } else { (t - depth, t) };
+        for region in sheet::material_union(regions, &mut work)? {
+            volume += region.area().abs() * depth;
+            pockets.push((region, z0, z1));
+        }
+    }
+    Ok(Recesses { level: if up { lo } else { hi }, pockets, volume })
 }
 
 /// The body a placed plastic feature joins: by name, else the one under the point.

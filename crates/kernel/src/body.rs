@@ -45,6 +45,50 @@ pub struct Body {
     /// Exact history of the operation that made this body, relative to that operation's
     /// operands; `None` when the operation does not report one.
     pub(crate) history: Option<std::sync::Arc<crate::history::History>>,
+    /// A placed copy of a solid that another body shows already (an instance of a part a STEP
+    /// assembly lists many times): its display mesh is that body's, placed by the matrix, so the
+    /// part is tessellated once rather than once per instance. Dropped by anything that changes
+    /// what the body shows (its geometry is never changed in place).
+    pub(crate) display_of: Option<std::sync::Arc<(std::sync::Arc<SharedDisplay>, [[f64; 4]; 4])>>,
+}
+
+/// The display mesh of a body that several placed copies show (see `Body::display_of`): the
+/// body, and its mesh once made.
+#[derive(Debug)]
+pub(crate) struct SharedDisplay {
+    pub(crate) original: Body,
+    mesh: std::sync::OnceLock<Option<Mesh>>,
+}
+
+impl SharedDisplay {
+    pub(crate) fn new(original: Body) -> Self {
+        SharedDisplay { original: Body { display_of: None, ..original }, mesh: std::sync::OnceLock::new() }
+    }
+}
+
+/// `m` placed by the rigid matrix `t` (by columns, translation in `t[3]`, as the kernel's
+/// transforms take it): positions, normals and edge polylines move, everything indexed stays.
+/// `None` for anything but a rotation and translation (a reflection would turn the triangles
+/// inside out).
+fn placed_mesh(m: &Mesh, t: &[[f64; 4]; 4]) -> Option<Mesh> {
+    let r = |v: Vec3, w: f64| {
+        Vec3::new(
+            t[0][0] * v.x + t[1][0] * v.y + t[2][0] * v.z + w * t[3][0],
+            t[0][1] * v.x + t[1][1] * v.y + t[2][1] * v.z + w * t[3][1],
+            t[0][2] * v.x + t[1][2] * v.y + t[2][2] * v.z + w * t[3][2],
+        )
+    };
+    let det = t[0][0] * (t[1][1] * t[2][2] - t[1][2] * t[2][1]) - t[0][1] * (t[1][0] * t[2][2] - t[1][2] * t[2][0])
+        + t[0][2] * (t[1][0] * t[2][1] - t[1][1] * t[2][0]);
+    if !(det > 0.0 && (det - 1.0).abs() < 1e-6) || t.iter().flatten().any(|x| !x.is_finite()) {
+        return None;
+    }
+    Some(Mesh {
+        positions: m.positions.iter().map(|p| r(*p, 1.0)).collect(),
+        normals: m.normals.iter().map(|n| r(*n, 0.0)).collect(),
+        edges: m.edges.iter().map(|e| e.iter().map(|p| r(*p, 1.0)).collect()).collect(),
+        ..m.clone()
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -538,6 +582,7 @@ impl Body {
             face_sources: None,
             regularization_protected: false,
             history: None,
+            display_of: None,
         })
     }
 
@@ -567,6 +612,7 @@ impl Body {
             face_sources: None,
             regularization_protected: false,
             history: None,
+            display_of: None,
         })
     }
 
@@ -869,8 +915,20 @@ impl Body {
     }
 
     /// The same body with the lines its faces were split along on purpose.
+    /// This body shows `shared`'s mesh placed by `t` (it is that body's solid, placed by `t`).
+    pub(crate) fn with_display_of(mut self, shared: std::sync::Arc<SharedDisplay>, t: [[f64; 4]; 4]) -> Body {
+        if self.splits.is_none() && !self.is_mesh() {
+            self.display_of = Some(std::sync::Arc::new((shared, t)));
+        }
+        self
+    }
+
     pub fn with_split_lines(mut self, s: Option<std::sync::Arc<Vec<Vec<Vec3>>>>) -> Body {
         self.splits = s.filter(|l| !l.is_empty());
+        // Split lines are drawn: the shared mesh does not have them.
+        if self.splits.is_some() {
+            self.display_of = None;
+        }
         self.regularization_protected |= self.splits.is_some();
         self
     }
@@ -984,6 +1042,17 @@ impl Body {
         let tol = tol.max(self.size() * 1e-6);
         if let Some(m) = &self.mesh {
             return Ok(m.to_mesh());
+        }
+        // A face trimmed by a helix (a modelled thread from another CAD system) turns more than
+        // once around its cylinder; truck meshes it with triangles across the solid (#1289).
+        // Such a body is meshed from its display plan, which cuts the face along a seam.
+        if guard("tessellate", || Ok(crate::tess::seam::turns_more_than_once(&self.solid))).unwrap_or(false) {
+            let turn = (angle.is_finite() && angle > 0.0)
+                .then(|| crate::tess::size::Turn { angle: angle.max(MIN_DISPLAY_ANGLE), floor: tol * DISPLAY_ANGLE_FLOOR });
+            match guard("tessellate", || crate::tess::plan(&self.solid, tol, turn)) {
+                Ok((plan, _)) => return Ok(plan.evaluate()),
+                Err(e) => log::debug!("helical faces: no display plan ({e}); meshing the reference way"),
+            }
         }
         let deflection = if angle.is_finite() && angle > 0.0 {
             Deflection { chord: tol, angle: angle.max(MIN_DISPLAY_ANGLE), floor: tol * DISPLAY_ANGLE_FLOOR, rulings: true }
@@ -1228,6 +1297,12 @@ impl Body {
     /// The reference mesher's angular display mesh: what [`Body::display_mesh_angular`] falls
     /// back to when no plan can be made.
     pub fn reference_display_mesh_angular(&self, tol: f64, angle: f64) -> Result<Mesh> {
+        if let Some((shared, t)) = self.display_of.as_deref()
+            && let Some(placed) =
+                shared.mesh.get_or_init(|| shared.original.reference_display_mesh_angular(tol, angle).ok()).as_ref().and_then(|m| placed_mesh(m, t))
+        {
+            return Ok(placed);
+        }
         if self.is_mesh() {
             return self.flagged(self.tessellate(tol)?);
         }

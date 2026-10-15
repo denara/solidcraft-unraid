@@ -31,8 +31,13 @@ const EXTENSION: usize = 8;
 const KNIFE: f64 = 1e-4;
 /// An end face this close to square-on-to-its-sides' normal counts as tangent to a side.
 const TANGENT_END: f64 = 1e-6;
-/// Times the run past a tangent end is halved when the ball does not fit along it.
+/// Times the run past a tangent end is halved when the ball does not fit along it (and the run
+/// past a curved end is shortened when its sections wrap round).
 const TANGENT_RETRIES: usize = 8;
+/// The longest step between the centres of neighbouring sections past an open chain's end, as a
+/// multiple of the step along the end tangent: longer, and the sections have wrapped round a
+/// curved edge's ring of centres.
+const MAX_STEP_STRETCH: f64 = 3.0;
 /// Slides of the ball's centre along a knife edge's faces, each 1.6 times the last.
 const KNIFE_STEPS: usize = 40;
 
@@ -416,6 +421,29 @@ struct Section {
     q2: Vec3,
 }
 
+/// The third condition of a section's solve, in place of staying in the plane square to the edge: a contact held at a seam.
+#[derive(Clone, Copy)]
+enum Extra<'a> {
+    /// Side `k`'s contact lies in this plane (a point on it, its normal): beside a straight seam.
+    Plane(usize, Vec3, Vec3),
+    /// Side `k`'s contact lies on this curved seam (a lofted wall's seam between its two halves).
+    Seam(usize, &'a mt::Edge),
+}
+
+/// The seam's point nearest `x` and its unit tangent there.
+fn nearest_on_seam(seam: &mt::Edge, x: Vec3) -> Option<(Vec3, Vec3)> {
+    use mt::{BoundedCurve, ParametricCurve, SearchNearestParameter};
+    let curve = seam.curve();
+    let (lo, hi) = curve.range_tuple();
+    let at = |t: f64| from_p3(curve.subs(t));
+    // The nearest of a few samples starts the search: a long seam holds the point's neighbourhood
+    // far from its ends.
+    let hint = (0..=64).map(|i| lo + (hi - lo) * i as f64 / 64.0).min_by(|a, b| at(*a).dist(x).total_cmp(&at(*b).dist(x)))?;
+    let t = curve.search_nearest_parameter(p3(x), hint, 100)?.clamp(lo, hi);
+    let d = curve.der(t);
+    Some((at(t), Vec3::new(d.x, d.y, d.z).normalized()?))
+}
+
 /// Nearest point of a face's surface and the outward normal there.
 pub(crate) fn project(f: &mt::Face, p: Vec3, hint: Option<(f64, f64)>) -> Option<(Vec3, Vec3, (f64, f64))> {
     use mt::{ParametricSurface, ParametricSurface3D, SearchNearestParameter};
@@ -427,7 +455,7 @@ pub(crate) fn project(f: &mt::Face, p: Vec3, hint: Option<(f64, f64)>) -> Option
 }
 
 /// Whether `uv` lies within the parameters of the face's surface (unbounded directions pass).
-fn in_range(f: &mt::Face, uv: (f64, f64)) -> bool {
+pub(crate) fn in_range(f: &mt::Face, uv: (f64, f64)) -> bool {
     use mt::ParametricSurface;
     use std::ops::Bound;
     let inside = |range: (Bound<f64>, Bound<f64>), x: f64| {
@@ -444,22 +472,12 @@ fn in_range(f: &mt::Face, uv: (f64, f64)) -> bool {
 }
 
 /// Solve for the ball touching both sides near `p`. `extra` adds a third condition (a plane the
-/// side-k contact must lie in); without it the centre stays in the plane through `p` square to
-/// `t`. `sigma` is +1 when the ball sits outside the material (concave edge), −1 inside.
+/// side-k contact must lie in, or a curved seam it must lie on); without it the centre stays in the
+/// plane through `p` square to `t`. `sigma` is +1 when the ball sits outside the material (concave edge), −1 inside.
 /// `cusp` is ±1 at a knife edge (the faces' normals opposite: both leave the edge the same way,
 /// along `cusp · n1 × t`, and the ball lies where the cusp has opened to its width), else 0.
 #[allow(clippy::too_many_arguments)]
-fn solve(
-    f1: &[&mt::Face],
-    f2: &[&mt::Face],
-    p: Vec3,
-    t: Vec3,
-    r: f64,
-    sigma: f64,
-    cusp: f64,
-    extra: Option<(usize, Vec3, Vec3)>,
-    tol: f64,
-) -> Option<Section> {
+fn solve(f1: &[&mt::Face], f2: &[&mt::Face], p: Vec3, t: Vec3, r: f64, sigma: f64, cusp: f64, extra: Option<Extra<'_>>, tol: f64) -> Option<Section> {
     solve_from(f1, f2, p, t, r, sigma, cusp, extra, tol, None)
 }
 
@@ -474,7 +492,7 @@ fn solve_from(
     r: f64,
     sigma: f64,
     cusp: f64,
-    extra: Option<(usize, Vec3, Vec3)>,
+    extra: Option<Extra<'_>>,
     tol: f64,
     start: Option<Vec3>,
 ) -> Option<Section> {
@@ -553,9 +571,18 @@ fn solve_from(
         // Third row: stay in the section plane, or put a contact on the seam plane.
         let (row3, g3) = match extra {
             None => (t, (c - p).dot(t)),
-            Some((k, o, m)) => {
+            Some(Extra::Plane(k, o, m)) => {
                 let q = if k == 1 { q1 } else { q2 };
                 (m, (q - o).dot(m))
+            }
+            Some(Extra::Seam(k, seam)) => {
+                // The plane through the seam's nearest point to the contact, square to that side's
+                // surface, taken afresh each step: it holds the contact on the curved seam as the
+                // steps close in.
+                let (q, n) = if k == 1 { (q1, n1) } else { (q2, n2) };
+                let (on_seam, d) = nearest_on_seam(seam, q)?;
+                let m = d.cross(n).normalized()?;
+                (m, (q - on_seam).dot(m))
             }
         };
         let a = [[n1.x, n1.y, n1.z], [n2.x, n2.y, n2.z], [row3.x, row3.y, row3.z]];
@@ -761,6 +788,23 @@ fn straight(e: &mt::Edge, tol: f64) -> bool {
     let (a, b) = (from_p3(e.front().point()), from_p3(e.back().point()));
     let (t0, t1) = c.range_tuple();
     a.dist(b) > tol && (0..=16).all(|i| from_p3(c.subs(t0 + (t1 - t0) * i as f64 / 16.0)).dist_to_segment(a, b) <= tol)
+}
+
+/// Consuming both seams of a side can leave its old boundary and a fitted contact on the
+/// same curve (#1113). They are distinct topological edges but enclose no usable face. Keep
+/// genuine two-edge faces (a lens or lune); refuse only coincident traces, in both directions
+/// since the curves need not have the same parameterisation.
+fn collapsed_boundary(edges: &[mt::Edge], tolerance: f64) -> bool {
+    use mt::{BoundedCurve, ParametricCurve};
+    let [a, b] = edges else { return false };
+    [(a, b), (b, a)].into_iter().all(|(edge, other)| {
+        let curve = edge.curve();
+        let (lo, hi) = curve.range_tuple();
+        (0..=16).all(|k| {
+            let p = from_p3(curve.subs(lo + (hi - lo) * f64::from(k) / 16.0));
+            crate::blend::on_edge(other, p, tolerance).is_some()
+        })
+    })
 }
 
 /// A curved seam (an arc of an end face) shortened to the blend's contacts: the part of its
@@ -1104,15 +1148,16 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
                 slanted.push((k, fi, p, t, None));
             }
         }
-        let extra = match here.first().cloned().filter(|_| !at_end) {
+        let extra = match here.first().filter(|_| !at_end) {
             None => None,
+            // A curved seam holds the contact on itself (the chain runs on smoothly across it: a
+            // lofted wall's two halves).
+            Some((side, seam)) if !straight(seam, tol * 10.0) => Some(Extra::Seam(*side, seam)),
             Some((side, seam)) => {
+                let side = *side;
                 // The plane through the seam square to that side's surface.
                 let o = from_p3(seam.front().point());
                 let d = (from_p3(seam.back().point()) - o).normalized().ok_or_else(|| KernelError::Failed("seam".into()))?;
-                if !straight(&seam, tol * 10.0) {
-                    return Err(unsupported("a curved seam where the edge chain turns"));
-                }
                 let fs = if side == 1 { &s1 } else { &s2 };
                 // The side's normal at the joint: from its face nearest the joint (any face of a
                 // longer side is no guide here).
@@ -1122,7 +1167,7 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
                     .min_by(|a, b| a.0.dist(p).total_cmp(&b.0.dist(p)))
                     .map(|x| x.1)
                     .ok_or_else(|| KernelError::Failed("seam normal".into()))?;
-                Some((side, o, d.cross(nn).normalized().ok_or_else(|| KernelError::Failed("seam plane".into()))?))
+                Some(Extra::Plane(side, o, d.cross(nn).normalized().ok_or_else(|| KernelError::Failed("seam plane".into()))?))
             }
         };
         // On the faces of the edge from this vertex alone (the last edge's at an open chain's
@@ -1170,20 +1215,44 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
         // the ball no longer fits, the run is shortened (it only gives the fit its context).
         let mut list = Vec::with_capacity(EXTENSION);
         let mut reach = reach;
-        for attempt in 0..(if tangent.is_some() { TANGENT_RETRIES } else { 1 }) {
+        // Past the end of a curved edge the planes square to its end tangent cut the ring of
+        // centres further and further round it, until a step jumps across the ring (#1255: a
+        // knuckle's cap circle with a round as wide as 0.7 of its radius). The run is shortened
+        // then, as long as one of its sections still lies wholly past the end face.
+        let ng_out = if ng.dot(out) < 0.0 { -ng } else { ng };
+        let past = |sec: &Section| [sec.c, sec.q1, sec.q2].iter().all(|x| (*x - *p).dot(ng_out) > tol);
+        let mut fallback: Option<Vec<Section>> = None;
+        for attempt in 0..TANGENT_RETRIES {
             list.clear();
+            let step = reach / EXTENSION as f64;
             let sections = (1..=EXTENSION).map(|j| {
-                let anchor = *p + out * (reach * j as f64 / EXTENSION as f64);
+                let anchor = *p + out * (step * j as f64);
                 solve(&e1, &e2, anchor, *t, r, sigma, cusp, None, tol * 100.0)
             });
-            if let Some(all) = sections.collect::<Option<Vec<_>>>() {
-                list = all;
-                break;
+            match sections.collect::<Option<Vec<_>>>() {
+                Some(all) => {
+                    let smooth = tangent.is_some()
+                        || std::iter::once(at.c).chain(all.iter().map(|s| s.c)).collect::<Vec<_>>().windows(2).all(|w| match w {
+                            [a, b] => a.dist(*b) <= MAX_STEP_STRETCH * step,
+                            _ => true,
+                        });
+                    if smooth {
+                        // A shortened run must still cross the end face; else the first,
+                        // full-length run stands.
+                        if fallback.is_none() || all.iter().any(past) {
+                            list = all;
+                        }
+                        break;
+                    }
+                    fallback.get_or_insert(all);
+                }
+                None if tangent.is_none() || fallback.is_some() || attempt + 1 == TANGENT_RETRIES => break,
+                None => {}
             }
-            if attempt + 1 == TANGENT_RETRIES || tangent.is_none() {
-                return Err(unsupported("the ball doesn't fit past the end of the edge"));
-            }
-            reach *= 0.5;
+            reach *= if tangent.is_some() { 0.5 } else { 0.75 };
+        }
+        if list.is_empty() {
+            list = fallback.ok_or_else(|| unsupported("the ball doesn't fit past the end of the edge"))?;
         }
         if *k == 0 {
             list.reverse();
@@ -1629,6 +1698,9 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
                         e.clone()
                     };
                     es.push(ne);
+                }
+                if collapsed_boundary(&es, fit_tolerance) {
+                    return Err(too_large("the blend would consume a neighbouring face"));
                 }
                 wires.push(mt::Wire::from(es));
             }

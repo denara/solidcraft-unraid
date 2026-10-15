@@ -30,7 +30,10 @@ pub static COMMANDS: &[CommandSpec] = &[
         .icon("component")
         .params("bodies: [names] → one new component per body, named after it"),
     CommandSpec::new("component.activate", "Activate Component", activate).noundo().params("component: id or name (0 or \"root\" for the design); occurrence?, path?: exact placement used to author shared geometry"),
-    CommandSpec::new("component.list", "List Components", list).noundo(),
+    CommandSpec::new("component.list", "List Components", list).noundo().params(
+        "compact?: bool (counts of bodies, features, sketches and construction planes instead of their names; occurrences leave out \
+         identity transforms; children as occurrence ids); bodies?: bool (with compact: body names, not their count)",
+    ),
     CommandSpec::new("component.properties", "Component Physical Properties", properties::component)
         .icon("measure").noundo()
         .params("component?: id or name (default active); descendants?: bool (default true). Measures the first placement, or all placements for root, including pending moves; material-aware mass and center of mass in world coordinates"),
@@ -156,9 +159,23 @@ fn activate(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({ "active": id }))
 }
 
-fn list(s: &mut Session, _p: &Value) -> Result<Value> {
+fn list(s: &mut Session, p: &Value) -> Result<Value> {
     let st = s.model.state();
     let doc = &s.doc;
+    // Compact: what a large assembly needs to be found around in, without every name and matrix.
+    let compact = bool_(p, "compact").unwrap_or(false);
+    let names = |v: Vec<&str>| if compact { json!(v.len()) } else { json!(v) };
+    let body_names = !compact || bool_(p, "bodies").unwrap_or(false);
+    let placement = |o: &Occurrence| {
+        if !compact {
+            return json!(o);
+        }
+        let mut v = json!({"id": o.id, "name": o.name, "parent": o.parent, "grounded": o.grounded});
+        if o.transform.iter().flatten().zip(solidcraft_doc::IDENTITY.iter().flatten()).any(|(a, b)| (a - b).abs() > 1e-12) {
+            v["transform"] = json!(o.transform);
+        }
+        v
+    };
     let node = |id: u64, name: &str, parent: Option<u64>| {
         let bodies: Vec<&str> = st.bodies.iter().filter(|b| doc.model_body_component(b) == id).map(|b| b.name.as_str()).collect();
         let features: Vec<&str> = doc
@@ -175,10 +192,11 @@ fn list(s: &mut Session, _p: &Value) -> Result<Value> {
             .filter(|f| f.component == id && matches!(f.kind, FeatureKind::ConstructionPlane { .. }))
             .map(|f| f.name.as_str())
             .collect();
-        let occurrences: Vec<&Occurrence> = doc.occurrences.iter().filter(|o| o.component == id).collect();
-        let children: Vec<&Occurrence> = doc.occurrences.iter().filter(|o| o.parent == id).collect();
-        json!({"id": id, "name": name, "parent": parent, "bodies": bodies, "features": features, "sketches": sketches,
-            "construction": construction, "occurrences": occurrences, "children": children})
+        let occurrences: Vec<Value> = doc.occurrences.iter().filter(|o| o.component == id).map(placement).collect();
+        let children: Vec<Value> = doc.occurrences.iter().filter(|o| o.parent == id).map(|o| if compact { json!(o.id) } else { json!(o) }).collect();
+        let bodies = if body_names { json!(bodies) } else { json!(bodies.len()) };
+        json!({"id": id, "name": name, "parent": parent, "bodies": bodies, "features": names(features), "sketches": names(sketches),
+            "construction": names(construction), "occurrences": occurrences, "children": children})
     };
     let mut out = vec![node(0, &doc.name, None)];
     for c in &doc.components {

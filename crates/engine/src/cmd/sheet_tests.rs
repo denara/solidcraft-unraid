@@ -507,6 +507,171 @@ fn unfold_cut_refold_and_convert() {
     assert!(t.execute("sheet.convert", &json!({"body": "Block", "face": [50, 30, 2.5]})).is_err());
 }
 
+/// A plate (15, -20) (0, 0) (-100, 0) (-100, -20) with a 20 mm inside flange on its slanted edge
+/// (2 mm sheet, R 2, K 0.5: the folded sheet holds its flat area times the thickness), unfolded,
+/// and a triangle cut out with a corner on the bend line: where the line ends on the plate's
+/// edge at (-5, 0), the triangle on the bend or on the base, or in the line's middle. The refold
+/// failed ("sew: face 10: This wire is not simple.").
+#[test]
+fn a_cut_out_with_a_corner_on_a_bend_line_refolds() {
+    // The base (10, -20) (-5, 0) (-100, 0) (-100, -20): 2050; the bend 25 x 3π/2; the flange 25 x 16.
+    let area = 2450.0 + 37.5 * PI;
+    let cases = [
+        ([[-5.0, 0.0], [-3.0, -1.0], [-3.0, 1.0]], 2.0),
+        ([[-5.0, 0.0], [-7.0, -1.0], [-6.0, -3.0]], 2.5),
+        ([[2.5, -10.0], [2.1, -12.8], [-0.3, -9.6]], 4.0),
+        ([[2.5, -10.0], [4.7, -9.6], [3.5, -8.0]], 2.0),
+    ];
+    for (triangle, cut) in cases {
+        let mut s = Session::default();
+        run(&mut s, "sheet.manage_rules", json!({"name": "Rule", "active": true, "thickness": "2 mm", "k_factor": "0.5", "bend_radius": "2 mm"}));
+        run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Outline"}));
+        run(&mut s, "sketch.line", json!({"points": [[15, -20], [0, 0], [-100, 0], [-100, -20]], "closed": true}));
+        run(&mut s, "sketch.finish", json!({}));
+        run(&mut s, "sheet.flange", json!({"sketch": "Outline", "rule": "Rule"}));
+        run(&mut s, "sheet.flange", json!({"edges": [[7.5, -10, 2]], "height": 20, "radius": 2, "position": "inside"}));
+        // The measure follows the bend by facets.
+        let folded = volume(&mut s);
+        assert!(rel(folded, area * 2.0) < 1e-4, "{folded} vs {}", area * 2.0);
+        run(&mut s, "sheet.unfold", json!({}));
+        run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Cutout"}));
+        run(&mut s, "sketch.line", json!({"points": triangle, "closed": true}));
+        run(&mut s, "sketch.finish", json!({}));
+        run(&mut s, "solid.extrude", json!({"sketch": "Cutout", "through_all": true, "direction": "symmetric", "operation": "cut"}));
+        assert!(rel(volume(&mut s), (area - cut) * 2.0) < 1e-9, "{triangle:?} flat: {}", volume(&mut s));
+        run(&mut s, "sheet.refold", json!({}));
+        let refolded = volume(&mut s);
+        assert!((folded - refolded - cut * 2.0).abs() < 0.01, "{triangle:?} refolded: {refolded}, {} less", folded - refolded);
+    }
+}
+
+/// Plates with an inside flange on a slanted edge (2 mm sheet, R 2, K 0.5: the folded sheet
+/// holds its flat area times the thickness), unfolded, and a triangle cut out across the bend
+/// line with a corner 0.05 µm beside the line, or on it at x = 84.0764335, a border between
+/// two cells of the 1e-6 mm grid the sew finds vertices on. The refold failed ("sew: a
+/// degenerate edge", "sew: face 13: This wire is not closed."); it loses the triangle.
+#[test]
+fn a_cut_corner_a_hair_from_a_bend_line_refolds() {
+    let root820 = 820f64.sqrt();
+    let cases = [
+        // Base 1750, bend 25 x 3π/2, flange 25 x 26; a triangle of 4 mm².
+        (
+            [[0.0, 0.0], [100.0, 0.0], [85.0, 20.0], [0.0, 20.0]],
+            [92.5, 10.0, 2.0],
+            30.0,
+            [[87.49999996, 9.99999997], [85.49999996, 7.99999997], [89.49999996, 7.99999997]],
+            2400.0 + 37.5 * PI,
+            4.0,
+        ),
+        // The edge is √820 long; the base loses 4 mm along its normal: 2444 − 4√820; the bend
+        // √820 x 3π/2, the flange √820 x 36; a triangle of 3 mm².
+        (
+            [[0.0, 0.0], [100.0, 0.0], [88.0, 26.0], [0.0, 26.0]],
+            [94.0, 13.0, 2.0],
+            40.0,
+            [[84.0764335, 24.9558467078], [82.0764335, 22.9558467078], [86.0764335, 23.9558467078]],
+            2444.0 + root820 * (32.0 + 3.0 * PI / 2.0),
+            3.0,
+        ),
+    ];
+    for (outline, edge, height, triangle, area, cut) in cases {
+        let mut s = Session::default();
+        run(&mut s, "sheet.manage_rules", json!({"name": "Rule", "active": true, "thickness": "2 mm", "k_factor": "0.5", "bend_radius": "2 mm"}));
+        run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Outline"}));
+        run(&mut s, "sketch.line", json!({"points": outline, "closed": true}));
+        run(&mut s, "sketch.finish", json!({}));
+        run(&mut s, "sheet.flange", json!({"sketch": "Outline", "rule": "Rule"}));
+        run(&mut s, "sheet.flange", json!({"edges": [edge], "height": height, "radius": 2, "position": "inside"}));
+        // The measure follows the bend by facets.
+        let folded = volume(&mut s);
+        assert!(rel(folded, area * 2.0) < 1e-4, "{folded} vs {}", area * 2.0);
+        run(&mut s, "sheet.unfold", json!({}));
+        run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Cutout"}));
+        run(&mut s, "sketch.line", json!({"points": triangle, "closed": true}));
+        run(&mut s, "sketch.finish", json!({}));
+        run(&mut s, "solid.extrude", json!({"sketch": "Cutout", "through_all": true, "direction": "symmetric", "operation": "cut"}));
+        assert!(rel(volume(&mut s), (area - cut) * 2.0) < 1e-9, "flat: {}", volume(&mut s));
+        run(&mut s, "sheet.refold", json!({}));
+        let refolded = volume(&mut s);
+        assert!((folded - refolded - cut * 2.0).abs() < 0.01, "refolded: {refolded}, {} less", folded - refolded);
+    }
+}
+
+/// A 100 x 60 plate (2 mm sheet, R 2, K 0.5) with a 42 mm flange (R 1) outside its bottom edge,
+/// unfolded, and a notch cut off the flat flange's free corner: an arc from the side edge,
+/// through (0.6, 0.6) from the corner, to the free edge, closed by lines through a point outside
+/// the sheet. The arc leaves the side edge 1.7997505 mm from the corner, in the folded flange at
+/// a height of 42 − 1.7997505 = 40.2002495 mm: a border between two cells of the 1e-6 mm grid the
+/// sew finds vertices on, and the arc's end and the edge's, worked out apart, differ by 7e-13
+/// mm. The refold failed ("sew: face 5: This wire is not closed."); it loses the notch.
+#[test]
+fn a_notch_whose_arc_ends_on_a_grid_border_refolds() {
+    let t = 1.7997505;
+    // The flat flange ends at 39 + the bend allowance (π/2)(R + K T) = 39 + π below the plate.
+    let free = -(42.0 - 1.0 - 2.0 + FRAC_PI_2 * (1.0 + 0.5 * 2.0));
+    let flat = 6000.0 + 100.0 * PI + 100.0 * 39.0;
+    // The notch is the triangle corner, end, end less the circle's segment over its chord; the
+    // circle's centre (a, a) from the corner is as far from (0.6, 0.6) as from the arc's ends.
+    let a = (t * t - 0.72) / (2.0 * t - 2.4);
+    let r2 = 2.0 * (a - 0.6) * (a - 0.6);
+    let angle = 2.0 * (t * 2f64.sqrt() / (2.0 * r2.sqrt())).asin();
+    let notch = t * t / 2.0 - r2 / 2.0 * (angle - angle.sin());
+    assert!((notch - 0.88421).abs() < 1e-5, "{notch}");
+    let mut s = Session::default();
+    run(&mut s, "sheet.manage_rules", json!({"name": "Rule", "active": true, "thickness": "2 mm", "k_factor": "0.5", "bend_radius": "2 mm"}));
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Outline"}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [100, 0], [100, 60], [0, 60]], "closed": true}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "sheet.flange", json!({"sketch": "Outline", "rule": "Rule"}));
+    run(&mut s, "sheet.flange", json!({"edges": [[50, 0, 2]], "height": 42, "radius": 1, "position": "outside"}));
+    // The measure follows the bend by facets.
+    let folded = volume(&mut s);
+    assert!(rel(folded, flat * 2.0) < 1e-4, "{folded} vs {}", flat * 2.0);
+    run(&mut s, "sheet.unfold", json!({}));
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Cutout"}));
+    run(&mut s, "sketch.arc.three_point", json!({"start": [t, free], "through": [0.6, free + 0.6], "end": [0.0, free + t]}));
+    run(&mut s, "sketch.line", json!({"points": [[0.0, free + t], [-1.0, -44.0]]}));
+    run(&mut s, "sketch.line", json!({"points": [[-1.0, -44.0], [t, free]]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"sketch": "Cutout", "through_all": true, "direction": "symmetric", "operation": "cut"}));
+    assert!(rel(volume(&mut s), (flat - notch) * 2.0) < 1e-6, "flat: {}", volume(&mut s));
+    run(&mut s, "sheet.refold", json!({}));
+    let refolded = volume(&mut s);
+    assert!((folded - refolded - notch * 2.0).abs() < 0.01, "refolded: {refolded}, {} less", folded - refolded);
+}
+
+/// An inside flange on a 100 x 60 plate (2 mm sheet, R 1, K 0.5) closes at every whole-degree
+/// turn of the plate. The flange's setback trims the plate at corners rounded to the nanometre,
+/// and the bend zone's corners beside them are not, so the two copies of a corner differ by a
+/// fraction of a nanometre. At 62° the trimmed corner lies on a border of the 1e-6 mm grid the
+/// sew finds vertices on (x = 100 cos 62° - 3 sin 62° = 44.2983135); its copies fell on either
+/// side, and the flange failed ("sew: the faces do not close"). The sew's weld of edge ends a
+/// hair apart joins them.
+#[test]
+fn an_inside_flange_on_a_turned_plate_closes_at_every_turn() {
+    // The plate less the 3 mm setback, a quarter annulus (radii 1 and 3) and a 17 mm leg, 100 long.
+    let want = 100.0 * 57.0 * 2.0 + PI * 2.0 * 100.0 + 17.0 * 2.0 * 100.0;
+    let mut failed = Vec::new();
+    for k in 0..90 {
+        let turn = (k as f64).to_radians();
+        let at = |x: f64, y: f64| [x * turn.cos() - y * turn.sin(), x * turn.sin() + y * turn.cos()];
+        let mut s = Session::default();
+        run(&mut s, "sheet.manage_rules", json!({"name": "R", "thickness": "2 mm", "k_factor": "0.5", "bend_radius": "1 mm", "active": true}));
+        run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Outline"}));
+        run(&mut s, "sketch.line", json!({"points": [at(0.0, 0.0), at(100.0, 0.0), at(100.0, 60.0), at(0.0, 60.0)], "closed": true}));
+        run(&mut s, "sketch.finish", json!({}));
+        run(&mut s, "sheet.flange", json!({"sketch": "Outline"}));
+        let [x, y] = at(50.0, 0.0);
+        let flange = json!({"edges": [[x, y, 2]], "height": 20, "angle": 90, "radius": 1, "position": "inside"});
+        if let Err(e) = s.execute("sheet.flange", &flange) {
+            failed.push(format!("{k}°: {e}"));
+            continue;
+        }
+        assert!(rel(volume(&mut s), want) < 1e-4, "{k}°: {} vs {want}", volume(&mut s));
+    }
+    assert!(failed.is_empty(), "{} of 90 turns: {failed:?}", failed.len());
+}
+
 /// A sketch line across a 100 x 60 plate's top face at x = 40.
 fn fold_line(s: &mut Session) {
     run(s, "sketch.create", json!({"plane": "XY", "offset": 2.5, "name": "FoldLine"}));
@@ -1386,7 +1551,7 @@ fn flat_dxf_preserves_exact_cutout_entities() {
         outer: Loop2 { segs: vec![Seg2::Arc { center: Vec2::new(40.0, 30.0), radius: 5.0, start: -PI, sweep: -2.0 * PI }] },
         holes: Vec::new(),
     }];
-    let dxf = super::flat_dxf(&sh).unwrap();
+    let dxf = super::flat_dxf(&sh, super::DxfCurves::Exact).unwrap();
     assert_eq!(dxf.matches("0\nCIRCLE\n").count(), 1, "{dxf}");
     assert!(!dxf.contains("0\nARC\n"), "a full circle must not become a zero-length ARC");
     let read = solidcraft_io::read_dxf(&dxf).unwrap();
@@ -1398,10 +1563,10 @@ fn flat_dxf_preserves_exact_cutout_entities() {
             Seg2::Arc { center: Vec2::new(20.0, 10.0), radius: 10.0, start: 0.0, sweep: PI },
         ],
     };
-    let dxf = super::flat_dxf(&sh).unwrap();
+    let dxf = super::flat_dxf(&sh, super::DxfCurves::Exact).unwrap();
     assert_eq!(dxf.matches("0\nLINE\n").count(), 5, "four outline lines and one exact cutout line");
     assert_eq!(dxf.matches("0\nARC\n").count(), 1);
-    assert!(dxf.contains("50\n0.000000\n51\n180.000000\n"));
+    assert!(dxf.contains(" 50\n0.0\n 51\n180.0\n"), "{dxf}");
     let read = solidcraft_io::read_dxf(&dxf).unwrap();
     assert_eq!(read.len(), 6);
     assert!(read.iter().any(|g| matches!(g, solidcraft_io::Geom2::Arc { c, a, b } if *c == Vec2::new(20.0, 10.0) && a.dist(Vec2::new(30.0, 10.0)) < 1e-9 && b.dist(Vec2::new(10.0, 10.0)) < 1e-9)));
@@ -2788,7 +2953,11 @@ fn corner_reliefs_of_the_rule_reach_the_part_the_flat_pattern_and_the_dxf() {
                 assert!(arcs.iter().any(|(c, r)| c.dist(Vec2::new(x, y)) < 1e-6 && (r - 4.0).abs() < 1e-6), "({x}, {y}): {arcs:?}");
             }
         } else {
-            assert!(arcs.is_empty() && dxf.contains(&format!("{:.6}\n20\n{:.6}\n", s0 + 4.0, s0 + 4.0)), "{arcs:?}");
+            let corner = Vec2::new(s0 + 4.0, s0 + 4.0);
+            let read = solidcraft_io::read_dxf(&dxf).unwrap_or_default();
+            let at_corner =
+                |g: &solidcraft_io::Geom2| matches!(g, solidcraft_io::Geom2::Line(a, b) if a.dist(corner) < 1e-6 || b.dist(corner) < 1e-6);
+            assert!(arcs.is_empty() && read.iter().any(at_corner), "{arcs:?}");
         }
         // Unfold and refold keep it, and a cut made folded still goes through: a Ø20 hole in the base.
         run(&mut s, "sheet.unfold", json!({}));
@@ -2859,7 +3028,10 @@ fn a_tear_of_the_rule_reaches_the_part_the_flat_pattern_and_the_dxf() {
         // The DXF: the outline in straight lines, each cut one of them, and four bend lines.
         let dxf = run(&mut s, "sheet.export_dxf", json!({}))["dxf"].as_str().unwrap_or_default().to_string();
         assert_eq!(dxf.matches("0\nLINE\n").count(), outline.len() + 4, "{deg}");
-        assert!(dxf.contains(&format!("{:.6}\n20\n{:.6}\n", x_end(s0), s0 - ba)), "{deg}");
+        let cut_end = solidcraft_geom::Vec2::new(x_end(s0), s0 - ba);
+        let read = solidcraft_io::read_dxf(&dxf).unwrap_or_default();
+        let at_cut_end = |g: &solidcraft_io::Geom2| matches!(g, solidcraft_io::Geom2::Line(a, b) if a.dist(cut_end) < 1e-6 || b.dist(cut_end) < 1e-6);
+        assert!(read.iter().any(at_cut_end), "{deg}");
         // Unfold and refold keep it, and a cut made folded still goes through: a Ø20 hole in the base.
         run(&mut s, "sheet.unfold", json!({}));
         assert!((volume(&mut s) - flat0 - want).abs() < 1e-6, "{deg}: unfolded {} - {flat0} vs {want}", volume(&mut s));
@@ -3822,4 +3994,154 @@ fn perforated_sheet_takes_a_thousand_round_holes() {
     let removed = flat - volume(&mut s);
     let expected = 1000.0 * std::f64::consts::PI * 0.5 * 0.5 * 0.8;
     assert!((removed - expected).abs() / expected < 0.05, "removed {removed:.1} mm³, 1000 holes are {expected:.1} mm³");
+}
+
+// ---- #732 sheet.perforate: a perforation field stored on the sheet, not cut into the B-rep ----------------------
+
+/// Hole centres of a staggered (60 deg) perforation over a w x h rectangle at z 0, as `sheet.perforate` places them:
+/// rows along x every pitch * sqrt(3) / 2, odd rows shifted half a pitch, starting at margin + radius from the
+/// lower-left corner; a hole is kept when it stays margin away from the outline.
+fn staggered_count(w: f64, h: f64, d: f64, pitch: f64, margin: f64) -> usize {
+    let (r, dy) = (d / 2.0, pitch * 3f64.sqrt() / 2.0);
+    let (lo, hix, hiy) = (margin + r, w - margin - r, h - margin - r);
+    let mut n = 0;
+    let mut row = 0;
+    while lo + row as f64 * dy <= hiy + 1e-9 {
+        let mut x = lo + if row % 2 == 1 { pitch / 2.0 } else { 0.0 };
+        while x <= hix + 1e-9 {
+            n += 1;
+            x += pitch;
+        }
+        row += 1;
+    }
+    n
+}
+
+fn perforation_circles(dxf: &str) -> Vec<(f64, f64, f64)> {
+    let lines: Vec<&str> = dxf.lines().map(str::trim).collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 1 < lines.len() {
+        if lines[i] == "0" && lines[i + 1] == "CIRCLE" {
+            let (mut layer, mut x, mut y, mut r) = ("", 0.0, 0.0, 0.0);
+            let mut j = i + 2;
+            while j + 1 < lines.len() && lines[j] != "0" {
+                match lines[j] {
+                    "8" => layer = lines[j + 1],
+                    "10" => x = lines[j + 1].parse().unwrap_or(0.0),
+                    "20" => y = lines[j + 1].parse().unwrap_or(0.0),
+                    "40" => r = lines[j + 1].parse().unwrap_or(0.0),
+                    _ => {}
+                }
+                j += 2;
+            }
+            if layer == "PERFORATION" {
+                out.push((x, y, r));
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// #732: Rv 1.0-1.5 over a 100 x 60 x 0.8 sheet: every hole is in the flat pattern and in the DXF (layer
+/// PERFORATION), placed on the documented grid, and the B-rep is not cut (the field is stored like a cosmetic thread).
+#[test]
+fn perforation_field_exports_every_hole_to_the_flat_pattern_and_dxf() {
+    let mut s = Session::default();
+    outline_blank(&mut s, json!([[0, 0], [100, 0], [100, 60], [0, 60]]));
+    let faces = run(&mut s, "inspect.measure", json!({}))["bodies"][0]["faces"].clone();
+    run(&mut s, "sheet.perforate", json!({"diameter": "1", "pitch": "1.5", "margin": "1"}));
+    let expected = staggered_count(100.0, 60.0, 1.0, 1.5, 1.0);
+    let f = flat(&mut s);
+    assert_eq!(f["perforations"][0]["count"].as_u64(), Some(expected as u64), "{}", f["perforations"]);
+    assert_eq!(f["perforations"][0]["pattern"], "staggered");
+    let open = f["perforations"][0]["open_area_mm2"].as_f64().unwrap();
+    assert!(rel(open, expected as f64 * PI * 0.25) < 1e-9);
+    let dxf = run(&mut s, "sheet.export_dxf", json!({}))["dxf"].as_str().unwrap_or_default().to_string();
+    let holes = perforation_circles(&dxf);
+    assert_eq!(holes.len(), expected);
+    assert!(holes.iter().all(|&(x, y, r)| (r - 0.5).abs() < 1e-9 && (1.5..=98.5).contains(&x) && (1.5..=58.5).contains(&y)));
+    assert!((holes[0].0 - 1.5).abs() < 1e-9 && (holes[0].1 - 1.5).abs() < 1e-9, "first hole at margin + radius: {:?}", holes[0]);
+    assert_eq!(run(&mut s, "inspect.measure", json!({}))["bodies"][0]["faces"], faces, "the B-rep is not cut");
+}
+
+/// #732: the measured volume and mass drop by the open area times the thickness.
+#[test]
+fn perforation_reduces_volume_and_mass_by_the_open_area() {
+    let mut s = Session::default();
+    outline_blank(&mut s, json!([[0, 0], [100, 0], [100, 60], [0, 60]]));
+    let before = run(&mut s, "inspect.measure", json!({}));
+    run(&mut s, "sheet.perforate", json!({"diameter": "1", "pitch": "1.5", "margin": "1"}));
+    let after = run(&mut s, "inspect.measure", json!({}));
+    let n = staggered_count(100.0, 60.0, 1.0, 1.5, 1.0) as f64;
+    let removed = before["total"]["volume_mm3"].as_f64().unwrap() - after["total"]["volume_mm3"].as_f64().unwrap();
+    assert!(rel(removed, n * PI * 0.25 * 0.8) < 1e-9, "removed {removed}");
+    let (m0, m1) = (before["bodies"][0]["mass_g"].as_f64().unwrap(), after["bodies"][0]["mass_g"].as_f64().unwrap());
+    let ratio = after["total"]["volume_mm3"].as_f64().unwrap() / before["total"]["volume_mm3"].as_f64().unwrap();
+    assert!(rel(m1 / m0, ratio) < 1e-9);
+}
+
+/// #732: holes stay out of bend zones, also when the fold comes after the perforation; the field follows the sheet
+/// through unfold / refold and through save and reopen.
+#[test]
+fn perforation_skips_bend_zones_and_survives_fold_unfold_and_reopen() {
+    let mut s = Session::default();
+    outline_blank(&mut s, json!([[0, 0], [100, 0], [100, 60], [0, 60]]));
+    run(&mut s, "sheet.perforate", json!({"diameter": "1", "pitch": "1.5", "margin": "1"}));
+    let flat_count = flat(&mut s)["perforations"][0]["count"].as_u64().unwrap();
+    run(&mut s, "sheet.fold", json!({"points": [[80, 0, 0.8], [80, 60, 0.8]], "fixed": [40, 30, 0.4]}));
+    let folded = flat(&mut s);
+    let count = folded["perforations"][0]["count"].as_u64().unwrap();
+    assert!(count < flat_count, "holes in the new bend zone are dropped: {count} of {flat_count}");
+    let zone = &folded["bend_zones"][0]; // [min x, max x, min y, max y] of the bend zone, flat coordinates
+    let (z0, z1) = (zone[0].as_f64().unwrap_or(f64::NAN), zone[1].as_f64().unwrap_or(f64::NAN));
+    let dxf = run(&mut s, "sheet.export_dxf", json!({}))["dxf"].as_str().unwrap_or_default().to_string();
+    assert!(
+        perforation_circles(&dxf).iter().all(|&(x, _, r)| x + r + 1.0 <= z0 + 1e-9 || x - r - 1.0 >= z1 - 1e-9),
+        "no hole within margin of the bend zone x {z0}..{z1}"
+    );
+    let volume_folded = volume(&mut s);
+    run(&mut s, "sheet.unfold", json!({}));
+    assert_eq!(flat(&mut s)["perforations"][0]["count"].as_u64(), Some(count));
+    run(&mut s, "sheet.refold", json!({}));
+    assert!(rel(volume(&mut s), volume_folded) < 1e-9);
+    let mut reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    assert_eq!(flat(&mut reopened)["perforations"][0]["count"].as_u64(), Some(count));
+    assert!(rel(volume(&mut reopened), volume_folded) < 1e-9);
+}
+
+/// #732: a real mesh panel - 400 x 470 with Rv 1.0-1.5 is about 94 000 holes - is quick to perforate, measure and
+/// export (the holes never enter the flat-geometry budget).
+#[test]
+fn perforating_a_mesh_panel_with_ninety_thousand_holes_is_fast() {
+    let mut s = Session::default();
+    outline_blank(&mut s, json!([[0, 0], [400, 0], [400, 470], [0, 470]]));
+    let t = std::time::Instant::now();
+    run(&mut s, "sheet.perforate", json!({"diameter": "1", "pitch": "1.5", "margin": "1"}));
+    let count = flat(&mut s)["perforations"][0]["count"].as_u64().unwrap();
+    let dxf = run(&mut s, "sheet.export_dxf", json!({}))["dxf"].as_str().unwrap_or_default().len();
+    volume(&mut s);
+    assert!(count > 90_000, "{count}");
+    assert!(dxf > 90_000 * 30, "every hole is in the DXF");
+    assert!(t.elapsed().as_secs_f64() < 20.0, "took {:?}", t.elapsed());
+}
+
+/// #732: a square pattern, and values that cannot be punched are refused.
+#[test]
+fn perforate_supports_a_square_pattern_and_refuses_impossible_values() {
+    let mut s = Session::default();
+    outline_blank(&mut s, json!([[0, 0], [30, 0], [30, 20], [0, 20]]));
+    run(&mut s, "sheet.perforate", json!({"diameter": "2", "pitch": "4", "margin": "0", "pattern": "square"}));
+    assert_eq!(flat(&mut s)["perforations"][0]["count"].as_u64(), Some(8 * 5));
+    for bad in [
+        json!({"diameter": "0", "pitch": "2"}),
+        json!({"diameter": "2", "pitch": "2"}),
+        json!({"diameter": "1", "pitch": "2", "pattern": "hexagon"}),
+        json!({"diameter": "1", "pitch": "2", "margin": "-1"}),
+    ] {
+        assert!(s.execute("sheet.perforate", &bad).is_err(), "{bad} must be refused");
+    }
 }

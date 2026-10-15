@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use solidcraft_doc::{EmbossFace, apply_point, mat_inverse, mat_mul};
 use solidcraft_geom::{Mesh, Vec2, Vec3};
 
-use crate::params::bad;
+use crate::params::{bad, vec3};
 use crate::{Result, Session};
 
 fn point_triangle_dist(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> f64 {
@@ -55,6 +55,22 @@ pub(super) fn face_is_planar(s: &Session, p: Vec3) -> Option<bool> {
         .collect();
     let n0 = *ns.first()?;
     Some(ns.iter().all(|n| n.dot(n0) > 1.0 - 1e-6))
+}
+
+/// A face given to a command: a point `[x, y, z]` on it (or `{point}`), or its name as
+/// `model.faces` lists it, looked up on `body` (any body without one). A name becomes a point on
+/// that face, which the feature keeps like a picked one, so it also keeps the face's name.
+/// The point is in the frame of the command's other picks: the component's own when
+/// they were mapped into it, else the world's.
+pub(super) fn face_ref(s: &Session, v: &Value, body: Option<&str>, cmd: &str) -> Result<Vec3> {
+    if let Some(name) = v.as_str() {
+        if name.is_empty() || name.len() > 512 {
+            return Err(bad(cmd, "a face name is 1…512 characters"));
+        }
+        let st = if crate::frames::mapped() { s.model.state() } else { s.world_state() };
+        return solidcraft_doc::naming::named_face_point(&st, body, name).map_err(|why| bad(cmd, why));
+    }
+    vec3(v).or_else(|| v.get("point").and_then(vec3)).ok_or_else(|| bad(cmd, "a face is a point [x, y, z] on it, or its name from model.faces"))
 }
 
 /// The body face under a point: (mesh, face index, distance, body).

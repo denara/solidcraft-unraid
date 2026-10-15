@@ -42,3 +42,8 @@ Mouse and touch:
 | Double-click the middle button | go Home: the home view, framing everything shown (Preferences › Navigation › Middle double-click: Home, Fit or Off) |
 
 Help › Keyboard Shortcuts in the app lists the current bindings, including any you changed.
+
+With the **Touchpad** navigation preset, hold **Shift** while moving the pointer to pan, or
+**Alt/Option** to orbit, without pressing a mouse button. Vertical scrolling zooms. These
+viewport gestures are separate from rebindable command shortcuts; mouse-button selection
+and editing keep their existing modifiers.

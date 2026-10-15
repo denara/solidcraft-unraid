@@ -395,10 +395,12 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
                 ui.add_space(10.0);
                 if big(ui, "open", "Open…", false) {
                     action = Some(Box::new(|app: &mut SolveApp| {
-                        if let Some(p) = app.services.pick_open.as_ref().and_then(|f| f()) {
-                            app.home.open = false;
-                            app.open_path_async(&p);
-                        }
+                        app.pick_open(|app, path| {
+                            if let Some(path) = path {
+                                app.home.open = false;
+                                app.open_path_async(&path);
+                            }
+                        });
                     }));
                 }
             });

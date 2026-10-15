@@ -206,6 +206,41 @@ Renew the credentials before `--expires` by repeating steps 2 and 3. The snap us
 confinement and only plugs that connect automatically, apart from `removable-media`, which users
 connect with `sudo snap connect solidcraft:removable-media` (getting-started.md).
 
+## WinGet (Windows Package Manager)
+
+SolidCraft is in [winget-pkgs](https://github.com/microsoft/winget-pkgs) as
+`bherbruck.SolidCraft` (`winget install bherbruck.SolidCraft`). Publishing a non-prerelease
+GitHub release runs `winget.yml`, which uses [Komac](https://github.com/russellbanks/Komac)
+(a pinned, checksum-verified binary) to open a pull request at microsoft/winget-pkgs from the
+owner's fork `bherbruck/winget-pkgs`. It submits the three versioned MSIs
+(`solidcraft-<version>-windows-{x64,x86,arm64}.msi`, never the fixed-name copies), reads their
+product codes, links the release notes and keeps the other fields from the previous version's
+manifest. The winget-pkgs bots validate it and a moderator merges it, usually within a day or two.
+
+The job does nothing, successfully, while the `WINGET_TOKEN` repository secret is missing or
+before the package's first version is merged into winget-pkgs. Like `snap-store.yml`, a
+publication made with `GITHUB_TOKEN` doesn't trigger it: then run
+`gh workflow run winget.yml -R bherbruck/solidcraft -f tag=v<version>`.
+
+To enable it once (owner):
+
+1. Create a **classic** personal access token at <https://github.com/settings/tokens/new>
+   (Settings > Developer settings > Personal access tokens > Tokens (classic)): note
+   "solidcraft winget", an expiry such as one year, and only the **`public_repo`** scope.
+   Fine-grained tokens can't open pull requests on microsoft/winget-pkgs.
+2. Store it as the repository secret (paste the token when asked):
+
+   ```sh
+   gh secret set WINGET_TOKEN -R bherbruck/solidcraft
+   ```
+
+3. Keep the fork `bherbruck/winget-pkgs` (Komac pushes its branches there). Its default branch
+   doesn't need syncing.
+
+When the token expires, create a new one the same way and run step 2 again. If a release was
+published while the secret was missing or expired, submit it afterwards with
+`gh workflow run winget.yml -R bherbruck/solidcraft -f tag=v<version>`.
+
 ## Update signing
 
 The app's **Update now** (docs/book/src/guide/updates.md) only installs a package whose SHA-256

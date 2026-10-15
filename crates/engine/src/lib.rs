@@ -15,7 +15,9 @@ pub mod fuzz;
 pub mod licences;
 pub mod occurrences;
 pub mod params;
+pub mod product_scene;
 pub mod recovery;
+pub mod render_jobs;
 pub mod sample;
 pub mod view;
 
@@ -41,7 +43,7 @@ pub const MAX_LINE: usize = 16 << 20;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
-    #[error("unknown command `{0}`")]
+    #[error("unknown command `{0}`{hint}", hint = cmd::did_you_mean(.0))]
     UnknownCommand(String),
     #[error("`{0}` is not available right now: {1}")]
     Disabled(String, String),
@@ -173,6 +175,8 @@ struct WorldCache {
     active_component: u64,
     active_occurrence_path: Option<Vec<u64>>,
     world: Arc<solidcraft_doc::ModelState>,
+    /// The moved components' bodies as placed for `world`, reused by the next world state.
+    placed: Arc<std::sync::Mutex<solidcraft_doc::PlacedBodies>>,
 }
 
 impl WorldCache {
@@ -226,6 +230,9 @@ pub struct Session {
     /// moves its viewport there and takes it; headless renders keep using it until a standard
     /// view is chosen.
     pub camera: Option<render::Camera>,
+    /// Host-owned viewport metadata, never saved or included in history.
+    render_viewport: Option<Arc<render::ExecutorDescriptor>>,
+    render_jobs: render_jobs::Jobs,
     /// The visibility the design file holds (what `is_dirty` compares with).
     saved_visibility: Visibility,
     /// States to go back to (`edit.checkpoint`, `edit.restore_checkpoint`): how batches of
@@ -322,6 +329,8 @@ impl Session {
             saved_visibility: visibility.clone(),
             visibility,
             camera: None,
+            render_viewport: None,
+            render_jobs: Default::default(),
             #[cfg(test)]
             evaluations: 0,
             crash_journal: false,
@@ -332,8 +341,12 @@ impl Session {
     /// are the user's rather than the design's: `auto_project` is a preference (#680).
     pub fn replace_design(&mut self, fresh: Session) {
         let auto_project = self.auto_project;
+        let render_viewport = self.render_viewport.clone();
+        let render_jobs = self.render_jobs.scratch();
         *self = fresh;
         self.auto_project = auto_project;
+        self.render_viewport = render_viewport;
+        self.render_jobs = render_jobs;
     }
 
     /// The design has changes not in its file: in the document, or in what is hidden.
@@ -343,6 +356,56 @@ impl Session {
     pub fn mark_saved(&mut self) {
         self.saved = self.doc.clone();
         self.saved_visibility = self.visibility.clone();
+    }
+
+    pub fn render_backend(&self) -> render::BackendDescriptor {
+        let mut backend = render::builtin_backend();
+        if let Some(viewport) = &self.render_viewport {
+            backend.executors.push((**viewport).clone());
+        }
+        if let Some(executor) = &self.render_jobs.descriptor {
+            let mut executor = executor.clone();
+            if self.render_jobs.host.as_ref().is_none_or(|host| !host.is_available()) {
+                executor.availability = render::Availability::Unavailable { reason: "CPU image host is unavailable".into() };
+            }
+            backend.executors.push(executor);
+        }
+        backend
+    }
+
+    pub fn render_viewport(&self) -> Option<&render::ExecutorDescriptor> {
+        self.render_viewport.as_deref()
+    }
+
+    /// Installed hosts supply pure metadata; document commands cannot invent a device.
+    pub fn set_render_viewport(&mut self, viewport: Option<render::ExecutorDescriptor>) -> Result<()> {
+        if self.render_viewport.as_deref() == viewport.as_ref() {
+            return Ok(());
+        }
+        if let Some(executor) = &viewport {
+            if executor.profiles.is_empty() || executor.profiles.iter().any(|p| p.operation != render::RenderOperation::Viewport) {
+                return Err(EngineError::Other("host viewport executor must contain only viewport profiles".into()));
+            }
+            let mut backend = render::builtin_backend();
+            if let Some(executor) = &self.render_jobs.descriptor {
+                backend.executors.push(executor.clone());
+            }
+            backend.executors.push(executor.clone());
+            // Resolution validates the whole registry, including duplicate executor IDs.
+            let request = render::RenderRequest {
+                backend: None,
+                mode: render::RenderMode::Preview,
+                operation: render::RenderOperation::Image,
+                width: 1,
+                height: 1,
+                format: Some(render::RenderFormat::Png),
+                features: Vec::new(),
+                policy: Default::default(),
+            };
+            render::resolve_request(&[backend], &request).map_err(|e| EngineError::Other(e.to_string()))?;
+        }
+        self.render_viewport = viewport.map(Arc::new);
+        Ok(())
     }
 
     /// The design as a file holds it: the document with what is hidden in it.
@@ -395,17 +458,27 @@ impl Session {
         {
             return cached.world.clone();
         }
-        let mut w = if self.pending_moves.is_empty() {
-            solidcraft_doc::world_state(&self.doc, &st)
-        } else {
-            let mut d = (*self.doc).clone();
-            for o in &mut d.occurrences {
-                if let Some(m) = self.pending_moves.get(&o.id) {
-                    o.transform = *m;
+        // The bodies the last world state placed: unchanged ones are not transformed and meshed
+        // again (a design built command by command changed one body at a time).
+        let placed = self.world_cache.lock().ok().and_then(|c| c.as_ref().map(|c| c.placed.clone())).unwrap_or_default();
+        // Taken out while placing, so a scratch copy of the session sharing it never waits.
+        let mut reuse = placed.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default();
+        let mut w = {
+            if self.pending_moves.is_empty() {
+                solidcraft_doc::world_state_reusing(&self.doc, &st, &mut reuse)
+            } else {
+                let mut d = (*self.doc).clone();
+                for o in &mut d.occurrences {
+                    if let Some(m) = self.pending_moves.get(&o.id) {
+                        o.transform = *m;
+                    }
                 }
+                solidcraft_doc::world_state_reusing(&d, &st, &mut reuse)
             }
-            solidcraft_doc::world_state(&d, &st)
         };
+        if let Ok(mut p) = placed.lock() {
+            *p = reuse;
+        }
         // Sketch definitions are displayed once, at the placement currently being authored.
         if self.active_occurrence_path.is_some() && self.active_component != 0 {
             let first = self.occurrence_placement(&self.doc.first_path(self.active_component)).map(|p| p.world).unwrap_or(solidcraft_doc::IDENTITY);
@@ -440,6 +513,7 @@ impl Session {
                 active_component: self.active_component,
                 active_occurrence_path: self.active_occurrence_path.clone(),
                 world: w.clone(),
+                placed,
             });
         }
         w
@@ -461,6 +535,23 @@ impl Session {
             && self.doc.feature(id).is_none()
         {
             self.active_sketch = None;
+        }
+    }
+
+    /// Only persistent render intent changed. Never evaluate or clear a stale model here.
+    fn render_only_change(&self, before: &Snapshot) -> bool {
+        self.active_sketch == before.active_sketch && self.pending_moves == before.pending_moves && self.doc.differs_only_in_render(&before.doc)
+    }
+
+    fn refresh_render(&mut self, previous: &Arc<Document>) {
+        self.revision += 1;
+        // Geometry/placements have been proved identical. Retarget the cache's document key
+        // instead of discarding prepared meshes merely because the document Arc changed.
+        if let Ok(mut cache) = self.world_cache.lock()
+            && let Some(cache) = cache.as_mut()
+            && Arc::ptr_eq(&cache.doc, previous)
+        {
+            cache.doc = self.doc.clone();
         }
     }
 
@@ -519,6 +610,8 @@ impl Session {
     /// the model up to date before anything reads it.
     pub fn execute(&mut self, id: &str, params: &Value) -> Result<Value> {
         let spec = find_command(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
+        let host_viewport = self.render_viewport.clone();
+        let host_jobs = self.render_jobs.host.clone();
         let live = spec.live.filter(|_| params.get("live").and_then(Value::as_bool) == Some(true));
         if live.is_none() && spec.reads_model && self.model.is_stale() {
             self.refresh();
@@ -554,6 +647,12 @@ impl Session {
                 Err(EngineError::Internal(spec.id.to_string(), msg))
             }
         };
+        // New/open/recover can replace the Session. Device ownership belongs to the host,
+        // so its capability metadata survives those document lifecycle commands.
+        self.render_viewport = host_viewport;
+        if self.render_jobs.host.is_none() && host_jobs.is_some() {
+            self.set_render_job_host(host_jobs)?;
+        }
         if outermost && crash::enabled() {
             // A failed command leaves the design as it was (restored below).
             let failed = r.as_ref().err().map(ToString::to_string);
@@ -570,6 +669,8 @@ impl Session {
             Ok((v, live_edit)) => {
                 let v = if changed { self.with_created(spec.id, params, &before, v) } else { v };
                 if changed {
+                    let render_only = self.render_only_change(&before);
+                    let previous_doc = before.doc.clone();
                     if spec.undoable {
                         self.undo.push(before);
                         if self.undo.len() > MAX_UNDO {
@@ -579,6 +680,7 @@ impl Session {
                     }
                     match live_edit {
                         Some(edit) => self.refresh_live(edit),
+                        None if render_only => self.refresh_render(&previous_doc),
                         None => self.refresh(),
                     }
                 }
@@ -640,13 +742,19 @@ impl Session {
     pub fn restore_checkpoint(&mut self, id: u64) -> Result<()> {
         let i = self.checkpoints.iter().position(|c| c.id == id).ok_or_else(|| EngineError::Other(format!("no checkpoint {id}")))?;
         let Some(c) = self.checkpoints.drain(i..).next() else { return Err(EngineError::Other(format!("no checkpoint {id}"))) };
+        let before =
+            Snapshot { label: String::new(), doc: self.doc.clone(), active_sketch: self.active_sketch, pending_moves: self.pending_moves.clone() };
         self.doc = c.doc;
         self.active_sketch = c.active_sketch;
         self.pending_moves = c.pending_moves;
         self.undo = c.undo;
         self.redo = c.redo;
         self.selection.clear();
-        self.refresh();
+        if self.render_only_change(&before) {
+            self.refresh_render(&before.doc);
+        } else if !Arc::ptr_eq(&self.doc, &before.doc) || self.active_sketch != before.active_sketch || self.pending_moves != before.pending_moves {
+            self.refresh();
+        }
         Ok(())
     }
 
@@ -685,6 +793,8 @@ impl Session {
             next_checkpoint: 1,
             visibility: self.visibility.clone(),
             camera: self.camera,
+            render_viewport: self.render_viewport.clone(),
+            render_jobs: self.render_jobs.scratch(),
             saved_visibility: self.saved_visibility.clone(),
             #[cfg(test)]
             evaluations: 0,
@@ -817,6 +927,8 @@ mod derived_units_tests;
 mod display_mesh_tests;
 #[cfg(test)]
 mod extent_tests;
+#[cfg(test)]
+mod face_name_tests;
 #[cfg(test)]
 mod hole_face_tests;
 #[cfg(test)]

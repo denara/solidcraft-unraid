@@ -9,16 +9,19 @@ pub mod appearance;
 mod assembly;
 mod body_transfer;
 mod body_transfer_sheet;
+pub mod pbr_appearance;
 pub use body_transfer::{valid_transfer_matrix, validate_body_transfer};
 pub mod canvas;
 mod clipboard;
 pub use clipboard::{clone_expression, remap_topology};
 pub mod config;
 pub mod construct;
+pub mod display_quality;
 mod document;
 mod eval;
 pub mod expr;
 pub mod face_anchor;
+mod feature_geometry;
 mod feature_refs;
 pub use face_anchor::{FaceAnchor, FaceAttachmentStatus};
 pub mod format;
@@ -27,6 +30,8 @@ mod history_names;
 pub use format_offsets::whole_profile_selection_from_value;
 pub mod joints;
 mod lineage;
+pub mod metadata;
+pub use metadata::Metadata;
 pub mod motion;
 mod name_lookup;
 pub mod naming;
@@ -35,10 +40,12 @@ pub mod physical_material;
 mod piece_names;
 mod profile_refs;
 pub mod progress;
+mod walk;
 pub use profile_refs::{capture_profile_selection, profile_selection_indices};
 pub mod plastic;
 pub mod project;
 mod project3d;
+pub mod render_settings;
 pub use project3d::iso_grid;
 pub mod sheet;
 
@@ -48,9 +55,10 @@ pub use assembly::{
 };
 pub use document::*;
 pub use eval::{
-    EdgeRef, FeatureResult, Model, ModelBody, ModelState, RevolveExtent, SolvedSketch, ThreadInfo, curve_pick_error, edge_names_for, edge_refs,
-    face_point_names, face_point_state, hole_direction_at, object_height, parse_metric_thread, pattern_matrices, revolve_extent,
+    EdgeRef, FeatureResult, Model, ModelBody, ModelState, PlacedBodies, RevolveExtent, SolvedSketch, ThreadInfo, curve_pick_error, edge_names_for,
+    edge_refs, face_point_names, face_point_state, hole_direction_at, object_height, parse_metric_thread, pattern_matrices, revolve_extent,
     revolve_extent_with_convention, select_profiles, sketch_hole_direction, state_in_frame, state_in_frame_at, through_all_distance, world_state,
+    world_state_reusing,
 };
 pub use params::{ParamRow, ParamUser, cycles};
 pub use solidcraft_kernel as kernel;

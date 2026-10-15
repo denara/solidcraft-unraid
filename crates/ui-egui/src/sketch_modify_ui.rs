@@ -179,6 +179,58 @@ pub fn candidate(d: &Dialog, session: &solidcraft_engine::Session, hit: &Hit) ->
     }
 }
 
+/// Reopen the same pattern window with its stored parameters. OK reaches the same engine
+/// command with the pattern id, so previews and programmatic edits share the implementation.
+pub fn edit_pattern(app: &mut SolveApp, id: &str) -> bool {
+    use solidcraft_engine::sketch::SketchPatternKind;
+    let Some(sid) = app.session.active_sketch else { return false };
+    let state = app.session.world_state();
+    let Some(sk) = state.sketch(sid).map(|s| &s.sketch) else { return false };
+    let Some(pattern) = sk.patterns.iter().find(|p| p.id == id) else { return false };
+    let kind = match &pattern.kind {
+        SketchPatternKind::Circular { count, angle, .. } => Mod::PatternCirc { count: count.to_string(), angle: format!("{angle} deg") },
+        SketchPatternKind::Rectangular { count, spacing, count2, spacing2, .. } => Mod::PatternRect {
+            count: count.to_string(),
+            spacing: format!("{spacing} mm"),
+            count2: count2.to_string(),
+            spacing2: format!("{spacing2} mm"),
+        },
+    };
+    let mut dialog = Dialog::new(Kind::SketchModify(kind.clone()), inputs(&kind));
+    if let Some(input) = dialog.inputs.first_mut() {
+        input.items = pattern
+            .entities
+            .iter()
+            .map(|id| if sk.curve_index(id).is_some() { Sel::SketchCurve { id: id.clone() } } else { Sel::SketchPoint { id: id.clone() } })
+            .collect();
+    }
+    match &pattern.kind {
+        SketchPatternKind::Circular { center, .. } => {
+            if let Some(input) = dialog.inputs.get_mut(1) {
+                input.items = vec![Sel::SketchPoint { id: center.clone() }];
+            }
+        }
+        SketchPatternKind::Rectangular { dir, .. } => {
+            dialog.extra.insert("dir".into(), json!(dir));
+        }
+    }
+    dialog.extra.insert("pattern".into(), json!(id));
+    app.tool = None;
+    app.dialog = Some(dialog);
+    true
+}
+
+pub fn double_click_pattern(app: &mut SolveApp, pos: Pos2) -> bool {
+    let Some(glyph) = crate::sketch_tools::glyph_at(pos) else { return false };
+    let Some(sid) = app.session.active_sketch else { return false };
+    let id = app
+        .session
+        .world_state()
+        .sketch(sid)
+        .and_then(|ss| ss.sketch.patterns.iter().find(|p| p.instances.iter().any(|i| i.constraints.contains(&glyph))).map(|p| p.id.clone()));
+    id.is_some_and(|id| edit_pattern(app, &id))
+}
+
 /// Place a circular pattern centre in empty sketch space without creating a document point.
 pub fn pick_position(d: &mut Dialog, session: &solidcraft_engine::Session, point: Vec3) -> bool {
     if !matches!(d.kind, Kind::SketchModify(Mod::PatternCirc { .. })) || d.active != 1 {

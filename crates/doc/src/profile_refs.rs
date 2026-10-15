@@ -312,6 +312,7 @@ mod tests {
                     sketch: feature,
                     profiles: selection.clone(),
                     extent: crate::Extent {
+                        convention: crate::ExtrudeConvention::LegacyPerSide,
                         distance: "2".into(),
                         direction: crate::Direction::Positive,
                         distance2: None,
@@ -438,6 +439,7 @@ mod tests {
                     sketch: feature,
                     profiles: selection.clone(),
                     extent: crate::Extent {
+                        convention: crate::ExtrudeConvention::LegacyPerSide,
                         distance: "2".into(),
                         direction: crate::Direction::Positive,
                         distance2: None,

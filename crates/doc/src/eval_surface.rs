@@ -1,8 +1,9 @@
 //! Evaluation of the surface features: Patch, Stitch, Thicken, Trim, Extend, Surface Extrude,
-//! Revolve, Sweep and Loft, Offset, Unstitch and Reverse Normal (kernel `surfaces`,
-//! `surface_offset`).
+//! Revolve, Sweep and Loft, Offset, Ruled, Untrim, Unstitch and Reverse Normal (kernel `surfaces`,
+//! `surface_offset`, `surface_ruled`, `surface_untrim`).
 
 use super::*;
+use crate::{RuledCorners, RuledMode};
 use solidcraft_geom::Seg2;
 
 pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut ModelState) -> Result<()> {
@@ -77,11 +78,30 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
             }
             Ok(())
         }
-        FeatureKind::SurfaceExtend { body, edges, distance } => {
-            let d = val(vals, distance, Kind::Length)?;
+        FeatureKind::SurfaceExtend { body, edges, distance, mode, up_to, neighbours } => {
             let i = st.bodies.iter().position(|b| &b.name == body).ok_or_else(|| DocError::Unknown(format!("body `{body}`")))?;
             let Some(mb) = st.bodies.get(i).cloned() else { return Err(DocError::Invalid("body".into())) };
-            let out = kernel::extend(&mb.body, edges, d)?;
+            let mode = match mode {
+                crate::ExtendMode::Natural => kernel::ExtendMode::Natural,
+                crate::ExtendMode::Tangent => kernel::ExtendMode::Tangent,
+                crate::ExtendMode::Curvature => kernel::ExtendMode::Curvature,
+            };
+            let at = |limit| kernel::ExtendOptions { mode, limit, neighbours: *neighbours };
+            let out = match up_to {
+                None => kernel::extend_surface(&mb.body, edges, &at(kernel::ExtendLimit::Distance(val(vals, distance, Kind::Length)?)))?,
+                Some(crate::ExtendTo::Bounds) => kernel::extend_surface(&mb.body, edges, &at(kernel::ExtendLimit::Bounds))?,
+                Some(crate::ExtendTo::Plane(plane)) => {
+                    let tool = kernel::SplitTool::Plane(doc.resolve_plane_in(vals, plane, 0, Some(st))?);
+                    kernel::extend_surface(&mb.body, edges, &at(kernel::ExtendLimit::UpTo(&tool)))?
+                }
+                Some(crate::ExtendTo::Face(t)) => {
+                    let tb = st.body(&t.body).ok_or_else(|| DocError::Unknown(format!("body `{}`", t.body)))?;
+                    let face = crate::appearance::face_index_at(tb, t.point)
+                        .ok_or_else(|| DocError::Invalid(format!("no face of `{}` at the target point", t.body)))?;
+                    let tool = kernel::SplitTool::Face { body: &tb.body, face };
+                    kernel::extend_surface(&mb.body, edges, &at(kernel::ExtendLimit::UpTo(&tool)))?
+                }
+            };
             if let Some(slot) = st.bodies.get_mut(i) {
                 *slot = ModelBody::new(mb.name, out, mb.feature);
             }
@@ -232,6 +252,52 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
             let made = Traced::step(kernel::offset_surface(&mb.body, &picked, d, tol)?, &[&mb.traced()]);
             let name = new_name(st, f, 0);
             st.bodies.push(ModelBody::traced_new(name, made, f.id));
+            Ok(())
+        }
+        FeatureKind::SurfaceRuled { body, edges, distance, mode, angle, direction, flip, corners, face } => {
+            let d = val(vals, distance, Kind::Length)?;
+            let mode = match mode {
+                RuledMode::Normal => kernel::RuledMode::Normal,
+                RuledMode::Tangent => kernel::RuledMode::Tangent,
+                RuledMode::Angle => {
+                    let a = angle.as_ref().ok_or_else(|| DocError::Invalid("a ruled surface at an angle needs `angle`".into()))?;
+                    kernel::RuledMode::Angle { angle: val(vals, a, Kind::Angle)?, reference: *direction }
+                }
+                RuledMode::Direction => kernel::RuledMode::Direction(
+                    direction.ok_or_else(|| DocError::Invalid("a ruled surface along a direction needs `direction`".into()))?,
+                ),
+            };
+            let corners = match corners {
+                RuledCorners::Mitre => kernel::RuledCorners::Mitre,
+                RuledCorners::Round => kernel::RuledCorners::Round,
+            };
+            let mb = st.body(body).cloned().ok_or_else(|| DocError::Unknown(format!("body `{body}`")))?;
+            let r = kernel::Ruled { distance: d, mode, flip: *flip, corners, face: *face };
+            let made = Traced::step(kernel::ruled_surface(&mb.body, edges, &r)?, &[&mb.traced()]);
+            let name = new_name(st, f, 0);
+            st.bodies.push(ModelBody::traced_new(name, made, f.id));
+            Ok(())
+        }
+        FeatureKind::SurfaceUntrim { face, holes, outer, in_place } => {
+            let i = st.bodies.iter().position(|b| b.name == face.body).ok_or_else(|| DocError::Unknown(format!("body `{}`", face.body)))?;
+            let Some(mb) = st.bodies.get(i).cloned() else { return Err(DocError::Invalid("body".into())) };
+            let fi = crate::appearance::face_index_at(&mb, face.point)
+                .ok_or_else(|| DocError::Invalid(format!("Untrim: no face of {} at {:?}", mb.name, face.point)))?;
+            let which = match holes {
+                None => kernel::UntrimHoles::All,
+                Some(points) => kernel::UntrimHoles::At(points),
+            };
+            // A surface body's face is untrimmed where it is when asked; a solid's is copied out.
+            let replace = *in_place && mb.body.is_surface();
+            let made = mb.traced().then(kernel::untrim(&mb.body, fi, which, *outer, replace)?);
+            if replace {
+                if let Some(slot) = st.bodies.get_mut(i) {
+                    *slot = ModelBody::traced_new(mb.name, made, mb.feature);
+                }
+            } else {
+                let name = new_name(st, f, 0);
+                st.bodies.push(ModelBody::traced_new(name, made, f.id));
+            }
             Ok(())
         }
         _ => Err(DocError::Invalid("not a surface feature".into())),

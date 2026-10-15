@@ -411,43 +411,60 @@ impl PolyBoundaryPiece {
     ) -> Option<Self> {
         let (up, vp) = (surface.u_period(), surface.v_period());
         let (urange, vrange) = surface.try_range_tuple();
-        let mut bdry3d: Vec<Point3> = wire
+        let bdry3d: Vec<Point3> = wire
             .flat_map(|poly_edge| {
                 let n = poly_edge.len() - 1;
                 poly_edge.into_iter().take(n)
             })
             .collect();
-        bdry3d.push(bdry3d[0]);
-        let mut previous = None;
-        let mut vec = bdry3d
-            .into_iter()
-            .flat_map(|pt| {
-                let (mut u, mut v) = match sp(surface, pt, previous) {
-                    // SolidCraft: validate exact and nearest results alike, once per
-                    // boundary point, including the bounded provisional preview.
-                    Some(hint) => sane(surface, pt, hint),
-                    None => return vec![None],
-                };
-                if let (Some(up), Some((u0, _))) = (up, previous) {
-                    u = get_mindiff(u, u0, up);
-                }
-                if let (Some(vp), Some((_, v0))) = (vp, previous) {
-                    v = get_mindiff(v, v0, vp);
-                }
-                let res = (|| {
-                    if let Some((u0, v0)) = previous {
-                        if !u0.near(&u) && surface.uder(u0, v0).so_small() {
-                            return vec![Some(Point2::new(u, v0)), Some(Point2::new(u, v))];
-                        } else if !v0.near(&v) && surface.vder(u0, v0).so_small() {
-                            return vec![Some(Point2::new(u0, v)), Some(Point2::new(u, v))];
-                        }
+        let walk = |mut bdry3d: Vec<Point3>| -> Option<Vec<Point2>> {
+            bdry3d.push(bdry3d[0]);
+            let mut previous = None;
+            bdry3d
+                .into_iter()
+                .flat_map(|pt| {
+                    let (mut u, mut v) = match sp(surface, pt, previous) {
+                        // SolidCraft: validate exact and nearest results alike, once per
+                        // boundary point, including the bounded provisional preview.
+                        Some(hint) => sane(surface, pt, hint),
+                        None => return vec![None],
+                    };
+                    if let (Some(up), Some((u0, _))) = (up, previous) {
+                        u = get_mindiff(u, u0, up);
                     }
-                    vec![Some(Point2::new(u, v))]
-                })();
-                previous = Some((u, v));
-                res
-            })
-            .collect::<Option<Vec<Point2>>>()?;
+                    if let (Some(vp), Some((_, v0))) = (vp, previous) {
+                        v = get_mindiff(v, v0, vp);
+                    }
+                    let res = (|| {
+                        if let Some((u0, v0)) = previous {
+                            if !u0.near(&u) && surface.uder(u0, v0).so_small() {
+                                return vec![Some(Point2::new(u, v0)), Some(Point2::new(u, v))];
+                            } else if !v0.near(&v) && surface.vder(u0, v0).so_small() {
+                                return vec![Some(Point2::new(u0, v)), Some(Point2::new(u, v))];
+                            }
+                        }
+                        vec![Some(Point2::new(u, v))]
+                    })();
+                    previous = Some((u, v));
+                    res
+                })
+                .collect::<Option<Vec<Point2>>>()
+        };
+        // SolidCraft: each point is searched from the one before it, but the first has no
+        // hint, and a search without one can miss a point that lies on the surface (a corner of
+        // a fillet strip on a surface extended past it, #882): the whole face was then left
+        // unmeshed. When the walk fails, it is tried once more from the first point an unhinted
+        // search finds. A walk that succeeds is kept as it is (where a loop starts decides how
+        // it is laid out across a periodic surface's seam).
+        let mut vec = match walk(bdry3d.clone()) {
+            Some(vec) => vec,
+            None => {
+                let start = bdry3d.iter().skip(1).position(|pt| sp(surface, *pt, None).is_some())? + 1;
+                let mut rotated = bdry3d;
+                rotated.rotate_left(start);
+                walk(rotated)?
+            }
+        };
         let grav = vec.iter().fold(Point2::origin(), |g, p| g + p.to_vec()) / vec.len() as f64;
         if let (Some(up), Some((u0, _))) = (up, urange) {
             let quot = f64::floor((grav.x - u0) / up);

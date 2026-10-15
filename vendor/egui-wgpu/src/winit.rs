@@ -27,6 +27,9 @@ struct SurfaceState {
     needs_recreate: bool,
 }
 
+/// SolidCraft: whether a frame was presented yet (`crate::STEP_FIRST_PRESENT`).
+static FIRST_PRESENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Everything you need to paint egui with [`wgpu`] on [`winit`].
 ///
 /// Alternatively you can use [`crate::Renderer`] directly.
@@ -70,6 +73,7 @@ impl Painter {
         options: RendererOptions,
     ) -> Self {
         let (capture_tx, capture_rx) = capture_channel();
+        crate::startup_step(crate::STEP_INSTANCE, ""); // SolidCraft
         let instance = config.wgpu_setup.new_instance().await;
 
         Self {
@@ -206,6 +210,7 @@ impl Painter {
         if let Some(window) = window {
             let size = window.inner_size();
             if !self.surfaces.contains_key(&viewport_id) {
+                crate::startup_step(crate::STEP_SURFACE, ""); // SolidCraft
                 let surface = self.instance.create_surface(window)?;
                 self.add_surface(surface, viewport_id, size).await?;
             }
@@ -259,6 +264,7 @@ impl Painter {
             self.options.msaa_samples = render_state.msaa_samples;
             self.render_state = Some(render_state);
         }
+        crate::startup_step(crate::STEP_SURFACE_CONFIGURE, ""); // SolidCraft
         self.install_surface(surface, viewport_id, size.width, size.height, false);
         Ok(())
     }
@@ -628,6 +634,10 @@ impl Painter {
             profiling::scope!("get_current_texture");
             // This is what vsync-waiting happens on my Mac.
             let start = web_time::Instant::now();
+            // SolidCraft: the first frame is the last startup step.
+            if !FIRST_PRESENT.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                crate::startup_step(crate::STEP_FIRST_PRESENT, "");
+            }
             let output_frame = surface_state.surface.get_current_texture();
             vsync_sec += start.elapsed().as_secs_f32();
             output_frame

@@ -41,6 +41,7 @@ fn surface_of(shell: mt::Shell) -> Body {
         splits: None,
         face_sources: None,
         history: None,
+        display_of: None,
         regularization_protected: false,
     }
 }
@@ -414,6 +415,17 @@ pub fn patch_edges(body: &Body, at: &[Vec3]) -> Result<Body> {
 /// The edges of `body` picked by points on them, chained into one closed loop (each turned to
 /// run along it). Call it under [`guard`]: sampling an intersection curve can fail in truck.
 pub(crate) fn picked_loop(body: &Body, at: &[Vec3]) -> Result<Vec<mt::Edge>> {
+    match picked_chain(body, at)? {
+        (chain, true) => Ok(chain),
+        (_, false) => Err(KernelError::Invalid("the edges do not form a closed loop".into())),
+    }
+}
+
+/// The edges of `body` picked by points on them, chained end to end (each turned to run along
+/// the chain), and whether the chain closes: a closed loop starts with the last edge picked; an
+/// open chain runs from the free end met first in pick order. Edges that branch, or form more
+/// than one chain, are refused. Call it under [`guard`], as [`picked_loop`].
+pub(crate) fn picked_chain(body: &Body, at: &[Vec3]) -> Result<(Vec<mt::Edge>, bool)> {
     let mut edges: Vec<mt::Edge> = Vec::new();
     for p in at {
         let e = edge_near(body, *p).ok_or_else(|| KernelError::Invalid(format!("no edge at {p:?}")))?;
@@ -421,25 +433,40 @@ pub(crate) fn picked_loop(body: &Body, at: &[Vec3]) -> Result<Vec<mt::Edge>> {
             edges.push(e);
         }
     }
+    let mut uses: HashMap<mt::VertexID, usize> = HashMap::new();
+    for e in &edges {
+        *uses.entry(e.front().id()).or_default() += 1;
+        *uses.entry(e.back().id()).or_default() += 1;
+    }
+    if uses.values().any(|n| *n > 2) {
+        return Err(KernelError::Invalid("the edges branch: pick one chain".into()));
+    }
+    let free = |v: &mt::Vertex| uses.get(&v.id()) == Some(&1);
+    let open_end = edges.iter().find_map(|e| [e.front(), e.back()].into_iter().find(|v| free(v)).cloned());
     let mut pool = edges;
-    let first = pool.pop().ok_or_else(|| KernelError::Invalid("no edges".into()))?;
+    let (first, closed) = match &open_end {
+        Some(v) => {
+            let k = pool.iter().position(|e| e.front().id() == v.id() || e.back().id() == v.id());
+            let e = k.map(|k| pool.remove(k)).ok_or_else(|| KernelError::Invalid("no edges".into()))?;
+            (if e.front().id() == v.id() { e } else { e.inverse() }, false)
+        }
+        None => (pool.pop().ok_or_else(|| KernelError::Invalid("no edges".into()))?, true),
+    };
     let start = first.front().id();
     let mut at_v = first.back().clone();
     let mut chain = vec![first];
-    while at_v.id() != start {
-        let k = pool
-            .iter()
-            .position(|e| e.front().id() == at_v.id() || e.back().id() == at_v.id())
-            .ok_or_else(|| KernelError::Invalid("the edges do not form a closed loop".into()))?;
+    while !(closed && at_v.id() == start) {
+        let Some(k) = pool.iter().position(|e| e.front().id() == at_v.id() || e.back().id() == at_v.id()) else { break };
         let e = pool.remove(k);
         let e = if e.front().id() == at_v.id() { e } else { e.inverse() };
         at_v = e.back().clone();
         chain.push(e);
     }
     if !pool.is_empty() {
-        return Err(KernelError::Invalid("the edges form more than one loop".into()));
+        let what = if closed { "the edges form more than one loop" } else { "the edges form more than one chain" };
+        return Err(KernelError::Invalid(what.into()));
     }
-    Ok(chain)
+    Ok((chain, closed))
 }
 
 /// Faces of a body copied out as a surface body (faces picked by points on them). Its history is
@@ -694,10 +721,24 @@ fn map_pt(off: &Offset, p: mt::Point3, d: f64) -> mt::Point3 {
 /// A curve moved by an offset (control points mapped; exact for lines, and for circles square
 /// to a cylinder's axis or in a plane).
 pub(crate) fn map_curve(off: &Offset, c: &mt::Curve, d: f64) -> Result<mt::Curve> {
-    Ok(match c {
-        mt::Curve::Line(l) => mt::Curve::Line(mt::Line(map_pt(off, l.0, d), map_pt(off, l.1, d))),
+    if let Some(moved) = map_control_points(c, |p| off.map(p, d)) {
+        return Ok(moved);
+    }
+    // Anything else: a cubic through moved samples.
+    let (t0, t1) = c.range_tuple();
+    let pts: Vec<Vec3> = (0..=32).map(|k| off.map(from_p3(c.subs(t0 + (t1 - t0) * k as f64 / 32.0)), d)).collect();
+    Ok(mt::Curve::BSplineCurve(crate::build::interpolate_cubic(&pts).ok_or_else(|| KernelError::Failed("offset edge".into()))?))
+}
+
+/// A line, B-spline or NURBS curve with its control points mapped by `f` (the exact image of
+/// the curve under an affine `f`); `None` for a curve without control points (an
+/// intersection curve).
+pub(crate) fn map_control_points(c: &mt::Curve, f: impl Fn(Vec3) -> Vec3) -> Option<mt::Curve> {
+    let map = |p: mt::Point3| p3(f(from_p3(p)));
+    Some(match c {
+        mt::Curve::Line(l) => mt::Curve::Line(mt::Line(map(l.0), map(l.1))),
         mt::Curve::BSplineCurve(b) => {
-            let pts: Vec<mt::Point3> = b.control_points().iter().map(|p| map_pt(off, *p, d)).collect();
+            let pts: Vec<mt::Point3> = b.control_points().iter().map(|p| map(*p)).collect();
             mt::Curve::BSplineCurve(mt::BSplineCurve::new(b.knot_vec().clone(), pts))
         }
         mt::Curve::NurbsCurve(n) => {
@@ -707,18 +748,13 @@ pub(crate) fn map_curve(off: &Offset, c: &mt::Curve, d: f64) -> Result<mt::Curve
                 .iter()
                 .map(|h| {
                     let w = h.w;
-                    let q = map_pt(off, mt::Point3::new(h.x / w, h.y / w, h.z / w), d);
+                    let q = map(mt::Point3::new(h.x / w, h.y / w, h.z / w));
                     mt::Vector4::new(q.x * w, q.y * w, q.z * w, w)
                 })
                 .collect();
             mt::Curve::NurbsCurve(mt::NurbsCurve::new(mt::BSplineCurve::new(nb.knot_vec().clone(), pts)))
         }
-        other => {
-            // Anything else: a cubic through moved samples.
-            let (t0, t1) = other.range_tuple();
-            let pts: Vec<Vec3> = (0..=32).map(|k| off.map(from_p3(other.subs(t0 + (t1 - t0) * k as f64 / 32.0)), d)).collect();
-            mt::Curve::BSplineCurve(crate::build::interpolate_cubic(&pts).ok_or_else(|| KernelError::Failed("offset edge".into()))?)
-        }
+        mt::Curve::IntersectionCurve(_) => return None,
     })
 }
 

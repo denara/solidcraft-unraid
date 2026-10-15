@@ -142,8 +142,9 @@ pub fn tool_definitions() -> Vec<Value> {
         tool(
             "body_topology",
             "List edges and faces",
-            "The edges (index, midpoint, length, endpoints) and faces (index, area, centroid, plane normal) of a body. Use \
-             an edge midpoint as the [x,y,z] point that picks the edge for fillet and chamfer.",
+            "The edges (index, midpoint, length, endpoints) and faces (index, name, area, centroid, plane normal, a `point` that lies \
+             on the face, and for a cylindrical face its `cylinder`: origin, axis, radius) of a body. Use an edge midpoint as the \
+             [x,y,z] point that picks the edge for fillet and chamfer; a face's point or its name picks the face for the face commands.",
             obj(json!({"body": string("Body name, e.g. \"Body1\"")}), &["body"]),
             Effect::ReadOnly,
         ),
@@ -170,7 +171,8 @@ pub fn tool_definitions() -> Vec<Value> {
             "Render the design and return it as a PNG image. Headless: a CPU render of the model, fitted to the view. \
              Connected to the app: a screenshot of the window (source \"window\", the default) or a render of the model \
              with the app's camera (source \"model\"). Both show an active section (inspect.section) with its cut face \
-             capped. `view` first turns the camera to a standard view or a saved named view (view.save), `camera` to              any camera (as view.apply).",
+             capped. `view` first turns the camera to a standard view or a saved named view (view.save), `camera` to              any camera (as view.apply). \
+             `grid: false` and `axes: false` leave the ground grid (on Z 0) and the origin's axes out of a model render.",
             obj(
                 json!({
                     "view": string(
@@ -181,6 +183,8 @@ pub fn tool_definitions() -> Vec<Value> {
                     "width": {"type": "integer", "description": "Render width in pixels (model renders; default 960)"},
                     "height": {"type": "integer", "description": "Render height in pixels (model renders; default 600)"},
                     "source": {"type": "string", "enum": ["window", "model"], "description": "window = app screenshot, model = model render"},
+                    "grid": {"type": "boolean", "description": "false: leave the ground grid out of the render. It lies on Z 0 and cuts through a part that straddles it. Model renders only: default true, or as the app shows it when connected; with `grid` or `axes` a connected screenshot is a model render, and source \"window\" is an error"},
+                    "axes": {"type": "boolean", "description": "false: leave the origin's three axes out of the render (see `grid`). Axes hidden with browser.visibility stay hidden"},
                 }),
                 &[],
             ),
@@ -237,8 +241,17 @@ pub fn tool_definitions() -> Vec<Value> {
             "Open a design",
             "Open a .solidcraft design file, a STEP file (.step/.stp: a new design whose bodies come from the file, as an \
              Import base feature) or a 3MF/STL mesh (.3mf/.stl: mesh bodies). Replaces the current design; insert into it \
-             instead with the file.insert_step (STEP) or file.insert_mesh (3MF/STL) commands.",
-            obj(json!({"path": string("Path to a .solidcraft, .step/.stp, .3mf or .stl file")}), &["path"]),
+             instead with the file.insert_step (STEP) or file.insert_mesh (3MF/STL) commands. A STEP file from a system \
+             that has Y up opens lying on its back: `up: \"y\"` turns it a quarter turn about X (Y becomes Z) with a Move \
+             feature. `names` picks what the bodies are named after when the solids' own names say nothing useful.",
+            obj(
+                json!({
+                    "path": string("Path to a .solidcraft, .step/.stp, .3mf or .stl file"),
+                    "up": {"type": "string", "enum": ["z", "y"], "description": "STEP only. z (default) keeps the file's axes; y: the file has Y up, so its bodies are turned to stand Z up"},
+                    "names": {"type": "string", "enum": ["solid", "product", "instance"], "description": "STEP only. What the bodies are named after: solid (default: the solid's own name, else the product's), product (the part's name) or instance (the assembly occurrence's name, else the product's)"},
+                }),
+                &["path"],
+            ),
             Effect::Files,
         ),
         tool(
@@ -400,7 +413,7 @@ fn dispatch(b: &mut dyn Backend, name: &str, a: &Map<String, Value>) -> Result<V
         "undo" => exec(b, "edit.undo", json!({})),
         "redo" => exec(b, "edit.redo", json!({})),
         "new_design" => exec(b, "file.new", pick(a, &["name"])),
-        "open" => exec(b, "doc.open", pick(a, &["path"])),
+        "open" => exec(b, "doc.open", pick(a, &["path", "up", "names"])),
         "save" => exec(b, "file.save", pick(a, &["path", "format"])),
         other => Err(format!("unknown tool `{other}`")),
     }
@@ -478,6 +491,8 @@ fn batch(b: &mut dyn Backend, a: &Map<String, Value>) -> Value {
             Ok(r) => return batch_reply(&r, rollback, verbose),
             // Older apps and the headless session, or the app wants the steps one by one.
             Err(e) if e.starts_with("unknown method") || e.starts_with("engine.batch unavailable") => {}
+            // Never sent: no app to send it to.
+            Err(e) if e.starts_with(crate::backend::NOT_RUNNING) => return text_result(&Value::String(e), true),
             // The app may have run it: sending the steps again would apply them twice.
             Err(e) => {
                 let msg = format!("the app did not answer engine.batch ({e}); it may have run: inspect the design before sending it again");
@@ -567,6 +582,16 @@ fn screenshot(b: &mut dyn Backend, a: &Map<String, Value>) -> Value {
 }
 
 fn capture(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<(Vec<u8>, Value), String> {
+    // `grid` and `axes` shape a model render; the window shows what it shows.
+    let guides: Vec<(&str, bool)> = ["grid", "axes"].into_iter().filter_map(|k| a.get(k).and_then(Value::as_bool).map(|v| (k, v))).collect();
+    let window = match str_arg(a, "source") {
+        Some("model") => false,
+        Some("window") if !guides.is_empty() => {
+            return Err("screenshot: `grid` and `axes` apply to model renders; use source \"model\" (the window shows what it shows)".into());
+        }
+        Some("window") => true,
+        _ => b.has_ui() && guides.is_empty(),
+    };
     let apply = |b: &mut dyn Backend, params: Value| b.call("engine.execute", json!({"command": "view.apply", "params": params}));
     match (str_arg(a, "view"), a.get("camera").filter(|c| !c.is_null())) {
         (Some(_), Some(_)) => return Err("screenshot: give `view` or `camera`, not both".into()),
@@ -592,13 +617,14 @@ fn capture(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<(Vec<u8>, Valu
         let dir = crate::scratch_dir().unwrap_or_else(vfs::temp_dir);
         dir.join(format!("shot-{n}.png")).to_string_lossy().to_string()
     });
-    let window = match str_arg(a, "source") {
-        Some("model") => false,
-        Some("window") => true,
-        _ => b.has_ui(),
-    };
     let size = |k: &str, d: u64| a.get(k).and_then(Value::as_u64).unwrap_or(d).clamp(16, 4096);
-    let render = |b: &mut dyn Backend| b.call("ui.render", json!({"path": path, "width": size("width", 960), "height": size("height", 600)}));
+    let render = |b: &mut dyn Backend| {
+        let mut params = json!({"path": path, "width": size("width", 960), "height": size("height", 600)});
+        for (k, v) in &guides {
+            params[*k] = json!(v);
+        }
+        b.call("ui.render", params)
+    };
     let (info, source) = if window {
         match b.call("ui.screenshot", json!({"path": path})) {
             Ok(v) => (v, "window"),

@@ -152,7 +152,14 @@ pub fn start(app: &SolveApp, id: &str) -> Option<(Kind, Vec<SelInput>)> {
         "joint.origin" => (Asm::JointOrigin { name: String::new(), hover: None }, vec![SelInput::new("Snap", SNAPS, false)]),
         "joint.rigid_group" => (Asm::RigidGroup, vec![SelInput::new("Components", BODIES, true)]),
         "joint.drive" => {
-            let joint = movable(s).first().copied().unwrap_or(0);
+            // The joint picked in the browser, else the first that moves.
+            let list = movable(s);
+            let picked = app
+                .tree
+                .picked_joints
+                .iter()
+                .find_map(|id| list.iter().copied().find(|i| s.doc.assembly.joints.get(*i).is_some_and(|j| j.id == *id)));
+            let joint = picked.or(list.first().copied()).unwrap_or(0);
             (Asm::Drive { joint, values: current_values(s, joint), focus: true }, vec![])
         }
         "joint.motion_link" => {
@@ -165,6 +172,48 @@ pub fn start(app: &SolveApp, id: &str) -> Option<(Kind, Vec<SelInput>)> {
         _ => return None,
     };
     Some((Kind::Assembly(asm), inputs))
+}
+
+/// What an open dialog starts on when the control channel's `ui.start` passes `params`. Drive
+/// Joints takes `joint` (id or name) and `values` (numbers: degrees or millimetres; text: an
+/// expression), as `joint.drive` does. Nothing is driven until OK.
+pub fn preset(s: &Session, k: &mut Asm, p: &Value) -> Result<(), String> {
+    let Asm::Drive { joint, values, .. } = k else { return Err(format!("{} takes no params yet", k.title())) };
+    let o = p.as_object().ok_or("`params` must be an object")?;
+    if let Some(key) = o.keys().find(|k| !matches!(k.as_str(), "joint" | "values")) {
+        return Err(format!("unknown param `{key}` (Drive Joints takes joint, values)"));
+    }
+    if let Some(v) = o.get("joint") {
+        let key = match v {
+            Value::Number(n) => n.to_string(),
+            Value::String(x) => x.clone(),
+            _ => return Err("`joint` must be an id or a name".into()),
+        };
+        let i = s.doc.assembly.joints.iter().position(|j| j.id.to_string() == key || j.name == key).ok_or_else(|| format!("no joint `{key}`"))?;
+        if !movable(s).contains(&i) {
+            return Err(format!("joint `{key}` is rigid: it has nothing to drive"));
+        }
+        *joint = i;
+        *values = current_values(s, i);
+    }
+    if let Some(v) = o.get("values") {
+        let j = s.doc.assembly.joints.get(*joint).ok_or("no joint that moves yet")?;
+        let list = v.as_array().ok_or("`values` must be a list")?;
+        if list.len() > values.len() {
+            return Err(format!("`{}` takes {} value(s)", j.name, values.len()));
+        }
+        for (i, (slot, v)) in values.iter_mut().zip(list).enumerate() {
+            *slot = match v {
+                Value::Number(n) => {
+                    let x = n.as_f64().filter(|x| x.is_finite() && x.abs() < 1e9).ok_or("values must be finite numbers")?;
+                    num(x, if j.kind.is_angle(i) { "deg" } else { "mm" })
+                }
+                Value::String(t) if t.len() <= 1000 => t.clone(),
+                _ => return Err("values must be numbers or expressions".into()),
+            };
+        }
+    }
+    Ok(())
 }
 
 /// Indices (into the design's joints) of joints that move (not rigid).
@@ -223,23 +272,28 @@ pub fn animate_joint(app: &SolveApp, id: u64) -> Option<Dialog> {
 pub fn find_joint(app: &mut SolveApp, id: u64) {
     let s = &app.session;
     let Some(j) = s.doc.assembly.joints.iter().find(|j| j.id == id) else { return };
-    let occs = [j.a.occurrence, j.b.occurrence];
-    let model = s.model.state();
-    let world = s.world_state();
-    let mut bb = Aabb3::default();
-    for (name, _, path, _) in s.doc.body_frames(&model) {
-        // The root (occurrence 0) holds the bodies outside every occurrence.
-        let on = occs.iter().any(|o| if *o == 0 { path.is_empty() } else { path.contains(o) });
-        if on && let Some(b) = world.body(&name) {
-            bb = bb.union(&b.mesh().bounds());
-        }
-    }
+    let bb = occurrence_bounds(s, &[j.a.occurrence, j.b.occurrence]);
     if bb.is_empty() {
         return;
     }
     let mut cam = app.cam;
     cam.fit(&bb);
     app.animate_to(cam);
+}
+
+/// The box around the bodies of occurrences (and of the occurrences inside them), where they
+/// are placed; occurrence 0 is the root, holding the bodies outside every occurrence.
+pub fn occurrence_bounds(s: &Session, occs: &[u64]) -> Aabb3 {
+    let model = s.model.state();
+    let world = s.world_state();
+    let mut bb = Aabb3::default();
+    for (name, _, path, _) in s.doc.body_frames(&model) {
+        let on = occs.iter().any(|o| if *o == 0 { path.is_empty() } else { path.contains(o) });
+        if on && let Some(b) = world.body(&name) {
+            bb = bb.union(&b.mesh().bounds());
+        }
+    }
+    bb
 }
 
 pub fn drive_joint(app: &SolveApp, id: u64) -> Option<Dialog> {
@@ -548,6 +602,13 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Asm, inputs: &mut [Se
                 );
                 ui.end_row();
             }
+            // The preview drove the joint: where it stopped short, and why (a closed loop or a
+            // contact set), so the values asked for are not taken for where it is.
+            if let Some(why) = app.preview.stopped.as_ref().and_then(drive_stop) {
+                row_label(ui, "");
+                ui.label(RichText::new(why).color(t.warning));
+                ui.end_row();
+            }
         }
         Asm::MotionLink { a, b, ia, ib, ratio, offset } => {
             let s = &app.session;
@@ -834,6 +895,13 @@ pub fn world_preview(s: &Session, cmds: &[(String, Value)], colors: Colors) -> O
         Ok(preview) => preview,
         Err(error) => return Some(Err(error.to_string())),
     };
+    let stopped = cmds
+        .iter()
+        .zip(&preview.replies)
+        .find(|((c, _), r)| {
+            c == "joint.drive" && (r["stopped_by_loop"].is_object() || r["stopped_by_contact"].is_object() || r["unconnected"].is_string())
+        })
+        .map(|(_, r)| r.clone());
     let (before, after) = (preview.before, preview.after);
     // A moved component looks like itself (no new surface), with its old place as the ghost.
     let colors = Colors { added: colors.body, ..colors };
@@ -841,10 +909,36 @@ pub fn world_preview(s: &Session, cmds: &[(String, Value)], colors: Colors) -> O
     Some(match built {
         Ok(mut b) => {
             b.bounds = after.bodies.iter().fold(Aabb3::EMPTY, |acc, x| acc.union(&x.mesh().bounds()));
+            b.stopped = stopped;
             Ok(b)
         }
         Err(_) => Err("the preview failed".into()),
     })
+}
+
+/// What a drive that stopped short of the asked values says: where the joint got to and why
+/// (`None`: it went all the way). `reply` is `joint.drive`'s result. A drive whose joint is
+/// joined to nothing grounded moves nothing, and says which part that is.
+pub fn drive_stop(reply: &Value) -> Option<String> {
+    if let Some(part) = reply.get("unconnected").and_then(Value::as_str) {
+        return Some(crate::i18n::format("drive.unconnected", &[("part", part)]));
+    }
+    // The values come as joint.list gives them: degrees and millimetres.
+    let at: Vec<String> = reply
+        .get("values")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|v| Some((v.get("value")?.as_f64()?, v.get("unit")?.as_str()?)))
+        .map(|(v, unit)| if unit == "deg" { num((v * 10.0).round() / 10.0, "deg") } else { num((v * 100.0).round() / 100.0, "mm") })
+        .collect();
+    let at = at.join(", ");
+    let name = |v: &Value| v.as_str().unwrap_or_default().to_string();
+    if let Some(l) = reply.get("stopped_by_loop").filter(|v| v.is_object()) {
+        return Some(crate::i18n::format("drive.stopped_by_loop", &[("value", &at), ("joint", &name(&l["joint"]))]));
+    }
+    let c = reply.get("stopped_by_contact").filter(|v| v.is_object())?;
+    Some(crate::i18n::format("drive.stopped_by_contact", &[("value", &at), ("a", &name(&c["a"])), ("b", &name(&c["b"]))]))
 }
 
 // ---- overlay ----
@@ -866,7 +960,9 @@ pub fn overlay(app: &SolveApp, painter: &egui::Painter, proj: &Proj, d: &mut Dia
                     continue;
                 }
                 let k = 0.55 + 0.45 * facing;
-                let fill = Color32::from_rgba_unmultiplied((235.0 * k) as u8, (45.0 * k) as u8, (40.0 * k) as u8, 210);
+                let shade = |c: u8| (f64::from(c) * k) as u8;
+                let ic = t.interference;
+                let fill = Color32::from_rgba_unmultiplied(shade(ic.r()), shade(ic.g()), shade(ic.b()), 210);
                 let sp: Vec<Pos2> = ps.iter().filter_map(|p| proj.to_screen(*p)).collect();
                 if sp.len() == 3 {
                     let base = em.vertices.len() as u32;
@@ -1051,14 +1147,24 @@ pub fn browser_joints(app: &mut SolveApp, ui: &mut egui::Ui, depth: usize) {
     use crate::browser::{Row, draw_row, is_open, toggle};
     let joints: Vec<(u64, String, JointKind, bool)> =
         app.session.doc.assembly.joints.iter().map(|j| (j.id, j.name.clone(), j.kind, j.suppressed)).collect();
+    app.tree.picked_joints.retain(|p| joints.iter().any(|j| j.0 == *p));
     if joints.is_empty() {
         return;
     }
-    // Drawn like every other browser node (its fold and rows publish `fold:Joints`, `row:<name>`).
+    // Drawn like every other browser node (its fold, eye and rows publish `fold:Joints`,
+    // `eye:Joints`, `row:<name>`). The folder's eye hides every joint's glyph, or shows them
+    // all when none is shown.
     let key = "c0/joints";
     let open = is_open(app, key, true);
-    let r = draw_row(ui, ui.id().with(key), &Row { depth, fold: Some(open), icon: "folder", label: "Joints", ..Default::default() });
-    if r.fold || r.clicked {
+    let any_visible = joints.iter().any(|j| app.session.joint_visible(j.0));
+    let r = draw_row(
+        ui,
+        ui.id().with(key),
+        &Row { depth, fold: Some(open), eye: Some(any_visible), icon: "folder", label: "Joints", ..Default::default() },
+    );
+    if r.eye {
+        let _ = app.run("browser.visibility", json!({ "folder": "joints", "visible": !any_visible }));
+    } else if r.fold || r.clicked {
         toggle(app, key, true);
     }
     if !open {
@@ -1066,22 +1172,63 @@ pub fn browser_joints(app: &mut SolveApp, ui: &mut egui::Ui, depth: usize) {
     }
     let mut dialog: Option<Dialog> = None;
     for (id, name, kind, suppressed) in joints {
-        let r =
-            draw_row(ui, ui.id().with(("joint", id)), &Row { depth: depth + 1, icon: "joint", label: &name, dim: suppressed, ..Default::default() });
+        let visible = app.session.joint_visible(id);
+        let selected = app.tree.picked_joints.contains(&id);
+        let r = draw_row(
+            ui,
+            ui.id().with(("joint", id)),
+            &Row {
+                depth: depth + 1,
+                eye: Some(visible),
+                icon: "joint",
+                label: &name,
+                name: true,
+                selected,
+                dim: suppressed || !visible,
+                ..Default::default()
+            },
+        );
         if let Some(resp) = &r.resp {
             resp.clone().on_hover_text(format!("{kind:?} joint"));
+        }
+        if r.eye {
+            let _ = app.run("browser.visibility", json!({ "joints": [id], "visible": !visible }));
+        } else if r.clicked {
+            pick_joint(app, id, ui.input(|i| i.modifiers.command || i.modifiers.ctrl));
         }
         if r.double {
             dialog = edit_joint(app, id);
         }
         // The same menus as the rest of the browser.
         if let Some(at) = r.secondary {
+            if !app.tree.picked_joints.contains(&id) {
+                app.tree.picked_joints = vec![id];
+            }
             crate::context_menu::open_for(app, at, crate::context_menu::Target::Joint { id });
         }
     }
     if let Some(d) = dialog {
         app.tool = None;
         app.dialog = Some(d);
+    }
+}
+
+/// A click on a joint's browser row: it becomes the pick (or, with Ctrl, toggles in or out of
+/// it). Picked joints draw highlighted in the viewport, even hidden ones.
+pub fn pick_joint(app: &mut SolveApp, id: u64, add: bool) {
+    if !add {
+        let was = app.tree.picked_joints == [id];
+        app.tree.picked_joints.clear();
+        app.tree.picked_canvases.clear();
+        app.tree.picked_components.clear();
+        let _ = app.run("select.clear", json!({}));
+        if !was {
+            app.tree.picked_joints.push(id);
+        }
+    } else if app.tree.picked_joints.contains(&id) {
+        app.tree.picked_joints.retain(|j| *j != id);
+    } else {
+        app.tree.picked_joints.push(id);
     }
 }
 
@@ -1136,3 +1283,118 @@ pub fn origins(app: &SolveApp, painter: &egui::Painter, proj: &Proj) {
         painter.circle(c, 4.5, t.panel, Stroke::new(1.5, t.text));
     }
 }
+
+thread_local! {
+    /// Joint frames in the world (joint id → A's frame), for the design state they were found in.
+    static JOINT_FRAMES: std::cell::RefCell<Option<(String, Vec<(u64, solidcraft_engine::doc::Mat)>)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Each joint's frame in the world (where its glyph sits): the frame of its first origin, on
+/// its occurrence as placed (including moves not captured yet).
+pub fn joint_frames_world(s: &Session) -> Vec<(u64, solidcraft_engine::doc::Mat)> {
+    if s.doc.assembly.joints.is_empty() {
+        return Vec::new();
+    }
+    let key = format!("{}:{:?}", s.revision, s.pending_moves);
+    if let Some(v) = JOINT_FRAMES.with(|o| o.borrow().as_ref().filter(|(k, _)| *k == key).map(|(_, v)| v.clone())) {
+        return v;
+    }
+    let doc: std::borrow::Cow<solidcraft_engine::doc::Document> = if s.pending_moves.is_empty() {
+        std::borrow::Cow::Borrowed(&*s.doc)
+    } else {
+        let mut d = (*s.doc).clone();
+        for o in &mut d.occurrences {
+            if let Some(m) = s.pending_moves.get(&o.id) {
+                o.transform = *m;
+            }
+        }
+        std::borrow::Cow::Owned(d)
+    };
+    let st = s.model.state();
+    let v: Vec<_> = doc.assembly.joints.iter().filter_map(|j| doc.origin_world(&st, &j.a).ok().map(|m| (j.id, m))).collect();
+    JOINT_FRAMES.with(|o| *o.borrow_mut() = Some((key, v.clone())));
+    v
+}
+
+/// The joints whose glyph the viewport draws, and whether each is highlighted. A hidden joint
+/// isn't drawn (it still constrains and moves the parts), except while it is picked in the
+/// browser: then it shows highlighted until the pick goes away.
+pub fn drawn_joints(app: &SolveApp) -> Vec<(u64, bool)> {
+    app.session
+        .doc
+        .assembly
+        .joints
+        .iter()
+        .filter_map(|j| {
+            let picked = app.tree.picked_joints.contains(&j.id);
+            (picked || app.session.joint_visible(j.id)).then_some((j.id, picked))
+        })
+        .collect()
+}
+
+/// Joint glyphs in the viewport: a ring where the joint sits, its motion axis, and its limits
+/// (ticks on the ring for a turn, along the axis for a slide). Glyphs are only drawn; they are
+/// never picked in the viewport.
+pub fn joint_glyphs(app: &SolveApp, painter: &egui::Painter, proj: &Proj) {
+    let drawn = drawn_joints(app);
+    if drawn.is_empty() {
+        return;
+    }
+    let t = Tokens::get();
+    let frames = joint_frames_world(&app.session);
+    let len = app.cam.half_height() * 2.0 * 0.05;
+    let at = |m: &solidcraft_engine::doc::Mat, x: f64, y: f64, z: f64| solidcraft_engine::doc::apply_point(m, Vec3::new(x, y, z));
+    for (id, picked) in drawn {
+        let Some(j) = app.session.doc.assembly.joints.iter().find(|j| j.id == id) else { continue };
+        let Some((_, m)) = frames.iter().find(|(f, _)| *f == id) else { continue };
+        let col = if picked {
+            t.sel_edge
+        } else if j.suppressed {
+            t.text_dim
+        } else {
+            t.accent
+        };
+        let width = if picked { 2.5 } else { 1.5 };
+        let stroke = Stroke::new(width, col);
+        let Some(c) = proj.to_screen(at(m, 0.0, 0.0, 0.0)) else { continue };
+        // The motion axis (z), both ways.
+        if let (Some(a), Some(b)) = (proj.to_screen(at(m, 0.0, 0.0, -len)), proj.to_screen(at(m, 0.0, 0.0, len))) {
+            painter.line_segment([a, b], stroke);
+        }
+        // A ring about the axis.
+        let r = len * 0.5;
+        let ring: Vec<Pos2> = (0..=32)
+            .filter_map(|k| {
+                let a = k as f64 / 32.0 * std::f64::consts::TAU;
+                proj.to_screen(at(m, r * a.cos(), r * a.sin(), 0.0))
+            })
+            .collect();
+        if ring.len() > 1 {
+            painter.add(egui::Shape::line(ring, stroke));
+        }
+        // Limits: ticks across the ring for a turn, across the axis (or slot) for a slide.
+        for (i, lim) in j.limits.iter().enumerate() {
+            let Some((lo, hi)) = lim else { continue };
+            let name = j.kind.dofs().get(i).copied().unwrap_or("");
+            for v in [*lo, *hi] {
+                if !v.is_finite() {
+                    continue;
+                }
+                let (p, q) = match name {
+                    "angle" => ((v.cos() * r * 0.7, v.sin() * r * 0.7, 0.0), (v.cos() * r * 1.3, v.sin() * r * 1.3, 0.0)),
+                    "distance" if v.abs() < 1e6 => ((-r * 0.3, 0.0, v), (r * 0.3, 0.0, v)),
+                    "slide" if v.abs() < 1e6 => ((v, -r * 0.3, 0.0), (v, r * 0.3, 0.0)),
+                    _ => continue,
+                };
+                if let (Some(p), Some(q)) = (proj.to_screen(at(m, p.0, p.1, p.2)), proj.to_screen(at(m, q.0, q.1, q.2))) {
+                    painter.line_segment([p, q], Stroke::new(width, t.warning));
+                }
+            }
+        }
+        painter.circle(c, if picked { 4.5 } else { 3.5 }, t.panel, stroke);
+    }
+}
+
+#[cfg(test)]
+#[path = "joint_browser_tests.rs"]
+mod joint_browser_tests;

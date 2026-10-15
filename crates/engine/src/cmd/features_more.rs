@@ -35,7 +35,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("solid.replace_face", "Replace Face", replace_face)
         .at("SOLID", "MODIFY")
         .icon("offset_face")
-        .params("faces: [[x,y,z] points on planar faces]; target: plane (XY|XZ|YZ|construction plane|{origin, normal}) | target_face: [x,y,z] on a parallel planar face; body?"),
+        .params("faces: [[x,y,z] points on planar faces, or face names from model.faces]; target: plane (XY|XZ|YZ|construction plane|{origin, normal}) | target_face: [x,y,z] on a parallel planar face; body?"),
     CommandSpec::new("solid.align", "Align", align)
         .at("SOLID", "MODIFY")
         .icon("move")
@@ -316,17 +316,17 @@ fn infer_emboss_selection(
     }
     Ok(chosen)
 }
-fn face_points(p: &Value, k: &str, cmd: &str) -> Result<Vec<Vec3>> {
-    let a = p.get(k).and_then(Value::as_array).ok_or_else(|| bad(cmd, format!("`{k}` must list points [x, y, z]")))?;
+fn face_points(s: &Session, p: &Value, k: &str, cmd: &str) -> Result<Vec<Vec3>> {
+    let a = p.get(k).and_then(Value::as_array).ok_or_else(|| bad(cmd, format!("`{k}` must list points [x, y, z] or face names")))?;
     if a.is_empty() || a.len() > 1000 {
         return Err(bad(cmd, format!("`{k}` must list 1…1000 points")));
     }
-    a.iter().map(|v| vec3(v).ok_or_else(|| bad(cmd, format!("`{k}` must contain [x, y, z] points")))).collect()
+    a.iter().map(|v| super::face::face_ref(s, v, str_(p, "body"), cmd)).collect()
 }
 
 fn replace_face(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "solid.replace_face";
-    let faces = face_points(p, "faces", cmd)?;
+    let faces = face_points(s, p, "faces", cmd)?;
     for f in &faces {
         if super::face::face_normal(s, *f).is_none() {
             return Err(bad(cmd, "not supported yet: replacing a face that is not planar"));

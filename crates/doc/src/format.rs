@@ -143,13 +143,61 @@
 //!   no transformation, and an extrude without `thin` saves as before; the version stamp makes
 //!   0.10.0 (which reads up to 19) ask for an update instead of ignoring the wall and filling
 //!   the sketch's profiles.
+//!   A `sheet_perforate` feature (Perforate: `diameter`, `pitch`, optional `margin`,
+//!   `pattern` and `body`): a perforation field stored on a sheet, for the flat pattern, the DXF
+//!   and the measure. It is also first saved in 20; 0.10.0 asks for an update instead of
+//!   meeting a feature it can't read.
+//!   Associative, editable sketch patterns (`patterns` in a sketch) and their point/radius
+//!   relations are also first saved in 20. Old sketch copies stay independent: migration cannot
+//!   infer which curves formed a pattern.
+//!   The saved visibility can also list hidden assembly joints (`visibility.hidden_joints`,
+//!   joint ids): their glyphs aren't drawn, but they still constrain and drive the parts. A
+//!   design without it shows every joint, as it always did; 0.10.0 would show them all.
+//! - 21: named render setups (`render: {setups: {name: setup}}`): renderer-independent render
+//!   intent (camera, resolution, exposure, environment). Version 20 designs need no
+//!   transformation (an absent field means no setups, and empty render state is not saved); the
+//!   version stamp makes 0.11.0 (which reads up to 20) ask for an update instead of silently
+//!   dropping saved setups.
+//!   Also first saved in 21, a design can carry `metadata` (#1015): design properties
+//!   (`project`, `part_number`, `revision`, `author`, `organization`, `description`, `license`,
+//!   each text) and other tools' data, each tool's under its own reverse-DNS key
+//!   (`com.example.tool`). Every key is kept as it is, and nothing in it is checked when the
+//!   design opens. A design without it saves as before. 0.11.x refuses format 21, so no
+//!   released build drops the properties when it saves.
+//!   Under the same version, looks can explicitly select opaque PBR parameters (`pbr`: metal
+//!   fraction, roughness, dielectric IOR). Absent fields keep the scalar shading a look always
+//!   had; 0.11.0 asks for an update instead of silently dropping the response.
+//!   A `SurfaceUntrim` feature (Untrim: a `face` as `body` and `point`, optional `holes`
+//!   points, `outer` and `in_place`) is also first saved in 21; 0.11.0 asks for an update
+//!   instead of meeting a feature it can't read.
+//!   A `SurfaceRuled` feature (Ruled Surface: `body`, `edges` points, `distance`, optional
+//!   `mode`, `angle`, `direction`, `flip`, `corners` and `face`) is also first saved in 21;
+//!   0.11.0 asks for an update instead of meeting a feature it can't read.
+//!   Under the same version, a `SurfaceExtend` can say how it continues the surface (`mode`:
+//!   `tangent` or `curvature`; `natural` when absent), extend up to something instead of its
+//!   `distance` (`up_to`: a `plane`, a `face` as `body` and `point`, or `bounds`) and keep the
+//!   neighbouring edges as they are (`neighbours: false`). An Extend without them builds the
+//!   planar extension it always did and saves as before; 0.11.0 asks for an update instead of
+//!   dropping them and extending a plane by the distance.
+//!   Under the same version, an extrude's extent records how a symmetric `distance` is read
+//!   (`convention`: `total_distance`, split evenly around the start plane, which new solid
+//!   extrudes save; or `legacy_per_side`). An extent without it keeps the per-side reading
+//!   designs always had, so their thickness and parameters don't change; 0.11.0 asks for an
+//!   update instead of doubling a total-distance extrude.
+//!   Under the same version, a Convert to Sheet Metal bend point can lie in the middle of a
+//!   chamfer (a flat strip between two faces), which then is one bend at the two faces' virtual
+//!   sharp; 0.11.0 bent the chamfer's nearest edge instead or found no edge there. Bend points
+//!   on edges convert as before.
+//!   A bend point can also lie on a bend modelled with its radius (a cylinder between two flat
+//!   faces tangent to it), which then is one bend at the two faces' virtual sharp with the
+//!   rule's radius; 0.11.0 found no edge there or refused the curved face.
 
 use serde_json::Value;
 
 use crate::{DocError, Document, Result};
 
 /// The format this build writes.
-pub const FORMAT: u32 = 20;
+pub const FORMAT: u32 = 21;
 
 pub fn format_string(n: u32) -> String {
     format!("solidcraft/{n}")
@@ -166,7 +214,7 @@ pub fn version_of(s: &str) -> Option<u32> {
 
 /// JSON-level upgrades: entry `i` turns format `i + 1` into `i + 2`.
 type JsonStep = fn(&mut Value) -> Result<()>;
-const JSON_STEPS: [JsonStep; 19] = [
+const JSON_STEPS: [JsonStep; 20] = [
     |_| Ok(()),
     v2_to_v3,
     v3_to_v4,
@@ -180,6 +228,7 @@ const JSON_STEPS: [JsonStep; 19] = [
     |_| Ok(()),
     |_| Ok(()),
     v13_to_v14,
+    |_| Ok(()),
     |_| Ok(()),
     |_| Ok(()),
     |_| Ok(()),
@@ -384,7 +433,7 @@ pub fn read(s: &str) -> Result<Document> {
             "this design was saved by a newer SolidCraft (file format {version}; this version reads formats up to {FORMAT}): update SolidCraft to open it"
         )));
     }
-    check_numbers(&v, 0)?;
+    check_design_numbers(&v)?;
     crate::config::validate_rules_json(&v)?;
     crate::config::validate_styles_json(&v)?;
     crate::face_anchor::validate_face_anchors_json(&v)?;
@@ -472,6 +521,7 @@ pub fn read(s: &str) -> Result<Document> {
         if let crate::FeatureKind::Sketch { sketch, .. } = &feature.kind {
             sketch.validate_freeform_offsets().map_err(|e| DocError::Invalid(format!("damaged design: {e}")))?;
             sketch.validate_wires().map_err(|e| DocError::Invalid(format!("damaged design: {e}")))?;
+            sketch.validate_patterns().map_err(|e| DocError::Invalid(format!("damaged design: {e}")))?;
             sketch.validate_periodic_splines().map_err(|e| DocError::Invalid(format!("damaged design: {e}")))?;
         }
         if let crate::FeatureKind::BodyTransfer { from, to, .. } = &feature.kind
@@ -519,8 +569,33 @@ fn validate_sketch_sizes(value: &Value) -> Result<()> {
         if len("points") > solidcraft_sketch::MAX_POINTS
             || len("curves") > solidcraft_sketch::MAX_CURVES
             || len("constraints") > solidcraft_sketch::MAX_CONSTRAINTS
+            || len("patterns") > solidcraft_sketch::MAX_CONSTRAINTS
         {
             return Err(invalid());
+        }
+        if let Some(patterns) = sketch.get("patterns").and_then(Value::as_array) {
+            let mut points = 0usize;
+            let mut curves = 0usize;
+            let mut constraints = 0usize;
+            for pattern in patterns {
+                let Some(entities) = pattern.get("entities").and_then(Value::as_array) else { return Err(invalid()) };
+                let Some(instances) = pattern.get("instances").and_then(Value::as_array) else { return Err(invalid()) };
+                if entities.len() > solidcraft_sketch::MAX_CURVES + solidcraft_sketch::MAX_POINTS || instances.len() >= 500 {
+                    return Err(invalid());
+                }
+                for instance in instances {
+                    let size = |key| instance.get(key).and_then(Value::as_array).map_or(0, Vec::len);
+                    points = points.saturating_add(size("points"));
+                    curves = curves.saturating_add(size("curves"));
+                    constraints = constraints.saturating_add(size("constraints"));
+                    if points > solidcraft_sketch::MAX_POINTS
+                        || curves > solidcraft_sketch::MAX_CURVES
+                        || constraints > solidcraft_sketch::MAX_CONSTRAINTS
+                    {
+                        return Err(invalid());
+                    }
+                }
+            }
         }
     }
     Ok(())
@@ -827,6 +902,16 @@ fn validate_freeform_offsets(value: &Value) -> Result<()> {
 /// outside what the kernel's tolerances serve.
 const MAX_REAL: f64 = 1e9;
 
+/// Every number the design itself holds is in range ([`check_numbers`]). `metadata` is left
+/// alone: it is other tools' data, kept as it is and never read as a number (#1015); parsing
+/// already bounds its nesting.
+fn check_design_numbers(v: &Value) -> Result<()> {
+    match v {
+        Value::Object(m) => m.iter().filter(|(k, _)| k.as_str() != "metadata").try_for_each(|(_, x)| check_numbers(x, 1)),
+        v => check_numbers(v, 0),
+    }
+}
+
 /// Every non-integer number in the file is finite and within ±`MAX_REAL` (a damaged or hostile
 /// file is refused instead of overflowing the geometry later).
 fn check_numbers(v: &Value, depth: usize) -> Result<()> {
@@ -1058,6 +1143,7 @@ mod tests {
                     sketch,
                     profiles: ProfileSel::All,
                     extent: Extent {
+                        convention: crate::ExtrudeConvention::LegacyPerSide,
                         distance: "10".into(),
                         direction: Direction::Negative,
                         distance2: None,

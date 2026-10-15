@@ -113,6 +113,10 @@ pub(super) fn fixtures() -> Vec<(&'static str, Value)> {
         ),
         ("sheet_hem", json!({"type": "sheet_hem", "edges": [o], "length": "hem.length", "gap": "hem.gap"})),
         (
+            "sheet_perforate",
+            json!({"type": "sheet_perforate", "diameter": "perforate.diameter", "pitch": "perforate.pitch", "margin": "perforate.margin"}),
+        ),
+        (
             "sheet_fold",
             json!({"type": "sheet_fold", "a": o, "b": [1, 0, 0], "angle": "fold.angle", "radius": "fold.radius", "position": "centerline"}),
         ),
@@ -147,7 +151,21 @@ pub(super) fn fixtures() -> Vec<(&'static str, Value)> {
         ("surface_offset", json!({"type": "surface_offset", "faces": [o], "distance": "soff.distance", "tolerance": "soff.tolerance"})),
         ("unstitch", json!({"type": "unstitch", "body": "B"})),
         ("reverse_normal", json!({"type": "reverse_normal", "body": "B"})),
+        ("surface_untrim", json!({"type": "surface_untrim", "face": {"body": "B", "point": o}, "holes": [o], "outer": true})),
         ("surface_extend", json!({"type": "surface_extend", "body": "B", "edges": [o], "distance": "extend.distance"})),
+        (
+            "surface_extend_to_plane",
+            json!({"type": "surface_extend", "body": "B", "edges": [o], "distance": "extend.distance", "mode": "curvature", "up_to": {"plane": plane("extend")}}),
+        ),
+        (
+            "surface_extend_to_face",
+            json!({"type": "surface_extend", "body": "B", "edges": [o], "distance": "extend.distance", "up_to": {"face": {"body": "B", "point": o}}, "neighbours": false}),
+        ),
+        (
+            "surface_ruled",
+            json!({"type": "surface_ruled", "body": "B", "edges": [o], "distance": "ruled.distance", "mode": "angle", "angle": "ruled.angle",
+                "direction": [0, 0, 1], "face": [1, 0, 0]}),
+        ),
         ("surface_trim", json!({"type": "surface_trim", "body": "B", "plane": plane("trim"), "keep": o})),
         ("move", json!({"type": "move", "bodies": ["B"], "translate": ["move.x", "move.y", "move.z"], "angle": "move.angle"})),
         ("import", json!({"type": "import", "file": "a.step", "step": ""})),
@@ -165,8 +183,8 @@ pub(super) fn with_refs(name: &str, mut v: Value) -> Value {
     let extra = match name {
         "extrude" | "extrude_thin" | "revolve" | "sweep" | "pipe" | "coil" | "thicken" => json!({"targets": ["B"]}),
         "fillet_constant" | "fillet_chord" | "fillet_curvature" | "fillet_variable" | "fillet_spline" | "chamfer" | "shell" | "draft"
-        | "offset_face" | "delete_face" | "replace_face" | "sheet_flange" | "sheet_hem" | "sheet_unfold" | "boss" | "lip" | "snap_fit" | "rest"
-        | "surface_offset" => {
+        | "offset_face" | "delete_face" | "replace_face" | "sheet_flange" | "sheet_hem" | "sheet_perforate" | "sheet_unfold" | "boss" | "lip"
+        | "snap_fit" | "rest" | "surface_offset" => {
             json!({"body": "B"})
         }
         "combine" => json!({"target": "B", "tools": ["B"]}),
@@ -179,6 +197,41 @@ pub(super) fn with_refs(name: &str, mut v: Value) -> Value {
         "emboss" => json!({"face": {"body": "B", "at": o}, "targets": ["B"]}),
         "sheet_fold" => json!({"sketch": 7, "body": "B"}),
         "patch" => json!({"sketch": 8, "body": "B"}),
+        _ => json!({}),
+    };
+    if let (Some(o), Some(e)) = (v.as_object_mut(), extra.as_object()) {
+        o.extend(e.clone());
+    }
+    v
+}
+
+/// The positions and directions a fixture leaves out (they don't change its expressions or
+/// references), set here so every point, direction and axis the geometry walks read is present:
+/// `to` / `from` picks, line axes, normals and origins. `hole_simple` places its hole at
+/// `position` (no sketch points), the other holes at sketch points.
+pub(super) fn with_points(name: &str, mut v: Value) -> Value {
+    let p = |i: f64| json!([i, i + 0.5, i + 0.25]);
+    let line = json!({"type": "line", "origin": p(9.0), "dir": [0.0, 0.6, 0.8]});
+    let extra = match name {
+        "extrude" | "surface_extrude" => {
+            if let Some(e) = v.get_mut("extent").and_then(Value::as_object_mut) {
+                e.insert("to".into(), p(1.0));
+                e.insert("from".into(), p(2.0));
+            }
+            json!({})
+        }
+        "revolve" => json!({"to": p(3.0), "axis": line}),
+        "surface_revolve" => json!({"axis": line}),
+        "hole_simple" => json!({"points": null, "to": p(4.0)}),
+        "hole_drilled" | "hole_counterbore" | "hole_countersink" => json!({"to": p(4.0)}),
+        "emboss" => json!({"face": {"body": "B", "at": p(5.0)}}),
+        "sheet_convert" => json!({"bends": [p(6.0)]}),
+        "sheet_fold" => json!({"fixed": p(7.0)}),
+        "rest" => json!({"along": [0.6, 0.8, 0.0]}),
+        "align" => json!({"from_normal": [0.0, 0.0, 1.0], "to_normal": [1.0, 0.0, 0.0]}),
+        "scale" => json!({"origin": p(8.0)}),
+        "move" => json!({"rotate_axis": [0.0, 1.0, 0.0]}),
+        "unstitch" | "reverse_normal" => json!({"faces": [p(10.0)]}),
         _ => json!({}),
     };
     if let (Some(o), Some(e)) = (v.as_object_mut(), extra.as_object()) {

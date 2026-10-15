@@ -125,10 +125,15 @@ fn construct<'a>(st: &'a ModelState, name: &str) -> Result<&'a ConstructGeom> {
 
 /// The face picked: (body, face index, point on it).
 fn face_of<'a>(st: &'a ModelState, at: Vec3, name: &Option<String>) -> Result<(&'a ModelBody, usize, Vec3)> {
-    let at = match name.as_deref().and_then(|n| crate::naming::point_on_face(st, n, at)) {
-        Some((q, _)) => q,
-        None => at,
-    };
+    // The named face itself: its nearest point to the old pick can lie on an edge it shares
+    // (a corner round that a parameter moved away from the pick), where picking again by the
+    // point finds the flat face beside it (#1255).
+    if let Some(hit) = name.as_deref().and_then(|n| crate::name_lookup::locate_face(st, n, at))
+        && let Some(b) = st.bodies.get(hit.body).filter(|b| !b.body.is_mesh())
+        && hit.face < b.body.face_count()
+    {
+        return Ok((b, hit.face, hit.point));
+    }
     for b in bodies(st) {
         if let Some(fi) = crate::appearance::face_index_at(b, at) {
             return Ok((b, fi, at));

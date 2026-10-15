@@ -157,6 +157,22 @@ pub(crate) fn script_steps(doc: &Document) -> Result<(Vec<Value>, Vec<String>)> 
     if doc.units != "mm" {
         out.push(step("document.units", json!({"units": doc.units})));
     }
+    // Design properties, in one step. Keys `document.metadata.set` would refuse (a well-known
+    // key holding something other than text, a key another tool wrote outside the rules) are
+    // listed as left out instead of failing the replay.
+    let mut properties = solidcraft_doc::Metadata::default();
+    let mut odd = Vec::new();
+    for (key, value) in &doc.metadata.0 {
+        if properties.set(key, value.clone()).is_err() {
+            odd.push(key.as_str());
+        }
+    }
+    if !properties.is_empty() {
+        out.push(step("document.metadata.set", json!({"values": properties})));
+    }
+    if !odd.is_empty() {
+        omitted.push(format!("design properties document.metadata.set can't set ({})", odd.join(", ")));
+    }
     for rule in &doc.sheet.rules {
         let mut p = serde_json::to_value(rule).map_err(|e| EngineError::Other(e.to_string()))?;
         if doc.sheet.active.as_deref() == Some(rule.name.as_str())

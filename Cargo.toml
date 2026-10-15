@@ -5,7 +5,7 @@ members = ["crates/*", "apps/*", "xtask"]
 exclude = ["vendor"]
 
 [workspace.package]
-version = "0.10.0"
+version = "0.11.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.95"
@@ -24,10 +24,15 @@ solidcraft-io = { path = "crates/io" }
 solidcraft-engine = { path = "crates/engine" }
 solidcraft-ui-egui = { path = "crates/ui-egui" }
 solidcraft-mcp = { path = "crates/mcp" }
+solidcraft-derive = { path = "crates/derive" }
 
 # foundation
 thiserror = "2"
 serde = { version = "1", features = ["derive", "rc"] }
+# derive macros (crates/derive); already in the tree through serde_derive
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 log = "0.4"
 sha2 = "0.10"
@@ -53,6 +58,7 @@ ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
 
 # images
 image = { version = "0.25", default-features = false, features = ["png", "hdr"] }
+png = "0.18.1"
 
 # ui
 egui = "0.36"

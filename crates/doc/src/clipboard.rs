@@ -194,6 +194,7 @@ impl crate::Feature {
             | K::SurfaceTrim { plane, .. } => checked_plane(plane, 0)?,
             K::Draft { neutral, .. } => checked_plane(neutral, 0)?,
             K::ReplaceFace { target, .. } => checked_plane(target, 0)?,
+            K::SurfaceExtend { up_to: Some(crate::ExtendTo::Plane(plane)), .. } => checked_plane(plane, 0)?,
             K::ConstructionAxis { def } => {
                 for r in def.refs() {
                     checked_geo(r, 0)?;
@@ -248,6 +249,7 @@ impl crate::Feature {
             | K::SurfaceTrim { plane, .. } => remap_plane(plane, ids, names, bodies, 0)?,
             K::Draft { neutral, .. } => remap_plane(neutral, ids, names, bodies, 0)?,
             K::ReplaceFace { target, .. } => remap_plane(target, ids, names, bodies, 0)?,
+            K::SurfaceExtend { up_to: Some(crate::ExtendTo::Plane(plane)), .. } => remap_plane(plane, ids, names, bodies, 0)?,
             K::ConstructionAxis { def } => {
                 for r in def.refs_mut() {
                     remap_geo(r, ids, names, bodies, 0)?;

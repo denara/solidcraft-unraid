@@ -529,7 +529,7 @@ fn backed(a: &Body, b: &Body, m: Vec3, d: f64, depth: f64) -> bool {
 }
 
 /// The faces of `body` lying in the plane (n, d), facing along n.
-fn faces_in(body: &Body, n: Vec3, d: f64, tol: f64) -> Vec<usize> {
+pub(crate) fn faces_in(body: &Body, n: Vec3, d: f64, tol: f64) -> Vec<usize> {
     planes(body).into_iter().filter(|(_, p)| p.n.dot(n) > 1.0 - 1e-9 && (p.d - d).abs() < tol).map(|(i, _)| i).collect()
 }
 
@@ -989,6 +989,9 @@ pub(crate) fn has_coincident_cylinders(a: &Body, b: &Body) -> bool {
 /// This is not a general emptiness or Boolean-equivalence certificate. Each direction
 /// returns a result only when `accept` takes it; otherwise this returns `None`. The result's
 /// history is over `[a, b]`.
+///
+/// A boss standing in the other body's bore on that cylinder (a disc joined into the bottom of
+/// a hole it fills) is grown instead ([`grown_boss_union`]).
 pub(crate) fn bore_union(a: &Body, b: &Body, accept: &dyn Fn(&Body) -> bool) -> Option<Body> {
     let size = a.size().max(b.size());
     let tol = (size * 1e-7).max(1e-9) * 10.0;
@@ -997,10 +1000,10 @@ pub(crate) fn bore_union(a: &Body, b: &Body, accept: &dyn Fn(&Body) -> bool) -> 
     let (ia, ib) = (ma.inside_index(), mb.inside_index());
     let empty = |p: Vec3| !ia.contains(p) && !ib.contains(p);
     let (ca, cb) = (cylinders(a), cylinders(b));
-    // (body to narrow, its operand number, its mesh and inside test, the other body, their faces
-    // on the cylinder).
-    let ways = [(b, 1, &mb, &ib, a, &cb, &ca), (a, 0, &ma, &ia, b, &ca, &cb)];
-    for (tool, tool_operand, mesh, inside, target, ct, co) in ways {
+    // (body to narrow, its operand number, its mesh and inside test, the other body and its
+    // inside test, their faces on the cylinder).
+    let ways = [(b, 1, &mb, &ib, a, &ia, &cb, &ca), (a, 0, &ma, &ia, b, &ib, &ca, &cb)];
+    for (tool, tool_operand, mesh, inside, target, target_inside, ct, co) in ways {
         for c in ct {
             if !co.iter().any(|o| same_cylinder(c, o, tol)) {
                 continue;
@@ -1032,6 +1035,13 @@ pub(crate) fn bore_union(a: &Body, b: &Body, accept: &dyn Fn(&Body) -> bool) -> 
             let Some(radial) = (q - along).normalized() else { continue };
             let on = along + radial * c.radius;
             let e = (c.radius * 0.05).max(size * 1e-4);
+            if inside.contains(on - radial * e) && !inside.contains(on + radial * e) {
+                let boss = Boss { tool, operand: tool_operand, cylinder: c, faces: &bore, t0, t1 };
+                if let Some(r) = grown_boss_union(a, b, &boss, target_inside, size, accept) {
+                    return Some(r);
+                }
+                continue;
+            }
             if !inside.contains(on + radial * e) || inside.contains(on - radial * e) {
                 continue;
             }
@@ -1097,6 +1107,127 @@ pub(crate) fn bore_union(a: &Body, b: &Body, accept: &dyn Fn(&Body) -> bool) -> 
         }
     }
     None
+}
+
+/// A tool (operand `operand`) with faces on a cylinder it shares with the other body, the
+/// material inside them (a boss), and its extent `t0..t1` along the axis there.
+struct Boss<'a> {
+    tool: &'a Body,
+    operand: usize,
+    cylinder: &'a CylFace,
+    faces: &'a [usize],
+    t0: f64,
+    t1: f64,
+}
+
+/// Union of `a` and `b` where one has a boss on a cylinder that is a bore of the other body (a disc joined into the bottom of a hole it fills): the boss's walls
+/// coincide with the bore's, which the mesh intersection can't take. Grown outward by a step,
+/// the boss reaches into the material around the bore instead, and joining it adds nothing
+/// more, provided that material is there all along the boss. The ring the step adds is sampled
+/// against the other body for that, and `accept` checks the result as a whole. The result's
+/// history is over `[a, b]` (the grown tool keeps the tool's faces and edges).
+fn grown_boss_union(
+    a: &Body,
+    b: &Body,
+    boss: &Boss,
+    target_inside: &solidcraft_geom::InsideIndex,
+    size: f64,
+    accept: &dyn Fn(&Body) -> bool,
+) -> Option<Body> {
+    let c = boss.cylinder;
+    let d = (c.radius * 0.2).min(size * 0.01);
+    let (u, w) = (c.axis.any_perp(), c.axis.cross(c.axis.any_perp()));
+    let at = |s: f64, r: f64, ang: f64| c.origin + c.axis * s + (u * ang.cos() + w * ang.sin()) * r;
+    // The other body's material all around the boss, as far out as it grows, over its length.
+    let backed = (1..=9).all(|i| {
+        let s = boss.t0 + (boss.t1 - boss.t0) * f64::from(i) / 10.0;
+        (0..16).all(|k| {
+            let ang = f64::from(k) * std::f64::consts::FRAC_PI_8 + 0.3;
+            [0.1, 0.5, 0.95].iter().all(|f| target_inside.contains(at(s, c.radius + d * f, ang)))
+        })
+    });
+    if !backed {
+        return None;
+    }
+    // Ends where the bore comes out of the other body and the boss's cap lies flush with the
+    // face it comes out of (a floor at the bottom of a through hole): faces in one plane, which
+    // the intersection can't take either. There the cap is moved out by the same step, and the
+    // stub that leaves past the face is deleted afterwards, the face healing over it.
+    let tol = (size * 1e-7).max(1e-9) * 10.0;
+    let target = if boss.operand == 1 { a } else { b };
+    let along = |p: Vec3| (p - c.origin).dot(c.axis);
+    let radial = |p: Vec3| (p - c.origin - c.axis * along(p)).len();
+    let plane_at = |body: &Body, i: usize, s: f64, out: f64| {
+        matches!(crate::face_surface(body, i), Some(crate::FaceSurface::Plane { normal, point })
+            if normal.dot(c.axis) * out > 1.0 - 1e-9 && (along(point) - s).abs() < tol)
+    };
+    let mut caps: Vec<(usize, f64, f64)> = Vec::new();
+    for (s, out) in [(boss.t0, -1.0), (boss.t1, 1.0)] {
+        let open = (0..8).all(|k| {
+            let ang = f64::from(k) * std::f64::consts::FRAC_PI_4 + 0.3;
+            !target_inside.contains(at(s + out * d * 0.5, c.radius + d * 0.5, ang))
+        });
+        if !open || !(0..target.face_count()).any(|i| plane_at(target, i, s, out)) {
+            continue;
+        }
+        let cap = boss
+            .tool
+            .solid
+            .face_iter()
+            .enumerate()
+            .position(|(i, f)| plane_at(boss.tool, i, s, out) && f.vertex_iter().all(|v| radial(from_p3(v.point())) < c.radius + tol));
+        // A flush end with no cap of its own to move: the faces would stay in one plane.
+        caps.push((cap?, s, out));
+    }
+    let counts = record::counts(&[a, b]);
+    let run = || -> Result<Option<Body>> {
+        let grown = crate::offset::offset_body(boss.tool, |i, _| if boss.faces.contains(&i) || caps.iter().any(|x| x.0 == i) { d } else { 0.0 })?;
+        if !grown.validity().is_empty() {
+            return Err(KernelError::Failed("growing a boss: an unsound result".into()));
+        }
+        // In the operands' order, so the history is over [a, b] once the grown tool's own is
+        // composed in.
+        let joined = if boss.operand == 1 { crate::ops::boolean(a, &grown, BoolOp::Union)? } else { crate::ops::boolean(&grown, b, BoolOp::Union)? };
+        let Some(joined) = joined else { return Ok(None) };
+        let joined = {
+            let h = crate::boolean_record::through(&joined, boss.operand, grown.history());
+            joined.with_checked_history(h, &counts)
+        };
+        if caps.is_empty() {
+            return Ok(Some(joined));
+        }
+        // The stubs: faces wholly past a flush end, within the grown boss, reaching out to its cap.
+        let stubs: Vec<usize> = joined
+            .solid
+            .face_iter()
+            .enumerate()
+            .filter(|(_, f)| {
+                let ps: Vec<Vec3> = f.vertex_iter().map(|v| from_p3(v.point())).collect();
+                caps.iter().any(|&(_, s, out)| {
+                    let past = |p: &Vec3| (along(*p) - s) * out;
+                    !ps.is_empty() && ps.iter().all(|p| past(p) > -tol && radial(*p) < c.radius + d * 1.01) && ps.iter().any(|p| past(p) > d * 0.5)
+                })
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if stubs.is_empty() {
+            return Err(KernelError::Failed("growing a boss: no stub past its flush end".into()));
+        }
+        let healed = crate::delete_faces(&joined, &stubs)?;
+        let h = crate::boolean_record::through(&healed, 0, joined.history());
+        Ok(Some(healed.with_checked_history(h, &counts)))
+    };
+    let (result, diagnostics) = crate::capture_boolean_diagnostics(run);
+    match result {
+        Ok(Some(r)) if accept(&r) => {
+            crate::boolean_diagnostics::merge(diagnostics);
+            let mut event = crate::BooleanFallback::new(crate::BooleanStrategy::GrownBoss);
+            event.face_shift_mm = d;
+            crate::boolean_diagnostics::record(event);
+            Some(r)
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]

@@ -225,3 +225,49 @@ fn a_control_open_answers_after_loading_without_freezing_the_window() {
     assert_eq!(w.app.session.doc.features.len(), sync.doc.features.len() + 1, "the edit went into the opened design");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A control-channel (MCP) import hands its `up` and `names` to the command, as the engine
+/// session takes them, and a caller that said which way is up is not offered to stand the part up.
+#[test]
+fn a_control_import_passes_up_and_names_on() {
+    let dir = scratch("import-options");
+    let path = dir.join("tall_in_y.step").to_string_lossy().to_string();
+    let mut src = Session::default();
+    src.execute("solid.box", &json!({"length": 10, "width": 40, "height": 5})).unwrap();
+    src.execute("file.export", &json!({"path": path})).unwrap();
+
+    // The reply, the part's height and whether the offer is up, for an import by this window.
+    let import = |params: serde_json::Value| {
+        let mut w = Win::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        w.app.control_rx = Some(rx);
+        let (req, reply_rx) = crate::control::ControlRequest::new("engine.execute", json!({"command": "file.insert_step", "params": params.clone()}));
+        tx.send(req).unwrap();
+        let mut reply = None;
+        for _ in 0..100_000 {
+            w.frame(vec![]);
+            reply = reply_rx.try_recv().ok();
+            if reply.is_some() {
+                break;
+            }
+        }
+        let reply = reply.expect("the import was answered");
+        assert_eq!(reply["ok"], true, "{params}: {reply}");
+        let mut sync = Session::default();
+        assert_eq!(reply["result"], sync.execute("file.insert_step", &params).unwrap(), "the window's reply is the session's");
+        let b = solidcraft_engine::view::bounds(&w.app.session);
+        (reply, [b.max.x - b.min.x, b.max.y - b.min.y, b.max.z - b.min.z], w.app.stand_up.is_some())
+    };
+
+    // As before: the file's axes, and the offer to stand it up.
+    let (_, size, offered) = import(json!({"path": path}));
+    assert!(size[1] > 39.9 && offered, "{size:?} {offered}");
+    // Y up said by the caller: stood up by the import, nothing left to offer.
+    let (reply, size, offered) = import(json!({"path": path, "up": "y", "names": "product"}));
+    assert!(size[2] > 39.9 && !offered, "{size:?} {offered}: {reply}");
+    assert!(reply["result"]["stand_up"].is_u64(), "{reply}");
+    // Z up said by the caller: kept as it is, and not asked about either.
+    let (_, size, offered) = import(json!({"path": path, "up": "z"}));
+    assert!(size[1] > 39.9 && !offered, "{size:?} {offered}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

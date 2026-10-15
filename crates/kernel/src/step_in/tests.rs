@@ -184,7 +184,7 @@ fn parallel_import_does_not_prepare_past_body_budget_with_duplicates_or_mapped_i
         reader.bodies = vec![seed.clone(); MAX_BODIES - 2];
         reader.node_items.insert(2000);
         let mut out = Vec::new();
-        reader.rep_bodies(60, &mt::Matrix4::from_scale(1.0), &[], "Budget", &mut out, 0);
+        reader.rep_bodies(60, &mt::Matrix4::from_scale(1.0), &[], "Budget", None, &mut out, 0);
         assert_eq!(reader.bodies.len(), MAX_BODIES);
         assert_eq!(out, vec![MAX_BODIES - 2, MAX_BODIES - 1]);
         assert_eq!(reader.bodies.last().unwrap().name, "Second");
@@ -453,6 +453,7 @@ fn hand_written_part_in_inches_with_colour() {
     let b = &imp.bodies[0];
     assert_eq!(b.name, "Cube");
     assert_eq!(b.path, vec!["Widget".to_string()]);
+    assert_eq!(b.instance, None, "a root part is no occurrence");
     assert_eq!(b.color, Some([1.0, 0.5, 0.0]));
     let m = measure(&b.body).unwrap();
     assert!(rel(m.volume, 25.4f64.powi(3)) < 1e-9, "{}", m.volume);
@@ -520,7 +521,72 @@ fn hand_written_assembly() {
     assert_eq!(root.children.len(), 2);
     assert!(root.children.iter().all(|c| c.name == "Block" && c.bodies.len() == 1));
     assert_eq!(imp.bodies[1].path, vec!["Assembly".to_string(), "Block".to_string()]);
+    assert_eq!([imp.bodies[0].instance.as_deref(), imp.bodies[1].instance.as_deref()], [Some("Block:0"), Some("Block:1")]);
     assert!((root.children[1].transform[3][0] - 100.0).abs() < 1e-9);
+}
+
+/// A part an assembly places twice is meshed once: the second instance shows the first one's
+/// display mesh, placed (the same triangles and faces, at its own place), and keeps its own
+/// placed geometry for everything else.
+#[test]
+fn later_instances_show_the_first_instances_mesh_placed() {
+    let imp = step_import(&two_instance_assembly()).unwrap();
+    let (first, second) = (&imp.bodies[0].body, &imp.bodies[1].body);
+    assert!(first.display_of.is_none() && second.display_of.is_some());
+    let a = first.reference_display_mesh_angular(0.01, crate::DISPLAY_ANGLE).unwrap();
+    let b = second.reference_display_mesh_angular(0.01, crate::DISPLAY_ANGLE).unwrap();
+    assert_eq!(a.triangles, b.triangles);
+    assert_eq!(a.tri_face, b.tri_face);
+    assert_eq!(a.edges.len(), b.edges.len());
+    // Turned 90 degrees about Z and moved 100 mm along X.
+    for (p, q) in a.positions.iter().zip(&b.positions) {
+        assert!(q.dist(Vec3::new(100.0 - p.y, p.x, p.z)) < 1e-9, "{p:?} -> {q:?}");
+    }
+    let own = measure(second).unwrap().bbox;
+    let shown = b.bounds();
+    assert!(shown.min.dist(own.min) < 1e-6 && shown.max.dist(own.max) < 1e-6, "{shown:?} vs {own:?}");
+    // Anything that changes what the body shows drops the shared mesh.
+    let split = second.clone().with_split_lines(Some(std::sync::Arc::new(vec![vec![Vec3::new(91.0, 0.0, 5.0), Vec3::new(91.0, 10.0, 5.0)]])));
+    assert!(split.display_of.is_none());
+}
+
+/// A body knows the product that holds it and the assembly occurrence it is, next to the name of
+/// its solid: a caller can name bodies after the part or the instance when the solids carry the
+/// name of the last feature that made them (`Cut-Extrude3`), which says nothing about the part.
+#[test]
+fn bodies_know_their_product_and_instance() {
+    use crate::step_out::{ExportBody, ExportProduct, StepHeader, step_export_products};
+    let plate = box_solid(Vec3::ZERO, Vec3::new(10.0, 10.0, 2.0)).unwrap();
+    let post = box_solid(Vec3::ZERO, Vec3::new(2.0, 2.0, 8.0)).unwrap();
+    let at = |x: f64| [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [x, 0.0, 0.0, 1.0]];
+    let part = |name: &str, label: &str, body| ExportProduct {
+        name: name.into(),
+        bodies: vec![ExportBody { name: label.into(), body, color: None }],
+        children: Vec::new(),
+    };
+    let products = vec![
+        ExportProduct {
+            name: "Frame".into(),
+            bodies: Vec::new(),
+            children: vec![(1, at(0.0), "Plate-1".into()), (2, at(20.0), "Post-1".into()), (2, at(30.0), "Post-2".into())],
+        },
+        part("Plate", "Cut-Extrude3", &plate),
+        part("Post", "Boss-Extrude1", &post),
+    ];
+    let text = step_export_products(&products, 0, &StepHeader::default()).unwrap();
+    let imp = step_import(&text).unwrap();
+    let seen: Vec<(&str, Vec<&str>, Option<&str>)> =
+        imp.bodies.iter().map(|b| (b.name.as_str(), b.path.iter().map(String::as_str).collect(), b.instance.as_deref())).collect();
+    assert_eq!(
+        seen,
+        [
+            ("Cut-Extrude3", vec!["Frame", "Plate"], Some("Plate-1")),
+            ("Boss-Extrude1", vec!["Frame", "Post"], Some("Post-1")),
+            ("Boss-Extrude1", vec!["Frame", "Post"], Some("Post-2")),
+        ]
+    );
+    // The same product's two placements are two occurrences, told apart by their names.
+    assert_eq!(imp.tree[0].children.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["Plate", "Post", "Post"]);
 }
 
 /// The import keeps a conversion only where the file can ask for the item again. A flat file of
@@ -860,6 +926,66 @@ fn glued_halves_export_as_whole_faces() {
     assert_eq!(text.matches("CYLINDRICAL_SURFACE(").count(), 2);
     let imp = round_trip(&b);
     // Box sides and caps (6) and two holes.
+    assert_eq!(imp.bodies[0].file_faces, 8);
+}
+
+/// A slot plate with a round on its top outline (issue #612): the extruded arc ends and the
+/// rounds along the straight edges are lone B-spline sheets, written as cylinders bounded by
+/// their faces. The rounds' sheets reach far past their edges, and a reader bounding the part by
+/// its surfaces saw a 60 mm part as 130 mm long.
+#[test]
+fn rounded_slot_exports_cylinders() {
+    use solidcraft_geom::Seg2;
+    use std::f64::consts::{FRAC_PI_2, PI};
+    let outer = Loop2 {
+        segs: vec![
+            Seg2::Line { a: Vec2::new(10.0, -10.0), b: Vec2::new(50.0, -10.0) },
+            Seg2::Arc { center: Vec2::new(50.0, 0.0), radius: 10.0, start: -FRAC_PI_2, sweep: PI },
+            Seg2::Line { a: Vec2::new(50.0, 10.0), b: Vec2::new(10.0, 10.0) },
+            Seg2::Arc { center: Vec2::new(10.0, 0.0), radius: 10.0, start: FRAC_PI_2, sweep: PI },
+        ],
+    };
+    let plate = extrude(&Plane::XY, &[Region2 { outer, holes: vec![] }], 0.0, 4.0).unwrap().pop().unwrap();
+    let edges = [Vec3::new(30.0, -10.0, 4.0), Vec3::new(30.0, 10.0, 4.0), Vec3::new(0.0, 0.0, 4.0), Vec3::new(60.0, 0.0, 4.0)];
+    let b = fillet(&plate, &edges, 1.0).unwrap();
+    let text = step_export(&[&b], "t").unwrap();
+    assert!(!text.contains("B_SPLINE_SURFACE"), "{text}");
+    assert_eq!(text.matches("CYLINDRICAL_SURFACE(").count(), 4);
+    assert_eq!(text.matches("TOROIDAL_SURFACE(").count(), 2);
+    // No point of the file (surface placements included) lies outside the part.
+    let imp = round_trip(&b);
+    for line in text.lines().filter(|l| l.contains("CARTESIAN_POINT")) {
+        let Some(xyz) = line.split("((").nth(1).and_then(|r| r.split("))").next()) else { continue };
+        let x: f64 = xyz.split(',').next().unwrap().trim().parse().unwrap();
+        assert!((-1e-6..=60.0 + 1e-6).contains(&x), "{line}");
+    }
+    // The volume analytically: the plate less the round's corner section swept along the edges
+    // (Pappus: the section's centroid runs 0.2234 r inside the edge round the arcs).
+    let section = 1.0 - PI / 4.0;
+    let centroid = (10.0 - 3.0 * PI) / (3.0 * (4.0 - PI));
+    let want = (800.0 + PI * 100.0) * 4.0 - section * (80.0 + std::f64::consts::TAU * (10.0 - centroid));
+    assert!(rel(measure(&imp.bodies[0].body).unwrap().volume, want) < 1e-3);
+}
+
+/// A countersink cut into a plate (issue #612): the cone is a tapered extrusion of a disc, a
+/// B-spline sheet per half, written as one CONICAL_SURFACE face (the sheets reached below the
+/// plate).
+#[test]
+fn countersink_exports_one_cone() {
+    use std::f64::consts::FRAC_PI_4;
+    let plate = box_solid(Vec3::new(-10.0, -10.0, 0.0), Vec3::new(10.0, 10.0, 4.0)).unwrap();
+    // A 90° countersink, radius 4 at the top face, down from 1 mm above it to radius 1.8, and the
+    // 2 mm drill through.
+    let disc = Region2 { outer: Loop2::circle(Vec2::ZERO, 5.0), holes: vec![] };
+    let cone = crate::extrude_tapered(&Plane::XY.offset(5.0), &disc, 3.2, -1.0, -FRAC_PI_4).unwrap();
+    let drill = cylinder(Vec3::new(0.0, 0.0, -1.0), Vec3::Z, 2.0, 6.0).unwrap();
+    let b = boolean(&boolean(&plate, &cone, BoolOp::Cut).unwrap().unwrap(), &drill, BoolOp::Cut).unwrap().unwrap();
+    let text = step_export(&[&b], "t").unwrap();
+    assert!(!text.contains("B_SPLINE_SURFACE"), "{text}");
+    assert_eq!(text.matches("CONICAL_SURFACE(").count(), 1, "{text}");
+    assert_eq!(text.matches("CYLINDRICAL_SURFACE(").count(), 1, "{text}");
+    let imp = round_trip(&b);
+    // Six box faces, the countersink and the drill.
     assert_eq!(imp.bodies[0].file_faces, 8);
 }
 

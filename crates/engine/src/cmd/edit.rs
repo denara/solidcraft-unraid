@@ -14,9 +14,11 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("edit.redo", "Redo", redo).icon("redo").key("Ctrl+Y").noundo().doc_only(),
     CommandSpec::new("edit.checkpoint", "Checkpoint", checkpoint)
         .noundo()
+        .doc_only()
         .params("→ {checkpoint: id}: remember the design, active sketch and undo history (restore with edit.restore_checkpoint)"),
     CommandSpec::new("edit.restore_checkpoint", "Restore Checkpoint", restore_checkpoint)
         .noundo()
+        .doc_only()
         .params("checkpoint: id; forget?: bool (true = drop it without going back). Goes back to it, undo history included"),
     CommandSpec::new("timeline.compute_all", "Compute All", compute_all).at("SOLID", "MODIFY").icon("compute").noundo(),
     CommandSpec::new("timeline.delete", "Delete", delete)
@@ -624,6 +626,13 @@ fn edit_feature(s: &mut Session, p: &Value) -> Result<Value> {
     merge(&mut v, set, 0);
     let mut nf: Feature = serde_json::from_value(v).map_err(|e| bad(cmd, format!("invalid feature: {e}")))?;
     nf.id = f.id;
+    if let (FeatureKind::Extrude { extent: old, .. }, FeatureKind::Extrude { extent: new, .. }) = (&f.kind, &mut nf.kind)
+        && old.direction != solidcraft_doc::Direction::Symmetric
+        && new.direction == solidcraft_doc::Direction::Symmetric
+        && set.get("extent").and_then(|e| e.get("convention")).is_none()
+    {
+        new.convention = solidcraft_doc::ExtrudeConvention::TotalDistance;
+    }
     if std::mem::discriminant(&nf.kind) != std::mem::discriminant(&f.kind) {
         return Err(bad(cmd, "the feature type cannot change"));
     }
@@ -844,6 +853,7 @@ fn redefine(s: &mut Session, p: &Value) -> Result<Value> {
             spec.id,
             "sheet.flange"
                 | "sheet.hem"
+                | "sheet.perforate"
                 | "sheet.fold"
                 | "sheet.unfold"
                 | "sheet.refold"
@@ -859,6 +869,17 @@ fn redefine(s: &mut Session, p: &Value) -> Result<Value> {
     let mut params = p.get("params").cloned().unwrap_or_else(|| json!({}));
     let idx = s.doc.feature_index(id).ok_or_else(|| bad(cmd, "feature"))?;
     let old = s.doc.feature(id).cloned().ok_or_else(|| bad(cmd, "feature"))?;
+    if let FeatureKind::Extrude { extent, .. } | FeatureKind::SurfaceExtrude { extent, .. } = &old.kind
+        && matches!(cid, "solid.extrude" | "surface.extrude")
+        && let Some(parameters) = params.as_object_mut()
+    {
+        let convention = if cid == "surface.extrude" || extent.direction == solidcraft_doc::Direction::Symmetric {
+            extent.convention
+        } else {
+            solidcraft_doc::ExtrudeConvention::TotalDistance
+        };
+        parameters.entry("convention").or_insert_with(|| json!(convention));
+    }
     if let FeatureKind::Revolve { convention, .. } = &old.kind
         && cid == "solid.revolve"
         && let Some(parameters) = params.as_object_mut()

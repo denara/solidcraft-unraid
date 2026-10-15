@@ -38,10 +38,12 @@ mod config;
 mod file;
 mod inspect;
 pub(crate) mod joints;
+mod libraries;
 mod material_properties;
 mod materials;
 mod measure_sel;
 mod mesh;
+mod metadata;
 pub(crate) mod motion;
 mod parts;
 mod script;
@@ -251,9 +253,11 @@ pub fn command_specs() -> Vec<&'static CommandSpec> {
     v.extend(script::COMMANDS.iter());
     v.extend(parameters::COMMANDS.iter());
     v.extend(file::COMMANDS.iter());
+    v.extend(metadata::COMMANDS.iter());
     v.extend(inspect::COMMANDS.iter());
     v.extend(materials::COMMANDS.iter());
     v.extend(material_properties::COMMANDS.iter());
+    v.extend(libraries::COMMANDS.iter());
     v.extend(section::COMMANDS.iter());
     v.extend(view_navigation::COMMANDS.iter());
     v.extend(diagnostics::COMMANDS.iter());
@@ -264,4 +268,46 @@ pub fn command_specs() -> Vec<&'static CommandSpec> {
 pub fn find_command(id: &str) -> Option<&'static CommandSpec> {
     let all = command_specs();
     all.iter().find(|c| c.id == id).or_else(|| all.iter().find(|c| c.id.eq_ignore_ascii_case(id))).copied()
+}
+
+/// The end of an unknown command's error: up to three ids like `id`, nearest first. Ids a few
+/// letters away (`solid.extrud` → `solid.extrude`) come before ids that end in the same word
+/// (`file.open` → `doc.open`). Empty when nothing is close.
+pub(crate) fn did_you_mean(id: &str) -> String {
+    let id = id.to_ascii_lowercase();
+    if id.len() > 64 {
+        return String::new();
+    }
+    let last = |s: &str| s.rsplit('.').next().unwrap_or(s).to_string();
+    let near = (id.chars().count() / 4).max(2);
+    let mut found: Vec<(bool, usize, &str)> = command_specs()
+        .iter()
+        .filter_map(|c| {
+            let d = edit_distance(&id, c.id);
+            (d <= near || last(&id) == last(c.id)).then_some((d > near, d, c.id))
+        })
+        .collect();
+    found.sort();
+    let ids: Vec<String> = found.iter().take(3).map(|(_, _, c)| format!("`{c}`")).collect();
+    match ids.as_slice() {
+        [] => String::new(),
+        [one] => format!(" (did you mean {one}?)"),
+        [rest @ .., end] => format!(" (did you mean {} or {end}?)", rest.join(", ")),
+    }
+}
+
+/// Levenshtein distance: the single-character edits that turn `a` into `b`.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let next = (prev + usize::from(ca != *cb)).min(row[j] + 1).min(row[j + 1] + 1);
+            prev = row[j + 1];
+            row[j + 1] = next;
+        }
+    }
+    row[b.len()]
 }

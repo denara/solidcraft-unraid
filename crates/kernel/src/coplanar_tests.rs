@@ -75,3 +75,24 @@ fn faces_with_room_are_pushed_apart() {
     let (added, lumps, how) = change(&block, &pad, BoolOp::Union);
     assert!((added - 30_000.0).abs() < 1e-6 && lumps == 1 && used(&how, BooleanStrategy::CoplanarSeparation), "{added}, {how:?}");
 }
+
+/// A disc joined into a round hole it fills (issue: "boolean Union: no result" for a 1 mm
+/// floor extruded into a through hole of a part that isn't a prism). The disc's wall lies on
+/// the hole's, and at either end its face lies in the block's bottom or top face: it adds its
+/// own volume, the block stays one piece, and the hole is closed where the disc is.
+#[test]
+fn a_disc_joined_into_the_hole_it_fills() {
+    let hole = cylinder(Vec3::new(150.0, 50.0, -1.0), Vec3::Z, 20.0, 22.0).unwrap();
+    let drilled = boolean(&block(200.0, 100.0, 20.0), &hole, BoolOp::Cut).unwrap().unwrap();
+    for (z0, z1) in [(0.0, 1.0), (5.0, 8.0), (19.0, 20.0)] {
+        let disc = cylinder(Vec3::new(150.0, 50.0, z0), Vec3::Z, 20.0, z1 - z0).unwrap();
+        let want = measure(&disc).unwrap().volume;
+        let (r, how) = capture_boolean_diagnostics(|| boolean(&drilled, &disc, BoolOp::Union));
+        let r = r.unwrap().unwrap();
+        let added = measure(&r).unwrap().volume - measure(&drilled).unwrap().volume;
+        assert!((added - want).abs() < want * 1e-3, "{z0}..{z1}: {added} vs {want}, {how:?}");
+        assert!(r.lumps().unwrap().len() == 1 && r.validity().is_empty(), "{z0}..{z1}: {:?}", r.validity());
+        // Exact: nothing of the tool is moved.
+        assert!(used(&how, BooleanStrategy::GrownBoss) && !used(&how, BooleanStrategy::ToolNudge), "{z0}..{z1}: {how:?}");
+    }
+}

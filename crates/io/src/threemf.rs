@@ -239,11 +239,21 @@ pub fn weld_tagged(positions: &[Vec3], triangles: &[[u32; 3]], tags: &[u32], eps
 
 /// The model part's XML.
 pub fn model_xml(objects: &[MeshObject]) -> String {
+    model_xml_with(objects, &[])
+}
+
+/// The model part's XML with model metadata after `Application`: (3MF metadata name, such as
+/// `Title` or `Designer`, and its text).
+pub fn model_xml_with(objects: &[MeshObject], metadata: &[(&str, &str)]) -> String {
     let mut x = String::new();
     x.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     let ft = if objects.iter().any(MeshObject::tagged) { format!(" xmlns:ft=\"{FACE_TAGS_NS}\"") } else { String::new() };
     let _ = writeln!(x, "<model unit=\"millimeter\" xml:lang=\"en-US\" xmlns=\"{CORE_NS}\"{ft}>");
-    x.push_str(" <metadata name=\"Application\">SolidCraft</metadata>\n <resources>\n");
+    x.push_str(" <metadata name=\"Application\">SolidCraft</metadata>\n");
+    for (name, text) in metadata {
+        let _ = writeln!(x, " <metadata name=\"{}\">{}</metadata>", esc(name), esc(text));
+    }
+    x.push_str(" <resources>\n");
     let colored = objects.iter().any(|o| o.color.is_some() || o.transparency > 0.0 || !o.looks.is_empty());
     // Base material group id 1 (each object's own colour, then its faces' colours); objects
     // from 2. A see-through colour carries its alpha (#RRGGBBAA).
@@ -308,6 +318,11 @@ pub fn model_xml(objects: &[MeshObject]) -> String {
 
 /// A 3MF package of meshes.
 pub fn write_3mf(objects: &[MeshObject]) -> Result<Vec<u8>> {
+    write_3mf_with(objects, &[])
+}
+
+/// A 3MF package of meshes with model metadata (see [`model_xml_with`]).
+pub fn write_3mf_with(objects: &[MeshObject], metadata: &[(&str, &str)]) -> Result<Vec<u8>> {
     if objects.is_empty() {
         return Err(IoError::Empty);
     }
@@ -315,7 +330,7 @@ pub fn write_3mf(objects: &[MeshObject]) -> Result<Vec<u8>> {
     let rels = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\n <Relationship Target=\"/3D/3dmodel.model\" Id=\"rel0\" Type=\"{MODEL_REL}\"/>\n</Relationships>\n"
     );
-    let model = model_xml(objects);
+    let model = model_xml_with(objects, metadata);
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
     for (name, data) in [("[Content_Types].xml", content_types.as_bytes()), ("_rels/.rels", rels.as_bytes()), ("3D/3dmodel.model", model.as_bytes())]
     {

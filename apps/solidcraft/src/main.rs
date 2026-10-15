@@ -1,6 +1,9 @@
 //! SolidCraft desktop app.
 //!
-//! Usage: `solidcraft [--control <port>] [--sample] [--crash-log] [design.solidcraft | part.step]`
+//! Usage: `solidcraft [--control <port>] [--sample] [--crash-log] [--safe-mode] [design.solidcraft | part.step]`
+//!
+//! `--safe-mode` (or `SOLIDCRAFT_SAFE_MODE=1`) starts with default settings, no recovery offer and
+//! the software renderer; see `startup` and docs/book/src/guide/troubleshooting.md.
 //!
 //! A `.step`/`.stp` file opens as a new design holding the file's bodies (an Import feature); a
 //! `.3mf`/`.stl` file as a new design holding mesh bodies.
@@ -18,18 +21,34 @@ mod app_icon;
 mod control_server;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 mod space_mouse;
+mod startup;
 
 use solidcraft_engine::{Session, io};
 use solidcraft_ui_egui::{Services, SolveApp};
 
 struct App {
     solve: SolveApp,
+    /// The settings folder whose start marker the first frame clears (`startup::started`).
+    starting: Option<std::path::PathBuf>,
+    /// Frames begun; the second one means the first was drawn (startup is over).
+    frames: u32,
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     space_mouse: space_mouse::SpaceMouse,
 }
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.frames < 2 {
+            self.frames += 1;
+            // A second frame right away, which means the first was presented: the app is up.
+            ctx.request_repaint();
+            if self.frames == 2 {
+                solidcraft_engine::crash::phase(solidcraft_engine::crash::RUNNING);
+                if let Some(dir) = self.starting.take() {
+                    startup::started(&dir);
+                }
+            }
+        }
         // The design on screen is the one whose commands a crash report replays.
         self.solve.session.crash_journal = solidcraft_engine::crash::enabled();
         // The OS closing the window (Alt+F4, Cmd+Q, the window manager): ask about unsaved
@@ -40,7 +59,9 @@ impl eframe::App for App {
         }
         self.solve.logic(ctx);
         #[cfg(any(target_os = "windows", target_os = "linux"))]
-        self.space_mouse.tick(&mut self.solve, ctx);
+        if !self.solve.file_picker_busy() {
+            self.space_mouse.tick(&mut self.solve, ctx);
+        }
         if self.solve.quit_requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -66,10 +87,13 @@ impl eframe::App for App {
     }
 }
 
-fn services() -> Services {
+fn services(cc: &eframe::CreationContext<'_>) -> Services {
+    let parent = rfd::AsyncFileDialog::new().set_parent(cc);
+    let open_parent = parent.clone();
     Services {
-        pick_open: Some(Box::new(|| {
-            rfd::FileDialog::new()
+        pick_open: Some(Box::new(move || {
+            let future = open_parent
+                .clone()
                 .add_filter(
                     "Designs, STEP, IGES and meshes",
                     &[
@@ -96,11 +120,11 @@ fn services() -> Services {
                 .add_filter("Mesh (3MF, STL)", &["3mf", "3MF", "stl", "STL"])
                 .add_filter("Sketch drawings (DXF, SVG)", &["dxf", "DXF", "svg", "SVG"])
                 .add_filter("All files", &["*"])
-                .pick_file()
-                .map(|p| p.to_string_lossy().to_string())
+                .pick_file();
+            Box::pin(async move { future.await.map(|p| p.path().to_string_lossy().into_owned()) })
         })),
-        pick_save: Some(Box::new(|name: &str, exts: &[&str]| {
-            let dialog = rfd::FileDialog::new().set_file_name(name);
+        pick_save: Some(Box::new(move |name: &str, exts: &[&str]| {
+            let dialog = parent.clone().set_file_name(name);
             let dialog = if exts == [io::DESIGN_EXT, "json"] {
                 if name.ends_with(".json") {
                     dialog.add_filter("Plain JSON design", &["json"]).add_filter("SolidCraft container", &[io::DESIGN_EXT])
@@ -110,7 +134,8 @@ fn services() -> Services {
             } else {
                 dialog.add_filter("File", exts)
             };
-            dialog.save_file().map(|p| p.to_string_lossy().to_string())
+            let future = dialog.save_file();
+            Box::pin(async move { future.await.map(|p| p.path().to_string_lossy().into_owned()) })
         })),
         graphics_path: graphics_path().map(|p| p.to_string_lossy().to_string()),
         http_get: Some(std::sync::Arc::new(http_get)),
@@ -255,11 +280,19 @@ fn adopt_settings(
     Ok(())
 }
 
+/// `graphics.json`, read before the window opens.
+fn graphics() -> Option<serde_json::Value> {
+    graphics_path().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+}
+
+/// The graphics backend preference (`graphics.json`'s `backend`: `auto`, `dx12`, `vulkan`, `gl`).
+fn backend_preference() -> Option<String> {
+    graphics().and_then(|v| v.get("backend").and_then(serde_json::Value::as_str).map(str::to_string))
+}
+
 /// Anti-aliasing samples from Preferences (4 when unset).
 fn msaa() -> u16 {
-    graphics_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+    graphics()
         .and_then(|v| v.get("msaa").and_then(serde_json::Value::as_u64))
         .and_then(|m| u16::try_from(m).ok())
         .filter(|m| [1, 2, 4, 8].contains(m))
@@ -300,7 +333,7 @@ const APP_ID: &str = solidcraft_engine::io::APP_ID;
 
 fn main() -> eframe::Result {
     adopt_legacy_settings();
-    let samples = msaa();
+    let mut safe_mode = startup::env_on(std::env::var(startup::SAFE_MODE_ENV).ok().as_deref());
     let mut control_port: Option<u16> = solidcraft_engine::geom::env::var("CONTROL_PORT").and_then(|p| p.parse().ok());
     let mut files = Vec::new();
     let mut sample = false;
@@ -309,6 +342,7 @@ fn main() -> eframe::Result {
         match a.as_str() {
             "--control" => control_port = args.next().and_then(|p| p.parse().ok()),
             "--sample" => sample = true,
+            "--safe-mode" => safe_mode = true,
             "--version" | "-V" => {
                 println!("solidcraft {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
@@ -327,12 +361,30 @@ fn main() -> eframe::Result {
                 return Ok(());
             }
             "--help" | "-h" => {
-                println!("usage: solidcraft [--control PORT] [--sample] [--crash-log] [design.solidcraft | part.step]");
+                println!("usage: solidcraft [--control PORT] [--sample] [--crash-log] [--safe-mode] [design.solidcraft | part.step]");
                 return Ok(());
             }
             _ => files.push(a),
         }
     }
+    // Settings that don't read are moved aside; launches that never got a window are counted,
+    // and after a few in a row this one starts in safe mode (docs/book/src/guide/troubleshooting.md).
+    let settings = settings_dir();
+    let mut notes: Vec<String> = Vec::new();
+    let mut failed_starts = 0;
+    if let Some(dir) = &settings {
+        notes.extend(startup::check_settings(dir, &[solidcraft_ui_egui::prefs::STORAGE_KEY, solidcraft_ui_egui::prefs::LEGACY_STORAGE_KEY]));
+        failed_starts = startup::begin(dir);
+    }
+    if failed_starts >= startup::FAILED_STARTS_FOR_SAFE_MODE && !safe_mode {
+        safe_mode = true;
+        notes.push(format!("The last {failed_starts} launches stopped before the window opened, so this one is in safe mode."));
+    }
+    let cpu_renderer = safe_mode || startup::cpu_renderer_env(std::env::var(startup::RENDERER_ENV).ok().as_deref());
+    if safe_mode {
+        notes.push("Safe mode: default settings (yours are kept for the next normal start), no recovery offer, software rendering.".into());
+    }
+    let samples = if safe_mode { MSAA } else { msaa() };
     // Crashes leave a report in the crash folder (solidcraft_engine::crash, docs/crash-reports.md).
     let crashed = solidcraft_engine::crash::default_dir()
         .map(|dir| {
@@ -344,13 +396,26 @@ fn main() -> eframe::Result {
             solidcraft_engine::crash::install(dir, build)
         })
         .unwrap_or_default();
+    // A crash in native code (a graphics driver) says where it happened: the exception and the
+    // module on Windows, and on every system the startup step the app was in.
+    eframe::egui_wgpu::set_startup_hook(startup_step);
+    solidcraft_engine::crash::phase("window");
     let options = eframe::NativeOptions {
         viewport: app_viewport()?,
         depth_buffer: DEPTH_BITS,
         stencil_buffer: STENCIL_BITS,
         multisampling: samples,
-        // Kept with the other settings, not in a folder named after the app id.
-        persistence_path: settings_dir().map(|d| d.join("app.ron")),
+        // Kept with the other settings, not in a folder named after the app id. Safe mode reads
+        // and writes a scratch copy, leaving the user's settings as they were.
+        persistence_path: if safe_mode {
+            let scratch = std::env::temp_dir().join(format!("solidcraft-safe-mode-{}.ron", std::process::id()));
+            let _ = std::fs::remove_file(&scratch);
+            Some(scratch)
+        } else {
+            settings.as_ref().map(|d| d.join("app.ron"))
+        },
+        persist_window: !safe_mode,
+        wgpu_options: wgpu_options(cpu_renderer, if safe_mode { None } else { backend_preference() }.as_deref()),
         ..Default::default()
     };
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -367,20 +432,30 @@ fn main() -> eframe::Result {
             b.with_x11();
         }));
     }
+    let created = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let created_in_app = created.clone();
+    let starting = settings.clone();
     let result = eframe::run_native(
         "SolidCraft",
         options,
         Box::new(move |cc| {
+            created_in_app.store(true, std::sync::atomic::Ordering::SeqCst);
+            solidcraft_engine::crash::phase("app setup");
             solidcraft_ui_egui::fonts::setup_fonts(&cc.egui_ctx);
-            let mut app = SolveApp::new(Session::default(), services());
+            let mut app = SolveApp::new(Session::default(), services(cc));
+            app.apply_off_thread = Some(solidcraft_ui_egui::dialogs::APPLY_AT_ONCE);
             app.custom_titlebar = CUSTOM_TITLEBAR;
             app.integrated_titlebar = cfg!(target_os = "macos");
-            if let Some(p) = cc.storage.and_then(|s| solidcraft_ui_egui::prefs::stored(|k| s.get_string(k))) {
+            app.cpu_meshing = safe_mode;
+            if let Some(p) = cc.storage.and_then(|s| solidcraft_ui_egui::prefs::stored(|k| s.get_string(k))).filter(|_| !safe_mode) {
                 app.load_prefs(&p);
             }
             if let Some(rs) = &cc.wgpu_render_state {
                 eprintln!("SolidCraft graphics: {:?}, MSAA {}x (requested {}x)", rs.adapter.get_info().backend, rs.msaa_samples, samples);
+                solidcraft_engine::crash::phase("viewport pipelines (shader compile)");
                 app.set_wgpu(rs, DEPTH_BITS, STENCIL_BITS, rs.msaa_samples);
+                // The graphics driver is loaded now; it may have put its own exception filter
+                // in front of ours.
                 // A saved anti-aliasing the device can't do: back to the default, with a notice.
                 solidcraft_ui_egui::prefs::check_msaa(&mut app, u32::from(samples));
                 let info = rs.adapter.get_info();
@@ -404,6 +479,11 @@ fn main() -> eframe::Result {
             for f in &files {
                 app.open_path_async(f);
             }
+            // No file and no sample: the empty design takes Units of new designs (#1205).
+            // An opened file and the sample part keep the units they were saved or built with.
+            if files.is_empty() && !sample {
+                solidcraft_ui_egui::prefs::apply_new_design(&mut app);
+            }
             // No design given: the start page (not when driven over the control channel, whose
             // clients expect the design view; `ui.home` shows it there).
             if files.is_empty() && !sample && control_port.is_none() {
@@ -414,20 +494,83 @@ fn main() -> eframe::Result {
             if let Some(dir) = solidcraft_engine::recovery::default_dir() {
                 let every = if app.autosave_minutes > 0.0 { app.autosave_minutes * 60.0 } else { f64::MAX / 4.0 };
                 solidcraft_ui_egui::recovery_ui::start(&mut app, &dir, std::time::Duration::from_secs_f64(every.min(1e9)));
+                // Safe mode keeps autosaving but offers nothing: the entries wait for a normal start.
+                if safe_mode {
+                    app.recoverable.clear();
+                }
             }
             // Tell the user about crashes since the last start (after the recovery offer is set up).
             solidcraft_ui_egui::crash_ui::announce(&mut app, &crashed);
+            if !notes.is_empty() {
+                app.set_status(notes.join(" "), true);
+            }
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             let space_mouse = space_mouse::SpaceMouse::start(&cc.egui_ctx);
+            solidcraft_engine::crash::phase("first frame");
             Ok(Box::new(App {
                 solve: app,
+                starting,
+                frames: 0,
                 #[cfg(any(target_os = "windows", target_os = "linux"))]
                 space_mouse,
             }))
         }),
     );
     control_server::remove_token_file();
-    result
+    match result {
+        Err(e) if !created.load(std::sync::atomic::Ordering::SeqCst) => no_window(e, cpu_renderer, settings.as_deref()),
+        r => r,
+    }
+}
+
+/// egui-wgpu is about to start a step of getting the graphics device and the window's surface up:
+/// the crash journal keeps it, and the adapter once it is picked.
+fn startup_step(step: &'static str, detail: &str) {
+    if step == eframe::egui_wgpu::STEP_ADAPTER_CHOSEN {
+        solidcraft_engine::crash::set_environment(&format!("Renderer: {detail}"));
+    }
+    solidcraft_engine::crash::phase(step);
+}
+
+/// The renderer settings: with `cpu`, the software adapter (WARP, lavapipe, llvmpipe). The
+/// backends come from `startup::choose_backends` (on Windows D3D12 first, and only the backend
+/// in use is started); `preference` is `graphics.json`'s `backend`.
+fn wgpu_options(cpu: bool, preference: Option<&str>) -> eframe::egui_wgpu::WgpuConfiguration {
+    let mut options = eframe::egui_wgpu::WgpuConfiguration::default();
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_setup {
+        let env_set = std::env::var(startup::WGPU_BACKEND_ENV).is_ok_and(|v| !v.trim().is_empty());
+        if let Some(backends) = startup::choose_backends(cfg!(target_os = "windows"), env_set, cpu, preference, startup::has_hardware_adapter) {
+            eprintln!("SolidCraft graphics: starting {backends:?}");
+            setup.instance_descriptor.backends = backends;
+        }
+        if cpu {
+            setup.native_adapter_selector = Some(std::sync::Arc::new(startup::pick_cpu_adapter));
+        }
+    }
+    options
+}
+
+/// The window never opened (no graphics adapter, a device that wouldn't start): once more on
+/// the software renderer, else a message box saying what failed instead of a silent exit.
+fn no_window(error: eframe::Error, tried_cpu: bool, settings: Option<&std::path::Path>) -> eframe::Result {
+    log::error!("the window could not open: {error}");
+    eprintln!("SolidCraft: the window could not open: {error}");
+    if !tried_cpu && let Ok(exe) = std::env::current_exe() {
+        eprintln!("SolidCraft: trying again with the software renderer ({}=cpu)", startup::RENDERER_ENV);
+        match std::process::Command::new(exe).args(std::env::args_os().skip(1)).env(startup::RENDERER_ENV, "cpu").status() {
+            Ok(status) if status.success() => return Ok(()),
+            // The second try showed its own message.
+            Ok(_) => return Err(error),
+            Err(e) => log::error!("could not start again with the software renderer: {e}"),
+        }
+    }
+    let _ = rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title("SolidCraft could not start")
+        .set_description(startup::no_window_message(&error.to_string(), settings))
+        .set_buttons(rfd::MessageButtons::Ok)
+        .show();
+    Err(error)
 }
 
 /// Whether to run through XWayland rather than native Wayland. winit has no file drag-and-drop

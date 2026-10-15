@@ -16,6 +16,50 @@ use crate::scenario::Harness;
 use crate::selection::{AXES, CURVES, POINTS, SelInput};
 use crate::sketch_modify_ui::{Mod, commands};
 
+#[test]
+fn existing_patterns_reopen_from_menu_and_badge_and_edit_without_changing_surviving_ids() {
+    for circular in [false, true] {
+        let mut h = Harness::new();
+        h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+        h.app.run("sketch.line", json!({"points":[[10,0],[20,0]],"ids":["l1"]})).unwrap();
+        let cmd = if circular { "sketch.pattern.circular" } else { "sketch.pattern.rectangular" };
+        let p = if circular {
+            json!({"entities":["l1"],"center":"origin","count":4})
+        } else {
+            json!({"entities":["l1"],"dir":[0,1],"count":4,"spacing":12})
+        };
+        let out = h.app.run(cmd, p).unwrap();
+        let before = h.app.session.doc.to_json();
+        h.app.session.selection = vec![Sel::SketchCurve { id: "l2".into() }];
+        h.settle();
+        let menu = crate::context_menu::items(&h.app, &crate::context_menu::Target::Viewport);
+        let item = menu.iter().find(|item| item.id == "ui.editSketchPattern").expect("a copy offers Edit Sketch Pattern");
+        crate::context_menu::run_item(&mut h.app, item, egui::pos2(0.0, 0.0));
+        assert_eq!(h.app.session.doc.to_json(), before, "opening the editor commits nothing");
+        let d = h.app.dialog.as_ref().unwrap();
+        assert_eq!(d.extra["pattern"], out["pattern"]);
+        let cmds = apply_commands(&h.app, d).unwrap();
+        if !circular {
+            assert_eq!(cmds[0].1["dir"], json!([0.0, 1.0]));
+        }
+        h.app.dialog = None;
+        h.settle();
+        let cid = out["constraints"][0].as_str().unwrap();
+        let at = crate::sketch_tools::glyph_positions().into_iter().find(|(id, _)| id == cid).expect("pattern has a badge").1;
+        assert!(crate::sketch_modify_ui::double_click_pattern(&mut h.app, at));
+        let d = h.app.dialog.as_mut().unwrap();
+        match &mut d.kind {
+            Kind::SketchModify(Mod::PatternCirc { count, .. }) | Kind::SketchModify(Mod::PatternRect { count, .. }) => *count = "5".into(),
+            _ => panic!("wrong pattern editor"),
+        }
+        let d = h.app.dialog.clone().unwrap();
+        let cmds = apply_commands(&h.app, &d).unwrap();
+        let result = h.app.run(&cmds[0].0, cmds[0].1.clone()).unwrap();
+        assert_eq!(result["curves"][0], "l2");
+        assert_eq!(result["curves"].as_array().unwrap().len(), 4);
+    }
+}
+
 /// A sketch on XY holding one 20 by 10 rectangle at the origin.
 fn rectangle() -> Harness {
     let mut h = Harness::new();

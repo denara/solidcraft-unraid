@@ -76,7 +76,7 @@ impl NameCell {
     }
 }
 
-pub use crate::name_lookup::{EdgeHit, FaceHit, LEGACY_MARK, face_has_name, faces_with_stem, legacy_name, locate_edge, locate_face};
+pub use crate::name_lookup::{EdgeHit, FaceHit, LEGACY_MARK, face_has_name, faces_with_stem, legacy_name, locate_edge, locate_face, locate_one};
 pub use crate::piece_names::parent_piece;
 
 /// Deeper chains than this are named by position only (bounded work and stack).
@@ -754,6 +754,71 @@ pub fn face_name_at_body(body: &ModelBody, point: Vec3) -> Option<String> {
     let tolerance = (body.body.size() * 1e-3).max(1e-3);
     let index = FaceIndex::new(&mesh, count).face_at(point, tolerance)?;
     face_names(body).get(index).filter(|name| !name.is_empty()).cloned()
+}
+
+/// Where a face is, for a script: a point that lies on it and picks it, and the plane, cylinder,
+/// cone, sphere or torus it is part of (when it is one).
+#[derive(Clone, Copy, Debug)]
+pub struct FaceSpot {
+    pub point: Vec3,
+    pub surface: Option<solidcraft_kernel::FaceSurface>,
+}
+
+/// The incentre and inradius of the roomiest triangle (greatest inradius) of each face of a mesh,
+/// of face `only` alone if given.
+fn roomiest(m: &Mesh, only: Option<usize>) -> Vec<Option<(f64, Vec3)>> {
+    let mut best = vec![None; m.tri_face.iter().map(|f| *f as usize + 1).max().unwrap_or(0)];
+    for (t, f) in m.triangles.iter().zip(&m.tri_face) {
+        let f = *f as usize;
+        if only.is_some_and(|i| i != f) {
+            continue;
+        }
+        let Some([a, b, c]) = m.tri(t) else { continue };
+        // The incentre weighs each corner by the side opposite it; the inradius is area / half the perimeter.
+        let (la, lb, lc) = (b.dist(c), c.dist(a), a.dist(b));
+        let perimeter = la + lb + lc;
+        let radius = (b - a).cross(c - a).len() / perimeter;
+        let centre = (a * la + b * lb + c * lc) / perimeter;
+        if let Some(slot) = best.get_mut(f)
+            && radius.is_finite()
+            && centre.is_finite()
+            && slot.is_none_or(|(old, _)| radius > old)
+        {
+            *slot = Some((radius, centre));
+        }
+    }
+    best
+}
+
+/// The spot of face `index` of `b` from its roomiest triangle: the triangle's incentre, so a point
+/// that lies on the face however it is shaped (the centroid of a plate with a hole is in the hole,
+/// that of a half cylinder inside the cylinder) and well away from its edges, so a pick there finds
+/// this face. On a face of an analytic surface the point is moved onto the surface itself (a facet
+/// of a curved face lies inside it by its sag), as far as that stays well inside the triangle.
+fn spot(b: &ModelBody, index: usize, roomiest: Option<(f64, Vec3)>) -> Option<FaceSpot> {
+    let (radius, centre) = roomiest?;
+    let surface = solidcraft_kernel::face_surface(&b.body, index);
+    let point = surface.and_then(|s| s.nearest(centre)).filter(|q| q.dist(centre) <= radius * 0.5).unwrap_or(centre);
+    Some(FaceSpot { point, surface })
+}
+
+/// [`face_spot`] of every face of a body (`None`: the face has no triangles), in one pass.
+pub fn face_spots(b: &ModelBody) -> Vec<Option<FaceSpot>> {
+    roomiest(&b.mesh(), None).into_iter().enumerate().map(|(i, best)| spot(b, i, best)).collect()
+}
+
+/// Where face `index` of `b` is (`None`: it has no triangles).
+pub fn face_spot(b: &ModelBody, index: usize) -> Option<FaceSpot> {
+    spot(b, index, roomiest(&b.mesh(), Some(index)).get(index).copied().flatten())
+}
+
+/// A point on the face with this name, the name `model.faces` lists for it, on the body called
+/// `body` or, without one, on any body (see [`locate_one`]): what a command that takes a face as
+/// a point is given instead when the face is named.
+pub fn named_face_point(st: &ModelState, body: Option<&str>, name: &str) -> Result<Vec3, String> {
+    let hit = locate_one(st, body, name)?;
+    let b = st.bodies.get(hit.body).ok_or_else(|| format!("no face is named `{name}`"))?;
+    face_spot(b, hit.face).map(|spot| spot.point).ok_or_else(|| format!("face `{name}` has no surface to pick"))
 }
 
 /// The point on the face with this name nearest `p` (a split face: its nearest piece, with

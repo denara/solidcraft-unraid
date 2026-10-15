@@ -129,6 +129,29 @@ pub fn write_atomic(path: &Path, bytes: &[u8], backup: bool) -> std::io::Result<
     write_steps(&resolve_links(path)?, bytes, backup, None)
 }
 
+/// Publish a complete new file without replacing an existing destination, even if another
+/// writer creates it after this call starts. Unsupported filesystems return an error.
+pub fn create_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if cfg!(target_arch = "wasm32") {
+        let name = path.to_string_lossy();
+        if crate::vfs::exists(&name) {
+            return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "destination already exists"));
+        }
+        return crate::vfs::write(&name, bytes);
+    }
+    let tmp = temp_beside(path, "create");
+    // Only remove a temporary file that this invocation successfully created.
+    let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+    let result = file.write_all(bytes).and_then(|_| file.sync_all());
+    drop(file);
+    let result = result.and_then(|_| fs::hard_link(&tmp, path));
+    let _ = fs::remove_file(&tmp);
+    if result.is_ok() {
+        sync_dir(path);
+    }
+    result
+}
+
 /// Leftover temporary files of saves that never finished (a crash part way), next to `path`
 /// (next to the file a link at `path` points to, where a save puts them).
 pub fn stale_temps(path: &Path) -> Vec<PathBuf> {
@@ -149,6 +172,42 @@ pub fn stale_temps(path: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn create_does_not_replace_an_existing_destination() {
+        let d = dir("create");
+        let p = d.join("render.png");
+        create_atomic(&p, b"first complete image").unwrap();
+        assert_eq!(create_atomic(&p, b"replacement").unwrap_err().kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&p).unwrap(), b"first complete image");
+        assert!(stale_temps(&p).is_empty());
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn concurrent_creators_publish_exactly_one_whole_file() {
+        let d = dir("create-race");
+        let p = d.join("render.png");
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let workers: Vec<_> = [b"first image".as_slice(), b"second image".as_slice()]
+            .into_iter()
+            .map(|bytes| {
+                let gate = gate.clone();
+                let p = p.clone();
+                std::thread::spawn(move || {
+                    gate.wait();
+                    create_atomic(&p, bytes)
+                })
+            })
+            .collect();
+        let results: Vec<_> = workers.into_iter().map(|w| w.join().unwrap()).collect();
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+        assert_eq!(results.iter().filter_map(|r| r.as_ref().err()).next().unwrap().kind(), std::io::ErrorKind::AlreadyExists);
+        let bytes = fs::read(&p).unwrap();
+        assert!(bytes == b"first image" || bytes == b"second image");
+        assert!(stale_temps(&p).is_empty());
+        fs::remove_dir_all(d).unwrap();
+    }
 
     fn dir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("solidcraft-safe-write-{tag}-{}", std::process::id()));

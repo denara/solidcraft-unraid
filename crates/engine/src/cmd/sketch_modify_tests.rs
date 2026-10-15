@@ -4,6 +4,9 @@ use solidcraft_sketch::{ConstraintKind, CurveKind};
 
 use crate::Session;
 
+#[path = "sketch_pattern_tests.rs"]
+mod pattern_tests;
+
 fn run(s: &mut Session, id: &str, p: Value) -> Value {
     match s.execute(id, &p) {
         Ok(v) => v,
@@ -675,6 +678,34 @@ fn ellipse_radii_dimensions() {
     assert!((a - std::f64::consts::PI * 60.0).abs() < 1e-6, "{a}");
 }
 
+/// #1026: a construction diagonal ending at a rectangle's corner is not one of the corner's
+/// sides. The corner is rounded, and the diagonal keeps its end on the virtual sharp corner.
+#[test]
+fn fillet_a_corner_a_construction_diagonal_ends_in() {
+    let mut s = new_sketch();
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [50, 0], [50, 30], [0, 30]], "closed": true, "ids": ["a", "b", "c", "d"]}));
+    let diag = ids(&run(&mut s, "sketch.line", json!({"points": ["c.end", "a.end"], "construction": true}))["curves"])[0].clone();
+    let f = run(&mut s, "sketch.fillet", json!({"point": "a.end", "radius": 2}));
+    let arc = ids(&f["curves"])[0].clone();
+    let sk = sketch(&s);
+    let ai = sk.curve_index(&arc).unwrap();
+    assert!((sk.radius(ai).unwrap() - 2.0).abs() < 1e-7);
+    let c = sk.center(ai).unwrap();
+    assert!(c.dist(Vec2::new(48.0, 2.0)) < 1e-6, "{c:?}");
+    // The diagonal still runs from (0, 30) to the sharp corner (50, 0).
+    let di = sk.curve_index(&diag).unwrap();
+    let Some(CurveKind::Line { a, b }) = sk.curves.get(di).map(|x| &x.kind) else { panic!("the diagonal is a line") };
+    let (pa, pb) = (sk.point(*a).unwrap(), sk.point(*b).unwrap());
+    assert!(pa.dist(Vec2::new(0.0, 30.0)) < 1e-6 && pb.dist(Vec2::new(50.0, 0.0)) < 1e-6, "{pa:?} {pb:?}");
+    assert!(sk.curves.get(di).unwrap().construction);
+    // Three lines at a corner, none of them construction, stay ambiguous.
+    let mut s = new_sketch();
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [50, 0], [50, 30]], "ids": ["a", "b"]}));
+    run(&mut s, "sketch.line", json!({"points": ["a.end", [80, 20]]}));
+    let e = s.execute("sketch.fillet", &json!({"point": "a.end", "radius": 2})).unwrap_err().to_string();
+    assert!(e.contains("exactly two lines") && e.contains("`a` and `b`"), "{e}");
+}
+
 #[test]
 fn fillet_a_line_and_an_arc() {
     let mut s = new_sketch();
@@ -693,6 +724,51 @@ fn fillet_a_line_and_an_arc() {
     assert!((c.y - 2.0).abs() < 1e-6 || (c.y + 2.0).abs() < 1e-6, "{c:?}");
     let d = c.dist(Vec2::new(30.0, 0.0));
     assert!((d - 12.0).abs() < 1e-6, "{d} {c:?}");
+}
+
+#[test]
+fn fillet_a_line_and_an_arc_drawn_to_meet_at_a_point() {
+    // #1208: the arc starts at the line's end by coordinates, so the corner is two points held
+    // together by a Coincident constraint. By point and by naming the two curves.
+    for how in [json!({"point": "l1.end"}), json!({"a": "l1", "b": "a1"})] {
+        let mut s = new_sketch();
+        run(&mut s, "sketch.line", json!({"points": [[0, 0], [40, 0]], "ids": ["l1"]}));
+        run(&mut s, "sketch.arc.center_point", json!({"center": [50, 0], "start": [60, 0], "end": [40, 0], "id": "a1"}));
+        let mut p = how.clone();
+        p["radius"] = json!(3);
+        let f = run(&mut s, "sketch.fillet", p);
+        let sk = sketch(&s);
+        let ai = sk.curve_index(&ids(&f["curves"])[0]).unwrap();
+        assert!((sk.radius(ai).unwrap() - 3.0).abs() < 1e-7, "{how}");
+        // Tangent to the line (centre 3 above it) and outside the R10 arc (13 from its centre).
+        let c = sk.center(ai).unwrap();
+        let want = Vec2::new(50.0 - 160f64.sqrt(), 3.0);
+        assert!(c.dist(want) < 1e-6, "{how}: {c:?} vs {want:?}");
+        // The line now ends where the fillet touches it, and the arc where the fillet touches it.
+        let l1 = sk.curve_index("l1").unwrap();
+        let CurveKind::Line { b, .. } = sk.curves[l1].kind else { panic!("l1 is a line") };
+        assert!(sk.point(b).unwrap().dist(Vec2::new(want.x, 0.0)) < 1e-6, "{how}");
+        let a1 = sk.curve_index("a1").unwrap();
+        let on_arc = Vec2::new(50.0, 0.0) + (want - Vec2::new(50.0, 0.0)) * (10.0 / 13.0);
+        assert!(sk.curves[a1].kind.point_ids().iter().any(|i| sk.point(*i).unwrap().dist(on_arc) < 1e-6), "{how}");
+        // No coincident pair is left at the old corner (only the line's start on the origin).
+        let coincident = sk.constraints.iter().filter(|k| matches!(k.kind, ConstraintKind::Coincident { .. })).count();
+        assert_eq!(coincident, 1, "{how}");
+    }
+}
+
+#[test]
+fn chamfer_two_lines_drawn_to_meet_at_a_point() {
+    let mut s = new_sketch();
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [40, 0]], "ids": ["l1"]}));
+    run(&mut s, "sketch.line", json!({"points": [[40, 0], [40, 30]], "ids": ["l2"]}));
+    let c = run(&mut s, "sketch.chamfer.equal_distance", json!({"point": "l1.end", "distance": 5}));
+    let sk = sketch(&s);
+    let ci = sk.curve_index(&ids(&c["curves"])[0]).unwrap();
+    let CurveKind::Line { a, b } = sk.curves[ci].kind else { panic!("the chamfer is a line") };
+    let mut ends = [sk.point(a).unwrap(), sk.point(b).unwrap()];
+    ends.sort_by(|p, q| p.x.total_cmp(&q.x));
+    assert!(ends[0].dist(Vec2::new(35.0, 0.0)) < 1e-6 && ends[1].dist(Vec2::new(40.0, 5.0)) < 1e-6, "{ends:?}");
 }
 
 #[test]
@@ -1475,7 +1551,7 @@ fn offset_driver_format18_offsets_keep_fixed_distances_on_upgrade() {
     let mut json: Value = serde_json::from_str(&doc.to_json()).unwrap();
     json["format"] = json!("solidcraft/18");
     let mut reopened = Session::new(solidcraft_doc::Document::from_json(&json.to_string()).unwrap());
-    assert_eq!(reopened.doc.format, "solidcraft/20");
+    assert_eq!(reopened.doc.format, solidcraft_doc::format::format_string(solidcraft_doc::format::FORMAT), "upgraded on opening");
     run(&mut reopened, "sketch.edit", json!({"sketch":1}));
     let sk = sketch(&reopened);
     assert!((sk.offsets[0].distance - 2.0).abs() < 1e-8);

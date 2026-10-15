@@ -427,6 +427,7 @@ mod tests {
                         sketch: if missing_sketch { 999_999 } else { id },
                         profiles: ProfileSel::OffsetBoundaries { associations: vec!["deleted-o1".into()] },
                         extent: crate::Extent {
+                            convention: crate::ExtrudeConvention::LegacyPerSide,
                             distance: "2".into(),
                             direction: crate::Direction::Positive,
                             distance2: None,

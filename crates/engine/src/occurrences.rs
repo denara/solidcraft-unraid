@@ -176,6 +176,12 @@ impl Session {
         Ok(count)
     }
 
+    /// Whether a joint's glyph is drawn (`browser.visibility`). Hiding a joint only hides its
+    /// drawing: it still constrains and drives the parts.
+    pub fn joint_visible(&self, id: u64) -> bool {
+        !self.visibility.hidden_joints.contains(&id)
+    }
+
     pub fn body_visible(&self, name: &str) -> bool {
         if self.visibility.hidden_bodies.iter().any(|n| n == name) {
             return false;

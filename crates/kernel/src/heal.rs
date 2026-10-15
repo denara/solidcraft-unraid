@@ -417,7 +417,7 @@ fn exact_edges(shell: &mt::Shell, tol: f64, trace: &mut Trace) -> Option<mt::She
 
 /// Faces whose surface is flat but not a plane (a revolved line square to the axis, a swept
 /// line) get a real plane, so they merge with their coplanar neighbours and blend like planes.
-fn planar_surfaces(shell: &mt::Shell, tol: f64) -> Option<mt::Shell> {
+pub(crate) fn planar_surfaces(shell: &mt::Shell, tol: f64) -> Option<mt::Shell> {
     use mt::{BoundedCurve, ParametricCurve, ParametricSurface, ParametricSurface3D, SearchNearestParameter};
     let mut changed = false;
     let mut faces = Vec::new();

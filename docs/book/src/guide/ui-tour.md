@@ -2,9 +2,11 @@
 
 ![The SolidCraft window](../generated/sample-plate.png)
 
-- **Title bar.** On Windows and Linux the application bar is the window's title bar: File, save,
-  undo and redo, the start page, the theme, Help, and one tab per open design (each with its own
-  undo history, selection and camera).
+- **Title bar.** On Windows and Linux the application bar is the window's title bar. On the left:
+  the File menu (New, Open, Save, Save As, Export…), undo and redo, the Home tab (the start page)
+  and one tab per open design (each with its own undo history, selection and camera; a dot marks
+  unsaved changes). On the right: Report a bug, Help (?), Preferences (which hold the theme) and the
+  window's buttons.
 - **Toolbar.** The workspace switcher (DESIGN) sits on the left. The tabs (SOLID, SURFACE,
   SHEET METAL, PLASTIC, UTILITIES, and SKETCH while you sketch) hold panels of commands. Click a
   panel's name for all its commands. Drag a command from the dropdown onto a panel's label
@@ -23,13 +25,19 @@
   Esc or a click elsewhere closes the list. Clicking again on the same spot, with nothing changed
   in between, selects the next thing in that list. The
   wheel zooms at the cursor, the middle button pans and right-drag orbits freely (the mouse
-<  preset in Preferences switches to SolidWorks, Inventor, Alias or Tinkercad style). On a
+  preset in Preferences switches to SolidWorks, Inventor, Alias, Tinkercad, OpenSCAD or Touchpad style). On a
   trackpad, pinch zooms and two-finger scroll pans (Navigation › Two-finger scroll pans;
   off: scroll zooms like the wheel); mouse wheels zoom and the thumb wheel pans sideways.
   Shift+middle orbits freely
   in the default and Inventor presets. In every preset, Ctrl+left drag (Cmd on macOS) that starts
   on empty space orbits; a Ctrl+click still adds to the selection. Shift+right-drag snaps to the nearest standard or
   diagonal view; Shift does not request snapping when the preset already requires it to orbit.
+  With **Touchpad** selected in Preferences › Navigation, hold **Shift** and move the pointer to
+  pan, or hold **Alt** (**Option** on macOS) and move it to orbit—no mouse button is needed.
+  Vertical two-finger scrolling zooms in this preset, regardless of the saved two-finger pan
+  setting; switching presets restores that setting. Release the modifier to stop navigating.
+  Shift+click and Shift+left-drag still select. Combined Shift+Alt or Ctrl/Cmd modifiers do not
+  start pointer-only navigation.
   The axis view shows the world's X/Y/Z directions in SolidCraft's colors. Click a signed
   axis tip to look along that axis; click the aligned tip again to look from the opposite side.
   Drag the axis view to orbit around the view centre, with Shift for snapping. Top and bottom
@@ -51,7 +59,10 @@
   to its top.
 
 Preferences (File › Preferences) hold the theme, the units of new designs, the mouse preset, the
-visual style and autosave. Help › Keyboard Shortcuts lists every key, and File › Keyboard
+visual style and autosave. Graphics › Colour vision gives the colours that carry a meaning (sketch
+states, axes, bends, analyses, icons) values for a weak red, green or blue sense: Protan, Deutan or
+Tritan. In a mode, the faces Draft and Accessibility Analysis mark as failing are striped too.
+Help › Keyboard Shortcuts lists every key, and File › Keyboard
 Shortcuts changes them.
 
 Navigation › **Smooth wheel zoom** is on by default. Turn it off to apply each wheel or

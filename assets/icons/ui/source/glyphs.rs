@@ -100,7 +100,7 @@ pub(crate) fn brand_mark(p: &egui::Painter, c: Pos2) {
     let face = |col: Color32, pts: &[(f32, f32)]| {
         p.add(egui::Shape::convex_polygon(m(pts), col, Stroke::NONE));
     };
-    let (light, mid, dark) = (Color32::from_rgb(96, 158, 236), Color32::from_rgb(58, 136, 238), Color32::from_rgb(55, 108, 197));
+    let [light, mid, dark, edge_col] = crate::theme::Tokens::get().logo;
     face(light, &[(3.5, 105.9), (177.0, 5.8), (263.4, 55.6), (263.8, 156.0), (177.0, 406.4)]);
     face(light, &[(177.0, 206.1), (263.8, 156.0), (350.5, 206.2), (350.5, 306.3), (177.0, 406.4)]);
     face(mid, &[(3.5, 105.9), (177.0, 206.1), (177.0, 406.4)]);
@@ -111,7 +111,7 @@ pub(crate) fn brand_mark(p: &egui::Painter, c: Pos2) {
     face(dark, &[(177.0, 206.1), (177.0, 406.4), (350.5, 306.3)]);
     face(dark, &[(263.8, 55.9), (263.8, 156.0), (177.1, 105.9)]);
     // White edge lines.
-    let edge = Stroke::new(10.0 * s, Color32::WHITE);
+    let edge = Stroke::new(10.0 * s, edge_col);
     let line = |pts: &[(f32, f32)]| {
         p.add(egui::Shape::line(m(pts), edge));
     };

@@ -165,10 +165,15 @@ pub fn start_hook(app: &mut SolveApp, id: &str) -> bool {
     if !matches!(id, "canvas.insert" | "canvas.decal") {
         return true;
     }
-    let path = app.services.pick_open.as_ref().and_then(|f| f());
-    let ok = path.is_some();
-    IMAGE.with(|i| *i.borrow_mut() = path);
-    ok
+    let command = id.to_string();
+    app.pick_open(move |app, path| {
+        if let Some(path) = path {
+            IMAGE.with(|i| *i.borrow_mut() = Some(path));
+            app.last_command = solidcraft_engine::find_command(&command).map(|spec| (spec.id.into(), spec.label.into()));
+            app.tool = crate::tools::Tool::for_command(&command);
+        }
+    });
+    false
 }
 
 fn v3(v: &Value) -> Option<Vec3> {
@@ -930,6 +935,13 @@ fn glyphs(app: &SolveApp, painter: &egui::Painter, proj: &Proj, hover: Option<Po
         if c.kind.is_dimension() {
             continue;
         }
+        if matches!(
+            c.kind,
+            solidcraft_engine::sketch::ConstraintKind::PatternPoint { .. } | solidcraft_engine::sketch::ConstraintKind::PatternRadius { .. }
+        ) && !ss.sketch.patterns.iter().any(|p| p.instances.first().and_then(|i| i.constraints.first()) == Some(&c.id))
+        {
+            continue;
+        }
         for (at, dir) in glyph_anchors(&ss.sketch, &c.kind) {
             let Some(base) = proj.to_screen(ss.plane.to_world(at)) else { continue };
             // The entity's direction on screen, and its side.
@@ -1001,7 +1013,14 @@ fn glyphs(app: &SolveApp, painter: &egui::Painter, proj: &Proj, hover: Option<Po
         let r = egui::Rect::from_center_size(*sp, egui::vec2(GLYPH, GLYPH));
         painter.rect_filled(r, 3.0, if lit { tk.accent_soft } else { tk.glyph_bg });
         painter.rect_stroke(r, 3.0, Stroke::new(1.0, if failing || lit { col } else { tk.glyph_edge }), egui::StrokeKind::Inside);
-        match glyph_icon(c.kind.name()) {
+        let pattern_icon = ss.sketch.patterns.iter().find(|p| p.instances.first().and_then(|i| i.constraints.first()) == Some(id)).map(|p| {
+            if matches!(p.kind, solidcraft_engine::sketch::SketchPatternKind::Circular { .. }) {
+                "sketch_circ_pattern"
+            } else {
+                "sketch_rect_pattern"
+            }
+        });
+        match pattern_icon.or_else(|| glyph_icon(c.kind.name())) {
             Some(icon) => crate::icons::paint(painter, r.shrink(2.0), icon, col, tk.glyph_bg, col),
             None => {
                 painter.text(*sp, egui::Align2::CENTER_CENTER, glyph_letter(c.kind.name()), egui::FontId::proportional(10.5), col);
@@ -1030,6 +1049,8 @@ fn constraint_entities(k: &solidcraft_engine::sketch::ConstraintKind) -> (Vec<us
     use solidcraft_engine::sketch::ConstraintKind::*;
     match *k {
         Coincident { p, q } | HorizontalPoints { p, q } | VerticalPoints { p, q } => (vec![], vec![p, q]),
+        PatternPoint { p, q, center, .. } => (vec![], vec![p, q].into_iter().chain(center).collect()),
+        PatternRadius { a, b } => (vec![a, b], vec![]),
         Fix { p } => (vec![], vec![p]),
         Midpoint { p, l } => (vec![l], vec![p]),
         PointOnCurve { p, c } => (vec![c], vec![p]),
@@ -1067,6 +1088,8 @@ fn glyph_anchors(sk: &solidcraft_engine::sketch::Sketch, k: &solidcraft_engine::
     let pt = |p: usize| sk.point(p).map(|q| (q, None));
     match *k {
         Coincident { p, .. } | Fix { p } | Midpoint { p, .. } | PointOnCurve { p, .. } => pt(p).into_iter().collect(),
+        PatternPoint { p, center, .. } => pt(center.unwrap_or(p)).into_iter().collect(),
+        PatternRadius { .. } => Vec::new(),
         HorizontalPoints { p, q } | VerticalPoints { p, q } | Symmetric { p, q, .. } => {
             sk.point(p).zip(sk.point(q)).map(|(a, b)| ((a + b) * 0.5, None)).into_iter().collect()
         }

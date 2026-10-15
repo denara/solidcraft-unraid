@@ -594,6 +594,199 @@ fn offset_polygon(ctrl: &[Vec2], a: Vec2, b: Vec2, d: f64) -> Option<Vec<Vec2>> 
     out.iter().all(|p| p.is_finite()).then_some(out)
 }
 
+/// Samples a moved free curve is fitted to, and checked against.
+const OFFSET_SAMPLES: usize = 16;
+
+/// Where the point at `t` of the free curve `s` goes once moved `d` to its right (along its
+/// normal there). `None` where it has no tangent.
+fn true_offset(s: &Seg2, t: f64, d: f64) -> Option<Vec2> {
+    let tangent = s.derivative(t).normalized()?;
+    Some(s.point_at(t) + Vec2::new(tangent.y, -tangent.x) * d)
+}
+
+/// The free curve `s` moved `d` to its right, as one curve of its kind from `a` to `b` (where
+/// its moved neighbours meet it; its own moved ends where it runs on into them). It is fitted to
+/// the true offset between the curve's own moved ends: a cubic keeps its end tangents and takes
+/// the handle lengths that fit best (least squares over [`OFFSET_SAMPLES`] points); a conic or a
+/// higher Bézier moves its control polygon ([`offset_polygon`]), its middle then put on the true
+/// offset. Its ends then go to `a` and `b`, along its end tangents (where moved neighbours meet
+/// it), their handles kept pointing the same way. Close for a curve that turns little against
+/// `d`; [`offset_splits`] cuts the others into such pieces first.
+fn offset_curve(s: &Seg2, a: Vec2, b: Vec2, d: f64) -> Option<Seg2> {
+    let (n0, n1) = (true_offset(s, 0.0, d)?, true_offset(s, 1.0, d)?);
+    let (t0, t3) = (s.start_tangent(), s.end_tangent());
+    let middle = |moved: &Seg2| Some(true_offset(s, 0.5, d)? - moved.point_at(0.5));
+    // The control points fitted between the natural ends.
+    let mut ctrl: Vec<Vec2> = match *s {
+        Seg2::Cubic { p0, p1, p2, p3 } => {
+            // The moved cubic n0·(B0+B1) + n1·(B2+B3) + α·t0·B1 − β·t3·B2: linear in α, β.
+            let (mut m, mut r) = ([[0.0f64; 2]; 2], [0.0f64; 2]);
+            for k in 1..OFFSET_SAMPLES {
+                let t = k as f64 / OFFSET_SAMPLES as f64;
+                let u = 1.0 - t;
+                let (b0, b1, b2, b3) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+                let rest = true_offset(s, t, d)? - (n0 * (b0 + b1) + n1 * (b2 + b3));
+                let (c1, c2) = (t0 * b1, t3 * -b2);
+                m[0][0] += c1.dot(c1);
+                m[0][1] += c1.dot(c2);
+                m[1][1] += c2.dot(c2);
+                r[0] += c1.dot(rest);
+                r[1] += c2.dot(rest);
+            }
+            let det = m[0][0] * m[1][1] - m[0][1] * m[0][1];
+            let (alpha, beta) = if det.abs() > 1e-12 * (m[0][0] * m[1][1]).max(1e-30) {
+                ((r[0] * m[1][1] - r[1] * m[0][1]) / det, (m[0][0] * r[1] - m[0][1] * r[0]) / det)
+            } else {
+                (f64::NAN, f64::NAN)
+            };
+            if alpha.is_finite() && beta.is_finite() && alpha > 0.0 && beta > 0.0 {
+                vec![n0, n0 + t0 * alpha, n1 - t3 * beta, n1]
+            } else {
+                // Handles that would turn back: the moved control polygon, its middle on the offset.
+                let mut q = offset_polygon(&[p0, p1, p2, p3], n0, n1, d)?;
+                let [q0, q1, q2, q3] = q[..] else { return None };
+                let shift = middle(&Seg2::Cubic { p0: q0, p1: q1, p2: q2, p3: q3 })? * (8.0 / 6.0);
+                for point in q.iter_mut().take(3).skip(1) {
+                    *point += shift;
+                }
+                q
+            }
+        }
+        Seg2::Conic { a: c0, apex, b: c1, w } => {
+            let mut q = offset_polygon(&[c0, apex, c1], n0, n1, d)?;
+            let [q0, qa, q1] = q[..] else { return None };
+            // The middle is (a + 2w·apex + b) / (2 + 2w).
+            let shift = middle(&Seg2::Conic { a: q0, apex: qa, b: q1, w })? * ((2.0 + 2.0 * w) / (2.0 * w));
+            if let Some(apex) = q.get_mut(1) {
+                *apex += shift;
+            }
+            q
+        }
+        Seg2::Bezier { n, p } => {
+            let k = (n as usize).clamp(1, solidcraft_geom::MAX_BEZIER_DEGREE);
+            let mut q = offset_polygon(p.get(..=k)?, n0, n1, d)?;
+            let mut all = p;
+            for (dst, src) in all.iter_mut().zip(&q) {
+                *dst = *src;
+            }
+            // The middle weighs the inner points by binomials summing to 2^k − 2.
+            let shift = middle(&Seg2::Bezier { n, p: all })? * (2f64.powi(k as i32) / (2f64.powi(k as i32) - 2.0));
+            for point in q.iter_mut().take(k).skip(1) {
+                *point += shift;
+            }
+            q
+        }
+        Seg2::Line { .. } | Seg2::Arc { .. } => return None,
+    };
+    // The ends to where the neighbours meet; a handle the move would turn round goes with it.
+    let last = ctrl.len().checked_sub(1)?;
+    if last < 2 {
+        return None;
+    }
+    let (ea, eb) = (a - n0, b - n1);
+    if let Some(h) = ctrl.get_mut(1)
+        && (*h - a).dot(t0) <= 0.0
+    {
+        *h += ea;
+    }
+    if let Some(h) = ctrl.get_mut(last - 1)
+        && (b - *h).dot(t3) <= 0.0
+    {
+        *h += eb;
+    }
+    if let Some(first) = ctrl.first_mut() {
+        *first = a;
+    }
+    if let Some(end) = ctrl.last_mut() {
+        *end = b;
+    }
+    Some(match (*s, &ctrl[..]) {
+        (Seg2::Cubic { .. }, &[p0, p1, p2, p3]) => Seg2::Cubic { p0, p1, p2, p3 },
+        (Seg2::Conic { w, .. }, &[a, apex, b]) => Seg2::Conic { a, apex, b, w },
+        (Seg2::Bezier { n, p }, q) => {
+            let mut all = p;
+            for (dst, src) in all.iter_mut().zip(q) {
+                *dst = *src;
+            }
+            Seg2::Bezier { n, p: all }
+        }
+        _ => return None,
+    })
+}
+
+/// How far a moved free curve strays from the free curve `s`'s true offset by `d`: the largest
+/// distance from its points to the true offset's (on polylines of [`OFFSET_SAMPLES`] spans).
+pub(crate) fn offset_error(s: &Seg2, d: f64) -> Option<f64> {
+    let (a, b) = (true_offset(s, 0.0, d)?, true_offset(s, 1.0, d)?);
+    let moved = offset_curve(s, a, b, d)?;
+    let n = OFFSET_SAMPLES * 2;
+    let truth: Vec<Vec2> = (0..=n).map(|k| true_offset(s, k as f64 / n as f64, d)).collect::<Option<_>>()?;
+    let near = |p: Vec2| {
+        truth
+            .iter()
+            .zip(truth.iter().skip(1))
+            .map(|(x, y)| Seg2::Line { a: *x, b: *y })
+            .map(|l| l.point_at(l.closest_param(p)).dist(p))
+            .fold(f64::INFINITY, f64::min)
+    };
+    Some((0..=n).map(|k| near(moved.point_at(k as f64 / n as f64))).fold(0.0, f64::max))
+}
+
+/// How close a moved free curve is kept to its true offset by `d`: 2 % of it, or 10 µm (a
+/// slope's offset is a fraction of a millimetre on text: finer would cut letters into many
+/// pieces, and every piece a face the booleans meet).
+pub(crate) fn offset_tolerance(d: f64) -> f64 {
+    (d.abs() * 2e-2).max(1e-2)
+}
+
+/// Deepest halving of a free curve in [`offset_splits`] (at most 2^6 pieces).
+const MAX_OFFSET_DEPTH: u32 = 6;
+
+/// Whether the free curve `s` bends anywhere tighter than `d` (its radius of curvature below
+/// |d|, on [`OFFSET_SAMPLES`] points): moved that far towards its centre, its true offset folds
+/// over itself there.
+fn tighter_than(s: &Seg2, d: f64) -> bool {
+    let h = 1e-4;
+    (0..=OFFSET_SAMPLES).any(|k| {
+        let t = (k as f64 / OFFSET_SAMPLES as f64).clamp(h, 1.0 - h);
+        let (v, a) = (s.derivative(t), (s.derivative(t + h) - s.derivative(t - h)) * (0.5 / h));
+        let speed = v.len();
+        speed > 1e-12 && v.cross(a).abs() * d.abs() >= speed.powi(3)
+    })
+}
+
+/// The loop `lp` with each free curve cut into pieces whose offset by up to `d` (either way)
+/// [`offset_curve`] fits within a small part of `d`, and the segment of `lp` each piece comes
+/// from. Lines and arcs stay whole, and so does a piece bending tighter than `d`
+/// ([`tighter_than`]): its true offset folds there, and a piece following it would carry the
+/// fold, where one moved piece smooths it over.
+pub(crate) fn offset_splits(lp: &Loop2, d: f64) -> (Loop2, Vec<usize>) {
+    let tol = offset_tolerance(d);
+    let mut segs = Vec::with_capacity(lp.segs.len());
+    let mut from = Vec::with_capacity(lp.segs.len());
+    for (i, s) in lp.segs.iter().enumerate() {
+        if s.is_line_or_arc() || d == 0.0 {
+            segs.push(*s);
+            from.push(i);
+            continue;
+        }
+        // Spans still to check, the last pushed checked first: the right half goes in first.
+        let mut todo = vec![(*s, 0u32)];
+        while let Some((piece, depth)) = todo.pop() {
+            let close = |d: f64| offset_error(&piece, d).is_some_and(|e| e <= tol);
+            if depth < MAX_OFFSET_DEPTH && !tighter_than(&piece, d) && !(close(d) && close(-d)) {
+                let (left, right) = piece.split_at(0.5);
+                todo.push((right, depth + 1));
+                todo.push((left, depth + 1));
+                continue;
+            }
+            segs.push(piece);
+            from.push(i);
+        }
+    }
+    (Loop2 { segs }, from)
+}
+
 /// [`offset_loop`] for a loop of lines, arcs and free curves. Each arc keeps its centre and
 /// angles and its radius moves by `d` (so its side stays an exact cone), each line moves `d` to
 /// its right, and each free curve moves its control polygon ([`offset_polygon`]). Where two
@@ -646,7 +839,13 @@ fn offset_segments(lp: &Loop2, d: f64) -> Result<Vec<Option<Seg2>>> {
                 // Two sides running back towards each other across a gone tip: the stroke is
                 // thinner than the taper.
                 (None, None) if !adjacent && turn.abs() < 1e-9 => return Err(closes()),
-                (None, None) if !tangent && turn * d < 0.0 => {
+                // Running on smoothly (the pieces of one curve): both move to the same point.
+                // (The tangents' crossing is ill-conditioned there.)
+                (None, None) if tangent => {
+                    let m = s.start() + right(tout) * d;
+                    (m, m)
+                }
+                (None, None) if turn * d < 0.0 => {
                     into.push((k, i));
                     (prev.end() + right(tin) * d, s.start() + right(tout) * d)
                 }
@@ -663,7 +862,6 @@ fn offset_segments(lp: &Loop2, d: f64) -> Result<Vec<Option<Seg2>>> {
         let mut pieces: Vec<Option<Seg2>> = vec![None; n];
         for &i in &kept {
             let (Some(s), Some(m), Some(&a), Some(&b)) = (lp.segs.get(i), moved.get(i), starts.get(i), ends.get(i)) else { return Err(bad()) };
-            let curve = |ctrl: &[Vec2]| offset_polygon(ctrl, a, b, d).ok_or_else(closes);
             let piece = match (m, *s) {
                 (Some(arc), _) => {
                     if arc.start().dist(a) > 1e-6 || arc.end().dist(b) > 1e-6 {
@@ -672,23 +870,8 @@ fn offset_segments(lp: &Loop2, d: f64) -> Result<Vec<Option<Seg2>>> {
                     *arc
                 }
                 (None, Seg2::Line { .. }) => Seg2::Line { a, b },
-                (None, Seg2::Cubic { p0, p1, p2, p3 }) => match curve(&[p0, p1, p2, p3])?[..] {
-                    [p0, p1, p2, p3] => Seg2::Cubic { p0, p1, p2, p3 },
-                    _ => return Err(bad()),
-                },
-                (None, Seg2::Conic { a: c0, apex, b: c1, w }) => match curve(&[c0, apex, c1])?[..] {
-                    [a, apex, b] => Seg2::Conic { a, apex, b, w },
-                    _ => return Err(bad()),
-                },
-                (None, Seg2::Bezier { n: degree, p }) => {
-                    let k = (degree as usize).clamp(1, solidcraft_geom::MAX_BEZIER_DEGREE);
-                    let mut q = p;
-                    for (dst, src) in q.iter_mut().zip(curve(p.get(..=k).ok_or_else(bad)?)?) {
-                        *dst = src;
-                    }
-                    Seg2::Bezier { n: degree, p: q }
-                }
                 (None, Seg2::Arc { .. }) => return Err(bad()),
+                (None, curve) => offset_curve(&curve, a, b, d).ok_or_else(closes)?,
             };
             if let Some(slot) = pieces.get_mut(i) {
                 *slot = Some(piece);
@@ -736,9 +919,14 @@ fn offset_segments(lp: &Loop2, d: f64) -> Result<Vec<Option<Seg2>>> {
 
 /// Where the end of `p` crosses the start of `q`, nearest the corner between them: the
 /// parameters on each and the point. On polylines of a few dozen points each, the point taken
-/// half way between the two crossing pieces.
+/// on a line where one is, else half way between the two crossing pieces.
+///
+/// Its limit: curves are sampled at [`MEET_SAMPLES`] points, so two that cross twice within one
+/// sample span (a tight curve against its neighbour) can be missed. The corner then gets the
+/// mitre of the end tangents instead, and the loop that makes, if it crosses itself, is refused
+/// by [`offset_crosses`] rather than built.
 fn meet(p: &Seg2, q: &Seg2) -> Option<(f64, f64, Vec2)> {
-    const SAMPLES: usize = 48;
+    const SAMPLES: usize = MEET_SAMPLES;
     let samples = |s: &Seg2| -> Vec<(f64, Vec2)> {
         let n = if matches!(s, Seg2::Line { .. }) { 1 } else { SAMPLES };
         (0..=n).map(|k| k as f64 / n as f64).map(|t| (t, s.point_at(t))).collect()
@@ -768,7 +956,13 @@ fn meet(p: &Seg2, q: &Seg2) -> Option<(f64, f64, Vec2)> {
     if tp <= 1e-9 || tq >= 1.0 - 1e-9 {
         return None;
     }
-    Some((tp, tq, (p.point_at(tp) + q.point_at(tq)) * 0.5))
+    // On a line where one meets it, so a line stays on its line (its side stays flat).
+    let x = match (p, q) {
+        (Seg2::Line { .. }, _) => p.point_at(tp),
+        (_, Seg2::Line { .. }) => q.point_at(tq),
+        _ => (p.point_at(tp) + q.point_at(tq)) * 0.5,
+    };
+    Some((tp, tq, x))
 }
 
 /// `s` ending at `x` (its last control point moved there).
@@ -805,13 +999,17 @@ fn with_start(s: &Seg2, x: Vec2) -> Seg2 {
     }
 }
 
-/// Most pairs of polyline pieces [`offset_crosses`] compares before it gives up (and says no).
+/// Points a free curve is sampled at by [`meet`].
+const MEET_SAMPLES: usize = 48;
+
+/// Most pairs of polyline pieces [`offset_crosses`] compares before it gives up.
 const CROSSING_BUDGET: usize = 20_000_000;
 
 /// Whether the offset loops of a region cross themselves or each other, on polylines within
 /// `tol` of them: the taper is too steep for the profile's details (a stroke thinner than the
-/// taper, a curve tighter than it, two loops it brings together).
-fn offset_crosses(loops: &[Vec<Option<Seg2>>], tol: f64) -> bool {
+/// taper, a curve tighter than it, two loops it brings together). `None` when there is too
+/// much to compare within [`CROSSING_BUDGET`]: then the offset is not known to be sound.
+fn offset_crosses(loops: &[Vec<Option<Seg2>>], tol: f64) -> Option<bool> {
     let lines: Vec<Vec<Vec2>> = loops
         .iter()
         .map(|l| {
@@ -841,7 +1039,7 @@ fn offset_crosses(loops: &[Vec<Option<Seg2>>], tol: f64) -> bool {
             }
             work += 1;
             if work > CROSSING_BUDGET {
-                return false;
+                return None;
             }
             // Neighbours in one loop share an end.
             if k == k2 && (i.abs_diff(i2) <= 1 || i.abs_diff(i2) == len.saturating_sub(1)) {
@@ -852,11 +1050,11 @@ fn offset_crosses(loops: &[Vec<Option<Seg2>>], tol: f64) -> bool {
             }
             let (d1, d2, d3, d4) = (side(c, d, a), side(c, d, b), side(a, b, c), side(a, b, d));
             if d1 * d2 < 0.0 && d3 * d4 < 0.0 {
-                return true;
+                return Some(true);
             }
         }
     }
-    false
+    Some(false)
 }
 
 /// The side faces of one loop of a tapered extrude through `levels` of it, bottom to top (the
@@ -893,7 +1091,9 @@ fn taper_loop(levels: &[(Plane, &[Option<Seg2>])], numbers: impl Fn(usize) -> Ve
     let mut ruling = |a: &mt::Vertex, b: &mt::Vertex| rulings.entry((a.id(), b.id())).or_insert_with(|| builder::line(a, b)).clone();
     let flat = |wire: mt::Wire| builder::try_attach_plane(&[wire]).map_err(|e| KernelError::Failed(format!("taper sides: {e}")));
     let mut sides = Vec::new();
-    for ((bv, bottom), (tv, top)) in built.iter().zip(built.iter().skip(1)) {
+    for (((bv, bottom), (tv, top)), (low_segs, high_segs)) in
+        built.iter().zip(built.iter().skip(1)).zip(levels.iter().map(|(_, s)| s).zip(levels.iter().skip(1).map(|(_, s)| s)))
+    {
         for i in 0..n {
             let j = (i + 1) % n;
             let (Some(b0), Some(b1), Some(t0), Some(t1)) = (bv.get(i), bv.get(j), tv.get(i), tv.get(j)) else { return Err(bad()) };
@@ -903,8 +1103,18 @@ fn taper_loop(levels: &[(Plane, &[Option<Seg2>])], numbers: impl Fn(usize) -> Ve
                     if low.len() != high.len() {
                         return Err(bad());
                     }
+                    // A line and its moved copy run side by side: their side is a plane, kept
+                    // one (a flat side the booleans meet exactly, however slight the taper).
+                    let lines = matches!(
+                        (low_segs.get(i).copied().flatten(), high_segs.get(i).copied().flatten()),
+                        (Some(Seg2::Line { .. }), Some(Seg2::Line { .. }))
+                    );
                     for (e, t) in low.iter().zip(high) {
                         let wire: mt::Wire = vec![e.clone(), ruling(e.back(), t.back()), t.inverse(), ruling(e.front(), t.front()).inverse()].into();
+                        if lines {
+                            sides.push((flat(wire)?, prov.clone()));
+                            continue;
+                        }
                         let surface = mt::BSplineSurface::homotopy(e.oriented_curve().lift_up(), t.oriented_curve().lift_up());
                         sides.push((mt::Face::new(vec![wire], mt::Surface::NurbsSurface(mt::NurbsSurface::new(surface))), prov.clone()));
                     }
@@ -953,25 +1163,36 @@ pub fn extrude_tapered_between(plane: &Plane, region: &Region2, from: f64, to: f
     let (t, sign) = (taper.tan(), dir_sign.signum());
     let (bottom_plane, top_plane) = (plane.offset(from * sign), plane.offset(to * sign));
     let loops0 = oriented(region)?;
-    let ends = |h: f64| loops0.loops().map(|l| offset_loop(&l.lp, h * t)).collect::<Result<Vec<_>>>();
+    let split: Vec<(Loop2, Vec<usize>)> = loops0.loops().map(|l| offset_splits(&l.lp, from.abs().max(to.abs()) * t)).collect();
+    let ends = |h: f64| split.iter().map(|(lp, _)| offset_loop(lp, h * t)).collect::<Result<Vec<_>>>();
     let (bottoms, tops) = (ends(from)?, ends(to)?);
     // Polylines within a small part of the larger offset of it.
     let tol = (from.abs().max(to.abs()) * t.abs() * 0.02).max(1e-6);
-    if t != 0.0 && (offset_crosses(&bottoms, tol) || offset_crosses(&tops, tol)) {
-        return Err(KernelError::Invalid(
-            "the taper closes the profile: at this distance its sides would cross (a stroke, a curve or a gap narrower than the taper); try a smaller taper or distance".into(),
-        ));
+    if t != 0.0 {
+        match (offset_crosses(&bottoms, tol), offset_crosses(&tops, tol)) {
+            (Some(false), Some(false)) => {}
+            (Some(true), _) | (_, Some(true)) => {
+                return Err(KernelError::Invalid(
+                    "the taper closes the profile: at this distance its sides would cross (a stroke, a curve or a gap narrower than the taper); try a smaller taper or distance".into(),
+                ));
+            }
+            _ => {
+                return Err(KernelError::TooLarge(
+                    "the tapered profile has too many details to check that its sides stay apart; taper fewer profiles at a time".into(),
+                ));
+            }
+        }
     }
     guard("tapered extrude", || {
         let mut sides: Vec<Side> = Vec::new();
         let (mut w0, mut w1): (Vec<mt::Wire>, Vec<mt::Wire>) = (Vec::new(), Vec::new());
-        for ((l, b), t) in loops0.loops().zip(&bottoms).zip(&tops) {
+        for (((l, (_, origin)), b), t) in loops0.loops().zip(&split).zip(&bottoms).zip(&tops) {
             let mut levels = vec![(bottom_plane, &b[..])];
             if foot > 0.0 {
                 levels.push((plane.offset((from + foot) * sign), &b[..]));
             }
             levels.push((top_plane, &t[..]));
-            let (s, below, above) = taper_loop(&levels, |i| l.numbers(i).to_vec())?;
+            let (s, below, above) = taper_loop(&levels, |i| origin.get(i).map(|&k| l.numbers(k).to_vec()).unwrap_or_default())?;
             sides.extend(s);
             w0.push(below);
             w1.push(above);
@@ -1398,16 +1619,50 @@ pub(crate) fn ruled_loft_faces(wires: &[mt::Wire], edge_sources: &[Vec<Vec<usize
     Ok(sides)
 }
 
-/// Points across the sections (one per section, in order) as a smooth B-spline: cubic through
-/// four or more, quadratic through three.
-fn across(pts: &[Vec3]) -> Option<mt::BSplineCurve<mt::Point3>> {
+/// Points across the sections (one per section, in order) as a smooth B-spline through them at the
+/// parameters `u` (rising from 0 to 1, one per section): cubic through four or more, quadratic
+/// through three.
+fn across(pts: &[Vec3], u: &[f64]) -> Option<mt::BSplineCurve<mt::Point3>> {
     match pts {
         [a, b, c] => {
-            let m = *b * 2.0 - (*a + *c) * 0.5;
+            // The quadratic Bezier through `b` at t = u[1].
+            let t = *u.get(1)?;
+            if !(t > 0.0 && t < 1.0) {
+                return None;
+            }
+            let m = (*b - *a * ((1.0 - t) * (1.0 - t)) - *c * (t * t)) * (1.0 / (2.0 * t * (1.0 - t)));
             mt::BSplineCurve::try_new(mt::KnotVec::bezier_knot(2), vec![p3(*a), p3(m), p3(*c)]).ok()
         }
-        _ => interpolate_cubic(pts),
+        _ => interpolate_cubic_at(pts, u),
     }
+}
+
+/// The parameters of the sections along a loft: in proportion to the distance between them (the
+/// mean over the wires' vertices), so that unevenly spaced sections get a surface that follows
+/// them. At a uniform parameter a section close to its neighbour makes the surface overshoot
+/// between the others (by several times the section's size when the spacing differs tenfold).
+/// Evenly spaced sections give the uniform parameters.
+fn section_parameters(edges: &[Vec<mt::Edge>]) -> Vec<f64> {
+    let m = edges.len();
+    let uniform = || (0..m).map(|i| i as f64 / (m.max(2) - 1) as f64).collect::<Vec<f64>>();
+    let corners: Vec<Vec<Vec3>> = edges.iter().map(|es| es.iter().map(|e| from_p3(e.front().point())).collect()).collect();
+    let mut u = vec![0.0];
+    for w in corners.windows(2) {
+        let (Some(a), Some(b)) = (w.first(), w.get(1)) else { return uniform() };
+        let n = a.len().min(b.len());
+        if n == 0 {
+            return uniform();
+        }
+        let step = a.iter().zip(b).map(|(p, q)| p.dist(*q)).sum::<f64>() / n as f64;
+        u.push(u.last().copied().unwrap_or(0.0) + step);
+    }
+    let Some(total) = u.last().copied().filter(|t| t.is_finite() && *t > 0.0) else { return uniform() };
+    let u: Vec<f64> = u.iter().map(|x| x / total).collect();
+    // A section on top of its neighbour: no parameter for it, so the uniform ones.
+    if u.windows(2).any(|w| w.get(1).zip(w.first()).is_none_or(|(b, a)| b - a < 1e-6)) {
+        return uniform();
+    }
+    u
 }
 
 /// A loft whose side faces are B-spline surfaces through every section (smooth across the
@@ -1432,6 +1687,7 @@ pub(crate) fn smooth_loft_faces(wires: &[mt::Wire], numbers: &[Vec<Vec<usize>>],
         }
     };
     let (Some(first), Some(last)) = (edges.first(), edges.last()) else { return Err(fail("sections")) };
+    let along = section_parameters(&edges);
     // Seams: through the k-th vertex of every section (an open wire's last one at the end of
     // its last edge).
     let vertex = |e: &mt::Edge, end: bool| if end { e.back().clone() } else { e.front().clone() };
@@ -1440,7 +1696,7 @@ pub(crate) fn smooth_loft_faces(wires: &[mt::Wire], numbers: &[Vec<Vec<usize>>],
     for k in 0..seam_count {
         let (at, end) = if k < n { (k, false) } else { (n - 1, true) };
         let pts: Vec<Vec3> = edges.iter().filter_map(|es| es.get(at).map(|e| from_p3(vertex(e, end).point()))).collect();
-        let c = across(&pts).ok_or_else(|| fail("seam"))?;
+        let c = across(&pts, &along).ok_or_else(|| fail("seam"))?;
         let (Some(a), Some(b)) = (first.get(at), last.get(at)) else { return Err(fail("seam")) };
         seams.push(mt::Edge::new(&vertex(a, end), &vertex(b, end), mt::Curve::BSplineCurve(c)));
     }
@@ -1458,7 +1714,7 @@ pub(crate) fn smooth_loft_faces(wires: &[mt::Wire], numbers: &[Vec<Vec<usize>>],
         let mut vk = None;
         for j in 0..m {
             let pts: Vec<Vec3> = curves.iter().filter_map(|c| c.control_points().get(j).map(|p| from_p3(*p))).collect();
-            let c = across(&pts).ok_or_else(|| fail("surface"))?;
+            let c = across(&pts, &along).ok_or_else(|| fail("surface"))?;
             vk = Some(c.knot_vec().clone());
             ctrl.push(c.control_points().clone());
         }
@@ -1579,6 +1835,16 @@ pub fn sweep(plane: &Plane, region: &Region2, path: &[PathSeg]) -> Result<Body> 
                 cur = next.inverse();
             }
             ends.push(cur);
+        }
+        // A straight profile edge square to an arc's axis turns in its own plane: that face is
+        // given a plane, so that it is found lying on a planar face of another body.
+        let mut bounds = solidcraft_geom::Aabb3::EMPTY;
+        shell.vertex_iter().for_each(|v| bounds.add(from_p3(v.point())));
+        let size = bounds.size().len();
+        if size.is_finite()
+            && let Some(flat) = crate::heal::planar_surfaces(&shell, (size * 1e-7).max(1e-9))
+        {
+            shell = flat;
         }
         // truck sweeps the faces: each profile edge's run along the whole path, path segment
         // after segment.

@@ -19,9 +19,10 @@
 //! - `ui.click {x, y, button?, shift?}`, `ui.move {x, y}`: real
 //!   pointer input in screen points; `ui.scroll {x, y, delta}`: mouse-wheel input in
 //!   points (zooms); `ui.key {key, cmd?, shift?}`, `ui.text {text}`
-//! - `ui.screenshot {path?}`: PNG of the window; `ui.render {path, width?, height?}`: headless
-//!   CPU render of the model with the current camera and the section the viewport shows (no
-//!   window needed)
+//! - `ui.screenshot {path?}`: PNG of the window; `ui.render {path, width?, height?, grid?, axes?}`:
+//!   headless CPU render of the model with the current camera, in the window's theme, with the
+//!   section the viewport shows (no window needed); the ground grid and the origin's axes as the
+//!   window shows them, unless `grid` or `axes` says
 //! - `ui.menu {x?, y?, target?, close?}`: open a context menu at a point (the viewport's marking
 //!   menu, or a browser menu with `target: {type: body|sketch|component, …}`); without a point,
 //!   the open menu and its items. `ui.menuPick {item}` runs an item by id or label;
@@ -159,28 +160,48 @@ fn batch(app: &mut SolveApp, p: &Value) -> Outcome {
     ok(json!({"completed": results.len(), "results": results, "undone": 0}))
 }
 
-pub fn handle(app: &mut SolveApp, ctx: &egui::Context, req: &ControlRequest) -> Outcome {
-    // A request from an MCP server carries the folders its agent may use; every file the
-    // request reaches must lie inside them (docs/mcp.md).
-    let Some(allowed) = req.params.get("allow_paths") else { return dispatch(app, ctx, &req.method, &req.params) };
+/// A request from an MCP server carries the folders its agent may use (`allow_paths`); every
+/// file the request reaches must lie inside them (docs/mcp.md). `None`: it names none.
+pub fn request_scope(app: &SolveApp, params: &Value) -> Result<Option<vfs::PathScope>, String> {
+    let Some(allowed) = params.get("allow_paths") else { return Ok(None) };
     let Some(roots) = allowed.as_array().and_then(|a| a.iter().map(|r| r.as_str().map(std::path::PathBuf::from)).collect::<Option<Vec<_>>>()) else {
-        return err("`allow_paths` must be a list of folders");
+        return Err("`allow_paths` must be a list of folders".into());
+    };
+    // Plus the app's own recovery folder and, when it is a safe one, the open design's folder.
+    let roots = roots.into_iter().chain(solidcraft_engine::recovery::default_dir());
+    Ok(Some(vfs::PathScope::new(roots).with_design(app.session.path.as_deref())))
+}
+
+pub fn handle(app: &mut SolveApp, ctx: &egui::Context, req: &ControlRequest) -> Outcome {
+    let scope = match request_scope(app, &req.params) {
+        Ok(Some(scope)) => scope,
+        Ok(None) => return dispatch(app, ctx, &req.method, &req.params),
+        Err(e) => return err(e),
     };
     let mut p = req.params.clone();
     if let Some(o) = p.as_object_mut() {
         o.remove("allow_paths");
     }
-    // Plus the app's own recovery folder and, when it is a safe one, the open design's folder.
-    let roots = roots.into_iter().chain(solidcraft_engine::recovery::default_dir());
-    let scope = vfs::PathScope::new(roots).with_design(app.session.path.as_deref());
     vfs::scoped(Some(scope), || dispatch(app, ctx, &req.method, &p))
 }
 
 fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) -> Outcome {
+    crate::render_workspace::sync_backend(app);
     let s = |k: &str| p.get(k).and_then(Value::as_str);
     let f = |k: &str| p.get(k).and_then(Value::as_f64).filter(|x| x.is_finite());
     let b = |k: &str| p.get(k).and_then(Value::as_bool).unwrap_or(false);
     match method {
+        "ui.workspace" => {
+            if let Some(workspace) = s("workspace") {
+                if !matches!(workspace, "design" | "render") {
+                    return err("workspace must be design or render");
+                }
+                if let Err(e) = crate::render_workspace::enter(app, workspace == "render") {
+                    return err(e);
+                }
+            }
+            ok(json!({"workspace":if crate::render_workspace::active(app) {"render"} else {"design"}}))
+        }
         "engine.execute" | "command" => {
             let Some(id) = s("command").or(s("id")) else { return err("missing `command`") };
             wrap(execute(app, id, p.get("params").cloned().filter(|v| !v.is_null()).unwrap_or(json!({}))))
@@ -221,6 +242,8 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
             "renderer": if app.viewport.gpu.is_some() { "gpu" } else { "cpu" },
             "frame_ms": app.frame_ms,
             "file_busy": app.file_load.busy(),
+            "file_picker_busy": app.file_picker_busy(),
+            "file_dialog_open": app.file_picker_busy(),
             "build_ms": app.viewport.build_ms,
             "preview": {"active": app.preview.active, "busy": app.preview.busy, "error": app.preview.error, "ms": app.preview.ms, "replaced": app.preview.replaced},
             "home": app.home.open,
@@ -255,11 +278,12 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
         }
         "ui.set" => {
             // What is hidden lives in the session (`browser.visibility`); `ui.set` still sets it.
-            const VIS: [(&str, &str); 4] = [
+            const VIS: [(&str, &str); 5] = [
                 ("hiddenBodies", "hidden_bodies"),
                 ("hiddenOrigin", "hidden_origin"),
                 ("hiddenSketches", "hidden_sketches"),
                 ("shownSketches", "shown_sketches"),
+                ("hiddenJoints", "hidden_joints"),
             ];
             let mut cur = serde_json::to_value(&app.ui).unwrap_or(json!({}));
             let mut vis = serde_json::to_value(&app.session.visibility).unwrap_or(json!({}));
@@ -273,6 +297,11 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
             }
             match (serde_json::from_value::<crate::UiState>(cur), serde_json::from_value::<solidcraft_engine::Visibility>(vis)) {
                 (Ok(u), Ok(v)) => {
+                    if (u.tab == "RENDER") != crate::render_workspace::active(app)
+                        && let Err(e) = crate::render_workspace::enter(app, u.tab == "RENDER")
+                    {
+                        return err(e);
+                    }
                     app.ui = u;
                     app.session.visibility = v;
                     ok(serde_json::to_value(&app.ui).unwrap_or_default())
@@ -305,14 +334,42 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
             }
             ok(json!(app.cam))
         }
+        "ui.camera" => wrap(camera(app, p)),
         "ui.start" => {
             let Some(id) = s("command") else { return err("missing `command`") };
+            // `params`: what the dialog opens on. Refused: nothing starts, or the dialog closes.
+            let params = p.get("params").filter(|v| !v.is_null());
+            if params.is_some() && id != "joint.drive" {
+                return err(format!("`{id}` takes no ui.start params yet (joint.drive takes joint, values)"));
+            }
             app.start(id);
+            if let Some(params) = params {
+                if app.tree.capture_prompt.is_some() {
+                    return err("Drive Joints waits for the Capture Position question (ui.capture)");
+                }
+                let Some(crate::dialogs::Kind::Assembly(k)) = app.dialog.as_mut().map(|d| &mut d.kind) else {
+                    let why = app.status.as_ref().filter(|s| s.2).map(|s| s.0.clone());
+                    return err(why.unwrap_or_else(|| "Drive Joints did not open".into()));
+                };
+                if let Err(e) = crate::dialogs_assembly::preset(&app.session, k, params) {
+                    crate::dialogs::cancel(app);
+                    return err(e);
+                }
+            }
             ok(json!({"tool": app.tool.as_ref().map(|t| t.cmd), "dialog": app.dialog.as_ref().map(|d| format!("{d:?}"))}))
         }
         "ui.move" | "ui.click" => {
             let (Some(x), Some(y)) = (f("x"), f("y")) else { return err("missing x/y") };
+            if x.abs() > 1e6 || y.abs() > 1e6 {
+                return err("x/y must be within ±1000000 screen points");
+            }
             let pos = egui::pos2(x as f32, y as f32);
+            let modifiers = if method == "ui.move" {
+                egui::Modifiers { shift: b("shift"), alt: b("alt"), ctrl: b("ctrl"), command: b("ctrl") || b("cmd"), mac_cmd: b("cmd") }
+            } else {
+                egui::Modifiers::NONE
+            };
+            app.synthetic.push(egui::Event::ModifiersChanged(modifiers));
             app.synthetic.push(egui::Event::PointerMoved(pos));
             if method == "ui.click" {
                 let button = match s("button") {
@@ -338,6 +395,8 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
             };
             let modifiers = egui::Modifiers { shift: b("shift"), ctrl: b("ctrl"), command: b("ctrl"), alt: b("alt"), ..Default::default() };
             let (a, z) = (egui::pos2(x0 as f32, y0 as f32), egui::pos2(x1 as f32, y1 as f32));
+            // Positioning precedes the press by a frame: it is not a modifier-only gesture.
+            app.synthetic.push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
             app.synthetic.push(egui::Event::PointerMoved(a));
             app.synthetic.push(egui::Event::PointerButton { pos: a, button, pressed: true, modifiers });
             // `hold`: frames to keep the button down before moving (press-and-hold).
@@ -620,9 +679,22 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
         "ui.render" => {
             let w = f("width").unwrap_or(1280.0).clamp(16.0, 8192.0) as usize;
             let h = f("height").unwrap_or(800.0).clamp(16.0, 8192.0) as usize;
-            // Cut by the section the viewport shows (an open Section Analysis dialog's preview,
-            // a sketch's Slice), not only the committed one.
-            let scene = solidcraft_engine::view::scene_with_section(&app.session, &app.cam, crate::viewport::section_plane(app));
+            // In the window's theme and colour vision mode, and cut by the section the viewport shows (an open Section
+            // Analysis dialog's preview, a sketch's Slice), not only the committed one.
+            // The grid and the axes as the window shows them (the Grid and Origin switches), unless
+            // the request says: `grid` and `axes` leave them out of the picture or put them in.
+            let guides = solidcraft_engine::view::Guides {
+                grid: p.get("grid").and_then(Value::as_bool).unwrap_or(app.ui.show_grid && !crate::viewport::active_view(app).hide_grid),
+                axes: p.get("axes").and_then(Value::as_bool).unwrap_or_else(|| app.origin_visible()),
+            };
+            let scene = solidcraft_engine::view::scene_with_palette_and_guides(
+                &app.session,
+                &app.cam,
+                crate::viewport::section_plane(app),
+                solidcraft_engine::view::world_curve_parts,
+                &crate::viewport::scene_palette(app.ui.dark, app.preferences.color_vision),
+                guides,
+            );
             let Some(png) = render_png(&scene, &app.cam, w, h) else { return err("render failed") };
             match s("path") {
                 Some(path) => match vfs::check(path).and_then(|()| std::fs::write(path, &png)) {
@@ -648,6 +720,96 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
     }
 }
 
+/// `ui.camera`: the viewport's orbit camera (`target`, `yaw`, `pitch`, `roll` in radians,
+/// `distance` in mm, `fov`, `up`), or a new one. A field left out keeps its value, so a reply
+/// passed back sets the same view again. `fit`: frame the listed occurrences (ids or names;
+/// `root`: the bodies outside every component), or everything (`true`), keeping the direction;
+/// `false` frames nothing.
+/// Nothing changes when a field is refused.
+fn camera(app: &mut SolveApp, p: &Value) -> Result<Value, String> {
+    const FIELDS: [&str; 8] = ["target", "yaw", "pitch", "roll", "distance", "fov", "up", "fit"];
+    let o = match p {
+        Value::Null => serde_json::Map::new(),
+        Value::Object(o) => o.clone(),
+        _ => return Err("params must be an object".into()),
+    };
+    if let Some(k) = o.keys().find(|k| !FIELDS.contains(&k.as_str())) {
+        return Err(format!("unknown camera field `{k}` (it takes {})", FIELDS.join(", ")));
+    }
+    let mut cam = app.cam;
+    let sets = o.keys().any(|k| k != "fit");
+    if sets {
+        let mut v = serde_json::to_value(app.cam).map_err(|e| e.to_string())?;
+        for (k, x) in o.iter().filter(|(k, _)| *k != "fit") {
+            v[k] = x.clone();
+        }
+        cam = serde_json::from_value(v).map_err(|e| format!("bad camera: {e}"))?;
+        // The distance cap is far past any Fit (so every reply replays) and still finite in f32.
+        if !cam.is_valid() || cam.distance > 1e15 || cam.pitch.abs() > std::f64::consts::FRAC_PI_2 {
+            return Err("the camera must be finite, with a distance up to 1e15 mm and a pitch within ±π/2".into());
+        }
+        // Straight up or down keeps a heading, as the standard views do.
+        let lim = std::f64::consts::FRAC_PI_2 - 1e-6;
+        cam.pitch = cam.pitch.clamp(-lim, lim);
+        // Perspective and the up axis are settings the camera follows, not its own.
+        if cam.fov != app.cam.fov {
+            return Err("`fov` follows the perspective setting (ui.set {perspective})".into());
+        }
+        if cam.up != app.cam.up {
+            return Err("`up` follows the up axis preference (ui.prefs {up_axis})".into());
+        }
+    }
+    let fit = match o.get("fit") {
+        None | Some(Value::Bool(false)) => None,
+        Some(Value::Bool(true)) if !crate::render_workspace::active(app) && crate::viewport::view_bounds(app).is_empty() => {
+            return Err("nothing is shown to fit".into());
+        }
+        Some(Value::Bool(true)) => Some(None),
+        Some(Value::Array(list)) if !list.is_empty() && list.len() <= 10_000 => {
+            let occs = list.iter().map(|v| occurrence(&app.session, v)).collect::<Result<Vec<u64>, String>>()?;
+            let b = crate::dialogs_assembly::occurrence_bounds(&app.session, &occs);
+            if b.is_empty() {
+                return Err("those occurrences show nothing to fit".into());
+            }
+            Some(Some(b))
+        }
+        Some(_) => return Err("`fit` must be true, false or a list of occurrences".into()),
+    };
+    // A read leaves a view change that is animating alone.
+    if !sets && fit.is_none() {
+        return serde_json::to_value(app.cam).map_err(|e| e.to_string());
+    }
+    app.cancel_view_animation();
+    app.viewport.orbit_snap = None;
+    app.viewport.orbit_free = None;
+    app.cam = cam;
+    match fit {
+        Some(None) => app.fit_view(),
+        Some(Some(b)) => app.fit_bounds(b),
+        None => {}
+    }
+    serde_json::to_value(app.cam).map_err(|e| e.to_string())
+}
+
+/// An occurrence by id or name (or a component's name: its first occurrence); 0 is the root.
+fn occurrence(s: &solidcraft_engine::Session, v: &Value) -> Result<u64, String> {
+    let key = match v {
+        Value::Number(n) => n.to_string(),
+        Value::String(x) => x.clone(),
+        _ => return Err("an occurrence must be an id or a name".into()),
+    };
+    if key == "0" || key.eq_ignore_ascii_case("root") {
+        return Ok(0);
+    }
+    s.doc
+        .occurrences
+        .iter()
+        .find(|o| o.id.to_string() == key || o.name == key)
+        .map(|o| o.id)
+        .or_else(|| s.doc.find_component(&key).and_then(|c| s.doc.occurrence_of(c)).map(|o| o.id))
+        .ok_or_else(|| format!("no occurrence `{key}`"))
+}
+
 /// Save a screenshot PNG.
 pub fn save_screenshot(image: &egui::ColorImage, path: Option<&str>) -> Value {
     let [w, h] = image.size;
@@ -671,6 +833,92 @@ mod tests {
     use super::*;
     use crate::Services;
 
+    #[test]
+    fn touchpad_automation_moves_with_modifiers_and_releases_without_buttons() {
+        let mut h = crate::scenario::Harness::new();
+        h.app.preferences.nav = "touchpad".into();
+        h.call("ui.move", json!({"x":800,"y":500}));
+        let before = h.app.cam;
+        h.call("ui.move", json!({"x":800,"y":500,"shift":true}));
+        h.step(&json!({"move":[830,520],"shift":true})).unwrap();
+        assert_ne!(h.app.cam.target, before.target);
+        assert_eq!(h.app.cam.yaw, before.yaw);
+        assert!(!h.ctx.input(|i| i.pointer.any_down()));
+        h.call("ui.move", json!({"x":830,"y":520,"alt":true}));
+        h.step(&json!({"move":[850,530],"alt":true})).unwrap();
+        assert!((h.app.cam.yaw - before.yaw - 0.16).abs() < 1e-6);
+        let after = h.app.cam;
+        h.call("ui.move", json!({"x":800,"y":500}));
+        h.frames(3);
+        assert_eq!(h.app.cam, after);
+        assert!(h.ctx.input(|i| i.modifiers.is_none()));
+        assert!(h.app.session.selection.is_empty());
+        assert!(h.app.viewport.boxsel.is_none());
+    }
+
+    #[test]
+    fn touchpad_drag_positioning_releases_previous_motion_modifiers() {
+        let mut h = crate::scenario::Harness::new();
+        h.app.preferences.nav = "touchpad".into();
+        h.call("ui.move", json!({"x":800,"y":500}));
+        for modifier in ["shift", "alt"] {
+            let mut params = json!({"x":800,"y":500});
+            params[modifier] = json!(true);
+            h.call("ui.move", params);
+            let before = h.app.cam;
+            h.call("ui.drag", json!({"x0":900,"y0":500,"x1":930,"y1":520,"shift":true,"steps":2}));
+            assert_eq!(h.app.cam, before, "positioning a selection drag must not inherit {modifier} motion");
+            assert!(!h.ctx.input(|i| i.pointer.any_down()));
+        }
+    }
+
+    #[test]
+    fn touchpad_text_prefix_does_not_collapse_queued_pointer_frames() {
+        let mut app = SolveApp::new(Session::default(), Services::default());
+        let ctx = egui::Context::default();
+        let (req, _) = ControlRequest::new("ui.text", json!({"text":"prefix"}));
+        assert!(matches!(handle(&mut app, &ctx, &req), Outcome::Done(_)));
+        for params in [json!({"x":10,"y":10,"shift":true}), json!({"x":20,"y":20,"alt":true}), json!({"x":30,"y":30})] {
+            let (req, _) = ControlRequest::new("ui.move", params);
+            assert!(matches!(handle(&mut app, &ctx, &req), Outcome::Done(_)));
+        }
+        for (p, shift, alt) in [(10.0, true, false), (20.0, false, true), (30.0, false, false)] {
+            let mut raw = egui::RawInput::default();
+            app.raw_input_hook(&mut raw);
+            let mut out = ctx.run_ui(raw, |ui| {
+                ui.input(|i| {
+                    assert_eq!(i.pointer.hover_pos(), Some(egui::pos2(p, p)));
+                    assert_eq!((i.modifiers.shift, i.modifiers.alt), (shift, alt));
+                });
+            });
+            out.textures_delta.clear();
+        }
+        assert!(app.synthetic.is_empty());
+    }
+
+    #[test]
+    fn touchpad_automation_preserves_each_queued_moves_modifiers() {
+        let mut app = SolveApp::new(Session::default(), Services::default());
+        let ctx = egui::Context::default();
+        for params in [json!({"x":10,"y":10,"shift":true}), json!({"x":20,"y":20,"alt":true}), json!({"x":30,"y":30})] {
+            let (req, _) = ControlRequest::new("ui.move", params);
+            assert!(matches!(handle(&mut app, &ctx, &req), Outcome::Done(_)));
+        }
+        for (p, shift, alt) in [(10.0, true, false), (20.0, false, true), (30.0, false, false)] {
+            let mut raw = egui::RawInput::default();
+            app.raw_input_hook(&mut raw);
+            let mut out = ctx.run_ui(raw, |ui| {
+                ui.input(|i| {
+                    assert_eq!(i.pointer.hover_pos(), Some(egui::pos2(p, p)));
+                    assert_eq!((i.modifiers.shift, i.modifiers.alt), (shift, alt));
+                    assert!(!i.pointer.any_down());
+                });
+            });
+            out.textures_delta.clear();
+        }
+        assert!(app.synthetic.is_empty());
+    }
+
     fn render(app: &mut SolveApp, path: &std::path::Path) -> Vec<u8> {
         let (req, _rx) = ControlRequest::new("ui.render", json!({"path": path.to_string_lossy(), "width": 200, "height": 140}));
         match handle(app, &egui::Context::default(), &req) {
@@ -678,6 +926,32 @@ mod tests {
             Outcome::Screenshot { .. } => panic!("ui.render took a screenshot"),
         }
         std::fs::read(path).unwrap()
+    }
+
+    /// `ui.render` draws in the window's theme (#974): its background is the viewport's, light
+    /// or dark.
+    #[test]
+    fn model_render_is_in_the_windows_theme() {
+        let mut s = Session::default();
+        s.execute("solid.box", &json!({"length": 40, "width": 30, "height": 20})).unwrap();
+        let mut app = SolveApp::new(s, Services::default());
+        let dir = std::env::temp_dir().join(format!("solidcraft-render-theme-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for dark in [false, true, false] {
+            app.ui.dark = dark;
+            let png = render(&mut app, &dir.join(format!("dark-{dark}.png")));
+            let img = image::load_from_memory(&png).unwrap().to_rgba8();
+            // The top row is the background's top: its most common colour.
+            let mut counts = std::collections::HashMap::new();
+            for x in 0..img.width() {
+                *counts.entry(img.get_pixel(x, 0).0).or_insert(0) += 1;
+            }
+            let top = counts.into_iter().max_by_key(|(_, n)| *n).map(|(c, _)| c).unwrap();
+            let want = if dark { crate::theme::Tokens::dark() } else { crate::theme::Tokens::light() }.viewport_top;
+            let near = top.iter().zip([want.r(), want.g(), want.b()]).all(|(a, b)| a.abs_diff(b) <= 2);
+            assert!(near, "dark {dark}: the render's top row is {top:?}, the window's background {want:?}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A model render shows the section the window shows: the open Section Analysis dialog's
@@ -701,6 +975,58 @@ mod tests {
         app.run("inspect.section", json!({"plane": "XZ", "offset": 15})).unwrap();
         app.dialog = None;
         assert!(render(&mut app, &dir.join("committed.png")) == preview, "the committed section renders differently");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `ui.render` with extra request parameters.
+    fn render_with(app: &mut SolveApp, path: &std::path::Path, extra: serde_json::Value) -> Vec<u8> {
+        let mut params = json!({"path": path.to_string_lossy(), "width": 200, "height": 140});
+        for (k, v) in extra.as_object().into_iter().flatten() {
+            params[k.as_str()] = v.clone();
+        }
+        let (req, _rx) = ControlRequest::new("ui.render", params);
+        match handle(app, &egui::Context::default(), &req) {
+            Outcome::Done(v) => assert_eq!(v["ok"], true, "{v}"),
+            Outcome::Screenshot { .. } => panic!("ui.render took a screenshot"),
+        }
+        std::fs::read(path).unwrap()
+    }
+
+    /// A model render draws the ground grid (it cuts through a part that straddles Z 0) and the
+    /// origin's axes as the window does, by the Grid and Origin switches, and `grid` and `axes`
+    /// in the request say otherwise for that render.
+    #[test]
+    fn model_render_follows_the_grid_and_origin_switches_unless_asked() {
+        let mut s = Session::default();
+        s.execute("solid.box", &json!({"length": 40, "width": 30, "height": 20, "corner": [10, -15, -10]})).unwrap();
+        let mut app = SolveApp::new(s, Services::default());
+        app.cam.set_view(solidcraft_engine::render::StandardView::Front);
+        let dir = std::env::temp_dir().join(format!("solidcraft-render-guides-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shot.png");
+        let shot = |app: &mut SolveApp, extra: serde_json::Value| render_with(app, &path, extra);
+        let all = shot(&mut app, json!({}));
+        let no_grid = shot(&mut app, json!({"grid": false}));
+        let no_axes = shot(&mut app, json!({"axes": false}));
+        let bare = shot(&mut app, json!({"grid": false, "axes": false}));
+        let pictures = [&all, &no_grid, &no_axes, &bare];
+        for (i, a) in pictures.iter().enumerate() {
+            for b in &pictures[i + 1..] {
+                assert!(a != b, "two of the pictures are the same");
+            }
+        }
+        // With the Grid switch off the render has no grid, and `grid: true` brings it back.
+        app.ui.show_grid = false;
+        assert!(shot(&mut app, json!({})) == no_grid);
+        assert!(shot(&mut app, json!({"grid": true})) == all);
+        // With the Origin off too it has neither; `axes: true` puts the axes back.
+        app.ui.show_origin = false;
+        assert!(shot(&mut app, json!({})) == bare);
+        assert!(shot(&mut app, json!({"axes": true})) == no_grid);
+        // The Origin and the Grid back on: the first picture again.
+        app.ui.show_grid = true;
+        app.ui.show_origin = true;
+        assert!(shot(&mut app, json!({})) == all);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -834,6 +1160,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// An MCP server's `doc.open` and imports load off the window thread (`file_load`), where
+    /// the agent's folders hold as they do for every other request.
+    #[test]
+    fn file_loads_stay_inside_allow_paths() {
+        let mut h = crate::scenario::Harness::new();
+        let base = vfs::temp_dir().join(format!("solidcraft-load-scope-{}", std::process::id()));
+        let (root, out) = (base.join("root"), base.join("out"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        let mut s = Session::default();
+        s.execute("solid.box", &json!({"length": 10, "width": 10, "height": 10})).unwrap();
+        for d in [&root, &out] {
+            std::fs::write(d.join("part.solidcraft"), solidcraft_engine::io::write_design(&s.doc)).unwrap();
+        }
+        s.execute("file.export", &json!({"path": out.join("part.step").to_string_lossy()})).unwrap();
+        let load = |command: &str, d: &std::path::Path, file: &str| json!({"command": command, "params": {"path": d.join(file).to_string_lossy()}, "allow_paths": [root.to_string_lossy()]});
+        for (command, file) in [("doc.open", "part.solidcraft"), ("file.insert_step", "part.step")] {
+            let (v, _) = h.call_queued("engine.execute", load(command, &out, file));
+            assert!(v["ok"] == false && v.to_string().contains("outside the folders this agent may use"), "{command}: {v}");
+        }
+        let (v, _) = h.call_queued("engine.execute", load("doc.open", &root, "part.solidcraft"));
+        assert_eq!(v["ok"], true, "{v}");
+        let (v, _) = h.call_queued("engine.execute", json!({"command": "doc.open", "params": {"path": "x"}, "allow_paths": "/"}));
+        assert!(v["error"].as_str().is_some_and(|e| e.contains("allow_paths")), "{v}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// Each step runs as `engine.execute` runs it: same results, same design.
     #[test]
     fn engine_batch_matches_engine_execute() {
@@ -893,5 +1246,131 @@ mod tests {
         let bad = call("engine.execute", json!({"command": "file.new", "allow_paths": "/"}), false);
         assert!(bad["error"].as_str().is_some_and(|e| e.contains("allow_paths")), "{bad}");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `ui.camera` reads the camera and sets it; its reply, passed back, sets the same view
+    /// again. Fields left out keep their values, `fit` frames occurrences, and a refused field
+    /// changes nothing.
+    #[test]
+    fn ui_camera_reads_sets_and_replays_the_view() {
+        let mut s = Session::default();
+        for (name, x) in [("A", 0), ("B", 100)] {
+            s.execute("component.activate", &json!({"component": "root"})).unwrap();
+            s.execute("component.create", &json!({ "name": name })).unwrap();
+            s.execute("solid.box", &json!({"length": 20, "width": 20, "height": 10, "corner": [x, 0, 0]})).unwrap();
+        }
+        s.execute("component.activate", &json!({"component": "root"})).unwrap();
+        let mut h = crate::scenario::Harness::new();
+        h.app = SolveApp::new(s, Services::default());
+        h.app.viewport.no_pixels = true;
+        h.frames(2);
+        let before = h.app.cam;
+        // Reading during an animated view change leaves it running (no frames run between).
+        fn raw(h: &mut crate::scenario::Harness, method: &str, params: Value) -> Value {
+            let (req, _rx) = ControlRequest::new(method, params);
+            match handle(&mut h.app, &h.ctx, &req) {
+                Outcome::Done(v) => v,
+                Outcome::Screenshot { .. } => Value::Null,
+            }
+        }
+        raw(&mut h, "ui.view", json!({"view": "top", "animate": true}));
+        let r = raw(&mut h, "ui.camera", Value::Null);
+        assert!(r["ok"] == true && h.app.cam_anim.is_some(), "{r}");
+        // Setting it, even to where it is now, ends the animation there.
+        let yaw = h.app.cam.yaw;
+        let r = raw(&mut h, "ui.camera", json!({ "yaw": yaw }));
+        assert!(r["ok"] == true && h.app.cam_anim.is_none(), "{r}");
+        h.app.cam = before;
+        let mut cam = |p: Value| {
+            let r = h.call("ui.camera", p);
+            assert_eq!(r["ok"], true, "{r}");
+            (r["result"].clone(), h.app.cam)
+        };
+        let (start, now) = cam(json!({}));
+        assert_eq!(start, json!(now));
+        let (set, _) = cam(json!({"target": [5, 6, 7], "yaw": 0.5, "pitch": -0.25, "distance": 300}));
+        assert_eq!(
+            (set["target"].clone(), set["yaw"].clone(), set["pitch"].clone(), set["distance"].clone()),
+            (json!([5.0, 6.0, 7.0]), json!(0.5), json!(-0.25), json!(300.0))
+        );
+        assert_eq!(set["roll"], start["roll"], "a field left out keeps its value");
+        let (top, _) = cam(json!({"pitch": std::f64::consts::FRAC_PI_2}));
+        assert!(top["pitch"].as_f64().unwrap() < std::f64::consts::FRAC_PI_2, "straight down keeps a heading: {top}");
+        let (again, now) = cam(set.clone());
+        assert_eq!((again, json!(now)), (set.clone(), set.clone()), "the reply sets the same view again");
+        let (fit, _) = cam(json!({"fit": ["B"]}));
+        let t: Vec<f64> = fit["target"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+        // Framed as Fit frames (the viewport's panels shift the target a little): on B, not A.
+        assert!((100.0..120.0).contains(&t[0]) && (0.0..20.0).contains(&t[1]) && (0.0..10.0).contains(&t[2]), "{fit}");
+        assert_eq!(fit["yaw"], set["yaw"], "fit keeps the direction");
+        let fov = h.app.cam.fov + 0.25;
+        for bad in [
+            json!({"zoom": 2}),
+            json!({"distance": -1}),
+            json!({"distance": 1e300}),
+            json!({"pitch": 2}),
+            json!({"yaw": "x"}),
+            json!({"fov": fov}),
+            json!({"up": "y"}),
+            json!({"yaw": 1, "fit": ["Nope"]}),
+            json!({"fit": []}),
+            json!({"fit": 1}),
+            json!([1, 2]),
+        ] {
+            let before = h.app.cam;
+            let r = h.call("ui.camera", bad.clone());
+            assert_eq!(r["ok"], false, "{bad}: {r}");
+            assert_eq!(h.app.cam, before, "{bad}");
+        }
+        // Nothing shown: nothing to fit.
+        let mut empty = crate::scenario::Harness::new();
+        empty.app.viewport.no_pixels = true;
+        let before = empty.app.cam;
+        let r = empty.call("ui.camera", json!({"yaw": 1, "fit": true}));
+        assert!(r["ok"] == false && empty.app.cam == before, "{r}");
+    }
+
+    /// `ui.start` params set what a dialog opens on: Drive Joints on a joint (by name or id) at
+    /// the given values, driving nothing yet. A param it doesn't take is refused and closes it.
+    #[test]
+    fn ui_start_params_open_drive_joints_where_asked() {
+        let mut s = Session::default();
+        for (name, x) in [("A", 0), ("B", 30), ("C", 60)] {
+            s.execute("component.activate", &json!({"component": "root"})).unwrap();
+            s.execute("component.create", &json!({ "name": name })).unwrap();
+            s.execute("solid.box", &json!({"length": 20, "width": 20, "height": 10, "corner": [x, 0, 0]})).unwrap();
+        }
+        s.execute("component.activate", &json!({"component": "root"})).unwrap();
+        s.execute("occurrence.ground", &json!({"occurrence": "A:1", "grounded": true})).unwrap();
+        let at = |o: &str, x: i32| json!({"occurrence": o, "point": [x, 10, 5], "z": [1, 0, 0]});
+        s.execute("joint.create", &json!({"type": "revolute", "a": at("A", 25), "b": at("B", 25), "flip": true, "name": "Hinge"})).unwrap();
+        s.execute("joint.create", &json!({"type": "slider", "a": at("B", 55), "b": at("C", 55), "flip": true, "name": "Rail"})).unwrap();
+        let mut h = crate::scenario::Harness::new();
+        h.app = SolveApp::new(s, Services::default());
+        h.app.viewport.no_pixels = true;
+        let before = h.app.session.doc.clone();
+        let drive = |h: &crate::scenario::Harness| match h.app.dialog.as_ref().map(|d| &d.kind) {
+            Some(crate::dialogs::Kind::Assembly(crate::dialogs_assembly::Asm::Drive { joint, values, .. })) => {
+                (h.app.session.doc.assembly.joints[*joint].name.clone(), values.clone())
+            }
+            other => panic!("{other:?}"),
+        };
+        let r = h.call("ui.start", json!({"command": "joint.drive", "params": {"joint": "Rail", "values": [12.5]}}));
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(drive(&h), ("Rail".to_string(), vec!["12.5 mm".to_string()]));
+        let hinge = h.app.session.doc.assembly.joints[0].id;
+        h.call("ui.start", json!({"command": "joint.drive", "params": {"joint": hinge, "values": ["45 deg"]}}));
+        assert_eq!(drive(&h), ("Hinge".to_string(), vec!["45 deg".to_string()]));
+        assert_eq!(h.app.session.doc, before, "nothing is driven until OK");
+        for bad in [json!({"joint": "Nope"}), json!({"joint": "Rail", "value": 3}), json!({"values": [1, 2]}), json!({"values": [f64::MAX]})] {
+            let r = h.call("ui.start", json!({"command": "joint.drive", "params": bad}));
+            assert_eq!(r["ok"], false, "{bad}: {r}");
+            assert!(h.app.dialog.is_none(), "{bad}");
+        }
+        for command in ["solid.extrude", "sketch.create", "inspect.zebra"] {
+            let r = h.call("ui.start", json!({"command": command, "params": {"distance": 5}}));
+            assert!(r["ok"] == false && r["error"].as_str().unwrap().contains("takes no ui.start params"), "{r}");
+            assert!(h.app.dialog.is_none() && h.app.tool.is_none() && h.app.session.analysis.is_none(), "{command} started nothing");
+        }
     }
 }

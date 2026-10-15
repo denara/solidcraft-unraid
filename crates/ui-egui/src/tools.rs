@@ -150,11 +150,9 @@ pub fn on_click(app: &mut SolveApp, proj: &Proj, pos: Pos2) {
     }
     match tool.kind {
         Kind::Draw(n) => {
-            if let Some(mut p) = sketch_point_at(app, proj, pos) {
+            if let Some(p) = sketch_point_at(app, proj, pos) {
                 // Typed values win over the cursor; lines snap to horizontal/vertical.
-                if tool.dims.iter().any(|b| b.locked) || (tool.cmd == "sketch.line" && p.1.is_none()) {
-                    p = (crate::sketch_dims::effective(app, &tool, p.0), None);
-                }
+                let p = crate::sketch_dims::placed(app, &tool, &p);
                 // A repeated initial point supplies no extent. Keep waiting rather than
                 // attempting a degenerate shape; explicit typed values still validate.
                 if n != 1 && tool.pts.len() == 1 && tool.pts.first().is_some_and(|first| first.0 == p.0) && !tool.dims.iter().any(|b| b.locked) {
@@ -691,8 +689,8 @@ pub fn preview(app: &SolveApp, t: &Tool, painter: &egui::Painter, proj: &Proj) {
             tk.text_dim,
         );
     }
-    let Some((h, _)) = t.hover.clone() else { return };
-    let h = crate::sketch_dims::effective(app, t, h);
+    let Some(hover) = t.hover.as_ref() else { return };
+    let h = crate::sketch_dims::shown(app, t, hover);
     if let Some(corners) = polygon_outline(t, h, crate::sketch_dims::locked_value(app, t, "Sides").unwrap_or(6.0)) {
         let outline: Vec<_> = corners.iter().map(|c| ss.plane.to_world(*c)).collect();
         paint_sketch_path(&outline, crate::sketch_palette::mode(app), painter, proj, stroke);

@@ -3,10 +3,10 @@
 //! designs, autosave, display precision, timeline layout, the agent cursor), Navigation (mouse presets, zoom
 //! direction, zoom to the cursor, orbit centre, Look At animation), Keyboard Shortcuts (search,
 //! rebind, conflicts; `keymap`), Design (default modelling orientation, Y up or Z up), Graphics
-//! (visual style, grid, shadow, perspective, anti-aliasing), Sketch and Selection. Changes apply
-//! at once; Cancel puts back what was there when the dialog opened, OK keeps them, Apply keeps
-//! them and stays open, and Restore Defaults resets the page shown. Everything is kept between
-//! runs, except anti-aliasing, which needs a restart.
+//! (visual style, grid, shadow, perspective, anti-aliasing, colour vision), Sketch and Selection.
+//! Changes apply at once; Cancel puts back what was there when the dialog opened, OK keeps them,
+//! Apply keeps them and stays open, and Restore Defaults resets the page shown. Everything is
+//! kept between runs, except anti-aliasing, which needs a restart.
 
 use egui::{Modifiers, Pos2, RichText};
 use serde::{Deserialize, Serialize};
@@ -30,6 +30,7 @@ use crate::viewport::NavMode;
 
 pub const UNITS: [&str; 5] = ["mm", "cm", "m", "in", "ft"];
 pub const OPENSCAD_NAV: &str = "openscad";
+pub const TOUCHPAD_NAV: &str = "touchpad";
 /// A mouse button that can drag the camera.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NavButton {
@@ -93,7 +94,7 @@ use NavButton::{Left, Middle, Right};
 use NavMode::{Orbit, Pan, Zoom};
 
 /// The mouse mappings. The first is the default.
-pub const NAV_PRESETS: [NavPreset; 6] = [
+pub const NAV_PRESETS: [NavPreset; 7] = [
     NavPreset {
         id: "fusion",
         label: "Fusion",
@@ -159,7 +160,39 @@ pub const NAV_PRESETS: [NavPreset; 6] = [
             bind(Middle, NavKeys::NONE, Pan),
         ],
     },
+    NavPreset {
+        id: TOUCHPAD_NAV,
+        label: "Touchpad",
+        help: "Hold Shift and move the pointer to pan; hold Alt/Option and move it to orbit. No mouse button is needed. Vertical scroll zooms.",
+        reverse_zoom: false,
+        bindings: &[bind(Middle, NavKeys::NONE, Pan), bind(Right, NavKeys::NONE, Orbit)],
+    },
 ];
+
+impl NavPreset {
+    /// Button-free motion has exact modifiers, unlike the additive drag bindings.
+    pub fn motion_mode(&self, mods: Modifiers) -> Option<NavMode> {
+        if self.id != TOUCHPAD_NAV || mods.ctrl || mods.command || mods.mac_cmd {
+            return None;
+        }
+        match (mods.shift, mods.alt) {
+            (true, false) => Some(Pan),
+            (false, true) => Some(Orbit),
+            _ => None,
+        }
+    }
+
+    fn translated_label(&self) -> &str {
+        if self.id == TOUCHPAD_NAV { crate::i18n::tr("nav.touchpad.label") } else { crate::i18n::tr_label(self.label) }
+    }
+}
+
+impl Prefs {
+    /// Touchpad scroll zooms without overwriting the user's preference for other presets.
+    pub fn trackpad_pans(&self) -> bool {
+        self.nav != TOUCHPAD_NAV && self.trackpad_pan
+    }
+}
 
 /// The preset with this id (the default for an unknown one).
 pub fn nav_preset(id: &str) -> &'static NavPreset {
@@ -177,6 +210,7 @@ pub const MSAA: [u32; 4] = [1, 2, 4, 8];
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NavigatorStyle {
+    /// Also what a navigator this version doesn't know reads as (`lenient`).
     #[default]
     Axes,
     Cube,
@@ -214,6 +248,9 @@ pub struct Prefs {
     pub space_mouse_speed: f32,
     /// Anti-aliasing samples (applies on restart).
     pub msaa: u32,
+    /// How finely the viewport tessellates curved faces and edges: `coarse`, `normal`, `fine` or
+    /// `ultra` (#1287). Only the display plan the viewport draws; never the design or exports.
+    pub display_quality: String,
     /// Decimals shown for lengths and angles.
     pub length_decimals: u8,
     pub angle_decimals: u8,
@@ -245,6 +282,8 @@ pub struct Prefs {
     pub offer_stand_up: bool,
     /// What a middle-button double-click in the view does: `home`, `fit` or `off`.
     pub middle_double_click: String,
+    /// Colour vision mode (#778): `off`, `protan`, `deutan` or `tritan`.
+    pub color_vision: crate::theme::ColorVision,
     /// Check for updates at start and once a day (docs/updates.md).
     pub check_updates: bool,
     /// When the last update check ran, and the versions skipped or put off (`update::Memo`).
@@ -291,6 +330,7 @@ impl Default for Prefs {
             space_mouse_enabled: true,
             space_mouse_speed: 1.0,
             msaa: 4,
+            display_quality: "normal".into(),
             length_decimals: 2,
             angle_decimals: 1,
             theme: "dark".into(),
@@ -307,6 +347,7 @@ impl Default for Prefs {
             up_axis: "z".into(),
             offer_stand_up: true,
             middle_double_click: "home".into(),
+            color_vision: crate::theme::ColorVision::Off,
             check_updates: true,
             update: crate::update::Memo::default(),
         }
@@ -430,6 +471,8 @@ fn defaults(app: &mut SolveApp, page: usize) {
         PAGE_GRAPHICS => {
             let msaa = p.msaa != d.msaa;
             p.msaa = d.msaa;
+            p.display_quality = d.display_quality;
+            p.color_vision = d.color_vision;
             app.ui.visual_style = 0;
             app.ui.show_grid = true;
             app.ui.ground_shadow = true;
@@ -446,6 +489,10 @@ fn defaults(app: &mut SolveApp, page: usize) {
 /// Settings that follow the preferences every frame: the theme when it follows the system, and
 /// the interface scale.
 pub fn apply(app: &mut SolveApp, ctx: &egui::Context) {
+    // The viewport's display quality (an unknown saved value draws at Normal).
+    solidcraft_engine::doc::display_quality::set_current(
+        solidcraft_engine::doc::display_quality::DisplayQuality::parse(&app.preferences.display_quality).unwrap_or_default(),
+    );
     // The view's up axis follows the preference (set in the dialog, by ui.prefs or loaded).
     if app.prefs_window.applied_up.as_deref() != Some(app.preferences.up_axis.as_str()) {
         up_axis_changed(app);
@@ -478,6 +525,8 @@ pub fn apply(app: &mut SolveApp, ctx: &egui::Context) {
 }
 
 /// A new, empty design takes the preferred units (not an undo step, not a change to save).
+/// Callers: a launch with no file, New on a design that is already empty, `file.new`, and the
+/// blank design left when the last tab closes. A design that already has features is unchanged.
 pub fn apply_new_design(app: &mut SolveApp) {
     if app.session.doc.features.is_empty() && app.session.doc.units != app.preferences.default_units {
         let saved = !app.session.is_dirty();
@@ -537,7 +586,7 @@ pub fn orbit(app: &mut SolveApp, rect: egui::Rect, dx: f64, dy: f64, press: Opti
 
 /// The model point under a screen position. Over empty space: the centre of the visible bodies
 /// and sketches (what Fit frames), or the view's centre when nothing is visible.
-fn pivot_under(app: &SolveApp, proj: &crate::viewport::Proj, at: Pos2) -> Vec3 {
+pub(crate) fn pivot_under(app: &SolveApp, proj: &crate::viewport::Proj, at: Pos2) -> Vec3 {
     use crate::viewport::Hit;
     for h in crate::viewport::pick(app, proj, at) {
         match h {
@@ -628,7 +677,14 @@ pub fn show_mm_bare(app: &SolveApp, v: f64) -> String {
 /// change while it is open).
 fn save_graphics(app: &SolveApp) {
     if let Some(path) = &app.services.graphics_path {
-        let _ = std::fs::write(path, json!({ "msaa": app.preferences.msaa }).to_string());
+        // Other settings in the file (the graphics `backend`) stay as they are.
+        let mut graphics = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| json!({}));
+        graphics["msaa"] = json!(app.preferences.msaa);
+        let _ = std::fs::write(path, graphics.to_string());
     }
 }
 
@@ -915,18 +971,22 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
         }
         1 => {
             ui.label(app.tr_label("Pan, zoom, orbit"));
-            let current_preset_label = app.tr_label(nav_preset(&app.preferences.nav).label);
+            let current_preset_label = nav_preset(&app.preferences.nav).translated_label();
             egui::ComboBox::from_id_salt("pref_nav").selected_text(current_preset_label).show_ui(ui, |ui| {
                 for p in &NAV_PRESETS {
-                    if ui.selectable_value(&mut app.preferences.nav, p.id.to_string(), crate::i18n::tr_label(p.label)).clicked() {
+                    if ui.selectable_value(&mut app.preferences.nav, p.id.to_string(), p.translated_label()).clicked() {
                         app.preferences.zoom_reverse = p.reverse_zoom;
                     }
                 }
             });
             ui.end_row();
-            let snap_help = if app.preferences.nav == OPENSCAD_NAV { "" } else { "; hold Shift during orbit to snap" };
-            let raw_help = format!("{}; Ctrl+left drag on empty space orbits{snap_help}; the wheel zooms", nav_preset(&app.preferences.nav).help);
-            note(ui, crate::i18n::tr_label(&raw_help));
+            if app.preferences.nav == TOUCHPAD_NAV {
+                note(ui, crate::i18n::tr("nav.touchpad.help"));
+            } else {
+                let snap_help = if app.preferences.nav == OPENSCAD_NAV { "" } else { "; hold Shift during orbit to snap" };
+                let raw_help = format!("{}; Ctrl+left drag on empty space orbits{snap_help}; the wheel zooms", nav_preset(&app.preferences.nav).help);
+                note(ui, crate::i18n::tr_label(&raw_help));
+            }
             ui.label(crate::i18n::tr_label("Context menu"));
             ui.checkbox(&mut app.preferences.radial_context_menu, crate::i18n::tr_label("Radial context menu"));
             ui.end_row();
@@ -954,9 +1014,12 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
                 .on_hover_text(crate::i18n::tr_label("Turn off to apply each wheel event immediately, without a smoothing tail"));
             ui.end_row();
             ui.label(crate::i18n::tr_label("Two-finger scroll pans"));
-            ui.checkbox(&mut app.preferences.trackpad_pan, "").on_hover_text(crate::i18n::tr_label(
-                "Trackpad gestures pan (off: they zoom like the wheel); mouse wheel zooms, thumb wheel pans sideways, pinch always zooms",
-            ));
+            let touchpad = app.preferences.nav == TOUCHPAD_NAV;
+            ui.add_enabled(!touchpad, egui::Checkbox::new(&mut app.preferences.trackpad_pan, "")).on_hover_text(if touchpad {
+                crate::i18n::tr("nav.touchpad.scroll")
+            } else {
+                crate::i18n::tr_label("Trackpad gestures pan (off: they zoom like the wheel); mouse wheel zooms, thumb wheel pans sideways, pinch always zooms")
+            });
             ui.end_row();
             ui.label(crate::i18n::tr_label("Orbit around"));
             ui.horizontal(|ui| {
@@ -1040,6 +1103,21 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
             });
             ui.end_row();
             note(ui, app.tr("settings.msaa_applies_on_restart"));
+            ui.label(app.tr("ui.display_quality"));
+            {
+                use solidcraft_engine::doc::display_quality::DisplayQuality;
+                let label = |q: DisplayQuality| crate::i18n::tr(&format!("ui.display_quality_{}", q.id())).to_string();
+                let current = DisplayQuality::parse(&app.preferences.display_quality).unwrap_or_default();
+                egui::ComboBox::from_id_salt("pref_display_quality").selected_text(label(current)).show_ui(ui, |ui| {
+                    for q in DisplayQuality::ALL {
+                        if ui.selectable_label(q == current, label(q)).clicked() {
+                            app.preferences.display_quality = q.id().to_string();
+                        }
+                    }
+                });
+            }
+            ui.end_row();
+            note(ui, app.tr("settings.display_quality_note"));
             ui.label(crate::i18n::tr_label("Renderer"));
             ui.label(match (&app.viewport.gpu, &app.help.gpu) {
                 (Some(_), Some(g)) => format!("GPU: {g}"),
@@ -1047,6 +1125,28 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
                 _ => "CPU (software)".to_string(),
             });
             ui.end_row();
+            // Colour vision (#778): its own section at the end of the page.
+            ui.label("");
+            ui.end_row();
+            ui.label(RichText::new(app.tr("ui.colour_vision")).strong());
+            ui.label("");
+            ui.end_row();
+            ui.label(app.tr("ui.colour_vision_mode"));
+            let mode = app.preferences.color_vision;
+            egui::ComboBox::from_id_salt("pref_color_vision").selected_text(app.tr(mode.label_id())).show_ui(ui, |ui| {
+                for m in crate::theme::ColorVision::ALL {
+                    ui.selectable_value(&mut app.preferences.color_vision, m, crate::i18n::tr(m.label_id())).on_hover_text(crate::i18n::tr(m.help_id()));
+                }
+            });
+            if app.preferences.color_vision != mode {
+                // At once, like the theme: the next frame draws in the new colours.
+                ui.ctx().request_repaint();
+            }
+            ui.end_row();
+            ui.label(app.tr("ui.colour_vision_sample"));
+            colour_vision_sample(ui, t);
+            ui.end_row();
+            note(ui, app.tr("ui.colour_vision_note"));
         }
         5 => {
             ui.label(crate::i18n::tr_label("Project face edges into new sketches"));
@@ -1062,6 +1162,76 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
             ui.end_row();
         }
     });
+}
+
+/// The names under the Colour vision sample (message ids).
+pub(crate) const COLOUR_VISION_SAMPLE: [&str; 6] =
+    ["ui.colour_vision_fixed", "ui.colour_vision_projected", "ui.axes", "Bends", "ui.draft", "ui.colour_vision_failed"];
+
+/// The Colour vision sample (#778): fixed and projected sketch lines, the X and Y axes, bends up
+/// and down, Draft Analysis and a failed feature, each drawn as it is where it appears, in the
+/// colours on now. One fixed-size area, so the grid row is as tall as what it draws.
+fn colour_vision_sample(ui: &mut egui::Ui, t: &Tokens) {
+    const W: f32 = 72.0;
+    const LINE: f32 = 4.0;
+    let (area, _) = ui.allocate_exact_size(egui::vec2(W * COLOUR_VISION_SAMPLE.len() as f32, 50.0), egui::Sense::hover());
+    let p = ui.painter_at(area);
+    let line = |c| egui::Stroke::new(LINE, c);
+    for (i, name) in COLOUR_VISION_SAMPLE.iter().enumerate() {
+        let cell = egui::Rect::from_min_size(area.min + egui::vec2(W * i as f32, 0.0), egui::vec2(W - 8.0, 32.0));
+        let (a, b) = (cell.left_center() + egui::vec2(8.0, 0.0), cell.right_center() - egui::vec2(8.0, 0.0));
+        match i {
+            0 | 1 => {
+                p.rect_filled(cell, 3.0, t.viewport_top);
+                p.line_segment([a, b], line(if i == 0 { t.sketch_locked } else { t.sketch_projected }));
+            }
+            2 => {
+                // X along and Y up from one corner, as the view triad draws them.
+                p.rect_filled(cell, 3.0, t.viewport_top);
+                let o = cell.left_bottom() + egui::vec2(12.0, -7.0);
+                p.line_segment([o, egui::pos2(cell.right() - 10.0, o.y)], line(t.triad[0]));
+                p.line_segment([o, egui::pos2(o.x, cell.top() + 6.0)], line(t.triad[1]));
+            }
+            3 => {
+                // Dashed, as the flat pattern draws them.
+                p.rect_filled(cell, 3.0, t.viewport_top);
+                for (dy, c) in [(-7.0, t.bend_up), (7.0, t.bend_down)] {
+                    p.extend(egui::Shape::dashed_line(&[a + egui::vec2(0.0, dy), b + egui::vec2(0.0, dy)], line(c), 8.0, 5.0));
+                }
+            }
+            4 => {
+                // The three bands of Draft Analysis; in a mode the negative one is striped.
+                let w = cell.width() / 3.0;
+                for (k, c) in t.analysis.draft.iter().enumerate() {
+                    let band = egui::Rect::from_min_size(cell.min + egui::vec2(w * k as f32, 0.0), egui::vec2(w, cell.height()));
+                    p.rect_filled(band, 0.0, crate::theme::srgb(*c));
+                    if k == 2 && t.analysis.hatch {
+                        let stripes = p.with_clip_rect(band);
+                        let dark = crate::theme::srgb(c.map(|x| x * 0.6));
+                        let mut x = band.left() - band.height();
+                        while x < band.right() {
+                            stripes.line_segment(
+                                [egui::pos2(x, band.bottom()), egui::pos2(x + band.height(), band.top())],
+                                egui::Stroke::new(2.0, dark),
+                            );
+                            x += 9.0;
+                        }
+                    }
+                }
+            }
+            _ => {
+                // A failed feature on the timeline.
+                p.rect(cell.shrink2(egui::vec2(10.0, 3.0)), 3.0, t.timeline_item_error, egui::Stroke::new(1.0, t.error), egui::StrokeKind::Inside);
+            }
+        }
+        p.text(
+            cell.center_bottom() + egui::vec2(0.0, 3.0),
+            egui::Align2::CENTER_TOP,
+            crate::i18n::tr(name),
+            egui::FontId::proportional(11.0),
+            t.text_dim,
+        );
+    }
 }
 
 /// The control channel's `ui.prefs`: `open` (a page name) opens the dialog there, `button`
@@ -1101,6 +1271,28 @@ pub fn control(app: &mut SolveApp, p: &serde_json::Value) -> Result<serde_json::
     Ok(out)
 }
 
+/// Saved preferences, keeping every one that still reads. A value this version doesn't
+/// understand (a setting a newer or older release saved differently, a hand edit) falls back to
+/// its default on its own instead of discarding all of them.
+pub fn lenient(saved: &serde_json::Value) -> Prefs {
+    if let Ok(p) = serde_json::from_value::<Prefs>(saved.clone()) {
+        return p;
+    }
+    let Ok(mut cur) = serde_json::to_value(Prefs::default()) else { return Prefs::default() };
+    if let (Some(o), Some(src)) = (cur.as_object_mut(), saved.as_object()) {
+        for (k, v) in src.iter().take(1000) {
+            // Keys this version doesn't have are ignored anyway.
+            let Some(old) = o.get(k).cloned() else { continue };
+            o.insert(k.clone(), v.clone());
+            if serde_json::from_value::<Prefs>(serde_json::Value::Object(o.clone())).is_err() {
+                log::warn!("preferences: `{k}` is not understood by this version; using its default");
+                o.insert(k.clone(), old);
+            }
+        }
+    }
+    serde_json::from_value(cur).unwrap_or_default()
+}
+
 /// Set preferences from JSON (control channel); returns them all.
 pub fn set(app: &mut SolveApp, p: &serde_json::Value) -> Result<serde_json::Value, String> {
     let mut cur = serde_json::to_value(&app.preferences).map_err(|e| e.to_string())?;
@@ -1112,12 +1304,18 @@ pub fn set(app: &mut SolveApp, p: &serde_json::Value) -> Result<serde_json::Valu
             o.insert(k.clone(), v.clone());
         }
     }
+    // Saved preferences read an unknown mode as Off; asked for here, it is an error.
+    if let Some(v) = p.get("color_vision")
+        && v.as_str().and_then(crate::theme::ColorVision::from_id).is_none()
+    {
+        return Err("`color_vision` must be off, protan, deutan or tritan".into());
+    }
     let new: Prefs = serde_json::from_value(cur).map_err(|e| e.to_string())?;
     if !UNITS.contains(&new.default_units.as_str()) {
         return Err(format!("units must be one of {}", UNITS.join(", ")));
     }
     if !NAV_PRESETS.iter().any(|p| p.id == new.nav) || !MSAA.contains(&new.msaa) {
-        return Err("`nav` must be fusion, solidworks, inventor, alias, tinkercad or openscad and `msaa` 1, 2, 4 or 8".into());
+        return Err(format!("`nav` must be one of {} and `msaa` 1, 2, 4 or 8", NAV_PRESETS.iter().map(|p| p.id).collect::<Vec<_>>().join(", ")));
     }
     if new.msaa != app.preferences.msaa && !app.msaa_supported.is_empty() && !app.msaa_supported.contains(&new.msaa) {
         return Err(format!("this graphics device doesn't support `msaa` {}; it supports {:?}", new.msaa, app.msaa_supported));
@@ -1130,6 +1328,9 @@ pub fn set(app: &mut SolveApp, p: &serde_json::Value) -> Result<serde_json::Valu
     }
     if !(0.5..=2.5).contains(&new.ui_scale) || !(0.25..=4.0).contains(&new.look_at_speed) {
         return Err("`ui_scale` must be 0.5…2.5 and `look_at_speed` 0.25…4".into());
+    }
+    if solidcraft_engine::doc::display_quality::DisplayQuality::parse(&new.display_quality).is_none() {
+        return Err("`display_quality` must be coarse, normal, fine or ultra".into());
     }
     if MiddleDoubleClick::parse(&new.middle_double_click).is_none() {
         return Err("`middle_double_click` must be home, fit or off".into());
@@ -1151,6 +1352,42 @@ pub fn set(app: &mut SolveApp, p: &serde_json::Value) -> Result<serde_json::Valu
 
 #[cfg(test)]
 mod tests {
+    /// Display quality (#1287) is a preference like any other: set by name, checked, saved with
+    /// the others, back to Normal with Restore Defaults.
+    #[test]
+    fn display_quality_is_set_checked_and_restored() {
+        use serde_json::json;
+        let mut app = crate::SolveApp::new(solidcraft_engine::Session::default(), crate::Services::default());
+        assert_eq!(app.preferences.display_quality, "normal");
+        let out = super::set(&mut app, &json!({"display_quality": "fine"})).unwrap();
+        assert_eq!(out["display_quality"], "fine");
+        assert!(super::set(&mut app, &json!({"display_quality": "silky"})).unwrap_err().contains("coarse, normal, fine or ultra"));
+        assert_eq!(app.preferences.display_quality, "fine");
+        assert_eq!(super::lenient(&json!({"display_quality": "ultra"})).display_quality, "ultra");
+        super::defaults(&mut app, super::PAGE_GRAPHICS);
+        assert_eq!(app.preferences.display_quality, "normal");
+    }
+
+    #[test]
+    fn a_value_this_version_does_not_understand_keeps_the_other_preferences() {
+        use serde_json::json;
+        // A navigator, a field of the wrong type and a key from another release.
+        let saved = json!({"nav": "solidworks", "navigator_style": "hologram", "ui_scale": "big", "zoom_reverse": true, "from_the_future": 3});
+        let p = super::lenient(&saved);
+        assert_eq!(p.nav, "solidworks");
+        assert!(p.zoom_reverse);
+        assert_eq!(p.navigator_style, super::NavigatorStyle::Axes);
+        assert_eq!(p.ui_scale, super::Prefs::default().ui_scale);
+        assert_eq!(super::lenient(&json!("garbage")), super::Prefs::default());
+        // Whole-app load: the other saved state is kept too, and nothing panics.
+        let mut app = crate::SolveApp::new(solidcraft_engine::Session::default(), crate::Services::default());
+        app.load_prefs(&json!({"grid": false, "preferences": saved}).to_string());
+        assert!(!app.ui.show_grid && app.preferences.nav == "solidworks" && app.preferences.zoom_reverse);
+        for junk in ["", "{", "[]", "null", "{\"preferences\": 7, \"recent\": {}, \"shortcuts\": 1, \"toolbar\": \"x\"}"] {
+            crate::SolveApp::new(solidcraft_engine::Session::default(), crate::Services::default()).load_prefs(junk);
+        }
+    }
+
     #[test]
     fn stored_prefs_fall_back_to_the_legacy_key() {
         let only_old = |k: &str| (k == super::LEGACY_STORAGE_KEY).then(|| "old".to_string());
@@ -1172,10 +1409,12 @@ mod tests {
         // WebGPU's guarantee for the surface format: 8x saved, the device can only do 1x and 4x.
         app.msaa_supported = vec![1, 4];
         app.preferences.msaa = 8;
+        std::fs::write(&path, r#"{"msaa":8,"backend":"vulkan"}"#).unwrap();
         check_msaa(&mut app, 8);
         assert_eq!(app.preferences.msaa, 4);
         let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap_or_default()).unwrap_or_default();
         assert_eq!(saved["msaa"], 4);
+        assert_eq!(saved["backend"], "vulkan", "the backend preference is kept");
         assert_eq!(app.settings_reset, [SettingReset::Msaa { requested: 8, reset: 4, supported: vec![1, 4] }]);
         assert_eq!(
             app.settings_reset[0].message(),
@@ -1318,6 +1557,24 @@ mod tests {
     }
 
     #[test]
+    fn touchpad_preset_persists_and_obeys_preference_transactions() {
+        let mut app = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
+        control(&mut app, &json!({"open":"Navigation", "nav":"touchpad"})).unwrap();
+        assert_eq!(app.preferences.nav, "touchpad");
+        assert!(app.preferences.trackpad_pan, "choosing Touchpad must not overwrite the saved scroll preference");
+        control(&mut app, &json!({"button":"cancel"})).unwrap();
+        assert_eq!(app.preferences.nav, "fusion");
+        control(&mut app, &json!({"open":"Navigation", "nav":"touchpad", "button":"apply"})).unwrap();
+        let mut other = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
+        other.load_prefs(&app.prefs());
+        assert_eq!(other.preferences.nav, "touchpad");
+        control(&mut app, &json!({"button":"defaults"})).unwrap();
+        assert_eq!(app.preferences.nav, "fusion");
+        control(&mut app, &json!({"button":"cancel"})).unwrap();
+        assert_eq!(app.preferences.nav, "touchpad");
+    }
+
+    #[test]
     fn openscad_preset_maps_navigation_and_persists() {
         let mut app = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
         set(&mut app, &json!({"nav": OPENSCAD_NAV})).unwrap();
@@ -1430,7 +1687,7 @@ mod tests {
         assert!(control(&mut app, &json!({"open": "Plugins"})).is_err());
         assert!(set(&mut app, &json!({"up_axis": "x"})).is_err());
         assert!(set(&mut app, &json!({"theme": "sepia"})).is_err());
-        assert!(set(&mut app, &json!({"language": "fr"})).is_err());
+        assert!(set(&mut app, &json!({"language": "xx"})).is_err());
     }
 
     #[test]

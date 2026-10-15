@@ -250,3 +250,20 @@ fn press_pull_on_the_enclosure_lid_is_prompt() {
     }
     assert!(total(&s) > before, "{before} -> {}", total(&s));
 }
+
+/// A lip swept round a block's rim, flush with its sides and round its corners, joins it as one
+/// solid of both volumes: the block (50 × 40 with R4.5 corners, 10 high) and the lip (1 × 1 along
+/// 41 + 31 + 41 mm of straight rim and two quarter turns between radii 3.5 and 4.5).
+#[test]
+fn lip_swept_flush_round_a_corner_joins() {
+    let s = replay(include_str!("../../../examples/regressions/lip_swept_flush_round_corner.json"));
+    let bodies = &s.model.state().bodies;
+    assert_eq!(bodies.len(), 1);
+    let b = &bodies[0];
+    assert!(b.body.validity().is_empty(), "{:?}", b.body.validity());
+    assert_eq!(b.body.shell_count(), 1);
+    let block = (50.0 * 40.0 - (4.0 - std::f64::consts::PI) * 4.5 * 4.5) * 10.0;
+    let lip = 41.0 + 31.0 + 41.0 + 2.0 * std::f64::consts::PI * (4.5 * 4.5 - 3.5 * 3.5) / 4.0;
+    let volume = b.body.tessellate(1e-5).unwrap().measure().volume;
+    assert!((volume - block - lip).abs() < 0.02, "{volume} expected {}", block + lip);
+}

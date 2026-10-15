@@ -7,10 +7,9 @@ license.workspace = true
 publish = false
 default-run = "solidcraft"
 
-# The workspace lints, except unsafe_code: denied, not forbidden, so that src/open_documents.rs can
-# allow it (macOS file-open events have no safe API). Keep the rest in sync with [workspace.lints].
+# Container fork: native unsafe platform bridges are omitted.
 [lints.rust]
-unsafe_code = "deny"
+unsafe_code = "forbid"
 
 [lints.clippy]
 dbg_macro = "warn"
@@ -27,6 +26,10 @@ egui = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
 rfd = { workspace = true }
+# Checks eframe's settings file (app.ron) before eframe reads it (src/startup.rs).
+ron = "0.12"
+# Waits for wgpu's adapter list when choosing the graphics backend before the window opens.
+pollster = { workspace = true }
 getrandom = "0.3"
 # The update check (docs/updates.md): HTTPS with rustls, certificates from the operating system.
 ureq = { version = "3.4", default-features = false, features = ["rustls-no-provider", "platform-verifier"] }
@@ -37,6 +40,18 @@ quick-xml = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 hidapi = { version = "2.6.7", default-features = false, features = ["windows-native"] }
+# Native crash capture (src/native_crash.rs): the exception filter, the faulting module, a minidump.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_IO",
+    "Win32_System_Kernel",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Files opened from Finder and the Dock (src/open_documents.rs); all already come with eframe and rfd.

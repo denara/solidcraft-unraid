@@ -9,11 +9,21 @@ The test is [`apps/solidcraft-cli/tests/action_matrix.rs`](../apps/solidcraft-cl
 ## Running it
 
 - **Every CI run** (pull requests too) checks a fixed sample, one action in 40 by a stable hash of
-  its name, on every design except the seven slowest to build (`action_matrix_sample`, under a
-  minute).
-- **Nightly** (and by hand, Run workflow), the "Action matrix" job runs the whole matrix in four
-  parts (`action_matrix_full_1` to `_4`).
-- **Locally**: `cargo xtask action-matrix` runs it whole (about 22 minutes with six designs at a time on a 16-core machine). Add `--bless` to
+  its name, on every design except the slowest to build (the `SLOW` list, and any design that
+  takes more than 8 s to load in costs.json; `action_matrix_sample`, a few minutes).
+- **Nightly** (and by hand, Run workflow), the "Action matrix" jobs run the whole matrix in 16
+  shards (`action_matrix_shard` with `ACTION_MATRIX_SHARD=k/16`) of about equal cost, cut by
+  [`tests/action_matrix/costs.json`](../tests/action_matrix/costs.json): what each design took on a
+  runner. A design that takes more than ten minutes is split into slices (actions by a hash of their name, each
+  slice loading the design again), and the pieces go largest first to the shard with the least
+  work. A design not in costs.json yet counts as two minutes. Each shard uploads its outcomes and
+  timings (artifact `action-matrix-k`); with all sixteen in one folder,
+  `cargo xtask action-matrix --from DIR --bless` writes the baseline and costs.json from them
+  without running anything. `ACTION_MATRIX_SHARD=k/n ACTION_MATRIX_SHARD_LIST=1` prints the plan.
+- **Determinism** (nightly, "Action matrix determinism"): `action_matrix_determinism` runs one
+  action in 8 of every design that takes at most five minutes twice on one runner and lists every action whose outcome changed; it fails when a
+  family of pieces passes a different number of times.
+- **Locally**: `cargo xtask action-matrix` runs it whole (a few hours on one machine now; the nightly shards' artifacts and `--from` are quicker). Add `--bless` to
   rewrite the baseline after a fix (newly passing actions are listed when you don't), and
   `--results FILE` to keep every outcome with its message and the command that was sent.
   `ACTION_MATRIX_FILTER=oracle/23` runs only the designs whose name contains it;
@@ -28,7 +38,9 @@ The test is [`apps/solidcraft-cli/tests/action_matrix.rs`](../apps/solidcraft-cl
   (from `apps/solidcraft-cli`).
 
 Each design runs in its own process, so an action that hangs (90 s without a result) or aborts is
-recorded as `timeout` or `crash` and the rest of the design still runs. Loading a design, before
+recorded as `timeout` or `crash` and the rest of the design still runs. An action that passes in the baseline and
+times out is listed but not judged (and stays passing when blessed): the slowest actions take 40 to
+80 s on a busy runner and land either side of the limit from night to night. Loading a design, before
 its first action, may take up to 300 s (the largest take several times longer on a loaded CI
 runner than here). None did in this run.
 

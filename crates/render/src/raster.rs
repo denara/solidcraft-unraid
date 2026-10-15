@@ -79,7 +79,7 @@ impl Canvas {
     }
 }
 
-fn shade(n: Vec3, view_dir: Vec3, base: [f64; 3]) -> [f64; 3] {
+pub(crate) fn shade(n: Vec3, view_dir: Vec3, base: [f64; 3]) -> [f64; 3] {
     let n = if n.dot(view_dir) < 0.0 { -n } else { n };
     let key = (view_dir * 0.8 + Vec3::new(-0.3, 0.2, 0.6)).normalized().unwrap_or(view_dir);
     let diff = n.dot(key).max(0.0);

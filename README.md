@@ -21,6 +21,8 @@ model through the built-in MCP server.
 - **Windows:** download and run the [installer][windows-msi].
   Also for [ARM64][windows-arm64-msi] and [32-bit][windows-x86-msi] PCs, or as a
   [portable zip][windows-portable] that runs without installing.
+  With [WinGet](https://learn.microsoft.com/windows/package-manager/winget/):
+  `winget install bherbruck.SolidCraft`.
 - **macOS:** open the [disk image][macos-dmg] and drag SolidCraft into Applications
   (Apple silicon and Intel).
 - **Linux:** download the [AppImage][linux-appimage], allow it to run as a program and open it.
@@ -134,6 +136,20 @@ rebuild with no errors, replayed here at 2× speed.
   (manifold solid B-reps, or trimmed and bounded surfaces sewn into solids) as a base feature
   that later features build on — open a `.step`/`.stp`/`.igs`/`.iges` file, insert one into a
   design, or drop it on the window ([docs/step-import.md](docs/step-import.md)).
+- **Render:** opaque surfaces can use metal fraction, roughness and dielectric IOR in the
+  integrated product viewport and CPU preview PNGs. Existing simple colors remain supported.
+  Fixed direct lighting is a preview; HDRI, refraction and texture maps are not implemented.
+  See [opaque surfaces](docs/render-opaque-pbr.md).
+- **Display meshes** from our own tessellation planner: each face becomes a plan of (u, v)
+  points and triangles that shares its edge nodes with its neighbours, so the mesh is watertight.
+  Facets follow the chord tolerance, the facet angle and a longest side, with cells at most 2:1
+  along straight directions. Box-bounded and four-cornered faces mesh as structured grids.
+  Trimmed faces are cut into four-sided patches: squares around holes, butterflies in round
+  faces, motorcycle traces from concave corners (after Lyon et al. 2019). Each patch then meshes
+  as a Coons grid. Intersection edges are evaluated by Newton on both surfaces. A compute shader
+  evaluates the plans for the whole scene in one dispatch, with a CPU fallback when the GPU
+  can't build it. Planning and evaluating the 78 reference bodies takes about 65 ms, 50–65×
+  faster than the previous mesher.
 - **Desktop app** (egui + wgpu): toolbar with workspace tabs, browser, timeline, 3D viewport with
   axis view and navigation bar, sketch tools, feature dialogs, command palette, and a JSON-lines
   control channel so agents and tests can drive it.
@@ -154,6 +170,7 @@ cargo run --release -p solidcraft -- --sample          # desktop app with a samp
 cargo run --release -p solidcraft-cli -- commands      # the command registry
 cargo run --release -p solidcraft-cli -- run examples/bracket.json --out bracket.step
 cargo run --release -p solidcraft-cli -- snapshot examples/bracket.json --out bracket.png
+cargo run --release -p solidcraft-cli -- render examples/render-studio.json --out product.png
 cargo run --release -p solidcraft -- part.step          # open a STEP file as a new design
 cargo run --release -p solidcraft-cli -- eval part.step # measure an imported STEP file
 cargo xtask ci                                          # fmt, clippy, tests, assets, layers, wasm
@@ -218,7 +235,7 @@ configuration and an example session: [docs/mcp.md](docs/mcp.md).
 | L2 | `doc` | parameters, expressions, the feature timeline and its incremental evaluation |
 | L3 | `io` | design files, STL/OBJ/STEP/3MF export, STEP and 3MF/STL import features |
 | L4 | `engine` | the session and the command registry (everything is a command) |
-| L5 | `ui-egui`, `mcp` | the swappable desktop front end; the MCP server (headless or bridged to the app) |
+| L5 | `gpu`, `ui-egui`, `mcp` | compute-shader evaluation of display tessellation plans; the swappable desktop front end; the MCP server (headless or bridged to the app) |
 | apps | `solidcraft`, `solidcraft-cli` | desktop app, headless CLI |
 <!-- ANCHOR_END: architecture -->
 
