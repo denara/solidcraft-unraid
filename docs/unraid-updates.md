@@ -583,3 +583,32 @@ repository; no metadata commit or new submission is needed. No Unraid/nginx/DNS 
 are made. Keep server and separate browser-design backups before updating: format21 saves
 need this snapshot or a newer build, including during rollback. Upstream main still matched
 the selected b3df2c38 snapshot at the pre-publication fetch.
+
+Publication passed [container workflow 38698443874](https://github.com/denara/solidcraft-unraid/actions/runs/38698443874)
+from validated integration commit `123d041b368826c7e932ddf82274c2379f0e9f4b`. The fresh
+public build repeated modelling/PNG/STEP, independent sessions, authentication/origin and
+file/font/diagnostic/stored-link confinement, persisted reopen after restart, browser assets
+and operational logging/privacy checks before publishing latest and the immutable source tag.
+Public image: `ghcr.io/denara/solidcraft-unraid:latest` (Linux amd64), immutable tag
+`sha-123d041b368826c7e932ddf82274c2379f0e9f4b`.
+Digest: `sha256:b1797a37108330b0402a15b279b192eabf2bfffeb2fbf26e9fd56520a06c74a2`.
+Both tags pulled anonymously using an empty Docker configuration; an anonymous manifest
+request returned HTTP 200 with matching digest, source label and architecture.
+
+The sole remaining local runtime `solvecraft-solvecraft-1` now runs that immutable public
+image, healthy at 0.11.0. Private pre-replacement data/config backups and the prior public
+0.10.0 image `solvecraft-unraid:rollback-before-b3df2c38` remain available. Volume, token,
+full environment, user, ports/origins and security/resource settings are unchanged.
+Authenticated SDK modelling/PNG and read-only known public saved-design reopen at 24000 mm3
+passed after replacement; the actual independent browser rendered Sample Plate at 0.11.0.
+Eight owned obsolete check, supplement, fixture, security, offline and candidate containers
+were removed only after inspecting labels, images, workspace mounts and activity. No volumes
+were deleted. Diagnostic logs, reusable toolchain/browser images, Cargo/build caches,
+archives, old compatibility fixtures and private backups remain intact.
+
+No CA metadata commit or new submission was needed. Unraid/nginx/DNS were not changed.
+On Unraid, back up server designs and separately export browser designs, update the existing
+container through the normal Docker action with the same settings/data/token, then reload
+the browser. Newly saved format21 documents require this snapshot or newer for reopening.
+The final upstream fetch observed `6f115ad7409af91716fe52b41bea6e6bacffcece`; subsequent
+upstream movement is deferred to the next fixed-snapshot run.
