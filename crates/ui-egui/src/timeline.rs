@@ -333,7 +333,7 @@ pub fn timeline(app: &mut SolveApp, ui: &mut egui::Ui) {
                         if let Some(sk) = sketch_of
                             && ui.button(crate::i18n::tr_label("Edit Profile Sketch")).clicked()
                         {
-                            app.edit_sketch(sk);
+                            app.edit_sketch(sk.0);
                             ui.close();
                         }
                         if ui.button(crate::i18n::tr_label("Rename")).clicked() {

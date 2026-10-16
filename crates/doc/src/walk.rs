@@ -13,13 +13,13 @@ pub(crate) use crate::expr::Kind;
 pub(crate) use crate::feature_geometry::Geo;
 pub(crate) use crate::feature_refs::Ref;
 pub(crate) use crate::params::ExprRole;
-use crate::{PlaneRef, PointExpr};
+use crate::{BodyName, Dir, Expr, FacePick, FeatureName, PlaneRef, PointExpr, Position, SketchId};
 
 /// An expression: its label, the expression, its kind and its role.
-pub(crate) type ExprItem<'a> = (&'static str, &'a String, Kind, ExprRole);
-pub(crate) type ExprItemMut<'a> = (&'static str, &'a mut String, Kind, ExprRole);
-pub(crate) type RefItem<'a> = Ref<&'a u64, &'a String>;
-pub(crate) type RefItemMut<'a> = Ref<&'a mut u64, &'a mut String>;
+pub(crate) type ExprItem<'a> = (&'static str, &'a Expr, Kind, ExprRole);
+pub(crate) type ExprItemMut<'a> = (&'static str, &'a mut Expr, Kind, ExprRole);
+pub(crate) type RefItem<'a> = Ref<&'a SketchId, &'a FeatureName, &'a BodyName>;
+pub(crate) type RefItemMut<'a> = Ref<&'a mut SketchId, &'a mut FeatureName, &'a mut BodyName>;
 pub(crate) type GeoItem<'a> = Geo<&'a Vec3, &'a PlaneRef, &'a GeoRef, &'a PointExpr, &'a ProfileSel>;
 pub(crate) type GeoItemMut<'a> = Geo<&'a mut Vec3, &'a mut PlaneRef, &'a mut GeoRef, &'a mut PointExpr, &'a mut ProfileSel>;
 
@@ -44,6 +44,7 @@ impl Walk for ProfileSel {}
 impl Walk for solidcraft_sketch::Sketch {}
 impl Walk for solidcraft_kernel::StepNode {}
 impl Walk for crate::document::Operation {}
+impl Walk for solidcraft_kernel::Continuity {}
 impl Walk for crate::document::Direction {}
 impl Walk for crate::document::FilletFit {}
 impl Walk for crate::document::MeshData {}
@@ -54,6 +55,52 @@ impl Walk for crate::document::ExtendMode {}
 impl Walk for crate::document::RuledMode {}
 impl Walk for crate::document::RuledCorners {}
 impl Walk for crate::document::ExtrudeConvention {}
+
+/// A reference walks itself: a sketch, a feature or a body.
+macro_rules! reference {
+    ($t:ty, $role:ident) => {
+        impl Walk for $t {
+            fn walk_refs<'a>(&'a self, f: &mut dyn FnMut(RefItem<'a>)) {
+                f(Ref::$role(self))
+            }
+            fn walk_refs_mut<'a>(&'a mut self, f: &mut dyn FnMut(RefItemMut<'a>)) {
+                f(Ref::$role(self))
+            }
+        }
+    };
+}
+
+reference!(SketchId, Sketch);
+reference!(FeatureName, Feature);
+reference!(BodyName, Body);
+
+/// A point walks itself with its role: a face pick, a position or a direction. As a plain
+/// `Vec3` it also serves a field whose attribute gives it another role (`pinned`, `pick_if`).
+macro_rules! point {
+    ($t:ty, $role:ident) => {
+        impl Walk for $t {
+            fn walk_geometry<'a>(&'a self, f: &mut dyn FnMut(GeoItem<'a>)) {
+                f(Geo::$role(&self.0))
+            }
+            fn walk_geometry_mut<'a>(&'a mut self, f: &mut dyn FnMut(GeoItemMut<'a>)) {
+                f(Geo::$role(&mut self.0))
+            }
+        }
+
+        impl Each<Vec3> for $t {
+            fn each<'a>(&'a self, f: &mut dyn FnMut(&'a Vec3)) {
+                f(&self.0)
+            }
+            fn each_mut<'a>(&'a mut self, f: &mut dyn FnMut(&'a mut Vec3)) {
+                f(&mut self.0)
+            }
+        }
+    };
+}
+
+point!(FacePick, Pick);
+point!(Position, Pos);
+point!(Dir, Dir);
 
 /// Containers walk what they hold, in order.
 macro_rules! walk_each {
@@ -136,6 +183,36 @@ impl<T> Each<T> for Vec<T> {
     }
 }
 
+impl<T, const N: usize> Each<T> for [T; N] {
+    fn each<'a>(&'a self, f: &mut dyn FnMut(&'a T)) {
+        for t in self {
+            f(t)
+        }
+    }
+    fn each_mut<'a>(&'a mut self, f: &mut dyn FnMut(&'a mut T)) {
+        for t in self {
+            f(t)
+        }
+    }
+}
+
+impl<T, const N: usize> Each<T> for Option<[T; N]> {
+    fn each<'a>(&'a self, f: &mut dyn FnMut(&'a T)) {
+        if let Some(a) = self {
+            for t in a {
+                f(t)
+            }
+        }
+    }
+    fn each_mut<'a>(&'a mut self, f: &mut dyn FnMut(&'a mut T)) {
+        if let Some(a) = self {
+            for t in a {
+                f(t)
+            }
+        }
+    }
+}
+
 impl<T> Each<T> for Option<Vec<T>> {
     fn each<'a>(&'a self, f: &mut dyn FnMut(&'a T)) {
         for t in self.iter().flatten() {
@@ -151,36 +228,36 @@ impl<T> Each<T> for Option<Vec<T>> {
 
 /// The expressions of an expression field, each with its index and their count (for its label).
 pub(crate) trait ExprField {
-    fn each<'a>(&'a self, f: &mut dyn FnMut(usize, usize, &'a String));
-    fn each_mut<'a>(&'a mut self, f: &mut dyn FnMut(usize, usize, &'a mut String));
+    fn each<'a>(&'a self, f: &mut dyn FnMut(usize, usize, &'a Expr));
+    fn each_mut<'a>(&'a mut self, f: &mut dyn FnMut(usize, usize, &'a mut Expr));
 }
 
-impl ExprField for String {
-    fn each<'a>(&'a self, f: &mut dyn FnMut(usize, usize, &'a String)) {
+impl ExprField for Expr {
+    fn each<'a>(&'a self, f: &mut dyn FnMut(usize, usize, &'a Expr)) {
         f(0, 1, self)
     }
-    fn each_mut<'a>(&'a mut self, f: &mut dyn FnMut(usize, usize, &'a mut String)) {
+    fn each_mut<'a>(&'a mut self, f: &mut dyn FnMut(usize, usize, &'a mut Expr)) {
         f(0, 1, self)
     }
 }
 
 /// A position along an edge with its radius (a variable fillet's mid radii).
-impl ExprField for (f64, String) {
-    fn each<'a>(&'a self, f: &mut dyn FnMut(usize, usize, &'a String)) {
+impl ExprField for (f64, Expr) {
+    fn each<'a>(&'a self, f: &mut dyn FnMut(usize, usize, &'a Expr)) {
         f(0, 1, &self.1)
     }
-    fn each_mut<'a>(&'a mut self, f: &mut dyn FnMut(usize, usize, &'a mut String)) {
+    fn each_mut<'a>(&'a mut self, f: &mut dyn FnMut(usize, usize, &'a mut Expr)) {
         f(0, 1, &mut self.1)
     }
 }
 
 impl<T: ExprField> ExprField for Option<T> {
-    fn each<'a>(&'a self, f: &mut dyn FnMut(usize, usize, &'a String)) {
+    fn each<'a>(&'a self, f: &mut dyn FnMut(usize, usize, &'a Expr)) {
         if let Some(t) = self {
             t.each(f)
         }
     }
-    fn each_mut<'a>(&'a mut self, f: &mut dyn FnMut(usize, usize, &'a mut String)) {
+    fn each_mut<'a>(&'a mut self, f: &mut dyn FnMut(usize, usize, &'a mut Expr)) {
         if let Some(t) = self {
             t.each_mut(f)
         }
@@ -191,13 +268,13 @@ impl<T: ExprField> ExprField for Option<T> {
 macro_rules! expr_list {
     ($([$($g:tt)*] $t:ty),*) => {$(
         impl<$($g)*> ExprField for $t {
-            fn each<'a>(&'a self, f: &mut dyn FnMut(usize, usize, &'a String)) {
+            fn each<'a>(&'a self, f: &mut dyn FnMut(usize, usize, &'a Expr)) {
                 let n = self.len();
                 for (i, t) in self.iter().enumerate() {
                     t.each(&mut |_, _, e| f(i, n, e));
                 }
             }
-            fn each_mut<'a>(&'a mut self, f: &mut dyn FnMut(usize, usize, &'a mut String)) {
+            fn each_mut<'a>(&'a mut self, f: &mut dyn FnMut(usize, usize, &'a mut Expr)) {
                 let n = self.len();
                 for (i, t) in self.iter_mut().enumerate() {
                     t.each_mut(&mut |_, _, e| f(i, n, e));
@@ -233,8 +310,9 @@ impl<F: Fn(usize, usize) -> &'static str> Label for F {
     }
 }
 
-/// The offsets and angles of a plane, outermost first (nesting is capped like every walk over a
-/// plane), the construction plane it is built on, and the plane itself.
+/// The offsets and angles of a plane, outermost first, and an explicit origin's coordinates
+/// (nesting is capped like every walk over a plane), the construction plane it is built on, and
+/// the plane itself.
 impl Walk for PlaneRef {
     fn walk_exprs<'a>(&'a self, f: &mut dyn FnMut(ExprItem<'a>)) {
         let mut p = self;
@@ -249,6 +327,12 @@ impl Walk for PlaneRef {
                     p = base;
                 }
                 PlaneRef::AlongPath { t, .. } => return f(("Distance (0 to 1)", t, Kind::Unitless, ExprRole::Input)),
+                PlaneRef::Placed { origin, .. } => {
+                    for (label, e) in ["X", "Y", "Z"].into_iter().zip(origin) {
+                        f((label, e, Kind::Length, ExprRole::Placement));
+                    }
+                    return;
+                }
                 _ => return,
             }
         }
@@ -266,6 +350,12 @@ impl Walk for PlaneRef {
                     p = base;
                 }
                 PlaneRef::AlongPath { t, .. } => return f(("Distance (0 to 1)", t, Kind::Unitless, ExprRole::Input)),
+                PlaneRef::Placed { origin, .. } => {
+                    for (label, e) in ["X", "Y", "Z"].into_iter().zip(origin) {
+                        f((label, e, Kind::Length, ExprRole::Placement));
+                    }
+                    return;
+                }
                 _ => return,
             }
         }

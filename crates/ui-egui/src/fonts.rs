@@ -16,6 +16,34 @@ pub const CJK_FALLBACK: &str = "cjk_fallback";
 /// Chinese falls through to this one per glyph.
 pub const CHINESE_FALLBACK: &str = "chinese_fallback";
 
+/// Name of the chosen interface font in [`egui::FontDefinitions`], first in the Proportional
+/// family when one is set (#1290).
+pub const UI_FONT: &str = "ui_font";
+
+/// The interface font a preference names (#1290): an installed family, a font file, or the
+/// sketch text's built-in family. `None` for the default (empty) or a font that can't be read.
+pub fn ui_font(name: &str) -> Option<egui::FontData> {
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let data = solidcraft_engine::sketch::font_data(Some(name)).ok()?;
+    ttf_parser::Face::parse(data.bytes(), data.index).ok()?;
+    let mut font = egui::FontData::from_owned(data.bytes().to_vec());
+    font.index = data.index;
+    Some(font)
+}
+
+/// `fonts` with `font` first in the Proportional family (menus, dialogs, labels); the default
+/// face and the fallbacks stay after it for the glyphs it lacks.
+pub fn with_ui_font(mut fonts: egui::FontDefinitions, font: egui::FontData) -> egui::FontDefinitions {
+    fonts.font_data.insert(UI_FONT.to_owned(), Arc::new(font));
+    let list = fonts.families.entry(egui::FontFamily::Proportional).or_default();
+    list.retain(|entry| entry != UI_FONT);
+    list.insert(0, UI_FONT.to_owned());
+    fonts
+}
+
 /// Name of the Hangul fallback entry in [`egui::FontDefinitions`], last.
 pub const HANGUL_FALLBACK: &str = "hangul_fallback";
 
@@ -441,14 +469,20 @@ pub fn fallback_order(language: &str) -> [&'static str; 3] {
 }
 
 /// Configure font definitions with system CJK, Chinese and Hangul fallbacks where available,
-/// ordered for the UI language (see [`fallback_order`]).
+/// ordered for the UI language (see [`fallback_order`]), after the interface font `ui_font`
+/// when one is chosen (see [`ui_font`]).
 #[cfg(not(target_arch = "wasm32"))]
-pub fn setup_fonts_for(ctx: &egui::Context, language: &str) {
+pub fn setup_fonts_for(ctx: &egui::Context, language: &str, ui_font: &str) {
     let cjk = find_system_cjk_font();
     let chinese = find_system_chinese_font().filter(|bytes| cjk.as_ref() != Some(bytes));
     let hangul = HANGUL_FONT_CANDIDATES.iter().find_map(|path| try_read_font(std::path::Path::new(path)));
     let mut fonts = egui::FontDefinitions::default();
-    let mut found = false;
+    // Set the fonts also when only the interface font changes, so going back to the default
+    // takes the chosen one away.
+    let mut found = !ui_font.trim().is_empty();
+    if let Some(font) = self::ui_font(ui_font) {
+        fonts = with_ui_font(fonts, font);
+    }
     for name in fallback_order(language) {
         let bytes = match name {
             CJK_FALLBACK => cjk.clone(),
@@ -472,7 +506,7 @@ pub fn setup_fonts_for(ctx: &egui::Context, language: &str) {
 /// follows the language, see [`setup_fonts_for`]).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn setup_fonts(ctx: &egui::Context) {
-    setup_fonts_for(ctx, "en");
+    setup_fonts_for(ctx, "en", "");
 }
 
 /// Find a font covering simplified Chinese in the known candidate paths or by scanning the
@@ -499,7 +533,7 @@ fn find_system_chinese_font() -> Option<Vec<u8>> {
 /// On web, setup_fonts does not perform synchronous disk reads.
 /// Use asynchronous loading through [`solidcraft_web`] or host scripts.
 #[cfg(target_arch = "wasm32")]
-pub fn setup_fonts_for(_ctx: &egui::Context, _language: &str) {}
+pub fn setup_fonts_for(_ctx: &egui::Context, _language: &str, _ui_font: &str) {}
 
 #[cfg(target_arch = "wasm32")]
 pub fn setup_fonts(_ctx: &egui::Context) {}
@@ -507,6 +541,24 @@ pub fn setup_fonts(_ctx: &egui::Context) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_interface_font_comes_first_and_keeps_the_fallbacks() {
+        // #1290: the chosen font leads the Proportional family; the default face stays after it.
+        assert!(ui_font("").is_none());
+        assert!(ui_font("No Such Font 1290").is_none());
+        let font = ui_font(solidcraft_engine::sketch::DEFAULT_FONT_FAMILY).expect("the built-in sketch font reads");
+        let defaults = egui::FontDefinitions::default();
+        let first_default = defaults.families[&egui::FontFamily::Proportional][0].clone();
+        let fonts = with_ui_font(defaults, font.clone());
+        let list = &fonts.families[&egui::FontFamily::Proportional];
+        assert_eq!(list[0], UI_FONT);
+        assert!(list.contains(&first_default), "{list:?}");
+        assert!(!fonts.families[&egui::FontFamily::Monospace].contains(&UI_FONT.to_string()));
+        // Choosing again replaces it rather than adding a second entry.
+        let again = with_ui_font(fonts, font);
+        assert_eq!(again.families[&egui::FontFamily::Proportional].iter().filter(|n| *n == UI_FONT).count(), 1);
+    }
 
     fn latin_font_bytes() -> Vec<u8> {
         let defaults = egui::FontDefinitions::default();

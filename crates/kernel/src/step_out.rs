@@ -156,6 +156,8 @@ struct Out {
     /// B-spline cylinder and cone sheets of the body being copied to write as analytic surfaces,
     /// with the direction of their parameter seam.
     merged: HashMap<u64, V3>,
+    /// B-spline sheets of the body being copied to write cut down to their faces.
+    trimmed: HashMap<u64, truck_modeling::Surface>,
     /// Faces of the body being copied: exchange id → written id.
     faces_out: HashMap<u64, u64>,
 }
@@ -233,6 +235,57 @@ impl Out {
             }
         }
     }
+    /// A B-spline (or NURBS) surface; `None` for other surfaces.
+    fn write_sheet(&mut self, s: &truck_modeling::Surface) -> Option<u64> {
+        use truck_modeling::Surface;
+        let (rows, weights, (ku, kv), (du, dv)): (Vec<Vec<V3>>, Option<Vec<Vec<f64>>>, _, _) = match s {
+            Surface::BSplineSurface(b) => (
+                b.control_points().iter().map(|r| r.iter().map(|p| [p.x, p.y, p.z]).collect()).collect(),
+                None,
+                b.knot_vecs().clone(),
+                (b.udegree(), b.vdegree()),
+            ),
+            Surface::NurbsSurface(n) => {
+                let b = n.non_rationalized();
+                let rows: Option<Vec<Vec<V3>>> = b
+                    .control_points()
+                    .iter()
+                    .map(|r| r.iter().map(|p| (p.w.abs() > 1e-300).then(|| [p.x / p.w, p.y / p.w, p.z / p.w])).collect())
+                    .collect();
+                (
+                    rows?,
+                    Some(b.control_points().iter().map(|r| r.iter().map(|p| p.w).collect()).collect()),
+                    b.knot_vecs().clone(),
+                    (b.udegree(), b.vdegree()),
+                )
+            }
+            _ => return None,
+        };
+        let net = rows
+            .iter()
+            .map(|r| format!("({})", r.iter().map(|p| format!("#{}", self.point(*p))).collect::<Vec<_>>().join(",")))
+            .collect::<Vec<_>>()
+            .join(",");
+        let list = |v: Vec<String>| v.join(",");
+        let ((ku, mu), (kv, mv)) = (ku.to_single_multi(), kv.to_single_multi());
+        let knots = format!(
+            "({}),({}),({}),({}),.UNSPECIFIED.",
+            list(mu.iter().map(|m| m.to_string()).collect()),
+            list(mv.iter().map(|m| m.to_string()).collect()),
+            list(ku.iter().map(|k| real(*k)).collect()),
+            list(kv.iter().map(|k| real(*k)).collect()),
+        );
+        let base = format!("{du},{dv},({net}),.UNSPECIFIED.,.U.,.U.,.U.");
+        Some(match weights {
+            None => self.add_shared(format!("B_SPLINE_SURFACE_WITH_KNOTS('',{base},{knots})")),
+            Some(w) => {
+                let w = w.iter().map(|r| format!("({})", list(r.iter().map(|x| real(*x)).collect()))).collect::<Vec<_>>().join(",");
+                self.add_shared(format!(
+                    "(BOUNDED_SURFACE()B_SPLINE_SURFACE({base})B_SPLINE_SURFACE_WITH_KNOTS({knots})GEOMETRIC_REPRESENTATION_ITEM()RATIONAL_B_SPLINE_SURFACE(({w}))REPRESENTATION_ITEM('')SURFACE())"
+                ))
+            }
+        })
+    }
     fn placement(&mut self, o: [f64; 3], z: [f64; 3], x: [f64; 3]) -> u64 {
         let (po, dz, dx) = (self.point(o), self.direction(z), self.direction(x));
         self.add_shared(format!("AXIS2_PLACEMENT_3D('',#{po},#{dz},#{dx})"))
@@ -288,6 +341,11 @@ impl Out {
                 if a.flip {
                     self.flipped.insert(new);
                 }
+                map.insert(id, new);
+                continue;
+            }
+            if !done && let Some(sheet) = self.trimmed.get(&id).cloned() {
+                let new = self.write_sheet(&sheet).ok_or_else(|| format!("cannot write the cut sheet #{id}"))?;
                 map.insert(id, new);
                 continue;
             }
@@ -723,12 +781,18 @@ fn square_or_ruled(ex: &p21::Exchange, fe: &p21::Entity, kind: &AnalyticKind) ->
 
 /// Points along an edge's curve (its ends for a line, None for a conic it cannot sample).
 fn edge_samples(ex: &p21::Exchange, edge: u64) -> Option<Vec<V3>> {
+    edge_points(ex, edge, 4)
+}
+
+/// `n + 1` points along an edge's curve, ends included (its ends for a line, None for a conic it
+/// cannot sample).
+fn edge_points(ex: &p21::Exchange, edge: u64, n: usize) -> Option<Vec<V3>> {
     use truck_modeling::{BoundedCurve, ParametricCurve};
     let p = ex.get(edge)?.params();
     let ends = [vertex_point(ex, p.get(1)?.as_ref_id()?)?, vertex_point(ex, p.get(2)?.as_ref_id()?)?];
     let cx = crate::step_in::Ctx { ex, len: 1.0, ang: 1.0, tol: 1e-6 };
     let sample = |f: &dyn Fn(f64) -> truck_modeling::Point3, (t0, t1): (f64, f64)| {
-        (0..=4).map(|k| f(t0 + (t1 - t0) * k as f64 / 4.0)).map(|q| [q.x, q.y, q.z]).collect::<Vec<V3>>()
+        (0..=n).map(|k| f(t0 + (t1 - t0) * k as f64 / n.max(1) as f64)).map(|q| [q.x, q.y, q.z]).collect::<Vec<V3>>()
     };
     match crate::step_in::geom::curve(&cx, p.get(3)?.as_ref_id()?, 0).ok()? {
         crate::step_in::geom::CurveGeo::Line { .. } => Some(ends.to_vec()),
@@ -1188,7 +1252,8 @@ fn merge_split_faces(ex: &mut p21::Exchange, paint: &mut HashMap<u64, FaceLook>,
 
 /// B-spline cylinder and cone sheets written as CYLINDRICAL_SURFACE and CONICAL_SURFACE (the
 /// sheet covers only its own piece, and a fillet's may reach far past it), with the direction of
-/// the parameter seam: on the face's seam edge for a full turn, else opposite the face's middle.
+/// the parameter seam: on the face's seam edge for a full turn, else in the middle of the gap the
+/// face leaves (`gap_middle`), else opposite the face's middle.
 /// Sheets under faces merged from pieces always; a lone piece when its edges are circles square
 /// to the axis and rulings. (Faces replaced by merges stay in the exchange unreferenced: only the
 /// shells' faces count.)
@@ -1228,17 +1293,22 @@ fn analytic_sheets(ex: &p21::Exchange, merged_surfaces: &std::collections::HashS
             let p = ex.get(edge)?.params();
             [p.get(1), p.get(2)].into_iter().filter_map(|v| vertex_point(ex, v?.as_ref_id()?)).find_map(|q| unit(radial(q)))
         });
-        let x = match seam_dir {
+        let x = match seam_dir.or_else(|| gap_middle(ex, &loops, z, &radial)) {
             Some(x) => Some(x),
             None => {
+                // No single gap to find (a half turn has two corners, a tube cut in pieces
+                // several). Points along the edges, not just their ends: the corners of a half
+                // turn (a slot's round end) point both ways and cancel out (#1198). The sheet's
+                // own middle where even those do.
                 let mean = loops
                     .iter()
                     .flatten()
-                    .filter_map(|(edge, _)| ex.get(*edge)?.params().get(1)?.as_ref_id())
-                    .filter_map(|v| vertex_point(ex, v))
+                    .filter_map(|(edge, _)| edge_samples(ex, *edge))
+                    .flatten()
                     .filter_map(|q| unit(radial(q)))
                     .fold([0.0; 3], add);
-                unit(mul(mean, -1.0))
+                let (AnalyticKind::Cylinder { x: middle, .. } | AnalyticKind::Cone { x: middle, .. }) = kind else { continue };
+                Some(unit(mul(mean, -1.0)).unwrap_or(middle))
             }
         };
         if let Some(x) = x {
@@ -1248,9 +1318,158 @@ fn analytic_sheets(ex: &p21::Exchange, merged_surfaces: &std::collections::HashS
     out
 }
 
-/// The B-rep entities of one body as truck writes them, parsed, and the B-spline sheets to write
-/// as cylinders and cones (see `analytic_sheets`). Without `merge` the file is truck's, as is.
-fn brep_exchange(b: &Body, merge: bool) -> Result<(p21::Exchange, HashMap<u64, V3>, HashMap<u64, FaceLook>)> {
+/// The middle of the one angular gap that a face on a cylinder or cone leaves around its axis
+/// `z`. The face's boundary vertices are sorted by angle; each two neighbours are joined by one
+/// of its edges except across the gap (a 270° face split at 0°, 90°, 180° and 270° leaves
+/// 270°–360°). None unless there are three angles or more and exactly one gap: two vertices can
+/// be joined either way round.
+fn gap_middle(ex: &p21::Exchange, loops: &[Vec<(u64, bool)>], z: V3, radial: &impl Fn(V3) -> V3) -> Option<V3> {
+    use std::f64::consts::TAU;
+    let mut edges: Vec<(V3, V3)> = Vec::new();
+    for (e, _) in loops.iter().flatten() {
+        let p = ex.get(*e)?.params();
+        let (a, b) = (vertex_point(ex, p.get(1)?.as_ref_id()?)?, vertex_point(ex, p.get(2)?.as_ref_id()?)?);
+        edges.push((unit(radial(a))?, unit(radial(b))?));
+    }
+    let e1 = edges.first()?.0;
+    let e2 = unit(cross(z, e1))?;
+    let angle = |d: V3| dot(d, e2).atan2(dot(d, e1)).rem_euclid(TAU);
+    let close = |a: f64, b: f64| {
+        let d = (a - b).rem_euclid(TAU);
+        d < 1e-6 || TAU - d < 1e-6
+    };
+    let mut angles: Vec<f64> = Vec::new();
+    for (a, b) in &edges {
+        for t in [angle(*a), angle(*b)] {
+            if !angles.iter().any(|s| close(*s, t)) {
+                angles.push(t);
+            }
+        }
+    }
+    if angles.len() < 3 {
+        return None;
+    }
+    angles.sort_by(f64::total_cmp);
+    let joined = |s: f64, t: f64| {
+        edges.iter().any(|(a, b)| {
+            let (x, y) = (angle(*a), angle(*b));
+            (close(x, s) && close(y, t)) || (close(x, t) && close(y, s))
+        })
+    };
+    let n = angles.len();
+    let gaps: Vec<(f64, f64)> = (0..n).filter_map(|i| Some((*angles.get(i)?, *angles.get((i + 1) % n)?))).filter(|(s, t)| !joined(*s, *t)).collect();
+    let [(s, t)] = gaps[..] else { return None };
+    let m = s + (t - s).rem_euclid(TAU) / 2.0;
+    unit(add(mul(e1, m.cos()), mul(e2, m.sin())))
+}
+
+/// Margin left round a face when its sheet is cut down to it, as a share of the face's own
+/// parameter range on each side.
+const SHEET_MARGIN: f64 = 0.02;
+
+/// B-spline sheets that reach well past the one face on them, cut down to that face's parameter
+/// range (and a margin), so readers bound the part by its faces (#1198): a round's sheet runs on
+/// past both ends of the edge it rounds, and when a later cut crosses the round, the crossing edge
+/// keeps it from being written as a cylinder (see `square_or_ruled`). Sheets written as analytic
+/// surfaces, flat ones, sheets under several faces, and those whose face's edges do not all lie
+/// on the piece cut out (a face across a closed sheet's seam) are left alone.
+fn trimmed_sheets(ex: &p21::Exchange, analytic: &HashMap<u64, V3>) -> HashMap<u64, truck_modeling::Surface> {
+    let live: Vec<u64> = ex
+        .entities
+        .values()
+        .filter_map(|e| if matches!(e.name(), "CLOSED_SHELL" | "OPEN_SHELL") { e.params().get(1).and_then(Param::as_list) } else { None })
+        .flatten()
+        .filter_map(Param::as_ref_id)
+        .collect();
+    let mut users: HashMap<u64, usize> = HashMap::new();
+    for e in live.iter().filter_map(|f| ex.get(*f)) {
+        if let Some(sid) = e.params().get(2).and_then(Param::as_ref_id) {
+            *users.entry(sid).or_default() += 1;
+        }
+    }
+    let mut out = HashMap::new();
+    for e in live.iter().filter_map(|f| ex.get(*f)) {
+        let Some(sid) = e.params().get(2).and_then(Param::as_ref_id) else { continue };
+        if users.get(&sid) != Some(&1) || analytic.contains_key(&sid) {
+            continue;
+        }
+        let Some(se) = ex.get(sid) else { continue };
+        if !(se.has("B_SPLINE_SURFACE") || se.name() == "B_SPLINE_SURFACE_WITH_KNOTS") || planar_bspline(ex, se).is_some() {
+            continue;
+        }
+        let Some(pts) = face_edges(ex, e).and_then(|ls| ls.iter().flatten().map(|(x, _)| edge_points(ex, *x, 16)).collect::<Option<Vec<_>>>()) else {
+            continue;
+        };
+        let pts: Vec<V3> = pts.into_iter().flatten().collect();
+        let cx = crate::step_in::Ctx { ex, len: 1.0, ang: 1.0, tol: 1e-6 };
+        let Ok(sheet) = crate::step_in::geom::bspline_surface(&cx, se) else { continue };
+        if let Ok(Some(cut)) = crate::guard("STEP sheet trim", || Ok(trim_sheet(&sheet, &pts))) {
+            out.insert(sid, cut);
+        }
+    }
+    out
+}
+
+/// `sheet` cut down to the parameter range `pts` (points on it) cover, with [`SHEET_MARGIN`];
+/// `None` when that would not make it much smaller, or when a point is not on the piece cut out.
+fn trim_sheet(sheet: &truck_modeling::Surface, pts: &[V3]) -> Option<truck_modeling::Surface> {
+    use truck_modeling::{ParametricSurface, SearchNearestParameter, Surface};
+    let (Some((u0, u1)), Some((v0, v1))) = sheet.try_range_tuple() else { return None };
+    // Edges made by intersecting surfaces are fitted to them, a micron or so off the sheet; a
+    // point on the wrong piece of it is far further.
+    let (lo, hi) = pts.iter().fold(([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]), |(lo, hi), p| {
+        ([lo[0].min(p[0]), lo[1].min(p[1]), lo[2].min(p[2])], [hi[0].max(p[0]), hi[1].max(p[1]), hi[2].max(p[2])])
+    });
+    let tol = 1e-3 + 1e-4 * norm(sub(hi, lo));
+    let near = |s: &Surface, p: V3| -> Option<(f64, f64)> {
+        let q = truck_modeling::Point3::new(p[0], p[1], p[2]);
+        let (u, v) = s.search_nearest_parameter(q, None, 100)?;
+        let r = s.subs(u, v);
+        (norm(sub([r.x, r.y, r.z], p)) <= tol).then_some((u, v))
+    };
+    let (mut ua, mut ub, mut va, mut vb) = (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
+    for p in pts {
+        let (u, v) = near(sheet, *p)?;
+        (ua, ub, va, vb) = (ua.min(u), ub.max(u), va.min(v), vb.max(v));
+    }
+    let (du, dv) = ((ub - ua) * SHEET_MARGIN, (vb - va) * SHEET_MARGIN);
+    let (ua, ub, va, vb) = ((ua - du).max(u0), (ub + du).min(u1), (va - dv).max(v0), (vb + dv).min(v1));
+    // Worth it only where a parameter keeps less than four fifths of its range.
+    let keeps = |a: f64, b: f64, lo: f64, hi: f64| (b - a) / (hi - lo);
+    if !(ua < ub && va < vb) || (keeps(ua, ub, u0, u1) > 0.8 && keeps(va, vb, v0, v1) > 0.8) {
+        return None;
+    }
+    // The piece between the new ends: `ucut` keeps what lies before the cut and returns the rest.
+    macro_rules! cut {
+        ($s:expr) => {{
+            let mut s = $s.clone();
+            if ua > u0 {
+                s = s.ucut(ua);
+            }
+            if ub < u1 {
+                s.ucut(ub);
+            }
+            if va > v0 {
+                s = s.vcut(va);
+            }
+            if vb < v1 {
+                s.vcut(vb);
+            }
+            s
+        }};
+    }
+    let piece = match sheet {
+        Surface::BSplineSurface(b) => Surface::BSplineSurface(cut!(b)),
+        Surface::NurbsSurface(n) => Surface::NurbsSurface(cut!(n)),
+        _ => return None,
+    };
+    pts.iter().all(|p| near(&piece, *p).is_some()).then_some(piece)
+}
+
+/// The B-rep entities of one body as truck writes them, parsed, the B-spline sheets to write
+/// as cylinders and cones (see `analytic_sheets`) and those to write cut down to their faces
+/// (see `trimmed_sheets`). Without `merge` the file is truck's, as is.
+fn brep_exchange(b: &Body, merge: bool) -> Result<(p21::Exchange, HashMap<u64, V3>, HashMap<u64, truck_modeling::Surface>, HashMap<u64, FaceLook>)> {
     let text = crate::step::truck_step(&[b], "SolidCraft")?;
     let mut ex = p21::parse(&text).map_err(|e| KernelError::Failed(format!("STEP export: {e}")))?;
     collapse_short_edges(&mut ex);
@@ -1270,17 +1489,18 @@ fn brep_exchange(b: &Body, merge: bool) -> Result<(p21::Exchange, HashMap<u64, V
     }
     let before = shell_face_count(&ex);
     let keep = b.split_lines().map(|l| l.as_slice()).unwrap_or(&[]);
-    let sheets = if merge {
+    let (sheets, trimmed) = if merge {
         let merged = merge_split_faces(&mut ex, &mut paint, keep);
         let sheets = analytic_sheets(&ex, &merged);
-        // Lone sheets rewritten as analytic surfaces count as changes to check too.
-        MERGES.with(|m| m.set(m.get() + sheets.keys().filter(|s| !merged.contains(s)).count()));
-        sheets
+        let trimmed = trimmed_sheets(&ex, &sheets);
+        // Lone sheets rewritten as analytic surfaces, or cut down, count as changes to check too.
+        MERGES.with(|m| m.set(m.get() + sheets.keys().filter(|s| !merged.contains(s)).count() + trimmed.len()));
+        (sheets, trimmed)
     } else {
         Default::default()
     };
     MERGES.with(|m| m.set(m.get() + before.saturating_sub(shell_face_count(&ex))));
-    Ok((ex, sheets, paint))
+    Ok((ex, sheets, trimmed, paint))
 }
 
 /// The separate pieces of a body for export, each keeping its face colours: a body of several
@@ -1469,8 +1689,9 @@ fn products_text(products: &[ExportProduct], root: usize, header: &StepHeader, m
             let mut solids = Vec::new();
             for b in &p.bodies {
                 for lump in export_lumps(b.body) {
-                    let (ex, merged, face_paint) = brep_exchange(&lump, merge)?;
+                    let (ex, merged, trimmed, face_paint) = brep_exchange(&lump, merge)?;
                     o.merged = merged;
+                    o.trimmed = trimmed;
                     o.faces_out.clear();
                     let mut roots: Vec<u64> =
                         ex.entities.iter().filter(|(_, e)| matches!(e.name(), "MANIFOLD_SOLID_BREP" | "BREP_WITH_VOIDS")).map(|(i, _)| *i).collect();

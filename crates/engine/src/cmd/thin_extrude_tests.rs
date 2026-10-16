@@ -172,3 +172,113 @@ fn hostile_thin_params_never_panic() {
         }
     }
 }
+
+// #1519: sketches on a thin extrude's caps. A thin wall's caps are bounded by offset curves the
+// sketch doesn't have, so they are certified by the curves the wall follows: the signature the
+// solid caps had when the wall follows the whole profile.
+
+fn attachment(s: &Session, sketch: &str) -> solidcraft_doc::FaceAttachmentStatus {
+    let id = s.doc.find_feature(sketch).map(|f| f.id).unwrap_or_default();
+    s.placed_document().sketch_face_attachment(id, &s.model)
+}
+
+fn attached(s: &Session, sketch: &str) -> (solidcraft_geom::Plane, Option<solidcraft_doc::config::FaceCertificate>) {
+    match attachment(s, sketch) {
+        solidcraft_doc::FaceAttachmentStatus::Healthy { plane, target, .. } => (plane, target.certificate),
+        other => panic!("{sketch}: {other:?}"),
+    }
+}
+
+fn same_plane(a: &solidcraft_geom::Plane, b: &solidcraft_geom::Plane) {
+    let near = |p: solidcraft_geom::Vec3, q: solidcraft_geom::Vec3| (p - q).len() < 1e-9;
+    assert!(near(a.origin, b.origin) && near(a.x, b.x) && near(a.y, b.y), "{a:?} != {b:?}");
+}
+
+fn sketch_on(s: &mut Session, at: [f64; 3], name: &str) {
+    run(s, "sketch.create", json!({"plane": {"face": at}, "name": name}));
+    run(s, "sketch.finish", json!({}));
+}
+
+fn is_extrude_cap(certificate: &Option<solidcraft_doc::config::FaceCertificate>) -> bool {
+    matches!(certificate, Some(solidcraft_doc::config::FaceCertificate::ExtrudeCap { .. }))
+}
+
+#[test]
+fn sketches_on_a_solid_extrudes_caps_keep_their_faces_when_it_is_made_thin_and_solid_again() {
+    for side in ["center", "inside", "outside"] {
+        let mut s = Session::default();
+        let sides = rectangle(&mut s);
+        run(&mut s, "solid.extrude", json!({"sketch": "Outline", "distance": 10, "name": "Wall"}));
+        // On the rim of the wall whichever side it lies on (the rectangle starts at (5, 5)).
+        sketch_on(&mut s, [5.5, 5.5, 10.0], "Top");
+        sketch_on(&mut s, [5.5, 5.5, 0.0], "Bottom");
+        let (top, _) = attached(&s, "Top");
+        let (bottom, _) = attached(&s, "Bottom");
+        run(&mut s, "timeline.edit", json!({"feature": "Wall", "set": {"thin": {"curves": sides, "thickness": "1", "side": side}}}));
+        no_errors(&s, side);
+        let (thin_top, certificate) = attached(&s, "Top");
+        assert!(is_extrude_cap(&certificate), "{side}: {certificate:?}");
+        same_plane(&thin_top, &top);
+        same_plane(&attached(&s, "Bottom").0, &bottom);
+        // The sketch follows the thin wall's height, and keeps its face through a save.
+        run(&mut s, "timeline.edit", json!({"feature": "Wall", "set": {"extent": {"distance": "25"}}}));
+        assert!((attached(&s, "Top").0.origin.z - 25.0).abs() < 1e-9, "{side}");
+        let mut reopened = Session { doc: solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap().into(), ..Session::default() };
+        reopened.refresh();
+        no_errors(&reopened, side);
+        assert!((attached(&reopened, "Top").0.origin.z - 25.0).abs() < 1e-9, "{side}");
+        // And solid again.
+        run(&mut s, "timeline.edit", json!({"feature": "Wall", "set": {"thin": null, "extent": {"distance": "10"}}}));
+        no_errors(&s, side);
+        same_plane(&attached(&s, "Top").0, &top);
+        same_plane(&attached(&s, "Bottom").0, &bottom);
+    }
+}
+
+#[test]
+fn a_sketch_on_a_thin_cap_is_certified_and_keeps_its_face_when_the_extrude_is_made_solid() {
+    let mut s = Session::default();
+    rectangle(&mut s);
+    run(&mut s, "solid.extrude", json!({"sketch": "Outline", "thin": true, "thickness": 2, "side": "inside", "distance": 10, "name": "Wall"}));
+    sketch_on(&mut s, [6.0, 6.0, 10.0], "Top");
+    let (top, certificate) = attached(&s, "Top");
+    assert!(is_extrude_cap(&certificate), "{certificate:?}");
+    run(&mut s, "timeline.edit", json!({"feature": "Wall", "set": {"thin": null}}));
+    no_errors(&s, "solid");
+    same_plane(&attached(&s, "Top").0, &top);
+}
+
+#[test]
+fn a_thin_wall_along_part_of_the_profile_does_not_take_over_its_cap() {
+    // A wall along two sides is another wall than the rectangle's: the sketch reports its lost
+    // face instead of moving onto the new one.
+    let mut s = Session::default();
+    let sides = rectangle(&mut s);
+    run(&mut s, "solid.extrude", json!({"sketch": "Outline", "distance": 10, "name": "Wall"}));
+    sketch_on(&mut s, [6.0, 6.0, 10.0], "Top");
+    let _ = s.execute("timeline.edit", &json!({"feature": "Wall", "set": {"thin": {"curves": [&sides[0], &sides[1]], "thickness": "2"}}}));
+    assert!(matches!(attachment(&s, "Top"), solidcraft_doc::FaceAttachmentStatus::Lost { .. }), "{:?}", attachment(&s, "Top"));
+}
+
+#[test]
+fn the_caps_of_walls_apart_attach_by_their_history_names() {
+    // Two rectangles make two walls: their caps aren't certified (one signature would name
+    // both), so a sketch on one attaches by its exact history name, as before.
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Outline"}));
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [10, 10]}));
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [20, 0], "p1": [30, 10]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"sketch": "Outline", "thin": true, "thickness": 1, "side": "inside", "distance": 5}));
+    sketch_on(&mut s, [0.5, 0.5, 5.0], "Top");
+    let (_, certificate) = attached(&s, "Top");
+    assert!(matches!(certificate, Some(solidcraft_doc::config::FaceCertificate::Lineage)), "{certificate:?}");
+}
+
+fn no_errors(s: &Session, context: &str) {
+    assert!(
+        s.model.results.iter().all(|r| r.error.is_none()),
+        "{context}: {:?}",
+        s.model.results.iter().filter_map(|r| r.error.as_ref()).collect::<Vec<_>>()
+    );
+}

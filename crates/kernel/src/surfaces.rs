@@ -211,16 +211,8 @@ pub fn sweep_sheet(plane: &Plane, chains: &[Vec<Seg2>], path: &[crate::PathSeg])
     }
     let ends: Vec<(Vec3, Vec3)> =
         path.iter().map(PathSeg::tangents).collect::<Option<_>>().ok_or_else(|| KernelError::Invalid("a path segment has no direction".into()))?;
-    let first = match path.first() {
-        Some(PathSeg::Line { a, .. } | PathSeg::Arc { a, .. }) => *a,
-        None => return Err(KernelError::Invalid("the path needs 1…1000 segments".into())),
-    };
     if ends.windows(2).any(|w| w[0].1.dot(w[1].0) < (1e-3f64).cos()) {
-        let mut pts = vec![first];
-        for seg in path {
-            pts.extend(seg.points_after_start(1e-2));
-        }
-        return sweep_sheet_points(plane, chains, &pts);
+        return sweep_sheet_points(plane, chains, &crate::build::path_polyline(path)?);
     }
     let mut sides = Vec::new();
     let mut offset = 0;
@@ -254,16 +246,39 @@ pub fn sweep_sheet(plane: &Plane, chains: &[Vec<Seg2>], path: &[crate::PathSeg])
 /// B-spline wall per segment where the path has no corners, else ruled walls between the path's
 /// points, mitred at the corners (see [`sweep_sheet`]).
 pub fn sweep_sheet_points(plane: &Plane, chains: &[Vec<Seg2>], path: &[Vec3]) -> Result<Body> {
+    sweep_sheet_points_with(plane, chains, path, &crate::SweepControl::default())
+}
+
+/// [`sweep_sheet`] with sweep options. The default options are exactly [`sweep_sheet`]; any
+/// other orientation, a twist or an end scale follow the path as a polyline through stations
+/// (see [`sweep_sheet_points_with`]).
+pub fn sweep_sheet_with(plane: &Plane, chains: &[Vec<Seg2>], path: &[crate::PathSeg], ctl: &crate::SweepControl) -> Result<Body> {
+    if ctl.is_default() {
+        return sweep_sheet(plane, chains, path);
+    }
+    ctl.check()?;
+    if path.is_empty() || path.len() > 1000 {
+        return Err(KernelError::Invalid("the path needs 1…1000 segments".into()));
+    }
+    if path.iter().any(|s| s.tangents().is_none()) {
+        return Err(KernelError::Invalid("a path segment has no direction".into()));
+    }
+    sweep_sheet_points_with(plane, chains, &crate::build::path_polyline(path)?, ctl)
+}
+
+/// [`sweep_sheet_points`] with sweep options: orientation, twist and end scale.
+pub fn sweep_sheet_points_with(plane: &Plane, chains: &[Vec<Seg2>], path: &[Vec3], ctl: &crate::SweepControl) -> Result<Body> {
+    ctl.check()?;
     if !crate::build::frame_ok(plane) {
         return Err(KernelError::Invalid("sweep frame is not finite and orthonormal".into()));
     }
     if chains.is_empty() || chains.len() > MAX_CHAINS {
         return Err(KernelError::Invalid("pick the curves or profiles to sweep".into()));
     }
-    let ruled = sheet_body(crate::sweep_path::ruled_sheet(plane, chains, path)?)?;
+    let ruled = sheet_body(crate::sweep_path::ruled_sheet(plane, chains, path, ctl)?)?;
     // Smooth walls where the path has no corners, kept when their area agrees with the ruled
     // walls' (a fit that went wrong falls back to those).
-    if let Ok(Some(sides)) = crate::sweep_path::smooth_sheet(plane, chains, path)
+    if let Ok(Some(sides)) = crate::sweep_path::smooth_sheet(plane, chains, path, ctl)
         && let Ok(smooth) = sheet_body(sides)
         && let (Ok(a), Ok(b)) = (crate::measure(&smooth), crate::measure(&ruled))
         && (a.area - b.area).abs() <= 0.02 * b.area.abs()

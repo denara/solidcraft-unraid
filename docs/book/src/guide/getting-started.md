@@ -27,6 +27,15 @@ Open the release `.dmg` and drag `SolidCraft.app` onto Applications.
 When updating from a build released under the previous product name, follow the
 [macOS upgrade notes](https://github.com/bherbruck/solidcraft/blob/main/docs/compatibility.md#macos) so you replace it rather than install a second copy.
 
+### Linux AppImage
+
+The first time you open the AppImage it adds a menu entry and icons under `~/.local/share`
+(`applications/ai.storyteller.solidcraft.desktop`, `icons/hicolor`), so the desktop shows the
+right name and icon. It adds nothing if [appimaged](https://github.com/probonopd/go-appimage)
+already made an entry for the file (and removes the entry SolidCraft added before). To
+turn it off for good, create an empty file `~/.local/share/solidcraft/no-desktop-integration`, or
+start the AppImage with `SOLIDCRAFT_NO_DESKTOP_INTEGRATION=1`.
+
 ### Linux Flatpak
 
 Install Flatpak using your distribution's package manager. For an installation that receives
@@ -73,16 +82,25 @@ doesn't update automatically.
 ## Web
 
 The same app runs in the browser: [open SolidCraft on the web](../app/) (`?sample` opens the sample
-part, `?webgl` forces WebGL2 where WebGPU is missing). Designs are saved in the browser's private
-file storage, which needs HTTPS or localhost. Planned worker and tiered-storage integration is
+part, `?webgl` forces WebGL2 where WebGPU is missing or misbehaves; the browser remembers it until
+`?webgpu`, and an app installed from Chrome or Edge starts with it too). Designs are saved in the
+browser's private file storage, which needs HTTPS or localhost.
+Planned worker and tiered-storage integration is
 described in [web-runtime.md](https://github.com/bherbruck/solidcraft/blob/main/docs/web-runtime.md)
 (design; not yet wired in the shipped wasm build).
 
 After the first visit the web app works offline: the browser keeps a copy of it. Online, each
 launch gets the latest published build (the browser downloads it once when it changes); offline,
 when the network doesn't answer within a few seconds, or when a new build can't be downloaded
-whole, the kept copy starts (and the download carries on for the next launch). To build it
-yourself:
+whole, the kept copy starts (and the download carries on for the next launch).
+
+Browsers that can install web apps add **Install app…** to the File menu: it installs SolidCraft
+as an app with its own window and launcher icon, working offline like the page. In Chrome, Edge
+and other Chromium browsers it shows the browser's install prompt, and once SolidCraft is
+installed the item is gone. Safari has no such prompt, so the item shows its steps instead:
+Share › Add to Home Screen on iPhone and iPad, File › Add to Dock on a Mac (Safari 17 or later).
+
+To build it yourself:
 
 ```sh
 rustup target add wasm32-unknown-unknown
@@ -91,6 +109,56 @@ cd apps/solidcraft-web && trunk serve --release --no-autoreload
 
 Offline use needs `--no-autoreload`: Trunk's live reload changes the page as it serves it, so it
 no longer matches the build the browser would keep. Debug builds (`trunk serve`) never keep a copy.
+
+### 3D mouse in the browser
+
+The web app reads a 3Dconnexion SpaceMouse or SpaceNavigator through the browser's Gamepad API,
+with the same switch and speed in Preferences › Navigation as the desktop app. Edge and Chrome
+read the device as it is. A browser shows a gamepad to a page only once it has been moved there,
+so if nothing happens at first, push the cap firmly once. 3DxWare also turns the cap into
+mouse-wheel zoom in browsers; while the cap moves, the web app ignores the wheel and reads the
+cap itself. Before the browser shows the cap to the page, that zoom still gets through, so the
+first push after opening the page may zoom a little.
+
+Firefox doesn't list 3D mice ([Mozilla bug 1226575](https://bugzilla.mozilla.org/show_bug.cgi?id=1226575)).
+On Windows it does list 3DxWare's virtual joystick, which can carry the cap instead. Save this
+as `%APPDATA%\3Dconnexion\3DxWare\Cfg\Firefox.xml`, then restart Firefox (and 3DxWare, if the cap
+still only zooms). It changes Firefox only: there 3DxWare sends the cap's six axes to the
+joystick instead of the mouse wheel. Delete the file to undo it.
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<AppCfg Default="false" xmlns="" CfgFormatVersion="1.3" ThisFileVersion="1.1">
+  <AppInfo>
+    <Signature>
+      <Name>STR_FIREFOX</Name>
+      <ExecutableName>FIREFOX.EXE</ExecutableName>
+      <Transport>KMJ</Transport>
+    </Signature>
+    <Options/>
+  </AppInfo>
+  <CfgProperties>
+    <ID>ID_STR_FIREFOX</ID>
+    <Name>STR_FIREFOX</Name>
+    <InheritsFromID>ID_STR_FIREFOX</InheritsFromID>
+  </CfgProperties>
+  <Devices>
+    <Device>
+      <ID>ID_Standard_3D_Mouse</ID>
+      <AxisBank>
+        <Name>STR_DEFAULT_BANK</Name>
+        <ID>Default</ID>
+        <Axis><Enabled>true</Enabled><Input><ActionID>HIDMultiAxis_X</ActionID><Min>-512</Min><Max>511</Max><Deadband>0</Deadband></Input><Output><ActionID>HIDJoystick_X</ActionID></Output></Axis>
+        <Axis><Enabled>true</Enabled><Input><ActionID>HIDMultiAxis_Y</ActionID><Min>-512</Min><Max>511</Max><Deadband>0</Deadband></Input><Output><ActionID>HIDJoystick_Y</ActionID></Output></Axis>
+        <Axis><Enabled>true</Enabled><Input><ActionID>HIDMultiAxis_Z</ActionID><Min>-512</Min><Max>511</Max><Deadband>0</Deadband></Input><Output><ActionID>HIDJoystick_Z</ActionID></Output></Axis>
+        <Axis><Enabled>true</Enabled><Input><ActionID>HIDMultiAxis_Rx</ActionID><Min>-512</Min><Max>511</Max><Deadband>0</Deadband></Input><Output><ActionID>HIDJoystick_Rx</ActionID></Output></Axis>
+        <Axis><Enabled>true</Enabled><Input><ActionID>HIDMultiAxis_Ry</ActionID><Min>-512</Min><Max>511</Max><Deadband>0</Deadband></Input><Output><ActionID>HIDJoystick_Ry</ActionID></Output></Axis>
+        <Axis><Enabled>true</Enabled><Input><ActionID>HIDMultiAxis_Rz</ActionID><Min>-512</Min><Max>511</Max><Deadband>0</Deadband></Input><Output><ActionID>HIDJoystick_Rz</ActionID></Output></Axis>
+      </AxisBank>
+    </Device>
+  </Devices>
+</AppCfg>
+```
 
 ## CLI
 
@@ -118,7 +186,7 @@ A script is a list of commands:
 
 ![The bracket example, rendered by solidcraft-cli snapshot](../generated/bracket.png)
 
-`snapshot` looks at the model from the iso view. `--view NAME` takes another standard view (`front`, `back`, `top`, `bottom`, `left`, `right`) or the name of a view saved in the design with `view.save`. `--camera JSON` takes any camera, as the MCP `screenshot` tool does (its conventions are in [the MCP page](mcp.md#camera-and-close-up-recipe)). A script that applies a view itself with `view.apply` sets the camera too. The ground grid lies on Z 0, so it cuts through a part that straddles it: `--no-grid` leaves it out of the picture, and `--no-axes` the origin's axes.
+`snapshot` looks at the model from the iso view. `--view NAME` takes another standard view (`front`, `back`, `top`, `bottom`, `left`, `right`) or the name of a view saved in the design with `view.save`. `--camera JSON` takes any camera, as the MCP `screenshot` tool does (its conventions are in [the MCP page](mcp.md#camera-and-close-up-recipe)). A script that applies a view itself with `view.apply` sets the camera too. The ground grid lies on Z 0, so it cuts through a part that straddles it: `--no-grid` leaves it out of the picture, and `--no-axes` the origin's axes. The picture is drawn on the GPU with the viewport's own pipelines, so it shows what the window would (a surface analysis such as `inspect.zebra` included); a machine without a GPU uses a software one (Mesa's lavapipe on Linux, WARP on Windows), and with neither (a Mac without usable Metal, a Linux box without Mesa's Vulkan) the CPU rasterizer draws it, without surface analysis colours, and the reply's `renderer` says `cpu` with a warning. `SOLIDCRAFT_GPU=auto|hardware|software|cpu` chooses (`hardware` and `software` fail rather than fall to the CPU), and `solidcraft-cli gpu` lists the adapters and the tier a snapshot would use.
 
 ```sh
 solidcraft-cli snapshot part.solidcraft --out photo.png --view Photo

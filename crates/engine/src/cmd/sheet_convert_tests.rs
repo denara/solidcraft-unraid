@@ -1492,3 +1492,232 @@ fn holes_beside_chamfer_bends_land_from_the_virtual_sharps() {
     let expect = t * 100.0 * (2.0 * (30.0 - (r + t)) + (40.0 - 2.0 * (r + t)) + PI * (r + t / 2.0)) - 2.0 * t * 9.0 * PI;
     assert!((volume(&mut s) - expect).abs() < 2e-3 * expect, "{} vs {expect}", volume(&mut s));
 }
+
+/// The rule of [`rule`] with its corner relief: `shape` 8 mm across.
+fn relief_rule(s: &mut Session, shape: &str) {
+    rule(s, "Test", 2.0, 0.44, 2.0, 0.5);
+    run(s, "sheet.manage_rules", json!({"name": "Test", "corner_relief_shape": shape, "corner_relief": "8 mm"}));
+}
+
+/// The flat outline's corners, from the low corner of their box.
+fn outline_corners(s: &mut Session) -> Vec<[f64; 2]> {
+    let f = flat(s);
+    let loops = f["outline"].as_array().cloned().unwrap_or_default();
+    let pts: Vec<[f64; 2]> =
+        loops.iter().flat_map(|l| l.as_array().cloned().unwrap_or_default()).filter_map(|q| Some([q[0].as_f64()?, q[1].as_f64()?])).collect();
+    let lo = [pts.iter().map(|q| q[0]).fold(f64::MAX, f64::min), pts.iter().map(|q| q[1]).fold(f64::MAX, f64::min)];
+    pts.iter().map(|q| [q[0] - lo[0], q[1] - lo[1]]).collect()
+}
+
+/// Whether the flat outline has a corner at each of `want` (from the low corner of its box), the
+/// flat as it lies or turned in its box: half round, or seen from its other face. (The flat frame
+/// runs along a longest edge of the fixed face, which may be either of two, and from a shell's
+/// inner skin it is seen from the other side.)
+fn outline_has(s: &mut Session, want: &[[f64; 2]]) -> bool {
+    let pts = outline_corners(s);
+    let hi = [pts.iter().map(|q| q[0]).fold(0.0, f64::max), pts.iter().map(|q| q[1]).fold(0.0, f64::max)];
+    let turned = |q: [f64; 2], (fx, fy): (bool, bool)| [if fx { hi[0] - q[0] } else { q[0] }, if fy { hi[1] - q[1] } else { q[1] }];
+    [(false, false), (true, true), (true, false), (false, true)].iter().any(|&turn| {
+        want.iter().all(|w| {
+            pts.iter().any(|q| {
+                let p = turned(*q, turn);
+                (p[0] - w[0]).abs() < 1e-6 && (p[1] - w[1]).abs() < 1e-6
+            })
+        })
+    })
+}
+
+/// The corners of a converted tray are a flanged tray's: closed with the rule's gap and given the
+/// rule's corner relief, in the folded part and the flat pattern. The shelled tray of [`tray`] and
+/// the same tray made from a base and four 30 mm edge flanges, T 2, R 2, K 0.44, gap 0.5, a relief
+/// 8 mm across: the bends meet at the base's corners, R + T = 4 in from the sharps, and are
+/// BA = π/2 (R + K T) = 1.44 π wide in the flat. A notch leaves them there (92 and 52 long); a
+/// round or a square relief takes 4 off each bend at each corner and r²·π/4 or r² (r = 4) of the
+/// base; a tear runs each bend on to its corner and cuts its end from there to where its wall's
+/// closed end starts, g/√2 + T from the sharp: R − g/√2 longer. The conversion used to bend every
+/// corner as a notch, whatever the rule said.
+#[test]
+fn a_converted_trays_corners_are_closed_and_relieved_as_a_flanged_trays_are() {
+    let (t, r, k, gap) = (2.0, 2.0, 0.44, 0.5);
+    let ba = FRAC_PI_2 * (r + k * t);
+    let grow = r - gap / SQRT_2;
+    // (bend lengths, flat area taken off the notch's at each corner)
+    let cases = [
+        ("notch", (92.0, 52.0), 0.0),
+        ("round", (84.0, 44.0), 4.0 * PI + 8.0 * ba),
+        ("rectangular", (84.0, 44.0), 16.0 + 8.0 * ba),
+        ("tear", (92.0 + grow, 52.0 + grow), -grow * ba),
+    ];
+    let cut = t + gap / SQRT_2;
+    let walls = 26.0 * 2.0 * ((100.0 - 2.0 * cut) + (60.0 - 2.0 * cut));
+    let flat_notch = t * (92.0 * 52.0 + ba * 2.0 * (92.0 + 52.0) + walls);
+    for (shape, (long, short), taken) in cases {
+        let mut s = Session::default();
+        relief_rule(&mut s, shape);
+        tray(&mut s, t);
+        let out = run(&mut s, "sheet.convert", json!({"body": "Tray", "face": [50, 30, 0], "bends": BOTTOM_EDGES}));
+        assert!(out["warning"].is_null(), "{shape}: {out}");
+        let mut lengths: Vec<f64> = bend_rows(&mut s).iter().map(|row| row.2).collect();
+        lengths.sort_by(f64::total_cmp);
+        let want = [short, short, long, long];
+        assert!(lengths.len() == 4 && lengths.iter().zip(want).all(|(l, w)| (l - w).abs() < 1e-6), "{shape}: {lengths:?}");
+        // The same tray made from flanges.
+        let mut f = Session::default();
+        relief_rule(&mut f, shape);
+        run(&mut f, "sketch.create", json!({"plane": "XY", "name": "Base"}));
+        run(&mut f, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [100, 60]}));
+        run(&mut f, "sketch.finish", json!({}));
+        run(&mut f, "sheet.flange", json!({"sketch": "Base"}));
+        run(&mut f, "sheet.flange", json!({"edges": [[50, 0, 2], [100, 30, 2], [50, 60, 2], [0, 30, 2]], "height": 30}));
+        let mut flanged: Vec<f64> = bend_rows(&mut f).iter().map(|row| row.2).collect();
+        flanged.sort_by(f64::total_cmp);
+        assert!(lengths.iter().zip(&flanged).all(|(a, b)| (a - b).abs() < 1e-9), "{shape}: {lengths:?} vs {flanged:?}");
+        // The flat patterns are congruent, corner for corner.
+        let corners = outline_corners(&mut f);
+        assert!(
+            outline_corners(&mut s).len() == corners.len() && outline_has(&mut s, &corners),
+            "{shape}: {:?} vs {corners:?}",
+            outline_corners(&mut s)
+        );
+        let (v, vf) = (volume(&mut s), volume(&mut f));
+        assert!((v - vf).abs() < 1e-6 * vf, "{shape}: {v} vs {vf}");
+        run(&mut s, "sheet.unfold", json!({}));
+        run(&mut f, "sheet.unfold", json!({}));
+        let (flat_v, flat_f) = (volume(&mut s), volume(&mut f));
+        assert!((flat_v - flat_f).abs() < 1e-6 * flat_f, "{shape}: {flat_v} vs {flat_f}");
+        // The flat takes the relief off the notch's (whose walls end g/√2 + T from the sharps).
+        let want = flat_notch - 4.0 * t * taken;
+        assert!((flat_v - want).abs() < 0.1, "{shape}: flat {flat_v} vs {want}");
+        run(&mut s, "sheet.refold", json!({}));
+        assert!((volume(&mut s) - v).abs() < 1e-6 * v, "{shape}");
+        // A round relief is an arc of radius 4 about each point where two bends meet: the base's
+        // corners R + T in from the sharps, 92 and 52 apart.
+        if shape == "round" {
+            let dxf = run(&mut s, "sheet.export_dxf", json!({}))["dxf"].as_str().unwrap_or_default().to_string();
+            let arcs: Vec<(solidcraft_geom::Vec2, f64)> = solidcraft_io::read_dxf(&dxf)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|g| if let solidcraft_io::Geom2::Arc { c, a, .. } = g { Some((*c, a.dist(*c))) } else { None })
+                .collect();
+            assert_eq!(arcs.len(), 4, "{arcs:?}");
+            let lo = solidcraft_geom::Vec2::new(
+                arcs.iter().map(|(c, _)| c.x).fold(f64::MAX, f64::min),
+                arcs.iter().map(|(c, _)| c.y).fold(f64::MAX, f64::min),
+            );
+            for (x, y) in [(0.0, 0.0), (92.0, 0.0), (92.0, 52.0), (0.0, 52.0)] {
+                let at = lo + solidcraft_geom::Vec2::new(x, y);
+                assert!(arcs.iter().any(|(c, r)| c.dist(at) < 1e-6 && (r - 4.0).abs() < 1e-6), "({x}, {y}): {arcs:?}");
+            }
+        }
+    }
+}
+
+/// A plate 80 x 50, `plate` thick, with a wall 2 thick and 30 high standing on its edge y = 0
+/// from `x0` to `x1`, joined (with a 2 mm plate, a shell).
+fn bracket(s: &mut Session, x0: f64, x1: f64, plate: f64) {
+    run(s, "solid.box", json!({"length": 80, "width": 50, "height": plate, "body_name": "Bracket"}));
+    run(s, "solid.box", json!({"length": x1 - x0, "width": 2, "height": 30, "corner": [x0, 0, 0], "operation": "join", "targets": ["Bracket"]}));
+}
+
+/// A wall standing on part of an edge (an L-bracket whose flange covers part of the plate's edge,
+/// a tab): the plate's edge face and the wall's outside are one face, the plate's edge running on
+/// past the wall a strip T high. Its bend ends where the wall does, and the rule's bend relief
+/// (2 wide, from 1 past the bend line through the plate's edge) is cut into the plate beside each
+/// end of the bend that has more plate beside it, as for an edge flange. The strip, lower than the
+/// bend's setback R + T = 4, was used up by it and the conversion refused; from the inner skin the
+/// bend ended against the plate without a relief. T 2, R 2, K 0.44: BA = 1.44 π, BD = 8 − BA.
+#[test]
+fn a_bend_ends_where_its_wall_ends_with_the_rules_bend_relief_beside_it() {
+    let (t, r, k) = (2.0, 2.0, 0.44);
+    let ba = FRAC_PI_2 * (r + k * t);
+    let bd = deduction(FRAC_PI_2, r, t, k);
+    // Folded and flat: the plate less the bend's setback under the wall and the reliefs (2 x 5
+    // each), the wall past the bend (30 − 4 high), and the bend on its neutral radius or as its
+    // allowance.
+    let parts = |wall: f64, reliefs: f64| {
+        let flat = 80.0 * 50.0 - 4.0 * wall - 10.0 * reliefs + 26.0 * wall;
+        (t * flat + FRAC_PI_2 * t * (r + t / 2.0) * wall, t * (flat + ba * wall))
+    };
+    // From the flat's low corner (the wall's far edge, 26 + BA − 4 past the plate's edge).
+    let edge = 26.0 + ba - 4.0;
+    // The wall in the middle, picked from the outside or the inside: the same sheet, the reliefs
+    // x 18 … 20 and 60 … 62, through the plate's edge to 1 past the bend line.
+    for (face, bend, way) in [([40.0, 25.0, 0.0], [40.0, 0.0, 0.0], "up"), ([40.0, 25.0, 2.0], [40.0, 2.0, 2.0], "down")] {
+        let mut s = Session::default();
+        rule(&mut s, "Test", t, k, r, 0.5);
+        bracket(&mut s, 20.0, 60.0, 2.0);
+        let out = run(&mut s, "sheet.convert", json!({"body": "Bracket", "face": face, "bends": [bend]}));
+        assert!(out["warning"].is_null(), "{way}: {out}");
+        let rows = bend_rows(&mut s);
+        assert!(rows.len() == 1 && rows[0].0 == 90 && rows[0].1 == way && (rows[0].2 - 40.0).abs() < 1e-6, "{way}: {rows:?}");
+        assert!(same_size(flat_size(&mut s), (80.0, 80.0 - bd), 1e-6), "{way}: {:?}", flat_size(&mut s));
+        let reliefs = [[18.0, edge], [18.0, edge + 5.0], [20.0, edge + 5.0], [60.0, edge + 5.0], [62.0, edge + 5.0], [62.0, edge]];
+        assert!(outline_has(&mut s, &reliefs), "{way}: {:?}", outline_corners(&mut s));
+        let (folded, flat) = parts(40.0, 2.0);
+        let v = volume(&mut s);
+        assert!((v - folded).abs() < 1e-4 * folded, "{way}: {v} vs {folded}");
+        run(&mut s, "sheet.unfold", json!({}));
+        assert!((volume(&mut s) - flat).abs() < 1e-6 * flat, "{way}: {} vs {flat}", volume(&mut s));
+        run(&mut s, "sheet.refold", json!({}));
+        assert!((volume(&mut s) - v).abs() < 1e-6 * v, "{way}");
+    }
+    // A wall at the plate's end: its bend runs from the plate's corner, one relief at its end.
+    let mut s = Session::default();
+    rule(&mut s, "Test", t, k, r, 0.5);
+    bracket(&mut s, 0.0, 40.0, 2.0);
+    run(&mut s, "sheet.convert", json!({"body": "Bracket", "face": [40, 25, 0], "bends": [[20, 0, 0]]}));
+    let rows = bend_rows(&mut s);
+    assert!(rows.len() == 1 && (rows[0].2 - 40.0).abs() < 1e-6, "{rows:?}");
+    assert!(outline_has(&mut s, &[[0.0, 0.0], [40.0, 0.0], [40.0, edge + 5.0], [42.0, edge + 5.0], [42.0, edge]]), "{:?}", outline_corners(&mut s));
+    let (folded, _) = parts(40.0, 1.0);
+    assert!((volume(&mut s) - folded).abs() < 1e-4 * folded, "{} vs {folded}", volume(&mut s));
+    // A strip taller than the setback (a 5 mm plate, the rule's T 2 taken into the block) stays a
+    // low wall of the sheet beside the wall, as before: one bend the plate's length, no relief.
+    let mut s = Session::default();
+    rule(&mut s, "Test", t, k, r, 0.5);
+    bracket(&mut s, 20.0, 60.0, 5.0);
+    run(&mut s, "sheet.convert", json!({"body": "Bracket", "face": [40, 25, 0], "bends": [[40, 0, 0]]}));
+    let rows = bend_rows(&mut s);
+    assert!(rows.len() == 1 && (rows[0].2 - 80.0).abs() < 1e-6, "{rows:?}");
+    let low = t * (80.0 * 46.0 + 80.0 * 1.0 + 40.0 * 25.0) + FRAC_PI_2 * t * (r + t / 2.0) * 80.0;
+    assert!((volume(&mut s) - low).abs() < 1e-4 * low, "{} vs {low}", volume(&mut s));
+}
+
+/// Both together: a plate 100 x 60 x 2 with a wall along its whole edge y = 0 and one on its edge
+/// x = 100 from y = 0 to 30 only, a round corner relief 8 across. The walls meet at the corner,
+/// closed with the gap (each ends g/√2 + T from the other's outside) and relieved there; the
+/// shorter one's bend ends at y = 30 with a bend relief beside it. In the flat from the plate's
+/// corner: the plate from y = 4 and up to x = 96 beside the short wall, 100 past it; bends 96 − 4
+/// and 26 − 4 long; the bend relief x 95 … 100, y 30 … 32.
+#[test]
+fn a_wall_on_part_of_an_edge_meets_a_wall_at_a_relieved_corner_and_is_relieved_at_its_end() {
+    let (t, r, k, gap) = (2.0, 2.0, 0.44, 0.5);
+    let ba = FRAC_PI_2 * (r + k * t);
+    let mut s = Session::default();
+    relief_rule(&mut s, "round");
+    run(&mut s, "solid.box", json!({"length": 100, "width": 60, "height": 2, "body_name": "Part"}));
+    run(&mut s, "solid.box", json!({"length": 100, "width": 2, "height": 30, "operation": "join", "targets": ["Part"]}));
+    run(&mut s, "solid.box", json!({"length": 2, "width": 30, "height": 30, "corner": [98, 0, 0], "operation": "join", "targets": ["Part"]}));
+    let out = run(&mut s, "sheet.convert", json!({"body": "Part", "face": [50, 30, 0], "bends": [[50, 0, 0], [100, 15, 0]]}));
+    assert!(out["warning"].is_null(), "{out}");
+    let mut lengths: Vec<f64> = bend_rows(&mut s).iter().map(|row| row.2).collect();
+    lengths.sort_by(f64::total_cmp);
+    assert!(lengths.len() == 2 && (lengths[0] - 22.0).abs() < 1e-6 && (lengths[1] - 92.0).abs() < 1e-6, "{lengths:?}");
+    // The plate less the setbacks, the round relief and the bend relief; the walls 26 high, each
+    // from the corner's closed end to its own end.
+    let cut = t + gap / SQRT_2;
+    let base = 100.0 * 56.0 - 4.0 * 26.0 - 4.0 * PI - 10.0;
+    let walls = 26.0 * ((100.0 - cut) + (30.0 - cut));
+    let folded = t * (base + walls) + FRAC_PI_2 * t * (r + t / 2.0) * 114.0;
+    let v = volume(&mut s);
+    assert!((v - folded).abs() < 1e-4 * folded, "{v} vs {folded}");
+    // From the flat's low corner (the long wall's far edge, 26 + BA − 4 past y = 0): the bend
+    // relief's corners.
+    let edge = 26.0 + ba - 4.0;
+    assert!(outline_has(&mut s, &[[95.0, edge + 30.0], [95.0, edge + 32.0], [100.0, edge + 32.0]]), "{:?}", outline_corners(&mut s));
+    run(&mut s, "sheet.unfold", json!({}));
+    let flat = t * (base + walls + ba * 114.0);
+    assert!((volume(&mut s) - flat).abs() < 0.1, "{} vs {flat}", volume(&mut s));
+    run(&mut s, "sheet.refold", json!({}));
+    assert!((volume(&mut s) - v).abs() < 1e-6 * v);
+}

@@ -135,8 +135,17 @@ pub fn tool_definitions() -> Vec<Value> {
             "measure",
             "Measure bodies",
             "Volume (mm³), surface area (mm²), centre of mass, bounding box and face/edge/vertex counts of one body or all \
-             bodies, with totals.",
-            obj(json!({"body": string("Body name (default: all bodies)")}), &[]),
+             bodies, with totals. With `items` (one or two selections, as `execute` takes them: faces, edges, vertices, \
+             sketch curves, profiles): one item's length, area or position, a circle's, arc's or cylinder's `diameter` and \
+             `radius` (with `circumference`, or an arc's `arc_length` and `angle_deg`), a slot's `slot` sizes; two items' \
+             `min` and `max` distance and, where one is round, `center_distance` (centre to centre, or from its axis).",
+            obj(
+                json!({
+                    "body": string("Body name (default: all bodies)"),
+                    "items": {"type": "array", "items": {"type": "object"}, "description": "One or two selections to measure instead of bodies, e.g. {\"type\": \"face\", \"body\": \"Body1\", \"index\": 3, \"point\": [x,y,z]}"},
+                }),
+                &[],
+            ),
             Effect::ReadOnly,
         ),
         tool(
@@ -240,14 +249,16 @@ pub fn tool_definitions() -> Vec<Value> {
             "open",
             "Open a design",
             "Open a .solidcraft design file, a STEP file (.step/.stp: a new design whose bodies come from the file, as an \
-             Import base feature) or a 3MF/STL mesh (.3mf/.stl: mesh bodies). Replaces the current design; insert into it \
-             instead with the file.insert_step (STEP) or file.insert_mesh (3MF/STL) commands. A STEP file from a system \
-             that has Y up opens lying on its back: `up: \"y\"` turns it a quarter turn about X (Y becomes Z) with a Move \
-             feature. `names` picks what the bodies are named after when the solids' own names say nothing useful.",
+             Import base feature in a component named after the file; an assembly's parts become nested components) or a \
+             mesh (.3mf/.stl/.obj/.glb/.gltf: mesh bodies in such a component; a glTF file's nodes become nested components and its \
+             materials appearances); the result reports the component (id, component_name). Replaces the current design; insert into it \
+             instead with the file.insert_step (STEP) or file.insert_mesh (mesh) commands. A STEP file from a system \
+             that has Y up opens lying on its back: `up: \"y\"` turns its component a quarter turn about X (Y becomes Z). glTF is Y up, \
+             so it is turned by default (`up: \"z\"` keeps its axes). `names` picks what the bodies are named after when the solids' own names say nothing useful.",
             obj(
                 json!({
-                    "path": string("Path to a .solidcraft, .step/.stp, .3mf or .stl file"),
-                    "up": {"type": "string", "enum": ["z", "y"], "description": "STEP only. z (default) keeps the file's axes; y: the file has Y up, so its bodies are turned to stand Z up"},
+                    "path": string("Path to a .solidcraft, .step/.stp, .3mf, .stl, .obj, .glb or .gltf file"),
+                    "up": {"type": "string", "enum": ["z", "y"], "description": "STEP and glTF only. z keeps the file's axes; y: the file has Y up, so its bodies are turned to stand Z up. Default: z for STEP, y for glTF"},
                     "names": {"type": "string", "enum": ["solid", "product", "instance"], "description": "STEP only. What the bodies are named after: solid (default: the solid's own name, else the product's), product (the part's name) or instance (the assembly occurrence's name, else the product's)"},
                 }),
                 &["path"],
@@ -388,6 +399,9 @@ fn dispatch(b: &mut dyn Backend, name: &str, a: &Map<String, Value>) -> Result<V
             Ok(d)
         }
         "measure" => {
+            if let Some(items) = a.get("items") {
+                return exec(b, "inspect.measure", json!({ "items": items }));
+            }
             let p = match str_arg(a, "body") {
                 Some(body) => json!({"bodies": [body]}),
                 None => json!({}),
@@ -644,7 +658,14 @@ fn capture(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<(Vec<u8>, Valu
         _ => (info.get("width").cloned().unwrap_or(Value::Null), info.get("height").cloned().unwrap_or(Value::Null)),
     };
     let bytes = png.len();
-    Ok((png, json!({"source": source, "path": keep, "width": w, "height": h, "bytes": bytes})))
+    let mut reply = json!({"source": source, "path": keep, "width": w, "height": h, "bytes": bytes});
+    // What drew a model render (gpu, gpu-software or cpu), and the warning a CPU render carries.
+    for k in ["renderer", "warning"] {
+        if let Some(v) = info.get(k).filter(|v| !v.is_null()) {
+            reply[k] = v.clone();
+        }
+    }
+    Ok((png, reply))
 }
 
 /// Standard base64 with padding (RFC 4648).

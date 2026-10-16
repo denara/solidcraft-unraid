@@ -23,6 +23,15 @@
   <link data-trunk rel="copy-file" href="../../assets/fonts/biz-udp-gothic/BIZUDPGothic-Regular.ttf" data-target-path="fonts" />
   <link data-trunk rel="copy-file" href="../../assets/fonts/biz-udp-gothic/OFL.txt" data-target-path="fonts" />
   <link data-trunk rel="css" href="../../assets/styles/web/loading.css" />
+  <!-- Installable as an app (manifest.webmanifest); the icons are the Linux exports of the app mark. -->
+  <meta name="theme-color" content="#343840">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" type="image/png" sizes="32x32" href="icons/32x32/ai.storyteller.solidcraft.png">
+  <link rel="apple-touch-icon" href="icons/256x256/ai.storyteller.solidcraft.png">
+  <link data-trunk rel="copy-file" href="manifest.webmanifest" />
+  <link data-trunk rel="copy-file" href="../../assets/icons/app/linux/exports/hicolor/32x32/apps/ai.storyteller.solidcraft.png" data-target-path="icons/32x32" />
+  <link data-trunk rel="copy-file" href="../../assets/icons/app/linux/exports/hicolor/256x256/apps/ai.storyteller.solidcraft.png" data-target-path="icons/256x256" />
+  <link data-trunk rel="copy-file" href="../../assets/icons/app/linux/exports/hicolor/512x512/apps/ai.storyteller.solidcraft.png" data-target-path="icons/512x512" />
 </head>
 <body>
   <canvas id="solidcraft_canvas"></canvas>
@@ -32,6 +41,10 @@
     if ("serviceWorker" in navigator) {
       addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
     }
+    // Install as an app: the browser's offer can come before the app runs, so it is kept here for
+    // the app's File ▸ Install app… item (src/install.rs). Installed, the browser makes no more offers.
+    addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); window.solidcraftInstall = e; });
+    addEventListener("appinstalled", () => { window.solidcraftInstall = null; });
   </script>
 </body>
 </html>

@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 pub mod access;
+pub mod agent_chat;
 pub mod agent_cursor;
 pub mod browser;
 pub mod canvas;
@@ -24,20 +25,26 @@ pub mod design_properties;
 pub mod dialogs;
 pub mod dialogs_appearance;
 pub mod dialogs_assembly;
+pub mod dialogs_coupling;
 pub mod dialogs_library;
 pub mod dialogs_motion;
 pub mod dialogs_move;
 pub mod dialogs_parts;
 pub mod dialogs_plastic;
+pub mod dialogs_save_mesh;
 pub mod dialogs_sheet;
 pub mod dialogs_surface;
+pub mod dialogs_sweep;
+pub mod dialogs_view_dxf;
 pub mod dim_view;
 #[cfg(test)]
 mod dimension_create_ui_tests;
 pub mod documents;
 pub mod drag_snap;
+pub mod edit_clipboard;
 pub mod fonts;
 pub mod frame;
+pub mod frame_rate;
 pub mod gizmo;
 pub mod gpu;
 pub mod help;
@@ -53,8 +60,13 @@ mod i18n_menu_tests;
 mod i18n_ui_tests;
 pub mod icons;
 pub mod inference;
+pub mod install;
 pub mod issue_report;
+pub mod joint_drag;
 pub mod keymap;
+mod material_card_review;
+#[cfg(test)]
+mod measurement_ui_tests;
 #[cfg(test)]
 mod menu_tests;
 #[cfg(test)]
@@ -87,9 +99,13 @@ mod file_load;
 mod file_picker;
 pub use file_picker::FilePickerFuture;
 #[cfg(test)]
+mod blend_arrow_tests;
+pub(crate) mod display_lod;
+#[cfg(test)]
 mod file_load_ui_tests;
 #[cfg(test)]
 mod fillet_spline_handle_tests;
+pub(crate) mod navigation;
 pub mod palette;
 pub mod params_dialog;
 pub mod prefs;
@@ -132,6 +148,7 @@ pub mod sketch_modify_ui;
 #[cfg(test)]
 mod sketch_modify_ui_tests;
 pub mod sketch_palette;
+mod sketch_pattern_tree;
 pub(crate) mod sketch_text;
 mod sketch_text_handles;
 mod sketch_text_move;
@@ -139,7 +156,10 @@ pub mod sketch_tools;
 pub mod smart_extrude;
 #[cfg(test)]
 mod smart_extrude_ui_tests;
+pub mod space_mouse;
 pub mod stand_up;
+#[cfg(test)]
+mod sweep_dialog_tests;
 pub mod theme;
 #[cfg(test)]
 mod thin_extrude_tests;
@@ -228,6 +248,8 @@ impl Default for UiState {
 pub struct Services {
     pub pick_open: Option<Box<dyn Fn() -> FilePickerFuture>>,
     pub pick_save: Option<Box<dyn Fn(&str, &[&str]) -> FilePickerFuture>>,
+    /// Open a dialog asking for a program (a slicer); `None` when the host has no such dialog.
+    pub pick_program: Option<Box<dyn Fn() -> FilePickerFuture>>,
     pub show_in_folder: Option<Box<dyn Fn(&str)>>,
     /// Where the host reads the anti-aliasing preference at start (a small JSON file).
     pub graphics_path: Option<String>,
@@ -235,6 +257,12 @@ pub struct Services {
     pub http_get: Option<update::HttpGet>,
     /// HTTPS download to a file, with progress, for one-click updates (`update::install`).
     pub http_download: Option<update::install::HttpDownload>,
+    /// The browser's offer to install the web app (`install`); None: no Install button (desktop).
+    pub install_app: Option<install::InstallApp>,
+    /// HTTP for the agent chat's API agents (OpenAI-compatible endpoints); None: no API agents.
+    pub agent_http: Option<agent_chat::backend::HttpFn>,
+    /// The system keychain, for API agents' keys; None: keys can't be stored.
+    pub secrets: Option<std::sync::Arc<dyn agent_chat::backend::Secrets>>,
 }
 
 pub struct SolveApp {
@@ -260,6 +288,7 @@ pub struct SolveApp {
     pub params: Option<params_dialog::ParamsDialog>,
     /// The Design Properties window, when open.
     pub design_properties: Option<design_properties::DesignProperties>,
+    material_card_review: Option<material_card_review::ReviewWindow>,
     pub palette: palette::Palette,
     /// Context menus, rename box and Properties window.
     pub menu: context_menu::MenuState,
@@ -277,12 +306,16 @@ pub struct SolveApp {
     pub crashes: crash_ui::CrashUi,
     /// The update check and its window (`update`).
     pub updater: update::Updater,
+    /// Safari's steps for installing the web app, while their window is open (`install`).
+    pub install_steps: Option<install::Steps>,
     /// Toolbar buttons the user pinned, removed or reordered.
     pub toolbar_custom: toolbar_custom::ToolbarCustom,
     pub sketch_choices: sketch_families::Choices,
     /// Preferences kept between runs, and their window.
     pub preferences: prefs::Prefs,
     pub prefs_window: prefs::PrefsWindow,
+    /// The slicers the Save as mesh dialog offers.
+    pub slicer_menu: dialogs_save_mesh::SlicerMenu,
     pub preview: preview::PreviewState,
     /// OK pressed on a feature that takes a while: its evaluation runs off the window thread.
     pub applying: Option<dialogs::Applying>,
@@ -301,6 +334,8 @@ pub struct SolveApp {
     pub recoverable: Vec<solidcraft_engine::recovery::Entry>,
     /// The bodies of a just-opened Y-up file, offered to be stood up (`stand_up`).
     pub stand_up: Option<Vec<String>>,
+    /// The placement of the component that file came in as: the offer turns it.
+    pub stand_up_occurrence: Option<u64>,
     /// The anti-aliasing sample counts the graphics device supports (empty without a GPU).
     pub msaa_supported: Vec<u32>,
     /// Settings put back at start because they kept SolidCraft from starting, one line each,
@@ -312,12 +347,17 @@ pub struct SolveApp {
     pub autosave_minutes: f64,
     /// The application bar is the window's title bar (Windows, Linux: no OS decorations).
     pub custom_titlebar: bool,
+    /// The OS hit test already offers the resize border ([`titlebar`]; the Windows desktop app),
+    /// so no egui resize zones are laid out.
+    pub native_resize_border: bool,
     /// macOS: the traffic lights sit over the application bar's left end.
     pub integrated_titlebar: bool,
     /// Build bodies' display meshes on the CPU even where the GPU could (safe mode). Read by
     /// [`SolveApp::set_wgpu`].
     pub cpu_meshing: bool,
     pub frame_ms: f64,
+    /// The viewport's frame-rate readout ([`frame_rate`]).
+    pub frame_rate: frame_rate::FrameRate,
     pub synthetic: Vec<egui::Event>,
     /// The modifiers of the synthetic press in progress (a Ctrl-drag keeps Ctrl while it moves).
     pub synthetic_mods: egui::Modifiers,
@@ -326,12 +366,16 @@ pub struct SolveApp {
     control_held: std::collections::VecDeque<ControlRequest>,
     /// The agent cursor acting out control requests.
     pub agent: agent_cursor::AgentCursor,
+    /// The agent chat panel (docs/design/in-app-agent-chat.md).
+    pub agent_chat: agent_chat::AgentChat,
     pending_shots: Vec<(u64, Option<String>, std::sync::mpsc::Sender<Value>, f64)>,
     queued_shots: Vec<(u64, f64, u32)>,
     shot_token: u64,
     styled: bool,
     fitted: bool,
     pending_fit: Option<(Camera, solidcraft_engine::geom::Aabb3, bool)>,
+    /// The sheet metal flat pattern's own pan and zoom.
+    pub flat_view: dialogs_sheet::FlatView,
     /// The start page.
     pub home: home::HomeState,
     pub file_load: file_load::FileLoad,
@@ -340,6 +384,8 @@ pub struct SolveApp {
     /// The language the installed font fallback chain is ordered for (`fonts::fallback_order`);
     /// changing `preferences.language` re-installs the fonts on the next frame.
     applied_fonts_language: String,
+    /// The interface font the fonts were last set up with (`Prefs::ui_font`).
+    applied_ui_font: String,
 }
 
 impl SolveApp {
@@ -369,6 +415,7 @@ impl SolveApp {
             dialog: None,
             params: None,
             design_properties: None,
+            material_card_review: None,
             palette: palette::Palette::default(),
             menu: context_menu::MenuState::default(),
             tree: browser::TreeState::default(),
@@ -378,10 +425,12 @@ impl SolveApp {
             issue_report: issue_report::ReportState::default(),
             crashes: crash_ui::CrashUi::default(),
             updater: update::Updater::default(),
+            install_steps: None,
             toolbar_custom: toolbar_custom::ToolbarCustom::default(),
             sketch_choices: sketch_families::Choices::default(),
             preferences: prefs::Prefs::default(),
             prefs_window: prefs::PrefsWindow::default(),
+            slicer_menu: dialogs_save_mesh::SlicerMenu::default(),
             preview: preview::PreviewState::default(),
             applying: None,
             apply_off_thread: None,
@@ -392,17 +441,21 @@ impl SolveApp {
             autosave: None,
             recoverable: Vec::new(),
             stand_up: None,
+            stand_up_occurrence: None,
             msaa_supported: Vec::new(),
             settings_reset: Vec::new(),
             big_operation: false,
             autosave_minutes: 5.0,
             custom_titlebar: false,
+            native_resize_border: false,
             integrated_titlebar: false,
             cpu_meshing: false,
             frame_ms: 0.0,
+            frame_rate: frame_rate::FrameRate::default(),
             synthetic: Vec::new(),
             synthetic_mods: egui::Modifiers::default(),
             control_rx: None,
+            agent_chat: Default::default(),
             control_held: Default::default(),
             agent: Default::default(),
             pending_shots: Vec::new(),
@@ -411,10 +464,12 @@ impl SolveApp {
             styled: false,
             fitted: false,
             pending_fit: None,
+            flat_view: Default::default(),
             home: home::HomeState::default(),
             file_load: file_load::FileLoad::default(),
             docs: documents::Documents::default(),
             applied_fonts_language: "en".into(),
+            applied_ui_font: String::new(),
         }
     }
 
@@ -579,7 +634,9 @@ impl SolveApp {
                 // reads the same way the toolbar button it came from does.
                 let language = i18n::Locale::for_language(&self.preferences.language);
                 let label = language.label(command_label(id));
-                if !(id == "view.navigate" && v.get("continuous").and_then(Value::as_bool) == Some(true)) {
+                // Frames of a gesture (a continuous view move, a part dragged by its joints) are
+                // not echoed one by one.
+                if v.get("continuous").and_then(Value::as_bool) != Some(true) {
                     self.session.echo(language.format("ui.command_done", &[("command", label)]));
                 }
                 if id == "file.new" {
@@ -596,7 +653,7 @@ impl SolveApp {
                     // applying cancellation hooks (such as restoring its timeline marker).
                     self.dialog = None;
                     self.tool = None;
-                    self.preview = preview::PreviewState::default();
+                    self.preview.reset();
                     self.cam = Camera::default();
                     self.fit_view();
                 }
@@ -641,6 +698,11 @@ impl SolveApp {
             self.set_status(format!("{label}: {why}"), true);
             return;
         }
+        if id == "material.properties.validate" {
+            self.material_card_review = Some(material_card_review::ReviewWindow::default());
+            self.home.open = false;
+            return;
+        }
         // Another command ends Edit Text (its dialog is not a feature edit to keep).
         sketch_text_move::cancel_drag(self);
         if sketch_text::editing(self) || self.dialog.as_ref().is_some_and(|d| matches!(d.kind, dialogs::Kind::TextMove(_))) {
@@ -662,6 +724,21 @@ impl SolveApp {
         self.home.open = false;
         if matches!(id, "sketch.insert_dxf" | "sketch.insert_svg") {
             self.pick_open_command(id, json!({}));
+            return;
+        }
+        if id == "component.insert_design" {
+            // Another design becomes a linked component; a STEP or mesh file picked here is
+            // inserted the way Insert STEP or Insert Mesh would (#1240).
+            self.pick_open(|app, path| {
+                let Some(path) = path else { return };
+                if is_design_path(&path) {
+                    if app.run("component.insert_design", json!({ "path": path })).is_ok() {
+                        app.fit_view();
+                    }
+                } else {
+                    app.insert_path_async(&path);
+                }
+            });
             return;
         }
         if matches!(id, "file.insert_step" | "file.insert_mesh") {
@@ -879,9 +956,9 @@ impl SolveApp {
     pub fn open_path(&mut self, path: &str) {
         self.home.open = false;
         documents::prepare_open(self);
-        if self.run("doc.open", json!({ "path": path })).is_ok() {
+        if let Ok(r) = self.run("doc.open", json!({ "path": path })) {
             self.fit_view();
-            stand_up::offer(self, path, &[]);
+            stand_up::offer(self, path, &[], Some(&r));
         }
     }
 
@@ -892,21 +969,21 @@ impl SolveApp {
         file_load::begin(self, path, true);
     }
 
-    /// Insert a STEP file's bodies (an Import base feature) or a 3MF/STL file's meshes into the
+    /// Insert a STEP file's bodies (an Import base feature) or a mesh file's meshes into the
     /// current design.
     pub fn insert_path(&mut self, path: &str) {
         let cmd = if solidcraft_engine::io::is_mesh_path(path) { "file.insert_mesh" } else { "file.insert_step" };
         let before: Vec<String> = self.session.world_state().bodies.iter().map(|b| b.name.clone()).collect();
         if let Ok(r) = self.run(cmd, json!({ "path": path })) {
             self.fit_view();
-            stand_up::offer(self, path, &before);
+            stand_up::offer(self, path, &before, Some(&r));
             if let Some(w) = r["warnings"].as_array().filter(|w| !w.is_empty()) {
                 self.set_status(format!("imported with {} warning(s): {}", w.len(), w.first().and_then(Value::as_str).unwrap_or("")), false);
             }
         }
     }
 
-    /// A dropped file: a STEP, 3MF or STL file joins a design that has features, anything else
+    /// A dropped file: a STEP or mesh file (3MF, STL, OBJ, glTF) joins a design that has features, anything else
     /// opens.
     pub fn drop_path(&mut self, path: &str) {
         let import = solidcraft_engine::io::is_step_path(path) || solidcraft_engine::io::is_mesh_path(path);
@@ -929,6 +1006,10 @@ impl SolveApp {
     }
 
     pub fn fit_view(&mut self) {
+        if dialogs_sheet::flat_active(self) {
+            self.flat_view.fitted = false;
+            return;
+        }
         if render_workspace::active(self) {
             self.cancel_view_animation();
             match solidcraft_engine::product_scene::extract(&self.session) {
@@ -1016,6 +1097,15 @@ impl SolveApp {
 
     /// Frame everything shown, keeping the orientation (animated; the selection is ignored).
     pub fn animate_fit_all(&mut self) {
+        if dialogs_sheet::flat_active(self) {
+            self.animate_view("fit");
+            return;
+        }
+        if render_workspace::active(self) {
+            // The Render preview frames its product scene (see `fit_view`).
+            self.fit_view();
+            return;
+        }
         self.pending_fit = None;
         let request = Some((self.cam, viewport::view_bounds(self), true));
         let to = self.fitted(self.cam);
@@ -1025,6 +1115,11 @@ impl SolveApp {
 
     /// Animated view changes for the axis view and navigation bar.
     pub fn animate_view(&mut self, v: &str) {
+        // The flat pattern is a 2D view: Fit and Home frame it, and the Design camera stays put.
+        if dialogs_sheet::flat_active(self) && matches!(v, "fit" | "home") {
+            self.flat_view.fitted = false;
+            return;
+        }
         if render_workspace::active(self) && matches!(v, "fit" | "home") {
             if v == "home" {
                 self.cam.set_view(StandardView::Iso);
@@ -1194,15 +1289,21 @@ impl SolveApp {
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         expression_complete::begin_frame(ui.ctx());
         let t0 = now_ms();
-        if self.preferences.language != self.applied_fonts_language {
+        if self.preferences.language != self.applied_fonts_language || self.preferences.ui_font != self.applied_ui_font {
             self.applied_fonts_language.clone_from(&self.preferences.language);
-            crate::fonts::setup_fonts_for(ui.ctx(), &self.preferences.language);
+            self.applied_ui_font.clone_from(&self.preferences.ui_font);
+            crate::fonts::setup_fonts_for(ui.ctx(), &self.preferences.language, &self.preferences.ui_font);
         }
         let _language = crate::i18n::scope(&self.preferences.language);
         let mut report_input = None;
         issue_report::CadInput::block(self, ui, &mut report_input);
         self.cad_ui(ui, &mut report_input);
         drop(report_input);
+        // After everything else, on every page (the start page too, which returns early from
+        // `cad_ui`): the window's edges resize it (#1381).
+        if self.custom_titlebar && !self.native_resize_border {
+            titlebar::resize_zones(ui);
+        }
         if self.file_picker.is_none() {
             issue_report::show(self, ui.ctx());
         }
@@ -1222,6 +1323,7 @@ impl SolveApp {
         file_load::show(self, ui.ctx());
         documents::prompt(self, ui.ctx());
         update::show(self, ui.ctx());
+        install::show(self, ui.ctx());
         if self.home.open {
             home::show(self, ui);
             if self.home.open {
@@ -1249,6 +1351,7 @@ impl SolveApp {
         if render_workspace::active(self) {
             render_workspace::panel(self, ui);
         }
+        agent_chat::show(self, ui);
         preview::update(self, ui.ctx());
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
             if render_workspace::active(self) {
@@ -1263,14 +1366,12 @@ impl SolveApp {
         self.resolve_fit(ui.ctx());
         params_dialog::show(self, ui.ctx());
         design_properties::show(self, ui.ctx());
+        material_card_review::show(self, ui.ctx());
         recovery_ui::show(self, ui.ctx());
         stand_up::show(self, ui.ctx());
         prefs::show_reset_notice(self, ui.ctx());
         context_menu::show(self, ui.ctx());
         delete::show(self, ui.ctx());
-        if self.custom_titlebar {
-            titlebar::resize_zones(ui);
-        }
         shortcut_box::show(self, ui.ctx());
         prefs::show(self, ui.ctx());
         toolbar_custom::window(self, ui.ctx());
@@ -1284,7 +1385,12 @@ impl SolveApp {
         /// Held requests beyond this are refused rather than kept.
         const MAX_HELD: usize = 256;
 
-        let Some(rx) = self.control_rx.take() else { return };
+        // Held requests (and the agent chat's, which it hands over here) run even when the app
+        // has no control channel of its own.
+        if self.control_rx.is_none() && self.control_held.is_empty() {
+            return;
+        }
+        let rx = self.control_rx.take();
         // While the agent cursor acts out a request, later ones wait their turn.
         for _ in 0..PER_FRAME {
             if self.agent.busy() {
@@ -1292,7 +1398,7 @@ impl SolveApp {
             }
             // Held requests go first, in order, once the file is in.
             let held = if self.file_load.busy() || self.file_picker.is_some() { None } else { self.control_held.pop_front() };
-            let Some(req) = held.or_else(|| rx.try_recv().ok()) else { break };
+            let Some(req) = held.or_else(|| rx.as_ref().and_then(|rx| rx.try_recv().ok())) else { break };
             // A file is loading: commands that change the design wait for it (the window,
             // inspection and screenshots still answer).
             if ((self.file_load.busy() || self.file_picker.is_some())
@@ -1329,7 +1435,7 @@ impl SolveApp {
             }
             ctx.request_repaint();
         }
-        self.control_rx = Some(rx);
+        self.control_rx = rx;
     }
 
     fn issue_screenshots(&mut self, ctx: &egui::Context) {
@@ -1402,3 +1508,10 @@ pub fn now_ms() -> f64 {
 
 #[cfg(test)]
 mod picker_test_support;
+
+/// A SolidCraft design file (`.solidcraft`, or a design saved as JSON), as opposed to a STEP or
+/// mesh file.
+fn is_design_path(path: &str) -> bool {
+    let ext = std::path::Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    matches!(ext.as_str(), "solidcraft" | "solvecraft" | "json")
+}

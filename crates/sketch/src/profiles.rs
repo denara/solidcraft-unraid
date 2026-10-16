@@ -558,7 +558,7 @@ fn find_profiles_bounded(sk: &Sketch, max_edges: usize) -> Vec<Profile> {
     let mut whole_graph_complete = true;
     let mut expected = std::collections::HashMap::<usize, Vec<usize>>::new();
     for (ci, c) in sk.curves.iter().enumerate() {
-        if c.construction || c.centerline {
+        if c.construction || c.centerline || c.infinite {
             continue;
         }
         if matches!(c.kind, CurveKind::Line { .. } | CurveKind::Arc { .. } | CurveKind::Circle { .. }) {

@@ -226,12 +226,30 @@ fn table(app: &mut SolveApp, ui: &mut egui::Ui, d: &mut ParamsDialog, rows: &[&R
             ui.label(RichText::new(h).color(t.text_dim).small());
         }
         ui.end_row();
-        for r in rows {
-            // Favourite star.
-            let star = if r.favorite { RichText::new("★").color(t.accent) } else { RichText::new("☆").color(t.text_dim) };
-            if ui.add(egui::Button::new(star).frame(false)).on_hover_text(crate::i18n::tr_label("Favourite")).clicked() {
-                d.error = app.run("parameters.favorite", json!({"name": r.name, "favorite": !r.favorite})).err();
-            }
+        for (i, r) in rows.iter().enumerate() {
+            ui.horizontal(|ui| {
+                // Favourite star.
+                let star = if r.favorite { RichText::new("★").color(t.accent) } else { RichText::new("☆").color(t.text_dim) };
+                if ui.add(egui::Button::new(star).frame(false)).on_hover_text(crate::i18n::tr_label("Favourite")).clicked() {
+                    d.error = app.run("parameters.favorite", json!({"name": r.name, "favorite": !r.favorite})).err();
+                }
+                // Up and down past the neighbouring user parameter (#1187), in the user table only:
+                // the favourites table lists favourites first whatever their order.
+                if salt == "user" {
+                    for (glyph, tip, neighbour, side) in
+                        [("▲", "Move up", i.checked_sub(1).and_then(|j| rows.get(j)), "before"), ("▼", "Move down", rows.get(i + 1), "after")]
+                    {
+                        let button = egui::Button::new(RichText::new(glyph).small().color(t.text_dim)).frame_when_inactive(false);
+                        let resp = ui.add_enabled(neighbour.is_some(), button).on_hover_text(crate::i18n::tr_label(tip));
+                        crate::scenario::publish_handle(&format!("param:{}:{}", side, r.name), resp.rect.center());
+                        if resp.clicked()
+                            && let Some(n) = neighbour
+                        {
+                            d.error = app.run("parameters.move", json!({"name": r.name, side: n.name})).err();
+                        }
+                    }
+                }
+            });
             // Name: double-click to rename.
             match &mut d.renaming {
                 Some((old, new)) if *old == r.name => {

@@ -390,7 +390,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Ap, inputs: &mut [Sel
             ("appearance.dielectric_ior", "appearance:ior", &mut ior, 1.0..=3.0),
         ] {
             row_label(ui, app.tr(label));
-            let response = ui.add(egui::DragValue::new(value).range(range).speed(0.01));
+            let response = ui.add(egui::DragValue::new(value).range(range).speed(0.01).custom_parser(crate::prefs::parse_number));
             crate::scenario::publish_handle(handle, response.rect.center());
             if response.changed() {
                 k.remove_override = false;

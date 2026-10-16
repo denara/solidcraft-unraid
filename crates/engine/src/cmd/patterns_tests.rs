@@ -402,3 +402,31 @@ fn pattern_of_touching_cuts_needs_no_fallback() {
         assert_eq!(m["bodies"][0][k], single["bodies"][0][k], "{k}");
     }
 }
+
+/// A pattern of cuts beside a round, on a bar whose long top edges are rounded, takes the exact
+/// planar route for every copy rather than the general boolean's retries: the teeth touch side
+/// by side and never reach the rounds (#1197). Retries and volume, not timing (see
+/// `scales_linearly`).
+#[test]
+fn pattern_of_cuts_beside_a_round_needs_no_retries() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"corner": [-10, 0, 0], "length": 20, "width": 200, "height": 4, "name": "Bar"}));
+    run(&mut s, "solid.fillet", json!({"edges": [[-10, 100, 4], [10, 100, 4]], "radius": 1}));
+    run(&mut s, "sketch.create", json!({"plane": "YZ", "name": "Tooth"}));
+    run(&mut s, "sketch.line", json!({"points": [[20, 4], [24, 2], [24, 5], [20, 5]], "closed": true}));
+    run(&mut s, "sketch.finish", json!({}));
+    let cut =
+        run(&mut s, "solid.extrude", json!({"sketch": "Tooth", "distance": 16, "direction": "symmetric", "operation": "cut", "name": "Tooth cut"}));
+    let teeth =
+        run(&mut s, "solid.pattern.rectangular", json!({"features": ["Tooth cut"], "dir1": [0, 1, 0], "count1": 40, "spacing1": 4, "name": "Teeth"}));
+    for created in [&cut, &teeth] {
+        let id = created["feature"].as_u64().unwrap();
+        let result = s.model.result(id).unwrap();
+        assert!(result.error.is_none() && result.warning.is_none(), "{result:?}");
+        assert!(result.boolean_diagnostics.events.is_empty(), "{:?}", result.boolean_diagnostics);
+    }
+    // The bar, less the rounds' corners and 40 teeth (a 4 x 2 triangle below the top, 16 wide).
+    let expected = 16000.0 - 400.0 * (1.0 - PI / 4.0) - 40.0 * 4.0 * 16.0;
+    let v = volume(&mut s);
+    assert!(rel(v, expected) < 1e-5, "{v} vs {expected}");
+}

@@ -8,7 +8,7 @@ description: Use when building, driving or animating an assembly or mechanism in
 ## Overview
 An assembly is components placed by joints. Work the mechanism out as world points and axes first: every pin, slide and hinge, which part each one joins, and the value you expect at each pose. Then give every joint origin by those coordinates, and check each step against a number you computed yourself. A drive that reports success can still have moved nothing. Command shapes, a worked example, the traps and reply sizes are in `reference.md` next to this file. To build the parts themselves, use `solidcraft-modeling`.
 
-Written against SolidCraft `main` after 0.11.1, which counts the degrees of freedom of closed loops and carries motion links through chains made in any order. The traps in `reference.md` say which answers are about to change.
+Written against SolidCraft `main` after 0.11.1, which counts the degrees of freedom of closed loops, carries motion links through chains made in any order, and answers drives in degrees with `moved` (and a `reason` when nothing could move).
 
 ## Before the first call
 1. Read `reference.md`.
@@ -36,11 +36,12 @@ Written against SolidCraft `main` after 0.11.1, which counts the degrees of free
 - **Origins by world coordinates:** `{"occurrence":..., "point":[x,y,z], "z":[ax,ay,az]}`. Always give `occurrence`; without it the nearest body is used. Use the same form on both sides; `frame`, `face`, `circle` and named origins are in `reference.md`.
 - **Pass `flip: true`** when both origins are the same world point and axis, which is the case when you join parts where they sit. Without it, b's z mates against a's and part b turns 180 degrees.
 - **Parts already in place:** `joint.as_built {"type":..., "a":..., "b":..., "at":{origin}, "name":..., "limits":[[min,max]]}` keeps them where they are.
-- **Values and limits** are degrees for angles and mm for distances. An angle turns right-handed about the joint's z. A drive past a joint's own limits is clamped to them, which is not a failure. A new joint starts at 0, so its limits must include 0, or the part turns to the nearer limit as it is joined. On a joint with several values, drive with `values`: `value` resets all but the first to 0.
-- **Every chain must reach something grounded.** A part that is neither grounded nor joined to a grounded part is never placed. A drive on a joint in that chain answers with the new value and no conflicts, and nothing moves. `dof: 6` on an occurrence in `joint.list` is the sign. Fix it with `joint.rigid_group {"occurrences":["Frame:1", ...]}`, or with a joint to the grounded structure.
+- **Values and limits** are degrees for angles and mm for distances. An angle turns right-handed about the joint's z. A drive past a joint's own limits is clamped to them, which is not a failure. A new joint starts at its `values` (default 0); one outside the limits starts at the nearer limit, so the part turns there as it is joined, and the reply's `warnings` say so. `value` drives a joint's first value and `values` the ones it lists; the others keep theirs.
+- **Every chain must reach something grounded.** A part that is neither grounded nor joined to a grounded part is never placed. A drive on a joint in that chain moves nothing and answers `moved: false`, with a `reason` and the part joined to nothing as `unconnected`. `joint.list` lists such chains under `floating`, and their occurrences have `dof: 6`. Fix it with `joint.rigid_group {"occurrences":["Frame:1", ...]}`, or with a joint to the grounded structure.
 
 ## Linked and closed motion
-- **Motion links:** `joint.motion_link {"a":..., "b":..., "ratio":r, "offset":o}` sets b = r·a + o, clamped to b's own limits. `offset` is in radians for an angle (mm for a distance), unlike every other joint value. A mirrored part takes `ratio: -1`, and limits mirrored too. Chains (a drives b, b drives c) work in any order of creation. Drive only the head of a chain.
+- **Motion links:** `joint.motion_link {"a":..., "b":..., "ratio":r, "offset":o}` sets b = r·a + o, clamped to b's own limits. `ratio` is b's units per a's: a pinion that moves its rack 0.5 mm per degree takes `ratio: 0.5`. `offset` is in b's units: degrees for an angle, mm for a distance, or an expression. A mirrored part takes `ratio: -1`, and limits mirrored too. Chains (a drives b, b drives c) work in any order of creation. Drive only the head of a chain.
+- **Gears, racks and screws:** links whose ratio comes from radii or a pitch, kept up to date when they change. `joint.gear {"a":..., "b":..., "ra":r1, "rb":r2}` turns b r1/r2 as far as a, the other way (`internal: true`: the same way). `joint.rack_pinion {"a":pinion, "b":rack, "radius":r}` moves the rack r·θ. `joint.screw {"joint":cylindrical, "pitch":p}` (or `a`, `b` for a revolute and a slider) advances p per turn. A size is mm, an expression (`"m*z1/2"`), or a round face `{"occurrence":..., "circle":[x,y,z]}` whose radius is read again after every edit. `reverse: true` turns b the other way (a left-hand thread). The driven joint keeps where it is. Drive a, never b.
 - **Closed loops:** an actuator between a frame and a hinged panel takes three joints besides the hinge:
   - a revolute root pin (frame and barrel)
   - a slider (barrel and rod), with z along the actuator from root to tip on both origins, both at the root pin, and the stroke as its limits
@@ -48,12 +49,13 @@ Written against SolidCraft `main` after 0.11.1, which counts the degrees of free
 
   A four-bar or a slider-crank follows the same pattern. Drive the hinge; the pins and the slider follow.
 - **Stops:** at the end of the stroke the drive stops, with `stopped_by_loop: {joint, fraction}` naming the joint that could not follow. A loop that cannot close at all is listed under `conflicts`, and nothing in it moves.
-- **dof** counts the loop: here the panel, barrel and rod report 1 each. At a pose where the actuator lies along its tip pin's path, a part can report 0 and still move; drive a little and list again.
+- **dof** counts the loop: here the panel, barrel and rod report 1 each, also at a pose where the actuator lies along its tip pin's path.
 
 ## Contact and motion studies
 - **Contact:** `contact.create {"occurrences":[...], "name":...}` and `contact.enable_sets {}`. A drive then stops where two bodies of one set would pass through each other, with `stopped_by_contact: {a, b, fraction}`. `contact.check {}` lists the pairs that overlap now.
 - **Motion study:** `motion.study {"name":..., "steps":N, "keys":[{"joint":..., "points":[[step, value], ...]}]}`. Values are degrees or mm, linear between points. Key only the driving joints; linked joints and loops follow.
 - **Play:** `motion.play {"study":..., "step":s}` sets the joints there, which changes the design, and answers every occurrence's pose (about 0.2 KB per occurrence). `motion.export {"study":..., "samples":n}` gives the poses at every step without changing the design.
+- **Trace:** `motion.trace {"occurrence":..., "point":[x,y,z], "joint":..., "from":0, "to":360}` (or `"study":...` instead of joint, from and to) answers the world path of a point of a part, such as a coupler curve, without changing the design. It ends at `stopped_at` where a loop or contact stops the motion. `motion.trace.keep` with the same params keeps it as a 3D sketch spline.
 
 ## Verify
 - **Each joint:** `execute occurrence.properties {"occurrence":"Wing:1"}` (under 1 KB) gives the world bbox and centre of mass of one occurrence. Joining must not move them.
@@ -72,8 +74,8 @@ Written against SolidCraft `main` after 0.11.1, which counts the degrees of free
 | Thought | Do instead |
 |---|---|
 | "The origins are at the same point, so `flip` doesn't matter" | Pass `flip: true`, or the part turns 180 degrees. |
-| "The drive answered values, so it moved" | Look for `dof: 6` in `joint.list`; a floating chain answers and moves nothing. |
-| "`joint.drive` says 0.349, the drive failed" | Its `values` are radians; `joint.list` gives degrees. (Once its replies carry `unit`, they are degrees.) |
+| "The drive answered values, so it moved" | Read `moved`; a chain joined to nothing grounded answers `moved: false` and a `reason`. |
+| "Drive the arm joint by joint until the gripper gets there" | `joint.reach {"occurrence":..., "at":..., "point":...}` solves every joint on its chain at once; read `reached` and `error_mm`. |
 | "Key every joint of the loop in the study" | Key the driving joint only; the loop follows. |
 | "Check the pose with `component.list`" | `occurrence.properties` on the one occurrence. `component.list` is 140 KB on a 36-part assembly. |
 | "Open the design with `file.open`" | The `open` tool, or `doc.open`; there is no `file.open`. |

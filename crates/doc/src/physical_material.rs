@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{DocError, Result};
 
@@ -116,6 +116,10 @@ pub struct Validation {
     pub property_kinds: Vec<String>,
     pub isotropic_moduli: Option<IsotropicModuli>,
     pub unspecified_conditions: Vec<String>,
+    /// Property kind -> absent condition fields under the existing family policy.
+    /// Empty when reading an older report that did not include this detail.
+    #[serde(default)]
+    pub missing_condition_fields: BTreeMap<String, Vec<String>>,
     pub source_review_required: Vec<String>,
     pub analysis_solver_available: bool,
     pub rendering_properties_available: bool,
@@ -256,6 +260,7 @@ impl MaterialCard {
         let mut kinds = BTreeSet::new();
         let mut used_sources = BTreeSet::new();
         let mut unspecified = Vec::new();
+        let mut missing_condition_fields = BTreeMap::new();
         let mut isotropic_moduli = None;
         for property in &self.properties {
             let kind = property.data.kind();
@@ -279,12 +284,20 @@ impl MaterialCard {
             if let Some(state) = &conditions.state {
                 text(state, 1024, "conditions.state")?;
             }
-            if conditions.temperature_k.is_none()
-                || conditions.state.is_none()
-                || (self.family == Family::Wood && conditions.moisture_dry_basis_kg_kg.is_none())
-                || (self.family == Family::Polymer && conditions.strain_rate_per_s.is_none())
-            {
+            let mut missing = Vec::new();
+            for (absent, field) in [
+                (conditions.temperature_k.is_none(), "temperature_k"),
+                (conditions.state.is_none(), "state"),
+                (self.family == Family::Wood && conditions.moisture_dry_basis_kg_kg.is_none(), "moisture_dry_basis_kg_kg"),
+                (self.family == Family::Polymer && conditions.strain_rate_per_s.is_none(), "strain_rate_per_s"),
+            ] {
+                if absent {
+                    missing.push(field.to_string());
+                }
+            }
+            if !missing.is_empty() {
                 unspecified.push(kind.to_string());
+                missing_condition_fields.insert(kind.to_string(), missing);
             }
             if let Some(moduli) = property.data.validate()? {
                 isotropic_moduli = Some(moduli);
@@ -295,6 +308,7 @@ impl MaterialCard {
             property_kinds: kinds.into_iter().collect(),
             isotropic_moduli,
             unspecified_conditions: unspecified,
+            missing_condition_fields,
             source_review_required: used_sources.into_iter().collect(),
             analysis_solver_available: false,
             rendering_properties_available: false,

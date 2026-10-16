@@ -36,7 +36,7 @@ Work the part out as numbers first. Then build it in a few large `batch` calls, 
   - expression fields such as `solid.cylinder base:["w/2-6","d/2-6","wall"]`
 
   A plain number never follows a parameter.
-- **Repeats:** `solid.pattern.rectangular` takes expression spacing; `solid.mirror` takes `XY`/`XZ`/`YZ`, a construction plane or `{origin, normal}`. A mirror or pattern feature cannot be mirrored or patterned again.
+- **Repeats:** `solid.pattern.rectangular` takes expression spacing; `solid.mirror` takes `XY`/`XZ`/`YZ`, a construction plane or `{origin, normal}` (origin coordinates may be length expressions such as `["half", 0, 0]`). A mirror or pattern feature cannot be mirrored or patterned again.
 - **Edge and face picks** snap to the nearest edge or face. There is no distance limit and no error, so compute the exact midpoint from your geometry (the vertical corner edge of a centred box is `[w/2, d/2, h/2]`).
   - Picks must be plain numbers.
   - A pick is resolved once and then follows its edge when parameters change.

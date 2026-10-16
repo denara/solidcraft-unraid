@@ -16,7 +16,7 @@ new uses of it anywhere else. Public docs/web/Flatpak deployments use project Pa
 
 ## Container prototype baseline
 The first Unraid prototype used upstream commit `af536a7`. The current validated
-container baseline is `b3df2c382b5cc600e42273ed6c21466bab181a71`.
+container baseline is `3707a67cee8ff9da897d9a9b9b5174739a0d4ee2`.
 Keep later upstream CAD/UI feature updates separate from this deployment addition;
 advance the baseline only as a separate, validated update. See [update records](docs/unraid-updates.md).
 
@@ -111,6 +111,10 @@ People trust SolidCraft with their designs; a crash loses their work. **This out
   egui/eframe/winit/wgpu/rfd. **The UI crate is swappable.** Only `crates/kernel` may use `truck`.
 - **The UI is thin**: panels read engine state and act through `app.run(id, params)` /
   `app.start(id)`. Colours come from `theme::Tokens`.
+- **One set of camera controls**: every page or canvas with a camera (viewport, Render
+  preview, future flat pattern or drawing pages) calls `navigation::handle` with its `NavCaps`
+  (orbit off for flat 2D pages). New canvases must use `navigation::handle`; never hand-roll
+  camera input (a test rejects it).
 - **Rust only.** Units are millimetres and radians internally; Z is up. The one exception is
   JavaScript the browser requires: the service worker `apps/solidcraft-web/sw.js` (browsers only
   run service workers as JavaScript) and the small inline scripts in `apps/solidcraft-web/index.html`.
@@ -150,6 +154,23 @@ People trust SolidCraft with their designs; a crash loses their work. **This out
   keep monitoring it while the task is active and make its pending status clear at handoff;
   do not claim it merged without checking.
 
+## Claim = a draft PR
+- Before working on issue #N, check nobody has it: `gh pr list -R bherbruck/solidcraft --state open --search "#N"`.
+- If none, branch from the latest `origin/main`, `git commit --allow-empty -m "claim: #N"`, push,
+  and open a **draft** PR titled `<summary> (#N)` right away. **The lowest-numbered open PR for an
+  issue wins**; if yours lost, close it. Don't claim by commenting or by editing files.
+- Push work in progress at least daily. A draft with no pushes for 72 hours may be taken over:
+  comment on it first, then open your own claim (you may start from its branch).
+- On a shared build machine, check the load before a big build (`cut -d' ' -f1 /proc/loadavg`)
+  and wait while it is over 24; build with `nice`.
+
+## Design file format
+A change that saves something new in a design adds ONE file, `crates/doc/src/format/pending/<name>.rs`
+(a `//!` note, and `pub fn step` if older designs must be rewritten). Never edit `FORMAT`,
+`JSON_STEPS`, the history in `format.rs`, another change's file or a `v<N>/` folder: the build
+works out the number (the next one while anything is pending), and the release folds pending
+changes into `v<N>/` with `scripts/fold-format-pending.sh`. See CONTRIBUTING.md.
+
 ## Application releases
 Development pushes are not application releases. Follow `docs/releasing.md` when asked to
 prepare or ship a release: choose the version from the actual changes, update Cargo.toml and
@@ -183,6 +204,13 @@ before the draft is verified.
 milestone task lands. `cargo xtask features` regenerates `docs/features.md` (SolidCraft's
 commands by area, from the registry) when commands are added or renamed.
 
-The container integration omits upstream's macOS Finder and Windows native-crash unsafe bridges; command-line
+The container integration omits upstream's macOS Finder and Windows native-crash/resize-border unsafe bridges; command-line
 file opening and all Linux/container behavior are preserved. CAD and UI logic remain Rust.
 The upstream JavaScript service worker is browser infrastructure, independent of HTTP MCP.
+
+Design-format additions follow upstream's per-change files under crates/doc/src/format/pending/.
+The fork regenerates shipped licences after integration so its HTTP gateway remains covered.
+
+## Lists many changes add to
+Keep message catalogs sorted (cargo xtask lists --fix), module lines in their sorted group,
+the language list English first then by id, and design-format additions as one new pending file.

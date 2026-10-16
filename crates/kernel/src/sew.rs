@@ -80,8 +80,17 @@ impl EdgeSpec {
             EdgeSpec::Line { .. } => None,
             EdgeSpec::Arc { mid, .. } => Some(key(*mid)),
             EdgeSpec::Chain { ctrl } => {
-                let n = ctrl.len().max(1) as f64;
-                Some(key(ctrl.iter().fold(Vec3::ZERO, |s, p| s + *p) * (1.0 / n)))
+                // Summed in pairs from both ends, so that the chain run either way gives the very
+                // same point: a font's control points are simple fractions, whose mean can fall
+                // exactly halfway between two steps of the key, where summing in another order
+                // would round it to the other one.
+                let n = ctrl.len();
+                let sum = (0..n.div_ceil(2)).fold(Vec3::ZERO, |s, i| match (ctrl.get(i), ctrl.get(n - 1 - i)) {
+                    (Some(p), Some(q)) if i != n - 1 - i => s + (*p + *q),
+                    (Some(p), _) => s + *p,
+                    _ => s,
+                });
+                Some(key(sum * (1.0 / n.max(1) as f64)))
             }
         }
     }
@@ -950,6 +959,23 @@ mod tests {
         let (a, b, c, d) = (p(0., 0., 0.), p(1., 0., 0.), p(1., 1., 0.), p(0., 1., 0.));
         let (e, f, g, h) = (p(0., 0., 1.), p(1., 0., 1.), p(1., 1., 1.), p(0., 1., 1.));
         vec![quad(a, d, c, b), quad(e, f, g, h), quad(a, b, f, e), quad(b, c, g, f), quad(c, d, h, g), quad(d, a, e, h)]
+    }
+
+    /// A chain's key is the same whichever way it runs. These control points (a joining stroke
+    /// of a script font) have their mean exactly halfway between two steps of the key, and
+    /// summed in order one way and the other they rounded to different steps: a wall and the cap
+    /// beside it, reading the curve opposite ways, got two edges and the solid did not close.
+    #[test]
+    fn a_chain_has_one_key_both_ways() {
+        let p = |x: f64, y: f64| Vec3::new(x, y, 40.0);
+        let ctrl = [
+            p(34.74439583333333, 11.397236111111111),
+            p(35.066196759259256, 11.722652777777778),
+            p(35.32833796296296, 11.885361111111111),
+            p(35.53081944444444, 11.885361111111111),
+        ];
+        let forward = EdgeSpec::Chain { ctrl: ctrl.to_vec().into() };
+        assert_eq!(forward.mid_key(), forward.reversed().mid_key());
     }
 
     #[test]

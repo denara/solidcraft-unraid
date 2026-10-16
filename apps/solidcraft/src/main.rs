@@ -6,7 +6,7 @@
 //! the software renderer; see `startup` and docs/book/src/guide/troubleshooting.md.
 //!
 //! A `.step`/`.stp` file opens as a new design holding the file's bodies (an Import feature); a
-//! `.3mf`/`.stl` file as a new design holding mesh bodies.
+//! `.3mf`/`.stl`/`.obj`/`.glb`/`.gltf` file as a new design holding mesh bodies.
 //!
 //! `--control <port>` (or `SOLIDCRAFT_CONTROL_PORT`) starts a localhost JSON-lines control
 //! server: `{"id":1,"method":"engine.execute","params":{"command":"solid.box","params":{…}}}`.
@@ -67,6 +67,9 @@ impl eframe::App for App {
         }
     }
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+        // Before the app's own hook, which adds the control channel's events.
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        self.space_mouse.raw_input_hook(self.solve.preferences.space_mouse_enabled, raw);
         self.solve.raw_input_hook(raw);
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -76,6 +79,8 @@ impl eframe::App for App {
         storage.set_string(solidcraft_ui_egui::prefs::STORAGE_KEY, self.solve.prefs());
     }
     fn on_exit(&mut self) {
+        // The agent chat's agent and everything it started end with the app.
+        solidcraft_ui_egui::agent_chat::shutdown(&mut self.solve);
         solidcraft_ui_egui::recovery_ui::close(&mut self.solve);
         solidcraft_engine::crash::end_session();
         // An update asked to restart into the new version or to run its installer.
@@ -90,12 +95,13 @@ impl eframe::App for App {
 fn services(cc: &eframe::CreationContext<'_>) -> Services {
     let parent = rfd::AsyncFileDialog::new().set_parent(cc);
     let open_parent = parent.clone();
+    let program_parent = parent.clone();
     Services {
         pick_open: Some(Box::new(move || {
             let future = open_parent
                 .clone()
                 .add_filter(
-                    "Designs, STEP, IGES and meshes",
+                    "Designs, CAD files and meshes",
                     &[
                         io::DESIGN_EXT,
                         io::LEGACY_DESIGN_EXT,
@@ -108,19 +114,36 @@ fn services(cc: &eframe::CreationContext<'_>) -> Services {
                         "iges",
                         "IGS",
                         "IGES",
+                        "FCStd",
+                        "fcstd",
+                        "3dm",
+                        "3DM",
                         "3mf",
                         "3MF",
                         "stl",
                         "STL",
+                        "obj",
+                        "OBJ",
+                        "glb",
+                        "GLB",
+                        "gltf",
+                        "GLTF",
                     ],
                 )
                 .add_filter("SolidCraft design (container or JSON)", &[io::DESIGN_EXT, io::LEGACY_DESIGN_EXT, "json"])
                 .add_filter("STEP", &["step", "stp", "STEP", "STP"])
                 .add_filter("IGES", &["igs", "iges", "IGS", "IGES"])
-                .add_filter("Mesh (3MF, STL)", &["3mf", "3MF", "stl", "STL"])
+                .add_filter("FreeCAD and Rhino", &["FCStd", "fcstd", "3dm", "3DM"])
+                .add_filter("Mesh (3MF, STL, OBJ, glTF)", &["3mf", "3MF", "stl", "STL", "obj", "OBJ", "glb", "GLB", "gltf", "GLTF"])
                 .add_filter("Sketch drawings (DXF, SVG)", &["dxf", "DXF", "svg", "SVG"])
                 .add_filter("All files", &["*"])
                 .pick_file();
+            Box::pin(async move { future.await.map(|p| p.path().to_string_lossy().into_owned()) })
+        })),
+        pick_program: Some(Box::new(move || {
+            let dialog = program_parent.clone().set_title("Choose your slicer");
+            let dialog = if cfg!(target_os = "windows") { dialog.add_filter("Programs", &["exe"]) } else { dialog };
+            let future = dialog.pick_file();
             Box::pin(async move { future.await.map(|p| p.path().to_string_lossy().into_owned()) })
         })),
         pick_save: Some(Box::new(move |name: &str, exts: &[&str]| {
@@ -140,6 +163,10 @@ fn services(cc: &eframe::CreationContext<'_>) -> Services {
         graphics_path: graphics_path().map(|p| p.to_string_lossy().to_string()),
         http_get: Some(std::sync::Arc::new(http_get)),
         http_download: Some(std::sync::Arc::new(http_download)),
+        // Already an installed app: only the browser build offers to install.
+        install_app: None,
+        agent_http: Some(std::sync::Arc::new(agent_http)),
+        secrets: Some(std::sync::Arc::new(Keychain)),
         show_in_folder: Some(Box::new(|path| {
             let folder = std::path::Path::new(path).parent().unwrap_or_else(|| std::path::Path::new("."));
             let mut command = std::process::Command::new(if cfg!(target_os = "windows") {
@@ -194,6 +221,71 @@ fn http_download(url: &str, to: &std::path::Path, progress: &dyn Fn(u64, Option<
     }
     file.sync_all().map_err(|e| fail(format!("{}: {e}", to.display())))?;
     Ok(())
+}
+
+/// HTTP for the agent chat's API agents (OpenAI-compatible endpoints, docs/agent-chat.md): to the
+/// URL the user configured, which may be plain HTTP on this computer (Ollama, LM Studio). No
+/// redirects (a key must not follow one elsewhere), at most 16 MB back.
+fn agent_http(r: &solidcraft_ui_egui::agent_chat::backend::HttpRequest) -> Result<(u16, Vec<u8>), String> {
+    use std::time::Duration;
+    let tls = ureq::tls::TlsConfig::builder()
+        .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+        .unversioned_rustls_crypto_provider(std::sync::Arc::new(rustls::crypto::ring::default_provider()))
+        .build();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .tls_config(tls)
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(r.timeout_s.clamp(1, 900))))
+        .timeout_connect(Some(Duration::from_secs(10)))
+        .user_agent("SolidCraft")
+        .max_redirects(0)
+        .build()
+        .into();
+    let mut response = if r.method == "POST" {
+        let mut req = agent.post(&r.url);
+        for (k, v) in &r.headers {
+            req = req.header(k, v);
+        }
+        req.send(r.body.as_deref().unwrap_or_default())
+    } else {
+        let mut req = agent.get(&r.url);
+        for (k, v) in &r.headers {
+            req = req.header(k, v);
+        }
+        req.call()
+    }
+    .map_err(|e| e.to_string())?;
+    let status = response.status().as_u16();
+    let body = response.body_mut().with_config().limit(16 << 20).read_to_vec().map_err(|e| e.to_string())?;
+    Ok((status, body))
+}
+
+/// API keys in the system keychain (service "SolidCraft agent chat", one entry per agent).
+struct Keychain;
+
+impl Keychain {
+    fn entry(id: &str) -> Result<keyring::Entry, String> {
+        keyring::Entry::new("SolidCraft agent chat", id).map_err(|e| e.to_string())
+    }
+}
+
+impl solidcraft_ui_egui::agent_chat::backend::Secrets for Keychain {
+    fn get(&self, id: &str) -> Result<Option<String>, String> {
+        match Self::entry(id)?.get_password() {
+            Ok(p) => Ok(Some(p)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+    fn set(&self, id: &str, secret: &str) -> Result<(), String> {
+        Self::entry(id)?.set_password(secret).map_err(|e| e.to_string())
+    }
+    fn delete(&self, id: &str) -> Result<(), String> {
+        match Self::entry(id)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
 }
 
 /// One GET to GitHub: a 200 answer, or why not (rate limits included).
@@ -445,6 +537,15 @@ fn main() -> eframe::Result {
             let mut app = SolveApp::new(Session::default(), services(cc));
             app.apply_off_thread = Some(solidcraft_ui_egui::dialogs::APPLY_AT_ONCE);
             app.custom_titlebar = CUSTOM_TITLEBAR;
+            // Windows: the OS hit test offers the resize border, at the window's DPI, from the
+            // first message (#1381).
+            #[cfg(target_os = "windows")]
+            {
+                app.native_resize_border = false;
+                if CUSTOM_TITLEBAR && !app.native_resize_border {
+                    eprintln!("SolidCraft window: no native resize border; egui edge zones instead");
+                }
+            }
             app.integrated_titlebar = cfg!(target_os = "macos");
             app.cpu_meshing = safe_mode;
             if let Some(p) = cc.storage.and_then(|s| solidcraft_ui_egui::prefs::stored(|k| s.get_string(k))).filter(|_| !safe_mode) {
@@ -454,6 +555,7 @@ fn main() -> eframe::Result {
                 eprintln!("SolidCraft graphics: {:?}, MSAA {}x (requested {}x)", rs.adapter.get_info().backend, rs.msaa_samples, samples);
                 solidcraft_engine::crash::phase("viewport pipelines (shader compile)");
                 app.set_wgpu(rs, DEPTH_BITS, STENCIL_BITS, rs.msaa_samples);
+                solidcraft_ui_egui::gpu::install_picture_renderer(rs);
                 // The graphics driver is loaded now; it may have put its own exception filter
                 // in front of ours.
                 // A saved anti-aliasing the device can't do: back to the default, with a notice.
@@ -468,6 +570,10 @@ fn main() -> eframe::Result {
                 let rx = control_server::start(port, cc.egui_ctx.clone());
                 app = app.with_control(rx);
             }
+            // The agent chat's MCP bridge reaches the app through an endpoint of its own, started
+            // on a free port the first time the chat connects (docs/agent-chat.md).
+            let ctx = cc.egui_ctx.clone();
+            app.agent_chat.control_starter = Some(Box::new(move |tx| control_server::listen_agent(tx, ctx.clone())));
             if sample {
                 if let Err(e) = app.session.run_script(&solidcraft_engine::sample::script()) {
                     app.set_status(format!("sample: {e}"), true);

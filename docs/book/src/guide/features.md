@@ -10,7 +10,7 @@ it.
 | Create | extrude (one side, two sides, symmetric, taper, start offset, to a distance or through all; new body, join, cut, intersect; thin walls along curves), revolve, sweep, loft, box, cylinder, sphere, torus, coil, pipe, rib, web, emboss, hole (simple, counterbore, countersink, tapped; on faces or at sketch points), thread, rectangular/circular/path patterns, mirror |
 | Modify | press pull, fillet, chamfer, shell, draft, scale, combine, split body, offset face, replace face, move/copy, align, remove |
 | Construct | offset plane, plane at angle, plane along path |
-| Inspect | measure, section analysis, interference, curvature comb and map, zebra, draft, minimum radius, isocurves, centre of mass |
+| Inspect | measure, section analysis, interference, compare bodies, curvature comb and map, zebra, draft, minimum radius, isocurves, centre of mass |
 
 Extrude automatically selects **Join** for additions when the active component already has a
 solid, including sideways elbow connections and screw bosses that meet only part of a face.
@@ -116,6 +116,43 @@ and 0.5 places the plane halfway along its length. The plane is perpendicular to
 local segment. Preview does not change the design; OK creates one editable timeline feature.
 The plane follows later path edits. Curved paths use their sampled polyline; absolute distance,
 reference-object placement and multi-curve chains are not yet available in this dialog.
+
+## Comparing two bodies
+
+**Compare Bodies** (`inspect.compare`) lays two versions of one part over each other, such as a
+part and the same part exported by another program, and finds the places where only one of them
+has material. It works from the two surfaces, not from a boolean of the bodies, so it also
+compares bodies that share almost every face, the case a boolean (Combine, Interference) handles
+worst.
+
+```json
+{"command": "inspect.compare", "params": {"a": "Bracket", "b": "Bracket (2)", "tolerance": 0.01, "color": true}}
+```
+
+Without `a` and `b` it compares the two selected bodies, or the design's only two. Both bodies
+are measured (volume, area, centre of mass and box, and `difference`: b − a of each). Each
+surface is sampled at the corners of its triangles and at points at most `spacing` (0.5 mm)
+apart on larger faces, and every sample measures its distance to the other surface: `deviation`
+gives the largest and the mean distance each way. Samples further than `tolerance` (0.01 mm) form
+the **regions**: `only_in_a` where `a` has material and `b` has none, `only_in_b` the other way
+round. Each region gives its volume, the deviating surface area, the largest deviation and where
+it is, its centre and box, and the faces of each body it lies on (`faces_a`, `faces_b`, numbered
+as `model.faces` lists them), largest volume first. The volume is integrated along a grid of
+parallel lines through the region (`resolution` gives their spacing), so a thin sliver is
+measured as well as a block. `identical` is true when no region is found, and `verdict` says it in
+one line. `warnings` lists what makes the result less certain: a body whose surface does not
+enclose the volume it measures (open, or with faces that failed to import), and lines left out of
+a region's volume because they crossed a gap. With `color`, the faces that hold a region turn
+red where only `a` has material and green where only `b` has, on both bodies: the faces mostly
+beyond the tolerance (a small change on a large face leaves the face alone), or, for a region
+with none, the face with the largest share.
+That is one undo step; without `color` the command changes nothing.
+
+The bodies are meshed within a quarter of the tolerance. The kernel meshes no finer than a
+millionth of a body's size, so keep the tolerance at least twice that (0.02 mm for a part 10 m
+across). Large bodies are sampled more coarsely, at about `max_points` (eight million) points
+each; `sampling.spacing_mm` says what was used, and a larger `max_points` (up to 50 million)
+samples them finer, at the cost of time.
 
 ## Editing a feature from a script
 

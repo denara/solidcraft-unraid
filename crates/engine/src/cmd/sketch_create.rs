@@ -3,7 +3,7 @@
 
 use serde_json::{Value, json};
 use solidcraft_geom::Vec2;
-use solidcraft_sketch::{ConstraintKind, CurveKind, LinkKind, LinkSource, Sketch, TextAlign, TextStyle};
+use solidcraft_sketch::{ConstraintKind, CurveKind, LinkKind, LinkSource, Sketch, TextAlign, TextExprs, TextStyle};
 
 /// The style parameters of `sketch.text` and `sketch.edit_text`.
 macro_rules! text_style_doc {
@@ -20,6 +20,10 @@ use crate::{Result, Session};
 #[cfg(test)]
 #[path = "sketch_text_move_tests.rs"]
 mod text_move_tests;
+
+#[cfg(test)]
+#[path = "sketch_text_expr_tests.rs"]
+mod text_expr_tests;
 
 pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("sketch.line.midpoint", "Midpoint Line", midpoint_line)
@@ -90,8 +94,12 @@ pub static COMMANDS: &[CommandSpec] = &[
         .icon("centerline")
         .enabled(in_sketch)
         .params("curves: [line ids], value?: bool (default toggles): centerline line type (not in profiles; an axis)"),
+    CommandSpec::new("sketch.infinite", "Infinite Line", infinite_line)
+        .enabled(in_sketch)
+        .params("curves: [line ids], value?: bool (default toggles): infinite line type (#1359): construction geometry drawn across the whole view through the line's two points; off, a normal line"),
     CommandSpec::new("sketch.text", "Text", text).at("SKETCH", "CREATE").icon("text").enabled(in_sketch).params(concat!(
-        "text: string (\\n breaks lines), at: baseline start [x,y], height?: capital height mm (default 5), angle?: deg, font?: an installed font's family or full name, or a .ttf/.otf file path (~ and %VAR% expand; default: the built-in Liberation Sans), ",
+        "text: string (\\n breaks lines), at: baseline start [x,y], height?: capital height mm (default 5), angle?: deg; at's x and y, height and angle each take a number or an expression over the design's parameters as a string (\"plate_width / 2\", \"label_size\"): the text keeps the expression, follows the parameters, and returns it in `exprs`; an expression naming no parameter is the number it comes to, a bare number in one is in the design's units, \
+         font?: an installed font's family or full name, or a .ttf/.otf file path (~ and %VAR% expand; default: the built-in Liberation Sans), ",
         text_style_doc!(),
         created_doc!()
     )),
@@ -99,7 +107,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .enabled(in_sketch)
         .live(edit_text_live)
         .params(concat!(
-            "link: the text's link id (or entity: one of its curves), text?, at?, height?, angle?: deg, font?: family or file path (empty: the built-in font), ",
+            "link: the text's link id (or entity: one of its curves), text?, at?, height?, angle?: deg (numbers or expressions as in sketch.text; a number replaces an expression, and so does moving the text), font?: family or file path (empty: the built-in font), ",
             text_style_doc!(),
             " (each kept when left out); live?: bool: one frame of an interactive change (the sketch is solved, the features after it stay as they were until `sketch.drag_end`)",
             created_doc!()
@@ -146,19 +154,47 @@ fn text_style(p: &Value, cmd: &str, old: TextStyle) -> Result<TextStyle> {
 }
 
 /// What a text's `at` must be.
-const AT_MUST: &str = "`at` must be the baseline start [x, y]";
+const AT_MUST: &str = "`at` must be the baseline start [x, y], each a number or an expression";
 
-/// The number given for `key`: `None` when it is left out or null, and an error when it is
-/// anything but a number (not read as left out).
-fn given_num(p: &Value, cmd: &str, key: &str, what: &str) -> Result<Option<f64>> {
-    match p.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(_) => num(p, key).map(Some).ok_or_else(|| bad(cmd, format!("`{key}` must be {what}"))),
+/// One number of a text, from a command's parameter `key`. A number is that number (mm, or
+/// degrees for the angle). A string is an expression over the design's parameters: a bare number
+/// in it is in the design's units (degrees for the angle), and it is kept as an expression when
+/// it names a parameter, so that the text follows it; one that names none is the number it comes
+/// to. Returns the value (mm or radians) and the expression kept. Anything else is refused with
+/// `must`.
+fn text_number(doc: &solidcraft_doc::Document, v: &Value, cmd: &str, key: &str, must: &str, angle: bool) -> Result<(f64, Option<String>)> {
+    use solidcraft_doc::expr::{self, Kind};
+    let kind = if angle { Kind::Angle } else { Kind::Length };
+    match v {
+        Value::Number(n) => {
+            let x = n.as_f64().and_then(crate::params::finite).ok_or_else(|| bad(cmd, must))?;
+            Ok((if angle { x.to_radians() } else { x }, None))
+        }
+        Value::String(e) if !e.trim().is_empty() && e.len() <= 4096 => {
+            let e = doc.with_design_unit(e.trim(), kind);
+            match doc.eval(&e, kind) {
+                Ok(x) => {
+                    let x = crate::params::finite(x).ok_or_else(|| bad(cmd, must))?;
+                    Ok((x, (!expr::references(&e).is_empty()).then_some(e)))
+                }
+                // Say what is wrong with it (an unknown parameter, a length where an angle goes).
+                Err(error) => Err(bad(cmd, format!("{key}: {error}"))),
+            }
+        }
+        _ => Err(bad(cmd, must)),
     }
 }
 
-fn text_source(p: &Value, cmd: &str, old: Option<(String, Vec2, f64, f64, Option<String>, TextStyle)>) -> Result<LinkSource> {
-    let (t0, at0, h0, a0, f0, s0) = old.unwrap_or((String::new(), Vec2::ZERO, 5.0, 0.0, None, TextStyle::default()));
+/// A text's values as `text_source` works on them: text, place, height, angle (radians), font,
+/// style and the expressions behind the numbers.
+type TextValues = (String, Vec2, f64, f64, Option<String>, TextStyle, TextExprs);
+
+/// A text's source from a command's parameters: what is given replaces what `old` has (the
+/// defaults, for a new text); what is left out stays, an expression with its number. A number
+/// replaces an expression. An input that is not understood is refused, not ignored.
+fn text_source(doc: &solidcraft_doc::Document, p: &Value, cmd: &str, old: Option<TextValues>) -> Result<LinkSource> {
+    let (t0, mut at, mut height, mut angle, f0, s0, mut exprs) =
+        old.unwrap_or((String::new(), Vec2::ZERO, 5.0, 0.0, None, TextStyle::default(), TextExprs::default()));
     let text = match p.get("text") {
         None | Some(Value::Null) => t0,
         Some(Value::String(t)) => t.clone(),
@@ -170,15 +206,27 @@ fn text_source(p: &Value, cmd: &str, old: Option<(String, Vec2, f64, f64, Option
     if text.chars().count() > solidcraft_sketch::MAX_TEXT_CHARS {
         return Err(bad(cmd, "text too long"));
     }
-    let at = match p.get("at") {
-        None | Some(Value::Null) => at0,
-        Some(v) => crate::params::vec2(v).ok_or_else(|| bad(cmd, AT_MUST))?,
-    };
-    let height = given_num(p, cmd, "height", "a length in mm")?.unwrap_or(h0);
+    match p.get("at") {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(a)) => {
+            let [x, y] = a.as_slice() else { return Err(bad(cmd, AT_MUST)) };
+            (at.x, exprs.x) = text_number(doc, x, cmd, "`at` x", AT_MUST, false)?;
+            (at.y, exprs.y) = text_number(doc, y, cmd, "`at` y", AT_MUST, false)?;
+        }
+        Some(v) => {
+            at = crate::params::vec2(v).ok_or_else(|| bad(cmd, AT_MUST))?;
+            (exprs.x, exprs.y) = (None, None);
+        }
+    }
+    if let Some(v) = p.get("height").filter(|v| !v.is_null()) {
+        (height, exprs.height) = text_number(doc, v, cmd, "`height`", "`height` must be a length in mm, or an expression", false)?;
+    }
     if !(height > 1e-6 && height < 1e5) {
         return Err(bad(cmd, "`height` must be positive"));
     }
-    let angle = given_num(p, cmd, "angle", "an angle in degrees")?.map_or(a0, f64::to_radians);
+    if let Some(v) = p.get("angle").filter(|v| !v.is_null()) {
+        (angle, exprs.angle) = text_number(doc, v, cmd, "`angle`", "`angle` must be an angle in degrees, or an expression", true)?;
+    }
     let font = match p.get("font") {
         None | Some(Value::Null) => f0,
         Some(Value::String(f)) if f.trim().is_empty() => None,
@@ -189,7 +237,19 @@ fn text_source(p: &Value, cmd: &str, old: Option<(String, Vec2, f64, f64, Option
     // An unknown font, an unreadable file or a style the font lacks is an error now, not a lost
     // link later; so is a font file outside an agent's folders (the font reader asks `vfs`).
     solidcraft_sketch::font_data_styled(font.as_deref(), style.bold, style.italic).map_err(|e| bad(cmd, e.to_string()))?;
-    Ok(LinkSource::Text { text, at, height, angle, font, style })
+    Ok(LinkSource::Text { text, at, height, angle, font, style, exprs })
+}
+
+/// The expressions behind a text's numbers, for a command's reply (`{"height": "plate_h / 10"}`).
+fn text_exprs_json(src: &LinkSource) -> Option<Value> {
+    let LinkSource::Text { exprs, .. } = src else { return None };
+    let mut out = serde_json::Map::new();
+    for (key, e) in [("x", &exprs.x), ("y", &exprs.y), ("height", &exprs.height), ("angle", &exprs.angle)] {
+        if let Some(e) = e {
+            out.insert(key.into(), json!(e));
+        }
+    }
+    (!out.is_empty()).then_some(Value::Object(out))
 }
 
 fn text(s: &mut Session, p: &Value) -> Result<Value> {
@@ -197,7 +257,7 @@ fn text(s: &mut Session, p: &Value) -> Result<Value> {
     if p.get("at").is_none_or(Value::is_null) {
         return Err(bad(cmd, AT_MUST));
     }
-    let src = text_source(p, cmd, None)?;
+    let src = text_source(&s.doc, p, cmd, None)?;
     let id = s.active_sketch.ok_or_else(|| bad(cmd, "no sketch is being edited"))?;
     let mut doc = (*s.doc).clone();
     let mut sk = doc.sketch(id)?.clone();
@@ -207,11 +267,16 @@ fn text(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad(cmd, "the text makes no outline"));
     }
     let guide = guide(&mut sk, &src);
+    let exprs = text_exprs_json(&src);
     let l = sk.add_link(LinkKind::Text, src, &geom)?;
     let curves = ids_of(&sk, &sk.link_curves(&l));
     *doc.sketch_mut(id)? = sk;
     *s.doc_mut() = doc;
-    Ok(json!({"link": l, "curves": curves, "guide": guide}))
+    let mut out = json!({"link": l, "curves": curves, "guide": guide});
+    if let Some(exprs) = exprs {
+        out["exprs"] = exprs;
+    }
+    Ok(out)
 }
 
 /// A text's path is its guide: the curve it follows becomes construction. Left as it was, it
@@ -242,7 +307,7 @@ pub(super) fn text_link<'a>(sk: &'a Sketch, entity: &str) -> Option<&'a str> {
 
 /// Transform a text source as a unit; generated outlines remain linked and editable.
 pub(super) fn move_text(sk: &mut Sketch, link: &str, translate: Vec2, rotation: f64, center: Vec2, copy: bool) -> Result<Vec<usize>> {
-    let Some(LinkSource::Text { text, at, height, angle, font, style }) = sk.link(link).map(|l| l.source.clone()) else {
+    let Some(LinkSource::Text { text, at, height, angle, font, style, mut exprs }) = sk.link(link).map(|l| l.source.clone()) else {
         return Err(bad("sketch.move", "the selected source is not text"));
     };
     if style.path.is_some() {
@@ -250,10 +315,20 @@ pub(super) fn move_text(sk: &mut Sketch, link: &str, translate: Vec2, rotation: 
     }
     let q = at - center;
     let (sin, cos) = rotation.sin_cos();
-    let at = center + Vec2::new(q.x * cos - q.y * sin, q.x * sin + q.y * cos) + translate;
-    let angle = angle + rotation;
+    let moved = center + Vec2::new(q.x * cos - q.y * sin, q.x * sin + q.y * cos) + translate;
+    // What the move changes is a number now, not the expression it was; the rest stays.
+    if (moved.x - at.x).abs() > 1e-12 {
+        exprs.x = None;
+    }
+    if (moved.y - at.y).abs() > 1e-12 {
+        exprs.y = None;
+    }
+    if rotation.abs() > 1e-12 {
+        exprs.angle = None;
+    }
+    let (at, angle) = (moved, angle + rotation);
     let geom = solidcraft_sketch::text_geometry_styled(font.as_deref(), &text, at, height, angle, &style, None)?;
-    let source = LinkSource::Text { text, at, height, angle, font, style };
+    let source = LinkSource::Text { text, at, height, angle, font, style, exprs };
     let link = if copy {
         sk.add_link(LinkKind::Text, source, &geom)?
     } else {
@@ -271,7 +346,10 @@ fn edit_text(s: &mut Session, p: &Value) -> Result<Value> {
     let id = s.active_sketch.ok_or_else(|| bad(cmd, "no sketch is being edited"))?;
     let mut doc = (*s.doc).clone();
     let mut sk = doc.sketch(id)?.clone();
-    let out = apply_text_edit(&mut sk, p)?;
+    // The numbers its expressions give now (a parameter may have changed since the sketch was
+    // last stored); one that cannot be evaluated is left as it was, to be replaced by this edit.
+    let _ = doc.apply_text_values(&doc.param_values().0, &mut sk);
+    let out = apply_text_edit(&mut sk, &doc, p)?;
     *doc.sketch_mut(id)? = sk;
     *s.doc_mut() = doc;
     Ok(out)
@@ -282,13 +360,13 @@ fn edit_text(s: &mut Session, p: &Value) -> Result<Value> {
 fn edit_text_live(s: &mut Session, p: &Value) -> Result<(Value, Option<crate::LiveEdit>)> {
     let cmd = "sketch.edit_text";
     let id = s.active_sketch.ok_or_else(|| bad(cmd, "no sketch is being edited"))?;
-    let (out, report) = super::sketch::edit_solved(s, id, false, |sk, _| Ok((apply_text_edit(sk, p)?, super::sketch::Left::Unsolved)))?;
+    let (out, report) = super::sketch::edit_solved(s, id, false, |sk, doc| Ok((apply_text_edit(sk, doc, p)?, super::sketch::Left::Unsolved)))?;
     Ok((out, report.map(|report| crate::LiveEdit { sketch: id, report })))
 }
 
 /// `sketch.edit_text`'s change to its sketch: the text source's new values and its outlines
 /// regenerated from them.
-fn apply_text_edit(sk: &mut Sketch, p: &Value) -> Result<Value> {
+fn apply_text_edit(sk: &mut Sketch, doc: &solidcraft_doc::Document, p: &Value) -> Result<Value> {
     let cmd = "sketch.edit_text";
     let l = match (str_(p, "link"), str_(p, "entity")) {
         (Some(l), _) => l.to_string(),
@@ -296,19 +374,24 @@ fn apply_text_edit(sk: &mut Sketch, p: &Value) -> Result<Value> {
         _ => return Err(bad(cmd, "give `link` or `entity`")),
     };
     let old = match sk.link(&l).map(|x| (x.kind, x.source.clone())) {
-        Some((LinkKind::Text, LinkSource::Text { text, at, height, angle, font, style })) => (text, at, height, angle, font, style),
+        Some((LinkKind::Text, LinkSource::Text { text, at, height, angle, font, style, exprs })) => (text, at, height, angle, font, style, exprs),
         _ => return Err(bad(cmd, format!("`{l}` is not text"))),
     };
-    let src = text_source(p, cmd, Some(old))?;
+    let src = text_source(doc, p, cmd, Some(old))?;
     let geom = sk.text_source_geometry(&src).map_err(|e| bad(cmd, e.to_string()))?;
     if geom.is_empty() {
         return Err(bad(cmd, "the text makes no outline"));
     }
     let guide = guide(sk, &src);
+    let exprs = text_exprs_json(&src);
     sk.set_link_source(&l, src.clone());
     sk.update_link(&l, &geom)?;
     let curves = ids_of(sk, &sk.link_curves(&l));
-    Ok(json!({"link": l, "curves": curves, "guide": guide}))
+    let mut out = json!({"link": l, "curves": curves, "guide": guide});
+    if let Some(exprs) = exprs {
+        out["exprs"] = exprs;
+    }
+    Ok(out)
 }
 
 /// The curve ending at point `pi` and the direction leaving it there.
@@ -356,7 +439,32 @@ fn centerline(s: &mut Session, p: &Value) -> Result<Value> {
             cu.centerline = want.unwrap_or(!cu.centerline);
             if cu.centerline {
                 cu.construction = false;
+                cu.infinite = false;
             }
+        }
+        Ok(ids.len())
+    })?;
+    Ok(json!({"changed": n, "sketch": info}))
+}
+
+fn infinite_line(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "sketch.infinite";
+    let ids = string_list(p, "curves");
+    if ids.is_empty() {
+        return Err(bad(cmd, "`curves` must list lines"));
+    }
+    let want = crate::params::bool_(p, "value");
+    let (n, info) = edit(s, p, cmd, false, |sk, _| {
+        for id in &ids {
+            let c = sk.curve_index(id).ok_or_else(|| bad(cmd, format!("unknown curve `{id}`")))?;
+            let cu = sk.curves.get_mut(c).ok_or_else(|| bad(cmd, "curve"))?;
+            if !matches!(cu.kind, CurveKind::Line { .. }) {
+                return Err(bad(cmd, format!("`{id}` is not a line")));
+            }
+            // Infinite lines are construction geometry (never in a profile); off, a normal line.
+            cu.infinite = want.unwrap_or(!cu.infinite);
+            cu.construction = cu.infinite;
+            cu.centerline = false;
         }
         Ok(ids.len())
     })?;
@@ -638,7 +746,7 @@ fn tangent_circle(s: &mut Session, p: &Value, cmd: &str, n: usize, radius: Optio
 fn circle_tan_tan(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "sketch.circle.two_tangent";
     let r = match (crate::params::expr(p, "radius"), num(p, "diameter")) {
-        (Some(r), _) => r,
+        (Some(r), _) => r.into_string(),
         (None, Some(d)) => format!("{}", d / 2.0),
         _ => return Err(bad(cmd, "needs `radius` or `diameter`")),
     };

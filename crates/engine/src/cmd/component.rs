@@ -42,6 +42,10 @@ pub static COMMANDS: &[CommandSpec] = &[
         .params("occurrence: id or name; path?: [occurrence ids] (required if nested under multiple instances); descendants?: bool (default true). Physical properties of this placement in world coordinates, including pending moves"),
     CommandSpec::new("component.rename", "Rename Component", rename).params("component, name"),
     CommandSpec::new("component.delete", "Delete Component", delete).params("component: deletes it, its subcomponents, occurrences and features"),
+    CommandSpec::new("component.unlock", "Unlock Contents", unlock).icon("rigid_group").params(
+        "component: removes the rigid joints that hold its contents together (an imported assembly's rigid group), so its parts \
+         move and take joints one by one → joints (the ids removed)",
+    ),
     CommandSpec::new("component.move_bodies", "Move Bodies to Component", move_bodies).params("bodies: [names], component"),
     CommandSpec::new("component.move_sketches", "Move Sketches to Component", move_sketches).params("sketches: [ids or names], component"),
     CommandSpec::new("occurrence.copy", "Paste (Instance)", copy_occurrence)
@@ -251,6 +255,23 @@ fn delete(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"deleted": gone, "features": feats}))
 }
 
+fn unlock(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "component.unlock";
+    let id = component(s, p, "component", cmd)?;
+    if id == 0 {
+        return Err(bad(cmd, "pick a component, not the design"));
+    }
+    let gone = s.contents_joints(id);
+    if gone.is_empty() {
+        return Err(bad(cmd, "nothing holds this component's contents together"));
+    }
+    let doc = s.doc_mut();
+    doc.assembly.joints.retain(|j| !gone.contains(&j.id));
+    doc.assembly.links.retain(|l| !gone.contains(&l.a) && !gone.contains(&l.b));
+    s.visibility.hidden_joints.retain(|h| !gone.contains(h));
+    Ok(json!({"component": id, "joints": gone}))
+}
+
 fn move_bodies(s: &mut Session, p: &Value) -> Result<Value> {
     transfer::move_bodies(s, p)
 }
@@ -375,6 +396,17 @@ fn move_occurrence(s: &mut Session, p: &Value) -> Result<Value> {
     let o = s.doc.occurrences.iter().find(|o| o.id == id).cloned().ok_or_else(|| bad(cmd, "occurrence"))?;
     if o.grounded {
         return Err(bad(cmd, format!("{} is grounded", o.name)));
+    }
+    if let Some(mut group) = s.held_by_rigid_group(id) {
+        // The outermost component the group holds it in moves it.
+        for _ in 0..64 {
+            match s.doc.occurrence_of(group).and_then(|o| s.held_by_rigid_group(o.id)) {
+                Some(up) => group = up,
+                None => break,
+            }
+        }
+        let name = s.doc.components.iter().find(|c| c.id == group).map(|c| c.name.clone()).unwrap_or_default();
+        return Err(bad(cmd, format!("{} is held in {name} by a rigid group: move {name}, or Unlock Contents (component.unlock) first", o.name)));
     }
     let t = move_vector(p, "translate", Vec3::ZERO, true, cmd)?;
     let axis = move_vector(p, "axis", Vec3::Z, false, cmd)?;

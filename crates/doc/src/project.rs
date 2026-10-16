@@ -255,14 +255,17 @@ fn resolve_uncached(
         LinkSource::SketchAxis { name } => {
             vec![solidcraft_sketch::sketch_axis_geom(name).ok_or_else(|| DocError::Unknown(format!("sketch axis `{name}`")))?]
         }
-        LinkSource::Text { text, at, height, angle, font, style } if style.path.is_none() => {
+        LinkSource::Text { text, at, height, angle, font, style, .. } if style.path.is_none() => {
             solidcraft_sketch::text_geometry_styled(font.as_deref(), text, *at, *height, *angle, style, None)?
         }
         // Its path is a curve of its own sketch: set with the sketch (`Sketch::text_source_geometry`).
         LinkSource::Text { .. } => return Err(DocError::Invalid("a text on a path is set with its sketch".into())),
         LinkSource::Plane { name } => {
-            let pr =
-                if Plane::named(name).is_some() { PlaneRef::Origin { name: name.clone() } } else { PlaneRef::Construction { name: name.clone() } };
+            let pr = if Plane::named(name).is_some() {
+                PlaneRef::Origin { name: name.clone() }
+            } else {
+                PlaneRef::Construction { name: name.clone().into() }
+            };
             let other = doc.resolve_plane_in(vals, &pr, 0, Some(st)).map_err(|_| lost(&format!("plane {name}")))?;
             plane_trace(plane, &other).into_iter().collect()
         }

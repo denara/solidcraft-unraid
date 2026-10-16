@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::expr::{self, Kind, ParamDef, Value};
+use crate::expr::{self, Expr, Kind, ParamDef, Value};
 use crate::walk::Walk;
 use crate::{DocError, Document, FeatureKind, MAX_PARAMS, Result};
 
@@ -23,7 +23,7 @@ pub(crate) enum ExprRole {
 
 impl FeatureKind {
     /// The feature's numeric inputs: (label, expression, kind), in a fixed order.
-    pub fn inputs_mut(&mut self) -> Vec<(&'static str, &mut String, Kind)> {
+    pub fn inputs_mut(&mut self) -> Vec<(&'static str, &mut Expr, Kind)> {
         let mut v = Vec::new();
         self.walk_exprs_mut(&mut |(label, e, kind, role)| {
             if role == ExprRole::Input {
@@ -38,7 +38,31 @@ impl FeatureKind {
         let mut v = Vec::new();
         self.walk_exprs(&mut |(label, e, kind, role)| {
             if role == ExprRole::Input {
-                v.push((label, e.clone(), kind));
+                v.push((label, e.to_string(), kind));
+            }
+        });
+        v
+    }
+
+    /// The coordinates of the points that place the feature: a primitive's position, an
+    /// explicit plane's origin. They are not inputs (no parameter names), but follow
+    /// parameters as inputs do.
+    pub fn placement_exprs_mut(&mut self) -> Vec<&mut Expr> {
+        let mut v = Vec::new();
+        self.walk_exprs_mut(&mut |(_, e, _, role)| {
+            if role == ExprRole::Placement {
+                v.push(e);
+            }
+        });
+        v
+    }
+
+    /// Read-only view of [`FeatureKind::placement_exprs_mut`].
+    pub fn placement_exprs(&self) -> Vec<&str> {
+        let mut v = Vec::new();
+        self.walk_exprs(&mut |(_, e, _, role)| {
+            if role == ExprRole::Placement {
+                v.push(e.as_str());
             }
         });
         v
@@ -236,7 +260,7 @@ impl Document {
         if let Some(f) = next.features.get_mut(i)
             && let Some((_, e, _)) = f.kind.inputs_mut().into_iter().nth(k)
         {
-            *e = expr_s.clone();
+            *e = expr_s.clone().into();
         }
         if let Some(c) = comment {
             next.param_comments.insert(name.to_string(), c.to_string());
@@ -284,7 +308,7 @@ impl Document {
             if *target != normalized {
                 changed.insert(name.clone());
             }
-            *target = normalized;
+            *target = normalized.into();
         }
         let (_, errors) = next.param_values();
         for (name, error) in errors {
@@ -350,6 +374,25 @@ impl Document {
             }
         }
         rows
+    }
+
+    /// Move user parameter `name` to just before (or with `after`, just after) user parameter
+    /// `target`: the order the Parameters dialog lists them in. Nothing else changes.
+    pub fn move_user_param(&mut self, name: &str, target: &str, after: bool) -> Result<()> {
+        fn user(params: &[crate::Param], n: &str) -> Option<usize> {
+            params.iter().position(|p| p.name == n && !p.model)
+        }
+        let (Some(from), Some(_)) = (user(&self.params, name), user(&self.params, target)) else {
+            let missing = if user(&self.params, name).is_none() { name } else { target };
+            return Err(DocError::Unknown(format!("user parameter `{missing}`")));
+        };
+        if name == target {
+            return Err(DocError::Invalid("a parameter cannot move next to itself".into()));
+        }
+        let moved = self.params.remove(from);
+        let at = user(&self.params, target).map_or(self.params.len(), |i| if after { i + 1 } else { i });
+        self.params.insert(at, moved);
+        Ok(())
     }
 
     pub fn set_favorite(&mut self, name: &str, on: bool) -> Result<()> {
@@ -556,13 +599,18 @@ impl Document {
                     }
                 }
             }
-            if f.kind.point_expr().is_some_and(|p| p.iter().any(|e| expr::references(e).iter().any(|r| r == name))) {
+            if f.kind.placement_exprs().iter().any(|e| expr::references(e).iter().any(|r| r == name)) {
                 out.push(ParamUser::Feature { feature: f.id, name: f.name.clone(), input: "Position".into() });
             }
             if let FeatureKind::Sketch { sketch, .. } = &f.kind {
                 for c in &sketch.constraints {
                     if c.param.as_deref() == Some(name) {
                         out.push(ParamUser::Dimension { feature: f.id, name: f.name.clone(), constraint: c.id.clone() });
+                    }
+                }
+                for (what, e) in sketch.text_exprs() {
+                    if expr::references(e).iter().any(|r| r == name) {
+                        out.push(ParamUser::Feature { feature: f.id, name: f.name.clone(), input: what.to_string() });
                     }
                 }
             }
@@ -622,17 +670,17 @@ impl Document {
                     *x = new.to_string();
                 }
             }
-            for e in f.kind.point_expr_mut().into_iter().flatten() {
+            for e in f.kind.placement_exprs_mut() {
                 let r = expr::rename_reference(e, old, new);
                 if r != *e {
-                    *e = r;
+                    *e = r.into();
                     n += 1;
                 }
             }
             for (_, e, _) in f.kind.inputs_mut() {
                 let r = expr::rename_reference(e, old, new);
                 if r != *e {
-                    *e = r;
+                    *e = r.into();
                     n += 1;
                 }
             }
@@ -640,6 +688,13 @@ impl Document {
                 for c in &mut sketch.constraints {
                     if c.param.as_deref() == Some(old) {
                         c.param = Some(new.to_string());
+                        n += 1;
+                    }
+                }
+                for e in sketch.text_exprs_mut() {
+                    let r = expr::rename_reference(e, old, new);
+                    if r != *e {
+                        *e = r;
                         n += 1;
                     }
                 }
@@ -698,6 +753,7 @@ impl Document {
             let mut names: BTreeSet<String> = f.param_names.iter().filter(|n| !n.is_empty()).cloned().collect();
             if let FeatureKind::Sketch { sketch, .. } = &f.kind {
                 names.extend(sketch.constraints.iter().filter_map(|c| c.param.clone()));
+                names.extend(sketch.text_exprs().into_iter().flat_map(|(_, e)| expr::references(e)));
             }
             out.extend(names.into_iter().map(|n| (format!("Feature:{}", f.name), n)));
         }
@@ -725,6 +781,7 @@ impl Document {
             hit |= f.kind.expressions().iter().any(|e| expr::references(e).iter().any(|r| affected.contains(r)));
             if let FeatureKind::Sketch { sketch, .. } = &f.kind {
                 hit |= sketch.constraints.iter().any(|c| c.param.as_ref().is_some_and(|p| affected.contains(p)));
+                hit |= sketch.text_exprs().iter().any(|(_, e)| expr::references(e).iter().any(|r| affected.contains(r)));
             }
             if hit {
                 out.push(f.id);

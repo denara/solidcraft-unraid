@@ -11,6 +11,14 @@
 //! two panels that is no bend is cut open: each panel ends square to the sheet, half the rule's
 //! gap from the plane halfway between the two.
 //!
+//! The bends on the fixed face are finished as the flanges of one edge flange feature are: where
+//! two meet at a corner of it, their walls are closed with the rule's gap and the corner gets the
+//! rule's corner relief (round, rectangular, a tear, or the notch the bends leave), and where one
+//! ends beside more of the fixed face, the rule's bend relief is cut there. A wall that stands on
+//! part of an edge of the fixed face (its outside in one plane with the plate's edge, which runs
+//! on past it a strip no taller than the bend's setback) bends only where it stands: the strip is
+//! the fixed face's own edge.
+//!
 //! A bend can also be a chamfer: a flat strip between two faces, as a model without bend radii
 //! draws a bend (the chord of its arc). Picked in its middle, the strip is no face of the sheet:
 //! the faces on either side are taken out to where their planes meet, and that line is the
@@ -37,7 +45,7 @@
 //! Not supported yet: curved faces other than bends (rolled sheet), holes and pockets that reach
 //! into a bend, pockets deeper than half the sheet or with a step or a hole in their floor, round
 //! edges that end at a bend or a cut edge, loops of bends, two faces that meet along more than
-//! one edge.
+//! one edge, a wall on part of an edge of a face other than the fixed one.
 
 use std::collections::BTreeMap;
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
@@ -45,7 +53,7 @@ use std::f64::consts::{FRAC_PI_2, PI, TAU};
 use solidcraft_geom::{Loop2, Mesh, Plane, Region2, Seg2, Vec2, Vec3};
 use solidcraft_kernel::{Body, FaceSurface, face_surface};
 
-use super::{FlatWork, RuleValues, SheetBody, SheetFlange, base_flange, point_in, polys_cross, signed_area, snap};
+use super::{FlatWork, ReliefOverride, RuleValues, SheetBody, SheetFlange, base_flange, point_in, polys_cross, signed_area, snap};
 use crate::{DocError, ModelBody, Result, apply_point, mat_inverse};
 
 const MAX_BENDS: usize = 1000;
@@ -500,6 +508,96 @@ fn inset(pts: &[Vec2], by: &[f64]) -> Result<(Vec<Vec2>, Vec<Option<usize>>)> {
     Ok((out, from))
 }
 
+/// A wall standing on part of an edge of the fixed face: where the outline of `wall`, the face
+/// across a bend from the fixed face `base` (`ids`: the two faces), leaves the bend's edge up a
+/// strip no taller than the bend's setback `by`, runs back along the edge and climbs the wall's
+/// end, the strip is the fixed face's own edge (a plate's edge face in one plane with the outside
+/// of a wall that stands on part of it), which the setback would use up. It is cut off the wall,
+/// whose bend's edge then ends where the line of the wall's end meets it, and the fixed face's
+/// edge is split there: the pieces beside the wall are no bend. `bend` says whether a face is a
+/// bend of the wall. Any other wall is left as it is.
+fn end_at_wall(base: &mut Face, wall: &mut Face, ids: (usize, usize), by: f64, bend: &dyn Fn(usize) -> bool, tol: f64) {
+    let (m, n) = (wall.pts.len(), base.pts.len());
+    let at_wall: Vec<usize> = (0..m).filter(|i| wall.across.get(*i).copied().flatten() == Some(ids.0)).collect();
+    let at_base: Vec<usize> = (0..n).filter(|i| base.across.get(*i).copied().flatten() == Some(ids.1)).collect();
+    let (&[k], &[i]) = (at_wall.as_slice(), at_base.as_slice()) else { return };
+    if m < 5 {
+        return;
+    }
+    // Corner `j` and edge `j` (from corner `j`) counted from the bend's edge on.
+    let pt = |j: usize| wall.pts.get((k + j) % m).copied().unwrap_or_default();
+    let (p, q) = (pt(0), pt(1));
+    let Some(d) = (q - p).normalized() else { return };
+    // Up the wall from the bend's edge (the outline runs counter-clockwise about the normal), and
+    // along the edge.
+    let up = |x: Vec3| (x - p).dot(wall.n.cross(d));
+    let along = |x: Vec3| (x - p).dot(d);
+    let free = |j: usize| {
+        let j = (k + j) % m;
+        wall.round.get(j).is_some_and(Option::is_none) && wall.across.get(j).copied().flatten().is_none_or(|g| !bend(g))
+    };
+    let low = |x: Vec3| up(x) > tol && up(x) <= by + tol;
+    // A strip from an end of the bend's edge up to `x1`, back along the edge (`back`: the way it
+    // runs) to `x2`, then the wall's end up to `x3`: where the line of that end meets the edge.
+    let foot = |x1: Vec3, x2: Vec3, x3: Vec3, back: f64| {
+        let rise = up(x3) - up(x2);
+        (low(x1) && low(x2) && (x2 - x1).dot(d) * back > tol && rise > tol).then(|| x2 - (x3 - x2) * (up(x2) / rise))
+    };
+    // At the edge's end the strip is edges 1 and 2, the wall's end edge 3; at its start the strip
+    // is edges m - 1 and m - 2, the wall's end edge m - 3.
+    let ok = |js: [usize; 3]| js.iter().all(|j| free(*j));
+    let end = if ok([1, 2, 3]) { foot(pt(2), pt(3), pt(4), -1.0) } else { None };
+    let start = if ok([m - 1, m - 2, m - 3]) { foot(pt(m - 1), pt(m - 2), pt(m - 3), 1.0) } else { None };
+    let (p1, q1) = (start.unwrap_or(p), end.unwrap_or(q));
+    let len = along(q);
+    let inside = |x: Option<Vec3>| x.is_none_or(|x| along(x) > tol && along(x) < len - tol);
+    if (start.is_none() && end.is_none())
+        || !inside(start)
+        || !inside(end)
+        || along(q1) - along(p1) <= tol
+        || (start.is_some() && end.is_some() && m < 7)
+    {
+        return;
+    }
+    // The wall: the strips' corners and edges go, the bend's edge runs from `p1` to `q1`.
+    let (mut corners_out, mut edges_out) = (Vec::new(), Vec::new());
+    if end.is_some() {
+        corners_out.extend([2, 3]);
+        edges_out.extend([1, 2]);
+    }
+    if start.is_some() {
+        corners_out.extend([m - 1, m - 2]);
+        edges_out.extend([m - 1, m - 2]);
+    }
+    if let Some(x) = wall.pts.get_mut(k) {
+        *x = p1;
+    }
+    if let Some(x) = wall.pts.get_mut((k + 1) % m) {
+        *x = q1;
+    }
+    let kept = |j: usize, out: &[usize]| !out.contains(&((j + m - k) % m));
+    wall.pts = wall.pts.iter().enumerate().filter(|(j, _)| kept(*j, &corners_out)).map(|(_, x)| *x).collect();
+    wall.across = wall.across.iter().enumerate().filter(|(j, _)| kept(*j, &edges_out)).map(|(_, x)| *x).collect();
+    wall.round = wall.round.iter().enumerate().filter(|(j, _)| kept(*j, &edges_out)).map(|(_, x)| *x).collect();
+    // The fixed face's edge: the bend from `p1` to `q1` (it runs the other way along it), no bend
+    // beside it.
+    let (Some(&a), Some(&b)) = (base.pts.get(i), base.pts.get((i + 1) % n)) else { return };
+    let from_a = |x: Vec3| (x - a).dot(b - a);
+    let (x, y) = if from_a(p1) < from_a(q1) { (p1, q1) } else { (q1, p1) };
+    let mut pieces: Vec<(Vec3, Option<usize>)> = Vec::with_capacity(3);
+    if x.dist(a) > tol {
+        pieces.push((a, None));
+    }
+    pieces.push((if x.dist(a) > tol { x } else { a }, Some(ids.1)));
+    if y.dist(b) > tol {
+        pieces.push((y, None));
+    }
+    let count = pieces.len();
+    base.pts.splice(i..=i, pieces.iter().map(|(x, _)| *x));
+    base.across.splice(i..=i, pieces.iter().map(|(_, g)| *g));
+    base.round.splice(i..=i, std::iter::repeat_n(None, count));
+}
+
 /// Give flange `i` its panel: `outline` in flat coordinates, counter-clockwise, its edge at the
 /// bend first trimmed to the end of the bend zone.
 fn set_panel(sh: &mut SheetBody, i: usize, outline: &[Vec2]) {
@@ -574,7 +672,8 @@ pub fn bend_edge_names(st: &crate::ModelState, body: &str, pts: &[Vec3]) -> Vec<
 /// Convert body `mb` to a sheet under the rule `rule` with values `rv`: `face` is a point on the
 /// fixed face and `bends` are points on the sharp edges that become bends, in the middle of
 /// chamfers or on bend cylinders that do (the body's coordinates, mm). See the module docs.
-pub fn convert_body(mb: &ModelBody, rule: &str, rv: &RuleValues, face: Vec3, bends: &[Vec3]) -> Result<SheetBody> {
+/// Returns the sheet and a note for every corner or end of a bend not finished as the rule says.
+pub fn convert_body(mb: &ModelBody, rule: &str, rv: &RuleValues, face: Vec3, bends: &[Vec3]) -> Result<(SheetBody, Vec<String>)> {
     if bends.is_empty() || bends.len() > MAX_BENDS {
         return err(format!("pick 1…{MAX_BENDS} bend edges"));
     }
@@ -696,6 +795,20 @@ pub fn convert_body(mb: &ModelBody, rule: &str, rv: &RuleValues, face: Vec3, ben
         .and_then(|(a, b)| Some((*a, (*b - *a).normalized()?)))
         .and_then(|(a, x)| Plane::new(a, x, x.cross(base.face.n)))
         .ok_or_else(|| DocError::Invalid("the fixed face has no plane".into()))?;
+    // A wall on part of an edge of the fixed face bends only where it stands (a bend picked as a
+    // chamfer or a cylinder is taken as it is).
+    let walls: Vec<(usize, f64)> = panels.iter().filter(|(_, p)| p.parent == Some(f0)).map(|(g, p)| (*g, p.setback)).collect();
+    for (g, by) in walls {
+        if chamfers.iter().any(|c| (c.a, c.b) == (f0, g) || (c.a, c.b) == (g, f0)) {
+            continue;
+        }
+        let kids: Vec<usize> = panels.iter().filter(|(_, p)| p.parent == Some(g)).map(|(h, _)| *h).collect();
+        let Some(mut wall) = panels.remove(&g) else { continue };
+        if let Some(base) = panels.get_mut(&f0) {
+            end_at_wall(&mut base.face, &mut wall.face, (f0, g), by, &|h| h == f0 || kids.contains(&h), tol);
+        }
+        panels.insert(g, wall);
+    }
     let mut sh = base_flange(&mb.name, rule, &RuleValues { thickness: t, ..*rv }, frame, Region2::default());
     // How far behind a face of the sheet the body's face `g` starts and ends: a hole's wall
     // reaches through the sheet, a pocket's ends on its floor, an island's starts at the face.
@@ -872,7 +985,25 @@ pub fn convert_body(mb: &ModelBody, rule: &str, rv: &RuleValues, face: Vec3, ben
             queue.push((g, Some(sh.flanges.len() - 1)));
         }
     }
-    Ok(sh)
+    // The bends on the fixed face finished as an edge flange feature finishes its own
+    // (`SheetBody::add_flanges_each`): the rule's bend relief where one ends beside more of the
+    // fixed face; where two meet at a corner of it, their walls closed with the rule's gap (which
+    // the cuts above already are) and the rule's corner relief.
+    let made: Vec<usize> = (0..sh.flanges.len()).collect();
+    let mut notes = Vec::new();
+    for &i in &made {
+        notes.extend(sh.relieve_bend_ends(i, (false, false)));
+    }
+    let corners = sh.corners(&made);
+    let mut closed = Vec::with_capacity(corners.len());
+    for k in &corners {
+        match sh.close_corner(k) {
+            Ok(()) => closed.push(*k),
+            Err(why) => notes.push(format!("the corner at {} stays cut open: {why}", sh.shown(k.c))),
+        }
+    }
+    notes.extend(sh.relieve_corners(&corners, &closed, ReliefOverride::default()));
+    Ok((sh, notes))
 }
 
 #[cfg(test)]

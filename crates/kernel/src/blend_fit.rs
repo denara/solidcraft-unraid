@@ -389,7 +389,78 @@ pub(crate) fn accept(input: &Body, out: Body, edges: &[Vec3], size: Size) -> Res
     }
     let sel = select(input, edges)?;
     check_in(&sel, size)?;
-    volume_in(&sel, input, out, size)
+    let out = volume_in(&sel, input, out, size)?;
+    right_way(input, out, edges, size)
+}
+
+/// Whether the edge of `body` nearest `p` is convex (`Some(true)`: a chamfer takes material
+/// away) or concave (`Some(false)`: it fills), from the two faces' outward normals and the
+/// directions into each face across the edge at `p`. `None` unless that is clear-cut: faces
+/// meeting at a few degrees of tangent or of a knife edge, an edge not between two faces.
+fn convex_at(body: &Body, p: Vec3) -> Option<bool> {
+    use mt::{BoundedCurve, ParametricCurve, SearchNearestParameter};
+    let tol = (body.size() * 1e-4).max(1e-4);
+    let (i, _) = body.nearest_edge(p, tol).ok()??;
+    let edge = Body::unique_edges(&body.solid).into_iter().nth(i)?;
+    let mut sides = Vec::new();
+    for f in body.solid.face_iter() {
+        for e in f.boundary_iters().into_iter().flatten().filter(|e| e.id() == edge.id()) {
+            let c = e.oriented_curve();
+            let (t0, t1) = c.range_tuple();
+            let t = c.search_nearest_parameter(crate::body::p3(p), None, 100)?.clamp(t0.min(t1), t0.max(t1));
+            let d = c.der(t);
+            let dir = Vec3::new(d.x, d.y, d.z).normalized()?;
+            let (_, n, _) = crate::curveblend::project(f, p, None)?;
+            // A face's boundary runs counter-clockwise about its outward normal: its inside is
+            // to the left of the edge.
+            sides.push((n, n.cross(dir).normalized()?));
+        }
+    }
+    let [(n1, t1), (n2, t2)] = sides[..] else { return None };
+    // About 3°: the faces neither nearly tangent nor folded onto each other.
+    const CLEAR: f64 = 0.05;
+    if t1.dot(t2) > 1.0 - CLEAR || t1.dot(t2) < -1.0 + CLEAR {
+        return None;
+    }
+    let (a, b) = (n1.dot(t2), n2.dot(t1));
+    if a < -CLEAR && b < -CLEAR {
+        Some(true)
+    } else if a > CLEAR && b > CLEAR {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// A chamfer of convex edges takes material away and one of concave edges fills it: a result
+/// that went the other way (a chamfer on a curved edge running off a face it skims, which the
+/// wedges can't bound) is refused rather than kept. Rounds are left to the wedges: a round
+/// rolled along a smooth chain may run on round convex and concave stretches alike.
+fn right_way(input: &Body, out: Body, edges: &[Vec3], size: Size) -> Result<Body> {
+    if matches!(size, Size::Round(_)) {
+        return Ok(out);
+    }
+    let ways: Option<Vec<bool>> = edges.iter().map(|p| convex_at(input, *p)).collect();
+    let Some(ways) = ways else { return Ok(out) };
+    let (convex, concave) = (ways.iter().all(|w| *w), ways.iter().all(|w| !*w));
+    if !(convex || concave) {
+        return Ok(out);
+    }
+    let (Ok(a), Ok(b)) = (crate::measure(input), crate::measure(&out)) else { return Ok(out) };
+    let slack = a.volume.abs() * 1e-5 + 1e-6;
+    let grew = b.volume - a.volume;
+    if (convex && grew > slack) || (concave && grew < -slack) {
+        return Err(KernelError::TooLarge(format!(
+            "{} mm is too large for this {}: on {} edge it would {} the part by {} mm³ instead (it runs off a face next to the edge)",
+            show(size.value()),
+            size.what(),
+            if convex { "a convex" } else { "a concave" },
+            if convex { "grow" } else { "shrink" },
+            // A fraction of a mm³ is typical here: to the hundredth.
+            show((grew.abs() * 100.0).round() / 100.0)
+        )));
+    }
+    Ok(out)
 }
 
 /// After a blend of `edges` at `size` turned `input` into `out`: refused when the volume taken

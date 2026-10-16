@@ -17,7 +17,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
 web-time = { workspace = true }
-image = { workspace = true, features = ["jpeg"] }
+image = { workspace = true, features = ["jpeg", "ico"] }
 ttf-parser = { workspace = true }
 semver = { workspace = true }
 # Updates: the downloaded package's SHA-256 (against the release's SHA256SUMS.txt), its optional

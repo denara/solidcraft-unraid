@@ -154,6 +154,20 @@ pub(super) fn hits(support: &Shape, seg: &Seg2, budget: &mut usize) -> Result<Ve
     Ok(out)
 }
 
+/// How far an infinite line (#1359) reaches each way from `near`, as a boundary: well past any
+/// sketch geometry.
+const ENDLESS: f64 = 1e7;
+
+/// An infinite line's piece `seg` as a boundary: the line through it, as a segment reaching
+/// [`ENDLESS`] each way from the point of the line nearest `near`. Other pieces are returned as
+/// they are.
+pub(super) fn endless(seg: &Seg2, near: Vec2) -> Seg2 {
+    let Seg2::Line { a, b } = *seg else { return *seg };
+    let Some(dir) = (b - a).normalized() else { return *seg };
+    let mid = a + dir * (near - a).dot(dir);
+    Seg2::Line { a: mid - dir * ENDLESS, b: mid + dir * ENDLESS }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

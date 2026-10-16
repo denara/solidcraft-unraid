@@ -410,8 +410,8 @@ pub fn commands(app: &SolveApp, k: &Pl, inputs: &[SelInput], extra: &Map<String,
     Ok(vec![(cmd.to_string(), p)])
 }
 
-fn s(o: &Option<String>) -> String {
-    o.clone().unwrap_or_default()
+fn s(o: &Option<solidcraft_engine::doc::Expr>) -> String {
+    o.as_deref().map(str::to_string).unwrap_or_default()
 }
 
 /// The dialog editing a plastic feature, filled from it.
@@ -434,7 +434,7 @@ pub fn for_feature(app: &SolveApp, kind: &FeatureKind) -> Option<(Kind, Vec<SelI
             rib_offset,
             body,
         } => {
-            extra.insert("direction".into(), pt(*direction));
+            extra.insert("direction".into(), pt(direction.0));
             if let Some(b) = body {
                 extra.insert("body".into(), json!(b));
             }
@@ -452,63 +452,63 @@ pub fn for_feature(app: &SolveApp, kind: &FeatureKind) -> Option<(Kind, Vec<SelI
                 rib_offset: ro,
             } = &mut b
             {
-                *d = diameter.clone();
-                *h = height.clone();
+                *d = diameter.to_string();
+                *h = height.to_string();
                 *hd = s(hole_diameter);
                 *hp = s(hole_depth);
                 *dr = s(draft);
                 *f = s(fillet);
-                *r = ribs.clone().unwrap_or_else(|| "0".into());
+                *r = ribs.as_deref().map(str::to_string).unwrap_or_else(|| "0".into());
                 for (slot, v) in [(rt, rib_thickness), (rl, rib_length), (ro, rib_offset)] {
                     if let Some(v) = v {
-                        *slot = v.clone();
+                        *slot = v.to_string();
                     }
                 }
             }
-            (b, "plastic.boss", *position)
+            (b, "plastic.boss", position.0)
         }
         FeatureKind::Lip { face, width, height, groove, gap, outside, body } => {
             if let Some(b) = body {
                 extra.insert("body".into(), json!(b));
             }
-            (Pl::Lip { groove: *groove, width: width.clone(), height: height.clone(), gap: s(gap), outside: *outside }, "plastic.lip", *face)
+            (Pl::Lip { groove: *groove, width: width.to_string(), height: height.to_string(), gap: s(gap), outside: *outside }, "plastic.lip", face.0)
         }
         FeatureKind::SnapFit { position, direction, hook, length, thickness, width, catch_depth, catch_length, body } => {
-            extra.insert("direction".into(), pt(*direction));
+            extra.insert("direction".into(), pt(direction.0));
             if let Some(b) = body {
                 extra.insert("body".into(), json!(b));
             }
-            let h = hook_dirs(*direction).iter().position(|(_, d)| d.dist(*hook) < 1e-6);
+            let h = hook_dirs(direction.0).iter().position(|(_, d)| d.dist(hook.0) < 1e-6);
             if h.is_none() {
-                extra.insert("hook".into(), pt(*hook));
+                extra.insert("hook".into(), pt(hook.0));
             }
             let f = Pl::SnapFit {
                 hook: h.unwrap_or(0),
-                length: length.clone(),
-                thickness: thickness.clone(),
-                width: width.clone(),
-                catch_depth: catch_depth.clone(),
-                catch_length: catch_length.clone(),
+                length: length.to_string(),
+                thickness: thickness.to_string(),
+                width: width.to_string(),
+                catch_depth: catch_depth.to_string(),
+                catch_length: catch_length.to_string(),
             };
-            (f, "plastic.snap_fit", *position)
+            (f, "plastic.snap_fit", position.0)
         }
         FeatureKind::Rest { position, direction, along, width, length, height, draft, thickness, body } => {
-            extra.insert("direction".into(), pt(*direction));
+            extra.insert("direction".into(), pt(direction.0));
             if let Some(a) = along {
-                extra.insert("along".into(), pt(*a));
+                extra.insert("along".into(), pt(a.0));
             }
             if let Some(b) = body {
                 extra.insert("body".into(), json!(b));
             }
             let r = Pl::Rest {
                 round: length.is_none(),
-                width: width.clone(),
-                length: length.clone().unwrap_or_else(|| "15 mm".into()),
-                height: height.clone(),
+                width: width.to_string(),
+                length: length.as_deref().map(str::to_string).unwrap_or_else(|| "15 mm".into()),
+                height: height.to_string(),
                 draft: s(draft),
                 thickness: s(thickness),
             };
-            (r, "plastic.rest", *position)
+            (r, "plastic.rest", position.0)
         }
         _ => return None,
     };

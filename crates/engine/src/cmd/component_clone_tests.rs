@@ -376,7 +376,7 @@ fn generated_copy_parameters_cannot_heal_an_unrelated_missing_reference() {
     let feature = s.doc_mut().feature_mut(broken).unwrap();
     feature.component = 0;
     if let solidcraft_doc::FeatureKind::Box { width, .. } = &mut feature.kind {
-        *width = missing;
+        *width = missing.into();
     }
     s.refresh();
     let original_error = s.model.result(broken).unwrap().error.clone();

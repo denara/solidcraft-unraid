@@ -546,6 +546,129 @@ fn merge(dst: &mut Value, src: &Value, depth: usize) {
     }
 }
 
+/// One step of a path into a feature's JSON definition.
+#[derive(Clone)]
+enum Step {
+    Key(String),
+    Index(usize),
+}
+
+fn path_text(path: &[Step]) -> String {
+    let mut t = String::new();
+    for s in path {
+        match s {
+            Step::Key(k) if t.is_empty() => t.push_str(k),
+            Step::Key(k) => t.push_str(&format!(".{k}")),
+            Step::Index(i) => t.push_str(&format!("[{i}]")),
+        }
+    }
+    t
+}
+
+fn at_path<'a>(v: &'a Value, path: &[Step]) -> Option<&'a Value> {
+    path.iter().try_fold(v, |v, s| match s {
+        Step::Key(k) => v.get(k),
+        Step::Index(i) => v.get(i),
+    })
+}
+
+/// Does the stored feature read the field at `path` of `merged` (a feature's JSON with the edit
+/// merged in)? serde skips a field it doesn't know whatever its value, but no field type takes a
+/// flag, a text and nested lists alike.
+fn reads_field(merged: &Value, path: &[Step]) -> bool {
+    let Some((last, parent)) = path.split_last() else { return true };
+    [json!(true), json!("\u{1}"), json!([[[]]])].into_iter().any(|probe| {
+        let mut v = merged.clone();
+        let slot = parent.iter().try_fold(&mut v, |v, s| match s {
+            Step::Key(k) => v.get_mut(k),
+            Step::Index(i) => v.get_mut(*i),
+        });
+        match (slot, last) {
+            (Some(Value::Object(o)), Step::Key(k)) => {
+                o.insert(k.clone(), probe);
+            }
+            (Some(Value::Array(a)), Step::Index(i)) => match a.get_mut(*i) {
+                Some(x) => *x = probe,
+                None => return false,
+            },
+            _ => return false,
+        }
+        serde_json::from_value::<Feature>(v).is_err()
+    })
+}
+
+/// The first field of `set` that the feature's definition doesn't have. A field the definition
+/// shows before or after the edit is known; one it leaves out (an unset option, a value at its
+/// default) is known when the stored feature reads it. Setting an absent field to `null`
+/// changes nothing either way and passes.
+fn unknown_field(
+    set: &Value,
+    before: Option<&Value>,
+    after: Option<&Value>,
+    merged: &Value,
+    path: &mut Vec<Step>,
+    depth: usize,
+) -> Option<Vec<Step>> {
+    if depth > 16 {
+        return None;
+    }
+    let check = |step: Step, v: &Value, path: &mut Vec<Step>| {
+        let one = [step];
+        let (b, a) = (before.and_then(|x| at_path(x, &one)), after.and_then(|x| at_path(x, &one)));
+        let [step] = one;
+        path.push(step);
+        let found = if b.is_none() && a.is_none() && !v.is_null() && !reads_field(merged, path) {
+            Some(path.clone())
+        } else {
+            unknown_field(v, b, a, merged, path, depth + 1)
+        };
+        path.pop();
+        found
+    };
+    match set {
+        Value::Object(o) => o.iter().find_map(|(k, v)| check(Step::Key(k.clone()), v, path)),
+        Value::Array(items) => items.iter().enumerate().take(10_000).find_map(|(i, v)| check(Step::Index(i), v, path)),
+        _ => None,
+    }
+}
+
+/// "unknown field `offset`; ConstructionPlane has `plane.base.name`, `plane.distance`…": the
+/// editable fields where it was given, as paths.
+fn unknown_field_message(field: &[Step], def: &Value, type_name: &str) -> String {
+    fn leaves(v: &Value, prefix: &str, top: bool, depth: usize, out: &mut Vec<String>) {
+        match v {
+            Value::Object(o) if depth < 4 && !o.is_empty() => {
+                for (k, x) in o {
+                    if top && NOT_EDITABLE.contains(&k.as_str()) {
+                        continue;
+                    }
+                    let at = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
+                    leaves(x, &at, false, depth + 1, out);
+                }
+            }
+            _ if !prefix.is_empty() => out.push(format!("`{prefix}`")),
+            _ => {}
+        }
+    }
+    let parent = field.split_last().map(|(_, p)| p).unwrap_or_default();
+    let mut known = Vec::new();
+    if let Some(at) = at_path(def, parent) {
+        leaves(at, &path_text(parent), parent.is_empty(), 0, &mut known);
+    }
+    const SHOWN: usize = 40;
+    let more = known.len().saturating_sub(SHOWN);
+    known.truncate(SHOWN);
+    let mut list = known.join(", ");
+    if more > 0 {
+        list.push_str(&format!(" and {more} more"));
+    }
+    let field = path_text(field);
+    if list.is_empty() {
+        return format!("unknown field `{field}`; timeline.inspect lists {type_name}'s fields");
+    }
+    format!("unknown field `{field}`; {type_name} has {list} (timeline.inspect shows them with their values)")
+}
+
 /// `profiles` (also a loft section's) given as the feature commands take it (`"all"`,
 /// `[index]`, `[{curves}]`, `[{point}]`...) becomes the stored form; the stored form passes.
 fn command_profiles(set: &Value, cmd: &str) -> Result<Value> {
@@ -624,7 +747,7 @@ fn edit_feature(s: &mut Session, p: &Value) -> Result<Value> {
     let mut v = serde_json::to_value(&f).map_err(|e| EngineError::Other(e.to_string()))?;
     let set = &command_profiles(set, cmd)?;
     merge(&mut v, set, 0);
-    let mut nf: Feature = serde_json::from_value(v).map_err(|e| bad(cmd, format!("invalid feature: {e}")))?;
+    let mut nf: Feature = serde_json::from_value(v.clone()).map_err(|e| bad(cmd, format!("invalid feature: {e}")))?;
     nf.id = f.id;
     if let (FeatureKind::Extrude { extent: old, .. }, FeatureKind::Extrude { extent: new, .. }) = (&f.kind, &mut nf.kind)
         && old.direction != solidcraft_doc::Direction::Symmetric
@@ -636,8 +759,15 @@ fn edit_feature(s: &mut Session, p: &Value) -> Result<Value> {
     if std::mem::discriminant(&nf.kind) != std::mem::discriminant(&f.kind) {
         return Err(bad(cmd, "the feature type cannot change"));
     }
+    // serde drops fields the definition doesn't have without a word: refuse them, or a typo
+    // would report success and change nothing.
+    let after = serde_json::to_value(&nf).map_err(|e| EngineError::Other(e.to_string()))?;
+    let before = serde_json::to_value(&f).map_err(|e| EngineError::Other(e.to_string()))?;
+    if let Some(field) = unknown_field(set, Some(&before), Some(&after), &v, &mut Vec::new(), 0) {
+        return Err(bad(cmd, unknown_field_message(&field, &before, f.kind.type_name())));
+    }
     if let FeatureKind::BodyTransfer { bodies, from, to, transform } = &nf.kind {
-        solidcraft_doc::validate_body_transfer(&s.doc, bodies, *from, *to, transform)?;
+        solidcraft_doc::validate_body_transfer(&s.doc, &solidcraft_doc::plain(bodies), *from, *to, transform)?;
         nf.component = *to;
     }
     if let (FeatureKind::Sketch { sketch: a, .. }, FeatureKind::Sketch { sketch: b, .. }) = (&nf.kind, &f.kind)
@@ -653,22 +783,22 @@ fn edit_feature(s: &mut Session, p: &Value) -> Result<Value> {
         && a != b
     {
         let before = s.model.state_before(id);
-        nf.edge_refs = solidcraft_doc::edge_refs(&before, body, a);
-        nf.edge_names = solidcraft_doc::edge_names_for(&before, body, a);
+        nf.edge_refs = solidcraft_doc::edge_refs(&before, body, &solidcraft_doc::plain(a));
+        nf.edge_names = solidcraft_doc::edge_names_for(&before, body, &solidcraft_doc::plain(a));
     }
     // New or reordered flange edges: their names now, so each edge's own angle and height stay
     // with the edge they were given for.
     if let (FeatureKind::SheetFlange { edges: a, .. }, FeatureKind::SheetFlange { edges: b, .. }) = (&nf.kind, &f.kind) {
         let points = |e: &[solidcraft_doc::FlangeEdge]| e.iter().map(|x| x.point).collect::<Vec<_>>();
         if points(a) != points(b) {
-            nf.edge_names = solidcraft_doc::sheet::sheet_edge_names(&s.model.state_before(id), &points(a));
+            nf.edge_names = solidcraft_doc::sheet::sheet_edge_names(&s.model.state_before(id), &solidcraft_doc::plain(&points(a)));
         }
     }
     // New bend edges for a conversion: the names of the body's edges there now.
     if let (FeatureKind::SheetConvert { bends: a, body, .. }, FeatureKind::SheetConvert { bends: b, body: was, .. }) = (&nf.kind, &f.kind)
         && (a != b || body != was)
     {
-        nf.edge_names = solidcraft_doc::sheet::bend_edge_names(&s.model.state_before(id), body, a);
+        nf.edge_names = solidcraft_doc::sheet::bend_edge_names(&s.model.state_before(id), body, &solidcraft_doc::plain(a));
     }
     // Profiles picked by index or point are kept by their curves, as when the feature was made.
     if nf.kind.clone().profile_sels_mut() != f.kind.clone().profile_sels_mut() {
@@ -915,7 +1045,7 @@ fn redefine(s: &mut Session, p: &Value) -> Result<Value> {
         && before.body == after.body
         && before.path == after.path
         && before.author_path == after.author_path
-        && before.at.dist(after.at) < 1e-8
+        && before.at.dist(after.at.0) < 1e-8
     {
         *after = before.clone();
     }

@@ -77,7 +77,7 @@ fn hovered_face_point(h: &mut Harness, at: [f64; 2]) -> Vec3 {
 fn hole(h: &Harness) -> (u64, Vec3, bool) {
     let f = h.app.session.doc.features.last().unwrap();
     match &f.kind {
-        FeatureKind::Hole { position, points, .. } => (f.id, *position, points.is_some()),
+        FeatureKind::Hole { position, points, .. } => (f.id, position.0, points.is_some()),
         other => panic!("the last feature is not a hole: {}", other.type_name()),
     }
 }

@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use solidcraft_doc::Document;
-use solidcraft_doc::joints::{Assembly, JointOrigin, Snap};
+use solidcraft_doc::joints::{Assembly, Coupling, JointOrigin, Size, Snap};
 
 use crate::{EngineError, Result};
 
@@ -104,6 +104,14 @@ fn budget(assembly: &Assembly) -> Result<()> {
     }
     if !assembly.links.iter().all(|l| l.ratio.is_finite() && l.offset.is_finite()) {
         return Err(invalid("motion link contains non-finite values"));
+    }
+    for size in assembly.links.iter().filter_map(|l| l.coupling.as_ref()).flat_map(Coupling::sizes) {
+        match size {
+            Size::Length(v) if !v.is_finite() => return Err(invalid("motion link contains non-finite values")),
+            Size::Expr(e) => text(e)?,
+            Size::Circle(o) => finite_origin(o)?,
+            Size::Length(_) => {}
+        }
     }
     if references > MAX_REFERENCES {
         return Err(invalid("assembly references exceed the processing budget"));
@@ -291,9 +299,16 @@ pub(super) fn clone_assembly(
         if !touched_joints.contains(&old.a) && !touched_joints.contains(&old.b) {
             continue;
         }
+        let mut item = old.clone();
+        // A gear's picked round faces are on occurrences of the copy too.
+        let faces = item.coupling.as_mut().is_none_or(|c| {
+            c.sizes_mut().into_iter().all(|size| match size {
+                Size::Circle(o) => origin(o, occurrences, features, bodies).map(|new| *o = new).is_some(),
+                _ => true,
+            })
+        });
         match (joints.get(&old.a), joints.get(&old.b)) {
-            (Some(aa), Some(bb)) => {
-                let mut item = old.clone();
+            (Some(aa), Some(bb)) if faces => {
                 item.a = *aa;
                 item.b = *bb;
                 a.links.push(item);

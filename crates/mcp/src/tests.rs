@@ -10,6 +10,25 @@ fn server() -> Server {
     Server::new(Box::new(Headless::default()))
 }
 
+/// Screenshots are drawn on the GPU by the renderer the host installs (`solidcraft-cli mcp`); the
+/// tests install the same one. `false`, with the reason printed, on a machine without a GPU
+/// adapter: the screenshots are then left out of the test.
+fn renders() -> bool {
+    match solidcraft_gpu::capture::shared() {
+        Ok(c) => {
+            solidcraft_engine::capture::install(std::sync::Arc::new(move |scene, cam, w, h| {
+                c.rgba(scene, cam, w, h).map(|rgba| solidcraft_engine::capture::Picture { rgba, renderer: c.renderer() }).map_err(|e| e.to_string())
+            }));
+            true
+        }
+        Err(e @ solidcraft_gpu::GpuError::NoAdapter(_)) if std::env::var_os("SOLIDCRAFT_REQUIRE_GPU").is_none() => {
+            eprintln!("screenshots left out: {e}");
+            false
+        }
+        Err(e) => panic!("{e}"),
+    }
+}
+
 fn call(s: &mut Server, id: u64, method: &str, params: Value) -> Value {
     let line = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}).to_string();
     let r = s.handle_line(&line).expect("reply");
@@ -166,10 +185,12 @@ fn agent_builds_box_fillet_hole() {
     assert!(rel(volume(&mut s), expect) < 5e-4);
 
     // Look at it from the top: a real PNG comes back as an image block.
-    let img = tool(&mut s, "screenshot", json!({"view": "top", "width": 320, "height": 200}));
-    assert_eq!(img["type"], "image");
-    assert_eq!(img["mimeType"], "image/png");
-    assert!(img["data"].as_str().unwrap().starts_with("iVBORw0KGgo"), "not a PNG");
+    if renders() {
+        let img = tool(&mut s, "screenshot", json!({"view": "top", "width": 320, "height": 200}));
+        assert_eq!(img["type"], "image");
+        assert_eq!(img["mimeType"], "image/png");
+        assert!(img["data"].as_str().unwrap().starts_with("iVBORw0KGgo"), "not a PNG");
+    }
 
     // Export, save, start over, open.
     let dir = std::env::temp_dir().join(format!("solidcraft-mcp-test-{}", std::process::id()));
@@ -181,8 +202,10 @@ fn agent_builds_box_fillet_hole() {
     tool(&mut s, "export", json!({"path": stl.to_string_lossy(), "format": "stl"}));
     assert!(std::fs::metadata(&stl).unwrap().len() > 1000);
     let shot = dir.join("shot.png");
-    tool(&mut s, "screenshot", json!({"path": shot.to_string_lossy(), "width": 64, "height": 64}));
-    assert!(std::fs::metadata(&shot).unwrap().len() > 100);
+    if renders() {
+        tool(&mut s, "screenshot", json!({"path": shot.to_string_lossy(), "width": 64, "height": 64}));
+        assert!(std::fs::metadata(&shot).unwrap().len() > 100);
+    }
     let design = dir.join("part.solidcraft");
     tool(&mut s, "save", json!({"path": design.to_string_lossy()}));
     tool(&mut s, "new_design", json!({"name": "Empty"}));
@@ -214,7 +237,7 @@ fn open_stands_a_y_up_step_file_up() {
     assert_eq!(r["features"], 1, "{r}");
     assert!((height(&mut s) - 5.0).abs() < 1e-6, "as written");
     let r = tool(&mut s, "open", json!({"path": step, "up": "y", "names": "product"}));
-    assert_eq!(r["features"], 2, "the import and the turn: {r}");
+    assert_eq!(r["features"], 1, "the import, its component turned: {r}");
     assert!((height(&mut s) - 40.0).abs() < 1e-6, "Y became Z");
 
     for args in [json!({"path": step, "up": "x"}), json!({"path": step, "names": "label"}), json!({"path": step, "up": 1})] {
@@ -524,7 +547,9 @@ fn the_default_folders_are_the_designs_the_recovery_folder_and_the_scratch_folde
     tool(&mut s, "execute", json!({"command": "parameters.export", "params": {"path": at(&proj, "params.csv")}}));
     tool(&mut s, "save", json!({"path": at(&proj, "copy.solidcraft")}));
     tool(&mut s, "open", json!({"path": at(&proj, "part.solidcraft")}));
-    tool(&mut s, "screenshot", json!({"width": 32, "height": 32}));
+    if renders() {
+        tool(&mut s, "screenshot", json!({"width": 32, "height": 32}));
+    }
     tool(&mut s, "execute", json!({"command": "doc.recovery_list", "params": {"dir": recovery.to_string_lossy()}}));
     assert!(proj.join("part.step").exists() && proj.join("copy.solidcraft").exists());
     // Hidden files in it, and folders beside it, stay out of reach.
@@ -563,7 +588,9 @@ fn tool_calls_stay_inside_the_agents_folders() {
     tool(&mut s, "save", json!({"path": at(&root, "part.solidcraft")}));
     tool(&mut s, "export", json!({"path": at(&root, "part.step")}));
     tool(&mut s, "open", json!({"path": at(&root, "part.solidcraft")}));
-    tool(&mut s, "screenshot", json!({"path": at(&root, "shot.png"), "width": 64, "height": 64}));
+    if renders() {
+        tool(&mut s, "screenshot", json!({"path": at(&root, "shot.png"), "width": 64, "height": 64}));
+    }
     let escapes = vec![at(&out, "x.step"), at(&root, "../out/x.step")];
     #[cfg(unix)]
     let mut escapes = escapes;
@@ -644,7 +671,9 @@ fn short_names_child() {
     assert!(windows_refusal(&temp.to_string_lossy()).is_some_and(|why| why.contains("8.3")), "{}", temp.display());
     let mut s = Server::new(Box::new(Headless::default())).with_path_scope(Some(crate::agent_scope([])));
     tool(&mut s, "execute", json!({"command": "solid.box", "params": {"length": 10, "width": 10, "height": 10}}));
-    tool(&mut s, "screenshot", json!({"width": 32, "height": 32}));
+    if renders() {
+        tool(&mut s, "screenshot", json!({"width": 32, "height": 32}));
+    }
     tool(&mut s, "execute", json!({"command": "doc.recovery_list", "params": {}}));
     // An agent's own short spelling of the scratch folder stays refused.
     let scratch = crate::scratch_dir().unwrap();
@@ -687,6 +716,9 @@ fn a_bridged_request_carries_the_agents_folders() {
 /// standard view.
 #[test]
 fn screenshot_renders_a_saved_named_view() {
+    if !renders() {
+        return;
+    }
     let mut s = server();
     tool(&mut s, "execute", json!({"command": "solid.box", "params": {"length": 40, "width": 20, "height": 10}}));
     let camera = json!({"target": [20, 10, 5], "yaw": 0.5, "pitch": -0.6, "distance": 150});
@@ -710,6 +742,9 @@ fn screenshot_renders_a_saved_named_view() {
 /// `browser.visibility` stays out whatever `axes` says.
 #[test]
 fn screenshot_can_leave_the_grid_and_the_axes_out() {
+    if !renders() {
+        return;
+    }
     let mut s = server();
     tool(&mut s, "execute", json!({"command": "solid.box", "params": {"length": 40, "width": 30, "height": 20, "corner": [10, -15, -10]}}));
     let shot = |s: &mut Server, extra: Value| {
@@ -1372,4 +1407,22 @@ fn tool_annotations_tell_the_whole_truth() {
         assert_eq!(hints(name), (false, false, false), "{name}");
     }
     assert!(tools.iter().all(|t| t["annotations"]["readOnlyHint"].is_boolean()), "every tool is annotated");
+}
+
+/// `measure` with `items` (#1392): a sketch circle's diameter and radius, and two circles'
+/// centre-to-centre with the closest and farthest distances.
+#[test]
+fn measure_items_gives_diameters_and_centre_distances() {
+    let mut s = server();
+    tool(&mut s, "execute", json!({"command": "sketch.create", "params": {"plane": "XY"}}));
+    let a = tool(&mut s, "execute", json!({"command": "sketch.circle.center", "params": {"center": [0, 0], "radius": 3}}));
+    let b = tool(&mut s, "execute", json!({"command": "sketch.circle.center", "params": {"center": [30, 40], "radius": 2}}));
+    let id = |r: &Value| r["curves"][0].as_str().or(r["result"]["curves"][0].as_str()).unwrap().to_string();
+    let (a, b) = (id(&a), id(&b));
+    let one = tool(&mut s, "measure", json!({"items": [{"type": "sketch_curve", "id": a}]}));
+    assert_eq!((one["diameter"].as_f64(), one["radius"].as_f64()), (Some(6.0), Some(3.0)), "{one}");
+    let two = tool(&mut s, "measure", json!({"items": [{"type": "sketch_curve", "id": a}, {"type": "sketch_curve", "id": b}]}));
+    assert!((two["center_distance"].as_f64().unwrap() - 50.0).abs() < 1e-9, "{two}");
+    assert!((two["min"].as_f64().unwrap() - 45.0).abs() < 1e-9 && (two["max"].as_f64().unwrap() - 55.0).abs() < 1e-9, "{two}");
+    assert!(two["distance_mm"].is_number() && two["from"].is_array(), "{two}");
 }

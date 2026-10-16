@@ -25,7 +25,7 @@
   Esc or a click elsewhere closes the list. Clicking again on the same spot, with nothing changed
   in between, selects the next thing in that list. The
   wheel zooms at the cursor, the middle button pans and right-drag orbits freely (the mouse
-  preset in Preferences switches to SolidWorks, Inventor, Alias, Tinkercad, OpenSCAD or Touchpad style). On a
+  preset in Preferences switches to SolidWorks, Inventor, Alias, Blender, Tinkercad, OpenSCAD or Touchpad style). On a
   trackpad, pinch zooms and two-finger scroll pans (Navigation › Two-finger scroll pans;
   off: scroll zooms like the wheel); mouse wheels zoom and the thumb wheel pans sideways.
   Shift+middle orbits freely
@@ -45,7 +45,8 @@
   home, framing what is shown now (Navigation › **Middle double-click** can make it Fit, which
   keeps the orientation, or turn it off).
   Right-click for the marking menu: eight commands around the cursor, plus a
-  menu for whatever is under it.
+  menu for whatever is under it. Near the window's bottom or right edge a menu opens above or
+  to the left of the cursor, so it stays in view.
   Shaded views omit certified smooth joins between spline spans on extruded
   walls. Real creases, cap outlines and authored face splits remain visible.
   Wireframe retains its edge presentation, and hiding a join does not remove its CAD

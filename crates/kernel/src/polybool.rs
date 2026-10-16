@@ -356,6 +356,11 @@ pub fn faceted_boolean(a: &Body, b: &Mesh, op: BoolOp, tol: f64) -> Result<Optio
     // whether the pieces' boundaries come out consistent: try a few tolerances, and take the
     // first whose result is watertight and agrees with the complementary boolean (A − B and
     // A ∩ B add up to A; A ∪ B is A plus B less A ∩ B).
+    // The BSP takes each list's first polygon as its splitting plane. Facets in sweep order
+    // (a thread's groove, turn after turn) make every splitter cut nothing, so the tree is as
+    // deep as the list is long: quadratic time and memory, and a long thread ran out of depth
+    // (#1250). The same lists in a fixed shuffled order give a shallow tree.
+    let (pa, pb) = (shuffled(pa), shuffled(pb));
     let (va, vb) = (polys_volume(&pa), polys_volume(&pb));
     let mut last = KernelError::Failed("faceted boolean".into());
     for rel in [1e-8, 1e-7, 3e-8, 1e-9, 3e-7] {
@@ -381,6 +386,23 @@ pub fn faceted_boolean(a: &Body, b: &Mesh, op: BoolOp, tol: f64) -> Result<Optio
         }
     }
     Err(last)
+}
+
+/// `polys` in a fixed pseudo-random order (the same every run, so results are reproducible).
+fn shuffled(mut polys: Vec<Poly>) -> Vec<Poly> {
+    let mut state = 0x9E37_79B9_7F4A_7C15u64 ^ polys.len() as u64;
+    let mut next = || {
+        // SplitMix64.
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    };
+    for i in (1..polys.len()).rev() {
+        polys.swap(i, (next() % (i as u64 + 1)) as usize);
+    }
+    polys
 }
 
 /// Boolean of two all-planar bodies.
@@ -409,7 +431,7 @@ pub fn planar_boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Option<Body>> {
 /// two parallel planes holds `b` and none of `a`'s curved faces (a pocket cut beside a round
 /// hole): `a` is split across the slab, the middle piece takes the exact boolean, and the
 /// pieces outside are joined back on. `None` when no such slab exists.
-fn sliced_planar_boolean(a: &Body, b: &Body, op: BoolOp) -> Option<Result<Option<Body>>> {
+pub(crate) fn sliced_planar_boolean(a: &Body, b: &Body, op: BoolOp) -> Option<Result<Option<Body>>> {
     let pb = planar_polys(b, 1).ok()?;
     let size = a.size().max(b.size());
     let tol = (a.size() * 1e-3).max(1e-3);
@@ -424,6 +446,10 @@ fn sliced_planar_boolean(a: &Body, b: &Body, op: BoolOp) -> Option<Result<Option
         for p in mesh.tri(t)? {
             bx.add(p);
         }
+    }
+    // All planar: the exact boolean itself, not this.
+    if curved.is_empty() {
+        return None;
     }
     let mut tool = solidcraft_geom::Aabb3::EMPTY;
     for p in pb.iter().flat_map(|p| &p.v) {
@@ -482,6 +508,13 @@ fn sliced_planar_boolean(a: &Body, b: &Body, op: BoolOp) -> Option<Result<Option
         for (slot, (cut, keep_positive)) in [(2, (lo, true)), (4, (hi, false))] {
             let Some(x) = cut else { continue };
             let plane = solidcraft_geom::Plane::new(axis * x, u, w).ok_or_else(|| fail("plane"))?;
+            // Split along the plane (an imprint: no boolean); two booleans with half boxes
+            // where the split can't be sorted into one piece kept and the rest away.
+            if let Some((away, kept)) = split_beside(&middle, &plane, axis, x, keep_positive) {
+                outside.extend(away);
+                middle = kept;
+                continue;
+            }
             let (away, kept) = (crate::ops::half_box(&middle.0, &plane, !keep_positive)?, crate::ops::half_box(&middle.0, &plane, keep_positive)?);
             let (h_away, h_kept) = (recorded::kept(&away, slot, n), recorded::kept(&kept, slot + 1, n));
             if let Some(o) = crate::ops::boolean(&middle.0, &away, BoolOp::Intersect)? {
@@ -560,6 +593,41 @@ fn sliced_planar_boolean(a: &Body, b: &Body, op: BoolOp) -> Option<Result<Option
         recorded::join(pieces.into_iter().map(|(p, h)| (p, dropped(h))).collect(), &counts)
     };
     Some(run())
+}
+
+/// `piece` split by `plane` (at `x` along `axis`): the parts on the side away from the tool
+/// and the one part on its side (positive along `axis` when `keep_positive`), each with its
+/// history over the operands `piece`'s is over. `None` when the split leaves no part on either
+/// side, or several on the tool's.
+fn split_beside(piece: &Traced, plane: &solidcraft_geom::Plane, axis: Vec3, x: f64, keep_positive: bool) -> Option<(Vec<Traced>, Traced)> {
+    let parts = crate::splitface::split_body(&piece.0, &crate::splitface::SplitTool::Plane(*plane)).ok()?;
+    if parts.len() < 2 {
+        return None;
+    }
+    let tol = piece.0.size() * 1e-6 + 1e-9;
+    let (mut away, mut kept) = (Vec::new(), Vec::new());
+    for part in parts {
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        for v in part.solid.vertex_iter() {
+            let t = from_p3(v.point()).dot(axis) - x;
+            lo = lo.min(t);
+            hi = hi.max(t);
+        }
+        let h = match (part.history(), piece.1.as_ref()) {
+            (Some(hp), Some(h)) => recorded::composed(hp.clone().substituted(0, h)),
+            _ => None,
+        };
+        let positive = if lo >= -tol {
+            true
+        } else if hi <= tol {
+            false
+        } else {
+            return None;
+        };
+        if positive == keep_positive { kept.push((part, h)) } else { away.push((part, h)) }
+    }
+    let kept = kept.pop().filter(|_| kept.is_empty())?;
+    (!away.is_empty()).then_some((away, kept))
 }
 
 /// `h` over `[a, b]`: the operands after them (the boxes a piece was cut with) dropped, which

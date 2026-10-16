@@ -16,7 +16,7 @@ new uses of it anywhere else. Public docs/web/Flatpak deployments use project Pa
 
 ## Container prototype baseline
 The first Unraid prototype used upstream commit `af536a7`. The current validated
-container baseline is `b3df2c382b5cc600e42273ed6c21466bab181a71`.
+container baseline is `3707a67cee8ff9da897d9a9b9b5174739a0d4ee2`.
 Keep later upstream CAD/UI feature updates separate from this deployment addition;
 advance the baseline only as a separate, validated update. See [update records](docs/unraid-updates.md).
 
@@ -183,6 +183,13 @@ before the draft is verified.
 milestone task lands. `cargo xtask features` regenerates `docs/features.md` (SolidCraft's
 commands by area, from the registry) when commands are added or renamed.
 
-The container integration omits upstream's macOS Finder and Windows native-crash unsafe bridges; command-line
+The container integration omits upstream's macOS Finder and Windows native-crash/resize-border unsafe bridges; command-line
 file opening and all Linux/container behavior are preserved. CAD and UI logic remain Rust.
 The upstream JavaScript service worker is browser infrastructure, independent of HTTP MCP.
+
+Design-format additions follow upstream's per-change files under crates/doc/src/format/pending/.
+The fork regenerates shipped licences after integration so its HTTP gateway remains covered.
+
+## Lists many changes add to
+Keep message catalogs sorted (cargo xtask lists --fix), module lines in their sorted group,
+the language list English first then by id, and design-format additions as one new pending file.

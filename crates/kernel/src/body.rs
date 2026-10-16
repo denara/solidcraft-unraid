@@ -1165,15 +1165,21 @@ impl Body {
     /// (rounds that overlap where a wall is thinner than both, #871). Boundaries that only
     /// touch (at a vertex they share, or within the size's millionth) don't count.
     pub fn crossed_face_loops(&self) -> Result<usize> {
+        Ok(self.crossed_faces()?.len())
+    }
+
+    /// The faces [`Body::crossed_face_loops`] counts, each as the mean of its boundary's
+    /// points: the same for a face an operation carried over unchanged.
+    pub fn crossed_faces(&self) -> Result<Vec<Vec3>> {
         use mt::{BoundedCurve, ParameterDivision1D};
         if self.is_mesh() {
-            return Ok(0);
+            return Ok(Vec::new());
         }
         const MAX_SEGMENTS: usize = 20_000;
         let size = self.size();
         let tol = (size * 1e-6).max(1e-9);
         let chord = (size * 1e-3).max(1e-4);
-        let mut crossed = 0;
+        let mut crossed = Vec::new();
         for f in self.solid.face_iter() {
             let mt::Surface::Plane(pl) = f.oriented_surface() else { continue };
             let o = from_p3(pl.origin());
@@ -1226,7 +1232,10 @@ impl Body {
                 loops.iter().enumerate().flat_map(|(l, segs)| segs.iter().map(move |s| (l, s))).collect();
             let bad = all.iter().enumerate().any(|(i, (_, s))| all.iter().skip(i + 1).any(|(_, t)| cross(s, t)));
             if bad {
-                crossed += 1;
+                let ends: Vec<(f64, f64)> = all.iter().map(|(_, s)| s.0).collect();
+                let k = ends.len().max(1) as f64;
+                let (su, sv) = ends.iter().fold((0.0, 0.0), |acc, p| (acc.0 + p.0, acc.1 + p.1));
+                crossed.push(o + u * (su / k) + v * (sv / k));
             }
         }
         Ok(crossed)

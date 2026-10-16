@@ -67,13 +67,18 @@ impl Default for RenderSetup {
 impl RenderSetup {
     pub fn validate(&self) -> Result<()> {
         let limits = RenderLimits::default();
-        if self.width == 0
-            || self.height == 0
-            || u64::from(self.width) > limits.max_dimension
-            || u64::from(self.height) > limits.max_dimension
-            || u64::from(self.width) * u64::from(self.height) > limits.max_pixels
+        let (width, height) = (u64::from(self.width), u64::from(self.height));
+        if width == 0 || height == 0 {
+            return Err(DocError::Invalid("render output must be at least 1 × 1 pixels".into()));
+        }
+        if let Some((w, h)) = limits.fit(width, height, None)
+            && (w, h) != (width, height)
         {
-            return Err(DocError::Invalid("render output exceeds the dimension/pixel limits".into()));
+            return Err(DocError::Invalid(format!(
+                "render output {width} × {height} exceeds the image limits ({} pixels per side, {} pixels in all); \
+                 the largest image at this aspect is {w} × {h}",
+                limits.max_dimension, limits.max_pixels
+            )));
         }
         let camera = &self.camera;
         if !camera.is_valid()
@@ -216,6 +221,18 @@ mod tests {
             let mixed: Document = serde_json::from_value(json).unwrap();
             assert!(!mixed.differs_only_in_render(&before), "{key}");
         }
+    }
+
+    #[test]
+    fn oversized_output_names_the_limits_and_the_largest_size() {
+        let setup = RenderSetup { width: 4096, height: 4096, ..Default::default() };
+        let message = setup.validate().unwrap_err().to_string();
+        assert!(message.contains("4096 × 4096 exceeds the image limits (4096 pixels per side, 4194304 pixels in all)"), "{message}");
+        assert!(message.contains("the largest image at this aspect is 2048 × 2048"), "{message}");
+        let setup = RenderSetup { width: 7680, height: 4320, ..Default::default() };
+        let message = setup.validate().unwrap_err().to_string();
+        assert!(message.contains("the largest image at this aspect is 27"), "{message}");
+        assert!(RenderSetup { width: 2048, height: 2048, ..Default::default() }.validate().is_ok());
     }
 
     #[test]

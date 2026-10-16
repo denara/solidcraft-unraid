@@ -1,6 +1,6 @@
 //! Associative sketch patterns. Editing retains ids at surviving instance indices.
 
-use solidcraft_sketch::{PatternInstance, SketchPattern, SketchPatternKind};
+use solidcraft_sketch::{PatternAlignment, PatternInstance, SketchPattern, SketchPatternKind};
 
 use super::*;
 
@@ -23,9 +23,24 @@ pub(super) fn run(s: &mut Session, p: &Value, circular: bool) -> Result<Value> {
                 return Err(bad(cmd, "use the existing pattern's type"));
             }
             let defaults = match &old.kind {
-                SketchPatternKind::Circular { center, count, angle } => json!({"entities":old.entities,"center":center,"count":count,"angle":angle}),
-                SketchPatternKind::Rectangular { dir, count, spacing, count2, spacing2 } => {
-                    json!({"entities":old.entities,"dir":dir,"count":count,"spacing":spacing,"count2":count2,"spacing2":spacing2})
+                SketchPatternKind::Circular { center, count, angle, alignment, reversed } => {
+                    json!({"entities":old.entities,"center":center,"count":count,"angle":angle,"alignment":alignment,"reversed":reversed})
+                }
+                SketchPatternKind::Rectangular {
+                    dir,
+                    dir2,
+                    direction,
+                    direction2,
+                    count,
+                    spacing,
+                    count2,
+                    spacing2,
+                    alignment,
+                    alignment2,
+                    reversed,
+                    reversed2,
+                } => {
+                    json!({"entities":old.entities,"dir":dir,"dir2":dir2,"direction":direction,"direction2":direction2,"count":count,"spacing":spacing,"count2":count2,"spacing2":spacing2,"alignment":alignment,"alignment2":alignment2,"reversed":reversed,"reversed2":reversed2})
                 }
             };
             if let (Some(params), Some(defaults)) = (params.as_object_mut(), defaults.as_object()) {
@@ -78,10 +93,12 @@ pub(super) fn run(s: &mut Session, p: &Value, circular: bool) -> Result<Value> {
             let id = sk.points.get(center).ok_or_else(|| bad(cmd, "missing center point"))?.id.clone();
             let full = (total.abs() - 360.0).abs() < 1e-9;
             let step = total / if full { n as f64 } else { (n.max(2) - 1) as f64 };
+            let alignment = alignment_param(&params, "alignment", cmd)?;
+            let reversed = reversed_param(&params, "reversed", cmd)?;
             (
-                SketchPatternKind::Circular { center: id, count: n, angle: total },
+                SketchPatternKind::Circular { center: id, count: n, angle: total, alignment, reversed },
                 Some(center),
-                (1..n).map(|i| ([i, 0], (step * i as f64).to_radians(), Vec2::ZERO)).collect::<Vec<_>>(),
+                (1..n).map(|i| ([i, 0], (step * alignment.multiplier(i, reversed)).to_radians(), Vec2::ZERO)).collect::<Vec<_>>(),
             )
         } else {
             let spacing = num(&params, "spacing").ok_or_else(|| bad(cmd, "`spacing` must be finite"))?;
@@ -98,14 +115,49 @@ pub(super) fn run(s: &mut Session, p: &Value, circular: bool) -> Result<Value> {
                 Some(value) => vec2(value).and_then(Vec2::normalized).ok_or_else(|| bad(cmd, "`dir` must be a finite nonzero vector"))?,
                 None => Vec2::X,
             };
+            let dir2 = match params.get("dir2") {
+                Some(value) if !value.is_null() => {
+                    Some(vec2(value).and_then(Vec2::normalized).ok_or_else(|| bad(cmd, "`dir2` must be a finite nonzero vector"))?)
+                }
+                _ => None,
+            };
+            let direction = direction_ref(sk, &params, "direction", cmd)?;
+            let direction2 = direction_ref(sk, &params, "direction2", cmd)?;
+            let alignment = alignment_param(&params, "alignment", cmd)?;
+            let alignment2 = alignment_param(&params, "alignment2", cmd)?;
+            let reversed = reversed_param(&params, "reversed", cmd)?;
+            let reversed2 = reversed_param(&params, "reversed2", cmd)?;
+            let first = line_direction(sk, direction.as_deref()).unwrap_or(dir);
+            let second = line_direction(sk, direction2.as_deref()).or(dir2).unwrap_or_else(|| first.perp());
             let slots = (0..n)
                 .flat_map(|i| {
                     (0..count2).filter_map(move |j| {
-                        (i != 0 || j != 0).then_some(([i, j], 0.0, dir * (spacing * i as f64) + dir.perp() * (spacing2 * j as f64)))
+                        (i != 0 || j != 0).then_some((
+                            [i, j],
+                            0.0,
+                            first * (spacing * alignment.multiplier(i, reversed)) + second * (spacing2 * alignment2.multiplier(j, reversed2)),
+                        ))
                     })
                 })
                 .collect();
-            (SketchPatternKind::Rectangular { dir, count: n, spacing, count2, spacing2 }, None, slots)
+            (
+                SketchPatternKind::Rectangular {
+                    dir,
+                    dir2,
+                    direction,
+                    direction2,
+                    count: n,
+                    spacing,
+                    count2,
+                    spacing2,
+                    alignment,
+                    alignment2,
+                    reversed,
+                    reversed2,
+                },
+                None,
+                slots,
+            )
         };
         let id = match &old {
             Some(old) => old.id.clone(),
@@ -126,20 +178,28 @@ pub(super) fn run(s: &mut Session, p: &Value, circular: bool) -> Result<Value> {
         if center_id.is_some() && center.is_none() {
             return Err(bad(cmd, "the center belongs to an instance removed by this edit"));
         }
+        if !circular {
+            // A direction can have belonged to an instance retired above. Resolve it again
+            // before creating relations so an edit never silently substitutes a vector.
+            direction_ref(sk, &params, "direction", cmd)?;
+            direction_ref(sk, &params, "direction2", cmd)?;
+        }
         let mut curves = Vec::new();
         let mut constraints = Vec::new();
         for (index, angle, offset) in slots {
+            let (base_offset, directions) = linear_displacement(sk, &kind, index, offset);
             let c = center.and_then(|i| sk.point(i)).unwrap_or(Vec2::ZERO);
             let transform = |p| rotate(c, angle)(p) + offset;
             let instance = if let Some(i) = existing.iter().position(|instance| instance.index == index) {
                 let instance = existing.remove(i);
                 for cid in &instance.constraints {
                     if let Some(constraint) = sk.constraints.iter_mut().find(|constraint| constraint.id == *cid)
-                        && let ConstraintKind::PatternPoint { center: slot, angle: a, offset: off, .. } = &mut constraint.kind
+                        && let ConstraintKind::PatternPoint { center: slot, angle: a, offset: off, directions: dirs, .. } = &mut constraint.kind
                     {
                         *slot = center;
                         *a = angle;
-                        *off = offset;
+                        *off = base_offset;
+                        *dirs = directions;
                     }
                 }
                 for (seed, copy) in &instance.points {
@@ -155,7 +215,7 @@ pub(super) fn run(s: &mut Session, p: &Value, circular: bool) -> Result<Value> {
                 let (made, map) = copy_through(sk, &cs, &ps, &transform, false, &|_| false, 1.0)?;
                 let mut cons = Vec::new();
                 for (p, q) in &map {
-                    cons.push(add_c(sk, ConstraintKind::PatternPoint { p: *p, q: *q, center, angle, offset })?);
+                    cons.push(add_c(sk, ConstraintKind::PatternPoint { p: *p, q: *q, center, angle, offset: base_offset, directions })?);
                 }
                 for (a, b) in cs.iter().zip(&made) {
                     if matches!(sk.curves.get(*a).map(|c| &c.kind), Some(CurveKind::Circle { .. } | CurveKind::Ellipse { .. })) {
@@ -187,4 +247,54 @@ pub(super) fn run(s: &mut Session, p: &Value, circular: bool) -> Result<Value> {
         out.insert("sketch".into(), info);
     }
     Ok(out)
+}
+
+fn direction_ref(sk: &Sketch, p: &Value, key: &str, cmd: &str) -> Result<Option<String>> {
+    match p.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(id)) if line_direction(sk, Some(id)).is_some() => Ok(Some(id.clone())),
+        _ => Err(bad(cmd, format!("`{key}` must reference a nondegenerate sketch line"))),
+    }
+}
+
+fn alignment_param(p: &Value, key: &str, cmd: &str) -> Result<PatternAlignment> {
+    p.get(key).map_or(Ok(PatternAlignment::default()), |value| {
+        serde_json::from_value(value.clone()).map_err(|_| bad(cmd, format!("`{key}` must be left, center or right")))
+    })
+}
+
+fn reversed_param(p: &Value, key: &str, cmd: &str) -> Result<bool> {
+    p.get(key).map_or(Ok(false), |value| serde_json::from_value(value.clone()).map_err(|_| bad(cmd, format!("`{key}` must be true or false"))))
+}
+
+fn line_direction(sk: &Sketch, id: Option<&str>) -> Option<Vec2> {
+    let Shape::Line { a, b } = sk.shape(sk.curve_index(id?)?)? else { return None };
+    (b - a).normalized()
+}
+
+/// Keep sampled vector directions compatible with older designs, while picked lines are
+/// solver references. The default second direction follows the first line's perpendicular.
+fn linear_displacement(sk: &Sketch, kind: &SketchPatternKind, [i, j]: [usize; 2], fallback: Vec2) -> (Vec2, [Option<(usize, Vec2)>; 2]) {
+    let SketchPatternKind::Rectangular { dir, dir2, direction, direction2, spacing, spacing2, alignment, alignment2, reversed, reversed2, .. } = kind
+    else {
+        return (fallback, [None; 2]);
+    };
+    let mut offset = Vec2::ZERO;
+    let mut directions = [None; 2];
+    let d1 = *spacing * alignment.multiplier(i, *reversed);
+    let d2 = *spacing2 * alignment2.multiplier(j, *reversed2);
+    if let Some(l) = direction.as_ref().and_then(|id| sk.curve_index(id)) {
+        directions[0] = Some((l, Vec2::new(d1, if dir2.is_none() && direction2.is_none() { d2 } else { 0.0 })));
+    } else {
+        offset += *dir * d1;
+        if dir2.is_none() && direction2.is_none() {
+            offset += dir.perp() * d2;
+        }
+    }
+    if let Some(l) = direction2.as_ref().and_then(|id| sk.curve_index(id)) {
+        directions[1] = Some((l, Vec2::new(d2, 0.0)));
+    } else if let Some(dir2) = dir2 {
+        offset += *dir2 * d2;
+    }
+    (offset, directions)
 }

@@ -10,16 +10,17 @@
 //!
 //! What a field is, is written once, on the field, with `#[walk(...)]`:
 //!
-//! - no attribute: the field's own type walks itself (`impl Walk`): a plane, a nested struct, a
-//!   list of them, or nothing for names, flags and numbers. A bare `Vec3` has no walk, so a point
-//!   that does not say its role does not compile;
-//! - `length = label`, `angle = label`, `unitless = label`: an expression input (a `String`, an
-//!   optional one, a list or an array of them, or `(f64, String)` pairs). The label is any
+//! - no attribute: the field's own type walks itself (`impl Walk`): a reference (`SketchId`,
+//!   `BodyName`, `FeatureName`), a point with its role (`FacePick`, `Position`, `Dir`), a plane, a
+//!   nested struct, a list of them, or nothing for names, flags and numbers. An `Expr` or a bare
+//!   `Vec3` has no walk, so an expression or a point that does not say what it is does not
+//!   compile;
+//! - `length = label`, `angle = label`, `unitless = label`: an expression input (an `Expr`, an
+//!   optional one, a list or an array of them, or `(f64, Expr)` pairs). The label is any
 //!   expression: a `&'static str`, an array of them (one per element), or a closure
 //!   `|i: usize, n: usize| -> &'static str`; it may read the other fields;
-//! - `sketch`, `feature`, `body`: a reference (an id, or a name, optional or a list);
-//! - `pick`, `pinned`, `pos`, `dir`: a point (`Vec3`, optional or a list) with that role;
-//!   `pick_if = cond`: a pick when `cond` holds, else a position;
+//! - `pinned`: a face pick that stays where it is when the feature moves;
+//!   `pick_if = cond`: a face pick when `cond` holds, else a position;
 //! - `placement`: a primitive's placement point (its X, Y and Z expressions are not inputs);
 //! - `profiles_of = sketch_field`, optionally with `when = cond`: a profile selection;
 //! - `after = field`: visit this field right after `field` instead of in declaration order (where
@@ -60,8 +61,6 @@ struct Roles {
     geo: Option<Geo>,
     /// The kind (`Length`, `Angle`, `Unitless`) and the label.
     expr: Option<(&'static str, Expr)>,
-    /// `Sketch`, `Feature` or `Body`.
-    reference: Option<&'static str>,
     after: Option<Ident>,
     /// The positions inside this (nested) value pick faces here.
     picks_faces: bool,
@@ -70,7 +69,7 @@ struct Roles {
 impl Roles {
     /// No role given: the field's type walks itself.
     fn nested(&self) -> bool {
-        self.geo.is_none() && self.expr.is_none() && self.reference.is_none()
+        self.geo.is_none() && self.expr.is_none()
     }
 }
 
@@ -82,10 +81,7 @@ fn roles(field: &syn::Field) -> syn::Result<Roles> {
         attr.parse_nested_meta(|meta| {
             let name = meta.path.get_ident().map(Ident::to_string).unwrap_or_default();
             match name.as_str() {
-                "pick" => r.geo = Some(Geo::Points("Pick")),
                 "pinned" => r.geo = Some(Geo::Points("Pinned")),
-                "pos" => r.geo = Some(Geo::Points("Pos")),
-                "dir" => r.geo = Some(Geo::Points("Dir")),
                 "placement" => r.geo = Some(Geo::Placement),
                 "pick_if" => r.geo = Some(Geo::PickIf(meta.value()?.parse()?)),
                 "profiles_of" => sketch = Some(meta.value()?.parse::<Ident>()?),
@@ -93,9 +89,6 @@ fn roles(field: &syn::Field) -> syn::Result<Roles> {
                 "length" => r.expr = Some(("Length", meta.value()?.parse()?)),
                 "angle" => r.expr = Some(("Angle", meta.value()?.parse()?)),
                 "unitless" => r.expr = Some(("Unitless", meta.value()?.parse()?)),
-                "sketch" => r.reference = Some("Sketch"),
-                "feature" => r.reference = Some("Feature"),
-                "body" => r.reference = Some("Body"),
                 "after" => r.after = Some(meta.value()?.parse()?),
                 "picks_faces" => r.picks_faces = true,
                 _ => return Err(meta.error("unknown walk role")),
@@ -157,14 +150,7 @@ fn walk_field(b: &Ident, r: &Roles, which: Which, mutable: bool) -> Tokens {
                 _ => quote!(),
             }
         }
-        Which::Refs => match r.reference {
-            Some(kind) => {
-                let t = if kind == "Sketch" { quote!(u64) } else { quote!(String) };
-                let kind = Ident::new(kind, Span::call_site());
-                quote! { #w::Each::<#t>::#each(#b, &mut |x| f(#w::Ref::#kind(x))); }
-            }
-            None => quote!(),
-        },
+        Which::Refs => quote!(),
         Which::Geometry => match &r.geo {
             Some(Geo::Points(v)) => {
                 let v = Ident::new(v, Span::call_site());
@@ -209,7 +195,7 @@ fn pre_values(b: &Ident, r: &Roles, which: Which) -> Tokens {
             quote! {
                 let #wh: bool = #when;
                 let mut #id: Option<u64> = None;
-                #w::Each::<u64>::each(&*#sketch, &mut |s| #id = Some(*s));
+                #w::Each::<crate::SketchId>::each(&*#sketch, &mut |s| #id = Some(s.0));
             }
         }
         _ => quote!(),

@@ -99,7 +99,7 @@ fn swap_in(app: &mut SolveApp, slot: DocSlot) -> DocSlot {
     app.cancel_view_animation();
     app.viewport.orbit_snap = None;
     app.viewport.orbit_free = None;
-    app.preview = crate::preview::PreviewState::default();
+    app.preview.reset();
     app.viewport.hover = None;
     app.menu.props = None;
     crate::sketch_attachment_ui::clear(app);
@@ -192,6 +192,24 @@ pub fn new_design(app: &mut SolveApp) {
         crate::prefs::apply_new_design(app);
         return;
     }
+    if let Err(e) = open_tab(app, Session::default()) {
+        app.set_status(e, true);
+    } else {
+        crate::prefs::apply_new_design(app);
+    }
+}
+
+/// The tab strip's +: always a new tab, except over the blank design the start page covers
+/// (a launch), which New takes as [`new_design`] does.
+pub fn new_tab(app: &mut SolveApp) {
+    if app.file_picker_busy() {
+        return;
+    }
+    if app.home.open && active_is_blank(app) {
+        new_design(app);
+        return;
+    }
+    app.home.open = false;
     if let Err(e) = open_tab(app, Session::default()) {
         app.set_status(e, true);
     } else {
@@ -455,7 +473,7 @@ pub fn tabs(app: &mut SolveApp, ui: &mut egui::Ui, r: Rect, x0: f32, x1: f32) {
     // A file loading into the window keeps the tabs as they are (dragging still moves it).
     let idle = !app.file_load.busy();
     if presp.on_hover_text("New Design (Ctrl+N)").clicked() && idle {
-        new_design(app);
+        new_tab(app);
     }
     match (shut, pick) {
         _ if !idle => {}
@@ -701,6 +719,21 @@ mod tests {
         assert_eq!(a.docs.active, 0);
         close(&mut a, 0, true);
         assert!(active_is_blank(&a) && a.home.open);
+    }
+
+    /// The tab strip's + opens a tab every time, an empty design's included; over the start
+    /// page's blank design (a launch) it uses that design.
+    #[test]
+    fn plus_opens_a_tab_every_time() {
+        let mut a = app();
+        a.home.open = true;
+        new_tab(&mut a);
+        assert_eq!(a.docs.count(), 1, "the launch's blank design is used");
+        assert!(!a.home.open);
+        new_tab(&mut a);
+        new_tab(&mut a);
+        assert_eq!(a.docs.count(), 3);
+        assert_eq!(a.docs.active, 2);
     }
 
     /// Quitting asks once per design with unsaved changes: Don't Save moves on (and keeps no

@@ -90,9 +90,10 @@ fn a_y_up_step_file_comes_in_standing_up() {
     let r = run(&mut d, "file.insert_step", json!({"path": path, "up": "y"}));
     let (lo, hi) = extent(&d);
     assert!(near(lo, [0.0, -20.0, 0.0]) && near(hi, [40.0, 0.0, 34.0]), "stood up: {lo:?} {hi:?}");
-    assert_eq!(kinds(&d), ["BaseFeature", "MoveFeature"]);
-    assert_eq!(r["stand_up"], d.doc.features[1].id, "{r}");
-    assert_eq!(r["created_bodies"].as_array().unwrap().len(), 3, "{r}");
+    // The import's component is turned (#1386), so an assembly's instances turn with it.
+    assert_eq!(kinds(&d), ["BaseFeature"]);
+    assert_eq!(r["stand_up"], r["occurrence"], "{r}");
+    assert_eq!(r["created_bodies"].as_array().unwrap().len(), 2, "the plate, and the post placed twice: {r}");
     assert!((total_volume(&mut d) - (40.0 * 4.0 * 20.0 + 2.0 * 4.0 * 30.0 * 4.0)).abs() < 1e-6);
     // The Import and the turn are one undo step.
     assert_eq!(d.undo.len(), undo + 1);
@@ -106,7 +107,7 @@ fn a_y_up_step_file_comes_in_standing_up() {
     let (lo, hi) = extent(&d);
     assert!(near(lo, [0.0, -20.0, 0.0]) && near(hi, [105.0, 106.0, 107.0]), "{lo:?} {hi:?}");
 
-    // The turn is an ordinary Move feature: the saved design has it and needs no new field.
+    // The turn is the component's placement: the saved design has it.
     let design = std::path::Path::new(&path).with_file_name("frame.solidcraft");
     run(&mut s, "edit.undo", json!({}));
     run(&mut s, "file.insert_step", json!({"path": path, "up": "y"}));
@@ -122,7 +123,7 @@ fn opening_a_y_up_step_file_can_stand_it_up() {
     let path = frame_file("open");
     let mut s = Session::default();
     let r = run(&mut s, "doc.open", json!({"path": path, "up": "y"}));
-    assert_eq!(r["features"], 2, "{r}");
+    assert_eq!(r["features"], 1, "{r}");
     assert!(near(extent(&s).1, [40.0, 0.0, 34.0]));
     assert!(s.undo.is_empty(), "a freshly opened design has no history");
     run(&mut s, "doc.open", json!({"path": path}));
@@ -181,22 +182,23 @@ fn the_bodies_are_named_after_the_solid_the_product_or_the_instance() {
         assert_eq!(r["name"], "Frame", "the timeline entry is the root product's");
         body_names(&s)
     };
-    let solids = ["Cut-Extrude3", "Boss-Extrude1", "Boss-Extrude1 (2)"];
+    // The post is placed twice: one component, two occurrences, its body built once (#1386).
+    let solids = ["Cut-Extrude3", "Boss-Extrude1"];
     assert_eq!(named(json!({"path": path})), solids);
     assert_eq!(named(json!({"path": path, "names": "solid"})), solids);
-    assert_eq!(named(json!({"path": path, "names": "product"})), ["Plate", "Post", "Post (2)"]);
-    assert_eq!(named(json!({"path": path, "names": "Instance"})), ["Plate-1", "Post-1", "Post-2"]);
+    assert_eq!(named(json!({"path": path, "names": "product"})), ["Plate", "Post"]);
+    assert_eq!(named(json!({"path": path, "names": "Instance"})), ["Plate-1", "Post-1"]);
 
     // The names are stored with the import: a saved design keeps them, and `up` does not change them.
     let mut s = Session::default();
     run(&mut s, "doc.open", json!({"path": path, "names": "instance", "up": "y"}));
-    assert_eq!(body_names(&s), ["Plate-1", "Post-1", "Post-2"]);
+    assert_eq!(body_names(&s), ["Plate-1", "Post-1"]);
     let design = std::path::Path::new(&path).with_file_name("frame-named.solidcraft");
     run(&mut s, "file.save_as", json!({"path": design.to_string_lossy()}));
     let mut again = Session::default();
     run(&mut again, "doc.open", json!({"path": design.to_string_lossy()}));
-    assert_eq!(body_names(&again), ["Plate-1", "Post-1", "Post-2"]);
+    assert_eq!(body_names(&again), ["Plate-1", "Post-1"]);
     // A feature finds them by those names.
-    run(&mut again, "solid.move", json!({"bodies": ["Post-2"], "translate": [0, 0, 5]}));
-    assert_eq!(body_names(&again), ["Plate-1", "Post-1", "Post-2"]);
+    run(&mut again, "solid.move", json!({"bodies": ["Post-1"], "translate": [0, 0, 5]}));
+    assert_eq!(body_names(&again), ["Plate-1", "Post-1"]);
 }

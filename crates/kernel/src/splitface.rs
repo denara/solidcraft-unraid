@@ -124,6 +124,9 @@ fn trace_tol(face: &mt::Face, size: f64) -> f64 {
 
 /// Trace the zero set of `g` over a face: chains of exact points.
 fn trace(face: &mt::Face, g: &Field, size: f64) -> Result<Vec<Chain>> {
+    if let Some(chains) = trace_flat(face, g, size) {
+        return Ok(chains);
+    }
     let tol = trace_tol(face, size);
     let shell: mt::Shell = vec![face.clone()].into();
     let meshed = shell.robust_triangulation(tol);
@@ -288,6 +291,53 @@ fn trace(face: &mt::Face, g: &Field, size: f64) -> Result<Vec<Chain>> {
         }
     }
     Ok(chains)
+}
+
+/// A plane across a flat face (a plane, or a B-spline surface that is one) with straight edges,
+/// exactly: the line the two planes meet in, inside the face between pairs of its crossings with
+/// the boundary, taken in order along the line. Which side a corner is on is decided once, at
+/// the corner, so a plane through a corner crosses the boundary there once or not at all, as it
+/// should. `None` (traced on a mesh instead) for any other face or tool, and where an edge lies
+/// in the plane.
+fn trace_flat(face: &mt::Face, g: &Field, size: f64) -> Option<Vec<Chain>> {
+    let Field::Plane { o, n } = g else { return None };
+    let surface = face.surface();
+    let Field::Plane { n: m, .. } = surface_field(&surface) else { return None };
+    let along = m.cross(*n).normalized()?;
+    let tol = size * 1e-7 + 1e-9;
+    let mut hits: Vec<mt::Point3> = Vec::new();
+    for e in face.boundaries().iter().flat_map(|w| w.edge_iter()) {
+        let (a, b) = (from_p3(e.front().point()), from_p3(e.back().point()));
+        let (ga, gb) = ((a - *o).dot(*n), (b - *o).dot(*n));
+        // Straight: a line, or a curve (a B-spline of degree one) whose points all lie on its
+        // chord; such an edge crosses the plane once at most.
+        let straight = matches!(e.curve(), mt::Curve::Line(_)) || {
+            let c = e.curve();
+            let (t0, t1) = c.range_tuple();
+            (1..8).all(|k| from_p3(c.subs(t0 + (t1 - t0) * k as f64 / 8.0)).dist_to_segment(a, b) <= tol)
+        };
+        if !straight || (ga.abs() <= tol && gb.abs() <= tol) || !ga.is_finite() || !gb.is_finite() {
+            return None;
+        }
+        if (ga >= 0.0) != (gb >= 0.0) {
+            hits.push(p3(a + (b - a) * (ga / (ga - gb)).clamp(0.0, 1.0)));
+        }
+    }
+    if !hits.len().is_multiple_of(2) {
+        return None;
+    }
+    hits.sort_by(|a, b| from_p3(*a).dot(along).total_cmp(&from_p3(*b).dot(along)));
+    let uv = |p: mt::Point3| surface.search_nearest_parameter(p, None, 50);
+    let mut chains = Vec::new();
+    for pair in hits.chunks(2) {
+        let [a, b] = pair else { return None };
+        // A corner the plane only touches: no line.
+        if a.distance(*b) <= tol {
+            continue;
+        }
+        chains.push(Chain { pts: vec![(*a, uv(*a)?), (*b, uv(*b)?)], closed: false });
+    }
+    Some(chains)
 }
 
 /// Where the zero set crosses a boundary edge of the face (exact, by bisection on the curve).
@@ -1084,9 +1134,22 @@ pub(crate) fn split_any(body: &Body, faces: &[usize], tool: &SplitTool) -> Resul
     })
 }
 
-/// A point well inside a face (a mesh triangle's centre where the field is largest) and the
-/// field there.
+/// The field at a point well inside a face (a mesh triangle's centre where the field is
+/// largest; for a plane, the face's corner farthest from it).
 fn side_of(face: &mt::Face, g: &Field, size: f64) -> Result<f64> {
+    // A face the plane does not cross is on the side of whichever corner lies off it (the
+    // farthest, against rounding); a face with every corner on the plane is meshed.
+    if let Field::Plane { .. } = g {
+        let far = face
+            .boundaries()
+            .iter()
+            .flat_map(|w| w.vertex_iter())
+            .map(|v| g.eval(from_p3(v.point())))
+            .fold(0.0, |b: f64, x| if x.abs() > b.abs() { x } else { b });
+        if far.abs() > size * 1e-6 {
+            return Ok(far);
+        }
+    }
     let shell: mt::Shell = vec![face.clone()].into();
     let meshed = shell.robust_triangulation((size * 2e-3).max(1e-4));
     let pm = meshed.face_iter().next().and_then(|f| f.surface()).ok_or_else(|| KernelError::Failed("a face could not be meshed".into()))?;

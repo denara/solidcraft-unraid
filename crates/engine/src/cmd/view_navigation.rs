@@ -10,7 +10,7 @@ pub static COMMANDS: &[CommandSpec] = &[CommandSpec::new("view.navigate", "Navig
     .icon("orbit")
     .noundo()
     .doc_only()
-    .params("camera: Camera; direction?: [x,y,z] in the camera's up-axis frame; or action: left|right|up|down|clockwise|counterclockwise|home|fit; or motion: pan|orbit|zoom, delta?: [dx,dy] (pixels, each ±10000), viewport?: [width,height] (1..1000000, required for pan or pivot), pivot?: [x,y,z], factor?: 0.05..20 (required for zoom), anchor?: [x,y,z] → camera, fit, continuous?")];
+    .params("camera: Camera; direction?: [x,y,z] in the camera's up-axis frame; or action: left|right|up|down|clockwise|counterclockwise|home|fit, degrees?: 0..180 (how far left|right|up|down turn; default 90); or motion: pan|orbit|zoom, delta?: [dx,dy] (pixels, each ±10000), viewport?: [width,height] (1..1000000, required for pan or pivot), pivot?: [x,y,z], factor?: 0.05..20 (required for zoom), anchor?: [x,y,z] → camera, fit, continuous?")];
 
 fn navigate(_s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "view.navigate";
@@ -41,12 +41,23 @@ fn navigate(_s: &mut Session, p: &Value) -> Result<Value> {
         }
     } else {
         use std::f64::consts::FRAC_PI_2;
-        let (r, u, _) = cam.basis();
+        let (r, u, b) = cam.basis();
+        // Left, right, up and down turn the view a quarter turn (the navigation cube's arrows),
+        // or `degrees` (the arrow keys' 15° steps, #1541).
+        let (sin, cos) = match p.get("degrees") {
+            None => (1.0, 0.0),
+            Some(d) => d
+                .as_f64()
+                .filter(|d| d.is_finite() && *d > 0.0 && *d <= 180.0)
+                .map(|d| if d == 90.0 { (1.0, 0.0) } else { d.to_radians().sin_cos() })
+                .ok_or_else(|| bad(cmd, "degrees must be a number above 0 and at most 180"))?,
+        };
+        let turn = |toward: solidcraft_geom::Vec3| cam.looking_from(b * cos + toward * sin);
         match p.get("action").and_then(Value::as_str) {
-            Some("left") => cam = cam.looking_from(-r),
-            Some("right") => cam = cam.looking_from(r),
-            Some("up") => cam = cam.looking_from(u),
-            Some("down") => cam = cam.looking_from(-u),
+            Some("left") => cam = turn(-r),
+            Some("right") => cam = turn(r),
+            Some("up") => cam = turn(u),
+            Some("down") => cam = turn(-u),
             Some("clockwise") => cam.roll = (cam.roll + FRAC_PI_2).rem_euclid(std::f64::consts::TAU),
             Some("counterclockwise") => cam.roll = (cam.roll - FRAC_PI_2).rem_euclid(std::f64::consts::TAU),
             Some("home") => {
@@ -130,6 +141,38 @@ mod tests {
     use super::*;
     use solidcraft_geom::Vec3;
     use solidcraft_render::UpAxis;
+
+    /// #1541: left, right, up and down turn a quarter turn, or `degrees` (the arrow keys' 15°).
+    #[test]
+    fn turns_take_degrees_and_default_to_a_quarter_turn() {
+        let mut s = Session::default();
+        let cam = Camera { yaw: 0.0, pitch: 0.0, distance: 100.0, ..Default::default() };
+        let mut turn = |action: &str, degrees: Option<Value>| -> Result<Camera> {
+            let mut params = json!({"camera": cam, "action": action});
+            if let Some(d) = degrees {
+                params["degrees"] = d;
+            }
+            let result = s.execute("view.navigate", &params)?;
+            Ok(serde_json::from_value(result["camera"].clone()).unwrap())
+        };
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        // A quarter turn as before, given or not.
+        let quarter = turn("left", None).unwrap();
+        assert_eq!(turn("left", Some(json!(90))).unwrap(), quarter);
+        assert!(close((quarter.yaw - cam.yaw).abs(), std::f64::consts::FRAC_PI_2));
+        // 15° each way, about the up axis or over the top.
+        for (action, yaw, pitch) in [("left", -15.0, 0.0), ("right", 15.0, 0.0), ("up", 0.0, 15.0), ("down", 0.0, -15.0)] {
+            let to = turn(action, Some(json!(15))).unwrap();
+            assert!(close(to.yaw.abs(), f64::to_radians(yaw).abs()), "{action}: yaw {}", to.yaw);
+            assert!(close(to.pitch, f64::to_radians(pitch)), "{action}: pitch {}", to.pitch);
+            assert_eq!((to.target, to.distance), (cam.target, cam.distance));
+        }
+        // Left and right turn opposite ways.
+        assert!(close(turn("left", Some(json!(15))).unwrap().yaw, -turn("right", Some(json!(15))).unwrap().yaw));
+        for bad in [json!(0), json!(-15), json!(181), json!(f64::NAN.to_string()), json!("15"), json!(null)] {
+            assert!(turn("left", Some(bad.clone())).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn continuous_navigation_moves_the_camera_without_editing_the_design() {

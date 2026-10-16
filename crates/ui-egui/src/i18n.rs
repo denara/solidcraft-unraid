@@ -32,14 +32,28 @@ impl Catalog {
 }
 
 static ENGLISH: Catalog = Catalog::new("en", "English", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/en.json")));
-static JAPANESE: Catalog = Catalog::new("ja", "日本語", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/ja.json")));
 static GERMAN: Catalog = Catalog::new("de", "Deutsch", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/de.json")));
 static FRENCH: Catalog = Catalog::new("fr", "Français", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/fr.json")));
+static JAPANESE: Catalog = Catalog::new("ja", "日本語", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/ja.json")));
 static KOREAN: Catalog = Catalog::new("ko", "한국어", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/ko.json")));
 static RUSSIAN: Catalog = Catalog::new("ru", "Русский", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/ru.json")));
+static TURKISH: Catalog = Catalog::new("tr", "Türkçe", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/tr.json")));
 static UKRAINIAN: Catalog = Catalog::new("uk", "Українська", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/uk.json")));
 static CHINESE: Catalog = Catalog::new("zh", "中文", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/zh.json")));
-pub const LOCALES: &[&Catalog] = &[&ENGLISH, &JAPANESE, &GERMAN, &FRENCH, &KOREAN, &RUSSIAN, &UKRAINIAN, &CHINESE];
+/// English first (the fallback), then by language id, one per line so that adding a language
+/// doesn't edit a line another addition edits.
+#[rustfmt::skip]
+pub const LOCALES: &[&Catalog] = &[
+    &ENGLISH,
+    &GERMAN,
+    &FRENCH,
+    &JAPANESE,
+    &KOREAN,
+    &RUSSIAN,
+    &TURKISH,
+    &UKRAINIAN,
+    &CHINESE,
+];
 
 pub fn is_supported(id: &str) -> bool {
     LOCALES.iter().any(|catalog| catalog.id == id)
@@ -187,6 +201,15 @@ pub fn tr_name(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The languages are listed English first, then by id, so adding one doesn't edit the
+    /// line another addition edits.
+    #[test]
+    fn locales_are_listed_english_first_then_by_id() {
+        let ids: Vec<&str> = LOCALES.iter().map(|c| c.id).collect();
+        assert_eq!(ids.first(), Some(&"en"));
+        assert!(ids[1..].is_sorted(), "{ids:?}");
+    }
     use std::collections::BTreeSet;
 
     fn placeholders(text: &str) -> BTreeSet<&str> {
@@ -267,6 +290,17 @@ mod tests {
         );
     }
 
+    /// The start page shows each built-in sample's name and description through `label()`, so a
+    /// sample added to the engine without English catalog entries would stay English everywhere.
+    #[test]
+    fn every_sample_name_and_description_is_in_the_english_catalog() {
+        let texts = english_texts();
+        let samples = solidcraft_engine::sample::samples();
+        let missing: Vec<&str> = samples.iter().flat_map(|s| [s.name, s.about]).filter(|text| !texts.contains(text)).collect();
+        assert!(missing.is_empty(), "sample texts absent from en.json: {missing:?}");
+        assert_eq!(Locale::for_language("ja").label("Sample Plate"), "サンプル プレート");
+    }
+
     /// The whole engine registry now reaches the catalogs. Sample command labels from areas that
     /// had no entry at all before (sheet metal, inspect, joints, motion) must resolve to their
     /// translation rather than echo the English source text — `label()` returns its argument when
@@ -317,6 +351,7 @@ mod tests {
             include_str!("browser.rs"),
             include_str!("sketch_palette.rs"),
             include_str!("design_properties.rs"),
+            include_str!("home.rs"),
         ] {
             for call in [".tr(\"", "i18n::tr(\"", "i18n::format(\""] {
                 for tail in source.split(call).skip(1) {
@@ -494,6 +529,17 @@ mod tests {
         assert_eq!(fr.dynamic("Parameters (5)"), "Paramètres (5)");
         assert_eq!(fr.dynamic("4 degrees of freedom"), "4 degrés de liberté");
         assert_eq!(fr.dynamic("Sketch of bracket"), "Sketch of bracket");
+    }
+
+    #[test]
+    fn turkish_catalog_is_registered_and_translates_keys() {
+        let tr = Locale::for_language("tr");
+        assert_eq!(tr.name(), "Türkçe");
+        assert!(is_supported("tr"));
+        assert_eq!(tr.text("ui.preferences"), "Ayarlar");
+        assert_eq!(tr.format("document.save_changes", &[("name", "My {design}")]), "My {design} içindeki değişiklikler kaydedilsin mi?");
+        assert_eq!(tr.format("dialog.selected_count", &[("count", "2")]), "↖ 2 seçildi");
+        assert_eq!(tr.label("NonExistentKey"), "NonExistentKey");
     }
 
     #[test]

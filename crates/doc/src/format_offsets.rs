@@ -424,7 +424,7 @@ mod tests {
                 .add_feature(
                     FeatureKind::Extrude {
                         thin: None,
-                        sketch: if missing_sketch { 999_999 } else { id },
+                        sketch: crate::SketchId(if missing_sketch { 999_999 } else { id }),
                         profiles: ProfileSel::OffsetBoundaries { associations: vec!["deleted-o1".into()] },
                         extent: crate::Extent {
                             convention: crate::ExtrudeConvention::LegacyPerSide,

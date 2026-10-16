@@ -64,6 +64,22 @@ warning saying where.
  "bend_radius":"1 mm","corner_relief_shape":"round","corner_relief":"8 mm","active":true}}
 ```
 
+The rule's shape and size are the default. An edge flange feature can choose its own for the
+corners its flanges make: `corner_relief_shape` (`notch`, `round`, `rectangular` or `tear`) and
+`corner_relief` (the size across, a length or an expression) in `sheet.flange`, or Corner Relief
+Shape and Corner Relief in the Flange dialog. In the dialog, Rule as the shape and an empty size
+take the rule's; either one left out follows the rule while the other is the feature's. Corners are
+relieved only between the flanges of one feature, so a feature's choice never meets another's at a
+corner, and two edge flange features of one part can have different reliefs under one rule. A
+base or contour flange takes its corners from the rule only and refuses both parameters. The
+flange gap and the rule's other values stay with the rule for every flange. The feature's choice is
+saved with the design (file format 23).
+
+```json
+{"command":"sheet.flange","params":{"edges":[[60,0,2],[120,45,2],[60,90,2],[0,45,2]],
+ "height":20,"corner_relief_shape":"round","corner_relief":"6 mm"}}
+```
+
 Where the edge flanges of one feature meet at a corner of the base, their panels are closed
 toward each other at any bend angle: each end is cut square to the sheet, on a line in the flat
 chosen so that the edges nearest each other (on the inner faces) run parallel, the rule's
@@ -185,13 +201,51 @@ consume an undo step.
 {"command":"sheet.export_dxf","params":{"path":"bracket-flat.dxf"}}
 ```
 
-The DXF is an AutoCAD 2000 (`AC1015`) drawing in millimetres. The `OUTLINE`, `BEND_UP` and
-`BEND_DOWN` layers separate cuts from bend centres. A round hole is a `CIRCLE`, a circular arc an
-`ARC`, a whole ellipse one `ELLIPSE` and an arc of an ellipse an elliptical `ELLIPSE`; the pieces
-of a spline, the outlines of text and the other conics are `SPLINE`s of their own degree, so no
-curve is written as chords. For a machine that reads only lines and arcs, pass
-`"curves": "arcs"` to `sheet.export_dxf`: the free-form curves are then tangent arcs and lines
-within 0.001 mm.
+The DXF is an AutoCAD 2000 (`AC1015`) drawing in millimetres, made for a laser-cutting shop's
+nesting or CAM software: each kind of line is on a layer of its own, with a colour (AutoCAD's
+index) and, for the bends, a linetype that the file defines.
+
+| Layer | Colour | Line | Holds |
+|---|---|---|---|
+| `OUTLINE` | 7 white or black | continuous | the outer contour of each piece of the sheet |
+| `CUT` | 4 cyan | continuous | what is cut out inside it: holes, slots, and the loose pieces a cut leaves (the middle of a ring) |
+| `TEXT` | 2 yellow | continuous | the letters that text cut through the sheet, with their counters; only with `"text": "cut"`, the default |
+| `ETCH` | 6 magenta | continuous | letters as single contours, to be marked and not cut: `"text": "etch"`, and always text machined to a depth |
+| `BEND_UP`, `BEND_DOWN` | 1 red, 5 blue | `DASHED` | the bend centre lines, by direction |
+| `BEND_NOTES` | 8 grey | continuous | the note beside each bend line, only with `"bend_notes": true` |
+| `POCKET_…` | 3 green | continuous | pockets, a layer for each depth (see below) |
+| `PERFORATION` | 3 green | continuous | the holes of a perforation field |
+
+`OUTLINE`, `CUT`, `BEND_UP` and `BEND_DOWN` are always in the layer table, the others when the
+sheet has something for them. The inner contours (`CUT`, `TEXT`) are written before the outline,
+so a program that follows the file's order cuts inside-out.
+
+A round hole is a `CIRCLE`, a circular arc an `ARC`, a whole ellipse one `ELLIPSE` and an arc of
+an ellipse an elliptical `ELLIPSE`; the pieces of a spline, the outlines of text and the other
+conics are `SPLINE`s of their own degree, so no curve is written as chords. For a machine that
+reads only lines and arcs, pass `"curves": "arcs"` to `sheet.export_dxf`: the free-form curves
+are then tangent arcs and lines within 0.001 mm.
+
+Letters are told from other cut-outs by where they came from: a cut whose sketch holds text
+(Sketch Text) marks the cut-outs it makes as letters, counters included, while the design is
+built; nothing more is saved in the design file. A letter that another cut-out overlaps, or
+that the sheet's edge clips, has become one shape with it and stays on `CUT`.
+
+```json
+{"command":"sheet.export_dxf","params":{"path":"tray-flat.dxf","text":"etch","bend_notes":true}}
+```
+
+With `"bend_notes": true` each bend line gets a note on `BEND_NOTES`, `B1 UP 90° R1` (the bend's
+number, its direction, its angle and its inner radius; `%%d` is AutoCAD's degree sign). It is 3 mm
+high (`"note_height"` changes that), centred half a height beside the middle of the line,
+parallel to it and readable from below or from the right. A bend that cut-outs split has a note
+for each piece. Notes are off by default, because a program that cuts or marks every layer would
+mark them.
+
+A design with several sheet bodies exports one file for each with `"per_body": true`: the files
+are `<path>-<body>.dxf` (characters a file name cannot hold become `_`; two bodies that would
+share a name get `_2`, `_3`…), and the reply lists them in `files`. Without a `path` it lists
+their DXF texts instead.
 
 Base-flange profiles keep their interior holes. Through cuts that cross a sheet edge become
 notches in the flat outline; overlapping and repeated cuts remove their combined area once.
@@ -206,6 +260,10 @@ exactly (`cutout_shapes`): a round hole as `{"circle": {"center", "radius"}}`, a
 
 Cuts can leave separate material pieces, including the centre of a ring cut. These pieces
 remain one logical sheet group through Unfold / Refold and export as separate flat outlines.
+A cut that parts a piece from the base (a flange cut off along its bend, the part of a ring's
+inside on a flange's edge) keeps it too, folded or flat, and its warning says how many pieces
+are no longer joined to the base, their area and where they lie in the flat pattern. Islands
+inside other material (a ring's centre, a letter's counter) are not counted.
 Large profiles that exceed the geometry processing budget report an error instead of
 exporting a partial outline.
 
@@ -225,7 +283,8 @@ become a through hole wherever they remove the whole thickness. Flat-pattern JSO
 `pockets` with their side, depth and bottom/top thickness coordinates in millimetres.
 DXF pocket boundaries use `POCKET_BOTTOM_Z…_TO_…_MM`, `POCKET_TOP_Z…_TO_…_MM`, or
 `POCKET_INTERNAL_Z…_TO_…_MM` layers. These are machining operations, so do not treat every
-pocket layer as a through-cut contour when importing the drawing into a CAM tool.
+pocket layer as a through-cut contour when importing the drawing into a CAM tool. (Text
+machined to a depth is a marking, on `ETCH`.)
 
 Extrude Intersect on a straight base or an unfolded sheet retains the material inside both
 the current tool footprint and its depth interval, including interior holes, detached islands

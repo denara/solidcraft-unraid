@@ -540,7 +540,7 @@ fn role_name(f: &Feature, before: &ModelState, ps: &[Vec3], ns: &[Vec3], fi: usi
     let c = ps.iter().fold(Vec3::ZERO, |a, p| a + *p) * (1.0 / ps.len().max(1) as f64);
     match &f.kind {
         FeatureKind::Extrude { sketch, .. } => {
-            let Some(ss) = before.sketch(*sketch) else { return format!("F{fid}:face:{fi}") };
+            let Some(ss) = before.sketch(sketch.0) else { return format!("F{fid}:face:{fi}") };
             let n = ss.plane.normal();
             // A face across the extrusion is a cap; others sweep a sketch curve.
             let flat = !ns.is_empty() && ns.iter().all(|m| m.cross(n).len() < 1e-6);
@@ -552,7 +552,7 @@ fn role_name(f: &Feature, before: &ModelState, ps: &[Vec3], ns: &[Vec3], fi: usi
             nearest_curve(ss, Vec2::new(q.x, q.y)).map(|id| format!("F{fid}:side:{id}")).unwrap_or_else(|| format!("F{fid}:face:{fi}"))
         }
         FeatureKind::Revolve { sketch, axis, .. } => {
-            let Some(ss) = before.sketch(*sketch) else { return format!("F{fid}:face:{fi}") };
+            let Some(ss) = before.sketch(sketch.0) else { return format!("F{fid}:face:{fi}") };
             let Ok((o2, d2)) = crate::eval::revolve_axis(ss, axis) else { return format!("F{fid}:face:{fi}") };
             let (o, d) = (ss.plane.to_world(o2), (ss.plane.to_world(o2 + d2) - ss.plane.to_world(o2)).normalized().unwrap_or(Vec3::Z));
             // A flat face holding the axis is an angle cap: on the sketch plane, or the far one.
@@ -582,7 +582,7 @@ fn role_name(f: &Feature, before: &ModelState, ps: &[Vec3], ns: &[Vec3], fi: usi
                 FeatureKind::Loft { sections, .. } => sections.first().map(|x| x.sketch),
                 _ => None,
             };
-            let Some(ss) = sk.and_then(|k| before.sketch(k)) else { return format!("F{fid}:face:{fi}") };
+            let Some(ss) = sk.and_then(|k| before.sketch(k.0)) else { return format!("F{fid}:face:{fi}") };
             let n = ss.plane.normal();
             let h = |p: &Vec3| (*p - ss.plane.origin).dot(n);
             let flat = !ns.is_empty() && ns.windows(2).all(|w| w[0].cross(w[1]).len() < 1e-6);
@@ -613,10 +613,10 @@ fn role_name(f: &Feature, before: &ModelState, ps: &[Vec3], ns: &[Vec3], fi: usi
             format!("F{fid}:{role}")
         }
         FeatureKind::Cylinder { axis, .. } => {
-            let flat = !ns.is_empty() && ns.iter().all(|m| m.cross(*axis).len() < 1e-6);
+            let flat = !ns.is_empty() && ns.iter().all(|m| m.cross(axis.0).len() < 1e-6);
             let role = if !flat {
                 "side"
-            } else if ns.first().is_some_and(|m| m.dot(*axis) > 0.0) {
+            } else if ns.first().is_some_and(|m| m.dot(axis.0) > 0.0) {
                 "top"
             } else {
                 "bottom"

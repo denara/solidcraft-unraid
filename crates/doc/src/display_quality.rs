@@ -77,6 +77,57 @@ impl DisplayQuality {
     }
 }
 
+/// Most refinement steps view-dependent display refinement takes past the chosen level (#1320):
+/// each halves the chord tolerance, so the finest is 1/16 of the chosen level's.
+pub const MAX_REFINE: u8 = 4;
+
+/// Screen-space error (physical pixels) above which a body is refined: a facet's sag shows.
+pub const REFINE_PX: f64 = 1.0;
+/// Error a refinement aims for (below [`REFINE_PX`], so a body just refined is not refined again
+/// at the next small zoom step).
+pub const TARGET_PX: f64 = 0.75;
+/// Error below which a refined body steps back toward the chosen level. A refinement lands
+/// between half [`TARGET_PX`] and [`TARGET_PX`], and a step back between this and twice this, so
+/// zooming out or in by up to 2× from either never flips the level back.
+pub const COARSEN_PX: f64 = 0.175;
+
+impl DisplayQuality {
+    /// Chord tolerance (mm) of a body of this size refined `k` steps past this level: halved
+    /// per step.
+    pub fn refined_chord(self, size: f64, k: u8) -> f64 {
+        self.chord(size) / f64::from(1u32 << k.min(MAX_REFINE))
+    }
+
+    /// Facet angle (radians) `k` steps past this level: an arc's sag goes with the square of its
+    /// angle, so the angle shrinks by √2 per step, keeping pace with the chord.
+    pub fn refined_angle(self, k: u8) -> f64 {
+        self.angle() / std::f64::consts::SQRT_2.powi(i32::from(k.min(MAX_REFINE)))
+    }
+}
+
+/// The refinement step a body should be drawn at (0: the chosen level), from `err_px`: the
+/// screen-space error of the chosen level, its chord tolerance in physical pixels where the body
+/// is nearest the eye (0 for a body off screen or too small to matter). `current` is the step
+/// drawn now; steps halve the error. A body is refined once its error passes [`REFINE_PX`], to the
+/// first step under [`TARGET_PX`], and steps back only once the error falls under [`COARSEN_PX`],
+/// to the coarsest step that stays under twice that: the band between keeps an orbit or a small
+/// zoom from flipping levels. Never past `max` (at most [`MAX_REFINE`]).
+pub fn refinement_for(err_px: f64, current: u8, max: u8) -> u8 {
+    let max = max.min(MAX_REFINE);
+    let current = current.min(max);
+    if !(err_px.is_finite() && err_px > 0.0) {
+        return 0;
+    }
+    let err = |k: u8| err_px / f64::from(1u32 << k);
+    if err(current) > REFINE_PX {
+        (current..=max).find(|&k| err(k) <= TARGET_PX).unwrap_or(max)
+    } else if err(current) < COARSEN_PX {
+        (0..=current).find(|&k| err(k) <= 2.0 * COARSEN_PX).unwrap_or(current)
+    } else {
+        current
+    }
+}
+
 static CURRENT: AtomicU8 = AtomicU8::new(1);
 
 /// The level the viewport draws at (process-wide; set from the preferences).
@@ -139,5 +190,59 @@ mod tests {
             let plan = mb.body.display_plan_angular((mb.body.size() * 1e-3).max(1e-3), solidcraft_kernel::DISPLAY_ANGLE).unwrap();
             plan.vertex_count()
         });
+    }
+
+    #[test]
+    fn refinement_follows_the_screen_space_error_with_hysteresis() {
+        // Off screen or tiny: the chosen level.
+        assert_eq!(refinement_for(0.0, 3, MAX_REFINE), 0);
+        assert_eq!(refinement_for(f64::NAN, 2, MAX_REFINE), 0);
+        // Fine already: stays.
+        assert_eq!(refinement_for(0.6, 0, MAX_REFINE), 0);
+        assert_eq!(refinement_for(1.0, 0, MAX_REFINE), 0);
+        // Past a pixel: the first step under the target (each halves the error).
+        assert_eq!(refinement_for(1.2, 0, MAX_REFINE), 1);
+        assert_eq!(refinement_for(5.0, 0, MAX_REFINE), 3);
+        assert_eq!(refinement_for(5.0, 1, MAX_REFINE), 3);
+        // Capped.
+        assert_eq!(refinement_for(1e6, 0, MAX_REFINE), MAX_REFINE);
+        assert_eq!(refinement_for(1e6, 0, 2), 2);
+        assert_eq!(refinement_for(1e6, 9, 99), MAX_REFINE);
+        // Zooming back out: kept until the error is well under a pixel, then the coarsest step
+        // that stays under half a pixel.
+        assert_eq!(refinement_for(5.0, 3, MAX_REFINE), 3);
+        assert_eq!(refinement_for(2.5, 3, MAX_REFINE), 3, "0.31 px at step 3: in the band");
+        assert_eq!(refinement_for(1.2, 3, MAX_REFINE), 2, "0.15 px at step 3: down to 0.3 px");
+        assert_eq!(refinement_for(0.05, 3, MAX_REFINE), 0);
+        // No flicker: any error, once settled, gives the same step again, and a zoom by up to
+        // 2x either way from where a level was chosen keeps it.
+        let mut e = 0.01;
+        while e < 1e4 {
+            for start in 0..=MAX_REFINE {
+                let k = refinement_for(e, start, MAX_REFINE);
+                assert_eq!(refinement_for(e, k, MAX_REFINE), k, "error {e}, from {start}");
+                // Settled by zooming in (from the chosen level) or out (from the finest).
+                if start == 0 || start == MAX_REFINE {
+                    for f in [0.5, 0.7, 1.0, 1.4, 2.0] {
+                        let back = refinement_for(e * f, k, MAX_REFINE);
+                        let zoomed_in = f >= 1.0;
+                        assert!(
+                            back == k || (zoomed_in && back > k && start == 0) || (!zoomed_in && back < k && start == MAX_REFINE),
+                            "error {e} x{f} from {start}: {k} -> {back}"
+                        );
+                    }
+                }
+            }
+            e *= 1.13;
+        }
+    }
+
+    #[test]
+    fn refined_steps_halve_the_chord() {
+        let q = DisplayQuality::Normal;
+        assert_eq!(q.refined_chord(200.0, 0), q.chord(200.0));
+        assert_eq!(q.refined_chord(200.0, 2), q.chord(200.0) / 4.0);
+        assert_eq!(q.refined_chord(200.0, 99), q.chord(200.0) / 16.0);
+        assert!((q.refined_angle(2) - q.angle() / 2.0).abs() < 1e-12);
     }
 }

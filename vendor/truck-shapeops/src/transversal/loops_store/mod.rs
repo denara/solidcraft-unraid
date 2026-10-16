@@ -158,7 +158,7 @@ impl ParameterKind {
     }
 }
 
-impl<P: Copy, C: Clone> Loops<P, C> {
+impl<P: Copy + Tolerance, C: Clone> Loops<P, C> {
     fn search_parameter(&self, pt: P) -> Option<(usize, usize, ParameterKind)>
     where C: BoundedCurve<Point = P> + SearchParameter<D1, Point = P> {
         self.iter()
@@ -167,7 +167,18 @@ impl<P: Copy, C: Clone> Loops<P, C> {
             .find_map(|(i, j, edge)| {
                 let curve = edge.curve();
                 curve.search_parameter(pt, None, 1).and_then(|t| {
-                    let kind = ParameterKind::try_new(t, curve.range_tuple())?;
+                    // SolidCraft: a point at an end of the curve is that end, however far its
+                    // parameter is from the end's. The parameter alone is no distance: on a
+                    // polyline it counts segments, and an intersection curve ending 2e-7 mm from
+                    // another's end (two walls of a glyph meeting a face) read 1.4e-6 before it,
+                    // so it was cut into a sliver and the result's shell never closed (#391).
+                    let kind = if pt.near(&curve.front()) {
+                        ParameterKind::Front
+                    } else if pt.near(&curve.back()) {
+                        ParameterKind::Back
+                    } else {
+                        ParameterKind::try_new(t, curve.range_tuple())?
+                    };
                     Some((i, j, kind))
                 })
             })

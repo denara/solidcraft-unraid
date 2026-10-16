@@ -48,6 +48,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -247,9 +248,15 @@ pub fn run(root: &Path, site: Option<&str>, required: bool) -> Result<(), String
     // v5's worker installs, its files coming slowly; meanwhile v6 is deployed and launched.
     let update = "navigator.serviceWorker.getRegistration().then((r) => { r.update(); return true; })";
     let name5 = kept.get(4).map(|(v, _)| cache_name(PREFIX, v)).unwrap_or_default();
+    let asked = server.slow.load(Ordering::SeqCst);
     server.set(Mode::SlowFiles(v5));
     cdp.eval(update)?;
     wait_for(&mut cdp, &state_js, "v5's worker starts downloading", |s| s["caches"].get(&name5).is_some())?;
+    // Chrome sends a server at most six requests at once: a build with more files has the rest
+    // wait for the first ones. v6 is deployed once all of v5's are asked for (any asked later
+    // would get v6's file, which rightly ends v5's download, but that isn't this step).
+    let files5 = kept.get(4).map_or(0, |(_, n)| *n);
+    server.wait_asked_slowly(asked + files5)?;
     server.set(Mode::Serve(v6));
     let t = launch(&mut cdp, "v6")?;
     wait_for(&mut cdp, &state_js, "v5's download is finished, not dropped", |s| s["complete"].as_array().is_some_and(|c| c.contains(&json!(name5))))?;
@@ -439,6 +446,8 @@ enum Mode {
 struct Server {
     port: u16,
     mode: Arc<Mutex<Mode>>,
+    /// How many files were asked for in Mode::SlowFiles.
+    slow: Arc<AtomicUsize>,
 }
 
 impl Server {
@@ -447,14 +456,26 @@ impl Server {
         let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("server: {e}"))?;
         let port = listener.local_addr().map_err(|e| format!("server: {e}"))?.port();
         let mode = Arc::new(Mutex::new(Mode::Refuse));
-        let shared = mode.clone();
+        let slow = Arc::new(AtomicUsize::new(0));
+        let (shared, asked) = (mode.clone(), slow.clone());
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
-                let (shared, elsewhere) = (shared.clone(), elsewhere.clone());
-                std::thread::spawn(move || answer(stream, &shared, &elsewhere));
+                let (shared, asked, elsewhere) = (shared.clone(), asked.clone(), elsewhere.clone());
+                std::thread::spawn(move || answer(stream, &shared, &asked, &elsewhere));
             }
         });
-        Ok(Server { port, mode })
+        Ok(Server { port, mode, slow })
+    }
+
+    /// Wait (at most 30 s) until `n` files in all were asked for in Mode::SlowFiles.
+    fn wait_asked_slowly(&self, n: usize) -> Result<(), String> {
+        for _ in 0..300 {
+            if self.slow.load(Ordering::SeqCst) >= n {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        Err(format!("only {} of {n} slow files were asked for", self.slow.load(Ordering::SeqCst)))
     }
 
     fn set(&self, mode: Mode) {
@@ -474,7 +495,7 @@ fn hold(shared: &Mutex<Mode>, still: impl Fn(&Mode) -> bool) {
     }
 }
 
-fn answer(mut stream: TcpStream, shared: &Mutex<Mode>, elsewhere: &Path) {
+fn answer(mut stream: TcpStream, shared: &Mutex<Mode>, slow: &AtomicUsize, elsewhere: &Path) {
     let Ok(read) = stream.try_clone() else { return };
     let mut reader = BufReader::new(read);
     let mut request = String::new();
@@ -506,6 +527,7 @@ fn answer(mut stream: TcpStream, shared: &Mutex<Mode>, elsewhere: &Path) {
         Mode::SlowCheck(dir) => (dir, false, true),
         Mode::SlowFiles(dir) => {
             if !small {
+                slow.fetch_add(1, Ordering::SeqCst);
                 std::thread::sleep(SLOW_FILE);
             }
             (dir, false, false)

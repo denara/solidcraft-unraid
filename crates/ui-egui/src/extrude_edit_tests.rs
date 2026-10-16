@@ -361,3 +361,36 @@ fn symmetric_through_all_handle_drag_switches_to_total_distance() {
     let bounds = h.app.session.world_state().body("Main").unwrap().mesh().bounds();
     assert!((bounds.min.z + 60.0).abs() < 1e-7 && (bounds.max.z - 60.0).abs() < 1e-7);
 }
+
+/// Inspect each held frame, not just the settled end of the drag: the displayed arrow must
+/// be at the distance the pointer just wrote, rather than the previous frame's distance.
+#[test]
+fn extrusion_arrow_tracks_the_current_drag_frame() {
+    let mut h = make(json!({"distance":10}));
+    open(&mut h);
+    let at = h.at(&json!({"handle":"arrow"})).unwrap();
+    let at = egui::pos2(at[0] as f32, at[1] as f32);
+    h.app.synthetic_mods.ctrl = true;
+    h.app.synthetic.push(egui::Event::PointerMoved(at));
+    h.frame();
+    h.app.synthetic.push(egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: h.app.synthetic_mods,
+    });
+    h.frame();
+    for dy in [-20.0, -40.0, -60.0] {
+        h.app.synthetic.push(egui::Event::PointerMoved(at + egui::vec2(0.0, dy)));
+        h.frame();
+        let d = h.app.dialog.as_ref().unwrap();
+        let crate::dialogs::Kind::Extrude { distance, .. } = &d.kind else { panic!("extrude") };
+        let distance = h.app.session.doc.eval(distance, solidcraft_engine::doc::expr::Kind::Length).unwrap();
+        assert!(distance > 10.0);
+        let (base, normal) = crate::canvas::anchor(&h.app, d).unwrap();
+        let world = base + normal.unwrap() * distance;
+        let expected = h.at(&json!({"world":[world.x, world.y, world.z]})).unwrap();
+        let drawn = h.at(&json!({"handle":"arrow"})).unwrap();
+        assert!((drawn[0] - expected[0]).hypot(drawn[1] - expected[1]) < 0.1, "arrow {drawn:?} trails current value {expected:?}");
+    }
+}

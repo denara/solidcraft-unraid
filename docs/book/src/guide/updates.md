@@ -5,14 +5,19 @@ the check sends nothing about you or your designs.
 
 ## What you see
 
-When a newer stable release exists, an **Update** button appears in the title bar next to
-**Report a bug**. It opens a small window with the new version, its release notes and three
-choices:
+When a newer stable release exists, a small accent-coloured pill reading **Update to 0.14.0**
+(the new version) appears in the title bar next to **Report a bug**. Nothing pops up by itself:
+clicking the pill opens a small window with the new version, its release notes and three
+choices. In a narrower window the pill shortens to **Update** so the document tabs keep their
+room, then to its icon alone.
 
 - **Download** opens the file that fits your installation (see the table below) in your
   browser, or the release page when there isn't one.
-- **Skip this version** hides the button until an even newer release comes out.
+- **Skip this version** hides the pill until an even newer release comes out.
 - **Remind me later** hides it for three days.
+
+SolidCraft checks every time it starts, so a release that came out since you last opened it shows
+up straight away, and again once a day while it stays open.
 
 **Preferences ▸ General ▸ Updates** has **Check for updates automatically** (on by default) and
 **Check now**, which checks right away and shows the window even for a version you skipped.
@@ -43,7 +48,7 @@ fails with a message, and **Download** is the way to update it.
 
 ## What is sent
 
-One HTTPS request, at start and at most once a day while SolidCraft runs:
+One HTTPS request each time SolidCraft starts, and once a day while it stays open:
 
 ```text
 GET https://api.github.com/repos/bherbruck/solidcraft/releases/latest
@@ -60,9 +65,9 @@ sees the request like any other visit to the API (your IP address, the time); se
 SolidCraft compares the answer with its own version on your computer.
 
 - Offline, or GitHub doesn't answer within 15 seconds: nothing is shown, and the check is tried
-  again an hour later.
+  again an hour later (or at the next start, whichever comes first).
 - GitHub's rate limit for anonymous requests (60 an hour per address) is respected: when GitHub
-  says to wait, SolidCraft waits that long, Check now included.
+  says to wait, SolidCraft waits that long, Check now and the check at start included.
 - Turning off **Check for updates automatically** stops the checks; only **Check now** asks.
 - Setting the environment variable `SOLIDCRAFT_UPDATE_CHECK=0` turns all checks off, for
   example on managed machines.

@@ -7,24 +7,63 @@
 //! what the entities refer to and what release 2000 needs to read them: the version, the
 //! handle seed, the units and the extents; the linetype, layer and block-record tables; the
 //! model and paper space blocks; handles, owners and the subclass markers of each entity; the
-//! root dictionary. Group codes follow Autodesk's public DXF reference.
+//! root dictionary. Layers can be dashed and a drawing can carry TEXT (for annotations). Group
+//! codes follow Autodesk's public DXF reference.
 
 use std::f64::consts::TAU;
 use std::fmt::Write as _;
 
 use solidcraft_geom::{Loop2, Seg2, Vec2};
 
-/// A layer: its name and AutoCAD colour index (1 red, 3 green, 5 blue, 7 white or black).
+/// A layer's linetype, defined in the file's LTYPE table so a viewer needs nothing else.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DxfLinetype {
+    #[default]
+    Continuous,
+    /// AutoCAD's DASHED: a dash of 12.7 mm and a gap of 6.35 mm.
+    Dashed,
+    /// Short 2 mm dashes and 1 mm gaps for hidden edges in millimetre drawings.
+    Hidden,
+}
+
+impl DxfLinetype {
+    fn name(self) -> &'static str {
+        match self {
+            DxfLinetype::Continuous => "Continuous",
+            DxfLinetype::Dashed => "DASHED",
+            DxfLinetype::Hidden => "HIDDEN",
+        }
+    }
+}
+
+/// A layer: its name, AutoCAD colour index (1 red, 3 green, 5 blue, 7 white or black) and linetype.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DxfLayer {
     pub name: String,
     pub color: i16,
+    pub linetype: DxfLinetype,
+}
+
+impl DxfLayer {
+    /// A continuous layer.
+    pub fn new(name: impl Into<String>, color: i16) -> DxfLayer {
+        DxfLayer { name: name.into(), color, linetype: DxfLinetype::Continuous }
+    }
+
+    /// The same layer with a dashed line.
+    pub fn dashed(self) -> DxfLayer {
+        DxfLayer { linetype: DxfLinetype::Dashed, ..self }
+    }
 }
 
 /// The geometry of one entity (millimetres).
 #[derive(Clone, Debug, PartialEq)]
 pub enum DxfShape {
     Line(Vec2, Vec2),
+    /// Connected straight segments, with continuous linetype generation through the vertices.
+    Polyline {
+        points: Vec<Vec2>,
+    },
     Circle {
         c: Vec2,
         r: f64,
@@ -53,6 +92,15 @@ pub enum DxfShape {
         knots: Vec<f64>,
         ctrl: Vec<Vec2>,
         weights: Option<Vec<f64>>,
+    },
+    /// One line of text, centred on `at` (its baseline) and turned `angle_deg` counter-clockwise.
+    /// `%%d`, `%%p` and `%%c` are AutoCAD's degree, plus-minus and diameter signs; other letters
+    /// outside ASCII are written as `\U+XXXX`.
+    Text {
+        at: Vec2,
+        height: f64,
+        angle_deg: f64,
+        text: String,
     },
 }
 
@@ -166,6 +214,7 @@ impl DxfShape {
     fn sample(&self, out: &mut Vec<Vec2>) {
         match self {
             DxfShape::Line(a, b) => out.extend([*a, *b]),
+            DxfShape::Polyline { points } => out.extend(points.iter().copied()),
             DxfShape::Circle { c, r } => out.extend([*c - Vec2::new(*r, *r), *c + Vec2::new(*r, *r)]),
             DxfShape::Arc { c, r, a0, a1 } => {
                 let sweep = (a1 - a0).rem_euclid(360.0);
@@ -180,6 +229,13 @@ impl DxfShape {
             }
             // A spline lies within the hull of its control points.
             DxfShape::Spline { ctrl, .. } => out.extend(ctrl.iter().copied()),
+            // Where a viewer puts the letters depends on its font: 0.8 heights for each.
+            DxfShape::Text { at, height, angle_deg, text } => {
+                let (along, up) = (Vec2::from_angle(angle_deg.to_radians()), Vec2::from_angle(angle_deg.to_radians()).perp());
+                let half = 0.4 * height * text.chars().count() as f64;
+                out.extend([-half, half].map(|s| *at + along * s));
+                out.extend([-half, half].map(|s| *at + along * s + up * *height));
+            }
         }
     }
 }
@@ -256,6 +312,19 @@ impl Out {
     }
 }
 
+/// A text on one line, as a TEXT entity holds it: at most 250 characters, control characters as
+/// spaces, letters outside ASCII as `\U+XXXX` (`?` beyond the first 65536).
+fn text_value(s: &str) -> String {
+    s.chars()
+        .take(250)
+        .map(|c| match c {
+            c if c.is_ascii_control() => " ".to_string(),
+            c if c.is_ascii() => c.to_string(),
+            c => u16::try_from(u32::from(c)).map_or_else(|_| "?".to_string(), |u| format!("\\U+{u:04X}")),
+        })
+        .collect()
+}
+
 /// A DXF drawing (AutoCAD 2000, millimetres) of `entities`. `layers` are the layers they are on
 /// (layer `0` is always there).
 pub fn write_dxf_drawing(layers: &[DxfLayer], entities: &[DxfEntity]) -> String {
@@ -271,7 +340,7 @@ pub fn write_dxf_drawing(layers: &[DxfLayer], entities: &[DxfEntity]) -> String 
         })
         .unwrap_or((Vec2::ZERO, Vec2::ZERO));
 
-    let mut layer_list = vec![DxfLayer { name: "0".into(), color: 7 }];
+    let mut layer_list = vec![DxfLayer::new("0", 7)];
     for l in layers {
         if !layer_list.iter().any(|x| x.name == l.name) {
             layer_list.push(l.clone());
@@ -285,15 +354,30 @@ pub fn write_dxf_drawing(layers: &[DxfLayer], entities: &[DxfEntity]) -> String 
 
     o.code(0, "SECTION");
     o.code(2, "TABLES");
-    let t = o.table("LTYPE", 3);
-    for (name, description) in [("ByBlock", ""), ("ByLayer", ""), ("Continuous", "Solid line")] {
+    // The three every drawing has, and DASHED, which the dashed layers name: dash and gap lengths
+    // (a gap is negative) after the pattern's total.
+    let mut linetypes: Vec<(&str, &str, &[f64])> = vec![
+        ("ByBlock", "", &[]),
+        ("ByLayer", "", &[]),
+        ("Continuous", "Solid line", &[]),
+        ("DASHED", "Dashed __ __ __ __ __ __ __ __ __ __", &[12.7, -6.35]),
+    ];
+    if layer_list.iter().any(|l| l.linetype == DxfLinetype::Hidden) {
+        linetypes.push(("HIDDEN", "Hidden edges", &[2.0, -1.0]));
+    }
+    let t = o.table("LTYPE", linetypes.len());
+    for (name, description, pattern) in linetypes {
         o.record("LTYPE", "AcDbLinetypeTableRecord", &t);
         o.code(2, name);
         o.code(70, 0);
         o.code(3, description);
         o.code(72, 65);
-        o.code(73, 0);
-        o.num(40, 0.0);
+        o.code(73, pattern.len());
+        o.num(40, pattern.iter().map(|d| d.abs()).sum());
+        for d in pattern {
+            o.num(49, *d);
+            o.code(74, 0);
+        }
     }
     o.code(0, "ENDTAB");
     let t = o.table("LAYER", layer_list.len());
@@ -302,8 +386,21 @@ pub fn write_dxf_drawing(layers: &[DxfLayer], entities: &[DxfEntity]) -> String 
         o.code(2, &l.name);
         o.code(70, 0);
         o.code(62, l.color);
-        o.code(6, "Continuous");
+        o.code(6, l.linetype.name());
     }
+    o.code(0, "ENDTAB");
+    // The one text style, which a TEXT entity uses when it names none.
+    let t = o.table("STYLE", 1);
+    o.record("STYLE", "AcDbTextStyleTableRecord", &t);
+    o.code(2, "Standard");
+    o.code(70, 0);
+    o.num(40, 0.0);
+    o.num(41, 1.0);
+    o.num(50, 0.0);
+    o.code(71, 0);
+    o.num(42, 2.5);
+    o.code(3, "txt");
+    o.code(4, "");
     o.code(0, "ENDTAB");
     let t = o.table("BLOCK_RECORD", 2);
     for (h, name) in [(&model, "*Model_Space"), (&paper, "*Paper_Space")] {
@@ -328,10 +425,12 @@ pub fn write_dxf_drawing(layers: &[DxfLayer], entities: &[DxfEntity]) -> String 
     for e in entities {
         let kind = match &e.shape {
             DxfShape::Line(..) => "LINE",
+            DxfShape::Polyline { .. } => "LWPOLYLINE",
             DxfShape::Circle { .. } => "CIRCLE",
             DxfShape::Arc { .. } => "ARC",
             DxfShape::Ellipse { .. } => "ELLIPSE",
             DxfShape::Spline { .. } => "SPLINE",
+            DxfShape::Text { .. } => "TEXT",
         };
         let h = o.handle();
         o.code(0, kind);
@@ -340,6 +439,16 @@ pub fn write_dxf_drawing(layers: &[DxfLayer], entities: &[DxfEntity]) -> String 
         o.code(100, "AcDbEntity");
         o.code(8, if e.layer.trim().is_empty() { "0" } else { e.layer.as_str() });
         match &e.shape {
+            DxfShape::Polyline { points } => {
+                o.code(100, "AcDbPolyline");
+                o.code(90, points.len());
+                // Autodesk DXF reference: bit 128 (PLINEGEN) continues the dash pattern.
+                o.code(70, 128);
+                for p in points {
+                    o.num(10, p.x);
+                    o.num(20, p.y);
+                }
+            }
             DxfShape::Line(a, b) => {
                 o.code(100, "AcDbLine");
                 o.point(10, *a);
@@ -390,6 +499,19 @@ pub fn write_dxf_drawing(layers: &[DxfLayer], entities: &[DxfEntity]) -> String 
                 for p in ctrl {
                     o.point(10, *p);
                 }
+            }
+            DxfShape::Text { at, height, angle_deg, text } => {
+                o.code(100, "AcDbText");
+                o.point(10, *at);
+                o.num(40, *height);
+                o.code(1, text_value(text));
+                o.num(50, *angle_deg);
+                // Centred (72 = 1): a reader that places the text by the second alignment point
+                // and one that takes the first both put its middle on `at`.
+                o.code(72, 1);
+                o.point(11, *at);
+                o.code(100, "AcDbText");
+                o.code(73, 0);
             }
         }
     }
@@ -561,7 +683,7 @@ mod tests {
             DxfEntity { layer: "OUTLINE".into(), shape: DxfShape::Circle { c: Vec2::new(5.0, 5.0), r: 4.0 } },
             DxfEntity { layer: "CUT".into(), shape: DxfShape::Line(Vec2::ZERO, Vec2::X) },
         ];
-        let dxf = write_dxf_drawing(&[DxfLayer { name: "OUTLINE".into(), color: 7 }, DxfLayer { name: "CUT".into(), color: 1 }], &ents);
+        let dxf = write_dxf_drawing(&[DxfLayer::new("OUTLINE", 7), DxfLayer::new("CUT", 1)], &ents);
         let p = pairs(&dxf);
         let after = |var: &str| &p[p.iter().position(|(c, v)| (*c, v.as_str()) == (9, var)).unwrap() + 1..];
         assert_eq!(after("$ACADVER")[0], (1, "AC1015".to_string()));
@@ -666,5 +788,107 @@ mod tests {
         let at = |code: i32| e.1.iter().position(|(c, _)| *c == code).unwrap();
         let last = |code: i32| e.1.iter().rposition(|(c, _)| *c == code).unwrap();
         assert!(last(40) < at(41) && last(41) < at(10), "{:?}", e.1);
+    }
+
+    /// The records of a symbol table, each as its group codes after the type.
+    fn table_records(p: &[(i32, String)], table: &str) -> Vec<Vec<(i32, String)>> {
+        let start = p.iter().position(|(c, v)| (*c, v.as_str()) == (2, table)).unwrap();
+        let mut out: Vec<Vec<(i32, String)>> = Vec::new();
+        for (c, v) in &p[start + 1..] {
+            match (*c, v.as_str()) {
+                (0, "ENDTAB") => break,
+                (0, _) => out.push(Vec::new()),
+                _ => {
+                    if let Some(record) = out.last_mut() {
+                        record.push((*c, v.clone()));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn field(record: &[(i32, String)], code: i32) -> &str {
+        record.iter().find(|(c, _)| *c == code).map_or("", |(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn a_dashed_layer_names_its_linetype_and_the_table_defines_it() {
+        let dxf = write_dxf_drawing(&[DxfLayer::new("BEND", 1).dashed(), DxfLayer::new("CUT", 4)], &[]);
+        let p = pairs(&dxf);
+        // The linetypes of every drawing, then DASHED: a dash of 12.7 mm and a gap of 6.35 mm, 19.05 mm in all.
+        let types = table_records(&p, "LTYPE");
+        assert_eq!(types.iter().map(|r| field(r, 2)).collect::<Vec<_>>(), ["ByBlock", "ByLayer", "Continuous", "DASHED"]);
+        let dashed = &types[3];
+        let numbers = |code: i32| dashed.iter().filter(|(c, _)| *c == code).map(|(_, v)| v.parse::<f64>().unwrap()).collect::<Vec<_>>();
+        assert!(near(&numbers(49), &[12.7, -6.35]) && near(&numbers(40), &[19.05]) && near(&numbers(73), &[2.0]) && near(&numbers(72), &[65.0]));
+        // The table says how many records it holds.
+        let at = p.iter().position(|(c, v)| (*c, v.as_str()) == (2, "LTYPE")).unwrap();
+        assert_eq!(p[at..].iter().find(|(c, _)| *c == 70).map(|(_, v)| v.as_str()), Some("4"));
+        // Each layer names its linetype.
+        let layers = table_records(&p, "LAYER");
+        assert_eq!(
+            layers.iter().map(|r| (field(r, 2), field(r, 62), field(r, 6))).collect::<Vec<_>>(),
+            [("0", "7", "Continuous"), ("BEND", "1", "DASHED"), ("CUT", "4", "Continuous")]
+        );
+    }
+
+    #[test]
+    fn hidden_polylines_continue_short_dashes_across_chords_and_round_trip() {
+        let points = vec![Vec2::ZERO, Vec2::new(1., 0.), Vec2::new(2., 1.), Vec2::new(3., 1.)];
+        let layer = DxfLayer { linetype: DxfLinetype::Hidden, ..DxfLayer::new("HIDDEN", 8) };
+        let text = write_dxf_drawing(&[layer], &[DxfEntity { layer: "HIDDEN".into(), shape: DxfShape::Polyline { points } }]);
+        let records = entities(&text);
+        assert_eq!(records[0].0, "LWPOLYLINE");
+        assert_eq!(field(&records[0].1, 70), "128");
+        assert_eq!(field(&records[0].1, 90), "4");
+        let types = table_records(&pairs(&text), "LTYPE");
+        let hidden = types.iter().find(|r| field(r, 2) == "HIDDEN").unwrap();
+        assert_eq!(hidden.iter().filter(|(c, _)| *c == 49).map(|(_, v)| v.parse::<f64>().unwrap()).collect::<Vec<_>>(), [2., -1.]);
+        assert_eq!(read_dxf(&text).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn text_is_centred_on_its_point_and_the_reader_gets_it_back() {
+        let at = Vec2::new(30.0, 12.0);
+        let note = DxfShape::Text { at, height: 3.0, angle_deg: 90.0, text: "AB%%d\nC\u{b0}".into() };
+        let dxf = write_dxf_drawing(&[DxfLayer::new("NOTES", 8)], &[DxfEntity { layer: "NOTES".into(), shape: note }]);
+        let file = entities(&dxf);
+        let [text] = file.as_slice() else { panic!("{file:?}") };
+        assert_eq!(text.0, "TEXT");
+        // One line (the newline is a space), the sign outside ASCII a code of its own, `%%d` AutoCAD's degree sign.
+        assert_eq!(text.1.iter().find(|(c, _)| *c == 1).map(|(_, v)| v.as_str()), Some("AB%%d C\\U+00B0"));
+        // Centred (72 = 1) on the second alignment point, which is the first as well; 3 mm high, turned 90°.
+        assert!(
+            near(&values(text, 11), &[30.0])
+                && near(&values(text, 21), &[12.0])
+                && near(&values(text, 10), &[30.0])
+                && near(&values(text, 20), &[12.0])
+        );
+        assert!(
+            near(&values(text, 72), &[1.0]) && near(&values(text, 73), &[0.0]) && near(&values(text, 40), &[3.0]) && near(&values(text, 50), &[90.0])
+        );
+        // Its style is in the STYLE table, and the layer it is on in the LAYER table.
+        let p = pairs(&dxf);
+        assert_eq!(table_records(&p, "STYLE").iter().map(|r| field(r, 2)).collect::<Vec<_>>(), ["Standard"]);
+        assert!(text.1.contains(&(8, "NOTES".to_string())));
+        // The reader finds the text where it was put, as high and as turned.
+        let back = read_dxf(&dxf).unwrap();
+        assert!(
+            matches!(&back[..], [Geom2::Text { at: found, height, angle, .. }] if found.dist(at) < 1e-9 && (height - 3.0).abs() < 1e-9 && (angle - FRAC_PI_2).abs() < 1e-9),
+            "{back:?}"
+        );
+    }
+
+    #[test]
+    fn the_extents_hold_the_text() {
+        // Five letters of 3 mm, turned to read upwards: 0.8 × 3 × 5 = 12 mm long around y = 12, and
+        // 3 mm to the left of the baseline at x = 30.
+        let shape = DxfShape::Text { at: Vec2::new(30.0, 12.0), height: 3.0, angle_deg: 90.0, text: "ABCDE".into() };
+        let dxf = write_dxf_drawing(&[], &[DxfEntity { layer: "0".into(), shape }]);
+        let p = pairs(&dxf);
+        let after = |var: &str| &p[p.iter().position(|(c, v)| (*c, v.as_str()) == (9, var)).unwrap() + 1..];
+        assert_eq!(&after("$EXTMIN")[..2], &[(10, "27.0".to_string()), (20, "6.0".to_string())]);
+        assert_eq!(&after("$EXTMAX")[..2], &[(10, "30.0".to_string()), (20, "18.0".to_string())]);
     }
 }

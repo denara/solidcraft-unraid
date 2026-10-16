@@ -17,6 +17,10 @@ Changes:
 - `transversal/integrate/mod.rs`: the result's shells and faces keep the order of the shell
   they come from (truck's connected components followed hash order of face addresses, so a
   boolean's faces came out in a different order on every run).
+- `transversal/loops_store/mod.rs`: a point at an end of a boundary curve (within the point
+  tolerance) is that end, whatever its parameter: a polyline's parameter counts segments, so
+  an intersection curve ending 2e-7 mm from another's end could read as inside it, cut it
+  into a sliver with a vertex of its own, and leave the result's shell open (#391).
 - `transversal/loops_store/mod.rs`: an intersection edge added to a face at a vertex that more
   than one wire visits (several curves end on it: the touching point of two equal cylinders) goes
   into the corner that holds its direction, swept counterclockwise about the face's normal from
@@ -38,6 +42,18 @@ Changes:
   wrappers that drop the history; the `*_with_history` forms return the same solid with the
   history as an `Option` (`None` where a face or edge went unrecorded).
 
+## truck-geometry 0.5.0 (Apache-2.0, © RICOS Co. Ltd., https://github.com/ricosjp/truck)
+
+Changes:
+- `decorators/intersection_curve.rs`: `IntersectionCurve::parameter_division` divides as
+  `algo::curve::parameter_division` does (the same split points, in the same order), but each
+  point's projection onto the two surfaces starts from the parameters of the point that begins
+  its piece, instead of a search of the whole surfaces (a grid pre-search of a B-spline surface
+  for every point: a small hole on a large curved face took seconds, #1038). A hinted result
+  farther from the leader's point than the curve's tolerance (the projection settled on another
+  part of a surface, such as the far side of a small hole) is dropped for the search from
+  nothing, as before. `crates/kernel/src/issue_1038_tests.rs` holds it to that search.
+
 ## truck-stepio 0.3.0 (Apache-2.0, © RICOS Co. Ltd., https://github.com/ricosjp/truck)
 
 Only the writer (`out`) is used; SolidCraft reads STEP with its own reader.
@@ -49,6 +65,12 @@ Changes:
   mirrored revolutions (ISO 10303-42 parameterises them by angle then profile, so their normal
   is the opposite of truck's; a mirroring transform reverses it again), and the modeling-surface
   wrapper passes the revolution's sense through instead of always `true`.
+- `out/geometry.rs`: a surface of revolution under a transform that commutes with turning about
+  its axis (a scale across the axis that differs from the scale along it, as a shell or offset
+  makes of a revolved face) is written as the transformed profile revolved about the
+  transformed axis. Only uniform scales were taken. Other transforms are still refused: the
+  writer stops with a formatting error, which SolidCraft's `step.rs` now reports as an export
+  error (`to_string` panicked on it).
 - `lib.rs`: compiler warnings no longer fail the build. Example and test targets are dropped
   (their sources are not vendored).
 
@@ -75,6 +97,13 @@ Changes:
   and the face was then left unmeshed, which also failed every boolean with the body (#882). A
   walk that succeeds is kept as it was: where a loop starts decides how it is laid out across a
   periodic surface's seam.
+- `tessellation/mod.rs`, `triangulation.rs`: edges are sampled through a new `TrySubs` trait
+  (`try_subs`, `approx_subs`), a bound of `PolylineableCurve`, instead of `subs`. truck's
+  `IntersectionCurve::subs` unwraps a projection onto its two surfaces that can fail to
+  converge, which panicked while meshing (#1252). A failed sample at an interval's end uses the
+  intersection curve's leader point, so the polyline stays finite; a failed interior probe is
+  NaN, which already counts as flat. `truck-shapeops`' `ShapeOpsCurve` carries the same bound,
+  and `truck-modeling` is now a regular dependency (it was a dev-dependency).
 - `tessellation/triangulation.rs`: the inside test of a face's boundary skips loops whose
   parameter box is clear of the point (it tested every segment of every loop, so a face with
   hundreds of holes meshed in quadratic time).
@@ -91,6 +120,11 @@ Changes:
   point that does not evaluate counts as flat instead of recursing). Surface grids refine only
   the direction that bends, and a ruling left undivided gets cells comparable to the other
   direction (long triangles from a trim loop to the grid's far ends cut through cylinders).
+- `tessellation/triangulation.rs`: an edge's division evaluates each parameter once. A piece
+  carries the points of its ends and its midpoint is an end of both halves: 2 evaluations per
+  piece instead of 4, and the same polyline (a point of an intersection curve costs two grid
+  searches of its surfaces). `bounded_polyline` and `Deflection::turn2`/`turns` are public but
+  hidden, for the kernel's regression against the old division.
 - `tessellation/mod.rs`, `tessellation/triangulation.rs`, for display: a `Deflection` is the
   chord tolerance plus an optional bound on the angle one facet spans, and
   `RoundMeshableShape::robust_triangulation_within` divides by it: an edge or a grid direction
@@ -101,6 +135,18 @@ Changes:
   stops refining a face's grid at 16 384 points. Each edge is still divided once for both its
   faces. `triangulation` and `robust_triangulation` divide by the chord tolerance alone, as
   before.
+- `analyzers/collision.rs`: the collision search builds each triangle's box once, filters the
+  sweep's open list by box overlap as it goes (it cloned the list for every triangle and built
+  both boxes for every pair), and runs the exact triangle tests on the rayon pool, in order
+  (sequential on wasm). Same collisions in the same order. The old search is kept as
+  `analyzers::collision_test_hooks`, behind a `test-hooks` feature that only
+  `solidcraft-kernel`'s tests turn on, and `crates/kernel/tests/mesh_collision_equivalence.rs`
+  compares the two.
+- `tessellation/triangulation.rs`: the inside test of a face's boundary also skips runs of 32
+  segments whose box, grown by the tolerance, the test's ray cannot meet. Same answers. The
+  old test is kept as `tessellation::include_test_hooks`, behind a `test-hooks` feature that
+  only `solidcraft-kernel`'s tests turn on, and `crates/kernel/tests/tess_include_equivalence.rs`
+  compares the two.
 - `lib.rs`: compiler warnings no longer fail the build. Example, test and bench targets are
   dropped (their sources are not vendored).
 
@@ -125,6 +171,8 @@ SolidCraft changes:
 - `src/lib.rs`: use 1x MSAA on the selected OpenGL adapter before creating pipelines,
   exposing the effective sample count so host paint callbacks can match it.
 - `src/winit.rs`: use that same effective count for depth and resolve attachments.
+- `src/renderer.rs`: when the GPU refuses a staging buffer for a frame's meshes (device lost
+  or out of memory), log a warning and draw nothing that frame instead of panicking (#1469).
 - Other backends retain requested MSAA, without another adapter or device probe.
 - `src/lib.rs`: clamp MSAA to the largest sample count the device supports for the surface and
   depth formats (`supported_msaa_samples`, `RenderState::msaa_supported`): a saved 8x on a

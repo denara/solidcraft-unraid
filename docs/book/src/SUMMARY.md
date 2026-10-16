@@ -17,6 +17,7 @@
 - [Updates and privacy](guide/updates.md)
 - [Troubleshooting: SolidCraft won't start](guide/troubleshooting.md)
 - [Driving SolidCraft with an AI agent (MCP)](guide/mcp.md)
+- [Agent chat](guide/agent-chat.md)
 
 # Developer guide
 

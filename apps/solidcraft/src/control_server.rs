@@ -18,8 +18,9 @@ const MAX_CONNECTIONS: usize = 16;
 const MAX_BAD_LINES: usize = 8;
 
 static OPEN: AtomicUsize = AtomicUsize::new(0);
-/// The token file this launch wrote, removed when the app ends.
-static TOKEN_FILE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+/// The token files this launch wrote (its `--control` port, the agent chat's endpoint), removed
+/// when the app ends.
+static TOKEN_FILES: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
 
 /// A new random token: 32 bytes from the operating system, as hex.
 fn new_token() -> Option<String> {
@@ -30,30 +31,55 @@ fn new_token() -> Option<String> {
 
 /// Remove this launch's token file (at exit).
 pub fn remove_token_file() {
-    if let Some(p) = TOKEN_FILE.get() {
-        let _ = std::fs::remove_file(p);
+    if let Ok(files) = TOKEN_FILES.lock() {
+        for p in files.iter() {
+            let _ = std::fs::remove_file(p);
+        }
     }
 }
 
 pub fn start(port: u16, ctx: egui::Context) -> Receiver<ControlRequest> {
     let (tx, rx) = channel::<ControlRequest>();
     // Every connection must show the token before anything runs (docs/control-protocol.md).
-    let Some(token) = control_auth::env_token().or_else(new_token) else {
-        eprintln!("solidcraft: control server not started: no random token available");
-        return rx;
+    match control_auth::env_token().or_else(new_token) {
+        Some(token) => {
+            listen(port, token, tx, ctx, false);
+        }
+        None => eprintln!("solidcraft: control server not started: no random token available"),
+    }
+    rx
+}
+
+/// The agent chat's own endpoint for its agent's MCP server (docs/agent-chat.md): a free loopback
+/// port with a fresh token of its own (never `SOLIDCRAFT_CONTROL_TOKEN`), written to the usual
+/// token file, where the MCP server finds it, so the token never passes through the agent. Its
+/// requests go to `tx`, where the chat's gate reads them; one may wait long for the user's Allow.
+pub fn listen_agent(tx: Sender<ControlRequest>, ctx: egui::Context) -> Option<u16> {
+    let Some(token) = new_token() else {
+        eprintln!("solidcraft: agent chat endpoint not started: no random token available");
+        return None;
     };
+    listen(0, token, tx, ctx, true)
+}
+
+/// Listen on `port` (0: a free port the system picks) with `token`; the port it listens on.
+/// `patient`: every request may wait as long as a batch (a person decides on it).
+fn listen(port: u16, token: String, tx: Sender<ControlRequest>, ctx: egui::Context, patient: bool) -> Option<u16> {
     let listener = match TcpListener::bind(("127.0.0.1", port)) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("solidcraft: control server failed to bind 127.0.0.1:{port}: {e}");
-            return rx;
+            return None;
         }
     };
+    let port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
     match control_auth::token_path(port) {
         Some(path) => match control_auth::write_token_file(&path, &token) {
             Ok(()) => {
                 eprintln!("solidcraft: control server listening on 127.0.0.1:{port} (token in {})", path.display());
-                let _ = TOKEN_FILE.set(path);
+                if let Ok(mut files) = TOKEN_FILES.lock() {
+                    files.push(path);
+                }
             }
             Err(e) => eprintln!(
                 "solidcraft: control server listening on 127.0.0.1:{port}, but its token file {} could not be written ({e}); \
@@ -78,12 +104,12 @@ pub fn start(port: u16, ctx: egui::Context) -> Receiver<ControlRequest> {
             let ctx = ctx.clone();
             let token = token.clone();
             std::thread::spawn(move || {
-                serve(stream, &token, tx, ctx);
+                serve(stream, &token, tx, ctx, patient);
                 OPEN.fetch_sub(1, Ordering::Relaxed);
             });
         }
     });
-    rx
+    Some(port)
 }
 
 /// One line without its newline, or `None` at the end of the stream. A client that sends
@@ -134,7 +160,7 @@ fn refuse(out: &mut TcpStream, reader: &mut BufReader<TcpStream>) {
     let _ = std::io::copy(&mut reader.by_ref().take(64 * 1024), &mut std::io::sink());
 }
 
-fn serve(stream: TcpStream, token: &str, tx: Sender<ControlRequest>, ctx: egui::Context) {
+fn serve(stream: TcpStream, token: &str, tx: Sender<ControlRequest>, ctx: egui::Context, patient: bool) {
     let Ok(read) = stream.try_clone() else { return };
     let mut out = stream;
     let mut reader = BufReader::new(read);
@@ -168,7 +194,7 @@ fn serve(stream: TcpStream, token: &str, tx: Sender<ControlRequest>, ctx: egui::
                 let method = msg.get("method").and_then(Value::as_str).unwrap_or("").to_string();
                 let params = msg.get("params").cloned().unwrap_or(json!({}));
                 // A batch replaces many short requests: the whole of it may take long (#743).
-                let wait = Duration::from_secs(if method == "engine.batch" { 3600 } else { 60 });
+                let wait = Duration::from_secs(if patient || method == "engine.batch" { 3600 } else { 60 });
                 let (req, rrx) = ControlRequest::new(method, params);
                 if tx.send(req).is_err() {
                     break;
@@ -223,7 +249,7 @@ mod tests {
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let tx = tx.clone();
-                std::thread::spawn(move || serve(stream, token, tx, egui::Context::default()));
+                std::thread::spawn(move || serve(stream, token, tx, egui::Context::default(), false));
             }
         });
         let session = |lines: &[String]| {

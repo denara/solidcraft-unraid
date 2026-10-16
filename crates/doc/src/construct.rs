@@ -82,7 +82,7 @@ pub enum PointDef {
     /// Where an edge (line) crosses a plane.
     EdgeAndPlane { edge: GeoRef, plane: GeoRef },
     /// At a fraction `t` (0…1) of the way along an edge or sketch curve.
-    AlongPath { path: GeoRef, t: String },
+    AlongPath { path: GeoRef, t: crate::Expr },
 }
 
 /// Resolved construction geometry, kept in the model state by feature.

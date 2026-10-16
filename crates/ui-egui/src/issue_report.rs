@@ -598,13 +598,14 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
             ui.add(egui::Label::new(crate::i18n::tr_label("3. Click Submit new issue on GitHub to send your report.")).wrap());
             ui.horizontal_wrapped(|ui| {
                 let t = crate::theme::Tokens::get();
-                if ui
-                    .add(
-                        egui::Button::new(RichText::new(crate::i18n::tr_label("Open GitHub draft")).strong().color(t.text))
-                            .fill(t.accent_soft)
-                            .stroke(egui::Stroke::new(1.0, t.accent)),
-                    )
-                    .clicked()
+                if crate::frame::add_outlined(
+                    ui,
+                    egui::Button::new(RichText::new(crate::i18n::tr_label("Open GitHub draft")).strong().color(t.text))
+                        .fill(t.accent_soft)
+                        .stroke(egui::Stroke::new(1.0, t.accent)),
+                    1.0,
+                )
+                .clicked()
                 {
                     if copy_needed {
                         ctx.copy_text(draft.body.clone());

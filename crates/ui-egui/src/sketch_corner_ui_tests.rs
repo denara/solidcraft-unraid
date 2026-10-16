@@ -379,6 +379,34 @@ fn a_fillet_rounds_every_picked_corner_to_one_radius() {
 }
 
 #[test]
+fn fully_constrained_center_rectangle_corners_can_be_picked_and_filleted() {
+    let mut h = crate::scenario::Harness::new();
+    h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+    h.app.run("sketch.rectangle.center", json!({"center":[0,0],"corner":[20,15]})).unwrap();
+    h.app.run("sketch.constraint.coincident", json!({"a":"p5","b":"origin"})).unwrap();
+    h.app.run("sketch.dimension", json!({"entities":["l1"],"value":40})).unwrap();
+    h.app.run("sketch.dimension", json!({"entities":["l2"],"value":30})).unwrap();
+    h.frames(2);
+    h.step(&json!({"start":"sketch.fillet"})).unwrap();
+    h.frames(2);
+    for corner in [[-20, -15, 0], [20, -15, 0], [20, 15, 0], [-20, 15, 0]] {
+        h.step(&json!({"click":{"world":corner}})).unwrap();
+        h.frames(2);
+    }
+    assert_eq!(h.app.dialog.as_ref().map(|d| d.inputs[0].items.len()), Some(4));
+    set_size(&mut h.app, "3");
+    apply(&mut h);
+    assert!(h.app.dialog.is_none(), "{:?}", h.app.status);
+    let info = h.app.run("sketch.inspect", json!({})).unwrap();
+    assert_eq!(info["dof"], 0, "{info}");
+    assert_eq!(info["status"], "solved", "{info}");
+    let st = h.app.session.world_state();
+    let ss = st.sketch(h.app.session.active_sketch.unwrap()).unwrap();
+    assert_eq!(ss.sketch.curves.iter().filter(|c| matches!(c.kind, CurveKind::Arc { .. })).count(), 4);
+    assert!((ss.profiles[0].area - (1200.0 - 36.0 * (1.0 - std::f64::consts::PI / 4.0))).abs() < 1e-6);
+}
+
+#[test]
 fn ordinary_drawing_keeps_origin_snap_and_real_origin_corners_work() {
     let mut h = crate::scenario::Harness::new();
     h.app.ui.show_origin = true;

@@ -5,19 +5,19 @@ use solidcraft_geom::Vec3;
 
 use crate::Session;
 
-fn run(s: &mut Session, id: &str, p: Value) -> Value {
+pub(super) fn run(s: &mut Session, id: &str, p: Value) -> Value {
     match s.execute(id, &p) {
         Ok(v) => v,
         Err(e) => panic!("{id} {p}: {e}"),
     }
 }
 
-fn occ(s: &Session, component: &str) -> u64 {
+pub(super) fn occ(s: &Session, component: &str) -> u64 {
     let c = s.doc.find_component(component).unwrap_or(0);
     s.doc.occurrence_of(c).map(|o| o.id).unwrap_or(0)
 }
 
-fn place(s: &Session, component: &str, p: Vec3) -> Vec3 {
+pub(super) fn place(s: &Session, component: &str, p: Vec3) -> Vec3 {
     solidcraft_doc::apply_point(&solidcraft_doc::joints::occurrence_world(&s.doc, occ(s, component)), p)
 }
 
@@ -247,6 +247,22 @@ fn faces_mate_by_default() {
     assert!(near(place(&s, "B", Vec3::new(25.0, 5.0, 10.0)), Vec3::new(5.0, 5.0, 0.0)), "{:?}", place(&s, "B", Vec3::new(25.0, 5.0, 10.0)));
 }
 
+/// #1239: two parts as bodies of one component (a multi-body STEP import). The refusal names the
+/// way out, and after Create Components from Bodies the same origins make the joint.
+#[test]
+fn bodies_of_one_component_get_components_first() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10}));
+    run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10, "corner": [20, 0, 0]}));
+    let p = json!({"type": "rigid", "a": {"face": [5, 5, 10]}, "b": {"face": [25, 5, 0]}});
+    let e = s.execute("joint.create", &p).map(|_| ()).unwrap_err().to_string();
+    assert!(e.contains("two different occurrences") && e.contains("component.from_bodies"), "{e}");
+    run(&mut s, "component.from_bodies", json!({"bodies": ["Body1", "Body2"]}));
+    run(&mut s, "joint.create", p);
+    // The first joint's A side stays; B lands on top of it.
+    assert!(near(place(&s, "Body2", Vec3::new(25.0, 5.0, 0.0)), Vec3::new(5.0, 5.0, 10.0)));
+}
+
 /// #527: an assembly with its fasteners passes 200 bodies quickly; the clash check must still
 /// cover the whole design. 201 separate 1 mm cubes 2 mm apart, plus one cube pushed half-way
 /// into the first: exactly that pair overlaps, by 0.5 mm³.
@@ -297,21 +313,21 @@ fn interference_box_sweep_matches_every_pair_check() {
 }
 
 /// A small block in a new component: a part of a linkage, where only its joints matter.
-fn part(s: &mut Session, name: &str, corner: [f64; 3]) {
+pub(super) fn part(s: &mut Session, name: &str, corner: [f64; 3]) {
     run(s, "component.activate", json!({"component": "root"}));
     run(s, "component.create", json!({"name": name}));
     run(s, "solid.box", json!({"length": 2, "width": 2, "height": 2, "corner": corner}));
 }
 
 /// A joint between two parts as they are, at a world point with its z along `z`.
-fn pin(s: &mut Session, kind: &str, name: &str, a: &str, b: &str, p: Vec3, z: Vec3) {
+pub(super) fn pin(s: &mut Session, kind: &str, name: &str, a: &str, b: &str, p: Vec3, z: Vec3) {
     let at = |o: &str| json!({"occurrence": o, "point": [p.x, p.y, p.z], "z": [z.x, z.y, z.z]});
     let r = run(s, "joint.create", json!({"type": kind, "a": at(a), "b": at(b), "flip": true, "name": name}));
     assert_eq!(r["conflicts"].as_array().map(Vec::len), Some(0), "{r}");
 }
 
 /// Where circles about `p` (radius `r`) and `q` (radius `s`) in the XY plane meet.
-fn meet(p: Vec3, r: f64, q: Vec3, s: f64) -> [Vec3; 2] {
+pub(super) fn meet(p: Vec3, r: f64, q: Vec3, s: f64) -> [Vec3; 2] {
     let d = q - p;
     let l = d.len();
     let a = (r * r - s * s + l * l) / (2.0 * l);
@@ -323,7 +339,7 @@ fn meet(p: Vec3, r: f64, q: Vec3, s: f64) -> [Vec3; 2] {
 /// A crank-rocker four-bar about +Z: ground pivots O2 = (0, 0) and O4 = (45, 0), crank 20,
 /// coupler 50, rocker 40, assembled with the crank at 90°. Returns the crank pin P0 and the
 /// rocker pin Q0 (the upper, open assembly).
-fn four_bar() -> (Session, Vec3, Vec3) {
+pub(super) fn four_bar() -> (Session, Vec3, Vec3) {
     let mut s = Session::default();
     let (o2, o4, p0) = (Vec3::ZERO, Vec3::new(45.0, 0.0, 0.0), Vec3::new(0.0, 20.0, 0.0));
     let [q0, _] = meet(p0, 50.0, o4, 40.0);
@@ -792,6 +808,32 @@ fn loops_report_their_mobility() {
     }
 }
 
+/// An actuator in line with the path of its tip pin, as modelled: a panel hinged at the origin,
+/// its tip pin at (30, 0) moving along Y, and a barrel and rod along Y from a root pin at
+/// (30, -40). There the rod only extends and the barrel's turn is zero to first order, but the
+/// barrel turns as soon as the panel does: it has one degree of freedom, at that pose too.
+#[test]
+fn a_part_at_a_dead_point_of_its_loop_keeps_its_mobility() {
+    let mut s = Session::default();
+    let (tip, root) = (Vec3::new(30.0, 0.0, 0.0), Vec3::new(30.0, -40.0, 0.0));
+    for (name, c) in [("Ground", Vec3::new(0.0, -40.0, 0.0)), ("Panel", tip), ("Barrel", root), ("Rod", (tip + root) * 0.5)] {
+        part(&mut s, name, [c.x, c.y, -5.0]);
+    }
+    let g = occ(&s, "Ground");
+    run(&mut s, "occurrence.ground", json!({"occurrence": g, "grounded": true}));
+    pin(&mut s, "revolute", "Hinge", "Ground", "Panel", Vec3::ZERO, Vec3::Z);
+    pin(&mut s, "revolute", "Root pin", "Ground", "Barrel", root, Vec3::Z);
+    pin(&mut s, "slider", "Stroke", "Barrel", "Rod", root, Vec3::Y);
+    pin(&mut s, "revolute", "Tip pin", "Rod", "Panel", tip, Vec3::Z);
+    for part in ["Panel", "Barrel", "Rod"] {
+        assert_eq!(dof_of(&mut s, part), 1, "dead point: {part}");
+    }
+    run(&mut s, "joint.drive", json!({"joint": "Hinge", "value": 5}));
+    for part in ["Panel", "Barrel", "Rod"] {
+        assert_eq!(dof_of(&mut s, part), 1, "driven: {part}");
+    }
+}
+
 /// A design file path in a fresh temporary folder (removed by the caller).
 fn temp_design(tag: &str, ext: &str) -> (std::path::PathBuf, String) {
     let dir = std::env::temp_dir().join(format!("solidcraft-joint-visibility-{tag}-{}", std::process::id()));
@@ -1038,3 +1080,334 @@ fn a_single_value_keeps_the_joints_other_values() {
     let r = run(&mut s, "joint.drive", json!({"joint": "Spindle", "values": [60]}));
     assert!((at(&r)[0] - 60.0).abs() < 1e-9 && (at(&r)[1] - 5.0).abs() < 1e-9, "{r}");
 }
+
+/// A motion link's offset is in the linked value's units, like joint values and limits: degrees
+/// for an angle, mm for a distance, or an expression. `joint.list` answers it the same way, it is
+/// stored in radians as before, and a saved link opens with the offset it had.
+#[test]
+fn a_link_offset_is_in_the_linked_values_units() {
+    let mut s = Session::default();
+    for (name, x) in [("Ground", 0.0), ("Dial", 80.0), ("Gear", 100.0), ("Car", 120.0), ("Cart", 140.0)] {
+        part(&mut s, name, [x, 0.0, -5.0]);
+    }
+    let g = occ(&s, "Ground");
+    run(&mut s, "occurrence.ground", json!({"occurrence": g, "grounded": true}));
+    for (kind, name, x) in [("revolute", "Dial", 80.0), ("revolute", "Gear", 100.0), ("slider", "Car", 120.0), ("slider", "Cart", 140.0)] {
+        pin(&mut s, kind, name, "Ground", name, Vec3::new(x, 0.0, 0.0), Vec3::Z);
+    }
+    run(&mut s, "joint.motion_link", json!({"a": "Dial", "b": "Gear", "ratio": 1, "offset": 10}));
+    run(&mut s, "joint.motion_link", json!({"a": "Car", "b": "Cart", "ratio": 1, "offset": "5 mm"}));
+    run(&mut s, "joint.drive", json!({"joint": "Dial", "value": 20}));
+    run(&mut s, "joint.drive", json!({"joint": "Car", "value": 3}));
+    let value = |l: &Value, name: &str| {
+        l["joints"].as_array().into_iter().flatten().find(|j| j["name"] == name).and_then(|j| j["values"][0]["value"].as_f64()).unwrap_or(f64::NAN)
+    };
+    let l = run(&mut s, "joint.list", json!({}));
+    assert!((value(&l, "Gear") - 30.0).abs() < 1e-9 && (value(&l, "Cart") - 8.0).abs() < 1e-9, "{l}");
+    let links: Vec<(f64, &str)> =
+        l["links"].as_array().into_iter().flatten().map(|k| (k["offset"].as_f64().unwrap_or(f64::NAN), k["unit"].as_str().unwrap_or(""))).collect();
+    assert!(
+        links.len() == 2 && (links[0].0 - 10.0).abs() < 1e-9 && links[0].1 == "deg" && (links[1].0 - 5.0).abs() < 1e-9 && links[1].1 == "mm",
+        "{l}"
+    );
+    assert!((s.doc.assembly.links[0].offset - 10f64.to_radians()).abs() < 1e-12);
+    // A design saved before offsets took degrees stored 0.1 rad, and opens turning Gear 5.73° past Dial.
+    s.doc_mut().assembly.links[0].offset = 0.1;
+    let (dir, path) = temp_design("link-offset", "solidcraft");
+    run(&mut s, "file.save", json!({"path": path}));
+    run(&mut s, "file.new", json!({}));
+    run(&mut s, "doc.open", json!({"path": path}));
+    let l = run(&mut s, "joint.list", json!({}));
+    assert!((value(&l, "Gear") - value(&l, "Dial") - 0.1f64.to_degrees()).abs() < 1e-9, "{l}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A link between an angle and a distance takes its ratio in b's units per a's, like its offset:
+/// a pinion moves its rack 0.5 mm per degree, and a car turns its dial 2 degrees per mm.
+/// `joint.list` answers the ratios the same way; they are stored per radian, as before.
+#[test]
+fn a_link_ratio_between_an_angle_and_a_distance_is_per_degree() {
+    let mut s = Session::default();
+    for (name, x) in [("Ground", 0.0), ("Pinion", 80.0), ("Rack", 100.0), ("Car", 120.0), ("Dial", 140.0)] {
+        part(&mut s, name, [x, 0.0, -5.0]);
+    }
+    let g = occ(&s, "Ground");
+    run(&mut s, "occurrence.ground", json!({"occurrence": g, "grounded": true}));
+    for (kind, name, x) in [("revolute", "Pinion", 80.0), ("slider", "Rack", 100.0), ("slider", "Car", 120.0), ("revolute", "Dial", 140.0)] {
+        pin(&mut s, kind, name, "Ground", name, Vec3::new(x, 0.0, 0.0), Vec3::Z);
+    }
+    run(&mut s, "joint.motion_link", json!({"a": "Pinion", "b": "Rack", "ratio": 0.5}));
+    run(&mut s, "joint.motion_link", json!({"a": "Car", "b": "Dial", "ratio": 2}));
+    run(&mut s, "joint.drive", json!({"joint": "Pinion", "value": 20}));
+    run(&mut s, "joint.drive", json!({"joint": "Car", "value": 3}));
+    let l = run(&mut s, "joint.list", json!({}));
+    let value = |name: &str| {
+        l["joints"].as_array().into_iter().flatten().find(|j| j["name"] == name).and_then(|j| j["values"][0]["value"].as_f64()).unwrap_or(f64::NAN)
+    };
+    assert!((value("Rack") - 10.0).abs() < 1e-9 && (value("Dial") - 6.0).abs() < 1e-9, "{l}");
+    let ratios: Vec<f64> = l["links"].as_array().into_iter().flatten().map(|k| k["ratio"].as_f64().unwrap_or(f64::NAN)).collect();
+    assert!(ratios.len() == 2 && (ratios[0] - 0.5).abs() < 1e-9 && (ratios[1] - 2.0).abs() < 1e-9, "{l}");
+    let stored: Vec<f64> = s.doc.assembly.links.iter().map(|k| k.ratio).collect();
+    assert!((stored[0] - 0.5f64 / 1f64.to_radians()).abs() < 1e-9 && (stored[1] - 2f64.to_radians()).abs() < 1e-12, "{stored:?}");
+}
+
+/// A new joint starts at its values inside its limits. Limits that leave out 0 (or the values
+/// given) start it at the nearer limit, which it keeps, and the answer says the part moved there.
+#[test]
+fn a_new_joint_starts_inside_its_limits_and_says_so() {
+    let mut s = two_cubes();
+    let r = run(&mut s, "joint.as_built", json!({"type": "slider", "a": "A", "b": "B", "name": "Rail", "limits": [[2, 5]]}));
+    let w = r["warnings"].as_array().cloned().unwrap_or_default();
+    assert!(
+        w.len() == 1 && w[0].as_str().is_some_and(|w| w.starts_with("Rail distance starts at 2 mm, inside its limits [2, 5], not at 0 mm")),
+        "{r}"
+    );
+    assert!(near(place(&s, "B", Vec3::new(20.0, 0.0, 0.0)), Vec3::new(20.0, 0.0, 2.0)), "{:?}", place(&s, "B", Vec3::new(20.0, 0.0, 0.0)));
+    assert_eq!(s.doc.assembly.joints[0].values, [2.0]);
+    // Values given outside the limits start at the nearer one too; angles are answered in degrees.
+    let mut s = two_cubes();
+    let r = run(
+        &mut s,
+        "joint.create",
+        json!({"type": "revolute", "a": {"face": [5, 5, 10]}, "b": {"face": [25, 5, 0]}, "values": [90], "limits": [[0, 60]], "name": "Hinge"}),
+    );
+    let w = r["warnings"].as_array().cloned().unwrap_or_default();
+    assert!(w.len() == 1 && w[0].as_str().is_some_and(|w| w.contains("starts at 60 deg") && w.contains("not at 90 deg")), "{r}");
+    // Inside the limits, nothing to say.
+    let mut s = two_cubes();
+    let r = run(&mut s, "joint.as_built", json!({"type": "cylindrical", "a": "A", "b": "B", "name": "Spindle", "limits": [[-30, 30], [0, 5]]}));
+    assert!(r.get("warnings").is_none(), "{r}");
+}
+
+/// The trace's points as world points.
+fn traced(r: &Value) -> Vec<Vec3> {
+    r["points"].as_array().into_iter().flatten().filter_map(crate::params::vec3).collect()
+}
+
+/// A point rigidly carried from segment (a0, b0) to segment (a, b) in the XY plane.
+fn carried(p0: Vec3, a0: Vec3, b0: Vec3, a: Vec3, b: Vec3) -> Vec3 {
+    let turn = (b.y - a.y).atan2(b.x - a.x) - (b0.y - a0.y).atan2(b0.x - a0.x);
+    let d = p0 - a0;
+    a + Vec3::new(d.x * turn.cos() - d.y * turn.sin(), d.x * turn.sin() + d.y * turn.cos(), d.z)
+}
+
+/// A point on the four-bar's coupler, 10 mm off the line between its pins, traces the coupler
+/// curve: the crank pin on its circle, the rocker pin where the coupler and rocker circles meet
+/// (on the open branch), and the point carried with the pins. A motion study turning the crank
+/// traces the same curve, and the design is left as it was.
+#[test]
+fn four_bar_coupler_point_traces_its_closed_form_curve() {
+    let (mut s, p0, q0) = four_bar();
+    let d = (q0 - p0) * (1.0 / q0.dist(p0));
+    let c0 = (p0 + q0) * 0.5 + Vec3::new(-d.y, d.x, 0.0) * 10.0;
+    let before = s.doc.clone();
+    let p = json!({"occurrence": "Coupler", "point": [c0.x, c0.y, c0.z], "joint": "Crank", "from": 0, "to": 360, "samples": 73});
+    let r = run(&mut s, "motion.trace", p);
+    assert_eq!(*s.doc, *before, "a trace leaves the design as it was");
+    assert!(r["stopped_at"].is_null() && r["samples"] == 73, "{r}");
+    let pts = traced(&r);
+    assert_eq!(pts.len(), 73);
+    let mut q = q0;
+    for (k, got) in pts.iter().enumerate() {
+        let v = 5.0 * k as f64;
+        if k > 0 {
+            q = rocker_pin(v - 5.0, v, q);
+        }
+        let th = (90.0 + v).to_radians();
+        let want = carried(c0, p0, q0, Vec3::new(20.0 * th.cos(), 20.0 * th.sin(), 0.0), q);
+        assert!(near(*got, want), "{v}°: {got:?} wants {want:?}");
+    }
+    assert!(pts.first().zip(pts.last()).is_some_and(|(a, b)| near(*a, *b)), "a full turn closes the curve");
+    run(&mut s, "motion.study", json!({"name": "Turn", "steps": 72, "keys": [{"joint": "Crank", "points": [[0, 0], [72, 360]]}]}));
+    let r = run(&mut s, "motion.trace", json!({"occurrence": "Coupler", "point": [c0.x, c0.y, c0.z], "study": "Turn"}));
+    let from_study = traced(&r);
+    assert_eq!(from_study.len(), 73, "{r}");
+    assert!(from_study.iter().zip(&pts).all(|(a, b)| near(*a, *b)), "{r}");
+}
+
+/// The middle of a slider-crank's rod: halfway between the crank pin on its circle and the wrist
+/// pin at a·cos θ + √(b² − (a·sin θ)²).
+#[test]
+fn slider_crank_rod_traces_its_closed_form_curve() {
+    let (mut s, p0, s0) = slider_crank();
+    let m0 = (p0 + s0) * 0.5;
+    let r =
+        run(&mut s, "motion.trace", json!({"occurrence": "Rod", "point": [m0.x, m0.y, m0.z], "joint": "Crank", "from": 0, "to": 360, "samples": 37}));
+    let pts = traced(&r);
+    assert_eq!(pts.len(), 37, "{r}");
+    for (k, got) in pts.iter().enumerate() {
+        let th = (90.0 + 10.0 * k as f64).to_radians();
+        let x = 15.0 * th.cos() + (40.0f64.powi(2) - (15.0 * th.sin()).powi(2)).sqrt();
+        let want = (Vec3::new(15.0 * th.cos(), 15.0 * th.sin(), 0.0) + Vec3::new(x, 0.0, 0.0)) * 0.5;
+        assert!(near(*got, want), "{}°: {got:?} wants {want:?}", 10 * k);
+    }
+}
+
+/// Driving the rocker past its swing stops where the loop can't close: the trace ends there.
+#[test]
+fn a_trace_ends_where_the_loop_stops_the_motion() {
+    let (mut s, _, q0) = four_bar();
+    let start = q0.y.atan2(q0.x - 45.0).to_degrees();
+    let r = run(
+        &mut s,
+        "motion.trace",
+        json!({"occurrence": "Rocker", "point": [q0.x, q0.y, q0.z], "joint": "Rocker", "from": 0, "to": 100, "samples": 21}),
+    );
+    assert!(r["stopped_by_loop"].is_object(), "{r}");
+    let k = r["stopped_at"].as_u64().unwrap_or(u64::MAX) as usize;
+    let pts = traced(&r);
+    assert!(k > 0 && k < 20 && pts.len() == k + 1 && r["samples"] == k + 1, "{r}");
+    let angle = |p: &Vec3| p.y.atan2(p.x - 45.0).to_degrees();
+    for (i, p) in pts.iter().take(k).enumerate() {
+        assert!((angle(p) - (start + 5.0 * i as f64)).abs() < 1e-6, "sample {i}: {}", angle(p));
+    }
+    let limit = ((900.0f64 - 3625.0) / 3600.0).acos().to_degrees();
+    let last = pts.last().map(angle).unwrap_or(f64::NAN);
+    assert!(last > limit - 5.0 && last <= limit + 1e-9, "stopped at {last}°, the limit is {limit}°");
+}
+
+/// Keep makes a 3D sketch spline through the trace, in one undo step.
+#[test]
+fn a_kept_trace_is_a_3d_sketch_spline() {
+    let (mut s, p0, q0) = four_bar();
+    let c0 = (p0 + q0) * 0.5;
+    let p = json!({"occurrence": "Coupler", "point": [c0.x, c0.y, c0.z], "joint": "Crank", "from": 0, "to": 180, "samples": 19});
+    let pts = traced(&run(&mut s, "motion.trace", p.clone()));
+    let features = s.doc.features.len();
+    let r = run(&mut s, "motion.trace.keep", p);
+    assert_eq!((r["name"].as_str(), r["points"].as_u64()), (Some("Motion Trace1"), Some(19)), "{r}");
+    assert!(s.active_sketch.is_none(), "the sketch is left");
+    let id = r["sketch"].as_u64().unwrap_or(0);
+    let sk = s.doc.sketch(id).cloned().unwrap_or_default();
+    assert!(sk.view.three_d && sk.wires.len() == 1, "{r}");
+    let fit = sk.wires.first().map(|w| w.fit.clone()).unwrap_or_default();
+    assert!(fit.len() == pts.len() && fit.iter().zip(&pts).all(|(a, b)| a.dist(*b) < 1e-9), "{fit:?}");
+    let again = json!({"occurrence": "Coupler", "point": [0, 0, 0], "joint": "Crank", "from": 0, "to": 90});
+    assert_eq!(run(&mut s, "motion.trace.keep", again)["name"], "Motion Trace2");
+    run(&mut s, "edit.undo", json!({}));
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!(s.doc.features.len(), features);
+    // A point on the ground does not move: there is nothing to keep.
+    let e = s.execute("motion.trace.keep", &json!({"occurrence": "Ground", "point": [0, 0, 0], "joint": "Crank", "from": 0, "to": 90})).unwrap_err();
+    assert!(e.to_string().contains("does not move"), "{e}");
+}
+
+/// A full turn kept closes exactly on its start, also when the sample before the end lies a hair
+/// from it (a study keyed to 359.99999° one step before 360°).
+#[test]
+fn a_kept_full_turn_closes_on_its_start() {
+    let mut s = Session::default();
+    part(&mut s, "Ground", [-1.0, -1.0, -5.0]);
+    part(&mut s, "Arm", [0.0, -1.0, 0.0]);
+    let g = occ(&s, "Ground");
+    run(&mut s, "occurrence.ground", json!({"occurrence": g, "grounded": true}));
+    pin(&mut s, "revolute", "Pivot", "Ground", "Arm", Vec3::ZERO, Vec3::Z);
+    run(&mut s, "motion.study", json!({"name": "Turn", "steps": 5, "keys": [{"joint": "Pivot", "points": [[0, 0], [4, 359.99999], [5, 360]]}]}));
+    let r = run(&mut s, "motion.trace.keep", json!({"occurrence": "Arm", "point": [1, 0, 0], "study": "Turn"}));
+    let id = r["sketch"].as_u64().unwrap_or(0);
+    let fit = s.doc.sketch(id).ok().and_then(|sk| sk.wires.first().map(|w| w.fit.clone())).unwrap_or_default();
+    assert_eq!(fit.len(), 5, "{fit:?}");
+    assert_eq!(fit.first(), fit.last(), "{fit:?}");
+}
+
+/// Kept while a component is active and shown moved (a move not captured yet): the spline goes
+/// in the root, where no joint moves it, through the traced points; the component stays active.
+#[test]
+fn a_trace_kept_in_a_moved_component_stays_on_the_path() {
+    let (mut s, p0, q0) = four_bar();
+    let crank = occ(&s, "Crank");
+    let c0 = (p0 + q0) * 0.5;
+    let p = json!({"occurrence": "Coupler", "point": [c0.x, c0.y, c0.z], "joint": "Crank", "from": 0, "to": 90, "samples": 4});
+    let pts = traced(&run(&mut s, "motion.trace", p.clone()));
+    run(&mut s, "component.activate", json!({"component": "Crank", "occurrence": crank, "path": [crank]}));
+    run(&mut s, "occurrence.move", json!({"occurrence": crank, "translate": [0, 0, 100], "capture": false}));
+    let active = (s.active_component, s.active_occurrence_path.clone());
+    let r = run(&mut s, "motion.trace.keep", p);
+    assert_eq!((s.active_component, s.active_occurrence_path.clone()), active);
+    let id = r["sketch"].as_u64().unwrap_or(0);
+    assert_eq!(s.doc.feature(id).map(|f| f.component), Some(0), "{r}");
+    let fit = s.doc.sketch(id).ok().and_then(|sk| sk.wires.first().map(|w| w.fit.clone())).unwrap_or_default();
+    assert!(fit.len() == pts.len() && fit.iter().zip(&pts).all(|(a, b)| near(*a, *b)), "{fit:?} wants {pts:?}");
+}
+
+/// A part inside a sub-assembly placed twice: the occurrence path picks the instance traced. The
+/// second Arm turns about its pivot and its Tip goes round; the first Arm, and so the Tip at its
+/// first placement, stays put.
+#[test]
+fn a_trace_follows_the_instance_its_path_names() {
+    let mut s = Session::default();
+    part(&mut s, "Ground", [-1.0, -1.0, -5.0]);
+    let g = occ(&s, "Ground");
+    run(&mut s, "occurrence.ground", json!({"occurrence": g, "grounded": true}));
+    run(&mut s, "component.activate", json!({"component": "root"}));
+    let arm = run(&mut s, "component.create", json!({"name": "Arm"}));
+    run(&mut s, "component.create", json!({"name": "Tip"}));
+    run(&mut s, "solid.box", json!({"length": 2, "width": 2, "height": 2, "corner": [10, 0, 0]}));
+    run(&mut s, "component.activate", json!({"component": "root"}));
+    let second = run(&mut s, "occurrence.copy", json!({"component": arm["component"], "translate": [0, 50, 0]}))["occurrence"].as_u64().unwrap_or(0);
+    let at = |o: Value| json!({"occurrence": o, "point": [0, 50, 0], "z": [0, 0, 1]});
+    run(&mut s, "joint.create", json!({"type": "revolute", "a": at(json!(g)), "b": at(json!(second)), "flip": true, "name": "Pivot"}));
+    let tip = occ(&s, "Tip");
+    let trace = |s: &mut Session, o: Value| {
+        traced(&run(s, "motion.trace", json!({"occurrence": o, "point": [11, 51, 1], "joint": "Pivot", "from": 0, "to": 90, "samples": 3})))
+    };
+    let turned = trace(&mut s, json!([second, tip]));
+    let pivot = Vec3::new(0.0, 50.0, 1.0);
+    assert!(turned.iter().all(|p| (p.dist(pivot) - 122f64.sqrt()).abs() < 1e-6), "{turned:?}");
+    assert!(turned.first().zip(turned.last()).is_some_and(|(a, b)| (a.dist(*b) - 244f64.sqrt()).abs() < 1e-6), "a quarter turn: {turned:?}");
+    let first = trace(&mut s, json!(tip));
+    assert!(first.iter().all(|p| p.dist(Vec3::new(11.0, 51.0, 1.0)) < 1e-9), "{first:?}");
+    assert!(s.execute("motion.trace", &json!({"occurrence": [tip, second], "point": [0, 0, 0], "joint": "Pivot", "from": 0, "to": 90})).is_err());
+    assert!(s.execute("motion.trace", &json!({"occurrence": vec![second; 65], "point": [0, 0, 0], "joint": "Pivot", "from": 0, "to": 90})).is_err());
+}
+
+/// Trace params come from scripts and the control channel: bad ones are refused, never a panic.
+#[test]
+fn hostile_trace_params_are_refused() {
+    let (mut s, _, _) = four_bar();
+    run(&mut s, "motion.study", json!({"name": "Turn", "steps": 4, "keys": [{"joint": "Crank", "points": [[0, 0], [4, 90]]}]}));
+    let base = json!({"occurrence": "Coupler", "point": [0, 0, 0], "joint": "Crank", "from": 0, "to": 90});
+    let with = |k: &str, v: Value| {
+        let mut p = base.clone();
+        p[k] = v;
+        p
+    };
+    let without = |k: &str| {
+        let mut p = base.clone();
+        p.as_object_mut().map(|o| o.remove(k));
+        p
+    };
+    for p in [
+        with("samples", json!(0)),
+        with("samples", json!(1)),
+        with("samples", json!(501)),
+        with("samples", json!(1e300)),
+        with("samples", json!(-3)),
+        with("samples", json!("many")),
+        with("point", json!([f64::MAX, 0, 0])),
+        with("point", json!([0, 0])),
+        with("point", json!("here")),
+        without("point"),
+        with("occurrence", json!("Nowhere")),
+        without("occurrence"),
+        with("joint", json!("Nowhere")),
+        with("index", json!(1)),
+        with("index", json!(-1)),
+        with("from", json!("nonsense +")),
+        with("to", json!(1e300)),
+        without("from"),
+        without("to"),
+        with("study", json!("Turn")),
+        with("study", json!(null)),
+        without("joint"),
+    ] {
+        for cmd in ["motion.trace", "motion.trace.keep"] {
+            assert!(s.execute(cmd, &p).is_err(), "{cmd} {p}");
+        }
+    }
+    run(&mut s, "joint.as_built", json!({"type": "rigid", "a": "Ground", "b": "Crank", "name": "Lock"}));
+    assert!(s.execute("motion.trace", &with("joint", json!("Lock"))).is_err(), "a rigid joint does not move");
+}
+
+#[path = "joints_coupling_tests.rs"]
+mod coupling;

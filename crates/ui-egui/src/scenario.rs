@@ -112,11 +112,12 @@ fn with_dir(v: Value, dir: &str) -> Value {
     }
 }
 
-/// A fresh folder for one scenario's files.
+/// A fresh folder for one scenario's files, under the temporary folder spelled with long names
+/// (a short 8.3 `TEMP` would trip the short-name refusal before the scope checks the scenarios test).
 fn scratch_dir() -> PathBuf {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static N: AtomicUsize = AtomicUsize::new(0);
-    let d = std::env::temp_dir().join(format!("solidcraft-scenario-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+    let d = solidcraft_engine::io::vfs::temp_dir().join(format!("solidcraft-scenario-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
     let _ = std::fs::create_dir_all(&d);
     d
 }
@@ -178,8 +179,6 @@ impl Harness {
     /// File pickers answer like a person would: save into the scenario's folder, open the file
     /// the scenario chose.
     fn install(&mut self) {
-        // Frames are laid out, never painted.
-        self.app.viewport.no_pixels = true;
         let dir = self.dir.clone();
         self.app.services.pick_save =
             Some(Box::new(move |name, _| Box::pin(std::future::ready(Some(dir.join(name).to_string_lossy().into_owned())))));
@@ -443,8 +442,19 @@ impl Harness {
             } else if let Some(name) = s.get("shot").and_then(Value::as_str) {
                 // With SOLIDCRAFT_SCENARIO_SHOTS set: a render of the model as the camera sees it.
                 if let Ok(dir) = solidcraft_engine::geom::env::var("SCENARIO_SHOTS").ok_or(()) {
+                    // Drawn on the GPU: the headless device, as the CLI draws.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if solidcraft_engine::capture::installed().is_none() {
+                        solidcraft_engine::capture::install(std::sync::Arc::new(|scene, cam, w, h| {
+                            let (rgba, renderer) = solidcraft_gpu::capture::headless_rgba(scene, cam, w, h)?;
+                            Ok(solidcraft_engine::capture::Picture { rgba, renderer })
+                        }));
+                    }
                     let path = std::path::Path::new(&dir).join(format!("{name}.png"));
-                    self.call("ui.render", json!({"path": path.to_string_lossy(), "width": 1000, "height": 700}));
+                    let r = self.call("ui.render", json!({"path": path.to_string_lossy(), "width": 1000, "height": 700}));
+                    if r["ok"] != true {
+                        return Err(format!("shot {name}: {}", r["error"]));
+                    }
                 }
                 return Ok(());
             } else if let Some(c) = s.get("camera") {

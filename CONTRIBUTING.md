@@ -98,8 +98,8 @@ The [README](README.md#architecture) has the layer table. The short version:
    MIT OR Apache-2.0, and its solver and blends are written from the maths. (Running an
    open-source application to get reference values for a test is fine; reading its source is
    not.) Permissive
-   dependencies are fine. Note which one you're adding and why in the PR, and run
-   `cargo xtask licences` so THIRD-PARTY-LICENSES.txt lists it (CI checks that it is current).
+   dependencies are fine. Note which one you're adding and why in the PR. THIRD-PARTY-LICENSES.txt
+   lists it once the change lands: the Generated files workflow rewrites it on `main`.
    Nightly/manual CI also scans advisories, bans and sources with cargo-deny; see
    [the local command and coverage limits](docs/book/src/dev/testing.md#dependency-advisories).
 3. **Every asset is original or openly licensed and has a row in
@@ -116,6 +116,12 @@ The [README](README.md#architecture) has the layer table. The short version:
 5. **Everything is a command, with a test.** A new feature means a `CommandSpec` in
    `crates/engine/src/cmd/`, engine tests that measure the result (volume, area,
    face/edge/vertex counts against a value you can derive), and for UI work a scenario (below).
+6. **One set of camera controls.** Every page or canvas that shows a view (the modelling
+   viewport, the Render preview, and any new page such as a flat pattern or drawing) calls
+   `navigation::handle` (`crates/ui-egui/src/navigation.rs`) for its camera input, with
+   `NavCaps` saying whether it can orbit (off for flat 2D pages) and pick. New canvases must use
+   `navigation::handle`; never read drags, the wheel or pinch to move the camera yourself. The
+   `hand_rolled_camera_input_is_rejected` test fails if a page does.
 
 [AGENTS.md](AGENTS.md) has the long form of these rules. It's written for AI agents, but it's
 the most complete description of the house style.
@@ -157,6 +163,13 @@ in the PR. `cargo xtask test` builds the tests with it and then runs every test 
 `cargo xtask test -- shell`. Tests run beside each other on a busy machine, so a test must not
 depend on wall-clock timing.
 
+**PRs test what they touch; main and nightly test everything.** On a pull request, CI maps the
+changed files to workspace packages and runs Clippy, the test build and the tests for those and
+the packages that depend on them (`scripts/ci/affected.py`, self-tested in the `checks` job). A
+change to `Cargo.lock`, the root `Cargo.toml`, `.cargo/`, `.config/`, `.github/`, `vendor/`,
+`tests/`, `scripts/` or any file outside a package runs the whole workspace, as does every push
+to `main`, the nightly run and Run workflow.
+
 **CI shards the tests.** One job builds them into a cargo-nextest archive and four jobs run a
 quarter each, so every test runs in its own process: don't rely on state left by another test.
 Pull requests skip a few heavy tests (one to four minutes each), which run on every push to
@@ -167,8 +180,8 @@ Pull requests skip a few heavy tests (one to four minutes each), which run on ev
   `tests::robustness_goldens` (pull requests that touch `crates/kernel` run its `sample_*` part),
   `pattern_suppress_tests::enclosure_arc_extinction_keeps_a_real_sharp_inner_lip_after_resize_and_reopen`,
   `pattern_suppress_tests::enclosure_datums_follow_wall_height_and_board_depth_with_material_proofs`,
-  `cmd::plastic::tests::enclosure_snap_fit_follows_resized_front_wall`
-- `solidcraft-kernel`: `tests::boolean_identity_on_tangent_primitives`
+  `cmd::plastic::tests::enclosure_snap_fit_follows_resized_front_wall`, the `atomic_commands` contract tests
+- `solidcraft-kernel`: `tests::boolean_identity_on_tangent_primitives`, the `boolean_props` property tests
 - `solidcraft-ui-egui` scenarios: `acceptance_sensor_enclosure`
 
 **The action matrix** tries every ordinary action on every face, edge, vertex and body of a
@@ -186,17 +199,74 @@ the current results, and CI runs `cargo xtask oracle` on every pull request. A c
 because of a known bug names its issue in `expected.json` (`"known_failure": "#123"`); never
 change an expected value to match SolidCraft's output.
 
+## Changing the design file format
+
+A design file says which format it is in (`"format": "solidcraft/N"`). If your change saves
+something new in a design (a field, a feature type, a new kind of name), or makes older designs
+mean something else, it needs a format change. **Add one file, and edit nothing shared:**
+
+1. Create `crates/doc/src/format/pending/<what-it-is>.rs` (lowercase, dashes). Start it with a
+   `//!` note: what is saved, what older designs get without it, and that the last release asks
+   for an update instead of meeting it.
+2. If older designs must be rewritten as they open, put `pub fn step(v: &mut Value) ->
+   crate::Result<()>` in the same file. Pending steps run in file-name order, after the older
+   formats' steps.
+3. Don't touch `FORMAT`, `JSON_STEPS`, the history in `crates/doc/src/format.rs`, another
+   change's file, or any `v<N>/` folder: those are fixed once released.
+
+That's all. The build counts the files: while any are pending it writes the next format number,
+which no release reads, so a release refuses a design that has your change instead of losing it.
+A file also lists the pending changes it has (`format_pending`), so a later development build
+runs only the steps that file is missing. Two pull requests that each add a change merge without
+a conflict. `crates/doc/src/format/pending/README.md` has an example.
+
+**At release time** the maintainer runs `scripts/fold-format-pending.sh`, which moves the pending
+files into `crates/doc/src/format/v<N>/` and fixes that number for good (see
+[docs/releasing.md](docs/releasing.md)). Never add a file to a `v<N>/` folder afterwards.
+
+## Lists many changes add to
+
+Some files gain an item in many pull requests at once. They are kept so that two changes that
+each add an item only meet when their items are neighbours, which spares everyone a conflict
+and a fresh CI run:
+
+- **Message catalogs** (`assets/locales/*.json`): one message per line, sorted by id. Add your
+  message anywhere and run `cargo xtask lists --fix`; `cargo xtask lists` (in `cargo xtask ci`
+  and the Lists workflow) fails on an unsorted catalog or an id that appears twice.
+- **`mod` lines**: one per line, in the sorted group they belong to (`cargo fmt` keeps each group
+  sorted). Add a new module into the existing group, not as a new group at the end.
+- **Languages** (`crates/ui-egui/src/i18n.rs`): one per line, English first, then by id (a test
+  checks it).
+- **Generated files**: `THIRD-PARTY-LICENSES.txt` and `docs/features.md` are rewritten on `main`
+  after each merge by the Generated files workflow (`cargo xtask licences`, `cargo xtask
+  features`). Don't regenerate or edit them in a pull request.
+- **Design format**: one file per change, never an edit to a shared number (above).
+
 ## Sending a change
 
 1. Work is tracked in [GitHub issues](https://github.com/bherbruck/solidcraft/issues), labelled
-   by area (`area:kernel`, `area:sketch`, `area:doc`, `area:ui`, `area:infra`). Before starting,
-   comment on the issue so it gets the `in progress` label and two people don't build the same
-   thing. For anything bigger than a bug fix that has no issue yet, open one first.
+   by area (`area:kernel`, `area:sketch`, `area:doc`, `area:ui`, `area:infra`). For anything
+   bigger than a bug fix that has no issue yet, open one first. **Claim the issue with a draft
+   PR** before you start, so two people don't build the same thing:
+   - Check nobody has it: `gh pr list -R bherbruck/solidcraft --state open --search "#N"`.
+   - Branch from the latest `main`, commit `git commit --allow-empty -m "claim: #N"`, push, and
+     open a **draft** PR titled `<summary> (#N)`, e.g. `Fillet: variable radius along a chain (#123)`.
+   - **The lowest-numbered open PR for an issue wins.** If yours lost, close it (or offer to help
+     on the other one).
+   - Push work in progress at least daily. A draft with no pushes for 72 hours may be taken over:
+     comment on it first, then open your own claim.
+   - Mark the PR ready for review when it is done.
 2. Branch from `main` and keep the PR to one topic.
 3. Run `cargo xtask ci` before pushing. It runs fmt, the asset, licence and layer checks,
    clippy (`-D warnings`), then the tests with the wasm build check alongside. A PR has to pass it.
 4. Reference the issue (`Fixes #12`). In the PR, say what you tested and how. For geometry work, include the measured numbers (and
    the expected ones).
+
+Comment `/claim` on an issue to take it: you are assigned, it gets the `in progress` label, and
+the bot replies with the deadline. Open a draft PR referencing the issue within 72 hours, or the
+claim lapses and the issue is freed again; a claim with a PR is freed after 14 days without
+pushes. `/unclaim` releases it early (only you or a maintainer can). Issues a maintainer has
+taken are never freed automatically.
 
 Help reviewers see what the words mean. For observable CAD, UI or model behavior, please
 include actual descriptive screenshots or a short recording in the issue or PR. This evidence
@@ -229,6 +299,8 @@ owning one area, with a human setting direction and reporting bugs. Their workin
 long as the change meets the rules above.
 
 ## Where help is wanted most
+
+**Kernel speed (slow fillets, booleans, STEP):** please don't rewrite the current kernel code for speed; it is being replaced by [solidcore](https://github.com/bherbruck/solidcore) ([progress](https://bherbruck.github.io/solidcore/)). Report slow cases with a file under the `kernel-perf` label, and put kernel effort into solidcore instead. See [#1597](https://github.com/bherbruck/solidcraft/issues/1597).
 
 See the [`help wanted`](https://github.com/bherbruck/solidcraft/labels/help%20wanted) and
 [`good first issue`](https://github.com/bherbruck/solidcraft/labels/good%20first%20issue) labels.

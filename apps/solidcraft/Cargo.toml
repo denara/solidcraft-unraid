@@ -34,13 +34,19 @@ getrandom = "0.3"
 # The update check (docs/updates.md): HTTPS with rustls, certificates from the operating system.
 ureq = { version = "3.4", default-features = false, features = ["rustls-no-provider", "platform-verifier"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# API keys of the agent chat's API agents (docs/agent-chat.md) live in the system keychain:
+# Keychain on macOS, Credential Manager on Windows, the Secret Service (pure-Rust D-Bus) elsewhere.
+keyring = { version = "3.6", default-features = false, features = ["apple-native", "windows-native", "async-secret-service", "async-io", "crypto-rust"] }
 
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
 quick-xml = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 hidapi = { version = "2.6.7", default-features = false, features = ["windows-native"] }
+# The main window's handle for src/native_frame.rs (already in the tree through eframe and winit).
+raw-window-handle = "0.6"
 # Native crash capture (src/native_crash.rs): the exception filter, the faulting module, a minidump.
+# The window's resize border and DPI size (src/native_frame.rs): the window procedure, hit test, DPI.
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
@@ -51,6 +57,8 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
     "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

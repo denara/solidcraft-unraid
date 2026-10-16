@@ -400,7 +400,12 @@ fn line_dist(p: Vec2, a: Vec2, b: Vec2) -> f64 {
 fn residuals(s: &State, k: &ConstraintKind, out: &mut Vec<f64>) {
     use ConstraintKind::*;
     match *k {
-        PatternPoint { p, q, center, angle, offset } => {
+        PatternPoint { p, q, center, angle, mut offset, directions } => {
+            for (l, distance) in directions.into_iter().flatten() {
+                let (a, b) = s.line(l);
+                let u = (b - a).normalized().unwrap_or(Vec2::ZERO);
+                offset += u * distance.x + u.perp() * distance.y;
+            }
             let c = center.map(|c| s.p(c)).unwrap_or(Vec2::ZERO);
             let d = s.p(p) - c;
             let (sin, cos) = angle.sin_cos();
@@ -775,7 +780,9 @@ fn block_refs(sk: &Sketch, b: &Block) -> Vec<Ref> {
         Block::Closure { a, b } => vec![P(*a), P(*b)],
         Block::Arc { c, a, b } => vec![P(*c), P(*a), P(*b)],
         Block::User(_, k) => match **k {
-            PatternPoint { p, q, center, .. } => vec![P(p), P(q)].into_iter().chain(center.map(P)).collect(),
+            PatternPoint { p, q, center, directions, .. } => {
+                vec![P(p), P(q)].into_iter().chain(center.map(P)).chain(directions.into_iter().flatten().map(|(l, _)| L(l))).collect()
+            }
             PatternRadius { a, b } => vec![C(a), C(b)],
             Coincident { p, q }
             | HorizontalPoints { p, q }

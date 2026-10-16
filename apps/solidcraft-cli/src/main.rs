@@ -34,7 +34,6 @@ use serde_json::{Value, json};
 mod app_icon;
 
 use solidcraft_engine::Session;
-use solidcraft_engine::render::render_png;
 use solidcraft_engine::view::Guides;
 
 const USAGE: &str = "usage:
@@ -63,6 +62,10 @@ const USAGE: &str = "usage:
   solidcraft-cli mcp [--in design.solidcraft|script.json] [--connect 127.0.0.1:PORT [--token T]] [--allow-path DIR]... [--allow-any-path] [--quiet]
   solidcraft-cli crashes [list [--json] | show <id> | replay <id> | dir | clear [<id>]]
   solidcraft-cli licences
+  solidcraft-cli gpu [--policy auto|hardware|software|cpu]
+      (the GPU adapters a headless render can open, best first, the one the policy picks and the tier it
+       lands on: gpu, gpu-software, or the CPU rasterizer (auto with no adapter, or cpu); the policy defaults
+       to SOLIDCRAFT_GPU, else auto; exits with an error when hardware or software finds no such adapter)
   solidcraft-cli icon --out icon.png [--size 256] | --out icon.ico
 ";
 
@@ -75,6 +78,7 @@ fn main() -> ExitCode {
         Some("snapshot") => cmd_snapshot(&args[1..]),
         Some("render") => render::run(&args[1..]),
         Some("exec") => cmd_exec(&args[1..]),
+        Some("gpu") => cmd_gpu(&args[1..]),
         Some("commands") => {
             use std::io::Write as _;
             let mut s = Session::default();
@@ -213,6 +217,7 @@ fn print_json(v: &Value, file: Option<&str>) -> Result<(), String> {
 }
 
 fn cmd_run(args: &[String]) -> Result<(), String> {
+    install_renderer();
     let json_out = json_out(args)?;
     let base = flag(args, "--in");
     let path = positional(args);
@@ -334,13 +339,59 @@ fn cmd_script(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// `gpu`: the headless adapter survey and the policy's pick.
+fn cmd_gpu(args: &[String]) -> Result<(), String> {
+    use solidcraft_gpu::select::{Policy, survey};
+    let policy = match args {
+        [] => Policy::from_env()?,
+        [flag, v] if flag == "--policy" => Policy::parse(v).ok_or_else(|| format!("--policy must be auto, hardware, software or cpu, not `{v}`"))?,
+        _ => return Err("usage: solidcraft-cli gpu [--policy auto|hardware|software|cpu]".into()),
+    };
+    let s = survey(policy);
+    let chosen = s.chosen.and_then(|i| s.adapters.get(i)).cloned();
+    // The tier pictures land on: a hardware GPU, a software adapter, or the CPU rasterizer.
+    let renderer = s.lands_on.map(|l| l.renderer());
+    println!(
+        "{}",
+        pretty(&json!({
+            "policy": policy.name(),
+            "backends": s.backends,
+            "adapters": s.adapters,
+            "chosen": chosen,
+            "lands_on": s.lands_on,
+            "renderer": renderer,
+        }))
+    );
+    match s.lands_on {
+        Some(solidcraft_gpu::select::Landing::Cpu) => {
+            eprintln!("warning: {}", solidcraft_engine::capture::CPU_WARNING);
+            Ok(())
+        }
+        Some(_) => Ok(()),
+        None => Err(format!("no adapter qualifies under the {} policy", policy.name())),
+    }
+}
+
+/// Draw this process's pictures (snapshots, MCP screenshots, saved thumbnails) on the GPU with the
+/// viewport's pipelines: the headless device the `SOLIDCRAFT_GPU` policy picks, opened on the first
+/// picture; under `auto` with no qualifying adapter (or `cpu`), the CPU rasterizer, and the
+/// picture says so. Under `hardware` or `software` with no such adapter a picture fails with an
+/// error that names the policy.
+fn install_renderer() {
+    solidcraft_engine::capture::install(std::sync::Arc::new(|scene, cam, w, h| {
+        let (rgba, renderer) = solidcraft_gpu::capture::headless_rgba(scene, cam, w, h)?;
+        Ok(solidcraft_engine::capture::Picture { rgba, renderer })
+    }));
+}
+
 fn cmd_snapshot(args: &[String]) -> Result<(), String> {
+    install_renderer();
     known_flags("snapshot", args, &["--in", "--out", "--width", "--height", "--view", "--camera"], &["--no-grid", "--no-axes"])?;
     if positional(args).is_none() && flag(args, "--in").is_none() {
         return Err(USAGE.to_string());
     }
     let out = flag(args, "--out").ok_or("snapshot needs --out FILE.png")?;
-    let size = |name: &str, default: usize| match flag(args, name) {
+    let size = |name: &str, default: u32| match flag(args, name) {
         None => Ok(default),
         Some(x) => x.parse().ok().filter(|n| (16..=8192).contains(n)).ok_or_else(|| format!("{name} must be 16 to 8192 pixels, not `{x}`")),
     };
@@ -364,9 +415,14 @@ fn cmd_snapshot(args: &[String]) -> Result<(), String> {
     let cam = s.camera.unwrap_or_else(|| solidcraft_engine::view::home_camera(&s));
     let guides = Guides { grid: !args.iter().any(|a| a == "--no-grid"), axes: !args.iter().any(|a| a == "--no-axes") };
     let scene = solidcraft_engine::view::scene_with_guides(&s, &cam, s.section, guides);
-    let png = render_png(&scene, &cam, w, h).ok_or("render failed")?;
-    std::fs::write(out, &png).map_err(|e| format!("{out}: {e}"))?;
-    println!("{}", pretty(&json!({"path": out, "width": w, "height": h, "bytes": png.len()})));
+    let png = solidcraft_engine::capture::png(&scene, &cam, w, h)?;
+    std::fs::write(out, &png.bytes).map_err(|e| format!("{out}: {e}"))?;
+    let mut reply = json!({"path": out, "width": w, "height": h, "bytes": png.bytes.len(), "renderer": png.renderer});
+    if let Some(w) = solidcraft_engine::capture::warning(png.renderer) {
+        eprintln!("warning: {w}");
+        reply["warning"] = json!(w);
+    }
+    println!("{}", pretty(&reply));
     Ok(())
 }
 
@@ -412,6 +468,7 @@ fn ico(images: &[(usize, Vec<u8>)]) -> Result<Vec<u8>, String> {
 }
 
 fn cmd_exec(args: &[String]) -> Result<(), String> {
+    install_renderer();
     let id = args.first().ok_or_else(|| USAGE.to_string())?;
     let p: Value = match args.get(1) {
         Some(t) => serde_json::from_str(t).map_err(|e| format!("params: {e}"))?,
@@ -427,6 +484,7 @@ fn cmd_exec(args: &[String]) -> Result<(), String> {
 /// a running app's control port. stdout carries only protocol messages. Files the agent's tool
 /// calls reach are confined to `solidcraft_mcp::agent_scope` unless `--allow-any-path` is given.
 fn cmd_mcp(args: &[String]) -> Result<(), String> {
+    install_renderer();
     let scope = (!args.iter().any(|a| a == "--allow-any-path"))
         .then(|| solidcraft_mcp::agent_scope(flags(args, "--allow-path").into_iter().map(std::path::PathBuf::from)));
     if !args.iter().any(|a| a == "--quiet")

@@ -217,24 +217,186 @@ fn skip_and_remind_later() {
 }
 
 #[test]
-fn checks_run_daily_and_back_off() {
+fn every_launch_checks_and_the_open_app_checks_daily() {
     let mut m = Memo::default();
     let now = 1_800_000_000.0;
-    assert!(m.due(now), "the first start checks");
+    assert!(m.due(now, true), "the first start checks");
     m.checked(now, &Ok(release()));
-    assert!(!m.due(now + 3600.0));
-    assert!(m.due(now + CHECK_INTERVAL_S));
-    assert!(m.due(now - 2.0 * CHECK_INTERVAL_S), "a clock set back doesn't block checks for days");
+    // Started this morning, checked then: the next start checks again at once.
+    assert!(m.due(now + 3600.0, true), "every start checks, whatever the daily schedule says");
+    assert!(m.due(now + 5.0, true));
+    // While it stays open: once a day.
+    assert!(!m.due(now + 3600.0, false));
+    assert!(m.due(now + CHECK_INTERVAL_S, false));
+    assert!(m.due(now - 2.0 * CHECK_INTERVAL_S, false), "a clock set back doesn't block checks for days");
+    // A failed check: the open app tries again an hour later; a new start checks anyway.
     m.checked(now, &Err(FetchError::Failed("offline".into())));
-    assert!(!m.due(now + 60.0));
-    assert!(m.due(now + RETRY_AFTER_FAILURE_S));
+    assert!(!m.due(now + 60.0, false));
+    assert!(m.due(now + RETRY_AFTER_FAILURE_S, false));
+    assert!(m.due(now + 60.0, true));
+}
+
+#[test]
+fn the_rate_limit_holds_at_launch_too() {
+    let mut m = Memo::default();
+    let now = 1_800_000_000.0;
     m.checked(now, &Err(FetchError::RateLimited { retry_after_s: 1800 }));
-    assert!(!m.due(now + 1700.0));
-    assert!(m.due(now + 1800.0));
     assert_eq!(m.rate_limited_until, now + 1800.0);
+    for launch in [false, true] {
+        assert!(!m.due(now + 1700.0, launch), "GitHub said to wait (launch: {launch})");
+        assert!(m.due(now + 1800.0, launch));
+    }
     // Absurd waits are capped at a day.
     m.checked(now, &Err(FetchError::RateLimited { retry_after_s: u64::MAX }));
-    assert!(m.due(now + CHECK_INTERVAL_S));
+    assert!(!m.due(now + 3600.0, true));
+    assert!(m.due(now + CHECK_INTERVAL_S, false));
+    // A clock set back more than a day doesn't keep the limit for days.
+    assert!(m.due(now - 2.0 * CHECK_INTERVAL_S, true));
+}
+
+/// A fresh folder for a test's feed file, removed with it.
+struct Scratch(PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn scratch() -> Scratch {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("solidcraft-update-test-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    Scratch(dir)
+}
+
+/// A release one minor version past this build, as the `SOLIDCRAFT_UPDATE_FEED` file gives it.
+fn next_release_feed(dir: &Path) -> (PathBuf, String) {
+    let mut v = parse_version(current_version()).unwrap();
+    v = semver::Version::new(v.major, v.minor + 1, 0);
+    let path = dir.join("latest.json");
+    let body = json!({
+        "tag_name": format!("v{v}"),
+        "name": format!("SolidCraft {v}"),
+        "body": "## What's new\n\n- Faster rebuilds.",
+        "html_url": format!("https://github.com/bherbruck/solidcraft/releases/tag/v{v}"),
+        "assets": []
+    });
+    std::fs::write(&path, body.to_string()).unwrap();
+    (path, v.to_string())
+}
+
+/// Frames until the check in flight has been collected.
+fn wait_for_check(h: &mut crate::scenario::Harness) {
+    for _ in 0..500 {
+        h.frame();
+        if h.app.updater.rx.is_none() && h.app.updater.status != Status::Checking {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    panic!("the update check didn't finish");
+}
+
+#[test]
+fn a_new_launch_checks_even_when_the_last_check_was_today() {
+    let dir = scratch();
+    let (feed, version) = next_release_feed(&dir.0);
+    let mut h = crate::scenario::Harness::new();
+    // Yesterday's version was started and checked this morning: no check due until tomorrow.
+    let now = unix_now();
+    h.app.preferences.update.last_check = now - 3600.0;
+    h.app.preferences.update.next_check = now + CHECK_INTERVAL_S - 3600.0;
+    h.app.updater.feed = Some(feed);
+    h.frame();
+    assert_eq!(h.app.updater.status, Status::Checking, "the launch checks at once");
+    wait_for_check(&mut h);
+    assert_eq!(h.app.updater.release.as_ref().map(|r| r.version().to_string()), Some(version.clone()));
+    assert!(h.app.preferences.update.next_check > now + CHECK_INTERVAL_S - 60.0, "the next check is a day later");
+    // While the app stays open it doesn't ask again before then.
+    h.frames(5);
+    assert!(h.app.updater.rx.is_none() && h.app.updater.status == Status::Idle);
+}
+
+#[test]
+fn turning_off_automatic_checks_stops_the_launch_check() {
+    let dir = scratch();
+    let (feed, _) = next_release_feed(&dir.0);
+    let mut h = crate::scenario::Harness::new();
+    h.app.preferences.check_updates = false;
+    h.app.updater.feed = Some(feed);
+    h.frames(3);
+    assert_eq!(h.app.updater.status, Status::Idle);
+    assert!(h.app.updater.release.is_none());
+}
+
+#[test]
+fn the_title_bar_offers_the_new_version_and_opens_the_update_window() {
+    let dir = scratch();
+    let (feed, version) = next_release_feed(&dir.0);
+    let mut h = crate::scenario::Harness::new();
+    let report = crate::scenario::rect_of("titlebar:report").unwrap();
+    assert!(crate::scenario::rect_of("titlebar:update").is_none(), "nothing offered before a check");
+    h.app.updater.feed = Some(feed);
+    h.frame();
+    wait_for_check(&mut h);
+    h.frames(2);
+    // An accent pill reading "Update to <version>", just left of Report a bug, on the bar.
+    let label = format!("Update to {version}");
+    let at = h.widget(&label).unwrap_or_else(|| panic!("no `{label}` in the title bar"));
+    let pill = crate::scenario::rect_of("titlebar:update").unwrap();
+    assert!(pill.contains(egui::pos2(at[0] as f32, at[1] as f32)));
+    assert!(pill.right() <= report.left() && report.left() - pill.right() < 12.0, "beside Report a bug: {pill:?} {report:?}");
+    assert!((pill.center().y - report.center().y).abs() < 1.0 && pill.height() <= report.height());
+    assert_eq!(crate::scenario::rect_of("titlebar:report"), Some(report), "Report a bug stays where it was");
+    assert!(!h.app.updater.open, "no window pops up by itself");
+    assert!(crate::scenario::rect_of("update:window").is_none());
+    // Clicking it opens the Update window (not a modal: the bar stays usable).
+    h.call("ui.click", json!({"x": pill.center().x, "y": pill.center().y}));
+    h.frames(2);
+    assert!(h.app.updater.open);
+    assert!(h.widget("Skip this version").is_some() && h.widget("Remind me later").is_some());
+    // Remind me later hides the pill.
+    let later = h.widget("Remind me later").unwrap();
+    h.call("ui.click", json!({"x": later[0], "y": later[1]}));
+    h.frames(2);
+    assert!(!h.app.updater.open);
+    assert!(h.widget(&label).is_none(), "Remind me later hides it");
+}
+
+#[test]
+fn the_pill_shortens_in_a_narrow_title_bar() {
+    let dir = scratch();
+    let (feed, version) = next_release_feed(&dir.0);
+    let mut h = crate::scenario::Harness::new();
+    h.app.updater.feed = Some(feed);
+    h.frame();
+    wait_for_check(&mut h);
+    let wide = crate::scenario::rect_of("titlebar:update").unwrap();
+    let label = format!("Update to {version}");
+    assert!(h.widget(&label).is_some());
+    // Narrower and narrower: the pill never grows, never reaches Report a bug, and its label gives
+    // way (to "Update", then the icon alone) before the document tabs run out of room.
+    let mut last = wide.width();
+    let mut shortened = false;
+    for width in [1000.0, 800.0, 700.0, 600.0, 520.0, 440.0] {
+        h.call("ui.resize", json!({"width": width, "height": 600}));
+        h.frames(3);
+        let report = crate::scenario::rect_of("titlebar:report").unwrap();
+        // Icon alone, it keeps the full text for screen readers.
+        let pill = crate::scenario::rect_of("titlebar:update").filter(|_| h.widget(&label).is_some() || h.widget("Update").is_some());
+        if let Some(p) = pill {
+            assert!(p.width() <= last + 0.5, "at {width}: {p:?} grew from {last}");
+            assert!(p.right() <= report.left(), "at {width}: {p:?} overlaps Report a bug {report:?}");
+            last = p.width();
+        }
+        shortened |= pill.is_none_or(|p| p.width() < wide.width());
+        if width == 800.0 {
+            assert!(h.widget("Update").is_some() && h.widget(&label).is_none(), "the short label keeps room for the tabs");
+        }
+    }
+    assert!(shortened, "the long label gives way in a narrow bar");
 }
 
 #[test]

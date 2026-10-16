@@ -8,6 +8,54 @@ use crate::blend::plane_normal;
 use crate::issue_851_tests::planned_volume;
 use crate::{Body, BoolOp, boolean, cylinder, fillet};
 
+#[test]
+fn issue_1303_chamfer_open_rim_after_end_chamfer() {
+    use solidcraft_geom::{Loop2, Plane, Region2, Seg2, Vec2};
+    let rim = Region2 {
+        outer: Loop2 {
+            segs: vec![
+                Seg2::Line { a: Vec2::new(31.0, -15.0), b: Vec2::new(31.0, -11.75) },
+                Seg2::Line { a: Vec2::new(31.0, -11.75), b: Vec2::new(0.0, -11.75) },
+                Seg2::Arc { center: Vec2::ZERO, radius: 11.75, start: -std::f64::consts::FRAC_PI_2, sweep: -std::f64::consts::PI },
+                Seg2::Line { a: Vec2::new(0.0, 11.75), b: Vec2::new(31.0, 11.75) },
+                Seg2::Line { a: Vec2::new(31.0, 11.75), b: Vec2::new(31.0, 15.0) },
+                Seg2::Line { a: Vec2::new(31.0, 15.0), b: Vec2::new(0.0, 15.0) },
+                Seg2::Arc { center: Vec2::ZERO, radius: 15.0, start: std::f64::consts::FRAC_PI_2, sweep: std::f64::consts::PI },
+                Seg2::Line { a: Vec2::new(0.0, -15.0), b: Vec2::new(31.0, -15.0) },
+            ],
+        },
+        holes: vec![],
+    };
+    let mut body = crate::extrude(&Plane::XY, &[rim], 0.0, 13.0).unwrap().pop().unwrap();
+    // Exact local end bevels, meeting at the four-face vertices (30, +/-11.75, 13).
+    body = crate::blend_corner::chamfer(
+        &body,
+        &[Vec3::new(31.0, 13.375, 13.0), Vec3::new(31.0, -13.375, 13.0), Vec3::new(31.0, 11.75, 8.0), Vec3::new(31.0, -11.75, 8.0)],
+        1.0,
+    )
+    .unwrap();
+    let picks = [Vec3::new(-11.75, 0.0, 13.0), Vec3::new(15.0, 11.75, 13.0), Vec3::new(15.0, -11.75, 13.0)];
+    let result = crate::chamfer(&body, &picks, 1.0).unwrap();
+    assert!(result.validity().is_empty(), "{:?}", result.validity());
+    assert_eq!(result.crossed_face_loops().unwrap(), 0);
+    // At height 12 + u, the removed half-ring area is pi/2 * (2*r*u + u^2).
+    // The straight strips end at min(31-u, 30+v), 0 <= v <= u. Their integral
+    // over 0 <= u <= 1 is 30 + 1/6; this includes both split end sections.
+    let expected = 30.0 + 1.0 / 6.0 + std::f64::consts::PI * (11.75 / 2.0 + 1.0 / 6.0);
+    let volume = |b: &Body| b.tessellate_with(0.0001, true).unwrap().measure().volume;
+    let removed = volume(&body) - volume(&result);
+    assert!((removed - expected).abs() < 0.02, "removed {removed}, expected {expected}");
+    for p in [Vec3::new(30.5, 12.25, 12.5), Vec3::new(30.5, -12.25, 12.5)] {
+        assert!(result.solid.vertex_iter().any(|v| from_p3(v.point()).dist(p) < 1e-6));
+    }
+    for selection in [vec![picks[0]], picks.into_iter().rev().collect()] {
+        let other = crate::chamfer(&body, &selection, 1.0).unwrap();
+        assert!(other.validity().is_empty(), "{:?}", other.validity());
+        assert!((volume(&body) - volume(&other) - expected).abs() < 0.02);
+    }
+    assert!(crate::chamfer(&body, &picks, 4.0).is_err());
+}
+
 fn tee(scale: f64, origin: Vec3) -> Body {
     let main = cylinder(origin + Vec3::new(-40.0, 0.0, 0.0) * scale, Vec3::X, 15.0 * scale, 80.0 * scale).unwrap();
     let branch = cylinder(origin, Vec3::Z, 10.0 * scale, 35.0 * scale).unwrap();

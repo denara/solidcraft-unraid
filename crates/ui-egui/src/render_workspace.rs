@@ -11,7 +11,7 @@ use solidcraft_engine::render::{
     ScratchLayout,
 };
 
-use crate::gpu::{GpuScene, SceneSlot, ViewportCallback};
+use crate::gpu::{Frame, GpuScene, SceneSlot, ViewportCallback};
 use crate::{SolveApp, theme::Tokens};
 
 const MAX_GEOMETRY_BYTES: usize = 128 * 1024 * 1024;
@@ -266,6 +266,18 @@ fn image_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
             app.render_workspace.view.dirty = true;
         }
     });
+    let draft = &app.render_workspace.view.draft;
+    let size = (u64::from(draft.width), u64::from(draft.height));
+    if let Some((w, h)) = RenderLimits::default().fit(size.0, size.1, None)
+        && (w, h) != size
+    {
+        ui.small(app.tr("render.image_too_large"));
+        if ui.button(format!("{} {w} × {h}", app.tr("render.image_use_largest"))).clicked() {
+            app.render_workspace.view.draft.width = u32::try_from(w).unwrap_or(1);
+            app.render_workspace.view.draft.height = u32::try_from(h).unwrap_or(1);
+            app.render_workspace.view.dirty = true;
+        }
+    }
     let transparent_label = app.tr("render.image_transparent").to_string();
     ui.checkbox(&mut app.render_workspace.view.transparent, transparent_label);
     if ui.button(app.tr("render.image_check")).clicked() {
@@ -435,23 +447,21 @@ fn hash_surface(surface: Option<solidcraft_engine::render::surface::OpaqueSurfac
     }
 }
 
+/// The size the product preview draws at for a viewport of `full` physical pixels: the full
+/// size when the viewport executor admits it, else the largest size at the same aspect it does.
+/// Without an executor the request is left for resolution to report.
+pub fn preview_size(executor: Option<&ExecutorDescriptor>, full: (u64, u64)) -> (u64, u64) {
+    executor.and_then(|e| e.fit(full.0, full.1)).unwrap_or(full)
+}
+
 pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
     let rect = ui.max_rect();
     app.viewport.rect = Some(rect);
-    let response = ui.allocate_rect(rect, Sense::click_and_drag());
-    let delta = ui.input(|i| i.pointer.delta());
-    if response.dragged_by(egui::PointerButton::Primary) {
-        app.cam.orbit(f64::from(delta.x), f64::from(delta.y));
-    }
-    if response.dragged_by(egui::PointerButton::Middle) {
-        app.cam.pan(f64::from(delta.x), f64::from(delta.y), f64::from(rect.height()));
-    }
-    if response.hovered() {
-        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-        if scroll != 0.0 {
-            app.cam.zoom_at((-f64::from(scroll) * 0.0015 * crate::prefs::zoom_sign(app)).exp(), None);
-        }
-    }
+    crate::viewport::refresh_layout(app, ui.ctx().pixels_per_point());
+    let response = ui.interact(rect, ui.id().with("render_preview"), Sense::click_and_drag());
+    // The modelling viewport's camera input (preset, Orbit around, zoom to the cursor, middle
+    // double-click), with nothing to pick or select here.
+    crate::navigation::handle(app, ui, rect, &response, crate::navigation::NavCaps::RENDER);
     let bg = app.render_workspace.view.draft.background;
     ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(bg[0], bg[1], bg[2]));
     let result = (|| -> Result<(), String> {
@@ -463,12 +473,16 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
         if setup.exposure_ev != 0.0 || setup.environment_rotation != 0.0 || setup.environment_intensity != 1.0 {
             return Err("fixed studio preview requires exposure 0, environment rotation 0 and intensity 1".into());
         }
+        // A 4K or 5K viewport is past the preview's pixel budget: draw it smaller and filter it
+        // up into the viewport rather than refusing the frame.
+        let full = ((rect.width() * ppp).max(1.0) as u64, (rect.height() * ppp).max(1.0) as u64);
+        let (width, height) = preview_size(app.session.render_viewport(), full);
         let mut request = RenderRequest {
             backend: Some(setup.backend.clone()),
             mode: setup.mode,
             operation: RenderOperation::Viewport,
-            width: (rect.width() * ppp).max(1.0) as u64,
-            height: (rect.height() * ppp).max(1.0) as u64,
+            width,
+            height,
             format: None,
             features: Vec::new(),
             policy: Default::default(),
@@ -504,7 +518,7 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
         let radius = scene.bounds.diagonal().max(10.0) + scene.bounds.center().dist(camera.target);
         let eye = camera.eye();
         let slot = app.render_workspace.slot.clone();
-        let callback = ViewportCallback {
+        let callback = ViewportCallback(Frame {
             product: true,
             key,
             slot: slot.clone(),
@@ -525,11 +539,13 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
             access: None,
             outline: false,
             eye: [eye.x as f32, eye.y as f32, eye.z as f32, if camera.fov > 0.0 { 1.0 } else { 0.0 }],
-        };
+            ssaa: if width < full.0 { width as f32 / full.0 as f32 } else { 1.0 },
+        });
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(rect, callback));
         Ok(())
     })();
     if let Err(error) = result {
         ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, error, egui::FontId::proportional(14.0), Tokens::get().text);
     }
+    crate::viewport::axis_view(app, ui, rect);
 }

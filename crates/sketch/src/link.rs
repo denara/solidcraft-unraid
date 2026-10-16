@@ -84,7 +84,45 @@ pub enum LinkSource {
         /// Bold or italic, alignment, spacing and the curve the text follows.
         #[serde(default, skip_serializing_if = "crate::text::TextStyle::is_plain")]
         style: crate::text::TextStyle,
+        /// The expressions behind the numbers above that were typed as expressions.
+        #[serde(default, skip_serializing_if = "TextExprs::is_empty")]
+        exprs: TextExprs,
     },
+}
+
+/// The expressions behind a text's numbers that were typed as expressions: its place (`x`, `y`),
+/// its height and its angle. A number without an expression is the number typed. The numbers
+/// of `LinkSource::Text` are what the expressions gave last: the document evaluates them against
+/// its parameters before the text's outlines are rebuilt (`Document::apply_text_values`), and
+/// the sketch crate, which knows no parameters, only keeps them.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TextExprs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub y: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub angle: Option<String>,
+}
+
+impl TextExprs {
+    pub fn is_empty(&self) -> bool {
+        *self == TextExprs::default()
+    }
+
+    /// The expressions set, each with what it sets.
+    pub fn list(&self) -> Vec<(&'static str, &String)> {
+        [("Text X", &self.x), ("Text Y", &self.y), ("Text height", &self.height), ("Text angle", &self.angle)]
+            .into_iter()
+            .filter_map(|(what, e)| e.as_ref().map(|e| (what, e)))
+            .collect()
+    }
+
+    pub fn list_mut(&mut self) -> Vec<&mut String> {
+        [&mut self.x, &mut self.y, &mut self.height, &mut self.angle].into_iter().filter_map(Option::as_mut).collect()
+    }
 }
 
 impl LinkSource {
@@ -106,6 +144,31 @@ impl LinkSource {
             LinkSource::Spun { body, .. } => format!("spun profile of {body}"),
             LinkSource::Iso { body, .. } => format!("isoparametric curve of {body}"),
             LinkSource::Text { text, .. } => format!("text \"{}\"", text.chars().take(20).collect::<String>()),
+        }
+    }
+
+    /// The bodies this source reads geometry from (an intersection reads two).
+    pub fn bodies(&self) -> Vec<&str> {
+        match self {
+            LinkSource::Edge { body, .. }
+            | LinkSource::Face { body, .. }
+            | LinkSource::Body { body }
+            | LinkSource::Vertex { body, .. }
+            | LinkSource::OnSurface { body, .. }
+            | LinkSource::Iso { body, .. }
+            | LinkSource::Spun { body, .. } => vec![body.as_str()],
+            LinkSource::Intersection { a, b } => {
+                let mut bodies = a.bodies();
+                bodies.extend(b.bodies());
+                bodies
+            }
+            LinkSource::SketchCurve { .. }
+            | LinkSource::SketchPoint { .. }
+            | LinkSource::Origin
+            | LinkSource::Axis { .. }
+            | LinkSource::SketchAxis { .. }
+            | LinkSource::Plane { .. }
+            | LinkSource::Text { .. } => Vec::new(),
         }
     }
 }
@@ -457,6 +520,30 @@ impl Sketch {
         self.links.iter().find(|l| l.id == id)
     }
 
+    /// The expressions of the sketch's texts, each with what it sets (`Text height`…).
+    pub fn text_exprs(&self) -> Vec<(&'static str, &String)> {
+        self.links
+            .iter()
+            .filter_map(|l| match &l.source {
+                LinkSource::Text { exprs, .. } => Some(exprs.list()),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// Mutable view of [`Sketch::text_exprs`], for renaming the parameters they refer to.
+    pub fn text_exprs_mut(&mut self) -> Vec<&mut String> {
+        self.links
+            .iter_mut()
+            .filter_map(|l| match &mut l.source {
+                LinkSource::Text { exprs, .. } => Some(exprs.list_mut()),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
     /// Curves owned by a link, in creation order.
     pub fn link_curves(&self, id: &str) -> Vec<usize> {
         self.curves.iter().enumerate().filter(|(_, c)| c.link.as_deref() == Some(id)).map(|(i, _)| i).collect()
@@ -568,6 +655,7 @@ impl Sketch {
                 link: Some(id.to_string()),
                 centerline: false,
                 fixed: false,
+                infinite: false,
             });
         }
         for li in &lay.lone {

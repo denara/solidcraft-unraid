@@ -234,16 +234,17 @@ const TEXT: &str = "`text` must be a string";
 /// "H" drew the text 5 mm high, `at: ["H", 25]` put it at the origin. Each with its message.
 fn not_understood() -> Vec<(Value, &'static str)> {
     vec![
-        (json!({"height":"H"}), HEIGHT),
+        // A string is an expression now: one naming no parameter is refused as such.
+        (json!({"height":"H"}), "unknown parameter `H`"),
         (json!({"height":true}), HEIGHT),
         (json!({"height":[10]}), HEIGHT),
         (json!({"height":1e10}), HEIGHT),
         (json!({"height":0}), "`height` must be positive"),
         (json!({"height":-3}), "`height` must be positive"),
-        (json!({"angle":"A"}), ANGLE),
+        (json!({"angle":"A"}), "unknown parameter `A`"),
         (json!({"angle":[15]}), ANGLE),
         (json!({"angle":1e10}), ANGLE),
-        (json!({"at":["H",25]}), AT),
+        (json!({"at":["H",25]}), "unknown parameter `H`"),
         (json!({"at":[1]}), AT),
         (json!({"at":[1,2,3]}), AT),
         (json!({"at":[1,null]}), AT),

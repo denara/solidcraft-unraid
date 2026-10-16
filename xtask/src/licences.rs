@@ -2,8 +2,7 @@
 //! into the shipped programs (solidcraft, solidcraft-cli, solidcraft-web), read from
 //! `cargo metadata` and the crates' own licence files. The programs embed it (Help ▸ About ▸
 //! Licences, `solidcraft-cli licences`), so a release download needs no licence files beside it.
-//! `--check` (part of `cargo xtask ci`) fails when the committed file is out of date, e.g. after a
-//! dependency changed.
+//! `--check` fails for stale shipped notices in this container fork; integration regenerates them.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;

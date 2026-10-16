@@ -93,12 +93,7 @@ impl Tokens {
             bend_up: Color32::from_rgb(30, 140, 50),
             bend_down: Color32::from_rgb(200, 90, 20),
             interference: Color32::from_rgb(235, 45, 40),
-            analysis: AnalysisColors {
-                draft: [[0.20, 0.75, 0.30], [0.95, 0.80, 0.15], [0.85, 0.22, 0.20]],
-                access: [[0.20, 0.75, 0.30], [0.85, 0.22, 0.20]],
-                curvature: [[0.15, 0.35, 0.95], [0.10, 0.80, 0.25], [0.90, 0.15, 0.10]],
-                hatch: false,
-            },
+            analysis: AnalysisColors::DEFAULT,
             icons: IconColors {
                 sheet: Color32::from_rgb(170, 200, 240),
                 sheet_2: Color32::from_rgb(150, 185, 235),

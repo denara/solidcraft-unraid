@@ -374,9 +374,14 @@ mod tests {
         let second = run(&mut s, "file.insert_step", json!({"path": path.to_string_lossy()}))["feature"].clone();
         assert_eq!(body_names(&s), ["Aa", "Bb", "Cc", "Aa (2)", "Bb (2)", "Cc (2)"]);
         paste_import_with_two_lifts(&mut s, &second, ["Aa (2)", "Bb (2)", "Cc (2)"]);
+        // Each import is a component of its own (#1386), shown after the pasted copies: the first
+        // import's bodies stay where they were, the second's and their copies are lifted.
         let plain = [[0.0, 0.0, 0.0], [30.0, 0.0, 0.0], [60.0, 0.0, 0.0]];
-        let at: Vec<Vec<f64>> = plain.iter().chain(&LIFTED).chain(&LIFTED).map(|c| c.to_vec()).collect();
+        let at: Vec<Vec<f64>> = LIFTED.iter().chain(&plain).chain(&LIFTED).map(|c| c.to_vec()).collect();
         assert_eq!(corners(&mut s), at, "{:?}", body_names(&s));
+        let m = run(&mut s, "inspect.measure", json!({}));
+        let names: Vec<&str> = m["bodies"].as_array().unwrap().iter().filter_map(|b| b["name"].as_str()).collect();
+        assert_eq!(names, ["Aa (copy)", "Bb (copy)", "Cc (copy)", "Aa", "Bb", "Cc", "Aa (2)", "Bb (2)", "Cc (2)"]);
     }
 
     /// A cylinder Emboss finds its face by the persistent name it recorded when it was made. The
@@ -522,6 +527,9 @@ mod tests {
         assert_eq!(def["definition"]["targets"], json!(["Plate (copy)"]), "{def}");
         let st = s.world_state();
         let v = |name: &str| solidcraft_kernel::measure(&st.body(name).unwrap().body).unwrap().volume;
-        assert!((v("Plate") - v("Plate (copy)")).abs() < 1e-6, "each plate carries one spring: {} vs {}", v("Plate"), v("Plate (copy)"));
+        // A spring on the wrong plate is hundreds of mm³ off. The two plates are measured apart
+        // (one moved 50 mm), which the boolean and the measure each round in their own way:
+        // a few 1e-6 mm³ on 5000.
+        assert!((v("Plate") - v("Plate (copy)")).abs() < 1e-8 * v("Plate"), "each plate carries one spring: {} vs {}", v("Plate"), v("Plate (copy)"));
     }
 }

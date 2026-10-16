@@ -78,7 +78,7 @@ Distances are unsigned. Draw the geometry on the correct side first, and the dim
 | `solid.hole` | `position:[x,y,z]` on a face + `diameter`, or `sketch` (+ `points`) | `clearance:"M3"`. `depth` defaults to through all. `type` is one of simple/drilled/counterbore/countersink. A `countersink` needs `cs_diameter` and `cs_angle`; a `counterbore` needs `cb_diameter` and `cb_depth`. `position` is a fixed point. |
 | `solid.pattern.rectangular` | `features`, `dir1`, `count1`, `spacing1` (+ `dir2`, `count2`, `spacing2`) | Spacing takes expressions and follows parameters. |
 | `solid.pattern.circular` | `features`, `axis` (`"Z"` or `{origin, dir}`), `count` | `angle` defaults to 360 deg. A full pattern keeps the COM on the axis, so check its radius with a top-view screenshot. |
-| `solid.mirror` | `features:[names]`, `plane` (`XY`/`XZ`/`YZ`, a construction plane, or `{origin, normal}`) | Follows parameters. Mirror and pattern features cannot be mirrored or patterned again. |
+| `solid.mirror` | `features:[names]`, `plane` (`XY`/`XZ`/`YZ`, a construction plane, or `{origin, normal}` whose origin may use length expressions) | Follows parameters. Mirror and pattern features cannot be mirrored or patterned again. |
 
 - **Names:** name every feature (`"name":"Standoff"`) and keep names unique across sketches and features. `timeline.roll_to {"feature":"Plate"}` picks the first match, which can be the sketch.
 - **Counts as parameters:** `parameters.add {"name":"n","expression":"6","unit":""}` creates a unitless parameter, and `"count":"n"` uses it in a pattern.

@@ -1,8 +1,9 @@
 # Sketching and constraints
 
 A sketch lies on a plane: an origin plane, a construction plane or a planar face. Start one with
-**Create Sketch** (`sketch.create`) and click a plane, or pick a face first. **Finish Sketch**
-returns to the model.
+**Create Sketch** (`sketch.create`) and click a plane, or pick a face first. Right-clicking a
+plane, in the view or on its browser row, offers **Create Sketch** on that plane too.
+**Finish Sketch** returns to the model.
 
 In scripts, `XY`, `XZ`, `YZ` and their `Top`, `Front`, `Right` aliases name origin planes.
 These names are reserved: a construction plane cannot be created with or renamed to one
@@ -46,16 +47,24 @@ circle and update the outline when the inline **Sides** value changes.
 `sketch.edit_text` take a `font`, the family or full name of an installed font ("DejaVu Sans") or the path
 of a `.ttf` / `.otf` file, and the **Edit Text** dialog has a **Font** field for it. An unknown font is an
 error, and the font is kept with the text in the design, so the text stays editable in it. `SOLIDCRAFT_FONT_DIRS`
-adds folders to the ones searched for installed fonts. The same two commands refuse a `text` that is not a
-string, an `at` that is not two numbers, and a `height` or `angle` that is not a number (or a `height` that is not
-positive) with a message, instead of drawing the text with a default; left out, they keep their defaults.
+adds folders to the ones searched for installed fonts. A text's `height`, its `angle` and each coordinate of
+its `at` can be expressions of the design's parameters, given as strings (`"height": "plate_height / 10"`,
+`"at": ["plate_width / 2", 5]`): the text keeps the expression and follows the parameters when they change, and
+saves it with the design. A number takes the place of an expression, and so does moving the text or dragging its
+handles (what moves becomes a number; turning a text leaves its height as it was). A string that names no
+parameter is the number it comes to. The same two commands refuse a `text` that is not a string, an `at` that is
+not two numbers or expressions, a `height` or `angle` that is neither (or a `height` that is not positive) and an
+expression that cannot be worked out with a message, instead of drawing the text with a default; left out, they
+keep their defaults.
 
 Right-click a letter's filled interior or outline and choose **Edit Text**. You can also
 start **Edit Text** first and click the letter. All outlines belonging to that text are
 highlighted while the dialog is open. A profile bounded by multiple text sources or other
 geometry cannot identify one text: use **Select Other** to choose its outline instead.
 Change the text, font, baseline X/Y, height or angle, then confirm with **OK**; **Cancel**
-keeps the original text. Position and height use the document's units.
+keeps the original text. Position and height use the document's units. The four fields take
+expressions: one that names a parameter (`plate_width / 2`) stays an expression, is shown as typed
+when the dialog is opened again, and keeps the text following the parameter.
 
 A text can follow a curve of its sketch (its **Path**). That curve becomes construction: the
 letters stand on it and their descenders cross it, so as a normal curve it would cut them into
@@ -233,6 +242,11 @@ remain valid in an inch design. Angular dimensions keep their angular units. Del
 retain trailing zeros. Component/canvas distance controls and inspection, parts-library
 and flat-pattern measurements follow design units too; parameter expressions and metric
 standard names retain their explicit authored units.
+
+Measure shows the currently selected distance (centre, minimum or maximum) and separate X, Y and Z
+distances on the canvas. The component dimensions follow the world axes and remain visible
+until the Measure dialog closes. To hide these extra lines and labels, turn off
+**Preferences > Graphics > Show X/Y/Z distances**. The choice is saved between runs.
 
 ### Reviewing mirror, pattern, and offset results
 

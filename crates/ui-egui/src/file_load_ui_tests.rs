@@ -18,7 +18,6 @@ impl Win {
     fn new() -> Self {
         let mut app = SolveApp::new(Session::default(), Default::default());
         app.custom_titlebar = true;
-        app.viewport.no_pixels = true;
         let mut w = Win { ctx: egui::Context::default(), app, time: 0.0 };
         for _ in 0..3 {
             w.frame(vec![]);

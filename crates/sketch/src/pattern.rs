@@ -5,11 +5,62 @@ use solidcraft_geom::Vec2;
 
 use crate::{CurveKind, Sketch, SketchError};
 
+/// Placement relative to the original, along a pattern direction's oriented line.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PatternAlignment {
+    Left,
+    Center,
+    #[default]
+    Right,
+}
+
+impl PatternAlignment {
+    /// Slot zero is always the original. Center alternates sides to retain stable copy ids.
+    pub fn multiplier(self, index: usize, reversed: bool) -> f64 {
+        let value = match self {
+            Self::Left => -(index as f64),
+            Self::Right => index as f64,
+            Self::Center if index.is_multiple_of(2) => -((index / 2) as f64),
+            Self::Center => index.div_ceil(2) as f64,
+        };
+        if reversed { -value } else { value }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SketchPatternKind {
-    Circular { center: String, count: usize, angle: f64 },
-    Rectangular { dir: Vec2, count: usize, spacing: f64, count2: usize, spacing2: f64 },
+    Circular {
+        center: String,
+        count: usize,
+        angle: f64,
+        #[serde(default)]
+        alignment: PatternAlignment,
+        #[serde(default)]
+        reversed: bool,
+    },
+    Rectangular {
+        dir: Vec2,
+        #[serde(default)]
+        dir2: Option<Vec2>,
+        #[serde(default)]
+        direction: Option<String>,
+        #[serde(default)]
+        direction2: Option<String>,
+        count: usize,
+        spacing: f64,
+        count2: usize,
+        spacing2: f64,
+        #[serde(default)]
+        alignment: PatternAlignment,
+        #[serde(default)]
+        alignment2: PatternAlignment,
+        #[serde(default)]
+        reversed: bool,
+        #[serde(default)]
+        reversed2: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -37,6 +88,8 @@ impl SketchPattern {
                 .iter()
                 .any(|instance| instance.curves.iter().any(|id| id == entity) || instance.points.iter().any(|(_, id)| id == entity))
             || matches!(&self.kind, SketchPatternKind::Circular { center, .. } if center == entity)
+            || matches!(&self.kind, SketchPatternKind::Rectangular { direction, direction2, .. }
+                if direction.as_deref() == Some(entity) || direction2.as_deref() == Some(entity))
     }
 }
 
@@ -53,7 +106,14 @@ impl Sketch {
                         continue;
                     };
                     match kind {
-                        crate::ConstraintKind::PatternPoint { p, q, center, angle, offset } => {
+                        crate::ConstraintKind::PatternPoint { p, q, center, angle, mut offset, directions } => {
+                            for (l, distance) in directions.into_iter().flatten() {
+                                if let Some(crate::Shape::Line { a, b }) = self.shape(l)
+                                    && let Some(u) = (b - a).normalized()
+                                {
+                                    offset += u * distance.x + u.perp() * distance.y;
+                                }
+                            }
                             let Some(seed) = self.point(p) else { continue };
                             let c = center.and_then(|c| self.point(c)).unwrap_or(Vec2::ZERO);
                             let d = seed - c;
@@ -95,6 +155,8 @@ impl Sketch {
             .filter(|pattern| {
                 pattern.entities.iter().any(|id| !curves.contains(id.as_str()) && !points.contains(id.as_str()))
                     || matches!(&pattern.kind, SketchPatternKind::Circular { center, .. } if !points.contains(center.as_str()))
+                    || matches!(&pattern.kind, SketchPatternKind::Rectangular { direction, direction2, .. }
+                        if direction.iter().chain(direction2).any(|id| !curves.contains(id.as_str())))
                     || pattern.instances.iter().any(|instance| {
                         instance.curves.iter().any(|id| !curves.contains(id.as_str()))
                             || instance.points.iter().any(|(p, q)| !points.contains(p.as_str()) || !points.contains(q.as_str()))
@@ -165,10 +227,10 @@ impl Sketch {
             let valid_count = |n| (1..=500).contains(&n);
             let finite = |v: f64| v.is_finite() && v.abs() <= crate::MAX_COORD;
             let valid = match &pattern.kind {
-                SketchPatternKind::Circular { count, angle, center } => {
+                SketchPatternKind::Circular { count, angle, center, .. } => {
                     valid_count(*count) && angle.is_finite() && angle.abs() > 1e-9 && angle.abs() <= 360.0 && self.resolve_point(center).is_some()
                 }
-                SketchPatternKind::Rectangular { count, count2, spacing, spacing2, dir } => {
+                SketchPatternKind::Rectangular { count, count2, spacing, spacing2, dir, dir2, direction, direction2, .. } => {
                     valid_count(*count)
                         && valid_count(*count2)
                         && count.checked_mul(*count2).is_some_and(|n| n <= 500)
@@ -177,6 +239,10 @@ impl Sketch {
                         && finite(dir.x)
                         && finite(dir.y)
                         && (dir.len() - 1.0).abs() < 1e-6
+                        && dir2.is_none_or(|d| finite(d.x) && finite(d.y) && (d.len() - 1.0).abs() < 1e-6)
+                        && direction.iter().chain(direction2).all(|id| {
+                            self.curve_index(id).is_some_and(|l| matches!(self.curves.get(l).map(|c| &c.kind), Some(CurveKind::Line { .. })))
+                        })
                 }
             };
             if !valid {

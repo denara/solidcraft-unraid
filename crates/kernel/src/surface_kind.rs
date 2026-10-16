@@ -3,7 +3,10 @@
 
 use solidcraft_geom::Vec3;
 
+use truck_modeling as mt;
+
 use crate::Body;
+use crate::body::from_p3;
 use crate::offset::{Surf, surf_of};
 
 /// A face's analytic surface. Axes are unit vectors.
@@ -49,6 +52,85 @@ pub fn face_surface(b: &Body, face: usize) -> Option<FaceSurface> {
         Surf::Sphere { c, r, .. } => FaceSurface::Sphere { center: c, radius: r },
         Surf::Torus { o, a, big, h, r, .. } => FaceSurface::Torus { center: o + a * h, axis: a, major: big, minor: r },
     })
+}
+
+/// The circle (or arc of one) an edge's curve lies on, from its exact curve.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EdgeCircle {
+    pub center: Vec3,
+    /// Unit normal of the circle's plane, oriented so the edge runs counter-clockwise about it.
+    pub axis: Vec3,
+    pub radius: f64,
+    /// The edge's ends (the same point for a closed circle).
+    pub start: Vec3,
+    pub end: Vec3,
+    /// The angle the edge spans (radians, 2π for a whole circle).
+    pub angle: f64,
+}
+
+/// The circle edge `edge` (in the order of [`Body::edges`] and the tessellated mesh's edges)
+/// lies on, if its curve is a circle or an arc of one. `None` for other curves, mesh bodies
+/// and an index out of range.
+pub fn edge_circle(b: &Body, edge: usize) -> Option<EdgeCircle> {
+    use mt::{BoundedCurve, ParametricCurve};
+    if b.mesh.is_some() {
+        return None;
+    }
+    let e = Body::unique_edges(&b.solid).into_iter().nth(edge)?;
+    let tol = (b.size() * 1e-7).max(1e-9) * 100.0;
+    crate::guard("edge circle", || {
+        let c = e.oriented_curve();
+        let (t0, t1) = c.range_tuple();
+        let at = |f: f64| from_p3(c.subs(t0 + (t1 - t0) * f));
+        let samples: Vec<Vec3> = (0..=24).map(|i| at(f64::from(i) / 24.0)).collect();
+        Ok(circle_through(&samples, tol))
+    })
+    .ok()
+    .flatten()
+}
+
+/// The circle through evenly spaced samples of a curve (first to last), if they all lie on one.
+fn circle_through(s: &[Vec3], tol: f64) -> Option<EdgeCircle> {
+    let (start, end) = (*s.first()?, *s.last()?);
+    let closed = start.dist(end) <= tol;
+    // Three well-spread samples: a quarter, half and three quarters for a closed curve.
+    let n = s.len().checked_sub(1)?;
+    let (a, b, c) = if closed { (*s.get(n / 4)?, *s.get(n / 2)?, *s.get(3 * n / 4)?) } else { (start, *s.get(n / 2)?, end) };
+    let (u, v) = (b - a, c - a);
+    let w = u.cross(v);
+    if !(w.len2() > u.len2() * v.len2() * 1e-16) {
+        return None;
+    }
+    let center = a + (v * u.len2() - u * v.len2()).cross(w) * (1.0 / (2.0 * w.len2()));
+    let axis = w.normalized()?;
+    let radius = center.dist(a);
+    if !(radius.is_finite() && radius > tol) || s.iter().any(|p| (p.dist(center) - radius).abs() > tol || (*p - center).dot(axis).abs() > tol) {
+        return None;
+    }
+    let x = (start - center).normalized()?;
+    let y = axis.cross(x);
+    let turn = |p: Vec3| {
+        let d = p - center;
+        let t = d.dot(y).atan2(d.dot(x));
+        if t < 0.0 { t + std::f64::consts::TAU } else { t }
+    };
+    // Accumulate the turn sample to sample so the span is right whichever way the curve runs.
+    let mut angle = 0.0;
+    let mut last = 0.0;
+    for p in s.iter().skip(1) {
+        let t = turn(*p);
+        let mut d = t - last;
+        if d < -std::f64::consts::PI {
+            d += std::f64::consts::TAU;
+        } else if d > std::f64::consts::PI {
+            d -= std::f64::consts::TAU;
+        }
+        angle += d;
+        last = t;
+    }
+    let (axis, angle) = if angle < 0.0 { (axis * -1.0, -angle) } else { (axis, angle) };
+    let angle = if closed { std::f64::consts::TAU } else { angle.min(std::f64::consts::TAU) };
+    Some(EdgeCircle { center, axis, radius, start, end, angle })
 }
 
 impl FaceSurface {

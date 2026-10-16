@@ -128,8 +128,9 @@ fn xy(v: Vec2) -> Value {
 }
 
 /// Start a sketch on the planar face at `point` holding a copy of the face boundary. Returns
-/// the sketch id and a point inside the face (sketch coordinates). The sketch is left active.
-pub(super) fn sketch_of_face(s: &mut Session, point: Vec3, cmd: &str, face_body: Option<&str>) -> Result<(u64, Vec2)> {
+/// the sketch id, a point inside the face (sketch coordinates), and the picked body's name.
+/// The sketch is left active.
+pub(super) fn sketch_of_face(s: &mut Session, point: Vec3, cmd: &str, face_body: Option<&str>) -> Result<(u64, Vec2, String)> {
     let none = || match face_body {
         Some(b) => bad(cmd, format!("no face of `{b}` at `face`")),
         None => bad(cmd, "no body face at `face`"),
@@ -199,7 +200,7 @@ pub(super) fn sketch_of_face(s: &mut Session, point: Vec3, cmd: &str, face_body:
     // The face's edges came in as linked projections: they follow the face when earlier
     // features change, so nothing is copied.
     if r.get("projected").is_some_and(|x| !x.is_null()) {
-        return Ok((sid, plane.to_local(author_inside)));
+        return Ok((sid, plane.to_local(author_inside), body));
     }
     for e in &edges {
         let pts: Vec<Vec2> = e.iter().map(|p| plane.to_local(*p)).collect();
@@ -237,9 +238,13 @@ pub(super) fn sketch_of_face(s: &mut Session, point: Vec3, cmd: &str, face_body:
             }
         };
     }
-    Ok((sid, plane.to_local(author_inside)))
+    Ok((sid, plane.to_local(author_inside), body))
 }
 
 #[cfg(test)]
 #[path = "face_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "face_join_tests.rs"]
+mod join_tests;

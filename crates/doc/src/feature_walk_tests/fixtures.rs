@@ -75,10 +75,16 @@ pub(super) fn fixtures() -> Vec<(&'static str, Value)> {
         ("thread", json!({"type": "thread", "face": o, "length": "thread.length"})),
         ("loft", json!({"type": "loft", "sections": []})),
         ("sweep", json!({"type": "sweep", "sketch": 1, "profiles": {"type": "all"}, "path_sketch": 2, "path": ["l1"]})),
+        (
+            "sweep_options",
+            json!({"type": "sweep", "sketch": 1, "profiles": {"type": "all"}, "path_sketch": 2, "path": ["l1"],
+                "orientation": {"direction": [0, 1, 0]}, "twist": "sweep.twist", "scale": "sweep.scale"}),
+        ),
         ("shell", json!({"type": "shell", "faces": [o], "thickness": "shell.thickness"})),
         ("draft", json!({"type": "draft", "faces": [o], "angle": "draft.angle", "neutral": plane("draft_neutral"), "pull": [0, 0, 1]})),
         ("construction_plane", json!({"type": "construction_plane", "plane": plane("cplane")})),
         ("split", json!({"type": "split", "body": "B", "plane": plane("split")})),
+        ("split_line", json!({"type": "split", "body": "B", "plane": plane("split_line")})),
         (
             "construction_axis",
             json!({"type": "construction_axis", "def": {"type": "two_planes", "a": geo_plane("axis_a"), "b": geo_plane("axis_b")}}),
@@ -109,7 +115,7 @@ pub(super) fn fixtures() -> Vec<(&'static str, Value)> {
         ("sheet_contour", json!({"type": "sheet_contour", "sketch": 1, "curves": ["l1"], "distance": "contour.distance"})),
         (
             "sheet_flange",
-            json!({"type": "sheet_flange", "edges": [{"point": o, "angle": "flange.e1_angle", "height": "flange.e1_height"}, {"point": o, "angle": null, "height": "flange.e2_height"}], "height": "flange.height", "angle": "flange.angle", "radius": "flange.radius"}),
+            json!({"type": "sheet_flange", "edges": [{"point": o, "angle": "flange.e1_angle", "height": "flange.e1_height"}, {"point": o, "angle": null, "height": "flange.e2_height"}], "height": "flange.height", "angle": "flange.angle", "radius": "flange.radius", "corner_relief_shape": "round", "corner_relief": "flange.relief"}),
         ),
         ("sheet_hem", json!({"type": "sheet_hem", "edges": [o], "length": "hem.length", "gap": "hem.gap"})),
         (
@@ -147,7 +153,13 @@ pub(super) fn fixtures() -> Vec<(&'static str, Value)> {
             json!({"type": "surface_revolve", "sketch": 1, "axis": {"type": "world", "axis": "X"}, "angle": "srev.angle", "angle2": "srev.angle2"}),
         ),
         ("surface_sweep", json!({"type": "surface_sweep", "sketch": 1, "path_sketch": 2, "path": ["l1"]})),
+        (
+            "surface_sweep_options",
+            json!({"type": "surface_sweep", "sketch": 1, "path_sketch": 2, "path": ["l1"],
+                "orientation": "parallel", "twist": "surface_sweep.twist", "scale": "surface_sweep.scale"}),
+        ),
         ("surface_loft", json!({"type": "surface_loft", "sections": []})),
+        ("surface_blend", json!({"type": "surface_blend", "from": {"body": "B", "edges": [o]}, "to": {"body": "C", "edges": [o]}, "align": [o, o]})),
         ("surface_offset", json!({"type": "surface_offset", "faces": [o], "distance": "soff.distance", "tolerance": "soff.tolerance"})),
         ("unstitch", json!({"type": "unstitch", "body": "B"})),
         ("reverse_normal", json!({"type": "reverse_normal", "body": "B"})),
@@ -181,7 +193,7 @@ pub(super) fn with_refs(name: &str, mut v: Value) -> Value {
     let o = [0, 0, 0];
     let tool = json!({"body": "B", "point": o});
     let extra = match name {
-        "extrude" | "extrude_thin" | "revolve" | "sweep" | "pipe" | "coil" | "thicken" => json!({"targets": ["B"]}),
+        "extrude" | "extrude_thin" | "revolve" | "sweep" | "sweep_options" | "pipe" | "coil" | "thicken" => json!({"targets": ["B"]}),
         "fillet_constant" | "fillet_chord" | "fillet_curvature" | "fillet_variable" | "fillet_spline" | "chamfer" | "shell" | "draft"
         | "offset_face" | "delete_face" | "replace_face" | "sheet_flange" | "sheet_hem" | "sheet_perforate" | "sheet_unfold" | "boss" | "lip"
         | "snap_fit" | "rest" | "surface_offset" => {
@@ -192,6 +204,7 @@ pub(super) fn with_refs(name: &str, mut v: Value) -> Value {
         "hole_simple" | "hole_drilled" | "hole_counterbore" | "hole_countersink" => json!({"points": {"sketch": 3, "ids": ["p"]}}),
         "loft" => json!({"sections": [{"sketch": 4, "profiles": {"type": "all"}}, {"sketch": 5, "profiles": {"type": "all"}}], "targets": ["B"]}),
         "split" | "surface_trim" => json!({"tool": tool}),
+        "split_line" => json!({"sketch": 6, "line": "l1"}),
         "surface_loft" => json!({"sections": [{"sketch": 4}, {"sketch": 5}]}),
         "split_face" => json!({"body": "B", "tool": tool, "sketch": 6}),
         "emboss" => json!({"face": {"body": "B", "at": o}, "targets": ["B"]}),

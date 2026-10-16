@@ -63,6 +63,9 @@ loft
   profiles: 4 all, 5 all
 sweep
   profiles: 1 all
+sweep_options
+  moves: orientation.direction[1], orientation.direction[2]
+  profiles: 1 all
 shell
   moves: faces[0][0], faces[0][1], faces[0][2]
   face points: [0, 0, 0]
@@ -73,6 +76,8 @@ construction_plane
   moves: plane.axis_dir[0], plane.axis_dir[1], plane.axis_origin[0], plane.axis_origin[1], plane.axis_origin[2]
 split
   moves: plane.axis_dir[0], plane.axis_dir[1], plane.axis_origin[0], plane.axis_origin[1], plane.axis_origin[2], tool.point[0], tool.point[1], tool.point[2]
+split_line
+  moves: plane.axis_dir[0], plane.axis_dir[1], plane.axis_origin[0], plane.axis_origin[1], plane.axis_origin[2]
 construction_axis
   moves: def.a.plane.axis_dir[0], def.a.plane.axis_dir[1], def.a.plane.axis_origin[0], def.a.plane.axis_origin[1], def.a.plane.axis_origin[2], def.b.plane.axis_dir[0], def.b.plane.axis_dir[1], def.b.plane.axis_origin[0], def.b.plane.axis_origin[1], def.b.plane.axis_origin[2]
 construction_point_planes
@@ -142,7 +147,10 @@ surface_extrude
 surface_revolve
   moves: axis.dir[0], axis.dir[1], axis.dir[2], axis.origin[0], axis.origin[1], axis.origin[2]
 surface_sweep
+surface_sweep_options
 surface_loft
+surface_blend
+  moves: align[0][0], align[0][1], align[0][2], align[1][0], align[1][1], align[1][2], from.edges[0][0], from.edges[0][1], from.edges[0][2], to.edges[0][0], to.edges[0][1], to.edges[0][2]
 surface_offset
   moves: faces[0][0], faces[0][1], faces[0][2]
   face points: [0, 0, 0]

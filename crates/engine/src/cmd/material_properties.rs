@@ -57,6 +57,7 @@ mod tests {
         let response = s.execute("material.properties.directional", &json!({"card":card,"direction":[1,2,3]})).unwrap();
         assert_eq!(response["young_modulus_pa"], 12e9);
         assert_eq!(response["validation"]["source_review_required"], json!(["test"]));
+        assert_eq!(response["validation"]["missing_condition_fields"], json!({"elasticity":["temperature_k","state"]}));
         for direction in [json!([0, 0, 0]), json!([1, 2]), json!([1, 2, 3, 4]), json!([true, 0, 0]), json!(["1", 0, 0]), Value::Null] {
             assert!(s.execute("material.properties.directional", &json!({"card":card,"direction":direction})).is_err());
         }
@@ -76,6 +77,7 @@ mod tests {
         assert_eq!(result["validation"]["isotropic_moduli"], json!({"shear_pa":4.8e9,"bulk_pa":8e9}));
         assert_eq!(result["validation"]["source_review_required"], json!(["fixture"]));
         assert_eq!(result["validation"]["rendering_properties_available"], false);
+        assert_eq!(result["validation"]["missing_condition_fields"], json!({"elasticity":["temperature_k","state"]}));
         card["properties"][0]["data"]["model"]["poisson_ratio"] = json!(0.6);
         assert!(s.execute("material.properties.validate", &json!({"card":card})).is_err());
     }
@@ -91,6 +93,7 @@ mod tests {
         let card = json!({"schema_version":1,"designation":"Synthetic empty card","family":"other","sources":[],"properties":[]});
         let result = s.execute("material.properties.validate", &json!({"card":card})).unwrap();
         assert_eq!(result["validation"]["analysis_solver_available"], false);
+        assert_eq!(result["validation"]["missing_condition_fields"], json!({}));
         for p in [json!({}), json!({"card":card,"assign":true}), json!({"card":{"schema_version":9}})] {
             assert!(s.execute("material.properties.validate", &p).is_err());
         }

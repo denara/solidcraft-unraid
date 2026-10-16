@@ -16,7 +16,7 @@ use egui::{FontId, Pos2, Rect, Shape, Stroke, vec2};
 use serde_json::json;
 use solidcraft_engine::Sel;
 use solidcraft_engine::geom::Vec2;
-use solidcraft_engine::sketch::{ConstraintKind, DimFrame, chain_centres, default_text, dim_frame, dim_layout};
+use solidcraft_engine::sketch::{ConstraintKind, DimFrame, chain_centres, default_text, dim_frame, dim_layout_reaching, dim_reach};
 
 use crate::SolveApp;
 use crate::theme::Tokens;
@@ -90,7 +90,8 @@ impl DimensionDraft {
             && app.session.pending_moves == self.pending
     }
     fn params(&self, expr: &str) -> serde_json::Value {
-        let mut params = json!({"entities": self.entities, "value": expr});
+        // The first dimension of a sketch scales it rather than distorting it (#1365).
+        let mut params = json!({"entities": self.entities, "value": expr, "scale_sketch": true});
         if let Some(at) = self.at {
             params["text_at"] = json!([at.x, at.y]);
         }
@@ -408,7 +409,7 @@ pub fn label(k: &ConstraintKind, expr: Option<&str>, driven: bool, units: &str, 
     let plain = expr.is_none_or(|e| {
         let e = e.trim();
         let e = ["mm", "cm", "in", "ft", "m", "deg", "rad", "°"].iter().find_map(|unit| e.strip_suffix(unit)).unwrap_or(e);
-        e.trim().parse::<f64>().is_ok()
+        crate::prefs::parse_number(e).is_some()
     });
     let text = if plain { num } else { format!("fx: {num}") };
     if driven { format!("({text})") } else { text }
@@ -516,7 +517,7 @@ pub fn show(app: &mut SolveApp, ui: &egui::Ui, painter: &egui::Painter, proj: &P
         let half = Vec2::new(f64::from(size.x) * 0.5 * px, f64::from(size.y) * 0.5 * px);
         // Unplaced linear dimensions sit outside the shape they measure.
         let away = first_point(sk, &c.kind).and_then(|p| centres.get(p).copied()).unwrap_or(anchor);
-        let lay = dim_layout(&frame, c.text.or_else(|| default_text(&frame, away, px)), px, half);
+        let lay = dim_layout_reaching(&frame, c.text.or_else(|| default_text(&frame, away, px)), px, half, dim_reach(sk, &c.kind));
         let stroke = Stroke::new(1.0, col);
         let mut segs = Vec::new();
         for line in &lay.lines {
@@ -823,6 +824,8 @@ mod tests {
         let k = ConstraintKind::Length { l: 0, value: 25.0 };
         assert_eq!(label(&k, Some("25 mm"), false, "mm", 2), "25.00");
         assert_eq!(label(&k, Some("width * 2"), false, "mm", 2), "fx: 25.00");
+        // A value typed with a decimal comma is a plain value too (#1347).
+        assert_eq!(label(&ConstraintKind::Length { l: 0, value: 25.5 }, Some("25,5 mm"), false, "mm", 2), "25.50");
         assert_eq!(label(&k, None, true, "mm", 2), "(25.00)");
         assert_eq!(label(&ConstraintKind::Radius { c: 0, value: 5.0 }, Some("5 mm"), false, "mm", 2), "R5.00");
         assert_eq!(label(&ConstraintKind::Diameter { c: 0, value: 10.0 }, Some("10"), false, "mm", 2), "Ø10.00");

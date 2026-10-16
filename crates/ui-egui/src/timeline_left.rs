@@ -685,7 +685,12 @@ fn vertical_features(app: &mut SolveApp, ui: &mut egui::Ui) {
         }
         slots.push(VerticalSlot { y: ui.cursor().top(), position: index, group: group_id, indent_group });
         let indent = group_id.map(|id| (group_depth(&groups, id) + 1) as f32 * 14.0).unwrap_or(0.0);
+        let has_patterns = matches!(kind, FeatureKind::Sketch { .. }) && crate::sketch_pattern_tree::has_patterns(app, *id);
+        let pattern_key = format!("timeline/sketch/{id}/patterns");
+        let patterns_open = crate::browser::is_open(app, &pattern_key, true);
         let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click_and_drag());
+        let fold_rect = Rect::from_min_size(rect.left_top() + vec2(indent, 0.0), vec2(16.0, rect.height()));
+        let on_fold = has_patterns && response.interact_pointer_pos().is_some_and(|p| fold_rect.contains(p));
         crate::scenario::publish_handle(&format!("timeline:{name}"), rect.center());
         let result = app.session.model.result(*id);
         let error = result.and_then(|result| result.error.clone());
@@ -705,7 +710,12 @@ fn vertical_features(app: &mut SolveApp, ui: &mut egui::Ui) {
         if background != Color32::TRANSPARENT {
             ui.painter().rect_filled(rect, 3.0, background);
         }
-        let icon_rect = Rect::from_center_size(pos2(rect.left() + 13.0 + indent, rect.center().y), vec2(18.0, 18.0));
+        if has_patterns {
+            crate::icons::glyphs::disclosure(ui.painter(), fold_rect.shrink(3.0), patterns_open, t.text_dim);
+            crate::scenario::publish_handle(&format!("timeline-sketch-fold:{name}"), fold_rect.center());
+        }
+        let icon_rect =
+            Rect::from_center_size(pos2(rect.left() + 13.0 + indent + if has_patterns { 16.0 } else { 0.0 }, rect.center().y), vec2(18.0, 18.0));
         let ink = if rolled || *suppressed { t.border } else { t.icon };
         icons::paint(ui.painter(), icon_rect, icon, ink, if rolled { t.panel_header } else { t.icon_fill }, if rolled { t.border } else { t.accent });
         if *suppressed {
@@ -737,7 +747,7 @@ fn vertical_features(app: &mut SolveApp, ui: &mut egui::Ui) {
         if response.hovered() {
             hovered = Some(*id);
         }
-        if response.drag_started() {
+        if response.drag_started() && !on_fold {
             if !selected {
                 select_only(app, TimelineItem::Feature(*id));
             }
@@ -753,10 +763,12 @@ fn vertical_features(app: &mut SolveApp, ui: &mut egui::Ui) {
         }
         tip.push_str("\nDouble-click to edit · drag to reorder · right-click for more");
         let response = response.on_hover_text(tip);
-        if response.clicked() {
+        if response.clicked() && on_fold {
+            crate::browser::toggle(app, &pattern_key, true);
+        } else if response.clicked() {
             select_item(app, ui, TimelineItem::Feature(*id), &order);
         }
-        if response.double_clicked() {
+        if response.double_clicked() && !on_fold {
             edit = Some(*id);
         }
         let sketch = match kind {
@@ -774,7 +786,7 @@ fn vertical_features(app: &mut SolveApp, ui: &mut egui::Ui) {
             if let Some(sketch) = sketch
                 && ui.button("Edit Profile Sketch").clicked()
             {
-                app.edit_sketch(sketch);
+                app.edit_sketch(sketch.0);
                 ui.close();
             }
             if ui.button("Rename Feature").clicked() {
@@ -800,6 +812,10 @@ fn vertical_features(app: &mut SolveApp, ui: &mut egui::Ui) {
                 ui.close();
             }
         });
+        if has_patterns && patterns_open {
+            let depth = group_id.map_or(1, |group| group_depth(&groups, group) + 2);
+            crate::sketch_pattern_tree::rows(app, ui, *id, depth, "timeline", None);
+        }
         previous_visible_group = group_id;
     }
     let mut trailing: Vec<_> = groups.iter().filter(|group| !shown_groups.contains(&group.id)).collect();

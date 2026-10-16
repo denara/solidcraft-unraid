@@ -1,5 +1,5 @@
-//! Update notifications (docs/updates.md). At start, and at most once a day after that, a
-//! background thread asks GitHub for the latest stable release (`releases/latest`; nightlies and
+//! Update notifications (docs/book/src/guide/updates.md). At every start, and once a day after
+//! that while the app stays open, a background thread asks GitHub for the latest stable release (`releases/latest`; nightlies and
 //! release candidates are never "latest"). When it is newer than this build, an Update button
 //! appears in the application bar beside Report a bug; it opens a small window with the version,
 //! the release notes and Download, Skip this version and Remind me later.
@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
 
-use egui::{Color32, FontId, RichText, text::LayoutJob};
+use egui::{FontId, RichText, text::LayoutJob};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -32,17 +32,19 @@ pub const RELEASES_PAGE: &str = "https://github.com/bherbruck/solidcraft/release
 /// Release pages and assets must be on GitHub, under this repository.
 const RELEASE_PREFIX: &str = "https://github.com/bherbruck/solidcraft/releases/";
 
-/// Automatic checks: at most one a day.
+/// While the app stays open, automatic checks run once a day (every start checks too).
 pub const CHECK_INTERVAL_S: f64 = 24.0 * 3600.0;
 /// Remind me later hides the button for three days.
 pub const REMIND_DELAY_S: f64 = 3.0 * 24.0 * 3600.0;
 /// Check now can't be pressed more often than this (GitHub allows 60 anonymous requests an hour).
 pub const MANUAL_COOLDOWN_S: f64 = 30.0;
-/// After a failed automatic check, try again after this long (an hour), not every start.
+/// After a failed automatic check, the open app tries again after this long (an hour).
 pub const RETRY_AFTER_FAILURE_S: f64 = 3600.0;
 /// Caps on what a release response may hold (it comes from the network).
 const MAX_NOTES: usize = 64 * 1024;
 const MAX_ASSETS: usize = 400;
+/// The room the Update pill's long label leaves for the document tabs.
+const TAB_ROOM: f32 = 300.0;
 /// The Update window's width, and its release notes' wrap width.
 const WINDOW_W: f32 = 460.0;
 const NOTES_W: f32 = WINDOW_W - 30.0;
@@ -407,7 +409,8 @@ impl Release {
 pub struct Memo {
     /// When the last check finished (successfully or not).
     pub last_check: f64,
-    /// The next automatic check: a day after a successful one, an hour after a failed one.
+    /// The next automatic check while the app stays open: a day after a successful one, an hour
+    /// after a failed one. A new start doesn't wait for it.
     pub next_check: f64,
     /// GitHub's rate limit was reached: no request at all before this, not even Check now.
     pub rate_limited_until: f64,
@@ -418,9 +421,13 @@ pub struct Memo {
 }
 
 impl Memo {
-    /// An automatic check is due (a clock set back by more than a day counts as due).
-    pub fn due(&self, now: f64) -> bool {
-        now >= self.rate_limited_until && (now >= self.next_check || self.next_check - now > CHECK_INTERVAL_S)
+    /// An automatic check is due. `launch`: no automatic check has run since SolidCraft started,
+    /// so one is due whatever the daily schedule says (someone who started yesterday's version
+    /// this morning hears about today's release at the next start). GitHub's rate limit always
+    /// holds. A clock set back by more than a day counts as due.
+    pub fn due(&self, now: f64, launch: bool) -> bool {
+        let limited = now < self.rate_limited_until && self.rate_limited_until - now <= CHECK_INTERVAL_S;
+        !limited && (launch || now >= self.next_check || self.next_check - now > CHECK_INTERVAL_S)
     }
 
     /// The Update button shows for `release`.
@@ -484,6 +491,10 @@ pub struct Updater {
     /// The check in flight, and whether Check now started it.
     rx: Option<(Receiver<Result<Release, FetchError>>, bool)>,
     started: bool,
+    /// An automatic check has started since launch (until then one is due at once).
+    launch_checked: bool,
+    /// `SOLIDCRAFT_UPDATE_CHECK=0`: no checks at all.
+    off: bool,
     /// When Check now was last pressed (Unix seconds).
     last_manual: f64,
     /// A release given by `SOLIDCRAFT_UPDATE_FEED` (a file), for tests and screenshots.
@@ -511,10 +522,11 @@ pub fn offered(app: &SolveApp) -> Option<&Release> {
 
 /// Checks may run here: a release build with the host's HTTP client, or a test feed.
 pub fn available(app: &mut SolveApp) -> bool {
-    app.updater.feed.is_some() || (app.services.http_get.is_some() && app.updater.kind().checks())
+    !app.updater.off && (app.updater.feed.is_some() || (app.services.http_get.is_some() && app.updater.kind().checks()))
 }
 
-/// Per frame: the first frame starts a due automatic check; a finished check is collected.
+/// Per frame: the first frame of each launch starts an automatic check, the open app checks
+/// again once a day (an hour after a failure), and a finished check is collected.
 pub fn tick(app: &mut SolveApp, ctx: &egui::Context) {
     poll_install(app);
     // Quitting to restart or install was cancelled (a "save changes?" answered Cancel).
@@ -527,6 +539,7 @@ pub fn tick(app: &mut SolveApp, ctx: &egui::Context) {
         {
             install::clean_up_after_update(std::env::current_exe().ok().as_deref());
             if std::env::var("SOLIDCRAFT_UPDATE_CHECK").is_ok_and(|v| v == "0") {
+                app.updater.off = true;
                 return;
             }
             app.updater.feed = std::env::var_os("SOLIDCRAFT_UPDATE_FEED").map(PathBuf::from);
@@ -534,7 +547,9 @@ pub fn tick(app: &mut SolveApp, ctx: &egui::Context) {
     }
     poll(app);
     let now = unix_now();
-    if app.updater.rx.is_none() && app.preferences.check_updates && app.preferences.update.due(now) && available(app) {
+    let launch = !app.updater.launch_checked;
+    if app.updater.rx.is_none() && app.preferences.check_updates && app.preferences.update.due(now, launch) && available(app) {
+        app.updater.launch_checked = true;
         start(app, ctx, false);
     }
 }
@@ -714,35 +729,15 @@ pub fn take_launch(app: &mut SolveApp) -> Option<(PathBuf, Vec<String>)> {
 
 // ---- user interface ---------------------------------------------------------------------------
 
-/// The application bar's Update button, right of `right`; returns its rect (None: not shown).
-pub fn button(app: &mut SolveApp, ui: &mut egui::Ui, right: f32, top: f32, labeled: bool) -> Option<egui::Rect> {
-    offered(app)?;
-    let t = Tokens::get();
-    let text = crate::i18n::tr("update.button");
-    let width = if labeled {
-        30.0 + ui.fonts_mut(|f| f.layout_no_wrap(text.to_string(), FontId::proportional(13.0), Color32::WHITE).size().x) + 10.0
-    } else {
-        28.0
-    };
-    let rect = egui::Rect::from_min_size(egui::pos2(right - width, top), egui::vec2(width, 26.0));
-    let response = ui.interact(rect, ui.id().with("sc_update_button"), egui::Sense::click());
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), text));
-    crate::scenario::publish_handle("titlebar:update", rect.center());
-    let fill = if response.hovered() || response.has_focus() { t.hover } else { t.app_bar };
-    ui.painter().rect_filled(rect, 4.0, fill);
-    ui.painter().rect_stroke(rect, 4.0, egui::Stroke::new(1.0, t.accent), egui::StrokeKind::Inside);
-    let icon = egui::Rect::from_center_size(egui::pos2(rect.left() + 14.0, rect.center().y), egui::vec2(18.0, 18.0));
-    crate::icons::paint(ui.painter(), icon, "update", t.accent, t.accent, t.app_bar);
-    if labeled {
-        ui.painter().text(
-            egui::pos2(rect.left() + 29.0, rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            text,
-            FontId::proportional(13.0),
-            t.app_bar_text,
-        );
-    }
-    let version = app.updater.release.as_ref().map(|r| r.version().to_string()).unwrap_or_default();
+/// The application bar's Update pill ("Update to 0.14.0"), at the right of `span`: it opens and
+/// closes the Update window. Returns its rect (None: not shown).
+pub fn button(app: &mut SolveApp, ui: &mut egui::Ui, span: egui::Rect, labeled: bool) -> Option<egui::Rect> {
+    let version = offered(app)?.version().to_string();
+    // "Update to 0.14.0" while the document tabs keep room; a short "Update" when they would be
+    // squeezed; the icon alone in a narrow bar.
+    let full = crate::i18n::format("update.button_version", &[("version", &version)]);
+    let labels = [full.as_str(), crate::i18n::tr("update.button")];
+    let (rect, response) = crate::toolbar::offer_pill(ui, span, labeled, &labels, TAB_ROOM, "update", "titlebar:update")?;
     if response.on_hover_text(crate::i18n::format("update.button_tip", &[("version", &version)])).clicked() {
         app.updater.open = !app.updater.open;
     }

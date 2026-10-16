@@ -612,3 +612,68 @@ container through the normal Docker action with the same settings/data/token, th
 the browser. Newly saved format21 documents require this snapshot or newer for reopening.
 The final upstream fetch observed `6f115ad7409af91716fe52b41bea6e6bacffcece`; subsequent
 upstream movement is deferred to the next fixed-snapshot run.
+
+## 2026-10-16: upstream 3707a67c (SolidCraft 0.13.1 development snapshot, format 25)
+
+Advanced the validated baseline from `b3df2c382b5cc600e42273ed6c21466bab181a71`
+to the single fixed upstream snapshot `3707a67cee8ff9da897d9a9b9b5174739a0d4ee2`.
+Its 145 non-merge commits include typed feature-field roles (PR #1273, confirmed merged),
+Motion Trace, mesh collision, sketch-line Split Body, revised surface/sheet/tessellation
+operations, shared GPU/CPU capture, glTF imports, and open FreeCAD/Rhino file imports.
+The package reports 0.13.1; main already carries five pending design-format changes and
+writes format 25. This is a tested development snapshot, not an application release.
+
+Started with a clean, synchronized codex/unraid-mcp-web; origin/main was an ancestor.
+Merged directly into that sole branch, preserving published history. Resolved conflicts
+in instructions, Cargo.lock, generated notices, desktop lint/startup declarations, pattern
+validation and corner selection. Retained new direction validation and construction-side
+selection. The new Windows unsafe resize bridge is omitted alongside the existing Finder
+and Windows native-crash bridges; safe egui resizing and Linux/container behavior remain.
+Two equivalent boolean simplifications satisfy warning-denied Clippy without relaxing it.
+The fork retains strict shipped-license freshness and the HTTP server license/layer roots.
+Cargo.lock adds the adapter graph to the selected upstream lock without unrelated upgrades.
+
+Validation was scoped to changed behavior and deployment boundaries, not the entire suite:
+
+- 312 selected tests passed: 243 HTTP gateway, stdio MCP, scoped VFS, archive, glTF/native
+  import, format/golden walk, direct path/font, capture, file/link, sketch pattern/corner
+  and CLI tests; 69 general surface-fill, adapter-policy, joints/Motion Trace, coplanar
+  and sketch-line Split Body checks. Five existing tests/benchmarks remain ignored.
+- Formatting, workspace/all-target Clippy with -D warnings, 90 attributed assets, dependency
+  layering (16 crates), regenerated notices and eleven-crate WebAssembly checks passed.
+  cadmpeg's Apache-2.0 open-format codecs only (fcstd/rhino/step) are enabled; commercial
+  formats and sat are disabled. No prohibited CAD code was read, linked or copied.
+- Built the release Linux amd64 container and independent WASM app. A new test volume,
+  loopback port and disposable token passed HTTP MCP sketch/extrusion at 24000 mm3,
+  PNG/STEP, independent sessions, auth/origin/file/font/diagnostic/stored-link rejection,
+  persisted reopen after restart, and operational logging/capacity/release/privacy/noise.
+- Official MCP SDK 1.32.1 reopened public 0.2.1/0.3.2 and format16/17/20/21 files at
+  24000 mm3, exported STEP and saved/reopened the current format. The actual ZIP contains
+  document.json stamped solidcraft/25 and the five pending change names. Verified uploaded
+  font geometry, compact replies/named cameras, a saved link changing 6000 to 9000 mm3,
+  a 2400 mm3 thin wall, confined library paths, completed PNG render jobs and job isolation.
+- New imports were exercised through real HTTP MCP: public FCStd/3dm boxes each measure
+  6000 mm3; our analytic tetrahedron loads from glTF with a relative external buffer.
+  Parent traversal, encoded traversal, absolute paths and network buffer URIs are rejected.
+  Sketch-line Split Body yields 2400/3600 mm3 from a 6000 mm3 box. Screenshot metadata
+  explicitly reports the container's CPU fallback and its limitation warning.
+- The actual browser independently rendered Sample Plate at 0.13.1; native proof PNGs were
+  visually inspected. Chromium software graphics passed every built-site offline/update
+  scenario (19 scenarios, 21 launches). No physical GPU, Windows or macOS certification.
+  An initial new SDK upload assertion expected 200 instead of the valid 201 response;
+  corrected the harness and repeated the affected SDK checks successfully.
+
+Image: `solvecraft-unraid:upstream-3707a67c` (Linux amd64).
+Local image ID: `sha256:4c3930dc445b2b7f1004105045de5ff5c395c9b09487f72a8fc5f5a2b21853eb`.
+Archive: `target/solidcraft-unraid-upstream-3707a67c.tar` (142,574,080 bytes).
+SHA256: `7a7ed1eec37013167bfb4c819db867e9c866e50018e7db41bf66b7b51823b432`.
+Exported manifest names the expected image tag. Private diagnostics and public proof models
+remain under ignored target/unraid-update-3707a67c, excluded from Git and build context.
+The canonical CA template and original icon still match denara/unraid-templates; no catalog
+commit or portal action is required. Publication/local replacement evidence follows below
+once verified. No Unraid installation or nginx/DNS change is performed.
+
+Before updating Unraid, back up server files and separately export browser designs; preserve
+the existing token, data mapping and settings. Reload the browser after the container update.
+Format25 saves require this snapshot or a compatible newer build; the released 0.13.1 and
+older images must not be assumed to reopen them. Keep pre-update copies for rollback.

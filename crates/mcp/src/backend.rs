@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use solidcraft_engine::Session;
-use solidcraft_engine::render::{StandardView, render_png};
+use solidcraft_engine::render::StandardView;
 use solidcraft_engine::view::Guides;
 
 /// Something that answers control-channel methods: `engine.execute`, `engine.commands`,
@@ -234,8 +234,8 @@ impl Headless {
     }
 }
 
-fn dim(p: &Value, k: &str, default: f64) -> usize {
-    p.get(k).and_then(Value::as_f64).filter(|x| x.is_finite()).unwrap_or(default).clamp(16.0, 4096.0) as usize
+fn dim(p: &Value, k: &str, default: f64) -> u32 {
+    p.get(k).and_then(Value::as_f64).filter(|x| x.is_finite()).unwrap_or(default).clamp(16.0, 4096.0) as u32
 }
 
 impl Backend for Headless {
@@ -279,11 +279,21 @@ impl Backend for Headless {
                 // The grid and the axes are drawn unless the request leaves them out.
                 let shown = |k: &str| p.get(k).and_then(Value::as_bool).unwrap_or(true);
                 let guides = Guides { grid: shown("grid"), axes: shown("axes") };
-                let scene = solidcraft_engine::view::scene_with_guides(s, &cam, s.section, guides);
-                let png = render_png(&scene, &cam, w, h).ok_or("render failed")?;
                 let path = str_p("path").ok_or("missing `path`")?;
-                solidcraft_engine::io::vfs::write(path, &png).map_err(|e| format!("{path}: {e}"))?;
-                Ok(json!({"path": path, "bytes": png.len(), "width": w, "height": h}))
+                // A path outside the agent's folders is refused before anything is drawn.
+                solidcraft_engine::io::vfs::check(path).map_err(|e| format!("{path}: {e}"))?;
+                let scene = solidcraft_engine::view::scene_with_guides(s, &cam, s.section, guides);
+                // Drawn on the GPU by the renderer the host installed (`solidcraft-cli mcp`).
+                let png = solidcraft_engine::capture::png(&scene, &cam, w, h)?;
+                solidcraft_engine::io::vfs::write(path, &png.bytes).map_err(|e| format!("{path}: {e}"))?;
+                Ok(json!({
+                    "path": path,
+                    "bytes": png.bytes.len(),
+                    "width": w,
+                    "height": h,
+                    "renderer": png.renderer,
+                    "warning": solidcraft_engine::capture::warning(png.renderer),
+                }))
             }
             "ui.screenshot" => Err("no window in headless mode; use ui.render".into()),
             other => Err(format!("unknown method `{other}`")),

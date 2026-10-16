@@ -24,6 +24,12 @@ const MARK: Palette = Palette {
     sketch_centerline: Rgb(43, 44, 45),
     axes: [Rgb(46, 47, 48), Rgb(49, 50, 51), Rgb(52, 53, 54)],
     cap: Rgb(55, 56, 57),
+    analysis: solidcraft_render::AnalysisColors {
+        draft: [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]],
+        access: [[0.11, 0.12, 0.13], [0.14, 0.15, 0.16]],
+        curvature: [[0.17, 0.18, 0.19], [0.21, 0.22, 0.23], [0.24, 0.25, 0.26]],
+        hatch: true,
+    },
 };
 
 /// Each curve's lines at x = its index, so a line tells which curve it draws.
@@ -49,6 +55,7 @@ fn the_default_palette_is_the_colour_table() {
         (colors::SKETCH_PROJECTED, colors::SKETCH_LOST, colors::SKETCH_CONSTRUCTION, colors::SKETCH_CENTERLINE)
     );
     assert_eq!((p.axes, p.cap), ([colors::AXIS_X, colors::AXIS_Y, colors::AXIS_Z], colors::SECTION_CAP));
+    assert_eq!(p.analysis, solidcraft_render::AnalysisColors::DEFAULT);
 }
 
 #[test]
@@ -68,7 +75,15 @@ fn each_sketch_state_takes_its_palette_colour() {
     let lost_link = sk.add_link(LinkKind::Project, LinkSource::Origin, &[LinkGeom::Line(Vec2::new(0., 6.), Vec2::new(2., 6.))]).unwrap();
     sk.set_link_lost(&lost_link, true);
     let lost = sk.curves.len() - 1;
-    let text = LinkSource::Text { text: "A".into(), at: Vec2::ZERO, height: 2., angle: 0., font: None, style: Default::default() };
+    let text = LinkSource::Text {
+        text: "A".into(),
+        at: Vec2::ZERO,
+        height: 2.,
+        angle: 0.,
+        font: None,
+        style: Default::default(),
+        exprs: Default::default(),
+    };
     sk.add_link(LinkKind::Text, text, &[LinkGeom::Line(Vec2::new(0., 7.), Vec2::new(2., 7.))]).unwrap();
     let text = sk.curves.len() - 1;
     let mut flags = vec![false; sk.curves.len()];
@@ -146,11 +161,13 @@ fn every_scene_colour_comes_from_its_palette_and_appearances_stay() {
         MARK.sketch_construction,
         MARK.sketch_centerline,
     ];
-    let stray: Vec<Rgb> = marked.lines.iter().map(|l| l.color).filter(|c| !allowed.contains(c)).collect();
+    let all_lines = || marked.grid.iter().chain(&marked.lines);
+    let stray: Vec<Rgb> = all_lines().map(|l| l.color).filter(|c| !allowed.contains(c)).collect();
     assert!(stray.is_empty(), "line colours not from the palette: {stray:?}");
     for want in [MARK.grid, MARK.grid_major, MARK.edge, MARK.axes[0], MARK.axes[1], MARK.axes[2], MARK.sketch_done] {
-        assert!(marked.lines.iter().any(|l| l.color == want), "no line in {want:?}");
+        assert!(all_lines().any(|l| l.color == want), "no line in {want:?}");
     }
+    assert!(marked.grid.iter().all(|l| [MARK.grid, MARK.grid_major].contains(&l.color)), "only the grid is drawn under the model");
     assert_eq!(mesh(&marked, "Grey").0, colors::BODY, "an appearance equal to the default grey is the design's");
     assert_eq!(mesh(&marked, "Picked").0, MARK.body_selected);
     let (plain, faces) = mesh(&marked, "Plain");
@@ -164,8 +181,8 @@ fn every_scene_colour_comes_from_its_palette_and_appearances_stay() {
         (default.background, default.cap, default.clip, default.radius),
         (plain_scene.background, plain_scene.cap, plain_scene.clip, plain_scene.radius)
     );
-    assert_eq!(default.lines.len(), plain_scene.lines.len());
-    for (a, b) in default.lines.iter().zip(&plain_scene.lines) {
+    assert_eq!((default.lines.len(), default.grid.len()), (plain_scene.lines.len(), plain_scene.grid.len()));
+    for (a, b) in default.lines.iter().zip(&plain_scene.lines).chain(default.grid.iter().zip(&plain_scene.grid)) {
         assert_eq!((&a.points, a.color, a.width, a.on_top), (&b.points, b.color, b.width, b.on_top));
     }
     for name in &names {

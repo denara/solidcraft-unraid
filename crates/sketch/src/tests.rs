@@ -650,7 +650,7 @@ fn merging_adjacent_regions() {
 /// outlines.
 fn text_sketch(text: &str, at: Vec2, height: f64) -> Sketch {
     let mut sk = Sketch::new();
-    let source = LinkSource::Text { text: text.into(), at, height, angle: 0.0, font: None, style: Default::default() };
+    let source = LinkSource::Text { text: text.into(), at, height, angle: 0.0, font: None, style: Default::default(), exprs: Default::default() };
     sk.add_link(LinkKind::Text, source, &text_geometry(text, at, height, 0.0).unwrap()).unwrap();
     sk
 }

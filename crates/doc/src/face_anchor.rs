@@ -69,8 +69,12 @@ impl FaceAnchor {
         }
         let inverse = crate::mat_inverse(&self.author_frame(doc, author)?)
             .ok_or_else(|| DocError::Invalid("attached sketch author frame is invalid".into()))?;
-        let source =
-            EmbossFace { body: self.target.body.clone(), at: self.target.point, path: self.path.clone(), author_path: self.author_path.clone() };
+        let source = EmbossFace {
+            body: self.target.body.clone().into(),
+            at: crate::FacePick(self.target.point),
+            path: self.path.clone(),
+            author_path: self.author_path.clone(),
+        };
         Ok(crate::mat_mul(&inverse, &source.body_frame(doc, body)?))
     }
 }
@@ -447,7 +451,7 @@ mod tests {
             .add_feature(
                 FeatureKind::Extrude {
                     thin: None,
-                    sketch: source,
+                    sketch: crate::SketchId(source),
                     profiles: crate::ProfileSel::Indices { indices: vec![0, 1] },
                     extent,
                     operation: crate::Operation::NewBody,
@@ -558,7 +562,7 @@ mod tests {
             .add_feature(
                 FeatureKind::Extrude {
                     thin: None,
-                    sketch: sk,
+                    sketch: crate::SketchId(sk),
                     profiles: crate::ProfileSel::All,
                     extent,
                     operation: crate::Operation::NewBody,

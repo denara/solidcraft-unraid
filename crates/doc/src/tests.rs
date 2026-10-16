@@ -30,7 +30,7 @@ fn plate_doc() -> (Document, u64) {
     doc.add_feature(
         FeatureKind::Extrude {
             thin: None,
-            sketch: s,
+            sketch: crate::SketchId(s),
             profiles: ProfileSel::All,
             extent: Extent {
                 convention: crate::ExtrudeConvention::LegacyPerSide,
@@ -108,7 +108,7 @@ fn box_fillet_cut_timeline() {
     let (mut doc, _) = plate_doc();
     doc.add_feature(
         FeatureKind::Fillet {
-            edges: vec![Vec3::new(0.0, 0.0, 10.0)],
+            edges: vec![Position(Vec3::new(0.0, 0.0, 10.0))],
             radius: "3".into(),
             body: None,
             style: Default::default(),
@@ -123,7 +123,7 @@ fn box_fillet_cut_timeline() {
     doc.add_feature(
         FeatureKind::Extrude {
             thin: None,
-            sketch: s2,
+            sketch: crate::SketchId(s2),
             profiles: ProfileSel::Points { points: vec![Vec2::new(20.0, 15.0)] },
             extent: Extent {
                 convention: crate::ExtrudeConvention::LegacyPerSide,
@@ -162,7 +162,7 @@ fn errors_are_reported_not_fatal() {
     let (mut doc, s) = plate_doc();
     doc.add_feature(
         FeatureKind::Revolve {
-            sketch: s,
+            sketch: crate::SketchId(s),
             profiles: ProfileSel::All,
             axis: AxisRef::SketchAxis { axis: "y".into() },
             angle: "90 deg".into(),
@@ -178,7 +178,7 @@ fn errors_are_reported_not_fatal() {
     .unwrap();
     doc.add_feature(
         FeatureKind::Fillet {
-            edges: vec![Vec3::new(500.0, 0.0, 0.0)],
+            edges: vec![Position(Vec3::new(500.0, 0.0, 0.0))],
             radius: "1".into(),
             body: None,
             style: Default::default(),
@@ -244,7 +244,7 @@ fn primitives_and_combine() {
     doc.add_feature(
         FeatureKind::Cylinder {
             base: point_expr(Vec3::new(5.0, 5.0, 0.0)),
-            axis: Vec3::Z,
+            axis: Dir(Vec3::Z),
             radius: "2".into(),
             height: "20".into(),
             operation: Operation::NewBody,

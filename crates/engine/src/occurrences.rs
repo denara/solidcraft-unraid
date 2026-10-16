@@ -1,6 +1,6 @@
 //! Exact placement identity and session view/authoring state.
 use crate::{EngineError, Result, Sel, Session};
-use solidcraft_doc::{IDENTITY, Mat, mat_mul};
+use solidcraft_doc::{FeatureKind, IDENTITY, Mat, PlaneRef, mat_mul};
 
 #[derive(Clone, Debug)]
 pub struct OccurrenceBody {
@@ -28,6 +28,14 @@ fn invalid(message: &str) -> EngineError {
 pub(crate) struct VisibilityCache {
     revision: u64,
     paths: Vec<Vec<u64>>,
+    bodies: std::collections::BTreeSet<String>,
+}
+
+/// [`Session::body_removed_later`] for one revision, sketch and history marker.
+pub(crate) struct RemovedLaterCache {
+    revision: u64,
+    sketch: u64,
+    marker: usize,
     bodies: std::collections::BTreeSet<String>,
 }
 
@@ -183,7 +191,7 @@ impl Session {
     }
 
     pub fn body_visible(&self, name: &str) -> bool {
-        if self.visibility.hidden_bodies.iter().any(|n| n == name) {
+        if self.visibility.hidden_bodies.iter().any(|n| n == name) || self.body_removed_later(name) {
             return false;
         }
         if self.visibility.hidden_occurrences.is_empty() {
@@ -203,6 +211,66 @@ impl Session {
             return cache.as_ref().is_none_or(|c| !c.bodies.contains(name));
         }
         self.doc.body_frames(&self.model.state()).iter().find(|(n, _, _, _)| n == name).is_none_or(|(_, _, path, _)| self.occurrence_visible(path))
+    }
+
+    /// Is this body deleted by a feature the history marker has rolled off, while a sketch is
+    /// being edited? Edit Sketch rolls the timeline back to the sketch, so a body made before the
+    /// sketch and removed after it is part of the shown model again; it stays out of the view,
+    /// as it does once the timeline runs to the end. Nothing else changes: the model, its state
+    /// and every command still see the history as it was rolled to. A body the sketch is
+    /// built on (the face it sits on, an edge it projects) stays.
+    pub fn body_removed_later(&self, name: &str) -> bool {
+        let (Some(sketch), Some(marker)) = (self.active_sketch, self.doc.marker) else { return false };
+        if marker >= self.doc.features.len() {
+            return false;
+        }
+        let Ok(mut cache) = self.removed_later_cache.lock() else { return false };
+        if cache.as_ref().is_none_or(|c| c.revision != self.revision || c.sketch != sketch || c.marker != marker) {
+            *cache = Some(RemovedLaterCache { revision: self.revision, sketch, marker, bodies: self.removed_later_bodies(sketch, marker) });
+        }
+        cache.as_ref().is_some_and(|c| c.bodies.contains(name))
+    }
+
+    /// The names (as shown in the world) of the bodies that features from `marker` on remove,
+    /// leaving out the bodies `sketch` is built on.
+    fn removed_later_bodies(&self, sketch: u64, marker: usize) -> std::collections::BTreeSet<String> {
+        let none = std::collections::BTreeSet::new();
+        let Some(FeatureKind::Sketch { plane, sketch: made }) = self.doc.feature(sketch).map(|f| &f.kind) else { return none };
+        let mut kept: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        let mut plane = plane;
+        loop {
+            match plane {
+                PlaneRef::Offset { base, .. } | PlaneRef::AtAngle { base, .. } => plane = base,
+                // A face attachment that names no exact source: which body it sits on is unknown,
+                // so none is taken from the view.
+                PlaneRef::Face { anchor: None, .. } => return none,
+                PlaneRef::Face { anchor: Some(anchor), .. } => {
+                    kept.insert(anchor.target.body.as_str());
+                    break;
+                }
+                _ => break,
+            }
+        }
+        for link in &made.links {
+            kept.extend(link.source.bodies());
+        }
+        let shown = self.model.state();
+        let mut removed = std::collections::BTreeSet::new();
+        for feature in self.doc.features.iter().skip(marker).filter(|f| !f.suppressed) {
+            if let FeatureKind::Remove { bodies } = &feature.kind {
+                removed.extend(bodies.iter().filter(|b| !kept.contains(b.0.as_str()) && shown.body(&b.0).is_some()).map(|b| b.0.clone()));
+            }
+        }
+        if removed.is_empty() || self.doc.occurrences.is_empty() {
+            return removed;
+        }
+        // A component's bodies are shown once per placement, each under its own name.
+        self.doc
+            .body_frames_with_source(&shown)
+            .into_iter()
+            .filter(|(_, source, _, _, _)| removed.contains(source))
+            .map(|(world, ..)| world)
+            .collect()
     }
 
     pub(crate) fn prune_occurrence_state(&mut self) {

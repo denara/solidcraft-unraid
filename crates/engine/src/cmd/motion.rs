@@ -10,12 +10,20 @@ use solidcraft_geom::Vec3;
 use solidcraft_kernel::Body;
 
 use super::CommandSpec;
-use super::joints::{cannot_move, joint_id, named_values, occurrence_id, resolve_holding, value};
+use super::joints::{cannot_move, effective_values, joint_id, occurrence_id, resolve_holding, value};
 use crate::params::{bad, bool_, str_, vec3};
 use crate::{EngineError, Result, Session};
 
 #[path = "contact_sweep.rs"]
 mod contact_sweep;
+
+macro_rules! trace_doc {
+    () => {
+        "occurrence: id|name, or an occurrence path [ids] (an instance inside sub-assemblies); point: [x,y,z] world point on it, where it is placed now; study: id|name, or joint: id|name with from and \
+         to (degrees for angles, mm for distances, or expressions) and index? (which value, default 0); samples? (2…500, default \
+         the study's steps + 1, or 100) - the point's path as the study plays or the joint is driven, closed loops following"
+    };
+}
 
 pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("contact.enable_sets", "Enable Contact Sets", enable_sets).at("SOLID", "ASSEMBLE").icon("joint").params(
@@ -46,6 +54,16 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("motion.export", "Export Motion Study", export)
         .noundo()
         .params("study; samples? (default steps + 1); path? (.json or .csv) → occurrence positions per step (the design is not changed)"),
+    CommandSpec::new("motion.trace", "Motion Trace", trace).at("SOLID", "ASSEMBLE").icon("trace").noundo().params(concat!(
+        trace_doc!(),
+        " → points: [[x,y,z]…] world positions, samples (taken), stopped_at (the sample where the motion stopped short; the trace \
+         ends there), stopped_by_loop, stopped_by_contact (the design is not changed)"
+    )),
+    CommandSpec::new("motion.trace.keep", "Keep Motion Trace", keep_trace).params(concat!(
+        trace_doc!(),
+        "; name? (default Motion TraceN) - keeps the trace as a 3D sketch spline through its points (a new sketch with 3D Sketch \
+         on, in the root component, where no joint moves it; a fixed curve, it does not follow later changes) → sketch, name, curves, points"
+    )),
     CommandSpec::new("motion.list", "List Motion Studies", list_studies).noundo(),
     CommandSpec::new("motion.delete", "Delete Motion Study", delete_study).params("study"),
     CommandSpec::new("explode.create", "Exploded View", explode_create).at("SOLID", "ASSEMBLE").icon("joint").params(
@@ -350,10 +368,7 @@ fn drive_with_contact(s: &mut Session, want: &[(u64, Vec<f64>)], given: &BTreeSe
         stopped = None;
         stopped_by_loop = Some(json!({"joint": name, "fraction": lo}));
     }
-    let values: Vec<Value> = want
-        .iter()
-        .map(|(id, _)| json!({"joint": id, "values": s.doc.assembly.joints.iter().find(|j| j.id == *id).map(|j| named_values(j, &j.values))}))
-        .collect();
+    let values: Vec<Value> = want.iter().map(|(id, _)| json!({"joint": id, "values": effective_values(s, *id)})).collect();
     let out = json!({"values": values, "stopped_by_contact": stopped, "stopped_by_loop": stopped_by_loop, "conflicts": sol.conflicts.len()});
     Ok((out, sol))
 }
@@ -658,6 +673,166 @@ fn export(s: &mut Session, p: &Value) -> Result<Value> {
         solidcraft_io::write_atomic(std::path::Path::new(path), text.as_bytes(), false).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
         return Ok(json!({"path": path, "samples": rows.len()}));
     }
+    Ok(out)
+}
+
+/// Most samples of a motion trace: each is a solve, and a kept trace keeps every one as a fit
+/// point of its spline.
+const MAX_TRACE: usize = solidcraft_sketch::MAX_FIT_POINTS;
+
+/// The joint values a trace drives to at sample `k` of `n`.
+type Plan = Box<dyn Fn(&Session, usize, usize) -> Vec<(u64, Vec<f64>)>>;
+
+/// Where a point of an occurrence goes as a study plays or a joint is driven: its world
+/// positions, sampled on a copy (the design is not changed). Each sample is driven from the one
+/// before, so closed loops follow on their branch and contact sets stop them; the trace ends at
+/// the sample where the motion stops short. Returns the points and the answer without them.
+fn sample_trace(s: &Session, p: &Value, cmd: &str) -> Result<(Vec<Vec3>, Value)> {
+    // The placement traced: an occurrence path through nested sub-assemblies (one instance of
+    // each), or an occurrence at its first placement (none: the root).
+    let path: Vec<u64> = match p.get("occurrence") {
+        Some(Value::Array(ids)) if ids.len() <= 64 => {
+            ids.iter().map(|v| v.as_u64().ok_or_else(|| bad(cmd, "an occurrence path lists occurrence ids"))).collect::<Result<_>>()?
+        }
+        Some(Value::Array(_)) => return Err(bad(cmd, "an occurrence path has at most 64 ids")),
+        v => {
+            let occ = occurrence_id(s, v, cmd)?;
+            match s.doc.occurrences.iter().find(|o| o.id == occ) {
+                Some(o) => s.doc.first_path(o.parent).into_iter().chain([o.id]).collect(),
+                None => Vec::new(),
+            }
+        }
+    };
+    let at = p.get("point").and_then(vec3).filter(|v| v.len() < 1e7).ok_or_else(|| bad(cmd, "`point` must be [x, y, z], a world point"))?;
+    let mut t = s.scratch();
+    // Traced from where the parts are placed: moves only shown (an exploded view, a move not
+    // captured yet) are not where the joints are solved.
+    t.pending_moves.clear();
+    let world = |t: &Session| -> Result<Mat> {
+        if path.is_empty() {
+            Ok(solidcraft_doc::IDENTITY)
+        } else {
+            t.occurrence_placement(&path).map(|o| o.world).map_err(|e| bad(cmd, e.to_string()))
+        }
+    };
+    let local = solidcraft_doc::mat_inverse(&world(&t)?)
+        .map(|m| solidcraft_doc::apply_point(&m, at))
+        .ok_or_else(|| bad(cmd, "the occurrence's placement is not invertible"))?;
+    let samples = |default: usize| match p.get("samples") {
+        Some(v) => v
+            .as_f64()
+            .filter(|n| n.is_finite() && *n >= 2.0 && *n <= MAX_TRACE as f64)
+            .map(|n| n.round() as usize)
+            .ok_or_else(|| bad(cmd, format!("`samples` must be 2…{MAX_TRACE}"))),
+        None => Ok(default),
+    };
+    let (n, given, plan): (usize, BTreeSet<(u64, usize)>, Plan) = match (p.get("study"), p.get("joint")) {
+        (Some(_), Some(_)) => return Err(bad(cmd, "give `study` or `joint`, not both")),
+        (Some(_), None) => {
+            let m = s.doc.assembly.studies.get(study_index(s, p, cmd)?).cloned().ok_or_else(|| bad(cmd, "study"))?;
+            let n = samples((m.steps as usize).saturating_add(1).clamp(2, MAX_TRACE))?;
+            (n, keyed(&m), Box::new(move |t, k, n| values_at(t, &m, f64::from(m.steps) * k as f64 / (n - 1) as f64)))
+        }
+        (None, Some(j)) => {
+            let id = joint_id(s, Some(j), cmd)?;
+            let kind = s.doc.assembly.joints.iter().find(|j| j.id == id).map(|j| j.kind).ok_or_else(|| bad(cmd, "joint"))?;
+            let dofs = kind.dofs().len();
+            if dofs == 0 {
+                return Err(bad(cmd, "a rigid joint does not move"));
+            }
+            let index = match p.get("index") {
+                None => 0,
+                Some(v) => v
+                    .as_u64()
+                    .and_then(|i| usize::try_from(i).ok())
+                    .filter(|i| *i < dofs)
+                    .ok_or_else(|| bad(cmd, format!("`index` must be below {dofs}, the joint's value count")))?,
+            };
+            let end = |key: &str| match p.get(key) {
+                Some(v) => value(s, v, kind.is_angle(index), cmd),
+                None => Err(bad(cmd, format!("give `from` and `to`: the joint's values the trace runs between (no `{key}`)"))),
+            };
+            let (from, to) = (end("from")?, end("to")?);
+            let plan: Plan = Box::new(move |t, k, n| {
+                let mut q = t.doc.assembly.joints.iter().find(|j| j.id == id).map(|j| j.values.clone()).unwrap_or_default();
+                q.resize(q.len().max(dofs), 0.0);
+                if let Some(x) = q.get_mut(index) {
+                    *x = from + (to - from) * k as f64 / (n - 1) as f64;
+                }
+                vec![(id, q)]
+            });
+            (samples(100)?, BTreeSet::from([(id, index)]), plan)
+        }
+        (None, None) => return Err(bad(cmd, "give a `study`, or a `joint` with `from` and `to`")),
+    };
+    let mut points = Vec::new();
+    let mut stop = (Value::Null, Value::Null, Value::Null);
+    for k in 0..n {
+        let want = plan(&t, k, n);
+        let (r, _) = drive_with_contact(&mut t, &want, &given)?;
+        points.push(solidcraft_doc::apply_point(&world(&t)?, local));
+        if r["stopped_by_loop"].is_object() || r["stopped_by_contact"].is_object() {
+            stop = (json!(k), r["stopped_by_loop"].clone(), r["stopped_by_contact"].clone());
+            break;
+        }
+    }
+    let name = s.doc.occurrences.iter().find(|o| Some(&o.id) == path.last()).map_or_else(|| "root".to_string(), |o| o.name.clone());
+    let out = json!({"occurrence": name, "samples": points.len(), "stopped_at": stop.0, "stopped_by_loop": stop.1, "stopped_by_contact": stop.2});
+    Ok((points, out))
+}
+
+fn trace(s: &mut Session, p: &Value) -> Result<Value> {
+    let (points, mut out) = sample_trace(s, p, "motion.trace")?;
+    out["points"] = points.iter().map(|v| json!([v.x, v.y, v.z])).collect();
+    Ok(out)
+}
+
+/// The trace as a 3D sketch spline, in one undo step: a new sketch of the root component (the
+/// world, which no joint moves) with 3D Sketch on and the spline through the trace's points.
+fn keep_trace(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "motion.trace.keep";
+    let (mut points, mut out) = sample_trace(s, p, cmd)?;
+    // Where the motion stood still (at a limit or a stop), one fit point.
+    points.dedup_by(|a, b| a.dist(*b) < 1e-6);
+    // A full cycle comes back to where it started (to the loop solver's tolerance): the spline
+    // closes there, smoothly, through the start itself (and a sample that would double it goes).
+    if points.len() > 3
+        && let (Some(&first), Some(&last)) = (points.first(), points.last())
+        && first.dist(last) < 1e-4
+    {
+        points.pop();
+        if points.last().is_some_and(|p| p.dist(first) < 1e-6) {
+            points.pop();
+        }
+        points.push(first);
+    }
+    if points.len() < 2 {
+        return Err(bad(cmd, "the point does not move: there is no trace to keep"));
+    }
+    let name = match str_(p, "name").map(str::trim).filter(|n| !n.is_empty()) {
+        Some(n) => n.to_string(),
+        None => (1..=s.doc.features.len() + 1).map(|k| format!("Motion Trace{k}")).find(|n| s.doc.find_feature(n).is_none()).unwrap_or_default(),
+    };
+    let pts: Vec<Value> = points.iter().map(|v| json!([v.x, v.y, v.z])).collect();
+    // Made in the root, whatever is being edited, which is then as it was (also on an error).
+    let before = (s.active_sketch, s.active_component, s.active_occurrence_path.take());
+    s.active_component = 0;
+    let made = (|| {
+        let run = |s: &mut Session, id: &str, q: Value| super::find_command(id).ok_or_else(|| bad(cmd, id.to_string()))?.run_nested(s, &q);
+        let made = run(s, "sketch.create", json!({"plane": "XY", "project_edges": false, "name": name}))?;
+        let sketch = made.get("sketch").cloned().unwrap_or(Value::Null);
+        run(s, "sketch.options", json!({"sketch": sketch, "sketch_3d": true}))?;
+        let spline = run(s, "sketch.spline3d", json!({"sketch": sketch, "points": pts}))?;
+        Ok::<_, EngineError>((made, spline))
+    })();
+    (s.active_sketch, s.active_component, s.active_occurrence_path) = before;
+    s.revision += 1;
+    let (made, spline) = made?;
+    let sketch = made.get("sketch").cloned().unwrap_or(Value::Null);
+    out["sketch"] = sketch;
+    out["name"] = made.get("name").cloned().unwrap_or(Value::Null);
+    out["curves"] = spline.get("curves").cloned().unwrap_or(Value::Null);
+    out["points"] = json!(points.len());
     Ok(out)
 }
 

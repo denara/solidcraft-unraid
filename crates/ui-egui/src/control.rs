@@ -31,7 +31,7 @@
 //! - `ui.confirm {accept?}`: the Delete confirmation (without `accept`: what it lists)
 //! - `ui.shortcut {command, key?, replace?}`: a command's key, or bind one ("" clears)
 //! - `ui.help {item?: about|shortcuts|report}`: the Help menu; returns the version and diagnostics
-//! - `ui.prefs {...}`: the preferences (default_units, nav, zoom_reverse, orbit_cursor, msaa,
+//! - `ui.prefs {...}`: the preferences (default_units, nav, zoom_reverse, orbit_around, msaa,
 //!   length_decimals, angle_decimals); returns them all
 //! - `ui.capture {action?: capture|revert|cancel}`: the Capture Position question
 //! - `ui.agent_cursor {show?, speed?: 1–5 (times) | "instant", follow_camera?}`: the agent cursor
@@ -43,7 +43,7 @@ use std::sync::mpsc::Sender;
 
 use serde_json::{Value, json};
 use solidcraft_engine::io::vfs;
-use solidcraft_engine::render::{StandardView, render_png};
+use solidcraft_engine::render::StandardView;
 
 use crate::SolveApp;
 
@@ -172,6 +172,37 @@ pub fn request_scope(app: &SolveApp, params: &Value) -> Result<Option<vfs::PathS
     Ok(Some(vfs::PathScope::new(roots).with_design(app.session.path.as_deref())))
 }
 
+/// What a picture of the view shows: the model as the window shows it (theme and colour vision
+/// mode, the section the viewport shows: an open Section Analysis dialog's preview, a sketch's
+/// Slice), with the grid and the origin's axes as `guides` says.
+pub(crate) fn view_scene(app: &SolveApp, guides: solidcraft_engine::view::Guides) -> solidcraft_engine::render::Scene {
+    solidcraft_engine::view::scene_with_palette_and_guides(
+        &app.session,
+        &app.cam,
+        crate::viewport::section_plane(app),
+        solidcraft_engine::view::world_curve_parts,
+        &crate::viewport::scene_palette(app.ui.dark, app.preferences.color_vision),
+        guides,
+    )
+}
+
+/// The grid and the origin's axes as the window shows them (the Grid and Origin switches).
+fn window_guides(app: &SolveApp) -> solidcraft_engine::view::Guides {
+    solidcraft_engine::view::Guides { grid: app.ui.show_grid && !crate::viewport::active_view(app).hide_grid, axes: app.origin_visible() }
+}
+
+/// A picture of the view as the window shows it, RGBA, drawn on the GPU with the viewport's
+/// pipelines (the renderer the app installs).
+pub(crate) fn view_rgba(app: &SolveApp, w: u32, h: u32) -> Result<Vec<u8>, String> {
+    solidcraft_engine::capture::rgba(&view_scene(app, window_guides(app)), &app.cam, w, h).map(|p| p.rgba)
+}
+
+/// [`view_rgba`] as PNG.
+pub fn view_png(app: &SolveApp, w: u32, h: u32) -> Result<Vec<u8>, String> {
+    let rgba = view_rgba(app, w, h)?;
+    solidcraft_engine::render::png(w as usize, h as usize, rgba).ok_or_else(|| "PNG encoding failed".to_string())
+}
+
 pub fn handle(app: &mut SolveApp, ctx: &egui::Context, req: &ControlRequest) -> Outcome {
     let scope = match request_scope(app, &req.params) {
         Ok(Some(scope)) => scope,
@@ -245,6 +276,7 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
             "file_picker_busy": app.file_picker_busy(),
             "file_dialog_open": app.file_picker_busy(),
             "build_ms": app.viewport.build_ms,
+            "display_lod": app.viewport.lod.lock().map(|l| serde_json::to_value(&l.stats).unwrap_or_default()).unwrap_or_default(),
             "preview": {"active": app.preview.active, "busy": app.preview.busy, "error": app.preview.error, "ms": app.preview.ms, "replaced": app.preview.replaced},
             "home": app.home.open,
             "recent_thumbnails_ready": app.home.ready_recents(),
@@ -640,6 +672,7 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
             None => ok(json!({"question": app.tree.capture_prompt, "pending_moves": app.session.pending_moves.len()})),
         },
         "ui.prefs" => wrap(crate::prefs::control(app, p)),
+        "ui.agent_chat" => wrap(crate::agent_chat::control(app, ctx, p)),
         "ui.help" => match s("item") {
             Some(i @ ("about" | "shortcuts" | "report" | "crashes")) => {
                 crate::help::run(app, ctx, i);
@@ -677,31 +710,32 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
             _ => Outcome::Screenshot { path: s("path").map(str::to_string) },
         },
         "ui.render" => {
-            let w = f("width").unwrap_or(1280.0).clamp(16.0, 8192.0) as usize;
-            let h = f("height").unwrap_or(800.0).clamp(16.0, 8192.0) as usize;
-            // In the window's theme and colour vision mode, and cut by the section the viewport shows (an open Section
-            // Analysis dialog's preview, a sketch's Slice), not only the committed one.
-            // The grid and the axes as the window shows them (the Grid and Origin switches), unless
-            // the request says: `grid` and `axes` leave them out of the picture or put them in.
+            let w = f("width").unwrap_or(1280.0).clamp(16.0, 8192.0) as u32;
+            let h = f("height").unwrap_or(800.0).clamp(16.0, 8192.0) as u32;
+            // As the window shows it (`view_scene`). The grid and the axes as the window shows
+            // them, unless the request says: `grid` and `axes` leave them out or put them in.
+            let shown = window_guides(app);
             let guides = solidcraft_engine::view::Guides {
-                grid: p.get("grid").and_then(Value::as_bool).unwrap_or(app.ui.show_grid && !crate::viewport::active_view(app).hide_grid),
-                axes: p.get("axes").and_then(Value::as_bool).unwrap_or_else(|| app.origin_visible()),
+                grid: p.get("grid").and_then(Value::as_bool).unwrap_or(shown.grid),
+                axes: p.get("axes").and_then(Value::as_bool).unwrap_or(shown.axes),
             };
-            let scene = solidcraft_engine::view::scene_with_palette_and_guides(
-                &app.session,
-                &app.cam,
-                crate::viewport::section_plane(app),
-                solidcraft_engine::view::world_curve_parts,
-                &crate::viewport::scene_palette(app.ui.dark, app.preferences.color_vision),
-                guides,
-            );
-            let Some(png) = render_png(&scene, &app.cam, w, h) else { return err("render failed") };
+            // A path outside the request's folders is refused before anything is drawn.
+            if let Some(Err(e)) = s("path").map(vfs::check) {
+                return err(e);
+            }
+            let scene = view_scene(app, guides);
+            let png = match solidcraft_engine::capture::png(&scene, &app.cam, w, h) {
+                Ok(png) => png,
+                Err(e) => return err(format!("render failed: {e}")),
+            };
+            // What drew it (gpu, gpu-software or cpu), and the warning a CPU render carries.
+            let (renderer, warning) = (png.renderer, solidcraft_engine::capture::warning(png.renderer));
             match s("path") {
-                Some(path) => match vfs::check(path).and_then(|()| std::fs::write(path, &png)) {
-                    Ok(()) => ok(json!({"path": path, "bytes": png.len()})),
+                Some(path) => match vfs::check(path).and_then(|()| std::fs::write(path, &png.bytes)) {
+                    Ok(()) => ok(json!({"path": path, "bytes": png.bytes.len(), "renderer": renderer, "warning": warning})),
                     Err(e) => err(e),
                 },
-                None => ok(json!({"bytes": png.len()})),
+                None => ok(json!({"bytes": png.bytes.len(), "renderer": renderer, "warning": warning})),
             }
         }
         "app.quit" => {
@@ -932,6 +966,9 @@ mod tests {
     /// or dark.
     #[test]
     fn model_render_is_in_the_windows_theme() {
+        if !crate::gpu::test_picture_renderer() {
+            return;
+        }
         let mut s = Session::default();
         s.execute("solid.box", &json!({"length": 40, "width": 30, "height": 20})).unwrap();
         let mut app = SolveApp::new(s, Services::default());
@@ -958,6 +995,9 @@ mod tests {
     /// preview too, not only a committed `inspect.section`.
     #[test]
     fn model_render_shows_the_section_dialog_preview() {
+        if !crate::gpu::test_picture_renderer() {
+            return;
+        }
         let mut s = Session::default();
         s.execute("solid.box", &json!({"length": 40, "width": 30, "height": 20})).unwrap();
         let mut app = SolveApp::new(s, Services::default());
@@ -997,6 +1037,9 @@ mod tests {
     /// in the request say otherwise for that render.
     #[test]
     fn model_render_follows_the_grid_and_origin_switches_unless_asked() {
+        if !crate::gpu::test_picture_renderer() {
+            return;
+        }
         let mut s = Session::default();
         s.execute("solid.box", &json!({"length": 40, "width": 30, "height": 20, "corner": [10, -15, -10]})).unwrap();
         let mut app = SolveApp::new(s, Services::default());
@@ -1229,7 +1272,9 @@ mod tests {
         };
         let export = |p: String| json!({"command": "file.export", "params": {"path": p}});
         assert_eq!(call("engine.execute", export(at(&root, "a.step")), true)["ok"], true);
-        assert_eq!(call("ui.render", json!({"path": at(&root, "a.png"), "width": 32, "height": 32}), true)["ok"], true);
+        if crate::gpu::test_picture_renderer() {
+            assert_eq!(call("ui.render", json!({"path": at(&root, "a.png"), "width": 32, "height": 32}), true)["ok"], true);
+        }
         assert_eq!(call("ui.screenshot", json!({"path": at(&root, "b.png")}), true)["ok"], true);
         for (method, params) in [
             ("engine.execute", export(at(&out, "a.step"))),
@@ -1262,7 +1307,6 @@ mod tests {
         s.execute("component.activate", &json!({"component": "root"})).unwrap();
         let mut h = crate::scenario::Harness::new();
         h.app = SolveApp::new(s, Services::default());
-        h.app.viewport.no_pixels = true;
         h.frames(2);
         let before = h.app.cam;
         // Reading during an animated view change leaves it running (no frames run between).
@@ -1324,7 +1368,6 @@ mod tests {
         }
         // Nothing shown: nothing to fit.
         let mut empty = crate::scenario::Harness::new();
-        empty.app.viewport.no_pixels = true;
         let before = empty.app.cam;
         let r = empty.call("ui.camera", json!({"yaw": 1, "fit": true}));
         assert!(r["ok"] == false && empty.app.cam == before, "{r}");
@@ -1347,7 +1390,6 @@ mod tests {
         s.execute("joint.create", &json!({"type": "slider", "a": at("B", 55), "b": at("C", 55), "flip": true, "name": "Rail"})).unwrap();
         let mut h = crate::scenario::Harness::new();
         h.app = SolveApp::new(s, Services::default());
-        h.app.viewport.no_pixels = true;
         let before = h.app.session.doc.clone();
         let drive = |h: &crate::scenario::Harness| match h.app.dialog.as_ref().map(|d| &d.kind) {
             Some(crate::dialogs::Kind::Assembly(crate::dialogs_assembly::Asm::Drive { joint, values, .. })) => {

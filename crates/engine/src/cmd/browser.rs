@@ -837,7 +837,7 @@ mod tests {
             solidcraft_doc::FeatureKind::Move { bodies, .. } => Some(bodies.clone()),
             _ => None,
         });
-        assert_eq!(moved, Some(vec!["Lid".to_string()]), "the move follows the rename");
+        assert_eq!(moved, Some(vec![solidcraft_doc::BodyName::from("Lid")]), "the move follows the rename");
         assert!(s.model.results.iter().all(|r| r.error.is_none()));
     }
 

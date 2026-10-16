@@ -240,6 +240,483 @@ pub(crate) fn push_faces_exact(b: &Body, n: Vec3, d: f64, delta: f64) -> Result<
     })
 }
 
+/// Move the planar faces of `b` that lie in the plane (n, d), n their outward normal, out by `delta`, whatever their
+/// neighbours are. [`push_faces`] stretches the neighbours, which must stand square to the face along straight edges (a
+/// box, an extruded outline); the neighbours of a lofted tube's end cap curve and lean. Here nothing is stretched: the
+/// faces move, and each edge one shares with a face that stays gets a new face between them, the edge swept along `n`
+/// (a strip). The neighbours keep their surfaces and meet the strips at a crease along the old edge, so the body is
+/// the old one with a short prism of the faces' outline on each of them. Exact, with no boolean. The result has no
+/// history.
+pub(crate) fn grow_faces_exact(b: &Body, n: Vec3, d: f64, delta: f64) -> Result<Body> {
+    use mt::{BoundedCurve, ParametricCurve, ParametricSurface3D, SearchNearestParameter};
+    let size = b.size();
+    let tol = (size * 1e-7).max(1e-9);
+    let fail = |m: &str| KernelError::Failed(format!("growing a face: {m}"));
+    guard("grow face", || {
+        let solid = b.deep_copy();
+        let shift = n * delta;
+        let mat = mt::Matrix4::from_translation(v3(shift));
+        let mut shells = Vec::new();
+        for sh in solid.boundaries() {
+            let faces: Vec<mt::Face> = sh.face_iter().cloned().collect();
+            let on_plane = |f: &mt::Face| match f.oriented_surface() {
+                mt::Surface::Plane(p) => {
+                    let m = p.normal();
+                    let m = Vec3::new(m.x, m.y, m.z);
+                    m.dot(n) > 1.0 - 1e-9 && (n.dot(from_p3(p.origin())) - d).abs() < tol * 10.0
+                }
+                _ => false,
+            };
+            let moving: Vec<usize> = (0..faces.len()).filter(|i| faces.get(*i).is_some_and(on_plane)).collect();
+            if moving.is_empty() {
+                shells.push(sh.clone());
+                continue;
+            }
+            let stays = |i: &usize| !moving.contains(i);
+            // The faces each edge bounds.
+            let mut bounds: HashMap<mt::EdgeID, Vec<usize>> = HashMap::new();
+            for (i, f) in faces.iter().enumerate() {
+                for e in f.edge_iter() {
+                    bounds.entry(e.id()).or_default().push(i);
+                }
+            }
+            // The moved copies of the moving faces' vertices and edges.
+            let mut vmap: HashMap<mt::VertexID, mt::Vertex> = HashMap::new();
+            let mut emap: HashMap<mt::EdgeID, mt::Edge> = HashMap::new();
+            for i in &moving {
+                let f = faces.get(*i).ok_or_else(|| fail("face"))?;
+                for v in f.vertex_iter() {
+                    vmap.entry(v.id()).or_insert_with(|| builder::vertex(p3(from_p3(v.point()) + shift)));
+                }
+            }
+            for i in &moving {
+                let f = faces.get(*i).ok_or_else(|| fail("face"))?;
+                for e in f.edge_iter() {
+                    if emap.contains_key(&e.id()) {
+                        continue;
+                    }
+                    let (a, bb) = (
+                        vmap.get(&e.absolute_front().id()).ok_or_else(|| fail("vertex"))?,
+                        vmap.get(&e.absolute_back().id()).ok_or_else(|| fail("vertex"))?,
+                    );
+                    emap.insert(e.id(), mt::Edge::new(a, bb, mt::Transformed::transformed(&e.curve(), mat)));
+                }
+            }
+            // The moved copy of an edge, running the way the edge does.
+            let moved = |e: &mt::Edge| -> Result<mt::Edge> {
+                let ne = emap.get(&e.id()).ok_or_else(|| fail("edge"))?;
+                Ok(if e.front() == e.absolute_front() { ne.clone() } else { ne.inverse() })
+            };
+            // A strip on every edge between a moving face and one that stays; the edges from a vertex to its moved copy are
+            // shared by the two strips that meet there.
+            let mut lateral: HashMap<mt::VertexID, mt::Edge> = HashMap::new();
+            let mut strips: Vec<mt::Face> = Vec::new();
+            for i in &moving {
+                let f = faces.get(*i).ok_or_else(|| fail("face"))?;
+                for w in f.boundaries() {
+                    for e in w.edge_iter() {
+                        let Some(&beside) = bounds.get(&e.id()).and_then(|fs| fs.iter().find(|j| stays(j))) else { continue };
+                        // The moving face runs along the edge from p to q; the strip runs along it the same way.
+                        let (p, q) = (e.front().clone(), e.back().clone());
+                        let mut lat = |v: &mt::Vertex| -> Result<mt::Edge> {
+                            let to = vmap.get(&v.id()).ok_or_else(|| fail("vertex"))?;
+                            Ok(lateral.entry(v.id()).or_insert_with(|| builder::line(v, to)).clone())
+                        };
+                        let (lp, lq) = (lat(&p)?, lat(&q)?);
+                        let wire: mt::Wire = vec![e.clone(), lq, moved(e)?.inverse(), lp.inverse()].into();
+                        // Its surface is the edge's curve swept along `n`, facing the way the face beside it does; a straight edge
+                        // sweeps to a plane (truck makes that a B-spline patch, which does not mesh).
+                        let curve = e.curve();
+                        let (t0, t1) = curve.range_tuple();
+                        let mid = from_p3(curve.subs(0.5 * (t0 + t1)));
+                        let old = faces.get(beside).ok_or_else(|| fail("face"))?.oriented_surface();
+                        let Some((u0, v0)) = old.search_nearest_parameter(p3(mid), None, 100) else {
+                            return Err(fail("which way a strip faces"));
+                        };
+                        let outward = old.normal(u0, v0);
+                        let outward = Vec3::new(outward.x, outward.y, outward.z);
+                        // (a loft's straight section edge is a B-spline of degree one, so ask the points, not the type)
+                        let straight = [0.2, 0.4, 0.6, 0.8].iter().all(|t| {
+                            let x = from_p3(curve.subs(t0 + t * (t1 - t0)));
+                            let chord = from_p3(q.point()) - from_p3(p.point());
+                            let off = (x - from_p3(p.point())).cross(chord).len();
+                            off <= tol * 10.0 * chord.len()
+                        });
+                        let s = if straight {
+                            let dir = (from_p3(q.point()) - from_p3(p.point())).normalized().ok_or_else(|| fail("a zero edge"))?;
+                            let mut m = dir.cross(n).normalized().ok_or_else(|| fail("an edge along the normal"))?;
+                            if m.dot(outward) < 0.0 {
+                                m = -m;
+                            }
+                            let o = from_p3(p.point());
+                            mt::Surface::Plane(mt::Plane::new(p3(o), p3(o + dir), p3(o + m.cross(dir))))
+                        } else {
+                            let swept: mt::Face = builder::tsweep(e, v3(shift));
+                            let mut s = swept.surface();
+                            let Some((u1, v1)) = s.search_nearest_parameter(p3(mid + shift * 0.5), None, 100) else {
+                                return Err(fail("which way a strip faces"));
+                            };
+                            let now = s.normal(u1, v1);
+                            if outward.dot(Vec3::new(now.x, now.y, now.z)) < 0.0 {
+                                s = mt::Invertible::inverse(&s);
+                            }
+                            s
+                        };
+                        strips.push(mt::Face::try_new(vec![wire], s).map_err(|e| fail(&e.to_string()))?);
+                    }
+                }
+            }
+            let mut out: Vec<mt::Face> = Vec::new();
+            for (i, f) in faces.iter().enumerate() {
+                if !moving.contains(&i) {
+                    out.push(f.clone());
+                    continue;
+                }
+                let wires = f
+                    .absolute_boundaries()
+                    .iter()
+                    .map(|w| w.edge_iter().map(&moved).collect::<Result<Vec<_>>>().map(mt::Wire::from))
+                    .collect::<Result<Vec<_>>>()?;
+                let mut nf = mt::Face::try_new(wires, mt::Transformed::transformed(&f.surface(), mat)).map_err(|e| fail(&e.to_string()))?;
+                if !f.orientation() {
+                    nf.invert();
+                }
+                out.push(nf);
+            }
+            out.extend(strips);
+            shells.push(out.into());
+        }
+        let s = Solid::try_new(shells).map_err(|e| fail(&e.to_string()))?;
+        let r = Body::new(s)?;
+        let problems = r.validity();
+        if !problems.is_empty() {
+            return Err(fail(&format!("an unsound result ({})", problems.iter().take(2).cloned().collect::<Vec<_>>().join("; "))));
+        }
+        Ok(r)
+    })
+}
+
+/// An edge's points from its start to its end along its curve, `k + 1` of them.
+fn edge_samples(e: &mt::Edge, k: u32) -> Vec<Vec3> {
+    use mt::{BoundedCurve, ParametricCurve};
+    let c = e.curve();
+    let (t0, t1) = c.range_tuple();
+    (0..=k).map(|i| from_p3(c.subs(t0 + (t1 - t0) * f64::from(i) / f64::from(k)))).collect()
+}
+
+/// Where the edges of `b` cross the plane (n, d), one point for every time (edges are cut there before a body is trimmed).
+fn plane_crossings(b: &Body, n: Vec3, d: f64, tol: f64) -> Vec<Vec3> {
+    use mt::{BoundedCurve, ParametricCurve};
+    const STEPS: u32 = 64;
+    let mut out = Vec::new();
+    for e in b.solid.edge_iter() {
+        let c = e.curve();
+        let (t0, t1) = c.range_tuple();
+        let at = |t: f64| from_p3(c.subs(t));
+        let h = |t: f64| n.dot(at(t)) - d;
+        let ts: Vec<f64> = (0..=STEPS).map(|i| t0 + (t1 - t0) * f64::from(i) / f64::from(STEPS)).collect();
+        // The samples clear of the plane, and between each two that lie on different sides the crossing.
+        let clear: Vec<(f64, f64)> = ts.iter().map(|t| (*t, h(*t))).filter(|(_, x)| x.abs() > tol).collect();
+        for pair in clear.windows(2) {
+            let [(ta, ha), (tb, hb)] = pair else { continue };
+            if (*ha < 0.0) == (*hb < 0.0) {
+                continue;
+            }
+            let (mut lo, mut hi, mut hlo) = (*ta, *tb, *ha);
+            for _ in 0..80 {
+                let mid = 0.5 * (lo + hi);
+                let hm = h(mid);
+                if (hm < 0.0) == (hlo < 0.0) {
+                    lo = mid;
+                    hlo = hm;
+                } else {
+                    hi = mid;
+                }
+            }
+            out.push(at(0.5 * (lo + hi)));
+        }
+    }
+    out
+}
+
+/// Which side of the plane (n, d) an edge lies on, once edges that cross it are cut: -1 near, +1 far, 0 in it.
+fn edge_side(e: &mt::Edge, n: Vec3, d: f64, tol: f64) -> Result<i8> {
+    let hs: Vec<f64> = edge_samples(e, 8).iter().map(|p| n.dot(*p) - d).collect();
+    let (lo, hi) = hs.iter().fold((f64::MAX, f64::MIN), |(l, h), x| (l.min(*x), h.max(*x)));
+    if hi <= tol && lo >= -tol {
+        Ok(0)
+    } else if hi <= tol {
+        Ok(-1)
+    } else if lo >= -tol {
+        Ok(1)
+    } else {
+        Err(KernelError::Failed("trimming at a plane: an edge still crosses it".into()))
+    }
+}
+
+/// Whether the point lies on the surface, to within `tol`.
+fn on_surface(s: &mt::Surface, p: Vec3, tol: f64) -> bool {
+    use mt::{ParametricSurface, SearchNearestParameter};
+    if let mt::Surface::Plane(pl) = s {
+        let m = pl.normal();
+        return (Vec3::new(m.x, m.y, m.z).dot(p - from_p3(pl.origin()))).abs() <= tol;
+    }
+    s.search_nearest_parameter(p3(p), None, 100).is_some_and(|(u, v)| from_p3(s.subs(u, v)).dist(p) <= tol)
+}
+
+/// The edge that closes the boundary of the flat face `face` from the vertex `from` to the vertex `to` (both in the plane) where a run of
+/// its edges beyond the plane went: the segment between them, which lies in the face. (A curved face that crosses the plane has been
+/// divided along it already.) Nothing when they are the same vertex.
+fn bridge(face: &mt::Face, from: &mt::Vertex, to: &mt::Vertex, tol: f64) -> Result<Vec<mt::Edge>> {
+    if from.id() == to.id() {
+        return Ok(Vec::new());
+    }
+    let (p, q) = (from_p3(from.point()), from_p3(to.point()));
+    let surface = face.oriented_surface();
+    if [0.25, 0.5, 0.75].iter().all(|t| on_surface(&surface, p + (q - p) * *t, tol * 10.0)) {
+        Ok(vec![builder::line(from, to)])
+    } else {
+        Err(KernelError::Failed("trimming at a plane: a curved face crosses the plane where it could not be divided".into()))
+    }
+}
+
+/// One boundary of the flat face `face`, which crosses the plane (n, d), clipped to the near side: the edges beyond the plane go and the
+/// segment in the plane from where the boundary leaves it to where it comes back takes their place. `None` when nothing of the boundary
+/// is on the near side.
+fn clip_wire(face: &mt::Face, w: &mt::Wire, n: Vec3, d: f64, tol: f64) -> Result<Option<Vec<mt::Edge>>> {
+    let fail = |m: &str| KernelError::Failed(format!("trimming at a plane: {m}"));
+    let mut edges: Vec<(mt::Edge, i8)> = Vec::new();
+    for e in w.edge_iter() {
+        let side = edge_side(e, n, d, tol)?;
+        edges.push((e.clone(), side));
+    }
+    if !edges.iter().any(|(_, side)| *side < 0) {
+        return Ok(None);
+    }
+    let m = edges.len();
+    let gone = |i: usize| edges.get(i % m).is_some_and(|(_, side)| *side > 0);
+    // Begin where a run of edges beyond the plane ends, so that no run is split between the end and the start.
+    let Some(start) = (0..m).find(|i| !gone(*i) && gone(*i + m - 1)) else {
+        return Ok(Some(edges.into_iter().map(|(e, _)| e).collect()));
+    };
+    let mut out: Vec<mt::Edge> = Vec::new();
+    let mut skipping = false;
+    for k in 0..m {
+        let Some((e, side)) = edges.get((start + k) % m) else { continue };
+        if *side > 0 {
+            skipping = true;
+            continue;
+        }
+        if skipping {
+            let from = out.last().ok_or_else(|| fail("a run beyond the plane first"))?.back().clone();
+            out.extend(bridge(face, &from, e.front(), tol)?);
+            skipping = false;
+        }
+        out.push(e.clone());
+    }
+    if skipping {
+        let from = out.last().ok_or_else(|| fail("nothing kept"))?.back().clone();
+        let to = out.first().ok_or_else(|| fail("nothing kept"))?.front().clone();
+        out.extend(bridge(face, &from, &to, tol)?);
+    }
+    Ok(Some(out))
+}
+
+/// `b` with everything beyond the plane (n, d) cut off, for a body that was grown or pushed past the plane (the faces that
+/// [`grow_faces_exact`] and [`push_faces`] moved) and joined there. A cut with a boolean would run along the edges where the grown
+/// faces meet their neighbours, which the mesh intersection cannot take. Here the edges that cross the plane are cut at it, the
+/// faces beyond it go, each face that crosses it gets one edge in the plane where its far part was, and the rim they leave (edges
+/// lying in the plane) is closed with flat faces. The result has no history.
+pub(crate) fn trim_exact(b: &Body, n: Vec3, d: f64) -> Result<Body> {
+    let fail = |m: &str| KernelError::Failed(format!("trimming at a plane: {m}"));
+    let tol = (b.size() * 1e-6).max(1e-9);
+    // A curved face that crosses the plane (a sphere or a cylinder stretched past it) is divided along the plane where they meet, exactly
+    // ([`crate::splitface::split_faces`]); the flat ones are clipped below.
+    let curved: Vec<usize> = b
+        .solid
+        .face_iter()
+        .enumerate()
+        .filter(|(_, f)| !matches!(f.oriented_surface(), mt::Surface::Plane(_)))
+        .filter(|(_, f)| {
+            let (mut near, mut far) = (false, false);
+            for e in f.edge_iter() {
+                for p in edge_samples(&e, 8) {
+                    near |= n.dot(p) - d < -tol;
+                    far |= n.dot(p) - d > tol;
+                }
+            }
+            near && far
+        })
+        .map(|(i, _)| i)
+        .collect();
+    let divided = if curved.is_empty() {
+        b.clone()
+    } else {
+        let u = n.any_perp();
+        let plane = solidcraft_geom::Plane::new(n * d, u, n.cross(u)).ok_or_else(|| fail("the plane"))?;
+        crate::splitface::split_faces(b, &curved, &crate::SplitTool::Plane(plane))?
+    };
+    let cut = crate::splitface::split_edges_at(&divided, &plane_crossings(&divided, n, d, tol))?;
+    guard("trim at a plane", || {
+        let mut kept: Vec<mt::Face> = Vec::new();
+        for f in cut.solid.face_iter() {
+            let mut sides: Vec<i8> = Vec::new();
+            for e in f.edge_iter() {
+                sides.push(edge_side(&e, n, d, tol)?);
+            }
+            match (sides.contains(&-1), sides.contains(&1)) {
+                (true, false) => kept.push(f.clone()),
+                (false, true) => {}
+                // A face lying in the plane (a sliver the join left there) goes with the others: the rim it leaves is closed below.
+                (false, false) => {}
+                (true, true) => {
+                    let mut wires: Vec<mt::Wire> = Vec::new();
+                    for (i, w) in f.absolute_boundaries().iter().enumerate() {
+                        match clip_wire(f, w, n, d, tol)? {
+                            Some(edges) => wires.push(edges.into()),
+                            None if i == 0 => return Err(fail("a face with no edge left on the near side")),
+                            None => {}
+                        }
+                    }
+                    let mut nf = mt::Face::try_new(wires, f.surface()).map_err(|x| fail(&x.to_string()))?;
+                    if !f.orientation() {
+                        nf.invert();
+                    }
+                    kept.push(nf);
+                }
+            }
+        }
+        close_rim(kept, n, d, tol)
+    })
+}
+
+/// The body whose faces are `faces`, which leave an opening in the plane (n, d): the edges only one face is on (all lying in the plane)
+/// are closed with flat faces. Counterclockwise loops about the normal are outlines, the others holes in the outline around them.
+fn close_rim(mut faces: Vec<mt::Face>, n: Vec3, d: f64, tol: f64) -> Result<Body> {
+    let fail = |m: &str| KernelError::Failed(format!("closing the cut: {m}"));
+    let mut uses: HashMap<mt::EdgeID, usize> = HashMap::new();
+    for f in &faces {
+        for e in f.edge_iter() {
+            *uses.entry(e.id()).or_default() += 1;
+        }
+    }
+    if uses.values().any(|c| *c > 2) {
+        return Err(fail("an edge on more than two faces"));
+    }
+    let mut open: Vec<mt::Edge> = Vec::new();
+    for f in &faces {
+        for w in f.boundaries() {
+            for e in w.edge_iter() {
+                if uses.get(&e.id()) == Some(&1) {
+                    if edge_samples(e, 8).iter().any(|p| (n.dot(*p) - d).abs() > tol) {
+                        return Err(fail("an edge left open off the plane"));
+                    }
+                    // The cap runs along it the other way.
+                    open.push(e.inverse());
+                }
+            }
+        }
+    }
+    if open.is_empty() {
+        return Err(fail("nothing was cut off"));
+    }
+    let mut loops: Vec<Vec<mt::Edge>> = Vec::new();
+    while let Some(first) = open.pop() {
+        let start = first.front().id();
+        let mut at = first.back().id();
+        let mut chain = vec![first];
+        while at != start {
+            let next: Vec<usize> = (0..open.len()).filter(|i| open.get(*i).is_some_and(|e| e.front().id() == at)).collect();
+            let [i] = next[..] else { return Err(fail("the rim does not close up, or pinches")) };
+            let e = open.remove(i);
+            at = e.back().id();
+            chain.push(e);
+        }
+        loops.push(chain);
+    }
+    let u = n.any_perp();
+    let v = n.cross(u);
+    let origin = n * d;
+    let polys: Vec<Vec<(f64, f64)>> = loops
+        .iter()
+        .map(|chain| {
+            chain
+                .iter()
+                .flat_map(|e| {
+                    let mut pts = edge_samples(e, 8);
+                    if !e.orientation() {
+                        pts.reverse();
+                    }
+                    pts.pop();
+                    pts
+                })
+                .map(|p| ((p - origin).dot(u), (p - origin).dot(v)))
+                .collect()
+        })
+        .collect();
+    let areas: Vec<f64> = polys
+        .iter()
+        .map(|poly| {
+            let m = poly.len();
+            (0..m)
+                .map(|i| match (poly.get(i), poly.get((i + 1) % m)) {
+                    (Some(a), Some(b)) => a.0 * b.1 - b.0 * a.1,
+                    _ => 0.0,
+                })
+                .sum::<f64>()
+                * 0.5
+        })
+        .collect();
+    let inside = |poly: &[(f64, f64)], q: (f64, f64)| -> bool {
+        let m = poly.len();
+        (0..m)
+            .filter(|i| match (poly.get(*i), poly.get((*i + 1) % m)) {
+                (Some(a), Some(b)) => (a.1 > q.1) != (b.1 > q.1) && q.0 < (b.0 - a.0) * (q.1 - a.1) / (b.1 - a.1) + a.0,
+                _ => false,
+            })
+            .count()
+            % 2
+            == 1
+    };
+    let outers: Vec<usize> = (0..loops.len()).filter(|i| areas.get(*i).is_some_and(|a| *a > 0.0)).collect();
+    let mut holes_of: HashMap<usize, Vec<usize>> = HashMap::new();
+    for i in (0..loops.len()).filter(|i| !outers.contains(i)) {
+        let q = polys.get(i).and_then(|p| p.first()).copied().ok_or_else(|| fail("an empty loop"))?;
+        let around = outers
+            .iter()
+            .filter(|o| polys.get(**o).is_some_and(|p| inside(p, q)))
+            .min_by(|x, y| areas.get(**x).partial_cmp(&areas.get(**y)).unwrap_or(std::cmp::Ordering::Equal))
+            .ok_or_else(|| fail("a hole outside every outline"))?;
+        holes_of.entry(*around).or_default().push(i);
+    }
+    let surface = mt::Surface::Plane(mt::Plane::new(p3(origin), p3(origin + u), p3(origin + v)));
+    for o in &outers {
+        let mut wires: Vec<mt::Wire> = vec![loops.get(*o).cloned().ok_or_else(|| fail("a loop"))?.into()];
+        for h in holes_of.get(o).into_iter().flatten() {
+            wires.push(loops.get(*h).cloned().ok_or_else(|| fail("a loop"))?.into());
+        }
+        faces.push(mt::Face::try_new(wires, surface.clone()).map_err(|x| fail(&x.to_string()))?);
+    }
+    let shell: mt::Shell = faces.into();
+    let solid = Solid::try_new(crate::polybool::components_in_order(&shell)).map_err(|x| fail(&x.to_string()))?;
+    let r = Body::new(solid)?;
+    let problems = r.validity();
+    if !problems.is_empty() {
+        return Err(fail(&format!("an unsound result ({})", problems.iter().take(2).cloned().collect::<Vec<_>>().join("; "))));
+    }
+    Ok(r)
+}
+
+/// Move the planar faces of `x` in the plane (n, d) out by `delta`: stretched ([`push_faces`]) where their neighbours
+/// allow it, else, when `grow`, grown ([`grow_faces_exact`]). Whether it grew them (the body then has no history).
+fn move_out(x: &Body, n: Vec3, d: f64, delta: f64, grow: bool) -> Result<(Body, bool)> {
+    match push_faces(x, n, d, delta) {
+        Ok(r) => Ok((r, false)),
+        Err(e) if grow => grow_faces_exact(x, n, d, delta).map(|r| (r, true)).map_err(|_| e),
+        Err(e) => Err(e),
+    }
+}
+
 /// A box covering everything beyond the plane (n, d) by up to `depth`.
 fn slab_beyond(n: Vec3, d: f64, depth: f64, extent: f64) -> Result<Body> {
     let u = n.any_perp();
@@ -326,6 +803,23 @@ pub(crate) const NO_ROOM: &str = "coincident faces were left in place: pushing t
 /// coincident faces or the faces can't be pushed; the error [`NO_ROOM`] when a face would
 /// move through something that changes the result.
 pub(crate) fn boolean_apart(a: &Body, b: &Body, op: BoolOp) -> Option<Result<Option<Body>>> {
+    apart_with(a, b, op, false)
+}
+
+/// [`boolean_apart`] for a join whose coincident faces cannot be pushed, because the neighbours of one of them curve
+/// (a flange flush with the end of a lofted tube): such a face is grown instead ([`grow_faces_exact`]) and the join's excess beyond
+/// the plane is cut off again by editing faces ([`trim_exact`]), where a boolean would fail on the edges the grown faces meet their
+/// neighbours along. The planar faces that sit on B-spline surfaces (a loft's flat sides) are put on planes first so that they
+/// are seen. Asked after the other routes have failed, so that what they take stays as it was. `None` when it does not apply.
+pub(crate) fn boolean_grown(a: &Body, b: &Body, op: BoolOp) -> Option<Result<Option<Body>>> {
+    if op != BoolOp::Union {
+        return None;
+    }
+    let (pa, pb) = (crate::planar_faces::planarized(a), crate::planar_faces::planarized(b));
+    apart_with(pa.as_ref().unwrap_or(a), pb.as_ref().unwrap_or(b), op, true)
+}
+
+fn apart_with(a: &Body, b: &Body, op: BoolOp, grow: bool) -> Option<Result<Option<Body>>> {
     let size = a.size().max(b.size());
     let tol = (size * 1e-7).max(1e-9);
     let coincident = coincident_planes(a, b);
@@ -341,7 +835,7 @@ pub(crate) fn boolean_apart(a: &Body, b: &Body, op: BoolOp) -> Option<Result<Opt
     let run = || -> Result<Option<Body>> {
         // The target's faces, meshed when the first face asks what it would move through.
         let faces_of_a = std::cell::OnceCell::new();
-        let target = || faces_of_a.get_or_init(|| Clearance::new(a, chord)).as_ref().ok_or_else(no_room);
+        let target = || faces_of_a.get_or_init(|| Clearance::new(a, chord).map(|c| c.with_exact_bounds(grow))).as_ref().ok_or_else(no_room);
         let (mut a2, mut b2) = (a.clone(), b.clone());
         // What the pushed bodies are made of: their histories over [a] and [b].
         let (mut ha, mut hb) = (crate::boolean_record::kept(a, 0, 1), crate::boolean_record::kept(b, 0, 1));
@@ -351,7 +845,7 @@ pub(crate) fn boolean_apart(a: &Body, b: &Body, op: BoolOp) -> Option<Result<Opt
                 // Both faces move out and the slab beyond the plane is cut off the joined body
                 // again, everywhere: neither body may have anything in it.
                 let depth = d1.max(d2) * 3.0 * 1.25;
-                let tool = Clearance::new(b, chord).ok_or_else(no_room)?;
+                let tool = Clearance::new(b, chord).ok_or_else(no_room)?.with_exact_bounds(grow);
                 target()?.clear_of_slab(*n, *d, skin, depth) && tool.clear_of_slab(*n, *d, skin, depth)
             } else {
                 // The tool takes whatever of `a` its face moves through (a rib standing on the
@@ -361,11 +855,17 @@ pub(crate) fn boolean_apart(a: &Body, b: &Body, op: BoolOp) -> Option<Result<Opt
             if !free {
                 return Err(no_room());
             }
-            b2 = push_faces(&b2, *n, *d, d2)?;
-            hb = crate::boolean_record::through(&b2, 0, hb.as_ref());
+            // A body that has to be grown goes deeper than one that is pushed: the pushed body's stretched sides then end inside
+            // the prism the grown one leaves beyond the plane, wherever they meet it, and cross the plane once each.
+            let swap = grow && push_faces(&a2, *n, *d, d1).is_err() && push_faces(&b2, *n, *d, d2).is_ok();
+            let (da, db) = if swap { (d2, d1) } else { (d1, d2) };
+            let (moved_b, b_grown) = move_out(&b2, *n, *d, db, grow)?;
+            b2 = moved_b;
+            hb = if b_grown { None } else { crate::boolean_record::through(&b2, 0, hb.as_ref()) };
             if op == BoolOp::Union {
-                a2 = push_faces(&a2, *n, *d, d1)?;
-                ha = crate::boolean_record::through(&a2, 0, ha.as_ref());
+                let (moved_a, a_grown) = move_out(&a2, *n, *d, da, grow)?;
+                a2 = moved_a;
+                ha = if a_grown { None } else { crate::boolean_record::through(&a2, 0, ha.as_ref()) };
             }
         }
         for (n, d) in &back {
@@ -395,7 +895,14 @@ pub(crate) fn boolean_apart(a: &Body, b: &Body, op: BoolOp) -> Option<Result<Opt
         // The pushed bodies' histories as over [a, b], a's and b's in their places.
         let (ha, hb) = (crate::boolean_record::placed(ha, 0, 2), crate::boolean_record::placed(hb, 1, 2));
         let mut h = crate::boolean_record::of_pair(&r, &ha, &hb);
-        if op == BoolOp::Union {
+        if op == BoolOp::Union && grow {
+            // What grown faces left beyond each plane is cut off by editing the faces: a cut along the plane would run along the
+            // edges where the grown faces meet their neighbours, which the mesh intersection cannot take.
+            for (n, d) in &same {
+                r = trim_exact(&r, *n, *d)?;
+            }
+            h = None;
+        } else if op == BoolOp::Union {
             for (n, d) in &same {
                 let slab = slab_beyond(*n, *d, d1.max(d2) * 3.0, size * 4.0)?;
                 match crate::ops::boolean(&r, &slab, BoolOp::Cut)? {

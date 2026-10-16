@@ -4,6 +4,8 @@ use image::{ImageDecoder, ImageFormat, ImageReader, Limits};
 use serde::{Deserialize, Serialize};
 use std::{io::Cursor, sync::Arc};
 
+pub mod normalization;
+
 pub const MAX_TEXTURE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_TEXTURE_EDGE: u32 = 2048;
 const MAX_CODEC_BYTES: u64 = 64 * 1024 * 1024;
@@ -71,25 +73,29 @@ fn reader(bytes: &[u8], format: ImageFormat) -> ImageReader<Cursor<&[u8]>> {
 fn guarded<T>(work: impl FnOnce() -> Result<T>) -> Result<T> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).map_err(|_| invalid("texture decoder failed"))?
 }
+fn admitted_format(bytes: &[u8], capacity: usize) -> Result<ImageFormat> {
+    if bytes.is_empty() || bytes.len() > MAX_TEXTURE_BYTES || capacity > MAX_TEXTURE_BYTES {
+        return Err(invalid("texture input must contain at most 16 MiB"));
+    }
+    let format = image::guess_format(bytes).map_err(|_| invalid("texture must be PNG or JPEG"))?;
+    if !matches!(format, ImageFormat::Png | ImageFormat::Jpeg) {
+        return Err(invalid("texture must be PNG or JPEG; HDR uses the Radiance input utility"));
+    }
+    // Whole-image codecs may return pixels before noticing a missing trailer. This
+    // marker check rejects that truncation; it is not a general container validator.
+    let complete = match format {
+        ImageFormat::Png => bytes.ends_with(b"\x00\x00\x00\x00IEND\xae\x42\x60\x82"),
+        ImageFormat::Jpeg => bytes.ends_with(b"\xff\xd9"),
+        _ => false,
+    };
+    if !complete {
+        return Err(invalid("texture is missing its final terminator"));
+    }
+    Ok(format)
+}
 impl TextureSource {
     pub fn new(bytes: Vec<u8>, role: MapRole) -> Result<Self> {
-        if bytes.is_empty() || bytes.len() > MAX_TEXTURE_BYTES || bytes.capacity() > MAX_TEXTURE_BYTES {
-            return Err(invalid("texture input must contain at most 16 MiB"));
-        }
-        let format = image::guess_format(&bytes).map_err(|_| invalid("texture must be PNG or JPEG"))?;
-        if !matches!(format, ImageFormat::Png | ImageFormat::Jpeg) {
-            return Err(invalid("texture must be PNG or JPEG; HDR uses the Radiance input utility"));
-        }
-        // Whole-image codecs may return pixels before noticing a missing trailer. This
-        // marker check rejects that truncation; it is not a general container validator.
-        let complete = match format {
-            ImageFormat::Png => bytes.ends_with(b"\x00\x00\x00\x00IEND\xae\x42\x60\x82"),
-            ImageFormat::Jpeg => bytes.ends_with(b"\xff\xd9"),
-            _ => false,
-        };
-        if !complete {
-            return Err(invalid("texture is missing its final terminator"));
-        }
+        let format = admitted_format(&bytes, bytes.capacity())?;
         let (width, height) = guarded(|| {
             let mut decoder = reader(&bytes, format).into_decoder().map_err(|e| invalid(e.to_string()))?;
             if !matches!(decoder.color_type(), image::ColorType::L8 | image::ColorType::La8 | image::ColorType::Rgb8 | image::ColorType::Rgba8) {

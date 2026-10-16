@@ -24,6 +24,9 @@ Keys handled by the window itself:
 | V | show or hide the selected bodies, sketches and planes |
 | F2 | rename the selected browser or timeline item |
 | F6 | fit the view to the model |
+| ← → ↑ ↓ | turn the view 15° (with Shift, a quarter turn) |
+| Ctrl+← → ↑ ↓ | pan the view |
+| Ctrl+8 | look straight at the selected face, plane or sketch |
 | Esc | cancel the running command, or clear the selection |
 
 While a value box has the keyboard (a dimension being added, a dialog field), keys type into

@@ -136,6 +136,11 @@ thread
   expressions: thread.length
 loft
 sweep
+sweep_options
+  inputs:
+    Twist = sweep.twist (Angle)
+    Scale = sweep.scale (Unitless)
+  expressions: sweep.twist, sweep.scale
 shell
   inputs:
     Thickness = shell.thickness (Length)
@@ -156,6 +161,11 @@ split
     Angle = split.angle (Angle)
     Offset = split.offset (Length)
   expressions: split.angle, split.offset
+split_line
+  inputs:
+    Angle = split_line.angle (Angle)
+    Offset = split_line.offset (Length)
+  expressions: split_line.angle, split_line.offset
 construction_axis
   inputs:
     Angle = axis_a.angle (Angle)
@@ -238,7 +248,8 @@ sheet_flange
     Edge angle = flange.e1_angle (Angle)
     Edge height = flange.e1_height (Length)
     Edge height = flange.e2_height (Length)
-  expressions: flange.height, flange.angle, flange.radius, flange.e1_angle, flange.e1_height, flange.e2_height
+    Corner relief = flange.relief (Length)
+  expressions: flange.height, flange.angle, flange.radius, flange.e1_angle, flange.e1_height, flange.e2_height, flange.relief
 sheet_hem
   inputs:
     Length = hem.length (Length)
@@ -317,7 +328,13 @@ surface_revolve
     Angle 2 = srev.angle2 (Angle)
   expressions: srev.angle, srev.angle2
 surface_sweep
+surface_sweep_options
+  inputs:
+    Twist = surface_sweep.twist (Angle)
+    Scale = surface_sweep.scale (Unitless)
+  expressions: surface_sweep.twist, surface_sweep.scale
 surface_loft
+surface_blend
 surface_offset
   inputs:
     Distance = soff.distance (Length)

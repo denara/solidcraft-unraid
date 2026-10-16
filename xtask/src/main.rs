@@ -10,6 +10,7 @@ mod features;
 mod i18n;
 mod layers;
 mod licences;
+mod lists;
 mod test;
 mod web_offline;
 mod web_offline_test;
@@ -46,7 +47,10 @@ commands:
                   into target/book
   licences [--check]
                   write THIRD-PARTY-LICENSES.txt (the licences of every shipped crate, embedded
-                  in the programs); --check fails when it is out of date
+                  in the programs); --check only reports when it is out of date: pull requests
+                  leave it to the Generated files workflow on main
+  lists [--fix]   check that files many changes add to are sorted one item per line (the
+                  message catalogs in assets/locales); --fix sorts them
   test [CARGO ARGS] [-- TEST ARGS]
                   build the tests with the ci profile, then run every test binary at once
                   (and the doc tests alongside)
@@ -57,7 +61,7 @@ commands:
   web-offline-test [--site DIR]
                   check in headless Chrome that the web app works offline and updates to a new
                   build (a stand-in app, or the web build in DIR such as dist/web)
-  ci              fmt --check, assets, licences --check, layers, clippy -D warnings, then the tests
+  ci              fmt --check, assets, licences --check, lists, layers, clippy -D warnings, then the tests
                   with the wasm check alongside, then web-offline-test when Chrome is installed
                   (stops at the first failing step)
 ";
@@ -78,6 +82,7 @@ fn main() -> ExitCode {
         }
         Some("book") => book::run(&root(), !rest.contains(&"--no-build")),
         Some("licences") => licences::run(&root(), rest.contains(&"--check")),
+        Some("lists") => lists::run(&root(), rest.contains(&"--fix")),
         Some("test") => {
             let (cargo_args, test_args) = rest.iter().position(|a| *a == "--").map_or((&rest[..], &[][..]), |i| (&rest[..i], &rest[i + 1..]));
             test::run(cargo_args, test_args, vec![test::doc_tests(cargo_args, test_args)])
@@ -358,6 +363,7 @@ fn cmd_ci() -> Result<(), String> {
     run(c, "cargo fmt --check")?;
     assets::run(&root())?;
     licences::run(&root(), true)?;
+    lists::run(&root(), false)?;
     cmd_layers()?;
     let mut c = cargo();
     c.args(["clippy", "--workspace", "--all-targets", "--profile", "ci", "--", "-D", "warnings"]);

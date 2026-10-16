@@ -1786,6 +1786,38 @@ pub(crate) fn rotate_about(p: Vec3, center: Vec3, k: Vec3, angle: f64) -> Vec3 {
     center + v * c + k.cross(v) * s + k * (k.dot(v) * (1.0 - c))
 }
 
+/// The path as a polyline: its first point, then each segment's points (arcs within 0.01 mm of
+/// their chords).
+pub(crate) fn path_polyline(path: &[PathSeg]) -> Result<Vec<Vec3>> {
+    let first = match path.first() {
+        Some(PathSeg::Line { a, .. } | PathSeg::Arc { a, .. }) => *a,
+        None => return Err(KernelError::Invalid("the path needs 1…1000 segments".into())),
+    };
+    let mut pts = vec![first];
+    for seg in path {
+        pts.extend(seg.points_after_start(1e-2));
+    }
+    Ok(pts)
+}
+
+/// [`sweep`] with sweep options. The default options are exactly [`sweep`]; any other
+/// orientation, a twist or an end scale follow the path as a polyline through stations (see
+/// [`crate::sweep_path_with`]).
+pub fn sweep_with(plane: &Plane, region: &Region2, path: &[PathSeg], ctl: &crate::SweepControl) -> Result<Body> {
+    if ctl.is_default() {
+        return sweep(plane, region, path);
+    }
+    ctl.check()?;
+    region_ok(region)?;
+    if path.is_empty() || path.len() > 1000 {
+        return Err(KernelError::Invalid("the path needs 1…1000 segments".into()));
+    }
+    if path.iter().any(|s| s.tangents().is_none()) {
+        return Err(KernelError::Invalid("a path segment has no direction".into()));
+    }
+    crate::sweep_path::sweep_path_with(plane, region, &path_polyline(path)?, ctl)
+}
+
 /// Sweep a planar region (outer loop) along a chain of path segments, keeping the profile
 /// perpendicular to the path (lines translate it, arcs rotate it). A path with sharp corners
 /// is swept as a polyline, mitred at the corners.
@@ -1800,15 +1832,7 @@ pub fn sweep(plane: &Plane, region: &Region2, path: &[PathSeg]) -> Result<Body> 
         path.iter().map(PathSeg::tangents).collect::<Option<_>>().ok_or_else(|| KernelError::Invalid("a path segment has no direction".into()))?;
     let corner = ends.windows(2).any(|w| w[0].1.dot(w[1].0) < (1e-3f64).cos());
     if corner {
-        let first = match path.first() {
-            Some(PathSeg::Line { a, .. } | PathSeg::Arc { a, .. }) => *a,
-            None => return Err(KernelError::Invalid("the path needs 1…1000 segments".into())),
-        };
-        let mut pts = vec![first];
-        for seg in path {
-            pts.extend(seg.points_after_start(1e-2));
-        }
-        return crate::sweep_path::sweep_path(plane, region, &pts);
+        return crate::sweep_path::sweep_path(plane, region, &path_polyline(path)?);
     }
     // The outer loop and each hole, swept along the path; the ends are capped with holes.
     let profile = region_wires(plane, &oriented(region)?)?;

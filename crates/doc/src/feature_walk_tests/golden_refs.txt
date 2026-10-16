@@ -67,6 +67,10 @@ sweep
   sketches: [1, 2]
   remap_refs: path_sketch, sketch
   remap_bodies: targets[0]
+sweep_options
+  sketches: [1, 2]
+  remap_refs: path_sketch, sketch
+  remap_bodies: targets[0]
 shell
   remap_bodies: body
 draft
@@ -77,6 +81,10 @@ construction_plane
 split
   remap_refs: plane.base.base.name
   remap_bodies: body, tool.body
+split_line
+  sketches: [6]
+  remap_refs: plane.base.base.name, sketch
+  remap_bodies: body
 construction_axis
 construction_point_planes
 construction_point_along
@@ -159,9 +167,14 @@ surface_revolve
 surface_sweep
   sketches: [1, 2]
   remap_refs: path_sketch, sketch
+surface_sweep_options
+  sketches: [1, 2]
+  remap_refs: path_sketch, sketch
 surface_loft
   sketches: [4, 5]
   remap_refs: sections[0].sketch, sections[1].sketch
+surface_blend
+  remap_bodies: from.body
 surface_offset
   remap_bodies: body
 unstitch

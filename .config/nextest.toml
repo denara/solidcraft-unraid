@@ -16,6 +16,8 @@ not (
         | test(=cmd::plastic::tests::enclosure_snap_fit_follows_resized_front_wall)
     ))
     | (package(solidcraft-kernel) & test(=tests::boolean_identity_on_tangent_primitives))
+    | (package(solidcraft-kernel) & binary(boolean_props))
+    | (package(solidcraft-engine) & binary(atomic_commands))
     | (package(solidcraft-ui-egui) & binary(scenarios) & test(=acceptance_sensor_enclosure))
 )
 """

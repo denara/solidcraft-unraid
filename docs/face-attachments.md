@@ -9,7 +9,12 @@ geometry and dimensions.
 Supported planar sources are exact Box faces, untapered New Body and Join Extrude caps and
 straight sketch sides, and planar faces of immutable STEP imports. Extrude caps also identify their
 outer boundary and holes by source curve IDs. Reordering profiles cannot substitute another
-profile's cap. A profile drawn over a face sketch's projected boundary (a rectangle
+profile's cap. A thin extrude's caps are bounded by offset curves the sketch doesn't have, so a
+wall built as one region is identified by the curves it follows instead (as its outer boundary,
+with no holes). That is the identity the solid caps had when the wall follows the whole profile,
+so a sketch on a cap keeps its face when the extrude is made thin, or solid again. A wall along
+other curves, or one of several walls apart, is another face: it is attached by its history
+name below, and a sketch made on the solid cap reports a lost attachment. A profile drawn over a face sketch's projected boundary (a rectangle
 traced over the whole face, or a strip whose sides lie on the face's edges) is identified by
 the drawn curves: where a drawn curve and a projected one cover the same edge, the drawn curve
 is the source. Two drawn curves, or two projections, over one edge remain ambiguous. Curved surfaces cannot host a planar sketch through this workflow.

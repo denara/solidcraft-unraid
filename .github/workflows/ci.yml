@@ -1,4 +1,10 @@
 # Fast checks always run; native builds run for code/CI changes.
+# PRs test what they touch; main and nightly test everything. On a pull request the "Select
+# checks" job maps the changed files to workspace packages (scripts/ci/affected.py), adds the
+# packages that depend on them, and Clippy, the test archive and the test shards cover only
+# those. Changes to the lockfile, root manifest, toolchain/cargo/nextest config, .github/,
+# vendor/, tests/, scripts/ or any file no package owns select the whole workspace, as do
+# pushes to main, the nightly run and Run workflow.
 # Tests are built once and run in 4 shards. A few heavy tests (see .config/nextest.toml) are
 # skipped on pull requests and run on pushes to main and nightly.
 # Cross-compilation is opt-in through Run workflow; release builds remain in release.yml.
@@ -49,6 +55,8 @@ jobs:
     outputs:
       native: ${{ steps.paths.outputs.native }}
       kernel: ${{ steps.paths.outputs.kernel }}
+      full: ${{ steps.paths.outputs.full }}
+      packages: ${{ steps.paths.outputs.packages }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -62,6 +70,8 @@ jobs:
         run: |
           native=false
           kernel=false
+          full=true
+          packages=
           if [ "$EVENT_NAME" != pull_request ]; then
             native=true
           else
@@ -76,9 +86,20 @@ jobs:
                 *) native=true ;;
               esac
             done < "$RUNNER_TEMP/ci-paths"
+            # Pull requests build and test the touched packages and their dependents.
+            python3 -I scripts/ci/affected.py --paths "$RUNNER_TEMP/ci-paths" > "$RUNNER_TEMP/ci-affected"
+            cat "$RUNNER_TEMP/ci-affected"
+            full=$(sed -n 's/^full=//p' "$RUNNER_TEMP/ci-affected")
+            packages=$(sed -n 's/^packages=//p' "$RUNNER_TEMP/ci-affected")
+            # Code changed but nothing was selected: be safe and test everything.
+            if [ "$native" = true ] && [ "$full" != true ] && [ -z "$packages" ]; then full=true; fi
           fi
-          echo "native=$native" >> "$GITHUB_OUTPUT"
-          echo "kernel=$kernel" >> "$GITHUB_OUTPUT"
+          {
+            echo "native=$native"
+            echo "kernel=$kernel"
+            echo "full=$full"
+            echo "packages=$packages"
+          } >> "$GITHUB_OUTPUT"
 
   checks:
     name: Format and repository checks
@@ -102,6 +123,10 @@ jobs:
         run: cargo xtask layers
       - name: Web app offline use and updates (headless Chrome)
         run: cargo xtask web-offline-test
+      - name: Affected-package selection self-test
+        run: python3 -I scripts/ci/test_affected.py
+      - name: Claim bot tests
+        run: node --test scripts/claim/*.test.js
 
   clippy:
     name: Native Linux Clippy
@@ -117,7 +142,15 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: native-clippy
-      - run: cargo clippy --workspace --all-targets --profile ci --locked -- -D warnings
+      - name: Clippy
+        env:
+          FULL: ${{ needs.changes.outputs.full }}
+          PACKAGES: ${{ needs.changes.outputs.packages }}
+        run: |
+          # Pull requests lint the affected packages (scripts/ci/affected.py); everything else, all.
+          scope=(--workspace)
+          if [ "$FULL" != true ]; then scope=(); for p in $PACKAGES; do scope+=(-p "$p"); done; fi
+          cargo clippy "${scope[@]}" --all-targets --profile ci --locked -- -D warnings
 
   build-tests:
     name: Build tests
@@ -144,7 +177,14 @@ jobs:
         with:
           tool: cargo-nextest
       - name: Compile tests into a nextest archive
-        run: cargo nextest archive --workspace --cargo-profile ci --locked --archive-file tests.tar.zst
+        env:
+          FULL: ${{ needs.changes.outputs.full }}
+          PACKAGES: ${{ needs.changes.outputs.packages }}
+        run: |
+          # Pull requests archive only the affected packages (scripts/ci/affected.py).
+          scope=(--workspace)
+          if [ "$FULL" != true ]; then scope=(); for p in $PACKAGES; do scope+=(-p "$p"); done; fi
+          cargo nextest archive "${scope[@]}" --cargo-profile ci --locked --archive-file tests.tar.zst
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nextest-archive
@@ -164,8 +204,18 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
+    env:
+      # Pictures (snapshots, screenshots, ui.render, the viewport's offscreen tests) are drawn on
+      # the GPU. The runner has none: Mesa's lavapipe (software Vulkan) draws them, and a test that
+      # would skip for want of an adapter fails instead.
+      SOLIDCRAFT_GPU: software
+      SOLIDCRAFT_REQUIRE_GPU: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install a software Vulkan driver (lavapipe)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers libvulkan1
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: cargo-nextest
@@ -183,7 +233,7 @@ jobs:
           # Extract into ./target: tests that run a built binary (env!("CARGO_BIN_EXE_*")) have
           # the build job's path, which is the same checkout path here.
           cargo nextest run --archive-file tests.tar.zst --workspace-remap . --extract-to . --extract-overwrite \
-            --profile ci --partition "slice:$SHARD/4" "${all[@]}"
+            --profile ci --partition "slice:$SHARD/4" --no-tests=pass "${all[@]}"
       - name: Robustness goldens sample (pull requests that touch the kernel)
         # Every 8th seed of tests/robustness/goldens.json, a quarter per shard; pushes to main and
         # the nightly run every seed in the step above.
@@ -267,6 +317,32 @@ jobs:
           cargo nextest run --archive-file tests.tar.zst --workspace-remap . --extract-to . --extract-overwrite \
             --profile ci --success-output final --run-ignored only -E "binary(action_matrix) & test(=action_matrix_determinism)"
 
+  property-tests:
+    # The boolean property tests and the atomic command tests with many cases. Pull requests skip
+    # them (.config/nextest.toml); pushes to main run them with small defaults (8 cases, seeds 0..4).
+    name: Property tests (many cases)
+    needs: build-tests
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-nextest
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: nextest-archive
+      - name: Boolean properties and atomic commands
+        # The defaults (8 cases, seeds 0..4) take 159 s and 802 s on a 2-core VM; four times the
+        # cases and twice the seeds are estimated at about 40 minutes there (not yet timed on CI).
+        env:
+          PROPTEST_CASES: "32"
+          ATOMIC_SEEDS: "0..8"
+        run: |
+          cargo nextest run --archive-file tests.tar.zst --workspace-remap . --extract-to . --extract-overwrite \
+            --profile ci --ignore-default-filter --success-output final -E "binary(boolean_props) | binary(atomic_commands)"
+
   doc-tests:
     name: Doc tests
     needs: changes
@@ -326,7 +402,8 @@ jobs:
   # D3D12's older shader compiler (FXC, used where dxcompiler.dll is absent) is stricter than
   # DXC, Vulkan and Metal: a shader it cannot compile once crashed the app at startup. Build the
   # GPU tessellation pipeline with FXC on the runner's WARP software adapter and compare its
-  # results with the CPU.
+  # results with the CPU, and draw headless pictures with the viewport's pipelines there
+  # (crates/gpu/tests/capture.rs).
   windows-fxc:
     name: Windows D3D12 FXC shaders
     needs: changes
@@ -336,6 +413,8 @@ jobs:
     env:
       WGPU_BACKEND: dx12
       WGPU_DX12_COMPILER: fxc
+      # WARP is a software (Cpu) adapter.
+      SOLIDCRAFT_GPU: software
       SOLIDCRAFT_REQUIRE_GPU: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -365,12 +444,15 @@ jobs:
         with:
           key: windows-startup
       - name: Backend order and probing on Windows
-        run: cargo test -p solidcraft --profile ci --locked -- startup::tests native_crash::tests
+        run: cargo test -p solidcraft --profile ci --locked -- startup::tests native_crash::tests native_frame::tests
       - name: Build the app
         run: cargo build -p solidcraft --profile ci --locked
       - name: Start the app under different settings
         shell: pwsh
         run: tools/windows-startup-smoke.ps1 -Exe target/ci/solidcraft.exe
+      - name: Resize border from the first frame
+        shell: pwsh
+        run: tools/windows-resize-smoke.ps1 -Exe target/ci/solidcraft.exe
 
   # Preserve the existing check name for branch protection, including docs-only PRs.
   ci:

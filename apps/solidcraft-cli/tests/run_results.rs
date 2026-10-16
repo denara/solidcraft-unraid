@@ -151,11 +151,20 @@ fn snapshot_runs_its_script_on_the_in_design() {
         json_output(cli().arg("snapshot").args(args).arg("--out").arg(&png).args(["--width", "64", "--height", "48"]).output().unwrap());
         std::fs::read(&png).unwrap()
     };
-    let alone = shot("alone.png", &[shifted.as_os_str()]);
-    let on_base = shot("on_base.png", &[shifted.as_os_str(), "--in".as_ref(), base.as_os_str()]);
-    let base_only = shot("base.png", &["--in".as_ref(), base.as_os_str()]);
-    assert_ne!(alone, on_base, "the script ran on the --in design");
-    assert_ne!(base_only, on_base);
+    // Pictures are drawn on the GPU: without an adapter only the option checks below run.
+    match solidcraft_gpu::capture::shared() {
+        Ok(_) => {
+            let alone = shot("alone.png", &[shifted.as_os_str()]);
+            let on_base = shot("on_base.png", &[shifted.as_os_str(), "--in".as_ref(), base.as_os_str()]);
+            let base_only = shot("base.png", &["--in".as_ref(), base.as_os_str()]);
+            assert_ne!(alone, on_base, "the script ran on the --in design");
+            assert_ne!(base_only, on_base);
+        }
+        Err(e @ solidcraft_gpu::GpuError::NoAdapter(_)) if std::env::var_os("SOLIDCRAFT_REQUIRE_GPU").is_none() => {
+            eprintln!("pictures left out: {e}")
+        }
+        Err(e) => panic!("{e}"),
+    }
     for (bad, says) in [(["--frobnicate", "1"], "doesn't take --frobnicate"), (["--width", "wide"], "--width must be 16 to 8192")] {
         let output = cli().arg("snapshot").arg(&base).arg("--out").arg(dir.0.join("x.png")).args(bad).output().unwrap();
         assert_eq!(output.status.code(), Some(1));

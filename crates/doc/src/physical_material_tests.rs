@@ -133,6 +133,58 @@ fn conditions_missing_values_and_source_claims_remain_explicit() {
 }
 
 #[test]
+fn missing_condition_fields_follow_family_policy_without_inventing_values() {
+    for (family, extra) in
+        [("wood", Some("moisture_dry_basis_kg_kg")), ("polymer", Some("strain_rate_per_s")), ("glass", None), ("metal", None), ("other", None)]
+    {
+        let mut value = card(json!({"kind":"density","kg_m3":600.}));
+        value["family"] = json!(family);
+        let mut expected = vec!["temperature_k", "state"];
+        expected.extend(extra);
+        let result = validate_card(&value).unwrap();
+        assert_eq!(result.missing_condition_fields, BTreeMap::from([("density".into(), expected.iter().map(|s| (*s).into()).collect())]));
+        assert_eq!(result.unspecified_conditions, vec!["density"]);
+
+        // Explicit zero dry-basis moisture is known; no wet/dry conversion or default is inferred.
+        value["properties"][0]["conditions"] =
+            json!({"temperature_k":293.15,"state":"synthetic","moisture_dry_basis_kg_kg":0.,"strain_rate_per_s":1.});
+        assert!(validate_card(&value).unwrap().missing_condition_fields.is_empty());
+        for field in expected {
+            let mut partial = value.clone();
+            partial["properties"][0]["conditions"].as_object_mut().unwrap().remove(field);
+            let result = validate_card(&partial).unwrap();
+            assert_eq!(result.missing_condition_fields, BTreeMap::from([("density".into(), vec![field.into()])]));
+            assert_eq!(result.unspecified_conditions, vec!["density"]);
+        }
+        value["properties"] = json!([]);
+        let result = validate_card(&value).unwrap();
+        assert!(result.missing_condition_fields.is_empty() && result.unspecified_conditions.is_empty());
+    }
+}
+
+#[test]
+fn missing_condition_fields_are_per_property_and_reports_remain_backward_readable() {
+    let mut value = card(json!({"kind":"density","kg_m3":600.}));
+    value["properties"][0]["conditions"] = json!({"temperature_k":293.15,"state":"synthetic"});
+    value["properties"].as_array_mut().unwrap().push(json!({"data":isotropic(12e9,0.25),"source_id":"test",
+        "conditions":{"state":"synthetic","moisture_dry_basis_kg_kg":1.5}}));
+    let before = value.clone();
+    let result = validate_card(&value).unwrap();
+    let expected = json!({"density":["moisture_dry_basis_kg_kg"],"elasticity":["temperature_k"]});
+    let serialized = serde_json::to_value(&result).unwrap();
+    assert_eq!(serialized["missing_condition_fields"], expected);
+    assert_eq!(result.unspecified_conditions, vec!["density", "elasticity"]);
+    assert_eq!(value, before);
+    assert_eq!(serde_json::from_value::<Validation>(serialized.clone()).unwrap(), result);
+    let mut old = serialized;
+    old.as_object_mut().unwrap().remove("missing_condition_fields");
+    let old: Validation = serde_json::from_value(old).unwrap();
+    assert!(old.missing_condition_fields.is_empty());
+    assert_eq!(old.unspecified_conditions, result.unspecified_conditions);
+    assert_eq!(old.source_review_required, result.source_review_required);
+}
+
+#[test]
 fn thermal_properties_accept_negative_expansion_but_not_negative_conductivity() {
     assert!(validate_card(&card(json!({"kind":"thermal_expansion","per_k":[-1e-6,0.,2e-6],"axes":"material123"}))).is_ok());
     assert!(validate_card(&card(json!({"kind":"thermal_conductivity","w_m_k":[1.,0.,1.],"axes":"material123"}))).is_err());

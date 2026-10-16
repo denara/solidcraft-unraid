@@ -1,7 +1,8 @@
 //! Joints between occurrences: joint origins (snap frames on component geometry, re-found on
 //! every solve so they follow edits), joints (rigid, revolute, slider, cylindrical, pin-slot,
-//! planar, ball) with their motion values and limits, motion links, and the solver that places
-//! occurrences from the joint graph.
+//! planar, ball) with their motion values and limits, motion links (gears, racks and screws are
+//! links whose ratio comes from radii or a pitch), and the solver that places occurrences from
+//! the joint graph.
 //!
 //! A joint makes B's joint frame coincide with A's frame moved by the joint's motion:
 //! `T_B · F_b = T_A · F_a · M(q) · Flip`, so `T_B = T_A · F_a · M(q) · Flip · F_b⁻¹`, where `T`
@@ -151,6 +152,115 @@ pub struct MotionLink {
     pub ratio: f64,
     #[serde(default)]
     pub offset: f64,
+    /// Gears, a rack and pinion or a screw: what the ratio comes from. The ratio is worked out
+    /// from it again whenever the design changes (`coupling_ratio`), so it follows the radii and
+    /// the pitch; the last one worked out is kept in `ratio`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coupling: Option<Coupling>,
+}
+
+/// A length a coupling's ratio comes from: millimetres, an expression over the design's
+/// parameters, or the radius of the round face picked on an occurrence (a circle-centre snap,
+/// found again on every solve like a joint origin).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Size {
+    Length(f64),
+    Expr(String),
+    Circle(JointOrigin),
+}
+
+/// The geometry a motion link's ratio comes from. `reverse` turns the follower the other way.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Coupling {
+    /// Two gears on revolute joints, `ra` on a's and `rb` on b's (pitch radii, or any two lengths
+    /// in their proportion such as tooth counts): b turns ra/rb as far as a, the other way round,
+    /// or the same way when one is an internal (ring) gear.
+    Gear {
+        ra: Size,
+        rb: Size,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        internal: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        reverse: bool,
+    },
+    /// A pinion of pitch radius `radius` on a revolute joint and a rack on a slider: the rack
+    /// travels the radius times the pinion's turn in radians (either joint may drive).
+    RackPinion {
+        radius: Size,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        reverse: bool,
+    },
+    /// A screw: the travel advances `pitch` per turn (a cylindrical joint's angle and distance,
+    /// or a revolute joint and a slider). Right-handed unless reversed.
+    Screw {
+        pitch: Size,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        reverse: bool,
+    },
+}
+
+impl Coupling {
+    /// The lengths the ratio comes from: a's gear and b's, or the pinion's radius or the pitch.
+    pub fn sizes(&self) -> Vec<&Size> {
+        match self {
+            Coupling::Gear { ra, rb, .. } => vec![ra, rb],
+            Coupling::RackPinion { radius: s, .. } | Coupling::Screw { pitch: s, .. } => vec![s],
+        }
+    }
+
+    pub fn sizes_mut(&mut self) -> Vec<&mut Size> {
+        match self {
+            Coupling::Gear { ra, rb, .. } => vec![ra, rb],
+            Coupling::RackPinion { radius: s, .. } | Coupling::Screw { pitch: s, .. } => vec![s],
+        }
+    }
+}
+
+/// Largest length a coupling takes (mm).
+const MAX_SIZE: f64 = 1e7;
+
+/// A coupling length in millimetres: positive and finite.
+fn size_of(doc: &Document, st: &ModelState, s: &Size) -> Result<f64> {
+    let v = match s {
+        Size::Length(v) => *v,
+        Size::Expr(e) => doc.eval(e, crate::expr::Kind::Length)?,
+        Size::Circle(o) => circle_at(doc, st, o)?.1.radius,
+    };
+    if v.is_finite() && v > 1e-9 && v <= MAX_SIZE {
+        Ok(v)
+    } else {
+        Err(DocError::Invalid(format!("a gear, rack or screw needs a positive length, not {v}")))
+    }
+}
+
+/// The ratio a link's coupling gives it (b's value per a's, in radians and mm), worked out from
+/// the geometry and parameters it is defined by; `None` for a plain link.
+pub fn coupling_ratio(doc: &Document, st: &ModelState, l: &MotionLink) -> Option<Result<f64>> {
+    l.coupling.as_ref().map(|c| coupled(doc, st, l, c))
+}
+
+fn coupled(doc: &Document, st: &ModelState, l: &MotionLink, c: &Coupling) -> Result<f64> {
+    let angle = |id: u64, i: usize| doc.assembly.joints.iter().find(|j| j.id == id).is_some_and(|j| j.kind.is_angle(i));
+    let (turn_a, turn_b) = (angle(l.a, l.ia), angle(l.b, l.ib));
+    // Travel per radian, for a turn coupled to a travel either way round.
+    let travel = |k: f64| match (turn_a, turn_b) {
+        (true, false) => Ok(k),
+        (false, true) => Ok(1.0 / k),
+        _ => Err(DocError::Invalid("a rack or a screw couples a turn and a travel".into())),
+    };
+    let sign = |reverse: bool| if reverse { -1.0 } else { 1.0 };
+    match c {
+        Coupling::Gear { ra, rb, internal, reverse } => {
+            if !(turn_a && turn_b) {
+                return Err(DocError::Invalid("gears couple two turns".into()));
+            }
+            Ok(size_of(doc, st, ra)? / size_of(doc, st, rb)? * sign(!internal) * sign(*reverse))
+        }
+        Coupling::RackPinion { radius, reverse } => Ok(travel(size_of(doc, st, radius)?)? * sign(*reverse)),
+        Coupling::Screw { pitch, reverse } => Ok(travel(size_of(doc, st, pitch)? / std::f64::consts::TAU)? * sign(*reverse)),
+    }
 }
 
 /// Joints, joint origins and motion links of a design.
@@ -272,25 +382,33 @@ pub fn resolve_origin(doc: &Document, st: &ModelState, o: &JointOrigin) -> Resul
             let (_, c, n) = best.ok_or_else(|| DocError::Invalid("joint origin: no planar face there".into()))?;
             frame(c, n, None).ok_or_else(bad)
         }
-        Snap::CircleCenter { pick, face } => {
-            let pick = &named_pick(st, *pick, face.as_deref())?;
-            let comp = component_of(doc, o.occurrence)?;
-            let cyl = component_bodies(doc, st, comp)
-                .into_iter()
-                .filter_map(|b| solidcraft_kernel::cylinder_face_at(&b.body, *pick))
-                .min_by(|a, b| {
-                    let off = |c: &solidcraft_kernel::CylinderFace| {
-                        let v = *pick - c.axis_point;
-                        ((v - c.axis * v.dot(c.axis)).len() - c.radius).abs()
-                    };
-                    off(a).total_cmp(&off(b))
-                })
-                .ok_or_else(|| DocError::Invalid("joint origin: no cylindrical face there".into()))?;
-            let s = (*pick - cyl.axis_point).dot(cyl.axis);
+        Snap::CircleCenter { .. } => {
+            let (pick, cyl) = circle_at(doc, st, o)?;
+            let s = (pick - cyl.axis_point).dot(cyl.axis);
             let (at, dir) = if (s - cyl.start).abs() <= (cyl.end - s).abs() { (cyl.start, -1.0) } else { (cyl.end, 1.0) };
             frame(cyl.axis_point + cyl.axis * at, cyl.axis * dir, None).ok_or_else(bad)
         }
     }
+}
+
+/// The pick of a circle-centre snap (on its named face) and the cylindrical face there
+/// (component coordinates). Any other snap is refused.
+fn circle_at(doc: &Document, st: &ModelState, o: &JointOrigin) -> Result<(Vec3, solidcraft_kernel::CylinderFace)> {
+    let Snap::CircleCenter { pick, face } = &o.snap else { return Err(DocError::Invalid("pick a round face".into())) };
+    let pick = named_pick(st, *pick, face.as_deref())?;
+    let comp = component_of(doc, o.occurrence)?;
+    let cyl = component_bodies(doc, st, comp)
+        .into_iter()
+        .filter_map(|b| solidcraft_kernel::cylinder_face_at(&b.body, pick))
+        .min_by(|a, b| {
+            let off = |c: &solidcraft_kernel::CylinderFace| {
+                let v = pick - c.axis_point;
+                ((v - c.axis * v.dot(c.axis)).len() - c.radius).abs()
+            };
+            off(a).total_cmp(&off(b))
+        })
+        .ok_or_else(|| DocError::Invalid("joint origin: no cylindrical face there".into()))?;
+    Ok((pick, cyl))
 }
 
 /// World transform of an occurrence (through its parents).
@@ -624,6 +742,16 @@ fn unknowns(tree: &Tree, around: &BTreeSet<u64>, asm: &Assembly, linked: &BTreeS
     vars
 }
 
+/// Each value's limits, or none.
+fn limit_bounds(tree: &Tree, vars: &[(u64, usize)]) -> Vec<(f64, f64)> {
+    vars.iter()
+        .map(|(id, i)| match tree.joints.get(id).and_then(|j| j.limits.get(*i).copied().flatten()) {
+            Some((lo, hi)) => (lo.min(hi), hi.max(lo)),
+            None => (f64::NEG_INFINITY, f64::INFINITY),
+        })
+        .collect()
+}
+
 /// The loops' size: the diagonal of the box around their joints' A frames, 1 mm to 1 km. Points
 /// that far apart weigh turns like moves.
 fn loop_scale(tree: &Tree, around: &BTreeSet<u64>, vals: &Values) -> f64 {
@@ -658,11 +786,72 @@ fn closure_gaps(tree: &Tree, closing: &[u64], vals: &Values, scale: f64, out: &m
 /// keep the tree's count.
 const MAX_DOF_OCCURRENCES: usize = 256;
 
+/// How far `nearby_pose` moves each value: radians for an angle, a share of the loops' size for a
+/// distance. Far enough for a part's motion that vanishes at a dead point to show in a rank, near
+/// enough to stay on the mechanism's branch.
+const NUDGE: f64 = 1e-3;
+
+/// A pose of the loops near `vals`: each value they move nudged by an amount of its own within
+/// its limits (so the nudge points in no special direction), then each group of loops closed
+/// again. A group that can't close again, or only further away than a few nudges (on another
+/// branch), keeps its values. It has a work budget of its own.
+fn nearby_pose(tree: &Tree, groups: &[Group], asm: &Assembly, linked: &BTreeSet<(u64, usize)>, vals: &Values) -> Values {
+    let mut near = vals.clone();
+    let mut spent = 0usize;
+    for (closing, around, _) in groups {
+        let vars = unknowns(tree, around, asm, linked, &Held::new());
+        if vars.is_empty() || vars.len() > MAX_LOOP_VALUES {
+            continue;
+        }
+        let scale = loop_scale(tree, around, vals);
+        let step: Vec<f64> =
+            vars.iter().map(|(id, i)| NUDGE * if tree.joints.get(id).is_some_and(|j| j.kind.is_angle(*i)) { 1.0 } else { scale }).collect();
+        let bounds = limit_bounds(tree, &vars);
+        let x0: Vec<f64> = vars.iter().map(|(id, i)| near.get(id).and_then(|q| q.get(*i)).copied().unwrap_or(0.0)).collect();
+        let mut x: Vec<f64> = x0
+            .iter()
+            .zip(step.iter().zip(&bounds))
+            .enumerate()
+            .map(|(k, (v, (d, (lo, hi))))| {
+                // 0.5 to 1.5 nudges, alternately up and down.
+                let w = 0.5 + (k as f64 * 0.618_034).fract();
+                (v + d * if k % 2 == 0 { w } else { -w }).max(*lo).min(*hi)
+            })
+            .collect();
+        let mut work = near.clone();
+        let mut gaps = |x: &[f64]| -> Option<Vec<f64>> {
+            spent += 1;
+            if spent > MAX_LOOP_WORK {
+                return None;
+            }
+            for ((id, i), v) in vars.iter().zip(x) {
+                if let Some(slot) = work.get_mut(id).and_then(|q| q.get_mut(*i)) {
+                    *slot = *v;
+                }
+            }
+            apply_links(asm, &mut work);
+            let mut out = Vec::with_capacity(closing.len() * 9);
+            closure_gaps(tree, closing, &work, scale, &mut out)?;
+            out.iter().all(|v| v.is_finite()).then_some(out)
+        };
+        if least_squares(&mut gaps, &mut x, &bounds, (1e-10 * scale).min(1e-7))
+            && x.iter().zip(&x0).zip(&step).all(|((a, b), d)| (a - b).abs() <= 4.0 * d)
+            && gaps(&x).is_some()
+        {
+            near = work;
+        }
+    }
+    near
+}
+
 /// The degrees of freedom of the occurrences loops constrain: how many independent ways each can
 /// still move with every loop kept closed, the rank of its placement over the joint values once
 /// the loops' closure is taken out (rank [J_loops; J_placement] - rank J_loops). An occurrence's
-/// values are those on its tree path and the unknowns of the loops on that path. The tree's
-/// count stands where a loop group is over the solver's caps or the work runs out.
+/// values are those on its tree path and the unknowns of the loops on that path. It is counted at
+/// the pose and at a pose nearby, and the larger count stands: at a dead point of its loop (an
+/// actuator in line with the path of its tip pin) a part's motion vanishes to first order, so the
+/// pose alone counts 0. The tree's count stands where a loop group is over the solver's caps or
+/// the work runs out.
 fn loop_dof(tree: &Tree, closing: &[u64], asm: &Assembly, vals: &Values, dof: &mut BTreeMap<u64, usize>) {
     if closing.len() > MAX_LOOPS {
         return;
@@ -690,6 +879,8 @@ fn loop_dof(tree: &Tree, closing: &[u64], asm: &Assembly, vals: &Values, dof: &m
         }
     }
     let (mut spent, mut counted) = (0usize, 0usize);
+    // A pose nearby, when one differs.
+    let near = (!candidates.is_empty()).then(|| nearby_pose(tree, &groups, asm, &linked, vals)).filter(|n| n != vals);
     for occ in tree.order.iter().filter(|o| candidates.contains(o)) {
         let path: Vec<u64> = tree.path(*occ).1.iter().map(|(k, _)| *k).collect();
         let (mut values, mut have): (Vec<(u64, usize)>, BTreeSet<(u64, usize)>) = (Vec::new(), BTreeSet::new());
@@ -751,41 +942,47 @@ fn loop_dof(tree: &Tree, closing: &[u64], asm: &Assembly, vals: &Values, dof: &m
             continue;
         }
         let scale = loop_scale(tree, &around, vals);
-        let mut work = vals.clone();
-        // The loops' gaps, then three points of the occurrence `scale` apart.
-        let mut f = |x: &[f64]| -> Option<Vec<f64>> {
-            spent += 1;
-            for ((id, i), v) in values.iter().zip(x) {
-                if let Some(slot) = work.get_mut(id).and_then(|q| q.get_mut(*i)) {
-                    *slot = *v;
-                }
-            }
-            apply_links(asm, &mut work);
-            let mut out = Vec::with_capacity(closers.len() * 9 + 9);
-            closure_gaps(tree, &closers, &work, scale, &mut out)?;
-            let t = tree.world(*occ, &work)?;
-            for p in [Vec3::ZERO, Vec3::X * scale, Vec3::Y * scale] {
-                let q = apply_point(&t, p);
-                out.extend([q.x, q.y, q.z]);
-            }
-            out.iter().all(|v| v.is_finite()).then_some(out)
-        };
-        let x0: Vec<f64> = values.iter().map(|(id, i)| vals.get(id).and_then(|q| q.get(*i)).copied().unwrap_or(0.0)).collect();
         let (n, gaps) = (values.len(), closers.len() * 9);
-        let Some(jac) = jacobian(&mut f, &x0, gaps + 9) else { continue };
-        let rank = |rows: usize| {
-            let mut a = linalg::Mat::zeros(rows, n);
-            let mut big = 0.0f64;
-            for r in 0..rows {
-                for c in 0..n {
-                    let v = jac.get(r * n + c).copied().unwrap_or(0.0);
-                    big = big.max(v.abs());
-                    a.set(r, c, v);
+        // How many ways the occurrence moves at a pose, with the loops kept closed.
+        let mut free_at = |at: &Values| -> Option<usize> {
+            let mut work = at.clone();
+            // The loops' gaps, then three points of the occurrence `scale` apart.
+            let mut f = |x: &[f64]| -> Option<Vec<f64>> {
+                spent += 1;
+                for ((id, i), v) in values.iter().zip(x) {
+                    if let Some(slot) = work.get_mut(id).and_then(|q| q.get_mut(*i)) {
+                        *slot = *v;
+                    }
                 }
-            }
-            linalg::rref(&mut a, 1e-6 * big.max(1.0)).len()
+                apply_links(asm, &mut work);
+                let mut out = Vec::with_capacity(closers.len() * 9 + 9);
+                closure_gaps(tree, &closers, &work, scale, &mut out)?;
+                let t = tree.world(*occ, &work)?;
+                for p in [Vec3::ZERO, Vec3::X * scale, Vec3::Y * scale] {
+                    let q = apply_point(&t, p);
+                    out.extend([q.x, q.y, q.z]);
+                }
+                out.iter().all(|v| v.is_finite()).then_some(out)
+            };
+            let x0: Vec<f64> = values.iter().map(|(id, i)| at.get(id).and_then(|q| q.get(*i)).copied().unwrap_or(0.0)).collect();
+            let jac = jacobian(&mut f, &x0, gaps + 9)?;
+            let rank = |rows: usize| {
+                let mut a = linalg::Mat::zeros(rows, n);
+                let mut big = 0.0f64;
+                for r in 0..rows {
+                    for c in 0..n {
+                        let v = jac.get(r * n + c).copied().unwrap_or(0.0);
+                        big = big.max(v.abs());
+                        a.set(r, c, v);
+                    }
+                }
+                linalg::rref(&mut a, 1e-6 * big.max(1.0)).len()
+            };
+            Some(rank(gaps + 9).saturating_sub(rank(gaps)))
         };
-        let free = rank(gaps + 9).saturating_sub(rank(gaps));
+        let here = free_at(vals);
+        let there = near.as_ref().and_then(&mut free_at);
+        let Some(free) = here.max(there) else { continue };
         dof.insert(*occ, free.min(6));
     }
 }
@@ -814,13 +1011,7 @@ fn close_group(
     if vars.len() > MAX_LOOP_VALUES {
         return Some(BTreeMap::new());
     }
-    let bounds: Vec<(f64, f64)> = vars
-        .iter()
-        .map(|(id, i)| match tree.joints.get(id).and_then(|j| j.limits.get(*i).copied().flatten()) {
-            Some((lo, hi)) => (lo.min(hi), hi.max(lo)),
-            None => (f64::NEG_INFINITY, f64::INFINITY),
-        })
-        .collect();
+    let bounds = limit_bounds(tree, &vars);
     let scale = loop_scale(tree, around, vals);
     // Closer than the conflict check needs: 1e-7 mm, and turns of 1e-10 rad across the loop.
     let tol = (1e-10 * scale).min(1e-7);
@@ -1020,72 +1211,8 @@ pub fn solve(doc: &Document, st: &ModelState) -> Solution {
 pub fn solve_holding(doc: &Document, st: &ModelState, held: &Held) -> Solution {
     let asm = &doc.assembly;
     let mut sol = Solution::default();
-    let joints: Vec<&Joint> = asm.joints.iter().filter(|j| !j.suppressed).take(MAX_JOINTS).collect();
     let mut vals = joint_values(asm);
-    // Joint frames in component coordinates (errors leave the joint out).
-    let mut frames: BTreeMap<u64, (Mat, Mat)> = BTreeMap::new();
-    for j in &joints {
-        match (resolve_origin(doc, st, &j.a), resolve_origin(doc, st, &j.b)) {
-            (Ok(fa), Ok(fb)) => {
-                frames.insert(j.id, (fa, fb));
-            }
-            (Err(e), _) | (_, Err(e)) => sol.errors.push((j.id, j.name.clone(), e.to_string())),
-        }
-    }
-    // Fixed: the root, grounded occurrences; with neither involved, the first joint's A side.
-    let mut placed: BTreeMap<u64, Mat> = BTreeMap::new();
-    let mut dof: BTreeMap<u64, usize> = BTreeMap::new();
-    placed.insert(0, IDENTITY);
-    dof.insert(0, 0);
-    for o in doc.occurrences.iter().filter(|o| o.grounded) {
-        placed.insert(o.id, occurrence_world(doc, o.id));
-        dof.insert(o.id, 0);
-    }
-    let involved: BTreeSet<u64> = joints.iter().flat_map(|j| [j.a.occurrence, j.b.occurrence]).collect();
-    if !involved.iter().any(|o| placed.contains_key(o))
-        && let Some(j) = joints.first()
-    {
-        placed.insert(j.a.occurrence, occurrence_world(doc, j.a.occurrence));
-        dof.insert(j.a.occurrence, 0);
-    }
-    sol.fixed = placed.keys().copied().collect();
-    let mut tree =
-        // Every joint's values are known, suppressed ones too (their motion links still set values).
-        Tree { joints: asm.joints.iter().map(|j| (j.id, j)).collect(), frames, fixed: placed.clone(), parent: BTreeMap::new(), order: Vec::new() };
-    let mut used: BTreeSet<u64> = BTreeSet::new();
-    let mut queue: VecDeque<u64> = placed.keys().copied().collect();
-    while let Some(occ) = queue.pop_front() {
-        let Some(t) = placed.get(&occ).copied() else { continue };
-        for j in &joints {
-            if used.contains(&j.id) || !tree.frames.contains_key(&j.id) {
-                continue;
-            }
-            let (other, from_a) = if j.a.occurrence == occ {
-                (j.b.occurrence, true)
-            } else if j.b.occurrence == occ {
-                (j.a.occurrence, false)
-            } else {
-                continue;
-            };
-            if placed.contains_key(&other) {
-                continue;
-            }
-            let Some(m) = tree.step(j.id, from_a, &t, &vals) else { continue };
-            used.insert(j.id);
-            placed.insert(other, m);
-            tree.parent.insert(other, (occ, j.id, from_a));
-            tree.order.push(other);
-            dof.insert(other, dof.get(&occ).copied().unwrap_or(0) + j.kind.dofs().len());
-            queue.push_back(other);
-        }
-    }
-    // Joints that close loops: move the loops' values to meet them, then check they agree.
-    let closing: Vec<u64> = joints
-        .iter()
-        .filter(|j| !used.contains(&j.id) && tree.frames.contains_key(&j.id))
-        .filter(|j| placed.contains_key(&j.a.occurrence) && placed.contains_key(&j.b.occurrence))
-        .map(|j| j.id)
-        .collect();
+    let Built { tree, mut placed, closing, mut dof } = build(doc, st, &vals, &mut sol);
     let mut stuck = BTreeSet::new();
     if !closing.is_empty() {
         (sol.values, stuck) = close_loops(&tree, &closing, asm, held, &mut vals);
@@ -1121,6 +1248,99 @@ pub fn solve_holding(doc: &Document, st: &ModelState, held: &Held) -> Solution {
     sol.world = placed;
     sol.dof = dof;
     sol
+}
+
+/// The joint graph laid out for a solve: the tree, where it places each occurrence for the
+/// values it was built with, the joints that close loops, and each occurrence's degrees of
+/// freedom along the tree.
+struct Built<'a> {
+    tree: Tree<'a>,
+    placed: BTreeMap<u64, Mat>,
+    closing: Vec<u64>,
+    dof: BTreeMap<u64, usize>,
+}
+
+/// Lay out the joint graph: the spanning tree out from the fixed occurrences (the root, grounded
+/// ones; with neither involved, the first joint's A side) and the joints left over, which close
+/// loops. Joints whose origins can't be resolved go to `sol.errors`; `sol.fixed` is set.
+fn build<'a>(doc: &'a Document, st: &ModelState, vals: &Values, sol: &mut Solution) -> Built<'a> {
+    let asm = &doc.assembly;
+    let joints: Vec<&Joint> = asm.joints.iter().filter(|j| !j.suppressed).take(MAX_JOINTS).collect();
+    // Joint frames in component coordinates (errors leave the joint out).
+    let mut frames: BTreeMap<u64, (Mat, Mat)> = BTreeMap::new();
+    for j in &joints {
+        match (resolve_origin(doc, st, &j.a), resolve_origin(doc, st, &j.b)) {
+            (Ok(fa), Ok(fb)) => {
+                frames.insert(j.id, (fa, fb));
+            }
+            (Err(e), _) | (_, Err(e)) => sol.errors.push((j.id, j.name.clone(), e.to_string())),
+        }
+    }
+    // Fixed: the root, grounded occurrences; with neither involved, the first joint's A side.
+    let mut placed: BTreeMap<u64, Mat> = BTreeMap::new();
+    let mut dof: BTreeMap<u64, usize> = BTreeMap::new();
+    placed.insert(0, IDENTITY);
+    dof.insert(0, 0);
+    for o in doc.occurrences.iter().filter(|o| o.grounded) {
+        placed.insert(o.id, occurrence_world(doc, o.id));
+        dof.insert(o.id, 0);
+    }
+    let involved: BTreeSet<u64> = joints.iter().flat_map(|j| [j.a.occurrence, j.b.occurrence]).collect();
+    if !involved.iter().any(|o| placed.contains_key(o))
+        && let Some(j) = joints.first()
+    {
+        placed.insert(j.a.occurrence, occurrence_world(doc, j.a.occurrence));
+        dof.insert(j.a.occurrence, 0);
+    }
+    sol.fixed = placed.keys().copied().collect();
+    let mut tree =
+        // Every joint's values are known, suppressed ones too (their motion links still set values).
+        Tree { joints: asm.joints.iter().map(|j| (j.id, j)).collect(), frames, fixed: placed.clone(), parent: BTreeMap::new(), order: Vec::new() };
+    let mut used: BTreeSet<u64> = BTreeSet::new();
+    let mut queue: VecDeque<u64> = placed.keys().copied().collect();
+    // The joints at each occurrence, in the joints' order (a large assembly is not walked joint by
+    // joint for every occurrence).
+    let mut at: BTreeMap<u64, Vec<&Joint>> = BTreeMap::new();
+    for j in joints.iter().copied() {
+        at.entry(j.a.occurrence).or_default().push(j);
+        if j.b.occurrence != j.a.occurrence {
+            at.entry(j.b.occurrence).or_default().push(j);
+        }
+    }
+    while let Some(occ) = queue.pop_front() {
+        let Some(t) = placed.get(&occ).copied() else { continue };
+        for j in at.get(&occ).map(Vec::as_slice).unwrap_or_default() {
+            if used.contains(&j.id) || !tree.frames.contains_key(&j.id) {
+                continue;
+            }
+            let (other, from_a) = if j.a.occurrence == occ {
+                (j.b.occurrence, true)
+            } else if j.b.occurrence == occ {
+                (j.a.occurrence, false)
+            } else {
+                continue;
+            };
+            if placed.contains_key(&other) {
+                continue;
+            }
+            let Some(m) = tree.step(j.id, from_a, &t, vals) else { continue };
+            used.insert(j.id);
+            placed.insert(other, m);
+            tree.parent.insert(other, (occ, j.id, from_a));
+            tree.order.push(other);
+            dof.insert(other, dof.get(&occ).copied().unwrap_or(0) + j.kind.dofs().len());
+            queue.push_back(other);
+        }
+    }
+    // Joints that close loops: the solve moves the loops' values to meet them, then checks they
+    // agree.
+    let closing: Vec<u64> = joints
+        .iter()
+        .filter(|j| !used.contains(&j.id) && tree.frames.contains_key(&j.id))
+        .filter(|j| placed.contains_key(&j.a.occurrence) && placed.contains_key(&j.b.occurrence))
+        .map(|j| j.id)
+        .collect();
+    Built { tree, placed, closing, dof }
 }
 
 impl Document {
@@ -1168,6 +1388,10 @@ impl Document {
     }
 }
 
+#[path = "joints_reach.rs"]
+mod reach;
+pub use reach::{REACH_TOL, Reach, Reached, reach};
+
 /// The frame matrix for an explicit origin / z / x (public for commands).
 pub fn frame_of(o: Vec3, z: Vec3, x: Option<Vec3>) -> Option<Mat> {
     frame(o, z, x)
@@ -1201,7 +1425,7 @@ mod tests {
                 suppressed: false,
             })
             .collect();
-        let links = (1..n).rev().map(|a| MotionLink { a, ia: 0, b: a + 1, ib: 0, ratio: 2.0, offset: 0.0 }).collect();
+        let links = (1..n).rev().map(|a| MotionLink { a, ia: 0, b: a + 1, ib: 0, ratio: 2.0, offset: 0.0, coupling: None }).collect();
         Assembly { joints, links, ..Assembly::default() }
     }
 
@@ -1222,6 +1446,53 @@ mod tests {
         let mut again = vals.clone();
         apply_links(&asm, &mut again);
         assert_eq!(again, vals);
+    }
+
+    /// A coupling saves as its definition: sizes as numbers, expressions or picked faces, flags
+    /// only when set; a link without one (as every design before couplings has) reads as before.
+    #[test]
+    fn couplings_read_and_write_their_definition() {
+        let old: MotionLink = serde_json::from_str(r#"{"a": 1, "b": 2, "ratio": 2}"#).unwrap();
+        assert_eq!((old.coupling, old.offset, old.ia), (None, 0.0, 0));
+        let text = r#"{"a": 1, "b": 2, "ratio": -0.5, "coupling": {"type": "gear", "ra": 10, "rb": "r2 * 2",
+            "internal": true}}"#;
+        let l: MotionLink = serde_json::from_str(text).unwrap();
+        let Some(Coupling::Gear { ra, rb, internal, reverse }) = &l.coupling else { panic!("{l:?}") };
+        assert_eq!((ra, rb, *internal, *reverse), (&Size::Length(10.0), &Size::Expr("r2 * 2".into()), true, false));
+        let back = serde_json::to_value(&l).unwrap();
+        assert_eq!(back["coupling"], serde_json::json!({"type": "gear", "ra": 10.0, "rb": "r2 * 2", "internal": true}));
+        let picked: Size = serde_json::from_str(r#"{"occurrence": 3, "snap": {"type": "circle_center", "pick": [1, 0, 0]}}"#).unwrap();
+        assert!(matches!(picked, Size::Circle(JointOrigin { occurrence: 3, snap: Snap::CircleCenter { .. } })));
+        let screw: Coupling = serde_json::from_str(r#"{"type": "screw", "pitch": 1.5, "reverse": true}"#).unwrap();
+        assert_eq!(screw, Coupling::Screw { pitch: Size::Length(1.5), reverse: true });
+    }
+
+    /// Ratios from the sizes: gears turn by their radii (the other way unless internal), a rack
+    /// and a screw travel per radian whichever of the two joints drives.
+    #[test]
+    fn coupling_ratios_follow_their_sizes() {
+        let mut doc = Document { assembly: chain(3, 0.0), ..Document::default() };
+        if let Some(j) = doc.assembly.joints.get_mut(2) {
+            j.kind = JointKind::Slider;
+        }
+        let st = ModelState::default();
+        let ratio = |a: u64, b: u64, c: Coupling| {
+            let l = MotionLink { a, ia: 0, b, ib: 0, ratio: 0.0, offset: 0.0, coupling: Some(c) };
+            coupling_ratio(&doc, &st, &l).map(|r| r.map_err(|e| e.to_string()))
+        };
+        let len = Size::Length;
+        assert_eq!(ratio(1, 2, Coupling::Gear { ra: len(10.0), rb: len(40.0), internal: false, reverse: false }), Some(Ok(-0.25)));
+        assert_eq!(ratio(1, 2, Coupling::Gear { ra: len(10.0), rb: len(40.0), internal: true, reverse: false }), Some(Ok(0.25)));
+        assert_eq!(ratio(1, 3, Coupling::RackPinion { radius: len(8.0), reverse: false }), Some(Ok(8.0)));
+        assert_eq!(ratio(3, 1, Coupling::RackPinion { radius: len(8.0), reverse: true }), Some(Ok(-0.125)));
+        let screw = ratio(1, 3, Coupling::Screw { pitch: len(std::f64::consts::TAU), reverse: false });
+        assert_eq!(screw, Some(Ok(1.0)));
+        assert!(matches!(ratio(1, 2, Coupling::RackPinion { radius: len(8.0), reverse: false }), Some(Err(_))));
+        assert!(matches!(ratio(1, 3, Coupling::Gear { ra: len(1.0), rb: len(1.0), internal: false, reverse: false }), Some(Err(_))));
+        for bad in [0.0, -2.0, f64::NAN, f64::INFINITY, 1e300] {
+            assert!(matches!(ratio(1, 2, Coupling::Gear { ra: len(bad), rb: len(1.0), internal: false, reverse: false }), Some(Err(_))), "{bad}");
+        }
+        assert!(matches!(ratio(1, 2, Coupling::Gear { ra: Size::Expr("nope".into()), rb: len(1.0), internal: false, reverse: false }), Some(Err(_))));
     }
 
     #[test]

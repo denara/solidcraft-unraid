@@ -95,6 +95,45 @@ struct Running {
     partial_rx: Option<Receiver<(egui::ColorImage, usize)>>,
     /// The picture shown is of the first this many features (`None`: the saved preview).
     built: Option<usize>,
+    /// A STEP file read a piece per frame on this thread (the web app), instead of on a worker.
+    staged: Option<Staged>,
+}
+
+/// A STEP import done a piece per frame, for the web app: it has one thread, which must keep
+/// drawing (and offer Cancel) while a large file comes in. The file is parsed in one frame,
+/// then its solids are converted a few at a time, each frame for about [`STAGED_FRAME_MS`];
+/// the import is then cached, and the command that inserts or opens the file finds it read.
+struct Staged {
+    tx: Sender<Job>,
+    session: Option<Session>,
+    command: &'static str,
+    params: Value,
+    reading: Option<solidcraft_engine::kernel::StepReading>,
+    /// The command's result once it has run; then the bodies' meshes are made, a few a frame,
+    /// so the first frame that draws the design doesn't make them all at once.
+    ran: Option<Value>,
+    /// Bodies meshed so far, and their triangles.
+    warmed: usize,
+    triangles: usize,
+    /// The overlay has been drawn once (the first frame does no work, so it shows at once).
+    shown: bool,
+}
+
+/// Designs up to this many triangles get a thumbnail (a picture of more takes a while).
+const STAGED_THUMBNAIL_TRIANGLES: usize = 1_000_000;
+
+/// How long a frame spends on a staged STEP import.
+const STAGED_FRAME_MS: f64 = 30.0;
+
+/// Files read in stages: STEP (not IGES, FreeCAD or Rhino, which are first restated as STEP) to
+/// insert or open.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn staged_kind(request: &Request) -> bool {
+    let p = &request.path;
+    matches!(request.kind, Kind::Insert | Kind::Open)
+        && solidcraft_engine::io::is_step_path(p)
+        && !solidcraft_engine::io::is_iges_path(p)
+        && !solidcraft_engine::io::is_native_cad_path(p)
 }
 
 impl Running {
@@ -147,6 +186,11 @@ pub fn begin(app: &mut SolveApp, path: &str, insert: bool) {
 pub fn begin_request(app: &mut SolveApp, request: Request) -> Result<(), String> {
     #[cfg(target_arch = "wasm32")]
     {
+        if staged_kind(&request) {
+            app.file_load.queued.push_back(request);
+            start_staged(app);
+            return Ok(());
+        }
         let r = match &request.kind {
             Kind::Insert => {
                 app.insert_path(&request.path);
@@ -332,6 +376,7 @@ fn start(app: &mut SolveApp) {
                 preview: None,
                 partial_rx,
                 built: None,
+                staged: None,
             })
         }
         Err(e) => {
@@ -339,6 +384,139 @@ fn start(app: &mut SolveApp) {
             request.answer(Err(e.clone()));
             app.set_status(e, true);
         }
+    }
+}
+
+/// Start the next queued STEP file as a [`Staged`] import (see [`step_staged`]).
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn start_staged(app: &mut SolveApp) {
+    if app.file_load.running.is_some() {
+        return;
+    }
+    let Some(request) = app.file_load.queued.pop_front() else { return };
+    let insert = request.insert();
+    let before = if insert { app.session.world_state().bodies.iter().map(|b| b.name.clone()).collect() } else { Vec::new() };
+    let mut session = if insert { app.session.scratch() } else { Session::default() };
+    if insert {
+        session.selection = app.session.selection.clone();
+    }
+    let (command, params) = request.command();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let progress = Arc::new(Progress::default());
+    #[cfg(test)]
+    if let Some(i) = app.file_load.hold_at.take() {
+        progress.hold_at(i);
+    }
+    app.file_load.running = Some(Running {
+        base: app.session.doc.clone(),
+        base_revision: app.session.revision,
+        before,
+        rx,
+        phase: Arc::new(AtomicU8::new(0)),
+        progress,
+        preview_rx: None,
+        preview: None,
+        partial_rx: None,
+        built: None,
+        staged: Some(Staged { tx, session: Some(session), command, params, reading: None, ran: None, warmed: 0, triangles: 0, shown: false }),
+        request,
+    });
+}
+
+/// One frame of a staged STEP import: parse the file, or convert solids for a frame's worth of
+/// time, or, once every solid is in, run the command (which finds the file read) and hand its
+/// result to [`tick`] as a worker would.
+fn step_staged(running: &mut Running) {
+    let Some(staged) = running.staged.as_mut() else { return };
+    let progress = running.progress.clone();
+    let scope = running.request.scope.clone();
+    let path = running.request.path.clone();
+    let send = |staged: &mut Staged, job: Job| {
+        let _ = staged.tx.send(job);
+        staged.session = None;
+        staged.reading = None;
+    };
+    if staged.session.is_none() {
+        return;
+    }
+    if progress.is_cancelled() {
+        send(staged, Err("file operation cancelled".into()));
+        return;
+    }
+    if !staged.shown {
+        staged.shown = true;
+        return;
+    }
+    let began = web_time::Instant::now();
+    let in_budget = || began.elapsed().as_secs_f64() * 1000.0 < STAGED_FRAME_MS;
+    if staged.ran.is_some() {
+        let Some(session) = staged.session.as_ref() else { return };
+        let world = session.world_state();
+        while staged.warmed < world.bodies.len() && in_budget() {
+            if let Some(body) = world.bodies.get(staged.warmed) {
+                staged.triangles += body.mesh().triangles.len();
+            }
+            staged.warmed += 1;
+        }
+        if staged.warmed < world.bodies.len() {
+            return;
+        }
+        let (Some(session), Some(result)) = (staged.session.take(), staged.ran.take()) else { return };
+        let thumbnail = staged.command == "doc.open" && staged.triangles <= STAGED_THUMBNAIL_TRIANGLES;
+        let image = if thumbnail { crate::home::remember(&session) } else { None };
+        send(staged, Ok(Made { session, result, image }));
+        return;
+    }
+    let Some(reading) = staged.reading.as_mut() else {
+        // Parse and walk the file. The reading keeps the watch: its steps report progress and
+        // stop on Cancel.
+        let read = solidcraft_engine::io::vfs::scoped(scope, || {
+            let bytes = solidcraft_engine::io::vfs::read(&path, solidcraft_engine::io::MAX_STEP_BYTES).map_err(|e| format!("{path}: {e}"))?;
+            // The same text the import command makes of the bytes, so it finds this reading.
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            solidcraft_engine::doc::progress::watch(progress.clone(), || solidcraft_engine::kernel::StepReading::new(&text))
+                .map_err(|e| format!("{path}: {e}"))
+        });
+        match read {
+            Ok(reading) => staged.reading = Some(reading),
+            Err(e) => send(staged, Err(e)),
+        }
+        return;
+    };
+    while in_budget() {
+        if !reading.step() {
+            break;
+        }
+    }
+    let (done, total) = reading.progress();
+    if done < total && !progress.is_cancelled() {
+        return;
+    }
+    let Some(reading) = staged.reading.take() else { return };
+    // Held until the command has read the file from the cache.
+    let import = reading.finish_shared();
+    let import = match import {
+        _ if progress.is_cancelled() => Err("file operation cancelled".to_string()),
+        Ok(import) => Ok(import),
+        Err(e) => Err(format!("{path}: {e}")),
+    };
+    let (Some(mut session), Ok(import)) = (staged.session.take(), import.clone()) else {
+        send(staged, Err(import.err().unwrap_or_else(|| "file operation cancelled".into())));
+        return;
+    };
+    let (command, params) = (staged.command, staged.params.clone());
+    let result = solidcraft_engine::io::vfs::scoped(running.request.scope.clone(), || {
+        solidcraft_engine::doc::progress::watch(progress.clone(), || session.execute(command, &params))
+    });
+    drop(import);
+    match result {
+        Ok(result) => {
+            // Next frames: the meshes ("Preparing the view").
+            running.phase.store(1, Ordering::Relaxed);
+            staged.session = Some(session);
+            staged.ran = Some(result);
+        }
+        Err(e) => send(staged, Err(e.to_string())),
     }
 }
 
@@ -376,8 +554,7 @@ fn partial_picture(world: &solidcraft_engine::doc::ModelState, stop: &dyn Fn() -
     if stop() || !preview_work_fits(&scene, &camera) {
         return None;
     }
-    let canvas = solidcraft_engine::render::render(&scene, &camera, 320, 200);
-    Some(egui::ColorImage::from_rgba_unmultiplied([320, 200], &canvas.rgba))
+    preview_image(&scene, &camera)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -423,12 +600,24 @@ fn saved_picture(preview: solidcraft_engine::io::DesignPreview) -> Option<egui::
     if !preview_work_fits(&scene, &camera) {
         return None;
     }
-    let canvas = solidcraft_engine::render::render(&scene, &camera, 320, 200);
-    Some(egui::ColorImage::from_rgba_unmultiplied([320, 200], &canvas.rgba))
+    preview_image(&scene, &camera)
 }
 
-/// Bound raster work as well as file size: repeated full-screen triangles must
-/// not monopolize the file worker. Match the rasterizer's 2x sampling rectangles.
+/// The preview picture, drawn on the GPU by the renderer the app installs (none: no picture).
+#[cfg(not(target_arch = "wasm32"))]
+fn preview_image(scene: &solidcraft_engine::render::Scene, camera: &solidcraft_engine::render::Camera) -> Option<egui::ColorImage> {
+    match solidcraft_engine::capture::rgba(scene, camera, 320, 200) {
+        Ok(picture) => Some(egui::ColorImage::from_rgba_unmultiplied([320, 200], &picture.rgba)),
+        Err(e) => {
+            log::warn!("no preview picture: {e}");
+            None
+        }
+    }
+}
+
+/// Bound drawing work as well as file size: repeated full-screen triangles (a hostile file) must
+/// not monopolize the file worker or a software GPU. Counts each triangle's pixel box at twice the
+/// picture's size.
 #[cfg(not(target_arch = "wasm32"))]
 fn preview_work_fits(scene: &solidcraft_engine::render::Scene, camera: &solidcraft_engine::render::Camera) -> bool {
     let mut pixels = 0.0;
@@ -521,6 +710,9 @@ fn compute(
 
 pub fn tick(app: &mut SolveApp, ctx: &egui::Context) {
     if let Some(running) = &mut app.file_load.running {
+        step_staged(running);
+    }
+    if let Some(running) = &mut app.file_load.running {
         if !running.cancelled() && running.matches(&app.session) {
             if let Some(image) = running.preview_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
                 running.preview = Some(ctx.load_texture("opening-preview", image, egui::TextureOptions::LINEAR));
@@ -563,7 +755,7 @@ pub fn tick(app: &mut SolveApp, ctx: &egui::Context) {
                 app.fit_view();
                 // A caller that said which way is up has been answered: no offer to stand the part up.
                 if (request.kind == Kind::Open || request.insert()) && !request.options.contains_key("up") {
-                    crate::stand_up::offer(app, &request.path, &running.before);
+                    crate::stand_up::offer(app, &request.path, &running.before, Some(&made.result));
                 }
                 let warnings = made.result.get("warnings").and_then(Value::as_array);
                 if let Kind::Recover { .. } = request.kind {
@@ -598,6 +790,8 @@ pub fn tick(app: &mut SolveApp, ctx: &egui::Context) {
     }
     #[cfg(not(target_arch = "wasm32"))]
     start(app);
+    #[cfg(target_arch = "wasm32")]
+    start_staged(app);
     if app.file_load.busy() {
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
     }
@@ -746,6 +940,7 @@ mod tests {
                 preview: None,
                 partial_rx: None,
                 built: None,
+                staged: None,
             });
             if change_document {
                 app.session.execute("file.new", &serde_json::json!({"name":"Newer design"})).unwrap();
@@ -766,6 +961,9 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn provisional_picture_renders_without_adopting_cached_meshes() {
+        if !crate::gpu::test_picture_renderer() {
+            return;
+        }
         let preview = solidcraft_engine::io::DesignPreview {
             meshes: vec![solidcraft_engine::doc::MeshData {
                 name: "Saved triangle".into(),
@@ -781,7 +979,7 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn repeated_large_preview_triangles_are_a_cache_miss_before_rasterization() {
+    fn repeated_large_preview_triangles_are_a_cache_miss_before_drawing() {
         let preview = solidcraft_engine::io::DesignPreview {
             meshes: vec![solidcraft_engine::doc::MeshData {
                 name: "Hostile overdraw".into(),
@@ -810,6 +1008,7 @@ mod tests {
             preview: None,
             partial_rx: None,
             built: None,
+            staged: None,
         });
         tick(&mut app, &egui::Context::default());
         assert!(Arc::ptr_eq(&app.session.doc, &old));
@@ -835,6 +1034,7 @@ mod tests {
             preview: None,
             partial_rx: None,
             built: None,
+            staged: None,
         });
         assert!(!app.file_load.busy());
         assert!(app.file_load.running.is_some());
@@ -844,5 +1044,62 @@ mod tests {
         tick(&mut app, &egui::Context::default());
         assert!(app.file_load.running.is_none());
         assert!(Arc::ptr_eq(&old, &app.session.doc));
+    }
+
+    /// #1376: the web app reads a STEP file a piece per frame. The first frame only shows the
+    /// overlay, the next parses, and the solids follow, frame by frame, until the insert
+    /// lands as a worker's would; Cancel between frames leaves the design as it was.
+    #[test]
+    fn a_staged_step_import_lands_over_frames_and_cancels_between_them() {
+        let dir = std::env::temp_dir().join(format!("solidcraft-staged-step-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("boxes.step").to_string_lossy().into_owned();
+        let mut part = Session::default();
+        for i in 0..6 {
+            part.execute("solid.box", &serde_json::json!({"length": 10, "width": 10, "height": 10, "corner": [i * 20, 0, 0]})).unwrap();
+        }
+        part.execute("file.export", &serde_json::json!({"path": path})).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = SolveApp::new(Session::default(), Default::default());
+        let bodies = |app: &SolveApp| app.session.world_state().bodies.len();
+        assert!(staged_kind(&Request::new(&path, Kind::Insert)) && staged_kind(&Request::new(&path, Kind::Open)));
+        assert!(!staged_kind(&Request::new("part.igs", Kind::Insert)) && !staged_kind(&Request::new("part.solidcraft", Kind::Open)));
+        app.file_load.queued.push_back(Request::new(&path, Kind::Insert));
+        start_staged(&mut app);
+        tick(&mut app, &ctx);
+        assert!(app.file_load.busy() && bodies(&app) == 0, "the first frame only shows the overlay");
+        tick(&mut app, &ctx);
+        let reading = app.file_load.running.as_ref().and_then(|r| r.staged.as_ref()).is_some_and(|s| s.reading.is_some());
+        assert!(reading, "the next frame parses the file");
+        let mut frames = 2;
+        while app.file_load.running.is_some() && frames < 1000 {
+            tick(&mut app, &ctx);
+            frames += 1;
+        }
+        assert_eq!(bodies(&app), 6, "{:?}", app.status);
+        assert!(app.status.as_ref().is_some_and(|s| s.0.contains("Insert done")), "{:?}", app.status);
+        // Cancelled after the parse: nothing is inserted, and nothing waits.
+        let before = app.session.doc.clone();
+        app.file_load.queued.push_back(Request::new(&path, Kind::Insert));
+        start_staged(&mut app);
+        tick(&mut app, &ctx);
+        tick(&mut app, &ctx);
+        app.file_load.cancel();
+        tick(&mut app, &ctx);
+        assert!(app.file_load.running.is_none() && !app.file_load.busy());
+        assert!(Arc::ptr_eq(&before, &app.session.doc));
+        assert_eq!(bodies(&app), 6);
+        // A file that isn't STEP fails like the worker's would, and the design stays.
+        let junk = dir.join("junk.step").to_string_lossy().into_owned();
+        std::fs::write(&junk, "not a step file").unwrap();
+        app.file_load.queued.push_back(Request::new(&junk, Kind::Insert));
+        start_staged(&mut app);
+        for _ in 0..4 {
+            tick(&mut app, &ctx);
+        }
+        assert!(app.file_load.running.is_none());
+        assert!(app.status.as_ref().is_some_and(|s| s.2 && s.0.contains("junk.step")), "{:?}", app.status);
+        assert!(Arc::ptr_eq(&before, &app.session.doc));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

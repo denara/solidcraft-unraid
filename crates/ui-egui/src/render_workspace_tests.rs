@@ -470,3 +470,205 @@ fn delayed_image_export_refuses_an_internally_replaced_document_even_with_overwr
         assert!(matches!(&h.app.status, Some((_, _, true))));
     }
 }
+
+/// One frame of either the modelling viewport or the Render preview, over the same rectangle.
+fn nav_frame(app: &mut crate::SolveApp, ctx: &egui::Context, render: bool, time: &mut f64, mods: egui::Modifiers, events: Vec<egui::Event>) {
+    *time += 1.0 / 60.0;
+    let events = std::iter::once(egui::Event::ModifiersChanged(mods)).chain(events).collect();
+    let raw = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+        time: Some(*time),
+        focused: true,
+        events,
+        ..Default::default()
+    };
+    let mut out = ctx.run_ui(raw, |ui| {
+        if render {
+            show(app, ui);
+        } else {
+            crate::viewport::show(app, ui);
+        }
+    });
+    out.textures_delta.clear();
+}
+
+fn nav_app(render: bool, preset: &str, around: crate::prefs::OrbitAround) -> crate::SolveApp {
+    let mut s = Session::default();
+    s.execute("solid.box", &json!({"length":40,"width":30,"height":20,"body_name":"Product"})).unwrap();
+    let mut app = crate::SolveApp::new(s, crate::Services::default());
+    if render {
+        enter(&mut app, true).unwrap();
+        assert!(active(&app));
+    }
+    app.preferences.nav = preset.into();
+    app.preferences.orbit_around = around;
+    app.preferences.zoom_to_cursor = true;
+    app.ui.perspective = true;
+    let mut cam = Camera::default();
+    cam.set_view(solidcraft_engine::render::StandardView::Iso);
+    cam.fit(&solidcraft_engine::product_scene::extract(&app.session).unwrap().bounds);
+    app.cam = cam;
+    app
+}
+
+/// #1454: the same mouse, wheel and modifier input moves the Render preview's camera exactly as
+/// it moves the modelling viewport's, under every navigation preset and Orbit around setting.
+#[test]
+fn render_preview_navigates_like_the_modelling_viewport_in_every_preset() {
+    use egui::{Event, Modifiers, PointerButton, pos2, vec2};
+    let none = Modifiers::NONE;
+    let chords = [none, Modifiers::SHIFT, Modifiers::CTRL, Modifiers::ALT, Modifiers::SHIFT | Modifiers::ALT];
+    let arounds = [crate::prefs::OrbitAround::ViewCentre, crate::prefs::OrbitAround::Cursor, crate::prefs::OrbitAround::Origin];
+    for preset in crate::prefs::NAV_PRESETS.iter().map(|p| p.id) {
+        for around in arounds {
+            let (design_ctx, render_ctx) = (egui::Context::default(), egui::Context::default());
+            let mut design = nav_app(false, preset, around);
+            let mut render = nav_app(true, preset, around);
+            let (mut design_time, mut render_time) = (0.0, 0.0);
+            let mut both = |events: Vec<Event>, mods: Modifiers, design: &mut crate::SolveApp, render: &mut crate::SolveApp| {
+                nav_frame(design, &design_ctx, false, &mut design_time, mods, events.clone());
+                nav_frame(render, &render_ctx, true, &mut render_time, mods, events);
+            };
+            both(vec![], none, &mut design, &mut render);
+            assert_eq!(design.viewport.rect, render.viewport.rect);
+            // Presses start on empty space (the Render preview has nothing to pick), and the wheel
+            // turns over the model, so zoom to the cursor anchors on its surface.
+            let empty = pos2(90.0, 520.0);
+            let proj = crate::viewport::projection(&design, design.viewport.rect.unwrap());
+            assert!(crate::viewport::pick(&design, &proj, empty).is_empty());
+            let model = proj.to_screen(design.cam.target).unwrap();
+            assert!(!crate::viewport::pick(&design, &proj, model).is_empty());
+            let mut moved = 0;
+            for button in [PointerButton::Primary, PointerButton::Middle, PointerButton::Secondary] {
+                for mods in chords {
+                    let before = design.cam;
+                    both(vec![Event::PointerMoved(empty)], mods, &mut design, &mut render);
+                    both(vec![Event::PointerButton { pos: empty, button, pressed: true, modifiers: mods }], mods, &mut design, &mut render);
+                    let mut at = empty;
+                    for _ in 0..5 {
+                        at += vec2(14.0, -9.0);
+                        both(vec![Event::PointerMoved(at)], mods, &mut design, &mut render);
+                    }
+                    both(vec![Event::PointerButton { pos: at, button, pressed: false, modifiers: mods }], mods, &mut design, &mut render);
+                    for _ in 0..30 {
+                        both(vec![], none, &mut design, &mut render);
+                    }
+                    assert_eq!(design.cam, render.cam, "{preset} {around:?}: {button:?} drag with {mods:?}");
+                    moved += usize::from(design.cam != before);
+                    // Let any snap settle and start the next gesture from the same view.
+                    design.cam = render.cam;
+                }
+            }
+            assert!(moved >= 2, "{preset}: the preset's drags move the camera ({moved})");
+            // Wheel over the model, then modifier-only motion (Touchpad: Shift pans, Alt orbits).
+            let before = design.cam;
+            both(vec![Event::PointerMoved(model)], none, &mut design, &mut render);
+            let wheel = Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: vec2(0.0, 3.0), modifiers: none, phase: egui::TouchPhase::Move };
+            both(vec![wheel], none, &mut design, &mut render);
+            for _ in 0..30 {
+                both(vec![], none, &mut design, &mut render);
+            }
+            assert_ne!(design.cam, before, "{preset}: the wheel zooms");
+            assert_eq!(design.cam, render.cam, "{preset} {around:?}: wheel zoom to the cursor");
+            for mods in [Modifiers::SHIFT, Modifiers::ALT] {
+                both(vec![Event::PointerMoved(empty)], mods, &mut design, &mut render);
+                both(vec![Event::PointerMoved(empty + vec2(25.0, 15.0))], mods, &mut design, &mut render);
+                both(vec![Event::PointerMoved(empty)], none, &mut design, &mut render);
+                assert_eq!(design.cam, render.cam, "{preset} {around:?}: modifier motion with {mods:?}");
+            }
+            assert!(render.session.selection.is_empty(), "the Render preview never selects");
+        }
+    }
+}
+
+/// #1454: Fit (F6), a middle double-click, and the axis view's and navigation cube's Home and
+/// view controls all work in the Render workspace, framing the product scene.
+#[test]
+fn render_workspace_view_keys_double_middle_click_and_navigators_work() {
+    for style in [crate::prefs::NavigatorStyle::Axes, crate::prefs::NavigatorStyle::Cube] {
+        let mut h = Harness::new();
+        h.app.preferences.navigator_style = style;
+        h.app.preferences.look_at_anim = false;
+        h.app.run("solid.box", json!({"length":40,"width":30,"height":20,"body_name":"Product"})).unwrap();
+        enter(&mut h.app, true).unwrap();
+        h.frames(3);
+        let bounds = solidcraft_engine::product_scene::extract(&h.app.session).unwrap().bounds;
+        let mut home = h.app.cam;
+        home.set_view(solidcraft_engine::render::StandardView::Iso);
+        home.fit(&bounds);
+        let off = |h: &mut Harness| {
+            h.app.cam.yaw += 0.7;
+            h.app.cam.pitch = 0.1;
+            h.app.cam.distance *= 3.0;
+            h.app.cam.target.x += 25.0;
+            h.frames(2);
+        };
+        // F6 fits, keeping the direction.
+        off(&mut h);
+        let mut fitted = h.app.cam;
+        fitted.fit(&bounds);
+        h.step(&json!({"key":"F6"})).unwrap();
+        h.settle();
+        assert_eq!(h.app.cam, fitted, "{style:?}: F6");
+        // A middle double-click goes Home.
+        off(&mut h);
+        let centre = h.app.viewport.rect.unwrap().center();
+        h.step(&json!({"click":[centre.x, centre.y], "double":true, "button":"middle"})).unwrap();
+        h.settle();
+        assert_eq!(h.app.cam, home, "{style:?}: middle double-click");
+        // The navigator's Home control.
+        off(&mut h);
+        let handle = match style {
+            crate::prefs::NavigatorStyle::Axes => "axis_view:home",
+            crate::prefs::NavigatorStyle::Cube => "navigation_cube:control:home",
+        };
+        h.step(&json!({"click":{"handle":handle}})).unwrap();
+        h.settle();
+        assert!(
+            (h.app.cam.yaw - home.yaw).abs() < 1e-6 && (h.app.cam.pitch - home.pitch).abs() < 1e-6,
+            "{style:?}: navigator Home turns to the home view"
+        );
+        // A standard view from the navigator.
+        h.step(&json!({"click":{"handle":"axis_view:z"}})).unwrap();
+        h.settle();
+        assert!(h.app.cam.back().dot(solidcraft_engine::geom::Vec3::Z) > 0.999, "{style:?}: view from +Z, got {:?}", h.app.cam.back());
+        assert!(h.app.session.selection.is_empty());
+    }
+}
+
+/// #1464: a maximised 4K or 5K window is past the preview's pixel budget. The preview draws
+/// smaller at the same aspect instead of refusing every frame.
+#[test]
+fn four_and_five_k_viewports_preview_downscaled_within_the_limits() {
+    use solidcraft_engine::render::*;
+    for samples in [1, 4, 16] {
+        let host = host_executor(16384, true, samples).unwrap();
+        let mut s = Session::default();
+        s.set_render_viewport(Some(host.clone())).unwrap();
+        let request = |width, height| RenderRequest {
+            backend: None,
+            mode: RenderMode::Preview,
+            operation: RenderOperation::Viewport,
+            width,
+            height,
+            format: None,
+            features: vec![RenderFeature::Pbr],
+            policy: Default::default(),
+        };
+        if samples <= 4 {
+            assert_eq!(preview_size(s.render_viewport(), (1920, 1080)), (1920, 1080), "fits: drawn at full size");
+        }
+        // 16× MSAA's scratch cost brings even 1080p under the budget.
+        let sizes: &[(u64, u64)] = if samples == 16 { &[(1920, 1080), (3840, 2160), (5120, 2880)] } else { &[(3840, 2160), (5120, 2880)] };
+        for &full in sizes {
+            assert!(resolve_request(&[s.render_backend()], &request(full.0, full.1)).is_err(), "{full:?} at full size is over the limit");
+            let (w, h) = preview_size(s.render_viewport(), full);
+            assert!(w < full.0 && h < full.1 && w * h <= host.limits.max_pixels, "{full:?} -> {w}x{h}");
+            assert!((w as f64 / h as f64 - 16.0 / 9.0).abs() < 0.01, "{w}x{h} keeps the aspect");
+            let resolved = resolve_request(&[s.render_backend()], &request(w, h)).unwrap();
+            assert_eq!(resolved.executor.as_str(), "gpu-viewport");
+            assert!(resolved.estimated_scratch_bytes <= host.limits.max_scratch_bytes);
+        }
+    }
+    assert_eq!(preview_size(None, (5120, 2880)), (5120, 2880), "no executor: resolution reports it");
+}

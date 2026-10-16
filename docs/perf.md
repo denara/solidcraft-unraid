@@ -1,5 +1,54 @@
 # Design loading
 
+## Edges made by booleans: each point evaluated once (2026-10-16)
+
+A boolean meshes both operands with truck-meshalgo, which first divides every edge into a
+polyline (`bounded_polyline`, vendored). An edge that an earlier boolean made is an
+intersection curve. Each of its points is found by a grid search on each of the two surfaces,
+51 × 51 evaluations of a NURBS surface each, before Newton. The division evaluated both ends of
+every piece again, so 2 of its 4 evaluations per piece repeated a point it already had.
+Profiles of `main` (01b1b705) on the machine below put the division at 42 % of the CPU time
+of opening the rover, 58 % of `bench-agent` and 82-85 % of a drilled hub or a union of tubes.
+
+Each piece now carries the points of its ends, and its midpoint is both the probe and an end of
+both halves: 2 evaluations per piece. The fallbacks for samples that do not evaluate (#1364) are
+kept: a midpoint that fails is NaN as a probe and the curve's approximation as an end, exactly as
+before. The polyline is the same, bit for bit: `edge_polyline_tests` compares it with the
+previous division (points, order and number of evaluations) on the intersection curves of a
+drilled cylinder and on a circle.
+
+Release `solidcraft-cli` from `main` (73493b94) and the same with the change, 3 alternating
+pairs (before/after, after/before, before/after), each run a new process timed with
+`/usr/bin/time -v`, started once the 1-minute load average was below 2.5. Medians, with the
+range of the 3 runs. 2018 laptop: Intel Core i7-8565U (4 cores / 8 threads, 15 W), 7.4 GB,
+Ubuntu (Linux 7.0), on mains power:
+
+| Run | Evaluation | Meshes | Wall time | CPU time | Peak RSS |
+|---|---:|---:|---:|---:|---:|
+| `bench-open`, `examples/acceptance/sensor_enclosure.json` | 3,203 → 3,089 ms | 6 → 6 ms | 3.2 → 3.1 s | 8.7 → 8.5 s | 91 → 91 MB |
+| `bench-open`, a hub barrel with one radial hole cut through it | 966 → 817 ms | 878 → 481 ms | 1.9 → 1.4 s (-24 %) | 4.4 → 2.8 s (-37 %) | 27 → 30 MB |
+| `bench-open`, the frame of the `bench-agent` bicycle (one union of tilted tubes) | 8,204 → 6,277 ms | 1,711 → 893 ms | 9.9 → 7.2 s (-28 %) | 33.3 → 20.6 s (-38 %) | 44 → 46 MB |
+| `bench-open`, a rover (3,324 features, 1,395 bodies) | 26,783 → 22,792 ms | 7,960 → 6,046 ms | 35.7 → 29.8 s (-17 %) | 129.0 → 101.9 s (-21 %) | 2,076 → 2,079 MB |
+| `bench-agent` (build 33.5 → 30.2 s, -10 %) | 10,553 → 8,565 ms | 2,778 → 2,081 ms | 47.6 → 41.1 s (-14 %) | 124.0 → 91.0 s (-27 %) | 1,428 → 1,432 MB |
+
+`bench-agent`'s evaluation and meshes are those of reopening the saved design. CPU time is the
+steadier measure on this 15 W processor: its before and after ranges are apart for the four
+cases with boolean edges (the hub 3.0-4.4 s before, 2.5-2.9 s after; the rover 113.6-133.5 s,
+101.0-102.5 s), while the first pair's "before" run, which started on a cool processor, overlaps
+the "after" wall times of the two short cases. The sensor enclosure does not change: its time goes
+to grid searches in face meshing, which this does not touch. An earlier series on `main`
+(8535d229), on a quieter machine, gave -38 %, -35 %, -18 % and -16 % of wall time for the same
+four cases. The CPU time saved is close to half the division's share in the profile. The mesh
+phase gains as well, so these display meshes also call the reference mesher somewhere (where is
+not traced here; `tess::edges`, the display plans' own edge division, already evaluated each
+point once). In the rover, the second shell (which names every body's faces, so meshes them all)
+goes from 7.8 s to 5.7 s.
+
+No model changed. `solidcraft-cli eval` of the five designs (the bicycle as `bench-agent` saved
+it) is the same with both binaries apart from the per-feature milliseconds: bodies, volumes,
+areas, centres, bounding boxes, topology counts and warnings. `bench-open` meshes the same
+triangle counts, and the bicycles both binaries save differ only in the document's name.
+
 ## STEP assemblies: a repeated part is meshed once (2026-10-14)
 
 The reader already converts each B-rep item once and keeps it for the instances that list it
@@ -816,3 +865,40 @@ observed 47.6 ms check; no local PNG was created and the active document remaine
 empty. The screenshot shows the transferred file's picture while built-in sample
 pictures are still loading. This is one functional visual check, not a first-frame
 benchmark. The separate counting-reader regression proves source-blob deferral.
+
+## Extrude drag preview delivery
+
+On macOS with Metal, editing a 15 mm radius cylinder's 10 mm extrusion and dragging its
+arrow upward by 150 screen points (120 input steps, Ctrl held) exposed preview starvation.
+A completed worker result was discarded whenever the pointer had already changed the
+requested distance. The arrow also drew the previous frame's distance.
+
+Main's tool-only preview already delivers intermediate Join/Cut/Intersect geometry. New Body
+extrusions (including feature edits) and Offset Face use full-result previews and still discard
+completed distances during a moving drag. Those paths now accept successful intermediate
+distances from the same setup. Selections, operation, extent mode, feature identity, revision
+and colours remain part of the setup identity. Errors still apply only to the exact requested
+inputs, and the final distance is computed normally. Tool previews and background Apply retain
+their existing paths. The arrow and value-box anchor use the current frame's pointer value.
+
+Release-build control-channel checks against upstream `4dc63810` with the arrow fix alone,
+then with the distance fallback, used the same 150-point, 120-step drags. The cylinder used
+the setup above; planar-face Press Pull (Join) and Offset Face used a 30 × 30 × 10 mm box.
+The samples captured 25–27 distinct requested distances per drag:
+
+| Preview updates before reaching the final distance | Main + arrow fix | With distance fallback |
+|---|---:|---:|
+| Edited New Body extrusion | 0 | 24 |
+| Planar-face Press Pull (Join) | 22 | 24 |
+| Offset Face | 0 | 23 |
+
+Join already streams on main; the small count difference reflects sampling, not a change to
+that path. Applying the fixed New Body extrusion produced the requested 19.585 mm height;
+applying the 11.672 mm face offset produced a 21.672 mm tall box.
+
+These are sampled preview deliveries (`ui.inspect.preview.ms` changes), not every rendered
+frame or a geometry-kernel speed benchmark. With main's preview code unchanged, the New Body,
+edited New Body and Offset Face drag regressions fail while Join passes. With the fallback,
+all six distance-preview regressions pass, covering intermediate geometry, exact final
+convergence, unchanged document/undo, obsolete errors and setup changes. A separate regression
+checks the arrow's position on each held input frame.

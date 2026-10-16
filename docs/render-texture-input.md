@@ -1,5 +1,9 @@
 # Bounded texture input (resource admission)
 
+The separate [explicit normalization API](render-texture-normalization.md) handles
+admitted high-precision/color/orientation conversions. The strict utility described
+below retains its existing refusals; normalization does not enable texture rendering.
+
 `solidcraft_render::texture_input` is an independent input utility for #900, coordinated
 with #792 and #813. It accepts in-memory PNG/JPEG bytes and supplies completed RGBA8
 pixels. It does not change a document, read files, assign materials, add a resource-pack

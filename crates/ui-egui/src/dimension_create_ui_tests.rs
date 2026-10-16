@@ -146,7 +146,8 @@ fn rectangle_side_and_fixed_origin_line_dimensions_preserve_other_constraints() 
         h.step(&json!({"key":"Enter"})).unwrap();
         let state = h.app.session.world_state();
         let solved = state.sketch(h.app.session.active_sketch.unwrap()).unwrap();
-        assert!((solved.profiles[0].area - 240.).abs() < 1e-5, "side dimensions keep rectangle width: {}", solved.profiles[0].area);
+        // The sketch's first dimension scales it (#1365): 20 × 10 becomes 24 × 12.
+        assert!((solved.profiles[0].area - 288.).abs() < 1e-5, "the first dimension scales the rectangle: {}", solved.profiles[0].area);
         assert_eq!(h.app.session.undo.len(), undo + 1);
         h.app.run("edit.undo", json!({})).unwrap();
         assert_eq!(h.app.session.doc.to_json(), baseline);
@@ -342,9 +343,11 @@ fn placing_a_two_point_dimension_picks_horizontal_vertical_or_aligned() {
         let b = sk.point(sk.resolve_point("l1.end").unwrap()).unwrap();
         let spans = spans(a, b);
         assert!((spans[measured] - 10.0).abs() < 1e-6, "placed at {at:?}: {a:?} {b:?}");
-        // A horizontal or vertical dimension leaves the other span as drawn.
+        // The sketch's first dimension scales it (#1365): the other span keeps its proportion.
         if measured < 2 {
-            assert!((spans[1 - measured] - [12.0, 16.0][1 - measured]).abs() < 1e-6, "placed at {at:?}: {a:?} {b:?}");
+            let drawn = [12.0, 16.0];
+            let other = drawn[1 - measured] * 10.0 / drawn[measured];
+            assert!((spans[1 - measured] - other).abs() < 1e-6, "placed at {at:?}: {a:?} {b:?}");
         }
     }
 }

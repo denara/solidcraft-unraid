@@ -52,7 +52,7 @@ pub fn panels(tab: &str) -> &'static [&'static str] {
     }
     match tab {
         "SOLID" => &["CREATE", "MODIFY", "ASSEMBLE", "CONSTRUCT", "INSPECT", "INSERT", "SELECT"],
-        "SKETCH" => &["CREATE", "MODIFY", "CONSTRAINTS", "INSPECT", "INSERT", "SELECT", "FINISH SKETCH"],
+        "SKETCH" => &["CREATE", "MODIFY", "PATTERN", "CONSTRAINTS", "INSPECT", "INSERT", "SELECT", "FINISH SKETCH"],
         "SURFACE" => &["CREATE", "MODIFY", "ASSEMBLE", "CONSTRUCT", "INSPECT", "INSERT", "SELECT"],
         "MESH" => &["CREATE", "PREPARE", "MODIFY", "ASSEMBLE", "CONSTRUCT", "INSPECT", "INSERT", "SELECT"],
         "SHEET METAL" => &["CREATE", "MODIFY", "ASSEMBLE", "CONSTRUCT", "INSPECT", "INSERT", "SELECT"],
@@ -69,6 +69,7 @@ pub fn promoted(tab: &str, panel: &str) -> usize {
         ("SOLID", "CREATE") => 4,
         ("SOLID", "MODIFY") => 4,
         ("SKETCH", "CONSTRAINTS") => 6,
+        ("SKETCH", "PATTERN") => 3,
         (_, "FINISH SKETCH") => 1,
         _ => 2,
     }
@@ -166,6 +167,59 @@ fn report_rect(bar: Rect, captions: f32, tabs_start: f32, label_width: f32) -> (
     (Rect::from_min_size(pos2(right - width, bar.top() + 4.0), vec2(width, 26.0)), labeled)
 }
 
+/// The height of an application-bar pill ([`offer_pill`]), a little under the bar's 26 px buttons.
+pub(crate) const PILL_HEIGHT: f32 = 22.0;
+
+/// An application-bar pill for something on offer (Update) at the right of `span` (the bar's free
+/// space): accent-filled, with `icon` and the first of `labels` that fits (the icon alone when
+/// none does or `labeled` is false). Every label but the last also leaves `keep` points of the
+/// span free (for the document tabs). None when even the icon doesn't fit: it never covers the
+/// bar's other buttons. `handle` names it for scenarios.
+pub(crate) fn offer_pill(
+    ui: &mut egui::Ui,
+    span: Rect,
+    labeled: bool,
+    labels: &[&str],
+    keep: f32,
+    icon: &str,
+    handle: &str,
+) -> Option<(Rect, egui::Response)> {
+    let t = Tokens::get();
+    let font = FontId::proportional(12.5);
+    let (icon_x, text_x, right_pad) = (16.0, 29.0, 11.0);
+    let last = labels.len().saturating_sub(1);
+    let label = labels.iter().enumerate().filter(|_| labeled).find_map(|(i, text)| {
+        let galley = ui.fonts_mut(|f| f.layout_no_wrap(text.to_string(), font.clone(), t.app_bar_text));
+        let width = text_x + galley.size().x + right_pad;
+        let room = if i < last { span.width() - keep } else { span.width() };
+        (width <= room).then_some((*text, width))
+    });
+    let width = label.map_or(PILL_HEIGHT + 4.0, |(_, w)| w);
+    if width > span.width() {
+        return None;
+    }
+    let rect = Rect::from_min_size(pos2(span.right() - width, span.center().y - PILL_HEIGHT / 2.0), vec2(width, PILL_HEIGHT));
+    let response = ui.interact(rect, ui.id().with(("sc_offer_pill", handle)), Sense::click());
+    let name = label.map(|(text, _)| text).or(labels.first().copied()).unwrap_or_default().to_string();
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &name));
+    crate::scenario::publish_handle(handle, rect.center());
+    crate::scenario::publish_rect(handle, rect);
+    let hot = response.hovered() || response.has_focus();
+    let fill = if hot { t.accent.lerp_to_gamma(t.app_bar_text, 0.18) } else { t.accent };
+    let radius = PILL_HEIGHT / 2.0;
+    ui.painter().rect_filled(rect, radius, fill);
+    if response.has_focus() {
+        ui.painter().rect_stroke(rect.expand(2.0), radius + 2.0, Stroke::new(1.0, t.app_bar_text), egui::StrokeKind::Outside);
+    }
+    let glyph_x = if label.is_some() { rect.left() + icon_x } else { rect.center().x };
+    let glyph = Rect::from_center_size(pos2(glyph_x, rect.center().y), vec2(16.0, 16.0));
+    icons::paint(ui.painter(), glyph, icon, t.app_bar_text, fill, t.app_bar_text);
+    if let Some((text, _)) = label {
+        ui.painter().text(pos2(rect.left() + text_x, rect.center().y), Align2::LEFT_CENTER, text, font, t.app_bar_text);
+    }
+    Some((rect, response))
+}
+
 /// Where the Report a bug text starts, from the button's left edge.
 const REPORT_TEXT_X: f32 = 29.0;
 
@@ -206,6 +260,7 @@ pub fn app_bar(app: &mut SolveApp, ui: &mut egui::Ui) {
             resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, idle, &label));
             crate::scenario::publish_handle("appbar:file", br.center());
             crate::scenario::publish_handle("appbar:folder", br.center());
+            crate::scenario::publish_rect("appbar:file", br);
             let open = ui.ctx().data(|d| d.get_temp::<bool>(egui::Id::new("sc_file_menu")).unwrap_or(false));
             if idle && (resp.hovered() || open) {
                 ui.painter().rect_filled(br, 4.0, t.app_bar_hover);
@@ -222,6 +277,7 @@ pub fn app_bar(app: &mut SolveApp, ui: &mut egui::Ui) {
             let resp = ui.interact(br, ui.id().with(("ab", icon)), if enabled { Sense::click() } else { Sense::hover() });
             resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, tip));
             crate::scenario::publish_handle(&format!("appbar:{icon}"), br.center());
+            crate::scenario::publish_rect(&format!("appbar:{icon}"), br);
             if enabled && resp.hovered() {
                 ui.painter().rect_filled(br, 4.0, Color32::from_white_alpha(30));
             }
@@ -277,8 +333,10 @@ pub fn app_bar(app: &mut SolveApp, ui: &mut egui::Ui) {
                 d.insert_temp(egui::Id::new("sc_help_anchor"), at);
             });
         }
-        // A newer release: its Update button, left of Report a bug (`update`).
-        let update = crate::update::button(app, ui, report.left() - 6.0, report.top(), report_label);
+        // A newer release: its Update button, left of Report a bug (`update`), in the space up to
+        // the bar's own buttons on the left (File, Undo and Redo, which end before `x`).
+        let span = Rect::from_min_max(pos2(x, report.top()), pos2(report.left() - 6.0, report.bottom()));
+        let update = crate::update::button(app, ui, span, report_label);
         let tabs_end = update.map_or(report.left(), |u| u.left()) - 8.0;
         // Narrow title bars can fit only part of the tab strip. Its hit regions must not
         // extend into the persistent report and window controls.
@@ -289,6 +347,7 @@ pub fn app_bar(app: &mut SolveApp, ui: &mut egui::Ui) {
         let response = ui.interact(report, ui.id().with("sc_report_button"), Sense::click());
         response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), report_text));
         crate::scenario::publish_handle("titlebar:report", report.center());
+        crate::scenario::publish_rect("titlebar:report", report);
         ui.painter().rect_filled(report, 4.0, if response.hovered() || response.has_focus() { t.hover } else { t.app_bar });
         ui.painter().rect_stroke(report, 4.0, Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
         let icon = Rect::from_center_size(pos2(report.left() + 14.0, report.center().y), vec2(18.0, 18.0));
@@ -390,6 +449,10 @@ fn file_menu(app: &mut SolveApp, ctx: &egui::Context) {
                     app.start("file.insert_mesh");
                     close = true;
                 }
+                if item_if(ui, &format!("{}…", app.tr_label("Insert Design")), "", shown) {
+                    app.start("component.insert_design");
+                    close = true;
+                }
                 if item_if(ui, app.tr("ui.save"), "Ctrl+S", shown) {
                     save(app);
                     close = true;
@@ -403,20 +466,16 @@ fn file_menu(app: &mut SolveApp, ctx: &egui::Context) {
                     close = true;
                 }
                 ui.separator();
-                if item_if(ui, "Export STL…", "", shown) {
-                    export(app, "stl");
+                if item_if(ui, "Save as mesh…", "", shown) {
+                    app.start("file.save_mesh");
                     close = true;
                 }
                 if item_if(ui, "Export STEP…", "", shown) {
                     export(app, "step");
                     close = true;
                 }
-                if item_if(ui, "Export 3MF…", "", shown) {
-                    export(app, "3mf");
-                    close = true;
-                }
-                if item_if(ui, "Export 3MF with Face Tags…", "", shown) {
-                    export_as(app, "3mf", Some("3mf-tagged"));
+                if item_if(ui, app.tr_label("Export Current View as DXF…"), "", shown) {
+                    app.start("file.export_view_dxf");
                     close = true;
                 }
                 if item_if(ui, "Export OBJ…", "", shown) {
@@ -437,6 +496,16 @@ fn file_menu(app: &mut SolveApp, ctx: &egui::Context) {
                     close = true;
                 }
                 ui.separator();
+                // The browser can install SolidCraft as an app (`install`): only while it offers to.
+                if let Some(offer) = crate::install::offered(app)
+                    && ui
+                        .add(egui::Button::new(crate::i18n::tr("install.menu")).min_size(vec2(180.0, 22.0)))
+                        .on_hover_text(crate::i18n::tr("install.button_tip"))
+                        .clicked()
+                {
+                    crate::install::start(app, offer);
+                    close = true;
+                }
                 if item(ui, &format!("{}…", app.tr("ui.preferences")), "") {
                     app.prefs_window.open = true;
                     close = true;
@@ -539,7 +608,7 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
         caret(&painter, pos2(ws.center().x + 27.0, ws.top() + 52.0), t.text);
         painter.text(pos2(ws.center().x, ws.top() + 69.0), Align2::CENTER_CENTER, app.tr("ui.workspace"), FontId::proportional(10.0), t.text_dim);
         if wresp.on_hover_text(app.tr("ui.change_workspace")).clicked() {
-            crate::context_menu::open_for(app, ws.left_bottom(), crate::context_menu::Target::Workspace);
+            crate::context_menu::toggle_for(app, ws, ws.left_bottom(), crate::context_menu::Target::Workspace);
         }
         crate::scenario::publish_rect("toolbar", r);
         crate::scenario::publish_rect("workspace_switcher", ws);
@@ -611,7 +680,10 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
             if tab == "SKETCH" && panel == "CREATE" { (count.max(1) as f32 * 68.0).max(64.0) + 8.0 } else { panel_width(count) }
         };
         let widths: Vec<f32> = lists.iter().map(|(panel, _, shown)| width_of(panel, shown.len())).collect();
-        let fits = fit(&widths, r.right() - 40.0 - px);
+        // The AI button keeps the toolbar row's right end, whatever the ribbon's width
+        // (docs/agent-chat.md); panels that no longer fit go to the » menu as usual.
+        let right = if crate::agent_chat::toolbar_button_shown(app) { r.right() - AI_BUTTON_ROOM } else { r.right() };
+        let fits = fit(&widths, right - 40.0 - px);
         crate::scenario::publish_count("toolbar_collapsed", fits.iter().filter(|f| **f == Fit::Collapsed).count() as f64);
         crate::scenario::publish_count("toolbar_more", fits.iter().filter(|f| **f == Fit::More).count() as f64);
         for ((panel, cmds, shown), fit) in lists.into_iter().zip(fits) {
@@ -784,8 +856,16 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
             let gy = lr.center().y - g.size().y / 2.0;
             painter.galley(pos2(gx, gy), g, lc);
             caret(&painter, pos2(gx + gw / 2.0 + 6.0, lr.center().y), lc);
+            // The label toggles its drop-down (#1522).
             if lresp.clicked() {
-                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("sc_panel_open"), popup_id));
+                ui.ctx().data_mut(|d| {
+                    let key = egui::Id::new("sc_panel_open");
+                    if d.get_temp::<egui::Id>(key) == Some(popup_id) {
+                        d.remove::<egui::Id>(key);
+                    } else {
+                        d.insert_temp(key, popup_id);
+                    }
+                });
             }
             // Labels, gaps and margins append; actual buttons keep their insert-before target.
             // Respect the current layer so a dropdown covering the panel is not a drop target.
@@ -871,7 +951,7 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
             px += 2.0;
         }
         if !overflow.is_empty() {
-            let at = Rect::from_min_size(pos2(px.min(r.right() - 40.0), top + 4.0), vec2(38.0, 52.0));
+            let at = Rect::from_min_size(pos2(px.min(right - 40.0), top + 4.0), vec2(38.0, 52.0));
             ui.scope_builder(egui::UiBuilder::new().max_rect(at), |ui| {
                 let response = ui.menu_button("»", |ui| {
                     for (panel, cmds) in &overflow {
@@ -898,6 +978,9 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
                 crate::scenario::publish_handle("toolbar:overflow", response.response.rect.center());
                 response.response.on_hover_text(crate::i18n::tr_label("More toolbar panels"));
             });
+        }
+        if right < r.right() {
+            ai_button(app, ui, Rect::from_min_max(pos2(right + 4.0, r.top() + 4.0), pos2(r.right() - 6.0, r.bottom() - 5.0)));
         }
         painter.line_segment([pos2(r.left(), r.bottom() - 0.5), pos2(r.right(), r.bottom() - 0.5)], Stroke::new(1.0, t.border));
         // Dragging a command: its icon follows the pointer; a toolbar button dragged off the
@@ -926,6 +1009,40 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
             crate::context_menu::open_for(app, at, crate::context_menu::Target::ToolbarCommand { id: id.to_string() });
         }
     });
+}
+
+/// Room the AI button takes at the toolbar row's right end.
+const AI_BUTTON_ROOM: f32 = 52.0;
+
+/// The AI button: shows and hides the agent chat panel (lit while it is open).
+fn ai_button(app: &mut SolveApp, ui: &mut egui::Ui, at: Rect) {
+    let t = Tokens::get();
+    let resp = ui.interact(at, ui.id().with("ai_button"), Sense::click());
+    crate::scenario::publish_handle("toolbar:ai", at.center());
+    let open = app.agent_chat.open;
+    let painter = ui.painter();
+    painter.line_segment([pos2(at.left() - 4.0, at.top() + 4.0), pos2(at.left() - 4.0, at.bottom() - 4.0)], Stroke::new(1.0, t.border));
+    if open || resp.hovered() {
+        painter.rect_filled(at, 4.0, if open { t.accent_soft } else { t.hover });
+    }
+    icons::paint(
+        painter,
+        Rect::from_center_size(pos2(at.center().x, at.top() + 24.0), vec2(26.0, 26.0)),
+        "agent_chat",
+        t.icon,
+        t.icon_fill,
+        t.accent,
+    );
+    painter.text(pos2(at.center().x, at.top() + 52.0), Align2::CENTER_CENTER, crate::i18n::tr("ui.ai_button"), FontId::proportional(11.0), t.text);
+    let waiting = app.agent_chat.waiting();
+    if waiting > 0 {
+        let c = pos2(at.right() - 6.0, at.top() + 9.0);
+        painter.circle_filled(c, 6.0, t.warning);
+        painter.text(c, Align2::CENTER_CENTER, waiting.min(9).to_string(), FontId::proportional(9.5), t.toolbar);
+    }
+    if resp.on_hover_text(crate::agent_chat::panel_tip()).clicked() {
+        crate::agent_chat::toggle(app);
+    }
 }
 
 /// What a click on a panel drop-down row asks for.
@@ -1172,7 +1289,7 @@ pub fn shortcuts(app: &mut SolveApp, ctx: &egui::Context) {
     }
     // A dimension value that is taking the keyboard: letters belong to it (a parameter name
     // starting with L or D), even on the frame before its field holds the focus.
-    if ctx.egui_wants_keyboard_input() || crate::dim_view::editing() {
+    if ctx.egui_wants_keyboard_input() || crate::dim_view::editing() || crate::dialogs_save_mesh::popup_open(ctx) {
         return;
     }
     let (keys, mods) = ctx.input(|i| {
@@ -1182,8 +1299,16 @@ pub fn shortcuts(app: &mut SolveApp, ctx: &egui::Context) {
     });
     // Home hides the design: only New, Open and Preferences work there.
     let shown = design_shown(app);
+    if shown {
+        crate::edit_clipboard::handle(app, ctx);
+    } else {
+        crate::edit_clipboard::flush(ctx);
+    }
     for k in keys {
         use egui::Key;
+        if shown && crate::navigation::view_key(app, ctx, k, mods) {
+            continue;
+        }
         if mods.command {
             match k {
                 Key::N => crate::documents::new_design(app),
@@ -1198,6 +1323,8 @@ pub fn shortcuts(app: &mut SolveApp, ctx: &egui::Context) {
                 _ if !shown => {}
                 Key::Z => drop(app.run("edit.undo", json!({}))),
                 Key::Y => drop(app.run("edit.redo", json!({}))),
+                // Copy, Cut and Paste (`edit_clipboard::handle`).
+                Key::C | Key::X | Key::V if !mods.shift && !mods.alt => {}
                 Key::S => save(app),
                 _ => crate::keymap::press(app, &crate::keymap::key_name(k, mods)),
             }
@@ -1721,5 +1848,35 @@ mod icon_accent_tests {
             let seen = solidcraft_engine::find_command(id).map(|c| (c.tab, c.panel, c.icon));
             assert_eq!(seen, Some(("SKETCH", "CREATE", icon)), "{id} must be on the SKETCH CREATE panel");
         }
+    }
+}
+
+#[cfg(test)]
+mod dropdown_toggle_tests {
+    use crate::scenario::{Harness, rect_of};
+    use serde_json::json;
+
+    /// A second click on the button that opened a drop-down closes it (#1522): the workspace
+    /// switcher's menu, and a panel's command list.
+    #[test]
+    fn a_second_click_on_its_button_closes_a_drop_down() {
+        let mut h = Harness::new();
+        h.frames(3);
+        let ws = rect_of("workspace_switcher").unwrap().center();
+        h.step(&json!({"click": [ws.x, ws.y]})).unwrap();
+        assert!(h.app.viewport.context_menu.is_some(), "the first click opens the workspace menu");
+        h.step(&json!({"click": [ws.x, ws.y]})).unwrap();
+        h.frames(2);
+        assert!(h.app.viewport.context_menu.is_none(), "the second click closes it instead of reopening it");
+        h.step(&json!({"click": [ws.x, ws.y]})).unwrap();
+        assert!(h.app.viewport.context_menu.is_some(), "and a third opens it again");
+        h.step(&json!({"key": "Escape"})).unwrap();
+
+        h.step(&json!({"click": {"handle": "panel:SOLID:CREATE"}})).unwrap();
+        h.frames(2);
+        assert!(rect_of("toolbar_dropdown").is_some(), "the first click opens the panel's list");
+        h.step(&json!({"click": {"handle": "panel:SOLID:CREATE"}})).unwrap();
+        h.frames(2);
+        assert!(rect_of("toolbar_dropdown").is_none(), "the second click closes it");
     }
 }

@@ -257,11 +257,13 @@ fn startup_steps_survive_a_rebase_and_running_ends_startup() {
     j.phase = Some(json!({"phase": "first frame", "ms": 5}).to_string());
     j.environment = Some(json!({"environment": "Renderer: X"}).to_string());
     j.rebase(&json!("new"), 1);
-    let r = read_journal(j.path.as_ref().unwrap());
+    // Read through the journal's own handle, as `read_live_journal` does: Windows refuses a
+    // second handle on a live journal's locked range (#1448).
+    let r = read_journal_file(j.file.as_ref().unwrap().try_clone().unwrap());
     assert_eq!(r.phase, Some(("first frame".to_string(), 5)));
     assert_eq!(r.environment.as_deref(), Some("Renderer: X"));
     j.write(&json!({"phase": RUNNING, "ms": 9}).to_string());
-    let r = read_journal(j.path.as_ref().unwrap());
+    let r = read_journal_file(j.file.as_ref().unwrap().try_clone().unwrap());
     assert_eq!(r.phase, Some((RUNNING.to_string(), 9)));
     assert!(from_journal(r).fields.get("startup_phase").is_none(), "a running app is past startup");
     drop(j);

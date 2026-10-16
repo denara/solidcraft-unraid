@@ -180,6 +180,9 @@ pub(super) fn refresh(s: &Session, doc: &Document, id: u64, sk: &mut Sketch) -> 
     }
     let doc = placed_candidate(s, doc);
     let (vals, _) = doc.param_values();
+    // A text's outlines are rebuilt from its numbers: the ones its expressions give come first
+    // (an expression that cannot be evaluated leaves the text as it was).
+    let _ = doc.apply_text_values(&vals, sk);
     let st = s.model.state_before(id);
     let attachment = doc.feature(id).and_then(|feature| match &feature.kind {
         solidcraft_doc::FeatureKind::Sketch { plane, .. } => super::sketch::face::anchor(plane),

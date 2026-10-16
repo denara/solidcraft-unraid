@@ -1753,6 +1753,33 @@ fn draft_of_a_round_ended_pocket() {
     assert!(rel(v, 80.0 * 60.0 * 25.0 - pocket) < 1e-4, "{v} vs {}", 80.0 * 60.0 * 25.0 - pocket);
 }
 
+/// Rounded edges elsewhere on the body don't stop a draft: only the faces round the drafted
+/// walls' corners must be walls or caps, the rest keep their surfaces and edges.
+#[test]
+fn draft_of_a_pocket_on_a_body_with_a_far_rounded_edge() {
+    let block = box_solid(Vec3::ZERO, Vec3::new(80.0, 60.0, 25.0)).unwrap();
+    let tool = box_solid(Vec3::new(25.0, 20.0, 15.0), Vec3::new(55.0, 40.0, 30.0)).unwrap();
+    let b = boolean(&block, &tool, BoolOp::Cut).unwrap().unwrap();
+    // The bottom edge along x at y = 0: a cylinder (and two sphere-free ends) far from the pocket.
+    let r = 2.0;
+    let b = fillet(&b, &[Vec3::new(40.0, 0.0, 0.0)], r).unwrap();
+    let faces_before = measure(&b).unwrap().merged.faces;
+    let walls = [Vec3::new(25.0, 30.0, 20.0), Vec3::new(40.0, 20.0, 20.0), Vec3::new(55.0, 30.0, 20.0), Vec3::new(40.0, 40.0, 20.0)];
+    let a = 5f64.to_radians();
+    let d = draft(&b, &walls, &Plane::XY.offset(25.0), Vec3::Z, a).unwrap();
+    // The pocket narrows going down: at depth t its walls stand t·tan(a) further in.
+    let (n, mut pocket) = (2000, 0.0);
+    for k in 0..n {
+        let e = (k as f64 + 0.5) / n as f64 * 10.0 * a.tan();
+        pocket += (30.0 - 2.0 * e) * (20.0 - 2.0 * e) * 10.0 / n as f64;
+    }
+    let round = (r * r - PI * r * r / 4.0) * 80.0;
+    let want = 80.0 * 60.0 * 25.0 - round - pocket;
+    let m = measure(&d).unwrap();
+    assert!(rel(m.volume, want) < 1e-4, "{} vs {want}", m.volume);
+    assert_eq!(m.merged.faces, faces_before, "the round and every other face survive");
+}
+
 /// A round wall is stored in pieces (a cylinder's two halves); one pick drafts all of it (#547).
 /// A hole drafted from the top narrows going down: a frustum from R 10 to 10 − 25 · tan 5°.
 #[test]
