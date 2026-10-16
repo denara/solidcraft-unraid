@@ -670,10 +670,36 @@ SHA256: `7a7ed1eec37013167bfb4c819db867e9c866e50018e7db41bf66b7b51823b432`.
 Exported manifest names the expected image tag. Private diagnostics and public proof models
 remain under ignored target/unraid-update-3707a67c, excluded from Git and build context.
 The canonical CA template and original icon still match denara/unraid-templates; no catalog
-commit or portal action is required. Publication/local replacement evidence follows below
-once verified. No Unraid installation or nginx/DNS change is performed.
+commit or portal action is required. Publication/local replacement evidence follows below. No Unraid installation or nginx/DNS change is performed.
 
 Before updating Unraid, back up server files and separately export browser designs; preserve
 the existing token, data mapping and settings. Reload the browser after the container update.
 Format25 saves require this snapshot or a compatible newer build; the released 0.13.1 and
 older images must not be assumed to reopen them. Keep pre-update copies for rollback.
+Publication passed [container workflow 38867713254](https://github.com/denara/solidcraft-unraid/actions/runs/38867713254)
+from validated source/merge commit `8e0bc62b0c6ce3284506df38ae0d9ce5297ac1a7` on
+codex/unraid-mcp-web. The fresh CI image passed modelling, PNG/STEP, independent sessions,
+auth/origin/file/font/diagnostic/stored-link checks, persisted reopen after restart, browser
+assets and operational logging/privacy checks before pushing the immutable source tag and latest.
+Public image: `ghcr.io/denara/solidcraft-unraid:latest`, immutable tag
+`sha-8e0bc62b0c6ce3284506df38ae0d9ce5297ac1a7` (Linux amd64).
+Digest: `sha256:d3fcdf5a53afe75995da524ce6eaf494e0619d1e94017fa83bb933624e89aa6e`.
+Both tags pulled anonymously through an empty Docker configuration, and an anonymous
+manifest request returned HTTP 200 with matching digest, OCI source revision and architecture.
+
+The sole remaining local runtime `solvecraft-solvecraft-1` runs that immutable public image,
+healthy at 0.13.1. A private pre-replacement data/config backup and the previous public
+0.11.0 image `solvecraft-unraid:rollback-before-3707a67c` remain available. The same data
+volume, token, complete environment, user, ports/origins and security/resource limits were
+verified after replacement. Authenticated SDK modelling/PNG and read-only reopening of the
+known public saved example at 24000 mm3 passed without saving over existing data. The actual
+independent browser visibly rendered Sample Plate at 0.13.1 after replacement.
+Five owned obsolete check, fixture, offline, supplement and candidate containers were removed
+only after label, image, workspace/volume mount and activity inspection. No volumes were deleted.
+Diagnostics, reusable toolchain/browser images, Cargo/build caches, private backups and the
+previous image remain available. No CA metadata commit, Unraid installation or nginx/DNS
+change was needed. On Unraid, back up server designs and separately export browser designs,
+update the existing container with unchanged settings/data/token, and reload the browser.
+Format25 designs require this snapshot or a compatible newer build for reopening.
+The final upstream fetch observed `db1fd39139596ecfcce0c27dfcc9fa33d1c45e5b`; changes after the fixed target
+are deferred to the next update run.
