@@ -14,11 +14,16 @@ use crate::config::Config;
 
 const MAX_REPLY: u64 = 64 << 20;
 
+fn tool_error(message: &Value, error: &str) -> Value {
+    json!({"jsonrpc":"2.0","id":message.get("id").cloned().unwrap_or(Value::Null),"result":{"isError":true,"content":[{"type":"text","text":error}]}})
+}
+
 pub struct Worker {
     child: Child,
     input: ChildStdin,
     output: BufReader<ChildStdout>,
     failed: bool,
+    model: Arc<std::sync::Mutex<crate::workspace_model::ModelStatus>>,
     // Fields drop in declaration order: kill the child, then release its permit,
     // then report the actual freed capacity (even after an in-flight DELETE).
     _slot: OwnedSemaphorePermit,
@@ -164,6 +169,16 @@ mod tests {
         assert!(rows.contains("cad.exchange_failed") && rows.contains("cad_failure"));
         assert!(rows.contains("slots=0/1") && !rows.contains(&id));
     }
+
+    #[tokio::test]
+    async fn tool_notifications_do_not_execute_preflight_or_return_null_id_errors() {
+        let fixture = Fixture::new();
+        let (_id, worker, log_id) = fixture.state.create("2025-06-18".into()).await.unwrap();
+        let notification = json!({"jsonrpc":"2.0","method":"tools/call","params":{"name":"execute","arguments":{"command":"motion.export_animation","params":{"path":"frames"}}}});
+        assert!(fixture.state.exchange(Arc::clone(&worker), notification, log_id).await.unwrap().is_none());
+        assert!(!worker.lock().await.failed);
+        assert!(!fixture.rows().iter().any(|row| row.contains("cad.timed_out") || row.contains("cad.exchange_failed")));
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -205,7 +220,12 @@ impl Drop for Lease {
 }
 
 impl Worker {
-    fn start(config: &Config, slot: OwnedSemaphorePermit, mut lease: Lease) -> Result<Self, String> {
+    fn start(
+        config: &Config,
+        slot: OwnedSemaphorePermit,
+        mut lease: Lease,
+        model: Arc<std::sync::Mutex<crate::workspace_model::ModelStatus>>,
+    ) -> Result<Self, String> {
         let mut child = Command::new(&config.cli)
             .arg("mcp")
             .arg("--allow-path")
@@ -223,7 +243,7 @@ impl Worker {
         let input = child.stdin.take().ok_or("CAD stdin unavailable")?;
         let output = BufReader::new(child.stdout.take().ok_or("CAD stdout unavailable")?);
         lease.started = true;
-        Ok(Self { _slot: slot, child, input, output, failed: false, lease })
+        Ok(Self { _slot: slot, child, input, output, failed: false, model, lease })
     }
 
     async fn exchange(&mut self, message: &Value) -> Result<Option<Value>, String> {
@@ -255,6 +275,7 @@ pub struct Entry {
     pub touched: Instant,
     pub version: String,
     pub log_id: String,
+    pub model: Arc<std::sync::Mutex<crate::workspace_model::ModelStatus>>,
     reason: Arc<AtomicU8>,
 }
 
@@ -263,12 +284,25 @@ pub struct State {
     pub config: Config,
     pub sessions: Mutex<HashMap<String, Entry>>,
     pub audit: Arc<Audit>,
+    pub browser: crate::workspace::BrowserAuth,
+    pub file_gate: Arc<Mutex<()>>,
 }
 
 impl State {
     pub fn new(config: Config) -> Self {
         let audit = Arc::new(Audit::new(config.log_color));
-        Self { slots: Arc::new(Semaphore::new(config.max_sessions)), config, sessions: Mutex::new(HashMap::new()), audit }
+        Self {
+            slots: Arc::new(Semaphore::new(config.max_sessions)),
+            config,
+            sessions: Mutex::new(HashMap::new()),
+            audit,
+            browser: Default::default(),
+            file_gate: Arc::new(Mutex::new(())),
+        }
+    }
+
+    pub fn slots_used(&self) -> usize {
+        self.config.max_sessions.saturating_sub(self.slots.available_permits())
     }
 
     pub async fn expire(&self) {
@@ -320,17 +354,20 @@ impl State {
             total: self.config.max_sessions,
             started: false,
         };
-        let worker = Arc::new(Mutex::new(Worker::start(&self.config, slot, lease).inspect_err(|_| {
+        let model = Arc::new(std::sync::Mutex::new(crate::workspace_model::ModelStatus::default()));
+        let worker = Arc::new(Mutex::new(Worker::start(&self.config, slot, lease, Arc::clone(&model)).inspect_err(|_| {
             self.audit.emit(Event::StartFailed, json!({"reason":"process_start_failed"}));
         })?));
-        sessions.insert(id.clone(), Entry { worker: Arc::clone(&worker), touched: Instant::now(), version, log_id: log_id.clone(), reason });
+        sessions.insert(id.clone(), Entry { worker: Arc::clone(&worker), touched: Instant::now(), version, log_id: log_id.clone(), reason, model });
         self.audit.emit(Event::Opened, json!({"session":log_id,"active_sessions":sessions.len(),"slots_used":self.config.max_sessions.saturating_sub(self.slots.available_permits()),"slots_total":self.config.max_sessions}));
         Ok((id, worker, log_id))
     }
 
-    pub async fn exchange(&self, worker: Arc<Mutex<Worker>>, message: Value, log_id: String) -> Result<Option<Value>, String> {
+    pub async fn exchange(&self, worker: Arc<Mutex<Worker>>, mut message: Value, log_id: String) -> Result<Option<Value>, String> {
         let timeout = self.config.timeout;
         let audit = Arc::clone(&self.audit);
+        let file_gate = Arc::clone(&self.file_gate);
+        let root = self.config.files.clone();
         // A disconnected HTTP client must not abandon a read and leave a late reply in
         // the pipe. The spawned task finishes the transaction even if its caller leaves.
         tokio::spawn(async move {
@@ -338,7 +375,56 @@ impl State {
                 audit.emit(Event::Busy, json!({"session":log_id,"reason":"concurrent_request"}));
                 "CAD session is busy; send one request at a time".to_string()
             })?;
-            let result = match tokio::time::timeout(timeout, worker.exchange(&message)).await {
+            let is_tool = message.get("method").and_then(Value::as_str) == Some("tools/call");
+            if is_tool && message.get("id").is_none() {
+                return Ok(None);
+            }
+            let expected = message
+                .pointer_mut("/params/arguments")
+                .and_then(Value::as_object_mut)
+                .and_then(|a| a.remove("expected_revisions"))
+                .unwrap_or(Value::Null);
+            let previous = worker.model.lock().map_err(|_| "model metadata unavailable")?.clone();
+            let operations = crate::workspace_model::operations(&root, &message, previous.current_file.as_deref());
+            let operations = match operations {
+                Ok(ops) => ops,
+                Err(error) => return Ok(Some(tool_error(&message, &error))),
+            };
+            let _files = if operations.is_empty() { None } else { Some(file_gate.lock().await) };
+            let check_root = root.clone();
+            let check_ops = operations.clone();
+            if let Err(error) =
+                tokio::task::spawn_blocking(move || crate::workspace_model::check_revisions(&check_root, &previous, &check_ops, &expected))
+                    .await
+                    .map_err(|_| "revision check unavailable")?
+            {
+                return Ok(Some(tool_error(&message, &error)));
+            }
+            let transaction = async {
+                let reply = worker.exchange(&message).await?;
+                if is_tool || message.get("method").and_then(Value::as_str) == Some("initialize") {
+                    let probe =
+                        json!({"jsonrpc":"2.0","id":format!("workspace-{}",uuid::Uuid::new_v4()),"method":"solidcraft/workspaceStatus","params":{}});
+                    let status = worker.exchange(&probe).await?;
+                    if let Some(status) = status.and_then(|value| value.get("result").cloned()) {
+                        let success = reply
+                            .as_ref()
+                            .is_some_and(|r| r.get("error").is_none() && r.pointer("/result/isError").and_then(Value::as_bool) != Some(true));
+                        let refreshed = success && crate::workspace_model::refreshes_current(&operations, &status, &root);
+                        let mut next_model = worker.model.lock().map_err(|_| "model metadata unavailable")?.clone();
+                        let status_root = root.clone();
+                        let next_model = tokio::task::spawn_blocking(move || {
+                            next_model.update(&status_root, &status, refreshed);
+                            next_model
+                        })
+                        .await
+                        .map_err(|_| "model metadata unavailable")?;
+                        *worker.model.lock().map_err(|_| "model metadata unavailable")? = next_model;
+                    }
+                }
+                Ok(reply)
+            };
+            let result = match tokio::time::timeout(timeout, transaction).await {
                 Ok(result) => result,
                 Err(_) => {
                     worker.lease.reason.store(EndReason::Timeout as u8, Ordering::Relaxed);

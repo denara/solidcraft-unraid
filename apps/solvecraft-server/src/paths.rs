@@ -15,6 +15,9 @@ pub fn resolve(root: &Path, name: &str) -> Result<PathBuf, String> {
     if relative.components().any(|c| !matches!(c, Component::Normal(_))) {
         return Err("absolute paths and parent traversal are not allowed".into());
     }
+    if relative.to_str().is_none_or(|name| !crate::workspace_files::visible_name(name)) {
+        return Err("hidden, temporary and reserved file names are not allowed".into());
+    }
     let mut out = root.to_path_buf();
     for component in relative.components() {
         out.push(component.as_os_str());
@@ -45,7 +48,25 @@ pub fn prepare_tool(root: &Path, tool: &str, value: &mut Value) -> Result<(), St
     match tool {
         "crash_reports" => Err("shared desktop crash reports are unavailable through the network gateway".into()),
         "open" | "save" | "export" | "screenshot" => file_fields(root, value),
-        "execute" | "batch" => commands(root, value, 0),
+        "execute" => commands(root, value, 0),
+        "batch" => {
+            // The MCP worker accepts `id` as a batch-step alias for `command`.
+            // Normalize only actual steps, never arbitrary geometry/feature IDs.
+            if let Some(steps) = value.get_mut("commands").and_then(Value::as_array_mut) {
+                if steps.len() > 1000 {
+                    return Err("too many batch commands".into());
+                }
+                for step in steps {
+                    if let Some(object) = step.as_object_mut()
+                        && !object.contains_key("command")
+                        && let Some(id) = object.get("id").and_then(Value::as_str).map(str::to_owned)
+                    {
+                        object.insert("command".into(), Value::String(id));
+                    }
+                }
+            }
+            commands(root, value, 0)
+        }
         _ => Ok(()),
     }
 }
@@ -145,6 +166,30 @@ mod tests {
         let mut link = json!({"command":"component.insert_design","params":{"path":"part.solidcraft"}});
         prepare_tool(&root, "execute", &mut link).unwrap();
         assert_eq!(link["params"]["path"], root.join("part.solidcraft").to_string_lossy().as_ref());
+    }
+
+    #[test]
+    fn batch_aliases_get_the_same_path_and_recovery_checks() {
+        let root = std::env::temp_dir();
+        let mut save = json!({"commands":[{"id":"file.save","params":{"path":"part.solidcraft"}}]});
+        prepare_tool(&root, "batch", &mut save).unwrap();
+        assert_eq!(save["commands"][0]["command"], "file.save");
+        assert_eq!(save["commands"][0]["params"]["path"], root.join("part.solidcraft").to_string_lossy().as_ref());
+        for (command, params) in [("doc.recover", json!({})), ("file.save", json!({"path":"../escape.solidcraft"}))] {
+            assert!(prepare_tool(&root, "batch", &mut json!({"commands":[{"id":command,"params":params}]})).is_err());
+        }
+        // A string feature ID nested in data must not turn into a command.
+        let mut data = json!({"commands":[{"command":"timeline.add","params":{"feature":{"id":"file.save"}}}]});
+        prepare_tool(&root, "batch", &mut data).unwrap();
+        assert!(data["commands"][0]["params"]["feature"].get("command").is_none());
+    }
+
+    #[test]
+    fn hidden_temporary_and_backup_names_are_reserved() {
+        let root = std::env::temp_dir();
+        for name in [".private", "folder/.private", "part.tmp", "part.part", "part.upload", "part.solidcraft~", "part.solidcraft.bak", "part.BAK"] {
+            assert!(resolve(&root, name).is_err(), "{name}");
+        }
     }
 
     #[cfg(unix)]

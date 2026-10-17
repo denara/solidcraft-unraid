@@ -1,6 +1,6 @@
 # SolidCraft roadmap
 
-Status as of **2026-10-14**. SolidCraft supports parametric modelling (sketch →
+Status as of **2026-10-17**. SolidCraft supports parametric modelling (sketch →
 features → parametric timeline) as an open, pure-Rust, agent-drivable application.
 
 ## At a glance
@@ -10,6 +10,9 @@ authenticated Streamable HTTP adapter for the existing headless MCP CLI. Separat
 sessions share explicitly saved files on a persistent volume; see [Unraid setup](docs/unraid.md).
 The gateway also records authentication outcomes and actual session/process-slot lifecycle
 with timestamps, severity labels and icons, while omitting sensitive data and routine traffic.
+Its protected `/workspace` page lists saved files and actual per-session model/dirty state,
+with independent browser authentication, downloads and optimistic file revisions shared by
+MCP and HTTP uploads. Browser CAD remains independent; see the Unraid setup for limits.
 Requested upstream updates use the repository's
 [update skill](.agents/skills/update-solvecraft-unraid/SKILL.md), with a fixed target snapshot,
 isolated validation and local-only private deployment settings.

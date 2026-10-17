@@ -26,6 +26,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .layer(from_fn_with_state(Arc::clone(&state), authorize));
     Router::new()
         .merge(protected)
+        .merge(crate::workspace::routes())
         .route("/health", get(|| async { Json(json!({"status":"ok","version":env!("CARGO_PKG_VERSION")})) }))
         .fallback_service(ServeDir::new(&state.config.web).append_index_html_on_directories(true))
         .layer(DefaultBodyLimit::max(16 << 20))
@@ -40,7 +41,7 @@ fn header_str<'a>(headers: &'a HeaderMap, key: &str) -> Option<&'a str> {
     headers.get(key).and_then(|v| v.to_str().ok())
 }
 
-fn token_matches(provided: &[u8], expected: &[u8]) -> bool {
+pub(crate) fn token_matches(provided: &[u8], expected: &[u8]) -> bool {
     // Compare all expected bytes even after a mismatch. Tokens have bounded lengths.
     let mut diff = provided.len() ^ expected.len();
     for (i, byte) in expected.iter().enumerate() {
@@ -112,6 +113,9 @@ async fn mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, bytes: Byte
     if let Err(e) = validate(&message) {
         return failure(StatusCode::BAD_REQUEST, id, e);
     }
+    if message.get("method").and_then(Value::as_str) == Some("solidcraft/workspaceStatus") {
+        return failure(StatusCode::BAD_REQUEST, id, "internal method is unavailable through HTTP; use session_status");
+    }
     let initialize = message.get("method").and_then(Value::as_str) == Some("initialize");
     if initialize && (message.get("id").is_none() || headers.contains_key(SESSION)) {
         return failure(StatusCode::BAD_REQUEST, id, "initialize needs an ID and must not reuse a session ID");
@@ -151,6 +155,33 @@ async fn mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, bytes: Byte
     };
     let tool = message.pointer("/params/name").and_then(Value::as_str).unwrap_or_default().to_owned();
     let method = message.get("method").and_then(Value::as_str).unwrap_or_default().to_owned();
+    // Match stdio: tool notifications neither execute nor receive a null-ID reply.
+    if method == "tools/call" && message.get("id").is_none() {
+        return StatusCode::ACCEPTED.into_response();
+    }
+    if method == "tools/call" && matches!(tool.as_str(), "workspace_list_files" | "session_status") {
+        if message.get("id").is_none() {
+            return StatusCode::ACCEPTED.into_response();
+        }
+        let result = if tool == "workspace_list_files" {
+            crate::workspace::file_tool(&state, message.pointer("/params/arguments").unwrap_or(&Value::Null)).await
+        } else {
+            let sessions = state.sessions.lock().await;
+            sessions.get(&session_id).ok_or_else(|| "session ended".to_string()).and_then(|entry| {
+                let mut status = entry.model.lock().map_err(|_| "model status unavailable")?.snapshot();
+                status["display_id"] = json!(entry.log_id.chars().take(14).collect::<String>());
+                status["request_in_flight"] = json!(entry.worker.try_lock().is_err());
+                Ok(status)
+            })
+        };
+        return match result {
+            Ok(value) => {
+                Json(json!({"jsonrpc":"2.0","id":id,"result":{"structuredContent":value,"content":[{"type":"text","text":value.to_string()}]}}))
+                    .into_response()
+            }
+            Err(error) => Json(json!({"jsonrpc":"2.0","id":id,"result":{"isError":true,"content":[{"type":"text","text":error}]}})).into_response(),
+        };
+    }
     if message.get("method").and_then(Value::as_str) == Some("tools/call")
         && let Some(args) = message.get_mut("params").and_then(Value::as_object_mut).map(|p| p.entry("arguments").or_insert_with(|| json!({})))
         && let Err(e) = paths::prepare_tool(&state.config.files, &tool, args)
@@ -168,6 +199,12 @@ async fn mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, bytes: Byte
                 && let Some(tools) = reply.pointer_mut("/result/tools").and_then(Value::as_array_mut)
             {
                 tools.retain(|tool| tool.get("name").and_then(Value::as_str) != Some("crash_reports"));
+                for definition in tools.iter_mut() {
+                    if matches!(definition.get("name").and_then(Value::as_str), Some("save" | "export" | "screenshot" | "execute" | "batch")) {
+                        definition["inputSchema"]["properties"]["expected_revisions"] = json!({"type":"object","additionalProperties":{"type":"string"},"description":"Optional map of relative output file names to revisions from workspace_list_files. Existing files require a matching revision or the session's loaded revision; conflicts retain the in-memory model."});
+                    }
+                }
+                tools.extend(crate::workspace::tools());
             }
             if reply.get("error").is_some() || reply.pointer("/result/isError").and_then(Value::as_bool) == Some(true) {
                 state.audit.emit(Event::ToolFailed, json!({"session":log_id,"reason":"cad_request_rejected"}));
@@ -175,7 +212,7 @@ async fn mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, bytes: Byte
             if initialize && let Some(instructions) = reply.pointer_mut("/result/instructions") {
                 let text = instructions.as_str().unwrap_or_default();
                 *instructions = Value::String(format!(
-                    "{text} Deployment: this is a separate headless model, independent of the browser app. File paths are relative to the shared persistent files directory. Save explicitly before session expiry or restart, then open the saved file in a new session. Exported files can be downloaded with the same Bearer authentication from /files/<relative-path>."
+                    "{text} Deployment: this is a separate headless model, independent of the browser app. File paths are relative to the shared persistent files directory. Save explicitly before session expiry or restart, then open the saved file in a new session. Exported files can be downloaded with the same Bearer authentication from /files/<relative-path>. Use workspace_list_files for saved files and session_status for your model's file and unsaved changes. Existing output files require the loaded file revision or an expected_revisions map obtained with workspace_list_files(path). On conflict your model is retained: reopen deliberately or save under a new name. The read-only browser workspace is /workspace."
                 ));
             }
             Json(reply).into_response()
@@ -218,7 +255,7 @@ async fn close(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Respon
     .into_response()
 }
 
-async fn download(State(state): State<Arc<AppState>>, Path(name): Path<String>) -> Response {
+pub(crate) async fn download(State(state): State<Arc<AppState>>, Path(name): Path<String>) -> Response {
     let path = match paths::resolve(&state.config.files, &name) {
         Ok(p) => p,
         Err(e) => return failure(StatusCode::BAD_REQUEST, Value::Null, &e),
@@ -236,11 +273,29 @@ async fn download(State(state): State<Arc<AppState>>, Path(name): Path<String>) 
     ([(header::CONTENT_TYPE, "application/octet-stream"), (header::CONTENT_DISPOSITION, "attachment")], body).into_response()
 }
 
-async fn upload(State(state): State<Arc<AppState>>, Path(name): Path<String>, bytes: Bytes) -> Response {
+async fn upload(State(state): State<Arc<AppState>>, Path(name): Path<String>, headers: HeaderMap, bytes: Bytes) -> Response {
+    let _files = state.file_gate.lock().await;
     let path = match paths::resolve(&state.config.files, &name) {
         Ok(p) => p,
         Err(e) => return failure(StatusCode::BAD_REQUEST, Value::Null, &e),
     };
+    let root = state.config.files.clone();
+    let check_name = name.clone();
+    let actual = match tokio::task::spawn_blocking(move || crate::workspace_files::revision(&root, &check_name)).await {
+        Ok(Ok(actual)) => actual,
+        _ => return failure(StatusCode::BAD_REQUEST, Value::Null, "cannot inspect upload target"),
+    };
+    let expected = header_str(&headers, "if-match");
+    if (actual.is_some() && header_str(&headers, "if-none-match") == Some("*")) || expected.is_some_and(|e| actual.as_deref() != Some(e)) {
+        return failure(
+            StatusCode::PRECONDITION_FAILED,
+            Value::Null,
+            "file revision conflict; obtain the current revision before replacing this file",
+        );
+    }
+    if actual.is_some() && expected.is_none() {
+        return failure(StatusCode::PRECONDITION_REQUIRED, Value::Null, "If-Match is required to replace an existing file");
+    }
     // Atomic replacement prevents a concurrent open from seeing a partially uploaded file.
     let temp = state.config.files.join(format!(".upload-{}", uuid::Uuid::new_v4()));
     if tokio::fs::write(&temp, &bytes).await.is_err() {
@@ -250,7 +305,12 @@ async fn upload(State(state): State<Arc<AppState>>, Path(name): Path<String>, by
         let _ = tokio::fs::remove_file(temp).await;
         return failure(StatusCode::BAD_REQUEST, Value::Null, "cannot store upload (parent directory must already exist)");
     }
-    StatusCode::CREATED.into_response()
+    let mut response = StatusCode::CREATED.into_response();
+    use sha2::{Digest, Sha256};
+    if let Ok(etag) = HeaderValue::from_str(&format!("\"{:x}\"", Sha256::digest(&bytes))) {
+        response.headers_mut().insert(header::ETAG, etag);
+    }
+    response
 }
 
 #[cfg(test)]
@@ -279,6 +339,43 @@ mod tests {
 
     fn app() -> Router {
         router(state())
+    }
+
+    #[tokio::test]
+    async fn bearer_downloads_also_reject_reserved_and_hidden_paths() {
+        for name in ["part.solidcraft.bak", ".private", "nested/.private"] {
+            let request = axum::http::Request::builder()
+                .uri(format!("/files/{name}"))
+                .header(header::AUTHORIZATION, "Bearer test-token-for-http-authorization")
+                .body(Body::empty())
+                .unwrap();
+            assert_eq!(app().oneshot(request).await.unwrap().status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_conditional_uploads_cannot_both_replace_one_revision() {
+        let state = state();
+        let name = format!("workspace-race-{}.txt", uuid::Uuid::new_v4());
+        let path = state.config.files.join(&name);
+        std::fs::write(&path, b"base").unwrap();
+        let revision = crate::workspace_files::revision(&state.config.files, &name).unwrap().unwrap();
+        let app = router(state);
+        let request = |content: &'static str| {
+            axum::http::Request::builder()
+                .method("PUT")
+                .uri(format!("/files/{name}"))
+                .header(header::AUTHORIZATION, "Bearer test-token-for-http-authorization")
+                .header(header::IF_MATCH, &revision)
+                .body(Body::from(content))
+                .unwrap()
+        };
+        let (a, b) = tokio::join!(app.clone().oneshot(request("left")), app.oneshot(request("right")));
+        let statuses = [a.unwrap().status(), b.unwrap().status()];
+        assert_eq!(statuses.iter().filter(|s| **s == StatusCode::CREATED).count(), 1);
+        assert_eq!(statuses.iter().filter(|s| **s == StatusCode::PRECONDITION_FAILED).count(), 1);
+        assert!([b"left".as_slice(), b"right".as_slice()].contains(&std::fs::read(&path).unwrap().as_slice()));
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

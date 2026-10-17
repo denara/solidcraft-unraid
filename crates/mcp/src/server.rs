@@ -147,6 +147,9 @@ impl Server {
                 }))
             }
             "ping" => Ok(json!({})),
+            // Private gateway-to-worker telemetry, not a public MCP tool. The HTTP gateway
+            // rejects this method from clients and sanitizes paths in its own status tool.
+            "solidcraft/workspaceStatus" => self.backend.call("workspace.status", json!({})).map_err(|e| (INTERNAL_ERROR, e)),
             "tools/list" => Ok(json!({"tools": tool_definitions()})),
             "tools/call" => {
                 let name = params.get("name").and_then(Value::as_str).ok_or((INVALID_PARAMS, "missing tool `name`".to_string()))?;

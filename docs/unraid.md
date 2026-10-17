@@ -75,6 +75,8 @@ restart an Unraid installation automatically.
 | Address | Purpose |
 | --- | --- |
 | `/` | Original browser CAD app; calculations and designs stay in the browser |
+| `/workspace` | Protected, read-only overview of saved MCP files and active sessions |
+| `/workspace/api` | The same bounded overview as JSON; requires a dashboard login |
 | `/mcp` | Bearer-authenticated Streamable HTTP MCP; a separate CAD process per session |
 | `/files/NAME` | Authenticated GET download / PUT upload of persistent server files |
 | `/health` | Container health check; no authentication required |
@@ -140,10 +142,83 @@ Download an export through authenticated GET `/files/bracket.step`, or copy it f
 Unraid share. Upload a design/STEP file by PUT to `/files/NAME`, then use MCP `open`.
 Uploads replace files atomically. Uploads and MCP requests are capped at 16 MiB;
 downloads at 256 MiB. Larger imports can be placed directly into the trusted data share.
+Replacing an existing file by HTTP PUT requires its current strong revision in
+`If-Match`: a missing precondition returns **428**, and a stale revision returns **412**.
+Successful PUT returns the new `ETag`. New filenames do not require `If-Match`;
+`If-None-Match: *` rejects a name that already exists.
 
 Save before closing a session. Unsaved designs are not persisted: idle sessions expire
 after 30 minutes, and container restarts end all sessions. Start a new MCP session and
 `open` the saved file after a restart. A volume retains saved files, not live RAM state.
+
+## File and session dashboard
+
+Open `/workspace` on the same service and sign in with the existing MCP token. Its
+location is reported as `token.location` in the container log. Authentication creates
+a separate server-side browser session with a one-hour lifetime and a random
+`HttpOnly`, `SameSite=Strict` cookie scoped to `/workspace`. The token is not stored in
+that cookie, a URL or application browser storage. Logout and container restarts end
+the browser login; a dashboard login never authenticates `/mcp` or `/files` requests.
+
+Use HTTPS through the configured origin. Login and logout require both a CSRF value
+and an explicit `Origin` matching `SOLVECRAFT_ALLOWED_ORIGINS` and the request's `Host`
+(including any port). Preserve the public Host and Origin through the reverse proxy.
+Cookies use `Secure`, except for an explicitly allowed HTTP loopback origin during
+local development. Merely reaching the container over a LAN HTTP address is insufficient
+for this exception. Failed logins are rate-limited. Dashboard responses are not cached;
+file contents and names require authentication.
+
+The page lists saved models, exports and other files, with size, UTC modification time
+and download links. Search by filename, select a file type and choose **Anzeigen**.
+Use **Aktualisieren** to obtain a new snapshot; the page does not poll automatically.
+Filters affect displayed file counts, while the session overview remains global.
+Downloads under `/workspace/files/<relative-name>` use the dashboard cookie and do
+not reveal the Bearer token to the browser.
+
+Sessions show an independent display ID, their current file, confirmed unsaved changes,
+the last request and whether a request is running. The display ID is not a usable MCP
+session credential. An open file is not locked: multiple sessions can load it into
+separate models. Unknown change state is explicitly shown as unknown. New unsaved
+models are counted separately from saved files and disappear when their session ends.
+The browser CAD app at `/` remains independent; download a saved model and import it
+there to inspect it. The dashboard cannot edit files or forcibly end MCP sessions.
+
+The inventory is bounded to 512 files, 4,096 visited directory entries and eight
+directory levels; files larger than 256 MiB are excluded. A `truncated` indicator warns
+that an inventory is incomplete. Symlinks, hidden names, `.bak` backups and temporary
+names (`.tmp`, `.part`, `.upload`, trailing `~`) are excluded and reserved from gateway
+file access. Keep private backups outside the public workspace.
+
+### MCP file status and save conflicts
+
+The HTTP gateway adds two read-only tools to its advertised catalog:
+
+- `workspace_list_files {"offset":0,"limit":50}` lists the shared saved files; follow
+  `next_offset` when present. Limits range from 1 to 100 within the bounded inventory.
+  `workspace_list_files {"path":"bracket.solidcraft"}` requests one visible file and
+  its strong content `revision`; a path outside the bounded inventory is unavailable.
+- `session_status {}` reports the calling session's current file, dirty state, loaded
+  revision, model availability and request state. It does not expose another session's
+  in-memory model.
+
+`save`, `export`, `screenshot`, `execute` and `batch` accept an optional
+`expected_revisions` object mapping each relative output filename to its revision from
+`workspace_list_files`. Pass revision strings unchanged, including their embedded ETag
+quotes. Replacing an existing file requires a matching supplied revision or the calling
+session's loaded revision for its current file. A conflict refuses the write and keeps
+the session model; reopen the newer file or save under a different name. New filenames
+remain available without a revision. This applies to command-based writes inside
+`execute` and `batch`, as well as the direct tools.
+
+Managed HTTP and MCP writes are serialized with their revision checks. This is not an
+operating-system file lock: programs writing directly to the data share can still race
+with the gateway. Avoid such concurrent external writes. A failed batch may roll back
+its in-memory document but does not undo files already written by earlier steps.
+
+Until every output target can be checked, the network gateway declines multi-file URDF
+exports, per-body DXF exports to files and PNG animation frame directories. Use an
+ordinary export or GIF animation instead; per-body DXF returned as text without a file
+path remains available. These restrictions concern the gateway, not desktop CAD.
 
 ## Install the locally built image on Unraid
 
@@ -204,6 +279,7 @@ Authorization and MCP headers; buffering is disabled and its timeout exceeds the
 
 Web: `https://cad.example.invalid/` (replace the hostname).
 MCP: `https://cad.example.invalid/mcp` with the Bearer token.
+File dashboard: `https://cad.example.invalid/workspace` with its separate browser login.
 
 The web page serves static application code; `/mcp` and `/files` require the token.
 The adapter checks any supplied Origin against `SOLVECRAFT_ALLOWED_ORIGINS`, defaulting
@@ -234,8 +310,8 @@ the gateway cannot change viewer settings or guarantee an exact theme shade.
 | --- | --- | --- |
 | `system` 🚀 / 🛑 | `server.ready` / `server.stopping` | Started / received a graceful stop signal |
 | `system` 🔑 | `token.location` | Every startup reports the token-file path inside the container, normally `/data/mcp-token`, or the environment variable when explicitly configured; never its value |
-| `login` ✅ | `auth.accepted` | Bearer authentication accepted for a session-admission request |
-| `warn` ⛔ | `auth.rejected` / `origin.rejected` | Missing/invalid Bearer token or disallowed origin |
+| `login` ✅ | `auth.accepted` | Token accepted for MCP session admission or a dashboard login; `endpoint` identifies the entry point |
+| `warn` ⛔ | `auth.rejected` / `origin.rejected` | Missing/invalid MCP Bearer token, invalid dashboard login token or rejected MCP origin |
 | `system` 🔒 | `session.opened slots=1/4` | A separate CAD process occupies one of four slots |
 | `system` ⏳ | `session.closing` | Session closed, but an in-flight request still holds its process slot |
 | `system` 🔓 | `session.released slots=0/4` | The process slot is actually free; reason includes explicit DELETE, idle expiry, timeout, failure or shutdown |
@@ -249,9 +325,10 @@ trusted token-file location is intentionally reported on every start; no host vo
 mapping or token value is printed. Because all
 clients share a Bearer token, these are session records, not authenticated user identities.
 Normal successful tool requests, initialized notifications, browser requests and health
-checks do not generate audit lines. Bearer authentication is stateless; `auth.accepted`
-is not repeated for each call in an existing session, and does not guarantee that a
-session can be allocated when capacity is full.
+checks do not generate audit lines. Dashboard login attempts use the same authentication
+events with `endpoint: workspace`. MCP Bearer authentication is stateless;
+`auth.accepted` is not repeated for each call in an existing session, and does not
+guarantee that a session can be allocated when capacity is full.
 
 `packaging/unraid/log-test.ps1` verifies real container log output after a disposable
 candidate's restart: login rejection/success, allocation/release/capacity, silence during
@@ -284,7 +361,7 @@ Linked components may read and refresh designs only under /data/files, including
 stored in uploaded documents. The gateway supplies a per-subprocess link root; resolved
 paths and parent folders are checked again by the engine, with symlinks refused. Desktop
 linked components retain their normal behavior when no network link root is supplied.
-This snapshot writes format 21. Keep pre-update server and separate browser-design backups; older builds cannot read newly saved designs.
+This snapshot writes format 26. Keep pre-update server and separate browser-design backups; older builds cannot read newly saved designs.
 
 The HTTP gateway launches native MCP with an explicit /data/files scope and --quiet. This keeps upstream file confinement active without logging private per-session paths. Browser build URLs are relative, matching upstream's offline/update support; Web and HTTP MCP remain independent.
 

@@ -55,7 +55,12 @@ if ($Reopen) {
 }
 $taskMeasured = Read-ToolJson (Invoke-Tool 'measure')
 if ([Math]::Abs($taskMeasured.total.volume_mm3 - 24000) -gt 0.01) { throw "Unexpected volume: $($taskMeasured.total.volume_mm3)" }
-$taskShot = Invoke-Tool 'screenshot' @{view = 'iso'; width = 800; height = 600; path = 'unraid-proof.png'}
+$taskShotArgs = @{view = 'iso'; width = 800; height = 600; path = 'unraid-proof.png'}
+if ($Reopen) {
+    $taskExisting = Read-ToolJson (Invoke-Tool 'workspace_list_files' @{path = 'unraid-proof.png'})
+    $taskShotArgs.expected_revisions = @{'unraid-proof.png' = $taskExisting.files[0].revision}
+}
+$taskShot = Invoke-Tool 'screenshot' $taskShotArgs
 $taskImage = ($taskShot.content | Where-Object type -EQ 'image' | Select-Object -First 1).data
 $taskBytes = [Convert]::FromBase64String($taskImage)
 if ($taskBytes.Length -lt 100 -or $taskBytes[0] -ne 137 -or $taskBytes[1] -ne 80) { throw 'PNG preview is invalid' }

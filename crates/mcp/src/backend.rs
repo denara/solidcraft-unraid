@@ -2,6 +2,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -212,6 +213,11 @@ pub struct Headless {
     pub session: Session,
     /// Orientation for renders; the camera is refitted to the model every time.
     pub view: StandardView,
+    /// Last content observed by internal workspace telemetry. Engine revision counts
+    /// refresh attempts too; it cannot distinguish a failed command from a real edit.
+    workspace_document: Arc<solidcraft_engine::doc::Document>,
+    workspace_visibility: solidcraft_engine::Visibility,
+    workspace_revision: u64,
 }
 
 impl Default for Headless {
@@ -230,7 +236,34 @@ impl Headless {
             }
             Err(e) => session.log.push(format!("image host unavailable: {e}")),
         }
-        Headless { session, view: StandardView::Iso }
+        Headless {
+            workspace_document: Arc::clone(&session.doc),
+            workspace_visibility: session.visibility.clone(),
+            workspace_revision: 1,
+            session,
+            view: StandardView::Iso,
+        }
+    }
+
+    /// Authoritative metadata without evaluating geometry or changing engine state.
+    /// The revision tracks observed document/visibility changes across design replacement;
+    /// it is not a file revision or a count of every command within a batch.
+    fn workspace_status(&mut self) -> Value {
+        let document_changed = !Arc::ptr_eq(&self.workspace_document, &self.session.doc) && *self.workspace_document != *self.session.doc;
+        let visibility_changed = self.workspace_visibility != self.session.visibility;
+        if document_changed || visibility_changed {
+            self.workspace_revision = self.workspace_revision.saturating_add(1);
+        }
+        self.workspace_document = Arc::clone(&self.session.doc);
+        if visibility_changed {
+            self.workspace_visibility.clone_from(&self.session.visibility);
+        }
+        json!({
+            "current_file": self.session.path,
+            "dirty": self.session.is_dirty(),
+            "has_model": !self.session.doc.features.is_empty(),
+            "revision": self.workspace_revision,
+        })
     }
 }
 
@@ -240,6 +273,9 @@ fn dim(p: &Value, k: &str, default: f64) -> u32 {
 
 impl Backend for Headless {
     fn call(&mut self, method: &str, p: Value) -> Result<Value, String> {
+        if method == "workspace.status" {
+            return Ok(self.workspace_status());
+        }
         let s = &mut self.session;
         let str_p = |k: &str| p.get(k).and_then(Value::as_str);
         match method {
@@ -309,3 +345,7 @@ impl Backend for Headless {
         self.session.path.clone()
     }
 }
+
+#[cfg(test)]
+#[path = "backend_workspace_tests.rs"]
+mod workspace_tests;

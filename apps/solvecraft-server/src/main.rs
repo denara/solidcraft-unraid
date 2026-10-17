@@ -7,6 +7,10 @@ mod config;
 mod http;
 mod paths;
 mod sessions;
+mod workspace;
+mod workspace_files;
+mod workspace_model;
+mod workspace_view;
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -35,7 +39,7 @@ async fn run() -> Result<(), String> {
         }
     });
     let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| format!("listen {addr}: {e}"))?;
-    eprintln!("SolidCraft web: http://{addr}/ ; MCP: /mcp (Bearer authentication required)");
+    eprintln!("SolidCraft web: http://{addr}/ ; workspace: /workspace ; MCP: /mcp (Bearer authentication required)");
     state.audit.startup(&state.config);
     let audit = Arc::clone(&state.audit);
     axum::serve(listener, http::router(state)).with_graceful_shutdown(shutdown(audit)).await.map_err(|e| e.to_string())

@@ -46,6 +46,14 @@ file/origin, persistence and web checks pass. Keep `latest` on a passing build a
 commit-specific tags. Verify anonymous pulls before claiming public availability.
 This is container packaging, not an upstream application release or an Unraid deployment.
 
+The container's `/workspace` dashboard is read-only and independent of browser CAD.
+Preserve its cookie-only browser authentication, Bearer-only MCP/files authentication,
+authoritative per-session metadata and shared HTTP/MCP file-revision checks. When an
+upstream update adds file-writing commands, review their entire output set against
+`workspace_model` and path confinement before enabling them through the gateway.
+Run `packaging/unraid/workspace-test.ps1` against an isolated candidate along with
+the existing modelling, persistence, logging and browser checks.
+
 
 ## Start every session here
 1. Read `plan/STATUS.md` (current milestone, next task), then the task in `plan/execution-plan.md`

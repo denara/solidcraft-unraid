@@ -98,12 +98,16 @@ jobs:
       - name: Verify operational logging and privacy
         shell: pwsh
         run: ./packaging/unraid/log-test.ps1 -Token disposable-container-proof-token-only
+      - name: Verify workspace and concurrent file revisions
+        shell: pwsh
+        run: ./packaging/unraid/workspace-test.ps1 -Token disposable-container-proof-token-only
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: container-mcp-proof
           path: |
             target/unraid-proof/
             target/unraid-log-proof/
+            target/unraid-workspace-proof/
           retention-days: 30
       - name: Authenticate to the container registry
         if: github.event_name == 'push' && github.repository == 'denara/solidcraft-unraid'
