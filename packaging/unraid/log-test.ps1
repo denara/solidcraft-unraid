@@ -1,6 +1,7 @@
 param(
     [string]$BaseUrl = 'http://localhost:8781',
     [string]$ContainerName = 'proof',
+    [ValidateSet('always', 'never')][string]$ColorMode = 'always',
     [Parameter(Mandatory = $true)][string]$Token,
     [string]$OutputDirectory = 'target/unraid-log-proof'
 )
@@ -65,8 +66,18 @@ $taskAllText = $taskAfter -join "`n"
 foreach ($taskPrivate in @($Token, $taskMarker) + @($taskSessions)) {
     if ($taskAllText.Contains($taskPrivate)) { throw 'Sensitive request data appeared in container logs' }
 }
-if ($taskAllText.Contains([char]27)) { throw 'Unexpected ANSI color escape sequences' }
-$taskDelta = @($taskAfter | Select-Object -Skip $taskBefore.Count)
+$taskRawDelta = @($taskAfter | Select-Object -Skip $taskBefore.Count)
+$taskEscape = [string][char]27
+$taskColors = @{ system = '36'; login = '95'; warn = '33'; error = '31' }
+foreach ($taskRow in $taskRawDelta) {
+    if ($ColorMode -eq 'always') {
+        if ($taskRow -notmatch "^$taskEscape\[(36|95|33|31)m.+$taskEscape\[0m$") { throw 'Missing category color or final reset' }
+        $taskCode = $Matches[1]
+        if ($taskRow -notmatch '\[(system|login|warn|error)\] ' -or $taskColors[$Matches[1]] -ne $taskCode) { throw 'Wrong color for log category' }
+    }
+}
+$taskDelta = @($taskRawDelta | ForEach-Object { $_ -replace "$taskEscape\[(36|95|33|31|0)m", '' })
+if (($taskDelta -join "`n").Contains([char]27) -or ($ColorMode -eq 'never' -and $taskAllText.Contains([char]27))) { throw 'Unexpected ANSI escape sequences' }
 foreach ($taskEvent in @('auth.accepted', 'auth.rejected', 'origin.rejected', 'session.opened', 'session.capacity_reached', 'session.released')) {
     if (-not (($taskDelta -join "`n").Contains($taskEvent))) { throw "Missing operational event: $taskEvent" }
 }
@@ -81,4 +92,4 @@ foreach ($taskRow in $taskDelta) {
 }
 New-Item -ItemType Directory -Force $OutputDirectory | Out-Null
 $taskDelta | Set-Content (Join-Path $OutputDirectory 'operational.log') -Encoding utf8
-Write-Output 'PASS: authentication/session/capacity logs, UTC/severity/icons, no credential or session-header leakage, no routine-request noise.'
+Write-Output "PASS: authentication/session/capacity logs, UTC/severity/icons, color=$ColorMode, no credential or session-header leakage, no routine-request noise."

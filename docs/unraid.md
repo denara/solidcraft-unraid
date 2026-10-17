@@ -221,9 +221,14 @@ The token file is a credential and should be excluded from publicly shared backu
 
 Unraid's **Docker → SolidCraft → Logs** view reads the gateway's standard error output;
 `docker logs solidcraft` is the equivalent terminal view (use your container's name).
-The gateway emits UTC timestamps, plain severity/category words and icons. It does not
-force ANSI colors; the viewer can apply its own palette. Categories match the displayed
-`system`, `login`, `warn` and `error` labels. Other viewers may display plain text.
+The gateway emits UTC timestamps, severity/category words and icons. Each operational
+line includes ANSI color and a reset by default, including when Docker captures a pipe:
+`system` cyan, `login` light magenta, `warn` yellow and `error` red, matching the Unraid
+log palette. Plain category labels alone did not color the rows in the Unraid viewer.
+Set `SOLVECRAFT_LOG_COLOR=never` for plain output or `auto` for terminal detection;
+`always` explicitly enables color. A non-empty `NO_COLOR` also disables color unless
+`always` is explicitly selected. Viewers must support ANSI SGR to display the colors;
+the gateway cannot change viewer settings or guarantee an exact theme shade.
 
 | Category | Event | Meaning |
 | --- | --- | --- |
@@ -251,7 +256,9 @@ session can be allocated when capacity is full.
 `packaging/unraid/log-test.ps1` verifies real container log output after a disposable
 candidate's restart: login rejection/success, allocation/release/capacity, silence during
 normal requests and absence of credentials, raw session IDs, arbitrary client metadata
-and ANSI escapes. It assumes four test slots and must not be run on a real deployment.
+and unapproved escape sequences. It checks the category palette and per-line reset
+in color mode, and escape-free output with `-ColorMode never`. It assumes four test
+slots and must not be run on a real deployment.
 
 ## Verification
 

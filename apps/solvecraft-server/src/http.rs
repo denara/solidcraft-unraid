@@ -269,6 +269,7 @@ mod tests {
             files: std::env::temp_dir(),
             token: "test-token-for-http-authorization".into(),
             token_source: crate::config::TokenSource::Environment,
+            log_color: false,
             origins: vec!["https://solvecraft.example".into()],
             max_sessions: 2,
             idle: Duration::from_secs(60),

@@ -1,5 +1,5 @@
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -24,6 +24,7 @@ pub struct Config {
     pub files: PathBuf,
     pub token: String,
     pub token_source: TokenSource,
+    pub log_color: bool,
     pub origins: Vec<String>,
     pub max_sessions: usize,
     pub idle: Duration,
@@ -75,6 +76,11 @@ impl Config {
             files: fs::canonicalize(data.join("files")).map_err(|e| e.to_string())?,
             token,
             token_source,
+            log_color: crate::audit::color_enabled(
+                std::env::var("SOLVECRAFT_LOG_COLOR").ok().as_deref(),
+                std::env::var("NO_COLOR").ok().as_deref(),
+                std::io::stderr().is_terminal(),
+            )?,
             origins,
             max_sessions: number("SOLVECRAFT_MAX_SESSIONS", 4, 1, 32)? as usize,
             idle: Duration::from_secs(number("SOLVECRAFT_IDLE_SECONDS", 1800, 60, 86400)?),

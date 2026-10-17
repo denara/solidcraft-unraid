@@ -52,6 +52,7 @@ mod tests {
                 files: directory.clone(),
                 token: "private-test-bearer-never-log".into(),
                 token_source: crate::config::TokenSource::Environment,
+                log_color: false,
                 origins: vec!["https://private-test-origin.invalid".into()],
                 max_sessions: 1,
                 idle: Duration::from_secs(60),
@@ -266,7 +267,8 @@ pub struct State {
 
 impl State {
     pub fn new(config: Config) -> Self {
-        Self { slots: Arc::new(Semaphore::new(config.max_sessions)), config, sessions: Mutex::new(HashMap::new()), audit: Arc::new(Audit::default()) }
+        let audit = Arc::new(Audit::new(config.log_color));
+        Self { slots: Arc::new(Semaphore::new(config.max_sessions)), config, sessions: Mutex::new(HashMap::new()), audit }
     }
 
     pub async fn expire(&self) {
