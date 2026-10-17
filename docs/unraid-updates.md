@@ -929,3 +929,53 @@ may refuse files carrying the new pending markers; keep pre-update copies and th
 image for rollback. No Unraid installation, nginx/DNS change or application release is
 performed here. Registry publication, archive checksum, local replacement/cleanup and the
 description-only catalog synchronization are recorded below after verification.
+
+The additional browser regressions passed on the actual built site: its local command API
+discovers commands, models/undoes/redoes a 6000 mm3 box, rejects invalid inputs and safely
+drains 256 queued calls while refusing the 257th. All 19 offline/update scenarios passed
+(21 page launches) in isolated Chromium with software graphics. A single upstream Python
+trailing space was removed at the final staged-diff check; its 13 tool tests passed again.
+No modelling behavior changed after the successful candidate proofs.
+
+Publication passed [container workflow 39042081456](https://github.com/denara/solidcraft-unraid/actions/runs/39042081456)
+from validated merge/source `fccb86ec42f0f97b5993b5a329c843ca6fab24b9`. The fresh CI image
+passed HTTP MCP modelling/PNG/STEP, independent sessions, authentication/origin/path checks,
+restart persistence, browser assets, logging/privacy and workspace/concurrent-revision
+proofs before registry push. Public Linux amd64 image: `ghcr.io/denara/solidcraft-unraid:latest`,
+immutable tag `sha-fccb86ec42f0f97b5993b5a329c843ca6fab24b9`.
+Digest: `sha256:a981b6967f9167495cebd153fff284602a538d95ce806d83a26717eb15135305`.
+Both tags pulled anonymously with an empty Docker configuration. An anonymous manifest
+request returned HTTP 200 and matched the digest, source revision and architecture.
+
+Archive: `target/solidcraft-unraid-upstream-72145d4a.tar` (148,038,144 bytes), tagged
+`solvecraft-unraid:upstream-72145d4a`.
+SHA256: `6409dc4f54c9fa322af60218d48580df96e14f6bc4bb05ecc593016a94b93404`.
+
+The sole remaining local test runtime `solvecraft-solvecraft-1` runs the immutable public
+image, healthy at 0.14.0. Private initial and fresh pre-replacement data/config backups and
+`solvecraft-unraid:rollback-before-72145d4a` retain the prior working image. Idle-process
+and unchanged-config checks preceded replacement. The data volume, MCP token, complete
+environment, user, ports/origins and resource/security settings were preserved. Authenticated
+SDK modelling/PNG, read-only reopen of the known public 24000 mm3 example, dashboard cookie
+login/API/logout and the actual browser CAD passed after replacement. No real saved file
+was overwritten by the proof. The owned idle candidate container and its now-unused prototype
+image were removed only after fresh label/image/mount/port/process checks. Build/browser
+check containers removed themselves. No volumes were deleted or global prune used;
+toolchain images, build caches, test volumes, public fixtures, archives and private recovery
+data remain available.
+
+The canonical overview-only template change was synchronized to `denara/unraid-templates`
+main as `69d444ad6b51a3b292e28d03ab5c5223df27a2b3`, after combined-image publication passed.
+Anonymous retrieval of its public XML returned HTTP 200 and matched the canonical template.
+It lists only the additional Unraid/MCP/workspace/file-protection/logging integration features
+as bullets; original SolidCraft features and changes have an upstream link. Original authorship
+and unofficial-distribution/trademark notices remain explicit. Runtime fields, the original
+icon, catalog profile and licence are unchanged. No new portal submission or terms acceptance
+was needed; catalog ingestion/cache refresh is separate from publishing this repository.
+
+The final fetch observed one later upstream commit, `f7343e91` (PR1860, CI work-sharing only).
+The selected snapshot remains fixed; that later change is left for the next update check.
+No Unraid installation, nginx/DNS modification, application version bump or release tag was made.
+To install on Unraid, save active work, preserve backups, update the existing container with
+the same data/token/settings and reload the browser. The catalog description is available
+through the refreshed Community Applications metadata.
