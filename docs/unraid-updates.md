@@ -1006,3 +1006,28 @@ the explanation for a consumed form, and recovery using its reload link. Public-
 evidence is under ignored `target/workspace-login-fix`, outside the container build context.
 No Unraid installation or proxy change was performed. Publication and local refresh are
 recorded after the exact-source container workflow passes.
+
+Published source `25f3e2286b1bdeb4d44a5dce52f8466eabf85bd7` passed
+[container workflow 39052067052](https://github.com/denara/solidcraft-unraid/actions/runs/39052067052),
+including its actual-image modelling, persistence, authentication, file/origin, browser,
+logging and extended workspace checks. Public tags are `ghcr.io/denara/solidcraft-unraid:latest`
+and `sha-25f3e2286b1bdeb4d44a5dce52f8466eabf85bd7`; both pulled anonymously and the manifest
+matched source, architecture and digest
+`sha256:f25e7bbaf0c61bab22fdc093562bde75732ffa3b5eb1f5731ac4563052e49db9`.
+
+Verified archive: `target/solidcraft-unraid-workspace-login-25f3e228.tar` (148,043,264 bytes),
+tag `solvecraft-unraid:workspace-login-fix-25f3e228`;
+SHA256 `79c9aba0573ce9a587760b9b7b6631d0d8ee009b476c86006152159361608d1b`.
+
+The sole local runtime `solvecraft-solvecraft-1` now uses that immutable public image.
+Fresh private backups and `solvecraft-unraid:rollback-before-workspace-login-fix` retain
+the prior state. Idle/ownership checks preceded replacement; data volume, token, complete
+environment, ports/origins, user and resource/security settings were verified unchanged.
+Authenticated SDK modelling/PNG, read-only reopen of the known public 24000 mm3 fixture,
+workspace cookie login/API/logout, health and actual browser CAD all passed after replacement.
+The owned idle candidate and its unused prototype image were removed after those checks,
+with diagnostics retained under ignored target. No volumes, toolchain images, build caches,
+rollback image or backups were deleted. Catalog metadata is unchanged, so no catalog commit
+was needed. No Unraid deployment, application version bump or release tag was made.
+The login-address correction works with the prior image; update the installed container
+when the improved rejection logs and explanations are desired.
