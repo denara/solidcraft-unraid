@@ -979,3 +979,30 @@ No Unraid installation, nginx/DNS modification, application version bump or rele
 To install on Unraid, save active work, preserve backups, update the existing container with
 the same data/token/settings and reload the browser. The catalog description is available
 through the refreshed Community Applications metadata.
+
+## 2026-10-17: workspace login diagnostics
+
+The validated upstream baseline stays `72145d4aba05eab66e7a49b383bee9c9f5764da3`.
+This focused gateway correction preserves the published CAD and independent browser app.
+The reported 403 came from opening Unraid's direct HTTP-IP WebUI link instead of the
+configured HTTPS proxy address. Native MCP authentication remained functional. Private
+deployment values and the persistent token are unchanged and are not published.
+
+Workspace form rejections now report fixed, credential-free audit reasons and show a
+German explanation with a reload link, including Origin/Host, cookie, expired/mismatched
+CSRF, malformed form, rate and browser-capacity rejection. A still-valid login challenge
+is reused across tabs without extending its expiry; successful submissions remain one-use.
+Strict Origin/Host checks, HTTPS cookies, browser/MCP authentication separation and file
+confinement are preserved. The deployment guide explains the local Unraid WebUI override.
+
+All 47 gateway tests, gateway all-target Clippy with warnings denied, formatting and the
+release build passed. An isolated candidate with fresh volume and disposable credential
+passed actual MCP modelling/PNG/STEP, authentication, session separation, path checks,
+restart persistence, category-color/privacy logs and the workspace/file-revision proofs.
+The workspace proof now also covers a second login tab and actionable, private 403 pages.
+Actual container logs contained the new rejection reasons without the test credential.
+The real browser proved successful login from the first tab after opening a second one,
+the explanation for a consumed form, and recovery using its reload link. Public-safe
+evidence is under ignored `target/workspace-login-fix`, outside the container build context.
+No Unraid installation or proxy change was performed. Publication and local refresh are
+recorded after the exact-source container workflow passes.

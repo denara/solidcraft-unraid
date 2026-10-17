@@ -89,6 +89,36 @@ pub fn login(error: bool, csrf: &str) -> String {
     html
 }
 
+/// Fixed explanations only; rejected requests never contribute content to HTML.
+pub fn login_rejected(reason: &str) -> String {
+    let explanation = match reason {
+        "origin_missing" => {
+            "Der Browser hat keine gültige Herkunft übermittelt. Öffne die Anmeldung direkt in einem neuen Tab. Prüfe gegebenenfalls Browser-Erweiterungen und die Referrer-Policy des Proxys."
+        }
+        "origin_not_allowed" => {
+            "Diese Browser-Adresse ist nicht freigegeben. In der Container-Einstellung SOLVECRAFT_ALLOWED_ORIGINS muss die verwendete Adresse mit http:// oder https:// und gegebenenfalls Port stehen, ohne Pfad oder abschließenden Schrägstrich."
+        }
+        "host_mismatch" => {
+            "Die vom Proxy übermittelte Host-Adresse passt nicht zur Browser-Adresse. Der Reverse Proxy muss den ursprünglichen Host-Header weiterreichen."
+        }
+        "csrf_cookie_missing" => "Das Anmelde-Cookie fehlt. Erlaube Cookies für diese Seite und verwende HTTPS. Lade die Anmeldung anschließend neu.",
+        "csrf_mismatch" | "csrf_expired" => {
+            "Diese Anmeldeseite ist abgelaufen oder wurde bereits verwendet. Lade die Anmeldung neu und gib den Token erneut ein."
+        }
+        "rate_limited" => "Zu viele fehlgeschlagene Anmeldungen. Warte eine Minute und lade die Anmeldung erneut.",
+        "browser_capacity" => {
+            "Die maximale Anzahl an Browser-Anmeldungen ist erreicht. Melde eine bestehende Sitzung ab oder warte, bis sie abgelaufen ist."
+        }
+        _ => "Das Anmeldeformular konnte nicht verarbeitet werden. Lade die Anmeldung neu und versuche es erneut.",
+    };
+    let mut html = start("Anmeldung nicht möglich", None);
+    let _ = write!(
+        html,
+        "<section class=\"panel loginpanel\"><h1>Anmeldung nicht möglich</h1><div class=\"error\" role=\"alert\">{explanation}</div><a class=\"primary\" href=\"/workspace/login\">Anmeldung neu laden</a><p class=\"loginhint\">Der Token wurde bei diesem Versuch noch nicht geprüft. Der Container-Log enthält den Ablehnungsgrund.</p></section></main></body></html>"
+    );
+    html
+}
+
 fn elapsed(seconds: u64) -> String {
     match seconds {
         0..=1 => "gerade eben".into(),

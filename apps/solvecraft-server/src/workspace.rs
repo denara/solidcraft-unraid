@@ -93,11 +93,22 @@ fn set_cookie(response: &mut Response, name: &str, value: &str, max_age: u64, se
     }
 }
 
-fn same_origin(state: &AppState, headers: &HeaderMap) -> bool {
+fn check_origin(state: &AppState, headers: &HeaderMap) -> Result<(), &'static str> {
     let host = headers.get(header::HOST).and_then(|h| h.to_str().ok());
-    headers.get(header::ORIGIN).and_then(|h| h.to_str().ok()).is_some_and(|origin| {
-        state.config.origins.iter().any(|allowed| allowed == origin) && origin.split_once("://").is_some_and(|(_, authority)| Some(authority) == host)
-    })
+    let origin = headers.get(header::ORIGIN).and_then(|h| h.to_str().ok()).ok_or("origin_missing")?;
+    if !state.config.origins.iter().any(|allowed| allowed == origin) {
+        return Err("origin_not_allowed");
+    }
+    if origin.split_once("://").is_none_or(|(_, authority)| Some(authority) != host) {
+        return Err("host_mismatch");
+    }
+    Ok(())
+}
+
+fn login_rejected(state: &AppState, status: StatusCode, reason: &'static str) -> Response {
+    // Only fixed reason codes: never log headers, submitted credentials or cookies.
+    state.audit.emit(crate::audit::Event::AuthRejected, json!({"endpoint":"workspace","reason":reason}));
+    protect((status, Html(crate::workspace_view::login_rejected(reason))).into_response())
 }
 
 fn decode(value: &str) -> Option<String> {
@@ -148,15 +159,23 @@ async fn browser_session(state: &AppState, headers: &HeaderMap) -> Option<String
 }
 
 async fn challenge(state: &AppState, headers: &HeaderMap, error: bool) -> Response {
-    let csrf = secret();
     let mut store = state.browser.inner.lock().await;
     clean(&mut store);
-    if store.challenges.len() >= 64
-        && let Some(oldest) = store.challenges.iter().min_by_key(|(_, expires)| **expires).map(|(id, _)| id.clone())
-    {
-        store.challenges.remove(&oldest);
-    }
-    store.challenges.insert(csrf.clone(), Instant::now() + Duration::from_secs(600));
+    // Tabs share cookies. Replacing a still-valid challenge on every GET made
+    // another open tab's form fail before its token was ever checked.
+    let csrf = match cookie_value(headers, CHALLENGE).filter(|id| store.challenges.contains_key(*id)) {
+        Some(existing) => existing.to_owned(),
+        None => {
+            if store.challenges.len() >= 64
+                && let Some(oldest) = store.challenges.iter().min_by_key(|(_, expires)| **expires).map(|(id, _)| id.clone())
+            {
+                store.challenges.remove(&oldest);
+            }
+            let csrf = secret();
+            store.challenges.insert(csrf.clone(), Instant::now() + Duration::from_secs(600));
+            csrf
+        }
+    };
     let mut response = protect(Html(crate::workspace_view::login(error, &csrf)).into_response());
     set_cookie(&mut response, CHALLENGE, &csrf, 600, secure(state, headers));
     response
@@ -170,8 +189,8 @@ async fn login_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
 }
 
 async fn login(State(state): State<Arc<AppState>>, headers: HeaderMap, bytes: Bytes) -> Response {
-    if !same_origin(&state, &headers) {
-        return protect(StatusCode::FORBIDDEN.into_response());
+    if let Err(reason) = check_origin(&state, &headers) {
+        return login_rejected(&state, StatusCode::FORBIDDEN, reason);
     }
     if bytes.len() > 4096
         || headers
@@ -179,21 +198,27 @@ async fn login(State(state): State<Arc<AppState>>, headers: HeaderMap, bytes: By
             .and_then(|v| v.to_str().ok())
             .is_none_or(|v| v.split(';').next() != Some("application/x-www-form-urlencoded"))
     {
-        return protect(StatusCode::BAD_REQUEST.into_response());
+        return login_rejected(&state, StatusCode::BAD_REQUEST, "invalid_form");
     }
     let Some(form) = std::str::from_utf8(&bytes).ok().and_then(fields) else {
-        return protect(StatusCode::BAD_REQUEST.into_response());
+        return login_rejected(&state, StatusCode::BAD_REQUEST, "invalid_form");
     };
-    let Some(csrf) = form.get("csrf").filter(|csrf| cookie_value(&headers, CHALLENGE) == Some(csrf.as_str())) else {
-        return protect(StatusCode::FORBIDDEN.into_response());
+    let Some(cookie) = cookie_value(&headers, CHALLENGE) else {
+        return login_rejected(&state, StatusCode::FORBIDDEN, "csrf_cookie_missing");
+    };
+    let Some(csrf) = form.get("csrf").filter(|csrf| cookie == csrf.as_str()) else {
+        return login_rejected(&state, StatusCode::FORBIDDEN, "csrf_mismatch");
     };
     let mut store = state.browser.inner.lock().await;
     clean(&mut store);
-    if store.failures.len() >= 12 || store.sessions.len() >= 64 {
-        return protect(StatusCode::TOO_MANY_REQUESTS.into_response());
+    if store.failures.len() >= 12 {
+        return login_rejected(&state, StatusCode::TOO_MANY_REQUESTS, "rate_limited");
+    }
+    if store.sessions.len() >= 64 {
+        return login_rejected(&state, StatusCode::TOO_MANY_REQUESTS, "browser_capacity");
     }
     if store.challenges.remove(csrf).is_none() {
-        return protect(StatusCode::FORBIDDEN.into_response());
+        return login_rejected(&state, StatusCode::FORBIDDEN, "csrf_expired");
     }
     let valid = form.get("token").is_some_and(|provided| crate::http::token_matches(provided.as_bytes(), state.config.token.as_bytes()));
     if !valid {
@@ -215,7 +240,7 @@ async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap, bytes: B
     let Some(csrf) = browser_session(&state, &headers).await else {
         return protect(StatusCode::UNAUTHORIZED.into_response());
     };
-    if !same_origin(&state, &headers)
+    if check_origin(&state, &headers).is_err()
         || std::str::from_utf8(&bytes).ok().and_then(fields).and_then(|f| f.get("csrf").cloned()).as_deref() != Some(&csrf)
     {
         return protect(StatusCode::FORBIDDEN.into_response());

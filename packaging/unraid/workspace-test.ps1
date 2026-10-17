@@ -68,6 +68,14 @@ try {
     if ($login.Headers.'Referrer-Policy' -ne 'same-origin') { throw 'Native form submissions would lose their Origin header' }
     if ($login.Content -notmatch 'name="csrf" value="([^"]+)"') { throw 'Login CSRF challenge missing' }
     $csrf = $Matches[1]
+    # Opening another tab must not invalidate the first tab's form/cookie pair.
+    $secondTab = Invoke-WebRequest "$BaseUrl/workspace/login" -WebSession $browser
+    if ($secondTab.Content -notmatch ('name="csrf" value="' + [regex]::Escape($csrf) + '"')) { throw 'A second login page invalidated the first tab' }
+    $originRejected = Invoke-WebRequest "$BaseUrl/workspace/login" -Method Post -WebSession $browser -Body @{token = $Token; csrf = $csrf} -SkipHttpErrorCheck
+    $cookieRejected = Invoke-WebRequest "$BaseUrl/workspace/login" -Method Post -Headers @{Origin = $BaseUrl} -Body @{token = $Token; csrf = $csrf} -SkipHttpErrorCheck
+    foreach ($rejected in @($originRejected, $cookieRejected)) {
+        if ($rejected.StatusCode -ne 403 -or $rejected.Content -notmatch 'Anmeldung neu laden' -or $rejected.Content.Contains($Token)) { throw 'Rejected login needs a private, actionable explanation' }
+    }
     $page = Invoke-WebRequest "$BaseUrl/workspace/login" -Method Post -WebSession $browser -Headers @{Origin = $BaseUrl} -Body @{token = $Token; csrf = $csrf}
     if ($page.Content -notmatch 'Dateien &amp; Sitzungen' -or $page.Content.Contains($Token)) { throw 'Authenticated dashboard missing or token reflected' }
     $snapshot = Invoke-RestMethod "$BaseUrl/workspace/api" -WebSession $browser

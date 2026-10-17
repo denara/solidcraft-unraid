@@ -281,6 +281,24 @@ Web: `https://cad.example.invalid/` (replace the hostname).
 MCP: `https://cad.example.invalid/mcp` with the Bearer token.
 File dashboard: `https://cad.example.invalid/workspace` with its separate browser login.
 
+Unraid's template initially opens the direct HTTP container address from its **WebUI**
+menu. For an HTTPS reverse-proxy deployment, edit the installed container in Unraid,
+enable **Advanced View**, and set its **WebUI** field to your own
+`https://cad.example.invalid/workspace` (or `/` for browser CAD). This is a local
+template setting; keep private hostnames out of the public template. Include only the
+origin, `https://cad.example.invalid`, in `SOLVECRAFT_ALLOWED_ORIGINS`, without a path
+or trailing slash. A direct HTTP-IP login is deliberately rejected: non-loopback
+dashboard cookies require HTTPS. Native authenticated MCP can still work because it
+usually does not send a browser Origin or use dashboard cookies.
+
+Rejected dashboard forms display a fixed explanation and an **Anmeldung neu laden**
+link instead of an empty 403 page. The log records `auth.rejected` with
+`endpoint: workspace` and a fixed reason such as `origin_not_allowed`, `host_mismatch`,
+`csrf_cookie_missing`, `csrf_mismatch` or `csrf_expired`; submitted tokens, cookies,
+hostnames and headers are never included. Expired (ten-minute) or already-used forms
+must be reloaded. Opening another login tab reuses the browser's still-valid challenge
+without extending its lifetime. Origin, Host and one-use cookie/CSRF checks remain required.
+
 The web page serves static application code; `/mcp` and `/files` require the token.
 The adapter checks any supplied Origin against `SOLVECRAFT_ALLOWED_ORIGINS`, defaulting
 to the local development origins when unset. Configure your HTTPS origin for deployment.

@@ -302,3 +302,78 @@ async fn malformed_duplicate_and_oversized_login_forms_cannot_create_sessions() 
     }
     assert!(fixture.state.browser.inner.lock().await.sessions.is_empty());
 }
+
+#[tokio::test]
+async fn opening_another_tab_preserves_the_first_tabs_challenge_and_expiry() {
+    let fixture = Fixture::new();
+    let (csrf, cookie) = fixture.challenge().await;
+    let expires = *fixture.state.browser.inner.lock().await.challenges.get(&csrf).unwrap();
+    let response = fixture
+        .app()
+        .oneshot(Request::builder().uri("/workspace/login").header(header::HOST, HOST).header(header::COOKIE, &cookie).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert!(body_text(response).await.contains(&format!("name=\"csrf\" value=\"{csrf}\"")));
+    assert_eq!(fixture.state.browser.inner.lock().await.challenges.get(&csrf), Some(&expires));
+    let response =
+        fixture.app().oneshot(form_request("/workspace/login", &cookie, &format!("csrf={csrf}&token={TOKEN}"), ORIGIN, HOST)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+}
+
+#[tokio::test]
+async fn pre_token_rejections_explain_and_log_only_fixed_reasons() {
+    for (reason, origin, host, send_cookie, wrong_csrf, expired) in [
+        ("origin_not_allowed", "https://private-origin-marker.example", HOST, true, false, false),
+        ("origin_missing", "", HOST, true, false, false),
+        ("host_mismatch", ORIGIN, "private-host-marker.example", true, false, false),
+        ("csrf_cookie_missing", ORIGIN, HOST, false, false, false),
+        ("csrf_mismatch", ORIGIN, HOST, true, true, false),
+        ("csrf_expired", ORIGIN, HOST, true, false, true),
+    ] {
+        let fixture = Fixture::new();
+        let (csrf, cookie) = fixture.challenge().await;
+        if expired {
+            fixture.state.browser.inner.lock().await.challenges.insert(csrf.clone(), Instant::now() - Duration::from_secs(1));
+        }
+        let submitted = if wrong_csrf { "private-csrf-marker" } else { &csrf };
+        let mut request =
+            form_request("/workspace/login", if send_cookie { &cookie } else { "" }, &format!("csrf={submitted}&token={TOKEN}"), origin, host);
+        if origin.is_empty() {
+            request.headers_mut().remove(header::ORIGIN);
+        }
+        let response = fixture.app().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{reason}");
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let body = body_text(response).await;
+        assert!(body.contains("Anmeldung neu laden"), "{reason}");
+        assert!(body.contains("noch nicht geprüft"));
+        assert!(fixture.state.browser.inner.lock().await.sessions.is_empty());
+        let rows = fixture.state.audit.rows.lock().unwrap();
+        assert_eq!(rows.len(), 1, "{reason}");
+        assert!(rows[0].contains("auth.rejected"));
+        assert!(rows[0].contains(&format!("\"reason\":\"{reason}\"")));
+        assert!(rows[0].contains("\"endpoint\":\"workspace\""));
+        for private in [TOKEN, &csrf, &cookie, "private-origin-marker", "private-host-marker", "private-csrf-marker"] {
+            assert!(!body.contains(private), "HTML reflected {private}");
+            assert!(!rows[0].contains(private), "log reflected {private}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_expired_cookie_gets_a_fresh_challenge_without_extending_the_old_one() {
+    let fixture = Fixture::new();
+    let (csrf, cookie) = fixture.challenge().await;
+    fixture.state.browser.inner.lock().await.challenges.insert(csrf.clone(), Instant::now() - Duration::from_secs(1));
+    let response = fixture
+        .app()
+        .oneshot(Request::builder().uri("/workspace/login").header(header::HOST, HOST).header(header::COOKIE, cookie).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!body_text(response).await.contains(&csrf));
+    let store = fixture.state.browser.inner.lock().await;
+    assert!(!store.challenges.contains_key(&csrf));
+    assert_eq!(store.challenges.len(), 1);
+    assert!(fixture.state.audit.rows.lock().unwrap().is_empty());
+}
