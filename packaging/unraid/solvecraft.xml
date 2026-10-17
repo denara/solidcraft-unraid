@@ -8,7 +8,17 @@
   <Privileged>false</Privileged>
   <Support>https://github.com/denara/solidcraft-unraid/issues</Support>
   <Project>https://github.com/denara/solidcraft-unraid</Project>
-  <Overview>Unofficial SolidCraft integration for Unraid, maintained by denara. Unraid® is a registered trademark of Lime Technology, Inc. This application is not affiliated with, endorsed, or sponsored by Lime Technology, Inc. The CAD application and browser app are developed by bherbruck and the upstream SolidCraft contributors; denara provides the container packaging, HTTP MCP adapter and Unraid template, not the original CAD application. Linux amd64 only. Experimental software: latest contains the newest container build that passed modelling, persistence and web checks. Server designs and exports persist under /data/files; browser designs are stored separately and do not share MCP sessions. Upstream: https://github.com/bherbruck/solidcraft. This is not an official upstream distribution.</Overview>
+  <Overview>Unofficial SolidCraft integration for Unraid, maintained by denara. The CAD application and browser app are developed by bherbruck and the upstream SolidCraft contributors; denara provides the Unraid integration, not the original CAD application.[br][br]
+SolidCraft features and upstream changes: https://github.com/bherbruck/solidcraft.[br][br]
+Additional features provided by this Unraid integration:[br]
+- Container packaging and Unraid template with persistent server files and resource/security limits.[br]
+- Authenticated HTTP MCP gateway for local AI clients, with independent CAD sessions and bounded capacity.[br]
+- Protected file and session dashboard at /workspace: search, filters, downloads, opened files, unsaved changes and new drafts.[br]
+- Shared-file revision checks to reject stale saves and accidental overwrites by parallel clients.[br]
+- Operational logs for authentication and session allocation/release, with Unraid category colors, icons and the token file location.[br]
+- Independent hosting of the upstream browser CAD app; browser designs remain separate from server files and MCP sessions.[br][br]
+Linux amd64 only. Experimental software: latest contains the newest container build that passed modelling, persistence and web checks. Server designs and exports persist under /data/files. The dashboard uses the existing MCP token; it does not edit models.[br][br]
+This is not an official upstream distribution. Unraid® is a registered trademark of Lime Technology, Inc. This application is not affiliated with, endorsed, or sponsored by Lime Technology, Inc.</Overview>
   <Category>Productivity: Tools:Utilities</Category>
   <Beta>true</Beta>
   <Icon>https://raw.githubusercontent.com/denara/unraid-templates/main/icons/solidcraft.png</Icon>

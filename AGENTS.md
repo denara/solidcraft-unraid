@@ -54,6 +54,13 @@ upstream update adds file-writing commands, review their entire output set again
 Run `packaging/unraid/workspace-test.ps1` against an isolated candidate along with
 the existing modelling, persistence, logging and browser checks.
 
+The next validated update must merge one selected upstream snapshot and publish it
+together with the existing integration features. Preserve the canonical Unraid template's
+Overview as a product description, not a dated changelog: link to upstream for SolidCraft
+features/changes and list only this fork's additional integration features as bullet points.
+Keep the original authorship and unofficial-integration notice explicit. Synchronize changed
+template metadata to `denara/unraid-templates` after the combined image passes publication.
+
 
 ## Start every session here
 1. Read `plan/STATUS.md` (current milestone, next task), then the task in `plan/execution-plan.md`
