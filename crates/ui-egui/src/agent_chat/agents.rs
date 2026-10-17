@@ -1,5 +1,5 @@
 //! The agents the chat can use: the installed ones it finds by itself (Claude Code, Codex,
-//! Gemini CLI, OpenCode, …) and the ones the user adds (another ACP command, or an
+//! Antigravity, OpenCode, …) and the ones the user adds (another ACP command, or an
 //! OpenAI-compatible endpoint such as Ollama, LM Studio or OpenAI). Also the permission modes.
 //! Preferences only: no design data, no keys (those are in the system keychain).
 

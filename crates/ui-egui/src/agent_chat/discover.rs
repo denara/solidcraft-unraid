@@ -24,6 +24,11 @@ pub struct Known {
     pub config_dir_var: Option<(&'static str, &'static str)>,
     /// Variables holding a key it uses instead of a login.
     pub key_vars: &'static [&'static str],
+    /// Retired by its maker: still used when it is installed, never offered for install.
+    pub retired: bool,
+    /// Whether `--version` prints its version. Antigravity's server prints its build date and takes
+    /// seconds to start, so it is not asked.
+    pub reports_version: bool,
 }
 
 /// The agents shown in the picker. The first one found is the default.
@@ -37,6 +42,8 @@ pub const KNOWN: &[Known] = &[
         credentials: Some(".claude/.credentials.json"),
         config_dir_var: Some(("CLAUDE_CONFIG_DIR", ".credentials.json")),
         key_vars: &["ANTHROPIC_API_KEY"],
+        retired: false,
+        reports_version: true,
     },
     Known {
         id: "codex",
@@ -47,7 +54,25 @@ pub const KNOWN: &[Known] = &[
         credentials: Some(".codex/auth.json"),
         config_dir_var: Some(("CODEX_HOME", "auth.json")),
         key_vars: &["OPENAI_API_KEY", "CODEX_API_KEY"],
+        retired: false,
+        reports_version: true,
     },
+    // Google's `agy` command line has no ACP mode; its ACP server is a separate download that the
+    // ACP registry lists (`agy_acp_server.par`, `agy_acp_server.exe` on Windows).
+    Known {
+        id: "antigravity",
+        name: "Google Antigravity",
+        programs: &["agy_acp_server.par", "agy_acp_server"],
+        args: &[],
+        install: "download the Antigravity ACP server for your system (see agentclientprotocol.com/registry), unzip it and put agy_acp_server.par on your PATH",
+        credentials: Some(".gemini/antigravity-acp/acp_token.json"),
+        config_dir_var: None,
+        key_vars: &["GEMINI_API_KEY"],
+        retired: false,
+        reports_version: false,
+    },
+    // Google retired it on 18 June 2026 in favour of Antigravity (#1790). Enterprise licences may
+    // still work, so an installed one is found, but nobody is sent to install it.
     Known {
         id: "gemini",
         name: "Gemini CLI",
@@ -57,6 +82,8 @@ pub const KNOWN: &[Known] = &[
         credentials: Some(".gemini/oauth_creds.json"),
         config_dir_var: None,
         key_vars: &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        retired: true,
+        reports_version: true,
     },
     Known {
         id: "opencode",
@@ -67,6 +94,8 @@ pub const KNOWN: &[Known] = &[
         credentials: Some(".local/share/opencode/auth.json"),
         config_dir_var: None,
         key_vars: &[],
+        retired: false,
+        reports_version: true,
     },
     Known {
         id: "grok",
@@ -77,6 +106,8 @@ pub const KNOWN: &[Known] = &[
         credentials: Some(".grok/auth.json"),
         config_dir_var: None,
         key_vars: &["XAI_API_KEY"],
+        retired: false,
+        reports_version: true,
     },
     Known {
         id: "copilot",
@@ -87,6 +118,8 @@ pub const KNOWN: &[Known] = &[
         credentials: None,
         config_dir_var: None,
         key_vars: &["GH_TOKEN", "GITHUB_TOKEN"],
+        retired: false,
+        reports_version: true,
     },
     Known {
         id: "qwen",
@@ -97,6 +130,8 @@ pub const KNOWN: &[Known] = &[
         credentials: Some(".qwen/oauth_creds.json"),
         config_dir_var: None,
         key_vars: &["DASHSCOPE_API_KEY"],
+        retired: false,
+        reports_version: true,
     },
     Known {
         id: "goose",
@@ -107,6 +142,8 @@ pub const KNOWN: &[Known] = &[
         credentials: None,
         config_dir_var: None,
         key_vars: &[],
+        retired: false,
+        reports_version: true,
     },
 ];
 
@@ -292,19 +329,24 @@ fn login_of(k: &Known, home: Option<&Path>) -> Login {
 
 /// Look for every known agent. Blocking (each probe has a time limit): run it off the UI thread.
 pub fn detect() -> Detection {
+    detect_in(&search_dirs(), home().as_deref())
+}
+
+fn detect_in(dirs: &[PathBuf], home: Option<&Path>) -> Detection {
     let t0 = Instant::now();
-    let dirs = search_dirs();
-    let home = home();
     let mut d = Detection::default();
     for k in KNOWN {
-        let Some(path) = k.programs.iter().find_map(|p| find_in(p, &dirs)) else {
-            d.missing.push(Missing { id: k.id, name: k.name, install: k.install });
+        let Some(path) = k.programs.iter().find_map(|p| find_in(p, dirs)) else {
+            if !k.retired {
+                d.missing.push(Missing { id: k.id, name: k.name, install: k.install });
+            }
             continue;
         };
-        let login = login_of(k, home.as_deref());
+        let login = login_of(k, home);
         let mut argv = vec![path.to_string_lossy().into_owned()];
         argv.extend(k.args.iter().map(|a| a.to_string()));
-        d.found.push(Found { id: k.id, name: k.name, version: version(&path, Duration::from_secs(3)), argv, login });
+        let version = if k.reports_version { version(&path, Duration::from_secs(3)) } else { None };
+        d.found.push(Found { id: k.id, name: k.name, version, argv, login });
     }
     d.took_ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
     d
@@ -376,11 +418,55 @@ mod tests {
         if std::env::var_os("XAI_API_KEY").is_none() {
             assert_eq!(login_of(grok, Some(&home)), Login::NotLoggedIn);
         }
+        // Antigravity's server keeps its own login, apart from the retired Gemini CLI's.
+        let agy = KNOWN.iter().find(|k| k.id == "antigravity").unwrap();
+        if std::env::var_os("GEMINI_API_KEY").is_none() {
+            assert_eq!(login_of(agy, Some(&home)), Login::NotLoggedIn, "the Gemini CLI's file is not its login");
+        }
+        std::fs::create_dir_all(home.join(".gemini/antigravity-acp")).unwrap();
+        std::fs::write(home.join(".gemini/antigravity-acp/acp_token.json"), "not credential data").unwrap();
+        assert_eq!(login_of(agy, Some(&home)), Login::LooksLoggedIn);
         std::fs::create_dir_all(home.join(".grok")).unwrap();
         // Discovery checks only for the file; it never needs to parse the user's tokens.
         std::fs::write(home.join(".grok/auth.json"), "not credential data").unwrap();
         assert_eq!(login_of(grok, Some(&home)), Login::LooksLoggedIn);
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// Google retired the Gemini CLI (#1790): one that is installed is still found, but nobody is
+    /// told to install it. Antigravity's ACP server is offered, and found under its file name.
+    #[test]
+    #[cfg(unix)]
+    fn a_retired_agent_is_found_but_not_offered_and_antigravity_is() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("sc-agent-retired-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let run = |name: &str, body: &str| {
+            let path = root.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let ids = |d: &Detection| (d.found.iter().map(|f| f.id).collect::<Vec<_>>(), d.missing.iter().map(|m| m.id).collect::<Vec<_>>());
+
+        let none = detect_in(std::slice::from_ref(&root), None);
+        let (found, missing) = ids(&none);
+        assert!(found.is_empty());
+        assert!(missing.contains(&"antigravity") && !missing.contains(&"gemini"), "{missing:?}");
+        let hint = none.missing.iter().find(|m| m.id == "antigravity").map(|m| m.install).unwrap_or_default();
+        assert!(hint.contains("agy_acp_server.par") && !hint.contains("npm"), "{hint}");
+
+        run("gemini", "echo gemini 0.64.0");
+        // A server that would take seconds to answer `--version`, which Antigravity is never asked.
+        run("agy_acp_server.par", "sleep 30");
+        let both = detect_in(std::slice::from_ref(&root), None);
+        let (found, missing) = ids(&both);
+        assert_eq!(found, ["antigravity", "gemini"]);
+        assert!(!missing.contains(&"antigravity") && !missing.contains(&"gemini"), "{missing:?}");
+        let agy = both.found.iter().find(|f| f.id == "antigravity");
+        assert_eq!(agy.map(|f| f.version.clone()), Some(None), "its --version is a build date, not asked");
+        assert_eq!(agy.and_then(|f| f.argv.get(1)), None, "the registry starts it without arguments");
+        assert!(both.took_ms < 5000, "Antigravity's server was started to read a version");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

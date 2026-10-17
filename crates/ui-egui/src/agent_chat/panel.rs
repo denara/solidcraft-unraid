@@ -639,8 +639,11 @@ fn conversation(app: &mut SolveApp, ui: &mut egui::Ui) {
                 });
             }
             Item::Agent { thought, text } => {
-                let rt = if *thought { RichText::new(text).italics().color(t.text_dim) } else { RichText::new(text).color(t.text) };
-                ui.add(egui::Label::new(rt).selectable(true).wrap());
+                if *thought {
+                    ui.add(egui::Label::new(RichText::new(text).italics().color(t.text_dim)).selectable(true).wrap());
+                } else {
+                    super::markdown_view::show(ui, n, text);
+                }
             }
             Item::Tool { title, kind, status, output, .. } => {
                 tool_card(ui, n, title, kind, *status, output.as_deref());

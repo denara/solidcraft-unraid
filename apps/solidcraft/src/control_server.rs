@@ -4,7 +4,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -160,12 +160,35 @@ fn refuse(out: &mut TcpStream, reader: &mut BufReader<TcpStream>) {
     let _ = std::io::copy(&mut reader.by_ref().take(64 * 1024), &mut std::io::sink());
 }
 
+/// How long a request waits for the app's reply: most requests, and a batch (or every request,
+/// on a patient connection).
+#[derive(Clone, Copy)]
+struct Waits {
+    short: Duration,
+    long: Duration,
+}
+
+const WAITS: Waits = Waits { short: Duration::from_secs(60), long: Duration::from_secs(3600) };
+
+/// A request that timed out but is still running in the app (#1618): its id and method, and where
+/// its reply will land.
+struct Pending {
+    id: Value,
+    method: String,
+    reply: Receiver<Value>,
+}
+
 fn serve(stream: TcpStream, token: &str, tx: Sender<ControlRequest>, ctx: egui::Context, patient: bool) {
+    serve_with(stream, token, tx, ctx, patient, WAITS);
+}
+
+fn serve_with(stream: TcpStream, token: &str, tx: Sender<ControlRequest>, ctx: egui::Context, patient: bool, waits: Waits) {
     let Ok(read) = stream.try_clone() else { return };
     let mut out = stream;
     let mut reader = BufReader::new(read);
     let mut bad = 0usize;
     let mut authenticated = false;
+    let mut pending: Option<Pending> = None;
     loop {
         let line = match read_line(&mut reader, MAX_LINE) {
             Ok(Some(l)) => String::from_utf8_lossy(&l).into_owned(),
@@ -193,14 +216,46 @@ fn serve(stream: TcpStream, token: &str, tx: Sender<ControlRequest>, ctx: egui::
                 let id = msg.get("id").cloned().unwrap_or(Value::Null);
                 let method = msg.get("method").and_then(Value::as_str).unwrap_or("").to_string();
                 let params = msg.get("params").cloned().unwrap_or(json!({}));
-                // A batch replaces many short requests: the whole of it may take long (#743).
-                let wait = Duration::from_secs(if patient || method == "engine.batch" { 3600 } else { 60 });
-                let (req, rrx) = ControlRequest::new(method, params);
-                if tx.send(req).is_err() {
-                    break;
-                }
-                ctx.request_repaint();
-                let mut r = rrx.recv_timeout(wait).unwrap_or_else(|_| json!({"ok": false, "error": "timeout"}));
+                // A request that timed out may have finished since (#1618).
+                let late = pending.as_ref().and_then(|p| match p.reply.try_recv() {
+                    Ok(reply) => Some(reply),
+                    Err(TryRecvError::Disconnected) => Some(json!({"ok": false, "error": "the app ended the request without a reply"})),
+                    Err(TryRecvError::Empty) => None,
+                });
+                let mut r = if method == "control.pending" {
+                    match (pending.take(), late) {
+                        (None, _) => json!({"ok": true, "result": {"pending": null}}),
+                        (Some(p), Some(reply)) => json!({"ok": true, "result": {"pending": p.id, "method": p.method, "done": true, "reply": reply}}),
+                        (Some(p), None) => {
+                            let r = json!({"ok": true, "result": {"pending": p.id, "method": p.method, "done": false}});
+                            pending = Some(p);
+                            r
+                        }
+                    }
+                } else if let Some(p) = pending.as_ref().filter(|_| late.is_none()) {
+                    // Nothing more is queued behind it, to run unseen when it ends.
+                    json!({"ok": false, "busy": true, "error": format!("busy: request {} (`{}`) is still running; ask `control.pending` for its result", p.id, p.method)})
+                } else {
+                    if late.is_some() {
+                        // Finished, and the client moved on without asking: it is dropped.
+                        pending = None;
+                    }
+                    // A batch replaces many short requests: the whole of it may take long (#743).
+                    let wait = if patient || method == "engine.batch" { waits.long } else { waits.short };
+                    let (req, rrx) = ControlRequest::new(method.clone(), params);
+                    if tx.send(req).is_err() {
+                        break;
+                    }
+                    ctx.request_repaint();
+                    match rrx.recv_timeout(wait) {
+                        Ok(r) => r,
+                        Err(_) => {
+                            let r = json!({"ok": false, "running": true, "error": format!("timeout: `{method}` is still running in the app and will still apply; ask `control.pending` for its result")});
+                            pending = Some(Pending { id: id.clone(), method, reply: rrx });
+                            r
+                        }
+                    }
+                };
                 if let Some(o) = r.as_object_mut() {
                     o.insert("id".into(), id);
                 }
@@ -227,6 +282,62 @@ fn serve(stream: TcpStream, token: &str, tx: Sender<ControlRequest>, ctx: egui::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1618: a request that outlasts its wait says it is still running; the connection keeps its
+    /// reply for `control.pending`, and refuses other requests as `busy` until it lands, so none
+    /// is queued to run unseen behind it.
+    #[test]
+    fn a_timed_out_request_can_be_asked_for_later() {
+        let token = "0123456789abcdef0123456789abcdef";
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = channel::<ControlRequest>();
+        let ran = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = ran.clone();
+        std::thread::spawn(move || {
+            for req in rx {
+                seen.lock().unwrap().push(req.method.clone());
+                if req.method == "slow" {
+                    std::thread::sleep(Duration::from_millis(400));
+                }
+                let _ = req.reply.send(json!({"ok": true, "result": req.method}));
+            }
+        });
+        let waits = Waits { short: Duration::from_millis(100), long: Duration::from_millis(100) };
+        std::thread::spawn(move || {
+            if let Some(stream) = listener.incoming().flatten().next() {
+                serve_with(stream, token, tx, egui::Context::default(), false, waits);
+            }
+        });
+        let s = TcpStream::connect(addr).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let mut out = s.try_clone().unwrap();
+        let mut lines = BufReader::new(s);
+        let mut ask = |v: Value| -> Value {
+            writeln!(out, "{v}").unwrap();
+            let mut l = String::new();
+            lines.read_line(&mut l).unwrap();
+            serde_json::from_str(&l).unwrap()
+        };
+        let r = ask(json!({"id": 1, "method": "slow", "token": token}));
+        assert!(r["ok"] == false && r["running"] == true && r["error"].as_str().is_some_and(|e| e.starts_with("timeout")), "{r}");
+        let r = ask(json!({"id": 2, "method": "ui.view"}));
+        assert!(r["busy"] == true && r["id"] == 2, "{r}");
+        let r = ask(json!({"id": 3, "method": "control.pending"}));
+        assert_eq!((&r["result"]["pending"], &r["result"]["done"]), (&json!(1), &json!(false)), "{r}");
+        std::thread::sleep(Duration::from_millis(600));
+        let r = ask(json!({"id": 4, "method": "control.pending"}));
+        assert_eq!(
+            (&r["result"]["pending"], &r["result"]["done"], &r["result"]["reply"]["result"]),
+            (&json!(1), &json!(true), &json!("slow")),
+            "{r}"
+        );
+        let r = ask(json!({"id": 5, "method": "control.pending"}));
+        assert_eq!(r["result"]["pending"], Value::Null, "{r}");
+        let r = ask(json!({"id": 6, "method": "ui.view"}));
+        assert_eq!((&r["ok"], &r["result"]), (&json!(true), &json!("ui.view")), "{r}");
+        assert_eq!(*ran.lock().unwrap(), ["slow", "ui.view"], "the busy request never reached the app");
+    }
 
     /// #205: a connection runs nothing until a request carries the launch's token; a wrong or
     /// missing token, or garbage, is refused and the connection closed. Once shown, the token

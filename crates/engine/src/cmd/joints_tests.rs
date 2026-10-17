@@ -35,6 +35,40 @@ fn leaf(s: &mut Session, name: &str) {
 }
 
 #[test]
+fn circle_given_by_its_centre_takes_that_round_end() {
+    // #393: `circle` at the centre of a round end, as the parameters document, was refused with
+    // "no cylindrical face there" (no face lies at a centre).
+    let mut s = Session::default();
+    run(&mut s, "component.create", json!({"name": "Plate"}));
+    run(&mut s, "solid.box", json!({"length": 30, "width": 20, "height": 6, "corner": [-15, -10, 0]}));
+    run(&mut s, "component.activate", json!({"component": "root"}));
+    run(&mut s, "component.create", json!({"name": "Knob"}));
+    run(&mut s, "solid.cylinder", json!({"base": [0, 0, 6], "axis": [0, 0, 1], "radius": 10, "height": 10, "operation": "new"}));
+    let r = run(
+        &mut s,
+        "joint.create",
+        json!({"type": "cylindrical", "a": {"occurrence": "Plate", "face": [0, 0, 6]}, "b": {"occurrence": "Knob", "circle": [0, 0, 6]}, "name": "J"}),
+    );
+    assert_eq!(r["conflicts"].as_array().map(Vec::len), Some(0), "{r}");
+    // The knob's bottom circle already sits on the plate's top: its axis stays put (it may turn
+    // about it, to line up the two frames' x).
+    for z in [6.0, 16.0] {
+        assert!(near(place(&s, "Knob", Vec3::new(0.0, 0.0, z)), Vec3::new(0.0, 0.0, z)), "{:?}", place(&s, "Knob", Vec3::new(0.0, 0.0, z)));
+    }
+    // The top end's centre: its axis points up, out of the knob.
+    run(&mut s, "joint.origin", json!({"occurrence": "Knob", "circle": [0, 0, 16], "name": "Top"}));
+    let top = s.doc.assembly.origins.iter().find(|o| o.name == "Top").map(|o| o.origin.snap.clone());
+    assert!(
+        matches!(top, Some(solidcraft_doc::joints::Snap::Point { point, z: Some(z) }) if near(point, Vec3::new(0.0, 0.0, 16.0)) && near(z, Vec3::Z)),
+        "{top:?}"
+    );
+    // Off the axis is still refused, and so is a coupling size (it follows a face).
+    assert!(s.execute("joint.origin", &json!({"occurrence": "Knob", "circle": [3, 0, 6]})).is_err());
+    let e = s.execute("joint.screw", &json!({"joint": "J", "pitch": {"occurrence": "Knob", "circle": [0, 0, 6]}})).unwrap_err();
+    assert!(e.to_string().contains("not its centre"), "{e}");
+}
+
+#[test]
 fn revolute_hinge_turns_about_the_knuckle() {
     let mut s = Session::default();
     leaf(&mut s, "LeafA");
@@ -1411,3 +1445,10 @@ fn hostile_trace_params_are_refused() {
 
 #[path = "joints_coupling_tests.rs"]
 mod coupling;
+
+#[path = "joints_cam_tests.rs"]
+mod cam;
+
+// Plots and interference of motion studies, on the four-bar and slider-crank above.
+#[path = "motion_analysis_tests.rs"]
+mod motion_analysis;

@@ -1,5 +1,5 @@
 //! Assembly dialogs: New Component, Joint, As-built Joint, Joint Origin, Rigid Group, Drive
-//! Joints, Motion Link, Gear, Rack and Pinion, Screw (`dialogs_coupling`) and Interference. Joint origins are picked by hovering geometry: a face
+//! Joints, Motion Link, Gear, Rack and Pinion, Screw, Cam (`dialogs_coupling`) and Interference. Joint origins are picked by hovering geometry: a face
 //! snaps to its centre (or a round face to the centre of its nearer end), an edge to its middle
 //! (a round edge to its centre), a vertex to itself; the snap shows as a glyph with its z axis
 //! before the click. Joints and drives preview on the placed (world) model: the moving
@@ -23,15 +23,15 @@ use crate::viewport::Proj;
 
 #[path = "dialogs_trace.rs"]
 mod trace;
-pub use trace::TraceForm;
+pub use trace::{TraceForm, picked_point};
 
 /// Joint types in the order the Type box lists them (command names).
 pub const TYPES: [&str; 7] = ["rigid", "revolute", "slider", "cylindrical", "pin_slot", "planar", "ball"];
 const TYPE_LABELS: [&str; 7] = ["Rigid", "Revolute", "Slider", "Cylindrical", "Pin-slot", "Planar", "Ball"];
 /// What a joint origin input accepts (snaps on faces, edges and vertices).
-const SNAPS: u16 = FACES | EDGES | VERTICES;
+pub const SNAPS: u16 = FACES | EDGES | VERTICES;
 /// Commands whose effect is where occurrences sit (previewed on the placed model).
-const MOVES: [&str; 11] = [
+const MOVES: [&str; 12] = [
     "joint.create",
     "joint.as_built",
     "joint.drive",
@@ -41,6 +41,7 @@ const MOVES: [&str; 11] = [
     "joint.gear",
     "joint.rack_pinion",
     "joint.screw",
+    "joint.cam",
     "parts.insert",
     "parts.fastener",
 ];
@@ -72,6 +73,7 @@ pub enum Asm {
         offset: String,
     },
     Coupling(Box<crate::dialogs_coupling::CouplingForm>),
+    Cam(Box<crate::dialogs_coupling::cam::CamForm>),
     Interference {
         result: Option<Value>,
         overlaps: Vec<Mesh>,
@@ -151,13 +153,14 @@ impl Asm {
                 "joint.rack_pinion" => "RACK AND PINION",
                 _ => "SCREW",
             },
+            Asm::Cam(_) => "CAM",
             Asm::Interference { .. } => "INTERFERENCE",
             Asm::Trace(_) => "MOTION TRACE",
         }
     }
 
     pub fn previews(&self) -> bool {
-        matches!(self, Asm::Joint(_) | Asm::Drive { .. } | Asm::RigidGroup | Asm::Coupling(_))
+        matches!(self, Asm::Joint(_) | Asm::Drive { .. } | Asm::RigidGroup | Asm::Coupling(_) | Asm::Cam(_))
     }
 }
 
@@ -185,6 +188,7 @@ pub fn start(app: &SolveApp, id: &str) -> Option<(Kind, Vec<SelInput>)> {
             (Asm::MotionLink { a: 0, b, ia: 0, ib: 0, ratio: "1".into(), offset: "0".into() }, vec![])
         }
         "joint.gear" | "joint.rack_pinion" | "joint.screw" => crate::dialogs_coupling::start(app, id)?,
+        "joint.cam" => crate::dialogs_coupling::cam::start(app),
         "inspect.interference" => {
             (Asm::Interference { result: None, overlaps: Vec::new(), of: Vec::new() }, vec![SelInput::new("Bodies (all if none)", BODIES, true)])
         }
@@ -261,7 +265,7 @@ fn current_values(s: &Session, index: usize) -> Vec<String> {
 }
 
 /// A value with its unit, without trailing zeros ("12 mm", "37.5 deg").
-fn num(v: f64, unit: &str) -> String {
+pub(crate) fn num(v: f64, unit: &str) -> String {
     let s = format!("{v:.4}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
     format!("{} {unit}", if s == "-0" { "0" } else { s })
@@ -686,6 +690,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Asm, inputs: &mut [Se
             ui.end_row();
         }
         Asm::Coupling(f) => enter |= crate::dialogs_coupling::rows(app, ui, f, inputs),
+        Asm::Cam(f) => enter |= crate::dialogs_coupling::cam::rows(app, ui, f, inputs),
         Asm::Interference { result, overlaps, of } => {
             let picked: Vec<Sel> = inputs.first().map(|i| i.items.clone()).unwrap_or_default();
             row_label(ui, "");
@@ -775,7 +780,7 @@ fn sel_items(inputs: &[SelInput], i: usize) -> &[Sel] {
 }
 
 /// The body a pick is on.
-fn body_of(sel: &Sel) -> Option<&str> {
+pub(crate) fn body_of(sel: &Sel) -> Option<&str> {
     match sel {
         Sel::Face { body, .. } | Sel::Edge { body, .. } | Sel::Vertex { body, .. } => Some(body),
         Sel::Body { name } => Some(name),
@@ -914,6 +919,7 @@ pub fn commands(app: &SolveApp, k: &Asm, inputs: &[SelInput]) -> Result<Vec<(Str
             cmd("joint.motion_link", json!({"a": ja.id, "b": jb.id, "ia": ia, "ib": ib, "ratio": ratio, "offset": offset.trim()}))
         }
         Asm::Coupling(f) => return crate::dialogs_coupling::commands(app, f, inputs),
+        Asm::Cam(f) => return crate::dialogs_coupling::cam::commands(app, f, inputs),
         // The check runs from its Compute button; OK only closes.
         Asm::Interference { .. } => Vec::new(),
         Asm::Trace(f) => cmd("motion.trace.keep", trace::params(s, f, inputs)?),
@@ -924,6 +930,9 @@ pub fn commands(app: &SolveApp, k: &Asm, inputs: &[SelInput]) -> Result<Vec<(Str
 pub fn animate(app: &SolveApp, k: &Asm, cmds: &mut Vec<(String, Value)>) {
     if let Asm::Coupling(f) = k {
         crate::dialogs_coupling::animate(&app.session, f, cmds);
+    }
+    if let Asm::Cam(f) = k {
+        crate::dialogs_coupling::cam::animate(&app.session, f, cmds);
     }
     let Asm::Joint(f) = k else { return };
     if !f.animate {

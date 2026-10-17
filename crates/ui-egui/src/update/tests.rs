@@ -441,3 +441,32 @@ fn release_notes_read_as_markdown() {
     }
     assert_eq!(inline("**[x](y)**"), vec![Span::Strong("x".into())]);
 }
+
+#[test]
+fn releases_under_either_owner_are_accepted() {
+    let parse = |owner: &str| {
+        let base = format!("https://github.com/{owner}/releases");
+        Release::parse(
+            json!({"tag_name": "v1.0.0", "html_url": format!("{base}/tag/v1.0.0"), "assets": [
+                {"name": "solidcraft-windows-x64.msi", "browser_download_url": format!("{base}/download/v1.0.0/solidcraft-windows-x64.msi")},
+            ]})
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap()
+    };
+    for owner in ["bherbruck/solidcraft", "tangency-labs/solidcraft"] {
+        let r = parse(owner);
+        assert_eq!(r.page, format!("https://github.com/{owner}/releases/tag/v1.0.0"));
+        assert_eq!(r.assets.len(), 1, "{owner}");
+    }
+    // Any other owner, repository, host or scheme is dropped.
+    for owner in ["evil/solidcraft", "tangency-labs/solidcraft-evil", "tangency-labs.evil/solidcraft", "bherbruck/other"] {
+        let r = parse(owner);
+        assert_eq!(r.page, RELEASES_PAGE, "{owner}");
+        assert!(r.assets.is_empty(), "{owner}");
+    }
+    assert!(!is_release_url("http://github.com/tangency-labs/solidcraft/releases/x"));
+    assert!(!is_release_url("https://github.com.evil.example/tangency-labs/solidcraft/releases/x"));
+    assert!(!is_release_url("https://github.com/tangency-labs/solidcraft/issues/1"));
+}

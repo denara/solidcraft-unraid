@@ -44,8 +44,8 @@ fn documents() -> (Document, Document) {
         NamedOrigin { name: "Outside".into(), origin: at(9) },
     ];
     source.assembly.links = vec![
-        MotionLink { a: 1, ia: 0, b: 2, ib: 0, ratio: -2.0, offset: 0.3, coupling: None },
-        MotionLink { a: 1, ia: 0, b: 3, ib: 0, ratio: 1.0, offset: 0.0, coupling: None },
+        MotionLink { a: 1, ia: 0, b: 2, ib: 0, ratio: -2.0, offset: 0.3, coupling: None, lift: Vec::new() },
+        MotionLink { a: 1, ia: 0, b: 3, ib: 0, ratio: 1.0, offset: 0.0, coupling: None, lift: Vec::new() },
     ];
     source.assembly.contact_sets = vec![
         ContactSet { id: 1, name: "Internal contact".into(), occurrences: vec![1, 2], suppressed: true },
@@ -106,8 +106,8 @@ fn copied_gears_take_their_picked_faces_along() {
     let circle = |face: &str| Size::Circle(JointOrigin { occurrence: 1, snap: Snap::CircleCenter { pick: Vec3::X, face: Some(face.into()) } });
     let gear = |ra| Coupling::Gear { ra, rb: Size::Length(5.0), internal: false, reverse: false };
     source.assembly.links = vec![
-        MotionLink { a: 1, ia: 0, b: 2, ib: 0, ratio: -2.0, offset: 0.0, coupling: Some(gear(circle("F1:side"))) },
-        MotionLink { a: 2, ia: 0, b: 1, ib: 0, ratio: -0.5, offset: 0.0, coupling: Some(gear(circle("F99:side"))) },
+        MotionLink { a: 1, ia: 0, b: 2, ib: 0, ratio: -2.0, offset: 0.0, coupling: Some(gear(circle("F1:side"))), lift: Vec::new() },
+        MotionLink { a: 2, ia: 0, b: 1, ib: 0, ratio: -0.5, offset: 0.0, coupling: Some(gear(circle("F99:side"))), lift: Vec::new() },
     ];
     let mut destination = source.clone();
     destination.occurrences.extend([101, 102].map(occurrence));

@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 use solidcraft_doc::expr::Kind;
+use solidcraft_doc::joints::cam::{self, Cam, CamProfile, Follower};
 use solidcraft_doc::joints::{self, Coupling, Joint, JointKind, JointOrigin, MotionLink, NamedOrigin, Size, Snap};
 use solidcraft_geom::{Aabb3, Vec3};
 
@@ -60,6 +61,9 @@ pub static COMMANDS: &[CommandSpec] = &[
          travel per turn (mm or an expression); reverse?: bool (a left-hand thread); link?: index (replace that motion link) → link, \
          ratio (mm per degree, or degrees per mm); b keeps where it is",
     ),
+    CommandSpec::new("joint.cam", "Cam", cam_cmd).at("SOLID", "ASSEMBLE").icon("cam").params(
+        "a: the cam's joint (revolute); b: the follower's joint, a slider (a translating follower) or a revolute (an oscillating one),          b driven by a; profile: {sketch: id|name, index?: the profile (default: the largest)} | {edges: [[x,y,z]…] (points on edges of          the cam's bodies forming one closed loop, world), occurrence?}: the cam's outline, in a plane square to its axis, read again          whenever the design changes; follower?: knife|roller|flat (default knife; flat: a face square to a slider's line); radius?: the          roller's radius (mm, an expression or {circle: [x,y,z], occurrence?}: the roller's round face, which is its tip too); tip?: a          joint origin where the follower touches: its knife's point or its roller's centre, such as {circle: [x,y,z]} on the roller          (needed for an oscillating follower; a translating one's line runs through it, by default along its slider's axis); flip?: bool (ride the cam from the other side          than the one the follower is on now); link?: index (replace that motion link) → link, lift: {min, max, rise, unit} (b's travel          over a turn of the cam), reverse (the side it rides from), follower_offset (mm: how far a translating follower's line passes          from the cam's axis); b keeps where it is",
+    ),
     CommandSpec::new("joint.limits", "Joint Limits", limits).params("joint; index?: value index (default 0); min?, max? (omit both to clear)"),
     CommandSpec::new("joint.edit", "Edit Joint", edit).params("joint; type?, flip?, offset?, angle?, suppressed?, name?"),
     CommandSpec::new("joint.delete", "Delete Joint", delete).params("joint: id|name (or origin: name, link: index)"),
@@ -80,29 +84,30 @@ pub fn resolve(s: &mut Session) -> joints::Solution {
     resolve_holding(s, &BTreeMap::new())
 }
 
-/// Work out the ratios of the coupled motion links again (a radius or a parameter may have
-/// changed). A coupling that can't be worked out (its face gone) keeps its last ratio;
-/// `joint.list` says why.
+/// Work out the ratios (and cam tables) of the coupled motion links again (a radius, a parameter
+/// or a cam's profile may have changed). A coupling that can't be worked out (its face gone)
+/// keeps its last ratio and table; `joint.list` says why.
 fn recouple(s: &mut Session) {
     if s.doc.assembly.links.iter().all(|l| l.coupling.is_none()) {
         return;
     }
     let st = s.model.state();
-    let changed: Vec<(usize, f64)> = s
+    let changed: Vec<(usize, (f64, Vec<f64>))> = s
         .doc
         .assembly
         .links
         .iter()
         .enumerate()
-        .filter_map(|(i, l)| joints::coupling_ratio(&s.doc, &st, l)?.ok().filter(|r| *r != l.ratio).map(|r| (i, r)))
+        .filter_map(|(i, l)| joints::coupling_values(&s.doc, &st, l)?.ok().filter(|(r, t)| *r != l.ratio || *t != l.lift).map(|v| (i, v)))
         .collect();
     if changed.is_empty() {
         return;
     }
     let doc = s.doc_mut();
-    for (i, r) in changed {
+    for (i, (r, t)) in changed {
         if let Some(l) = doc.assembly.links.get_mut(i) {
             l.ratio = r;
+            l.lift = t;
         }
     }
 }
@@ -305,8 +310,29 @@ fn origin_param(s: &Session, v: Option<&Value>, cmd: &str) -> Result<JointOrigin
         }
     };
     let o = JointOrigin { occurrence, snap };
-    joints::resolve_origin(&s.doc, &s.model.state(), &o).map_err(|e| bad(cmd, e.to_string()))?;
-    Ok(o)
+    match joints::resolve_origin(&s.doc, &s.model.state(), &o) {
+        Ok(_) => Ok(o),
+        // A circle given by its centre, where no face lies (#393).
+        Err(e) => match (what == "circle").then(|| circle_centre(s, occurrence, local(world))).flatten() {
+            Some(snap) => Ok(JointOrigin { occurrence, snap }),
+            None => Err(bad(cmd, e.to_string())),
+        },
+    }
+}
+
+/// The round end of a cylindrical face of the occurrence's bodies centred at `pick`: a point on
+/// its axis there, pointing out of that end (as picking its circular edge gives).
+fn circle_centre(s: &Session, occurrence: u64, pick: Vec3) -> Option<Snap> {
+    let component = if occurrence == 0 { 0 } else { s.doc.occurrences.iter().find(|o| o.id == occurrence)?.component };
+    let st = s.model.state();
+    let c = st
+        .bodies
+        .iter()
+        .filter(|b| s.doc.model_body_component(b) == component)
+        .find_map(|b| solidcraft_doc::kernel::cylinder_end_at(&b.body, pick))?;
+    let along = (pick - c.axis_point).dot(c.axis);
+    let (at, dir) = if (along - c.start).abs() <= (c.end - along).abs() { (c.start, -1.0) } else { (c.end, 1.0) };
+    Some(Snap::Point { point: c.axis_point + c.axis * at, z: Some(c.axis * dir) })
 }
 
 pub(crate) fn joint_id(s: &Session, v: Option<&Value>, cmd: &str) -> Result<u64> {
@@ -688,7 +714,7 @@ fn motion_link(s: &mut Session, p: &Value) -> Result<Value> {
         None => 0.0,
     };
     let ratio = ratio * ratio_scale(s, a, ia, b, ib);
-    s.doc_mut().assembly.links.push(MotionLink { a, ia, b, ib, ratio, offset, coupling: None });
+    s.doc_mut().assembly.links.push(MotionLink { a, ia, b, ib, ratio, offset, coupling: None, lift: Vec::new() });
     let sol = resolve(s);
     Ok(sol_json(&sol, p))
 }
@@ -699,7 +725,10 @@ fn size_param(s: &Session, p: &Value, key: &str, cmd: &str) -> Result<Size> {
     match p.get(key) {
         Some(Value::Number(n)) => n.as_f64().map(Size::Length).ok_or_else(|| bad(cmd, format!("`{key}` must be a finite length"))),
         Some(Value::String(t)) if t.len() <= 1000 => Ok(Size::Expr(t.trim().to_string())),
-        Some(o @ Value::Object(m)) if m.contains_key("circle") => Ok(Size::Circle(origin_param(s, Some(o), cmd)?)),
+        Some(o @ Value::Object(m)) if m.contains_key("circle") => match origin_param(s, Some(o), cmd)? {
+            o @ JointOrigin { snap: Snap::CircleCenter { .. }, .. } => Ok(Size::Circle(o)),
+            _ => Err(bad(cmd, format!("`{key}`: give a point on the round face, not its centre"))),
+        },
         _ => Err(bad(cmd, format!("`{key}` must be a length (mm or an expression) or a round face ({{circle: [x, y, z]}})"))),
     }
 }
@@ -742,7 +771,7 @@ fn gear(s: &mut Session, p: &Value) -> Result<Value> {
         internal: bool_(p, "internal").unwrap_or(false),
         reverse: reverse(p),
     };
-    couple(s, p, cmd, MotionLink { a, ia, b, ib, ratio: 1.0, offset: 0.0, coupling: Some(c) })
+    couple(s, p, cmd, MotionLink { a, ia, b, ib, ratio: 1.0, offset: 0.0, coupling: Some(c), lift: Vec::new() })
 }
 
 fn rack_pinion(s: &mut Session, p: &Value) -> Result<Value> {
@@ -750,7 +779,7 @@ fn rack_pinion(s: &mut Session, p: &Value) -> Result<Value> {
     let (a, b) = joint_pair(s, p, cmd)?;
     let (ia, ib) = turn_and_travel(s, a, b, cmd)?;
     let c = Coupling::RackPinion { radius: size_param(s, p, "radius", cmd)?, reverse: reverse(p) };
-    couple(s, p, cmd, MotionLink { a, ia, b, ib, ratio: 1.0, offset: 0.0, coupling: Some(c) })
+    couple(s, p, cmd, MotionLink { a, ia, b, ib, ratio: 1.0, offset: 0.0, coupling: Some(c), lift: Vec::new() })
 }
 
 fn screw(s: &mut Session, p: &Value) -> Result<Value> {
@@ -770,7 +799,120 @@ fn screw(s: &mut Session, p: &Value) -> Result<Value> {
         }
     };
     let c = Coupling::Screw { pitch: size_param(s, p, "pitch", cmd)?, reverse: reverse(p) };
-    couple(s, p, cmd, MotionLink { a, ia, b, ib, ratio: 1.0, offset: 0.0, coupling: Some(c) })
+    couple(s, p, cmd, MotionLink { a, ia, b, ib, ratio: 1.0, offset: 0.0, coupling: Some(c), lift: Vec::new() })
+}
+
+fn cam_cmd(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "joint.cam";
+    let (a, b) = joint_pair(s, p, cmd)?;
+    let kind = |id: u64| s.doc.assembly.joints.iter().find(|j| j.id == id).map(|j| j.kind);
+    if kind(a) != Some(JointKind::Revolute) {
+        return Err(bad(cmd, "the cam (a) turns on a revolute joint"));
+    }
+    let oscillating = match kind(b) {
+        Some(JointKind::Slider) => false,
+        Some(JointKind::Revolute) => true,
+        _ => return Err(bad(cmd, "the follower (b) is a slider or a revolute joint")),
+    };
+    let follower = match str_(p, "follower").unwrap_or("knife") {
+        "knife" => Follower::Knife,
+        "roller" => Follower::Roller { radius: size_param(s, p, "radius", cmd)? },
+        "flat" => Follower::Flat,
+        _ => return Err(bad(cmd, "`follower` is knife, roller or flat")),
+    };
+    if oscillating && p.get("tip").is_none() && !matches!(follower, Follower::Roller { radius: Size::Circle(_) }) {
+        return Err(bad(cmd, "an oscillating follower needs `tip`: its knife's point or its roller's centre ({circle: [x, y, z]} on the roller)"));
+    }
+    let tip = match p.get("tip") {
+        Some(v) => Some(origin_param(s, Some(v), cmd)?),
+        None => None,
+    };
+    let mut c = Cam { profile: cam_profile(s, p, cmd)?, follower, tip, reverse: false };
+    let probe = MotionLink { a, ia: 0, b, ib: 0, ratio: 1.0, offset: 0.0, coupling: None, lift: Vec::new() };
+    let st = s.model.state();
+    c.reverse = cam::default_reverse(&s.doc, &st, &probe, &c).map_err(|e| bad(cmd, e.to_string()))? != bool_(p, "flip").unwrap_or(false);
+    let offset = cam::follower_offset(&s.doc, &st, &probe, &c).map_err(|e| bad(cmd, e.to_string()))?;
+    let reverse = c.reverse;
+    let mut out = couple(s, p, cmd, MotionLink { coupling: Some(Coupling::Cam(c)), ..probe })?;
+    let index = out["link"].as_u64().and_then(|i| usize::try_from(i).ok()).unwrap_or(usize::MAX);
+    if let (Some(o), Some(l)) = (out.as_object_mut(), s.doc.assembly.links.get(index)) {
+        o.remove("ratio");
+        o.insert("lift".into(), lift_json(l, oscillating));
+        o.insert("reverse".into(), json!(reverse));
+        if !oscillating {
+            o.insert("follower_offset".into(), json!(offset));
+        }
+    }
+    Ok(out)
+}
+
+/// A cam's follower travel over a turn of the cam: b's lowest and highest values and their
+/// difference, in degrees (`angle`) or mm.
+fn lift_json(l: &MotionLink, angle: bool) -> Value {
+    // A table that is not whole (a hand-edited file) moves nothing, and says so.
+    if l.lift.len() != cam::CAM_SAMPLES {
+        return Value::Null;
+    }
+    let unit = |v: f64| if angle { v.to_degrees() } else { v };
+    let (lo, hi) = l.lift.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+    let (lo, hi) = (unit(lo + l.offset), unit(hi + l.offset));
+    json!({"min": lo, "max": hi, "rise": hi - lo, "unit": if angle { "deg" } else { "mm" }})
+}
+
+/// A cam's profile: a sketch's closed profile (kept by its outer loop's curve ids, so the sketch's
+/// other profiles may change), or picked edges of the cam's bodies (kept in the component's
+/// coordinates with the edges' names).
+fn cam_profile(s: &Session, p: &Value, cmd: &str) -> Result<CamProfile> {
+    let v = p.get("profile").ok_or_else(|| bad(cmd, "`profile` is required: {sketch: id|name} or {edges: [[x, y, z], …]}"))?;
+    if let Some(sk) = v.get("sketch") {
+        let sketch = super::features::sketch_id(s, Some(sk), cmd, "profile.sketch")?;
+        let st = s.model.state();
+        let solved =
+            st.sketches.iter().find(|x| x.feature == sketch).ok_or_else(|| bad(cmd, "that sketch is not evaluated (it is after the marker?)"))?;
+        let picked = match v.get("index") {
+            None => cam::sketch_profile(solved, &[]),
+            Some(i) => i.as_u64().and_then(|i| usize::try_from(i).ok()).and_then(|i| solved.profiles.get(i)),
+        };
+        let profile = picked.ok_or_else(|| bad(cmd, "the sketch has no such closed profile (an open curve makes none)"))?;
+        return Ok(CamProfile::Sketch { sketch, curves: profile.outer_curves.clone() });
+    }
+    let Some(Value::Array(pts)) = v.get("edges") else {
+        return Err(bad(cmd, "`profile` is {sketch: id|name} or {edges: [[x, y, z], …]}"));
+    };
+    if pts.is_empty() || pts.len() > cam::MAX_PROFILE_EDGES {
+        return Err(bad(cmd, format!("pick 1 to {} edges", cam::MAX_PROFILE_EDGES)));
+    }
+    let world: Vec<Vec3> = pts.iter().map(vec3).collect::<Option<_>>().ok_or_else(|| bad(cmd, "`edges` are finite [x, y, z] points"))?;
+    let occurrence = match v.get("occurrence") {
+        Some(o) => occurrence_id(s, Some(o), cmd)?,
+        None => world.first().and_then(|w| occurrence_at(s, *w)).ok_or_else(|| bad(cmd, "no body there"))?,
+    };
+    let t = if occurrence == 0 { solidcraft_doc::IDENTITY } else { joints::occurrence_world(&s.doc, occurrence) };
+    let inv = solidcraft_doc::mat_inverse(&t).ok_or_else(|| bad(cmd, "occurrence transform"))?;
+    let picks: Vec<Vec3> = world.iter().map(|w| solidcraft_doc::apply_point(&inv, *w)).collect();
+    let comp = s.doc.occurrences.iter().find(|o| o.id == occurrence).map(|o| o.component).unwrap_or(0);
+    let st = s.model.state();
+    let bodies: Vec<&solidcraft_doc::ModelBody> = st.bodies.iter().filter(|b| s.doc.model_body_component(b) == comp).collect();
+    // Each pick's edge name on the body whose edges pass nearest it.
+    let names = picks
+        .iter()
+        .map(|q| {
+            let near = |b: &&solidcraft_doc::ModelBody| {
+                b.mesh()
+                    .edges
+                    .iter()
+                    .flat_map(|e| e.windows(2))
+                    .filter_map(|w| Some(q.dist_to_segment(*w.first()?, *w.get(1)?)))
+                    .fold(f64::MAX, f64::min)
+            };
+            bodies
+                .iter()
+                .min_by(|x, y| near(x).total_cmp(&near(y)))
+                .and_then(|b| solidcraft_doc::naming::edge_names_at(b, &[*q]).into_iter().next())
+                .unwrap_or_default()
+        })
+        .collect();
+    Ok(CamProfile::Edges { occurrence, picks, names })
 }
 
 /// Add a coupling's motion link, or put it in place of link `link`: its ratio worked out from its
@@ -802,14 +944,18 @@ fn couple(s: &mut Session, p: &Value, cmd: &str, mut l: MotionLink) -> Result<Va
             None => break,
         }
     }
-    l.ratio = joints::coupling_ratio(&s.doc, &s.model.state(), &l).unwrap_or(Ok(l.ratio)).map_err(|e| bad(cmd, e.to_string()))?;
+    (l.ratio, l.lift) =
+        joints::coupling_values(&s.doc, &s.model.state(), &l).unwrap_or(Ok((l.ratio, Vec::new()))).map_err(|e| bad(cmd, e.to_string()))?;
     let vals = joints::joint_values(&s.doc.assembly);
     let value = |id: u64, i: usize| vals.get(&id).and_then(|q| q.get(i)).copied().unwrap_or(0.0);
     // A link put in place of another keeps its offset, as a radius edited in the design does.
     l.offset = match replace.and_then(|i| links.get(i)) {
         Some(old) => old.offset,
-        None => value(l.b, l.ib) - l.ratio * value(l.a, l.ia),
+        None => value(l.b, l.ib) - MotionLink { offset: 0.0, ..l.clone() }.follow(value(l.a, l.ia)),
     };
+    if !l.offset.is_finite() {
+        return Err(bad(cmd, "the coupling gives the driven joint no value where it is"));
+    }
     let shown = l.ratio / ratio_scale(s, l.a, l.ia, l.b, l.ib);
     let doc = s.doc_mut();
     let index = match replace {
@@ -970,9 +1116,16 @@ fn list(s: &mut Session, p: &Value) -> Result<Value> {
                 json!({"a": l.a, "ia": l.ia, "b": l.b, "ib": l.ib, "ratio": ratio, "offset": offset, "unit": if angle { "deg" } else { "mm" }});
             if let Some(c) = &l.coupling {
                 v["coupling"] = json!(c);
-                if let Some(Err(e)) = joints::coupling_ratio(&s.doc, &st, l) {
+                if let Some(Err(e)) = joints::coupling_values(&s.doc, &st, l) {
                     v["error"] = json!(e.to_string());
                 }
+            }
+            // A cam's follower follows its table, not a ratio: its travel instead.
+            if matches!(l.coupling, Some(Coupling::Cam(_)))
+                && let Some(o) = v.as_object_mut()
+            {
+                o.remove("ratio");
+                o.insert("lift".into(), lift_json(l, angle));
             }
             v
         })

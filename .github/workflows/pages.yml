@@ -1,5 +1,5 @@
-# The documentation site on GitHub Pages: the book (docs/book) at /solidcraft/ and the web app
-# at /solidcraft/app/. Needs Settings → Pages → Source = GitHub Actions; skipped while the
+# The documentation site on GitHub Pages: the book (docs/book) at https://docs.solidcraft.io/
+# and the bundled web app at /app/. Needs Settings → Pages → Source = GitHub Actions; skipped while the
 # repository is private.
 name: Pages
 
@@ -56,7 +56,7 @@ jobs:
         run: cargo xtask book
       - name: Build the web app
         working-directory: apps/solidcraft-web
-        run: trunk build --release --public-url /solidcraft/app/
+        run: trunk build --release --public-url ./
       - name: Test the web app offline and across an update (headless Chrome)
         run: cargo xtask web-offline-test --site dist/web
       - name: Assemble the site

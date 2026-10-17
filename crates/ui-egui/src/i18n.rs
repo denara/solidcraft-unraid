@@ -34,8 +34,11 @@ impl Catalog {
 static ENGLISH: Catalog = Catalog::new("en", "English", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/en.json")));
 static GERMAN: Catalog = Catalog::new("de", "Deutsch", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/de.json")));
 static FRENCH: Catalog = Catalog::new("fr", "Français", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/fr.json")));
+static GALICIAN: Catalog = Catalog::new("gl", "Galego", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/gl.json")));
 static JAPANESE: Catalog = Catalog::new("ja", "日本語", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/ja.json")));
 static KOREAN: Catalog = Catalog::new("ko", "한국어", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/ko.json")));
+static PORTUGUESE_BR: Catalog =
+    Catalog::new("pt-BR", "Português (Brasil)", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/pt-BR.json")));
 static RUSSIAN: Catalog = Catalog::new("ru", "Русский", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/ru.json")));
 static TURKISH: Catalog = Catalog::new("tr", "Türkçe", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/tr.json")));
 static UKRAINIAN: Catalog = Catalog::new("uk", "Українська", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/uk.json")));
@@ -47,8 +50,10 @@ pub const LOCALES: &[&Catalog] = &[
     &ENGLISH,
     &GERMAN,
     &FRENCH,
+    &GALICIAN,
     &JAPANESE,
     &KOREAN,
+    &PORTUGUESE_BR,
     &RUSSIAN,
     &TURKISH,
     &UKRAINIAN,
@@ -540,6 +545,29 @@ mod tests {
         assert_eq!(tr.format("document.save_changes", &[("name", "My {design}")]), "My {design} içindeki değişiklikler kaydedilsin mi?");
         assert_eq!(tr.format("dialog.selected_count", &[("count", "2")]), "↖ 2 seçildi");
         assert_eq!(tr.label("NonExistentKey"), "NonExistentKey");
+    }
+
+    #[test]
+    fn brazilian_portuguese_catalog_is_registered_and_translates_keys() {
+        let pt = Locale::for_language("pt-BR");
+        assert_eq!(pt.name(), "Português (Brasil)");
+        assert!(is_supported("pt-BR"));
+        assert_eq!(pt.text("ui.preferences"), "Preferências");
+        assert_eq!(pt.format("document.save_changes", &[("name", "My {design}")]), "Salvar as alterações em My {design}?");
+        assert_eq!(pt.format("dialog.selected_count", &[("count", "2")]), "↖ 2 selecionados");
+        assert_eq!(pt.label("NonExistentKey"), "NonExistentKey");
+    }
+
+    #[test]
+    fn galician_catalog_is_registered_and_translates_keys() {
+        let gl = Locale::for_language("gl");
+        assert_eq!(gl.name(), "Galego");
+        assert!(is_supported("gl"));
+        assert_eq!(gl.text("ui.preferences"), "Preferencias");
+        assert_eq!(gl.format("document.save_changes", &[("name", "My {design}")]), "Gardar os cambios en My {design}?");
+        assert_eq!(gl.format("dialog.selected_count", &[("count", "2")]), "↖ 2 seleccionados");
+        assert_eq!(gl.label("Fillet"), "Arredondamento");
+        assert_eq!(gl.label("NonExistentKey"), "NonExistentKey");
     }
 
     #[test]

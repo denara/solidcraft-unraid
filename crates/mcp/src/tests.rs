@@ -831,6 +831,59 @@ fn bridged_screenshots_with_grid_or_axes_are_model_renders() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// #1677: a hidden window gives no picture. With no `source`, a model render comes back and says
+/// it is one (`fallback`); asked for the window, the tool says why there is none, at once.
+#[test]
+fn a_hidden_window_screenshot_says_so() {
+    struct Hidden {
+        calls: Vec<String>,
+    }
+    impl crate::backend::Backend for Hidden {
+        fn call(&mut self, method: &str, params: Value) -> Result<Value, String> {
+            self.calls.push(method.to_string());
+            match method {
+                "ui.screenshot" => Err("no frame was presented (window hidden?); use ui.render".into()),
+                "ui.render" => {
+                    let path = params["path"].as_str().ok_or("missing `path`")?;
+                    std::fs::write(path, b"\x89PNG").map_err(|e| e.to_string())?;
+                    Ok(json!({"path": path, "width": 64, "height": 48}))
+                }
+                other => Err(format!("unknown method `{other}`")),
+            }
+        }
+        fn has_ui(&self) -> bool {
+            true
+        }
+        fn describe(&self) -> String {
+            "app".into()
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("solidcraft-mcp-hidden-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("shot.png").to_string_lossy().to_string();
+    let shoot = |extra: Value| {
+        let mut args = json!({"path": path, "width": 64, "height": 48});
+        args.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        let mut app = Hidden { calls: Vec::new() };
+        let r = crate::tools::call_tool(&mut app, "screenshot", &args);
+        (app.calls, r)
+    };
+    // The default: the window first, then a model render that says why.
+    let (calls, r) = shoot(json!({}));
+    assert!(r["isError"] != json!(true), "{r}");
+    assert_eq!(calls, ["ui.screenshot", "ui.render"]);
+    let info: Value = serde_json::from_str(r["content"][1]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(info["source"], "model", "{info}");
+    assert!(info["fallback"].as_str().is_some_and(|f| f.contains("window hidden")), "{info}");
+    // Asked for the window: an error naming the cause and the way out, and no render.
+    let (calls, r) = shoot(json!({"source": "window"}));
+    assert_eq!(r["isError"], json!(true), "{r}");
+    let text = r["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("window hidden") && text.contains("source \"model\""), "{text}");
+    assert_eq!(calls, ["ui.screenshot"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// #530: in a design with many bodies every feature result lists all of them, so a batch reply
 /// is mostly the same body list once per step. A compact batch reply names only what each step
 /// added or changed.

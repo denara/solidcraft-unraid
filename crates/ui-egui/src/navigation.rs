@@ -165,8 +165,7 @@ pub(crate) fn modifier_motion(
         && app.viewport.boxsel.is_none()
         && !(picking && hover.is_some_and(|p| app.viewport.rect.is_some_and(|rect| crate::canvas::owns_pointer(app, &projection(app, rect), p))))
         && !hover.is_some_and(|p| app.viewport.layout.as_ref().is_some_and(|l| l.navigation.contains(p)));
-    let next =
-        hover.filter(|p| owns && p.is_finite()).and_then(|p| crate::prefs::nav_preset(&app.preferences.nav).motion_mode(mods).map(|mode| (mode, p)));
+    let next = crate::prefs::nav_preset(&app.preferences.nav).motion_mode(mods).zip(hover.filter(|p| owns && p.is_finite()));
     let previous = app.viewport.modifier_nav;
     if previous.map(|(m, _)| m) != next.map(|(m, _)| m) {
         app.viewport.orbit_pivot = None;

@@ -278,6 +278,19 @@ fn default_name_for(name: &str, path: &str) -> Option<String> {
     (!stem.is_empty()).then_some(stem)
 }
 
+/// The name a design takes when saved to `path`, if it changes: its file's name while it has
+/// none of its own ([`default_name_for`]), or while it still has the name it took from the file
+/// it was saved as before, so Save As under another name renames it too (#1710). A name the
+/// user chose is kept.
+fn saved_name(name: &str, old_path: Option<&str>, path: &str) -> Option<String> {
+    if let Some(stem) = default_name_for(name, path) {
+        return Some(stem);
+    }
+    let stem = |p: &str| std::path::Path::new(p).file_stem().map(|x| x.to_string_lossy().trim().to_string()).filter(|x| !x.is_empty());
+    let (old, new) = (stem(old_path?)?, stem(path)?);
+    (name.trim() == old && new != old).then_some(new)
+}
+
 /// Rename the design, and the undo and redo states that still carry the old name, so undo
 /// does not bring the default name back and leave the design looking changed.
 fn rename_design(s: &mut Session, from: &str, to: &str) {
@@ -291,8 +304,9 @@ fn rename_design(s: &mut Session, from: &str, to: &str) {
 
 fn write(s: &mut Session, path: &str, format: &str, compression: &str, preview: bool, cache: bool) -> Result<Value> {
     solidcraft_io::vfs::check(path).map_err(|e| EngineError::Other(e.to_string()))?;
-    // Saving an unnamed design names it after its file (not an undoable edit).
-    let renamed = default_name_for(&s.doc.name, path).map(|stem| (s.doc.name.clone(), stem));
+    // Saving an unnamed design, or one named after the file it was saved as, names it after its
+    // file (not an undoable edit).
+    let renamed = saved_name(&s.doc.name, s.path.as_deref(), path).map(|stem| (s.doc.name.clone(), stem));
     if let Some((from, to)) = &renamed {
         rename_design(s, from, to);
     }
@@ -883,9 +897,20 @@ mod tests {
         // Undoing the box does not bring the old name back.
         s.execute("edit.undo", &json!({})).unwrap();
         assert_eq!(s.doc.name, "bracket");
-        // Saving under another file keeps the name it now has.
-        s.execute("file.save_as", &json!({"path":dir.join("copy.solidcraft")})).unwrap();
-        assert_eq!(s.doc.name, "bracket");
+        // Saved under another file, a name taken from the old file follows it (#1710), in the
+        // file too, so reopening shows it.
+        let copy = dir.join("copy.solidcraft");
+        s.execute("file.save_as", &json!({"path":copy})).unwrap();
+        assert_eq!(s.doc.name, "copy");
+        let mut reopened = Session::default();
+        reopened.execute("doc.open", &json!({"path":copy})).unwrap();
+        assert_eq!(reopened.doc.name, "copy");
+        // Saving again to the same file changes nothing.
+        s.execute("file.save", &json!({})).unwrap();
+        assert_eq!(s.doc.name, "copy");
+        // As in the issue: a design opened from its file, then saved as another.
+        reopened.execute("file.save_as", &json!({"path":dir.join("third.solidcraft")})).unwrap();
+        assert_eq!(reopened.doc.name, "third");
         // A failed save leaves the name alone.
         let mut failed = Session::default();
         assert!(failed.execute("file.save_as", &json!({"path":dir.join("missing-dir").join("plate.solidcraft")})).is_err());

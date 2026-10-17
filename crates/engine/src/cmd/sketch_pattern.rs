@@ -1,8 +1,9 @@
 //! Associative sketch patterns. Editing retains ids at surviving instance indices.
 
-use solidcraft_sketch::{PatternAlignment, PatternInstance, SketchPattern, SketchPatternKind};
+use solidcraft_sketch::{PatternInstance, SketchPattern, SketchPatternKind};
 
 use super::*;
+use crate::cmd::{alignment_param, reversed_param};
 
 pub(super) fn run(s: &mut Session, p: &Value, circular: bool) -> Result<Value> {
     let cmd = if circular { "sketch.pattern.circular" } else { "sketch.pattern.rectangular" };
@@ -255,16 +256,6 @@ fn direction_ref(sk: &Sketch, p: &Value, key: &str, cmd: &str) -> Result<Option<
         Some(Value::String(id)) if line_direction(sk, Some(id)).is_some() => Ok(Some(id.clone())),
         _ => Err(bad(cmd, format!("`{key}` must reference a nondegenerate sketch line"))),
     }
-}
-
-fn alignment_param(p: &Value, key: &str, cmd: &str) -> Result<PatternAlignment> {
-    p.get(key).map_or(Ok(PatternAlignment::default()), |value| {
-        serde_json::from_value(value.clone()).map_err(|_| bad(cmd, format!("`{key}` must be left, center or right")))
-    })
-}
-
-fn reversed_param(p: &Value, key: &str, cmd: &str) -> Result<bool> {
-    p.get(key).map_or(Ok(false), |value| serde_json::from_value(value.clone()).map_err(|_| bad(cmd, format!("`{key}` must be true or false"))))
 }
 
 fn line_direction(sk: &Sketch, id: Option<&str>) -> Option<Vec2> {

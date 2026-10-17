@@ -81,7 +81,7 @@ pub(crate) fn delete_features(app: &mut SolveApp, ids: Vec<u64>) {
         }
     }
     if with.is_empty() && fail.is_empty() {
-        let _ = app.run("timeline.delete", json!({ "features": ids }));
+        let _ = app.run_heavy("timeline.delete", json!({ "features": ids }));
     } else {
         app.dialog = Some(crate::dialogs::Dialog::confirm_delete_many(ids, with.into_iter().collect(), fail.into_iter().collect()));
     }
@@ -192,7 +192,7 @@ pub fn timeline(app: &mut SolveApp, ui: &mut egui::Ui) {
                     Some(k) if k < n => json!({"position": k}),
                     _ => json!({}),
                 };
-                let _ = app.run("timeline.roll_to", pos);
+                let _ = app.run_heavy("timeline.roll_to", pos);
             }
             x += 24.0;
         }
@@ -341,11 +341,11 @@ pub fn timeline(app: &mut SolveApp, ui: &mut egui::Ui) {
                             ui.close();
                         }
                         if ui.button(if *suppressed { "Unsuppress Features" } else { "Suppress Features" }).clicked() {
-                            let _ = app.run("timeline.suppress", json!({"feature": id}));
+                            let _ = app.run_heavy("timeline.suppress", json!({"feature": id}));
                             ui.close();
                         }
                         if ui.button(crate::i18n::tr_label("Roll History Marker Here")).clicked() {
-                            let _ = app.run("timeline.roll_to", json!({ "feature": id }));
+                            let _ = app.run_heavy("timeline.roll_to", json!({ "feature": id }));
                             ui.close();
                         }
                         if ui.button(crate::i18n::tr_label("Find in Browser")).clicked() {
@@ -398,14 +398,14 @@ pub fn timeline(app: &mut SolveApp, ui: &mut egui::Ui) {
                     let slot = slot_at(&xs, end, pp.x);
                     match dg {
                         Drag::Marker => {
-                            let _ = app.run("timeline.roll_to", if slot >= n { json!({}) } else { json!({ "position": slot }) });
+                            let _ = app.run_heavy("timeline.roll_to", if slot >= n { json!({}) } else { json!({ "position": slot }) });
                         }
                         Drag::Feature(id) => {
                             let from = app.session.doc.feature_index(id).unwrap_or(0);
                             // Dropping after itself means the slot shifts by one.
                             let to = if slot > from { slot - 1 } else { slot };
                             if to != from {
-                                let _ = app.run("timeline.reorder", json!({ "feature": id, "position": to }));
+                                let _ = app.run_heavy("timeline.reorder", json!({ "feature": id, "position": to }));
                             }
                         }
                     }

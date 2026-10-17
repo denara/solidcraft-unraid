@@ -4,10 +4,13 @@
 //! inputs, and when a case fails it shrinks the inputs to a small case that still fails. Paste
 //! that case into a normal `#[test]` as a regression test.
 //!
-//! Case count: `PROPTEST_CASES` (default 8). Pull requests skip this file (.config/nextest.toml);
-//! pushes to main run it, and the nightly `property-tests` job uses more cases. A long local run:
+//! Case count: `PROPTEST_CASES` (default 8). Pull requests and pushes to main skip this file
+//! (.config/nextest.toml, .github/workflows/ci.yml): its random inputs differ on every run, so a
+//! known kernel bug would turn main red at random. The nightly `property-tests` job runs it with
+//! more cases. A long local run:
 //! `PROPTEST_CASES=2000 cargo test -p solidcraft-kernel --test boolean_props`.
-//! proptest saves every failing seed in `tests/boolean_props.proptest-regressions`. Commit it.
+//! proptest saves every failing seed in `tests/boolean_props.proptest-regressions`. Commit it, and
+//! copy the shrunk case into a `#[test]` below (ignored, with its issue, until the kernel is fixed).
 
 use proptest::prelude::*;
 use solidcraft_geom::Vec3;
@@ -102,7 +105,15 @@ fn cfg(default: u32) -> ProptestConfig {
     // The env var overrides the default; proptest reads PROPTEST_CASES itself only when the
     // config does not set `cases`, so read it here.
     let cases = std::env::var("PROPTEST_CASES").ok().and_then(|s| s.parse().ok()).unwrap_or(default);
-    ProptestConfig { cases, max_shrink_iters: 200, ..ProptestConfig::default() }
+    // Integration tests have no lib.rs or main.rs beside them, so proptest's default persistence
+    // cannot place its file; name it.
+    let file = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/boolean_props.proptest-regressions");
+    ProptestConfig {
+        cases,
+        max_shrink_iters: 200,
+        failure_persistence: Some(Box::new(prop::test_runner::FileFailurePersistence::Direct(file))),
+        ..ProptestConfig::default()
+    }
 }
 
 proptest! {
@@ -217,4 +228,45 @@ proptest! {
         let (vp, vb) = (vol(&plate), vol(&boss));
         prop_assert!(close(run(&plate, &boss, BoolOp::Union)?, vp + vb, vp + vb), "plate + boss lost or gained volume");
     }
+}
+
+// Cases the property tests found, as plain tests. Ignored until the kernel bug is fixed: run them
+// with `cargo test -p solidcraft-kernel --test boolean_props -- --ignored`.
+
+fn check(r: Result<(), TestCaseError>) {
+    if let Err(e) = r {
+        panic!("{e}");
+    }
+}
+
+/// A box and a cylinder in general position: the intersect is refused as an implausible volume.
+#[test]
+#[ignore = "kernel bug, #1647"]
+fn generic_box_cylinder_intersect() {
+    let a = Prim::Box { at: [11.483767761089219, 4.801612107504224, 3.6313476467611787], size: [4.789088988834864, 3.0, 10.419335961063835] };
+    let b = Prim::Cyl { at: [29.2480632732879, 8.3683289461485, 6.947922225984966], axis: 2, r: 13.502884497756853, h: 19.719218725477496 };
+    check(identity(&a, &b));
+}
+
+/// A sphere and a box on the grid: the union has a face that does not mesh.
+#[test]
+#[ignore = "kernel bug, #1648"]
+fn grid_sphere_box_union_is_sound() {
+    let a = Prim::Sph { at: [2.5, 15.0, 27.5], r: 12.5 };
+    let b = Prim::Box { at: [0.0, 0.0, 17.5], size: [5.0, 7.5, 5.0] };
+    check(identity(&a, &b));
+}
+
+/// Two crossing cylinders: the union moved 1000 mm away loses about a tenth of its volume.
+#[test]
+#[ignore = "kernel bug, #1649"]
+fn crossing_cylinders_union_moved_far() {
+    let a = Prim::Cyl { at: [17.5, 30.0, 7.5], axis: 0, r: 5.0, h: 10.0 }.body();
+    let b = Prim::Cyl { at: [17.5, 30.0, 15.0], axis: 1, r: 12.5, h: 5.0 }.body();
+    let t = Vec3::new(1000.0, -700.0, 300.0);
+    let mv = |x: &Body| transform(x, t, Vec3::ZERO, Vec3::Z, 0.0).expect("translate");
+    let s = vol(&a) + vol(&b);
+    let here = run(&a, &b, BoolOp::Union).unwrap();
+    let there = run(&mv(&a), &mv(&b), BoolOp::Union).unwrap();
+    assert!(close(here, there, s), "union at origin {here:.4}, moved by 1000 gives {there:.4}");
 }

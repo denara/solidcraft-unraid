@@ -1,6 +1,10 @@
 //! A drawing of the visible bodies from a supplied viewport camera. No screen pixels, grid,
 //! selection highlights or tessellation diagonals are exported.
 
+#[path = "view_dxf_meshes.rs"]
+mod meshes;
+#[path = "view_dxf_progress.rs"]
+mod progress;
 #[path = "view_dxf_projection.rs"]
 mod projection;
 
@@ -46,28 +50,17 @@ fn export(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(path) = path {
         solidcraft_io::vfs::check(path).map_err(|e| crate::EngineError::Other(e.to_string()))?;
     }
-    let world = s.world_state();
-    let mut meshes = Vec::new();
-    let mut count = 0usize;
-    for body in world.bodies.iter().filter(|b| s.body_visible(&b.name)) {
-        let mesh = body.body.reference_display_mesh_angular(tolerance, solidcraft_kernel::DISPLAY_ANGLE)?;
-        count = count.saturating_add(mesh.triangles.len()).saturating_add(mesh.edges.iter().map(Vec::len).sum::<usize>());
-        if count > 1_000_000 {
-            return Err(bad(CMD, "view too complex to export; hide bodies or increase tolerance"));
-        }
-        if mesh.triangles.is_empty() {
-            return Err(bad(CMD, format!("{} has no exportable surface", body.name)));
-        }
-        meshes.push(mesh);
-    }
-    if meshes.is_empty() {
-        return Err(bad(CMD, "no visible bodies to export"));
-    }
-    let lines = projection::drawing(&meshes, &cam).map_err(|e| bad(CMD, e))?;
+    let started = std::time::Instant::now();
+    progress::Stage::new("dxf_meshes", 1).check().map_err(|e| bad(CMD, e))?;
+    let meshes = meshes::prepare(s, tolerance)?;
+    let prepare_ms = started.elapsed().as_secs_f64() * 1000.;
+    let drawing = projection::drawing(&meshes, &cam).map_err(|e| bad(CMD, e))?;
+    let writing = progress::Stage::new("dxf_write", 1);
+    writing.check().map_err(|e| bad(CMD, e))?;
     let mut visible = 0;
     let mut hidden = 0;
     let mut entities = Vec::new();
-    for line in lines {
+    for line in drawing.lines {
         if line.hidden && !dashed {
             continue;
         }
@@ -86,9 +79,14 @@ fn export(s: &mut Session, p: &Value) -> Result<Value> {
         layers.push(DxfLayer { linetype: DxfLinetype::Hidden, ..DxfLayer::new("HIDDEN", 8) });
     }
     let text = solidcraft_io::write_dxf_drawing(&layers, &entities);
+    writing.check().map_err(|e| bad(CMD, e))?;
     let mut result = json!({"visible":visible,"hidden":hidden,"units":"mm","tolerance":tolerance,"projection":if cam.fov > 0.0 {"perspective"} else {"orthographic"}});
+    result["stats"] = json!({"bodies":meshes.placements.len(),"shared_meshes":meshes.meshes.len(),"triangles":meshes.triangles,
+        "mesh_bytes":meshes.bytes,"worker_limit":meshes::WORKERS,"segments":drawing.segments,"occlusion_work":drawing.work,
+        "prepare_ms":prepare_ms,"projection_ms":drawing.projection_ms,"occlusion_ms":drawing.occlusion_ms});
     if let Some(path) = path {
-        solidcraft_io::vfs::write(path, text.as_bytes()).map_err(|e| crate::EngineError::Other(e.to_string()))?;
+        solidcraft_io::vfs::check(path).map_err(|e| crate::EngineError::Other(e.to_string()))?;
+        solidcraft_io::write_atomic(std::path::Path::new(path), text.as_bytes(), false).map_err(|e| crate::EngineError::Other(e.to_string()))?;
         result["path"] = json!(path);
     } else {
         result["dxf"] = json!(text);

@@ -1289,8 +1289,8 @@ impl Sketch {
     }
 
     /// Exact boundary segments of a free-form curve: ellipses as four conics, conics, fit
-    /// splines and control splines up to degree 3 as Béziers. None for other curves (and for
-    /// higher-degree splines, which stay polylines).
+    /// splines and control splines up to `MAX_BEZIER_DEGREE` as Béziers. None for other curves
+    /// (and for higher-degree splines, which stay polylines).
     pub fn exact_segs(&self, ci: usize) -> Option<Vec<Seg2>> {
         let cu = self.curves.get(ci)?;
         let pt = |i: &usize| self.point(*i);
@@ -1323,6 +1323,17 @@ impl Sketch {
                 Some(crate::curves::bspline_beziers(&p, k).iter().filter_map(|c| solidcraft_geom::bezier(c)).collect())
             }
             _ => None,
+        }
+    }
+
+    /// The exact [`Seg2`] pieces of a curve of any kind, in the curve's own direction of travel:
+    /// lines, circles and arcs from their analytic form, free-form curves through
+    /// [`Sketch::exact_segs`]. Empty for a curve with no exact pieces (a spline above
+    /// `solidcraft_geom::MAX_BEZIER_DEGREE`).
+    pub fn exact_pieces(&self, ci: usize) -> Vec<Seg2> {
+        match self.exact_segs(ci) {
+            Some(segs) => segs,
+            None => self.segs(ci),
         }
     }
 
@@ -1375,8 +1386,11 @@ impl Sketch {
                 "e"
             }
             CurveKind::Spline { pts, control, degree, periodic } => {
-                if pts.len() < 2 || pts.len() > crate::curves::MAX_SPLINE_POINTS || !(1..=7).contains(degree) {
-                    return Err(SketchError::Invalid("a spline needs 2 to 500 points and degree 1 to 7".into()));
+                if pts.len() < 2 || pts.len() > crate::curves::MAX_SPLINE_POINTS || !(1..=solidcraft_geom::MAX_BEZIER_DEGREE as u8).contains(degree) {
+                    return Err(SketchError::Invalid(format!(
+                        "a spline needs 2 to 500 points and degree 1 to {}",
+                        solidcraft_geom::MAX_BEZIER_DEGREE
+                    )));
                 }
                 if *periodic {
                     if *control || *degree != 3 {

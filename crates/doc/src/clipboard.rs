@@ -113,7 +113,9 @@ fn remap_plane(
         return Err(crate::DocError::Invalid("clone plane reference depth exceeded".into()));
     }
     match p {
-        PlaneRef::Offset { base, .. } | PlaneRef::AtAngle { base, .. } => remap_plane(base, ids, names, bodies, depth + 1)?,
+        PlaneRef::Offset { base, .. } | PlaneRef::AtAngle { base, .. } | PlaneRef::Flipped { base, .. } => {
+            remap_plane(base, ids, names, bodies, depth + 1)?
+        }
         PlaneRef::Construction { name } => mapped_name(&mut name.0, names),
         PlaneRef::Face { name, anchor, .. } => {
             if let Some(name) = name {
@@ -283,7 +285,7 @@ fn checked_plane(p: &PlaneRef, depth: usize) -> crate::Result<()> {
         return Err(crate::DocError::Invalid("copy reference nesting exceeds 64".into()));
     }
     match p {
-        PlaneRef::Offset { base, .. } | PlaneRef::AtAngle { base, .. } => checked_plane(base, depth + 1)?,
+        PlaneRef::Offset { base, .. } | PlaneRef::AtAngle { base, .. } | PlaneRef::Flipped { base, .. } => checked_plane(base, depth + 1)?,
         PlaneRef::Midplane { a, b } | PlaneRef::TwoEdges { a, b } => {
             checked_geo(a, depth + 1)?;
             checked_geo(b, depth + 1)?;

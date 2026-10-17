@@ -214,10 +214,18 @@ fn rename(s: &mut Session, p: &Value) -> Result<Value> {
     let id = component(s, p, "component", cmd)?;
     let name =
         str_(p, "name").map(str::trim).filter(|n| !n.is_empty() && n.len() <= 128).ok_or_else(|| bad(cmd, "`name` must be 1…128 characters"))?;
+    let d = s.doc_mut();
     if id == 0 {
-        s.doc_mut().name = name.to_string();
-    } else if let Some(c) = s.doc_mut().components.iter_mut().find(|c| c.id == id) {
-        c.name = name.to_string();
+        d.name = name.to_string();
+    } else if let Some(c) = d.components.iter_mut().find(|c| c.id == id) {
+        let old = std::mem::replace(&mut c.name, name.to_string());
+        // Placements still named after the component ("Old:2") follow it (#1665); others keep theirs.
+        for o in d.occurrences.iter_mut().filter(|o| o.component == id) {
+            let k = o.name.strip_prefix(old.as_str()).and_then(|r| r.strip_prefix(':'));
+            if let Some(k) = k.filter(|k| !k.is_empty() && k.bytes().all(|b| b.is_ascii_digit())) {
+                o.name = format!("{name}:{k}");
+            }
+        }
     }
     Ok(json!({"component": id, "name": name}))
 }

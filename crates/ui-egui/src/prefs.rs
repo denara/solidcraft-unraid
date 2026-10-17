@@ -332,6 +332,8 @@ pub struct Prefs {
     pub save_mesh_format: String,
     /// Hidden edges in the current-view DXF export (false: omit, true: dashed).
     pub view_dxf_dashed: bool,
+    /// Model-space chord tolerance for current-view DXF curves, in millimetres.
+    pub view_dxf_tolerance: f64,
     pub save_mesh_send: bool,
     pub save_mesh_slicer: String,
     pub custom_slicers: Vec<String>,
@@ -428,6 +430,7 @@ impl Default for Prefs {
             update: crate::update::Memo::default(),
             save_mesh_format: "stl".into(),
             view_dxf_dashed: false,
+            view_dxf_tolerance: 0.01,
             save_mesh_send: false,
             save_mesh_slicer: String::new(),
             custom_slicers: Vec::new(),

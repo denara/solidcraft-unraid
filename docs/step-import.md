@@ -12,6 +12,24 @@ Every import (STEP, IGES, 3MF, STL, OBJ; inserted, dropped, opened as a new desi
 
 A STEP **assembly** keeps its structure: each product under the file's root becomes a component nested under the import's, named after the product, at the place the file gives it. A part (or sub-assembly) the file places more than once becomes **one component with an occurrence per placement**: the Import feature builds the part once and skips the file's later copies (`skip` in the feature, format 22), and the occurrences show it everywhere else. The reply adds `subcomponents` (how many components were made below the import's) and `rigid_joints`.
 
+The Browser reuses body, sketch and construction-plane membership, child lists and resolved placements while the
+camera moves. Large assemblies keep their tree open without resolving every part and
+folder again on each frame. Geometry edits, assembly changes and uncaptured or reverted
+positions refresh those queries; selection, visibility and locking are read live.
+
+Hover picking pauses while the mouse moves the view and resumes when navigation stops.
+A 3D mouse moving the view leaves it on: the pointer hand is free, so preselection and
+clicks keep working while the other hand turns the view. Picking uses the cached body
+bounds directly in model order, so finding each body's bounds does not scan the assembly
+again.
+
+Hovering an assembly's Browser row retains its whole-body highlight buffers during
+rotation, panning and zoom; the GPU transforms those buffers with the camera. The
+origin and construction widgets resize independently. Whole-body
+highlight generation scans each mesh once rather than scanning it again for every
+face. Sketch profile feedback still updates its projected curves and lift toward
+the eye as the view changes.
+
 The contents of an imported assembly are **rigid by default**: rigid joints (a rigid group, its glyphs not drawn) hold each part where the file put it in its parent, so moving the import's component moves everything, and an inner part doesn't move on its own; joint degrees of freedom count the whole import as one body. To joint the parts one by one, release them with **Unlock Contents** on the component's browser menu (`component.unlock {component}`), one undo step. Undo takes a whole import away in one step.
 
 Designs saved before imports made components keep their Import where it is (no component is made for it) and rebuild as they did.

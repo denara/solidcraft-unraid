@@ -389,7 +389,14 @@ fn shell_create_polygon<S: PreMeshableSurface>(
         .collect::<Option<Vec<_>>>();
     let polygon: Option<PolygonMesh> = (|| {
         let boundary = PolyBoundary::new(preboundary?, &surface, tol);
-        Some(trimming_tessellation(surface, &boundary, tol, cap))
+        let mut mesh = trimming_tessellation(surface, &boundary, tol, cap);
+        // Display and export meshes only, as the ruling grid lines: the meshes Boolean
+        // operations intersect keep truck's points.
+        if tol.rulings {
+            let points: Vec<Point3> = wires.iter().flat_map(Wire::edge_iter).flat_map(|e| e.curve().0).collect();
+            onto_edges(&mut mesh, &boundary, &points, tol.chord);
+        }
+        Some(mesh)
     })();
     // SolidCraft: faces with seam edges (a loop running along an edge both ways, as STEP
     // writes cylinders) are valid here; `debug_new` asserts simple loops in debug builds.
@@ -398,6 +405,42 @@ fn shell_create_polygon<S: PreMeshableSurface>(
         new_face.invert();
     }
     new_face
+}
+
+/// SolidCraft: a face's mesh puts every point where its own surface passes the point's
+/// parameters, and a boundary point's parameters are those its edge point projects to. An edge
+/// that lies on a surface only within tolerance (a sample of an intersection curve whose
+/// projection did not converge, an imported edge) then puts the point it shares with the next
+/// face in a different place on each face, and the shell's mesh cracks there. Each vertex at a
+/// point of the boundary loops (the same parameters, as the triangulation got them) that is
+/// farther than `TOLERANCE` from the nearest point of the face's edges goes to that point, when
+/// it is within `tol`, so the faces of an edge have the very same points along it. Within
+/// `TOLERANCE` the points are already the same, and a face keeps them on its surface: grid
+/// points can lie on a boundary between its points (the ruling lines of a plane), and moving
+/// only the boundary points would bend the boundary there.
+fn onto_edges(mesh: &mut PolygonMesh, boundary: &PolyBoundary, points: &[Point3], tol: f64) {
+    let key = |x: f64, y: f64| [spade_round(x).to_bits(), spade_round(y).to_bits()];
+    let loops: rustc_hash::FxHashSet<[u64; 2]> = boundary.0.iter().flatten().map(|p| key(p.x, p.y)).collect();
+    let on_loops: Vec<bool> = mesh.uv_coords().iter().map(|uv| loops.contains(&key(uv.x, uv.y))).collect();
+    let cell = |p: Point3| [p.x, p.y, p.z].map(|x| (x / tol).floor() as i64);
+    let mut grid: HashMap<[i64; 3], Vec<Point3>> = HashMap::default();
+    points.iter().for_each(|p| grid.entry(cell(*p)).or_default().push(*p));
+    for (p, _) in mesh.positions_mut().iter_mut().zip(on_loops).filter(|(_, on)| *on) {
+        let c = cell(*p);
+        let mut best = (tol * tol, None);
+        for d in (0..27).map(|k| [k % 3 - 1, k / 3 % 3 - 1, k / 9 - 1]) {
+            let near = [c[0].saturating_add(d[0]), c[1].saturating_add(d[1]), c[2].saturating_add(d[2])];
+            for q in grid.get(&near).into_iter().flatten() {
+                let d2 = q.distance2(*p);
+                if d2 <= best.0 {
+                    best = (d2, Some(*q));
+                }
+            }
+        }
+        if let Some(q) = best.1.filter(|_| best.0 > TOLERANCE2) {
+            *p = q;
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -971,7 +1014,14 @@ fn bounded_surface_division<S: PreMeshableSurface>(surface: &S, (ur, vr): ((f64,
                 let pt10 = surface.subs(u[1], v[0]).to_vec();
                 let pt11 = surface.subs(u[1], v[1]).to_vec();
                 let pt = Point3::from_vec(pt00 * (1.0 - p) * (1.0 - q) + pt01 * (1.0 - p) * q + pt10 * p * (1.0 - q) + pt11 * p * q);
-                let far = p0.distance2(pt) > tol * tol;
+                // SolidCraft (#1666): a cell is drawn as two triangles, not as the bilinear blend
+                // of its corners. A twisted cell (a bilinear patch is the blend exactly, so `pt`
+                // never tells) bows off its corners' plane by a quarter of its twist at the middle,
+                // across that plane: a cone's trapezoid between two rulings is flat and needs none.
+                let normal = (pt10 - pt00).cross(pt01 - pt00);
+                let bow = (pt00 - pt01 - pt10 + pt11).dot(normal) * 0.25;
+                let twisted = normal.magnitude2() > 0.0 && bow * bow > tol * tol * normal.magnitude2();
+                let far = p0.distance2(pt) > tol * tol || twisted;
                 // Which direction bends: refine only that one (a cylinder needs no division
                 // along its rulings).
                 let (su, sv) = ([surface.subs(u[0], v0), surface.subs(u[1], v0)], [surface.subs(u0, v[0]), surface.subs(u0, v[1])]);

@@ -22,6 +22,18 @@ fn volume(s: &mut Session, b: &str) -> f64 {
 
 const SIZES: [(f64, f64); 9] = [(3.0, 0.5), (4.0, 0.7), (5.0, 0.8), (6.0, 1.0), (8.0, 1.25), (10.0, 1.5), (12.0, 1.75), (16.0, 2.0), (20.0, 2.5)];
 
+#[test]
+fn non_finite_thread_designations_are_refused_without_changing_the_design() {
+    let mut s = Session::default();
+    run(&mut s, "solid.cylinder", json!({"radius":4,"height":10}));
+    let saved = s.doc.to_json();
+    for designation in ["Minfx1", "M8xinf", "MNaNx1", "M8xNaN", "M1e999x1"] {
+        let result = s.execute("solid.thread", &json!({"face":[4,0,2],"designation":designation}));
+        assert!(result.is_err(), "{designation}: {result:?}");
+        assert_eq!(s.doc.to_json(), saved);
+    }
+}
+
 /// ∫ 2π r · width(r) dr over [a, b]: the volume one turn of the groove takes out (a screw
 /// motion of a section in an axial plane sweeps 2π∫r dA per turn).
 fn per_turn(a: f64, b: f64, width: impl Fn(f64) -> f64) -> f64 {

@@ -1338,6 +1338,20 @@ pub(crate) fn paint_with(p: &Painter, r: Rect, name: &str, ink: Color32, fill: C
             pen.poly(&[(6.0, 10.0), (18.0, 10.0), (18.0, 15.0), (6.0, 15.0)], pen.fill, a);
             pen.arrow((21.0, 17.0), (21.0, 6.0), a);
         }
+        "cam" => {
+            // A cam on its shaft, its lobe up under the follower it lifts.
+            let cam: Vec<(f32, f32)> = (0..36)
+                .map(|k| {
+                    let t = std::f32::consts::TAU * k as f32 / 36.0;
+                    let r = 5.0 + 3.0 * (0.5 + 0.5 * t.sin()).powi(3);
+                    (11.0 + r * t.cos(), 16.0 - r * t.sin())
+                })
+                .collect();
+            pen.poly(&cam, pen.fill, ink);
+            pen.dot(11.0, 16.0, ink);
+            pen.poly(&[(9.0, 2.0), (13.0, 2.0), (13.0, 8.0), (9.0, 8.0)], pen.fill, a);
+            pen.arrow((18.5, 9.5), (18.5, 2.5), a);
+        }
         "interference" => {
             pen.closed(&[(3.0, 5.0), (14.0, 5.0), (14.0, 16.0), (3.0, 16.0)], ink);
             pen.poly(&[(9.0, 10.0), (14.0, 10.0), (14.0, 16.0), (9.0, 16.0)], ic.interference, ic.interference);

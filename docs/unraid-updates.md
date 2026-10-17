@@ -703,3 +703,71 @@ update the existing container with unchanged settings/data/token, and reload the
 Format25 designs require this snapshot or a compatible newer build for reopening.
 The final upstream fetch observed `db1fd39139596ecfcce0c27dfcc9fa33d1c45e5b`; changes after the fixed target
 are deferred to the next update run.
+
+## 2026-10-17: upstream c5992386 (SolidCraft 0.14.0 development snapshot, format 26)
+
+Advanced the validated baseline from `3707a67cee8ff9da897d9a9b9b5174739a0d4ee2`
+to the single fixed snapshot `c59923865324cb487ff90def4361ad9c7d8a2556`
+(PR #1827 confirmed merged). Its 91 non-merge commits add cam couplings, motion plots,
+interference analysis and GIF/PNG animation export, Class-A surface work, feature-pattern
+alignment, expression-driven hole positions, shared navigation controls, viewport depth fixes,
+Linux spacenavd support and a corrected SVG picker filter. Upstream's package version is
+0.14.0; main has three pending changes beyond the folded format25 and writes format26.
+This is container packaging of a tested main snapshot, not an application release or tag.
+
+Started clean and synchronized with origin/codex/unraid-mcp-web; origin/main was an ancestor.
+Merged directly into that sole branch without conflicts, preserving published merge history,
+HTTP MCP/browser independence, strict unsafe/privacy rules and the omitted native bridges.
+Three equivalent boolean simplifications (curve-blend length validation and two feature
+pattern/mirror Option predicates) satisfy warning-denied Clippy; no warning was suppressed.
+The first local build was cancelled and rebuilt with those final corrections. Diagnostics
+remain private. Cargo.lock changes the gateway's inherited version only beyond upstream's
+graph; weezl's MIT/Apache-2.0 LZW code was already an indirect dependency. Regenerated notices
+and server license/layer roots remain correct. The canonical CA template/icon hashes match
+denara/unraid-templates; no catalog commit or portal submission is needed.
+
+Validation was scoped to the changes and deployment boundaries, not the complete test suite:
+
+- 382 selected tests passed: 329 gateway/stdio MCP, VFS/archive, format/golden walks,
+  direct file/font scoping, motion/analysis/animation/cam/joints, file commands, GIF,
+  navigation, CLI and curve-blend checks; 53 feature-mirror/pattern, file-picker,
+  expression-driven hole and surface command regressions. Five existing tests/benchmarks
+  remain ignored. The analytic rounded-corner rolling-ball case passed in the selected
+  31-case blend group; it is a longer check, not a timeout or ignored failure.
+- Formatting, workspace/all-target Clippy with -D warnings, all 95 attributed assets,
+  dependency layering (16 crates), fresh license notices and eleven-crate Wasm checks passed.
+  The Linux amd64 release CLI/gateway and independent browser app built successfully.
+- A new named test volume, loopback port and disposable token passed real HTTP MCP
+  sketch/extrusion at 24000 mm3, PNG/STEP, independent sessions, auth/origin and
+  file/font/diagnostic/stored-link confinement, restart reopen, compatibility CLI alias,
+  logging severity/icons, authentication/session capacity/release and no secret/noise leakage.
+- Official MCP SDK 1.32.1 reopened copied public 0.2.1/0.3.2 and format16/17/20/21 designs,
+  plus the previous snapshot's format25 with its five pending names, at 24000 mm3.
+  Save/reopen produced an actual ZIP document.json stamped solidcraft/26 with cam-couplings,
+  fillet-corner-and-loft-continuity and hole-position-expressions. STEP, uploaded-font
+  geometry, compact/named-camera replies, linked-file refresh (6000 to 9000 mm3), thin
+  extrusion (2400 mm3), render-job PNG export and cross-session job rejection also passed.
+  Existing public FCStd/3dm/glTF imports and their external buffer path guards still passed.
+- New behavior passed on that actual image through HTTP MCP: explicit window screenshots
+  correctly error in the headless service; model pictures remain available. A slider study
+  reports the analytic -5 mm/s velocity and detects intentional overlap. An exported GIF
+  has three real 64x40 frames; three PNG frames render different start/end placements.
+  Out-of-workspace GIF/folder destinations are refused and joint values stay unchanged.
+  Native start/end PNGs were visually inspected, without using or overwriting real designs.
+- The actual independent browser rendered Sample Plate at 0.14.0. Chromium software
+  graphics passed all 19 built-site offline/update scenarios (21 launches). Physical GPU,
+  Windows/macOS platform bridges and a real SpaceMouse are outside this container proof.
+
+Image: `solvecraft-unraid:upstream-c5992386` (Linux amd64).
+Local image ID: `sha256:9e98221b1506044025660b77a9fcc92cf03969a61eb13c19a5c1531f91eceaa5`.
+Archive: `target/solidcraft-unraid-upstream-c5992386.tar` (144,539,136 bytes).
+SHA256: `dd46b82831c059dec4045d2825398b1c6b24c638064d60c8d22b8883ceb0f3eb`.
+The export manifest names the tested tag. Proof models, PNG/GIF files, logs and private
+configuration stay under ignored target/unraid-update-c5992386, excluded from Git/build context.
+Verified registry publication and local replacement/cleanup are recorded separately below.
+No Unraid installation, nginx/DNS change or application release is performed.
+
+Before updating Unraid, back up server files and separately export browser designs. Preserve
+the existing token, data mapping and settings, then reload the browser. Format26 saves need
+this snapshot or a compatible newer build; upstream's released 0.14.0 reads up to format25.
+Retain pre-update design copies and the previous image for rollback.

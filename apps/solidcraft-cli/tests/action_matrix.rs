@@ -1519,7 +1519,6 @@ fn sketches_on_loft_and_sweep_faces() {
 }
 
 #[test]
-#[ignore = "fails until #562 is fixed"]
 fn press_pull_on_the_pi_case_floor() {
     reproduces(
         Some("tests/action_matrix/designs/pi-case.solidcraft"),
@@ -1560,7 +1559,6 @@ fn a_sketch_on_the_rim_a_shell_leaves() {
 }
 
 #[test]
-#[ignore = "fails until #565 is fixed"]
 fn sketches_after_split_body_and_intersect() {
     reproduces(
         None,

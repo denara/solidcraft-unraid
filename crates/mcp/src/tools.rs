@@ -639,11 +639,21 @@ fn capture(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<(Vec<u8>, Valu
         }
         b.call("ui.render", params)
     };
+    let asked_window = str_arg(a, "source") == Some("window");
+    let mut fallback = None;
     let (info, source) = if window {
         match b.call("ui.screenshot", json!({"path": path})) {
             Ok(v) => (v, "window"),
-            // No presented frame (minimised or hidden window): fall back to a model render.
-            Err(_) => (render(b)?, "model"),
+            // Asked for the window: say why there is none, so the caller can show it or ask for
+            // a model render (#1677).
+            Err(e) if asked_window => {
+                return Err(format!("screenshot: the window gave no picture ({e}); show the window, or use source \"model\""));
+            }
+            // No presented frame (minimised or hidden window): a model render, and the reply says so.
+            Err(e) => {
+                fallback = Some(e);
+                (render(b)?, "model")
+            }
         }
     } else {
         (render(b)?, "model")
@@ -659,6 +669,9 @@ fn capture(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<(Vec<u8>, Valu
     };
     let bytes = png.len();
     let mut reply = json!({"source": source, "path": keep, "width": w, "height": h, "bytes": bytes});
+    if let Some(why) = fallback {
+        reply["fallback"] = json!(format!("the window gave no picture ({why}); this is a model render"));
+    }
     // What drew a model render (gpu, gpu-software or cpu), and the warning a CPU render carries.
     for k in ["renderer", "warning"] {
         if let Some(v) = info.get(k).filter(|v| !v.is_null()) {

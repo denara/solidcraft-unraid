@@ -1,7 +1,7 @@
 # Agent chat
 
 Agent chat is a side panel where you talk to a coding agent you already use (Claude Code,
-Codex, Gemini CLI, OpenCode, Grok Build and others), or to a model behind an OpenAI-compatible endpoint you
+Codex, Google Antigravity, OpenCode, Grok Build and others), or to a model behind an OpenAI-compatible endpoint you
 choose (Ollama or LM Studio on your computer, OpenAI, any other URL), and have it work on the
 design that's open. A coding agent runs on your computer under **your own account** with that
 agent: SolidCraft doesn't sell or proxy a model and needs no key for it. An endpoint's key, if
@@ -88,7 +88,7 @@ the keychain, so SolidCraft doesn't guess there.
 |---|---|
 | Claude Code | `npm install -g @agentclientprotocol/claude-agent-acp` (the ACP adapter for Claude Code) |
 | Codex | `npm install -g @agentclientprotocol/codex-acp` |
-| Gemini CLI | `npm install -g @google/gemini-cli` (it speaks ACP itself: `gemini --acp`) |
+| Google Antigravity | Google's ACP server, a separate download from Google's `agy` command (which has no ACP mode): take the zip for your system from the [ACP registry](https://agentclientprotocol.com/registry), unzip it and put `agy_acp_server.par` (`agy_acp_server.exe` on Windows) on your `PATH`. The zip also holds `localharness_external`: leave the two together. It signs in itself (browser). |
 | OpenCode | `npm install -g opencode-ai` (`opencode acp`) |
 | XAI Grok | [Grok Build installer](https://docs.x.ai/build/overview), then `grok login` (`grok agent stdio` speaks ACP) |
 | GitHub Copilot CLI, Qwen Code, goose | listed with their install command when missing |
@@ -149,6 +149,9 @@ The agent reaches the open design only through SolidCraft's own tools (the
   a single undo step, named after your message. The conversation shows *N changes, one undo
   step* with **Undo these changes** while nothing else has happened since.
 - **Tool cards:** each tool call shows as a card with its state; click it to see what it returned.
+- **Formatted text:** the agent's answers show as Markdown: headings, lists, quotes, code blocks
+  (with **Copy**), bold, italic, `code` and links (web links only; each link is a button that opens
+  it in your browser). What you type, and the agent's thoughts, stay plain text.
 - **Attach view:** tick it to send a picture of the current view with your message, for agents
   that take pictures.
 

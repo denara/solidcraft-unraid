@@ -340,6 +340,13 @@ surface_offset
     Distance = soff.distance (Length)
     Tolerance = soff.tolerance (Length)
   expressions: soff.distance, soff.tolerance
+surface_blend
+surface_boundary
+surface_match
+surface_fair
+  inputs:
+    Tolerance = sfair.tolerance (Length)
+  expressions: sfair.tolerance
 unstitch
 reverse_normal
 surface_untrim

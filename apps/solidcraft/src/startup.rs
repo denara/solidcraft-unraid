@@ -157,6 +157,23 @@ pub fn choose_backends(
     Some(WINDOWS_ORDER.into_iter().find(|b| has_hardware(*b)).unwrap_or(Backends::DX12))
 }
 
+/// The device feature for a 32-bit float depth buffer with a stencil (reversed depth, #1434).
+pub const FLOAT_DEPTH_STENCIL: eframe::wgpu::Features = eframe::wgpu::Features::DEPTH32FLOAT_STENCIL8;
+
+/// Whether every adapter `options` could start offers a float depth buffer with a stencil. eframe
+/// makes the window's depth buffer from the depth bits before it picks the adapter, so the window
+/// asks for a float one only when whichever it picks has it.
+pub fn float_depth_everywhere(options: &eframe::egui_wgpu::WgpuConfiguration) -> bool {
+    let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &options.wgpu_setup else { return false };
+    let mut desc = eframe::wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+    desc.backends = setup.instance_descriptor.backends;
+    let instance = eframe::wgpu::Instance::new(desc);
+    let adapters = pollster::block_on(instance.enumerate_adapters(setup.instance_descriptor.backends));
+    let all = !adapters.is_empty() && adapters.iter().all(|a| a.features().contains(FLOAT_DEPTH_STENCIL));
+    log::info!("graphics: float depth with stencil on every adapter: {all}");
+    all
+}
+
 /// The order backends are tried in on Windows.
 pub const WINDOWS_ORDER: [eframe::wgpu::Backends; 3] = [eframe::wgpu::Backends::DX12, eframe::wgpu::Backends::VULKAN, eframe::wgpu::Backends::GL];
 

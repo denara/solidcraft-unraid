@@ -45,7 +45,7 @@ fn explicit_planes(p: &mut PlaneRef) {
                 *p = PlaneRef::Custom { plane };
             }
         }
-        PlaneRef::Offset { base, .. } | PlaneRef::AtAngle { base, .. } => explicit_planes(base),
+        PlaneRef::Offset { base, .. } | PlaneRef::AtAngle { base, .. } | PlaneRef::Flipped { base, .. } => explicit_planes(base),
         _ => {}
     }
 }

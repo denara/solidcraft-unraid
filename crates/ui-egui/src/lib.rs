@@ -20,6 +20,7 @@ mod colour_vision_tests;
 pub mod context_menu;
 pub mod control;
 pub mod crash_ui;
+pub mod deferred;
 pub mod delete;
 pub mod design_properties;
 pub mod dialogs;
@@ -35,6 +36,7 @@ pub mod dialogs_save_mesh;
 pub mod dialogs_sheet;
 pub mod dialogs_surface;
 pub mod dialogs_sweep;
+mod dialogs_thread;
 pub mod dialogs_view_dxf;
 pub mod dim_view;
 #[cfg(test)]
@@ -97,6 +99,8 @@ mod expression_complete;
 mod extrude_edit_tests;
 mod file_load;
 mod file_picker;
+#[cfg(test)]
+mod history_off_thread_tests;
 pub use file_picker::FilePickerFuture;
 #[cfg(test)]
 mod blend_arrow_tests;
@@ -108,6 +112,8 @@ mod fillet_spline_handle_tests;
 pub(crate) mod navigation;
 pub mod palette;
 pub mod params_dialog;
+pub(crate) mod pick_buffer;
+pub(crate) mod pick_index;
 pub mod prefs;
 #[cfg(test)]
 mod preselect_tests;
@@ -149,6 +155,8 @@ pub mod sketch_modify_ui;
 mod sketch_modify_ui_tests;
 pub mod sketch_palette;
 mod sketch_pattern_tree;
+#[cfg(test)]
+mod sketch_side_ui_tests;
 pub(crate) mod sketch_text;
 mod sketch_text_handles;
 mod sketch_text_move;
@@ -246,7 +254,9 @@ impl Default for UiState {
 /// Host services injected by the app so this crate stays portable.
 #[derive(Default)]
 pub struct Services {
-    pub pick_open: Option<Box<dyn Fn() -> FilePickerFuture>>,
+    /// Ask for a file to open. The extensions are the file type the command reads, offered as
+    /// the picker's first filter (`&[]`: designs, CAD files and meshes, #1801).
+    pub pick_open: Option<Box<dyn Fn(&[&str]) -> FilePickerFuture>>,
     pub pick_save: Option<Box<dyn Fn(&str, &[&str]) -> FilePickerFuture>>,
     /// Open a dialog asking for a program (a slicer); `None` when the host has no such dialog.
     pub pick_program: Option<Box<dyn Fn() -> FilePickerFuture>>,
@@ -319,6 +329,10 @@ pub struct SolveApp {
     pub preview: preview::PreviewState,
     /// OK pressed on a feature that takes a while: its evaluation runs off the window thread.
     pub applying: Option<dialogs::Applying>,
+    /// A command recomputing the history (the marker moved, undo) computing off the window
+    /// thread, and those asked for meanwhile ([`deferred`]).
+    pub deferred: Option<deferred::Deferred>,
+    pub deferred_queue: Vec<(String, Value)>,
     /// How long OK waits for a feature before computing it off the window thread, saying so;
     /// `None`: it waits as long as it takes (headless use, tests). The desktop app sets it.
     pub apply_off_thread: Option<std::time::Duration>,
@@ -433,6 +447,8 @@ impl SolveApp {
             slicer_menu: dialogs_save_mesh::SlicerMenu::default(),
             preview: preview::PreviewState::default(),
             applying: None,
+            deferred: None,
+            deferred_queue: Vec::new(),
             apply_off_thread: None,
             last_command: None,
             esc_handled: false,
@@ -722,8 +738,8 @@ impl SolveApp {
         dim_view::cancel();
         self.tool = None;
         self.home.open = false;
-        if matches!(id, "sketch.insert_dxf" | "sketch.insert_svg") {
-            self.pick_open_command(id, json!({}));
+        if let Some(ext) = id.strip_prefix("sketch.insert_").filter(|e| matches!(*e, "dxf" | "svg")) {
+            self.pick_open_command(id, json!({}), &[ext]);
             return;
         }
         if id == "component.insert_design" {
@@ -841,6 +857,11 @@ impl SolveApp {
             self.dialog = Some(d);
             return;
         }
+        // Undo and redo can recompute much of the history: off the window thread when slow.
+        if matches!(id, "edit.undo" | "edit.redo") {
+            let _ = self.run_heavy(id, json!({}));
+            return;
+        }
         let _ = self.run(id, json!({}));
     }
 
@@ -926,7 +947,9 @@ impl SolveApp {
     }
 
     fn restore_marker(&mut self, marker: Option<usize>) {
-        let _ = self.run("timeline.roll_to", marker.map(|m| json!({ "position": m })).unwrap_or_else(|| json!({})));
+        // Rolling forward past the features after the sketch recomputes them (an edited sketch
+        // under a text cut): off the window thread when it takes a while.
+        let _ = self.run_heavy("timeline.roll_to", marker.map(|m| json!({ "position": m })).unwrap_or_else(|| json!({})));
     }
 
     /// Everything shown as selected: the selection plus the open dialog's inputs.
@@ -940,13 +963,16 @@ impl SolveApp {
         v
     }
 
-    /// Is the origin widget shown (always while picking a sketch plane)?
-    /// Origin planes and axes are drawn and pickable. Hidden ones only come back while Create
-    /// Sketch has nothing else to offer (no body shown).
+    /// Is the origin widget shown? Origin planes and axes are drawn and pickable. While Create
+    /// Sketch picks its plane the Origin is always shown, drawn through the model (a plane
+    /// inside a body stays visible), even when the browser hides it.
     pub fn origin_visible(&self) -> bool {
-        self.ui.show_origin
-            || (self.dialog.as_ref().is_some_and(|d| matches!(d.kind, dialogs::Kind::Sketch))
-                && !self.session.world_state().bodies.iter().any(|b| self.session.body_visible(&b.name)))
+        self.ui.show_origin || self.picking_sketch_plane()
+    }
+
+    /// Is Create Sketch open, waiting for its plane?
+    pub fn picking_sketch_plane(&self) -> bool {
+        self.dialog.as_ref().is_some_and(|d| matches!(d.kind, dialogs::Kind::Sketch))
     }
 
     pub fn set_status(&mut self, s: impl Into<String>, error: bool) {
@@ -1318,6 +1344,7 @@ impl SolveApp {
 
     fn cad_ui(&mut self, ui: &mut egui::Ui, report_input: &mut Option<issue_report::CadInput>) {
         scenario::clear_handles();
+        self.poll_deferred(ui.ctx());
         toolbar::app_bar(self, ui);
         issue_report::CadInput::block(self, ui, report_input);
         file_load::show(self, ui.ctx());
@@ -1426,6 +1453,11 @@ impl SolveApp {
                 control::Outcome::Done(v) => {
                     let _ = reply.send(v);
                 }
+                // A window that is minimised or covered (another macOS Space) presents no frame:
+                // say so at once rather than after the deadline (#1677).
+                control::Outcome::Screenshot { .. } if window_hidden(ctx) => {
+                    let _ = reply.send(json!({"ok": false, "hidden": true, "error": "no frame was presented (window hidden?); use ui.render"}));
+                }
                 control::Outcome::Screenshot { path } => {
                     self.shot_token += 1;
                     let token = self.shot_token;
@@ -1479,14 +1511,22 @@ impl SolveApp {
             }
         }
         let now = now_ms();
+        // Hidden while waiting: no frame is coming.
+        let hidden = window_hidden(ctx);
         self.pending_shots.retain(|(_, _, reply, deadline)| {
-            if now < *deadline {
+            if now < *deadline && !hidden {
                 return true;
             }
             let _ = reply.send(json!({"ok": false, "error": "no frame was presented (window hidden?); use ui.render"}));
             false
         });
     }
+}
+
+/// The window is minimised or fully covered, so it presents no frames (#1677). Unknown counts as
+/// shown: the screenshot deadline still ends a wait for a frame that never comes.
+fn window_hidden(ctx: &egui::Context) -> bool {
+    ctx.input(|i| i.viewport().visible()) == Some(false)
 }
 
 /// A command's name as people see it (its label), for the status bar.

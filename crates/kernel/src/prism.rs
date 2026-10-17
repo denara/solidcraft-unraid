@@ -1300,10 +1300,15 @@ fn exact_loop(lp: &Loop2, tags: &[Tag], sources: &[Seg2], near: f64) -> (Vec<Seg
         };
         let (t0, t1) = (at(seg.start()), at(last.end()));
         if (t1 - t0).abs() < 1e-9 {
-            // A sliver of the curve: its arcs as they are.
-            for m in k..=j {
-                let q = (first + m) % n;
-                pieces.push(Piece::Plain(*lp.segs.get(q).unwrap_or(seg), tag(q)));
+            // A sliver of the curve: its arcs as they are, or, shorter than the tolerance (where
+            // a curve lies on another, as when the same letters are cut again), nothing: its
+            // neighbours meet where it was, and as an edge it would have no length.
+            let length: f64 = (k..=j).filter_map(|m| lp.segs.get((first + m) % n)).map(Seg2::length).sum();
+            if length > near {
+                for m in k..=j {
+                    let q = (first + m) % n;
+                    pieces.push(Piece::Plain(*lp.segs.get(q).unwrap_or(seg), tag(q)));
+                }
             }
         } else {
             let t = Tag { end: tag((first + j) % n).end, ..tag(i) };
@@ -1313,6 +1318,9 @@ fn exact_loop(lp: &Loop2, tags: &[Tag], sources: &[Seg2], near: f64) -> (Vec<Seg
     }
     // Each joint at an exact curve: both sides end at the same point, the exact crossing where
     // the curve is cut, its own end point where it ends.
+    if pieces.is_empty() {
+        return plain();
+    }
     let m = pieces.len();
     let inner = |t: f64| t > 1e-9 && t < 1.0 - 1e-9;
     for i in 0..m {
@@ -1690,6 +1698,11 @@ fn split_seg(seg: &Seg2, pts: &[Vec2], tol: f64) -> Option<Vec<Seg2>> {
             {
                 return None;
             }
+            // A point within `tol` of an end is that end (the sewing welds them into one): a cut
+            // there would leave a piece with no length.
+            if p.dist(seg.start()) < tol || p.dist(seg.end()) < tol {
+                return None;
+            }
             let t = seg.closest_param(*p);
             (t > 1e-9 && t < 1.0 - 1e-9 && seg.point_at(t).dist(*p) < tol).then_some(t)
         })
@@ -1951,13 +1964,38 @@ fn sew_connected_sections(
     };
     let at = |u: Vec2, z: f64| plane.to_world(u) + d * z;
     let welded = |u: Vec2, z: f64| at(weld(&ends, &grid, u).unwrap_or(u), z);
+    // One edge between two ends, whichever way a wall or a cap reads the curve there: a piece of
+    // a font's curve so short that one section reads it as an arc within the tolerance, where
+    // another has the curve itself (the same letters cut again), is one edge. The first reading
+    // stands for all of them.
+    let readings: std::cell::RefCell<Vec<(Vec3, Vec3, Vec3, EdgeSpec)>> = std::cell::RefCell::new(Vec::new());
+    let same_edge = |spec: EdgeSpec, a: Vec3, b: Vec3, mid: Vec3| -> EdgeSpec {
+        let mut known = readings.borrow_mut();
+        for (ka, kb, km, k) in known.iter() {
+            if km.dist(mid) <= tol * 10.0 {
+                if *ka == a && *kb == b {
+                    return k.clone();
+                }
+                if *ka == b && *kb == a {
+                    return k.reversed();
+                }
+            }
+        }
+        known.push((a, b, mid, spec.clone()));
+        spec
+    };
     let edge = |sg: &Seg2, z: f64| -> Option<EdgeSpec> {
         Some(match sg {
             Seg2::Line { .. } => EdgeSpec::Line { a: welded(sg.start(), z), b: welded(sg.end(), z) },
-            Seg2::Arc { .. } => EdgeSpec::Arc { a: welded(sg.start(), z), b: welded(sg.end(), z), mid: at(sg.point_at(0.5), z) },
+            Seg2::Arc { .. } => {
+                let (a, b, mid) = (welded(sg.start(), z), welded(sg.end(), z), at(sg.point_at(0.5), z));
+                same_edge(EdgeSpec::Arc { a, b, mid }, a, b, mid)
+            }
             _ => {
                 let [p0, p1, p2, p3] = cubic_of(sg)?;
-                EdgeSpec::Chain { ctrl: same_chain([welded(p0, z), at(p1, z), at(p2, z), welded(p3, z)]).to_vec().into() }
+                let c = same_chain([welded(p0, z), at(p1, z), at(p2, z), welded(p3, z)]);
+                let mid = (c[0] + (c[1] + c[2]) * 3.0 + c[3]) * 0.125;
+                same_edge(EdgeSpec::Chain { degree: 3, ctrl: c.to_vec().into() }, c[0], c[3], mid)
             }
         })
     };
@@ -2215,6 +2253,34 @@ fn directions(a: &Body, b: &Body) -> Option<Vec<Vec3>> {
     let mut dirs: Vec<Vec3> = target.iter().take(8).copied().collect();
     dirs.extend(target.iter().skip(8).filter(|d| capped(d)).take(8));
     Some(dirs)
+}
+
+/// The direction `b` is a prism (or a stack of prisms) along: the first of its planar faces'
+/// normals along which it is one. `None` when there is none.
+pub(crate) fn prism_axis(b: &Body) -> Option<Vec3> {
+    if b.face_count() > MAX_PLANAR_SEGMENTS {
+        return None;
+    }
+    let tol = (b.size() * 1e-7).max(1e-9) * 10.0;
+    let index = LazyIndex::new(b, 1);
+    let mut tried: Vec<Vec3> = Vec::new();
+    for f in b.solid.face_iter() {
+        let mt::Surface::Plane(p) = f.oriented_surface() else { continue };
+        let n = p.normal();
+        let Some(n) = Vec3::new(n.x, n.y, n.z).normalized() else { continue };
+        if tried.iter().any(|m| m.dot(n).abs() > 1.0 - 1e-9) {
+            continue;
+        }
+        tried.push(n);
+        if tried.len() > 16 {
+            return None;
+        }
+        let plane = Plane::from_normal(Vec3::ZERO, n)?;
+        if stack_tagged(b, n, &plane, tol, &index).is_some() {
+            return Some(n);
+        }
+    }
+    None
 }
 
 /// Whether a boolean of sections left one of area `v` as it was (area `u` after): the same to

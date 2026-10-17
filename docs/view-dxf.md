@@ -1,8 +1,22 @@
 # Export the current view as DXF
 
 Choose **File → Export Current View as DXF…**, choose whether to omit hidden edges or
-export them as dashed lines, then choose **Export DXF…** and a destination. The hidden-edge
-choice is remembered between runs. The Japanese menu is **ファイル → 現在の表示をDXFでエクスポート…**.
+export them as dashed lines, set **Curve tolerance**, then choose **Export DXF…** and a
+destination. Both settings are remembered. The Japanese menu is
+**ファイル → 現在の表示をDXFでエクスポート…**.
+
+On desktop, the export runs on a background worker while the window continues repainting
+and responding to its title-bar controls. A progress card shows mesh preparation, surface
+preparation, projection, hidden-line removal and writing, with a count and progress bar for
+the current stage. **Cancel** stops at the next mesh or traversal checkpoint; a single
+meshing call or sort may need to finish first. The model waits during the export and remains
+unchanged on success, failure and cancellation. Individual control-channel
+`file.export_view_dxf` commands use the same worker.
+The browser's export still runs synchronously on its single thread.
+
+An export replaces its destination atomically only after the complete drawing is ready.
+Cancellation that takes effect before the final write preserves any previous file. Once
+that atomic write starts, it finishes; a late Cancel reports the completed save.
 
 The drawing uses the camera when Export is pressed, including roll, the world's up axis
 and perspective. Only shown bodies are exported, at their current component/occurrence
@@ -15,7 +29,9 @@ Coordinates are 2D, Z=0, in millimetres. Orthographic views retain 1:1 dimension
 view plane. Perspective views retain foreshortening, projected onto the plane through the
 camera target; they are intended for illustrations rather than dimensioned fabrication.
 Curves and curved silhouettes are approximated with straight segments at a default
-model-space chord tolerance of 0.01 mm. This is not an exact analytic curve export.
+model-space chord tolerance of 0.01 mm. The setting accepts 0.0001–1 mm; smaller values
+produce finer curves and generally need more time and memory. This is not an exact analytic
+curve export or a tolerance guarantee for the original imported surfaces.
 
 The AutoCAD 2000 ASCII DXF contains `VISIBLE` (continuous) and, when requested, `HIDDEN`
 (2 mm dashes / 1 mm gaps) layers. Hidden curves use connected `LWPOLYLINE` entities with
@@ -29,6 +45,18 @@ are excluded; curved-body silhouettes are included. Very complex drawings fail w
 error rather than returning an incomplete export. If geometry crosses the perspective
 camera's eye plane, zoom out before exporting.
 
+Repeated component placements share their export mesh and triangle hierarchy. Each placement
+keeps its own edge choices, position and orientation; no bodies are fused or omitted to reduce
+the workload. A hierarchy over placed parts rejects unrelated occluders before searching a
+part's triangles. Already hidden intervals are skipped, and a fully hidden line stops searching.
+Desktop mesh preparation and independent line queries use at most eight computation workers;
+the browser runs serially. Export memory, candidate lines, output lines and total occlusion
+work remain bounded, and exceeding a budget returns an error without writing a partial drawing.
+
 Programmatic callers use `file.export_view_dxf` with `camera: Camera`, `hidden: "omit"` or
 `"dashed"`, optional `tolerance` (0.0001–1 mm) and optional `path`. Without `path`, the
 command returns the DXF text. The command does not modify the design or its undo history.
+The result also includes `stats`: placed body and shared mesh counts, source triangle count,
+retained mesh bytes, worker limit, candidate segment count, occlusion work, and preparation,
+projection and occlusion times in milliseconds. These timings exclude STEP import and DXF
+serialization; the worker limit is a maximum, not a claim that every worker was busy.

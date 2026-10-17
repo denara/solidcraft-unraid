@@ -1,8 +1,8 @@
 //! Joints between occurrences: joint origins (snap frames on component geometry, re-found on
 //! every solve so they follow edits), joints (rigid, revolute, slider, cylindrical, pin-slot,
 //! planar, ball) with their motion values and limits, motion links (gears, racks and screws are
-//! links whose ratio comes from radii or a pitch), and the solver that places occurrences from
-//! the joint graph.
+//! links whose ratio comes from radii or a pitch; a cam's follower follows a table worked out from
+//! its profile, `joints_cam.rs`), and the solver that places occurrences from the joint graph.
 //!
 //! A joint makes B's joint frame coincide with A's frame moved by the joint's motion:
 //! `T_B · F_b = T_A · F_a · M(q) · Flip`, so `T_B = T_A · F_a · M(q) · Flip · F_b⁻¹`, where `T`
@@ -140,7 +140,8 @@ pub struct Joint {
     pub suppressed: bool,
 }
 
-/// Value of joint `b` (index `ib`) = ratio · value of joint `a` (index `ia`) + offset.
+/// Value of joint `b` (index `ib`) = ratio · value of joint `a` (index `ia`) + offset, or for a
+/// cam, its `lift` table at a's value + offset.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MotionLink {
     pub a: u64,
@@ -152,11 +153,29 @@ pub struct MotionLink {
     pub ratio: f64,
     #[serde(default)]
     pub offset: f64,
-    /// Gears, a rack and pinion or a screw: what the ratio comes from. The ratio is worked out
-    /// from it again whenever the design changes (`coupling_ratio`), so it follows the radii and
-    /// the pitch; the last one worked out is kept in `ratio`.
+    /// Gears, a rack and pinion, a screw or a cam: what the ratio (or a cam's table) comes from.
+    /// It is worked out from it again whenever the design changes (`coupling_values`), so it
+    /// follows the radii, the pitch and the cam's profile; the last one worked out is kept in
+    /// `ratio` and `lift`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coupling: Option<Coupling>,
+    /// A cam's follower values over one turn of a (`cam::CAM_SAMPLES` of them, in b's units, the
+    /// offset left out); empty for every other link.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lift: Vec<f64>,
+}
+
+impl MotionLink {
+    /// b's value for a's value `x` (before b's limits). A cam's table that is not whole (a
+    /// hand-edited file) gives no value, so b keeps where it is; a table on any other link is
+    /// not read.
+    pub fn follow(&self, x: f64) -> f64 {
+        match &self.coupling {
+            Some(Coupling::Cam(_)) if self.lift.len() == cam::CAM_SAMPLES => cam::lift_at(&self.lift, x) + self.offset,
+            Some(Coupling::Cam(_)) => f64::NAN,
+            _ => self.ratio * x + self.offset,
+        }
+    }
 }
 
 /// A length a coupling's ratio comes from: millimetres, an expression over the design's
@@ -199,14 +218,22 @@ pub enum Coupling {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         reverse: bool,
     },
+    /// A cam on a revolute joint (a) and its follower (b, a slider or a revolute): b rides the
+    /// cam's profile (`joints_cam.rs`).
+    Cam(cam::Cam),
 }
 
 impl Coupling {
-    /// The lengths the ratio comes from: a's gear and b's, or the pinion's radius or the pitch.
+    /// The lengths the ratio comes from: a's gear and b's, the pinion's radius, the pitch, or a
+    /// cam's roller radius.
     pub fn sizes(&self) -> Vec<&Size> {
         match self {
             Coupling::Gear { ra, rb, .. } => vec![ra, rb],
             Coupling::RackPinion { radius: s, .. } | Coupling::Screw { pitch: s, .. } => vec![s],
+            Coupling::Cam(c) => match &c.follower {
+                cam::Follower::Roller { radius } => vec![radius],
+                _ => Vec::new(),
+            },
         }
     }
 
@@ -214,6 +241,10 @@ impl Coupling {
         match self {
             Coupling::Gear { ra, rb, .. } => vec![ra, rb],
             Coupling::RackPinion { radius: s, .. } | Coupling::Screw { pitch: s, .. } => vec![s],
+            Coupling::Cam(c) => match &mut c.follower {
+                cam::Follower::Roller { radius } => vec![radius],
+                _ => Vec::new(),
+            },
         }
     }
 }
@@ -231,14 +262,18 @@ fn size_of(doc: &Document, st: &ModelState, s: &Size) -> Result<f64> {
     if v.is_finite() && v > 1e-9 && v <= MAX_SIZE {
         Ok(v)
     } else {
-        Err(DocError::Invalid(format!("a gear, rack or screw needs a positive length, not {v}")))
+        Err(DocError::Invalid(format!("a gear, rack, screw or roller needs a positive length, not {v}")))
     }
 }
 
-/// The ratio a link's coupling gives it (b's value per a's, in radians and mm), worked out from
-/// the geometry and parameters it is defined by; `None` for a plain link.
-pub fn coupling_ratio(doc: &Document, st: &ModelState, l: &MotionLink) -> Option<Result<f64>> {
-    l.coupling.as_ref().map(|c| coupled(doc, st, l, c))
+/// The ratio a link's coupling gives it (b's value per a's, in radians and mm) and a cam's table
+/// (`MotionLink::lift`; empty for the others), worked out from the geometry and parameters it is
+/// defined by; `None` for a plain link.
+pub fn coupling_values(doc: &Document, st: &ModelState, l: &MotionLink) -> Option<Result<(f64, Vec<f64>)>> {
+    l.coupling.as_ref().map(|c| match c {
+        Coupling::Cam(c) => cam::table(doc, st, l, c).map(|t| (1.0, t)),
+        c => coupled(doc, st, l, c).map(|r| (r, Vec::new())),
+    })
 }
 
 fn coupled(doc: &Document, st: &ModelState, l: &MotionLink, c: &Coupling) -> Result<f64> {
@@ -260,6 +295,8 @@ fn coupled(doc: &Document, st: &ModelState, l: &MotionLink, c: &Coupling) -> Res
         }
         Coupling::RackPinion { radius, reverse } => Ok(travel(size_of(doc, st, radius)?)? * sign(*reverse)),
         Coupling::Screw { pitch, reverse } => Ok(travel(size_of(doc, st, pitch)? / std::f64::consts::TAU)? * sign(*reverse)),
+        // A cam's follower follows its table (`coupling_values`), not a ratio.
+        Coupling::Cam(_) => Ok(1.0),
     }
 }
 
@@ -491,7 +528,11 @@ fn apply_links(asm: &Assembly, vals: &mut Values) {
         let before = linked(vals);
         for l in &asm.links {
             let Some(src) = vals.get(&l.a).and_then(|q| q.get(l.ia)).copied() else { continue };
-            let mut next = l.ratio * src + l.offset;
+            let mut next = l.follow(src);
+            // A hand-edited table (or source) that gives no number leaves b where it is.
+            if !next.is_finite() {
+                continue;
+            }
             if let Some((lo, hi)) = limits.get(&(l.b, l.ib)) {
                 next = next.max(*lo).min(*hi);
             }
@@ -1388,6 +1429,9 @@ impl Document {
     }
 }
 
+#[path = "joints_cam.rs"]
+pub mod cam;
+
 #[path = "joints_reach.rs"]
 mod reach;
 pub use reach::{REACH_TOL, Reach, Reached, reach};
@@ -1425,7 +1469,8 @@ mod tests {
                 suppressed: false,
             })
             .collect();
-        let links = (1..n).rev().map(|a| MotionLink { a, ia: 0, b: a + 1, ib: 0, ratio: 2.0, offset: 0.0, coupling: None }).collect();
+        let links =
+            (1..n).rev().map(|a| MotionLink { a, ia: 0, b: a + 1, ib: 0, ratio: 2.0, offset: 0.0, coupling: None, lift: Vec::new() }).collect();
         Assembly { joints, links, ..Assembly::default() }
     }
 
@@ -1477,8 +1522,8 @@ mod tests {
         }
         let st = ModelState::default();
         let ratio = |a: u64, b: u64, c: Coupling| {
-            let l = MotionLink { a, ia: 0, b, ib: 0, ratio: 0.0, offset: 0.0, coupling: Some(c) };
-            coupling_ratio(&doc, &st, &l).map(|r| r.map_err(|e| e.to_string()))
+            let l = MotionLink { a, ia: 0, b, ib: 0, ratio: 0.0, offset: 0.0, coupling: Some(c), lift: Vec::new() };
+            coupling_values(&doc, &st, &l).map(|r| r.map(|(ratio, _)| ratio).map_err(|e| e.to_string()))
         };
         let len = Size::Length;
         assert_eq!(ratio(1, 2, Coupling::Gear { ra: len(10.0), rb: len(40.0), internal: false, reverse: false }), Some(Ok(-0.25)));

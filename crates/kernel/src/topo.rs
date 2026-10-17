@@ -663,6 +663,32 @@ pub fn cylinder_face_at(b: &Body, p: Vec3) -> Option<CylinderFace> {
     let tol = (size * 1e-4).max(1e-6);
     let surfs = classify_faces(b, &mesh, nf, tol);
     let Surf::Cylinder { axis, p: ap, r } = *surfs.get(face as usize)? else { return None };
+    Some(cylinder_extent(&mesh, face, axis, ap, r))
+}
+
+/// The cylindrical face one of whose end circles is centred at `p` (a circle given by its
+/// centre, where no face lies), the nearest when several are.
+pub fn cylinder_end_at(b: &Body, p: Vec3) -> Option<CylinderFace> {
+    let size = b.size();
+    let tol = (size * 1e-3).max(1e-3);
+    let mesh = b.tessellate(tol).ok()?;
+    let surfs = classify_faces(b, &mesh, b.face_count(), (size * 1e-4).max(1e-6));
+    let mut best: Option<(f64, CylinderFace)> = None;
+    for (face, s) in surfs.iter().enumerate() {
+        let Surf::Cylinder { axis, p: ap, r } = *s else { continue };
+        let c = cylinder_extent(&mesh, u32::try_from(face).ok()?, axis, ap, r);
+        let v = p - c.axis_point;
+        let along = v.dot(c.axis);
+        let off = (v - c.axis * along).len() + (along - c.start).abs().min((c.end - along).abs());
+        if off <= tol && best.is_none_or(|(bo, _)| off < bo) {
+            best = Some((off, c));
+        }
+    }
+    best.map(|(_, c)| c)
+}
+
+/// The extent along its axis, and the side, of a cylindrical face of a tessellated body.
+fn cylinder_extent(mesh: &Mesh, face: u32, axis: Vec3, ap: Vec3, r: f64) -> CylinderFace {
     let mut lo = f64::INFINITY;
     let mut hi = f64::NEG_INFINITY;
     let mut inward = 0.0;
@@ -679,5 +705,5 @@ pub fn cylinder_face_at(b: &Body, p: Vec3) -> Option<CylinderFace> {
             inward += n.dot(radial);
         }
     }
-    Some(CylinderFace { axis_point: ap, axis, radius: r, start: lo, end: hi, internal: inward < 0.0 })
+    CylinderFace { axis_point: ap, axis, radius: r, start: lo, end: hi, internal: inward < 0.0 }
 }

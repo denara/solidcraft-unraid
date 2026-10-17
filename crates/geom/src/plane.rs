@@ -39,6 +39,12 @@ impl Plane {
         Plane::new(origin, x, n.cross(x))
     }
 
+    /// The same plane seen from its other side: a half turn about the sketch x axis (y
+    /// reversed), or about the y axis (x reversed) when `about_y`. Still right-handed.
+    pub fn flipped(&self, about_y: bool) -> Plane {
+        if about_y { Plane { x: -self.x, ..*self } } else { Plane { y: -self.y, ..*self } }
+    }
+
     /// Named origin plane: `XY`, `XZ`, `YZ` (case-insensitive).
     pub fn named(name: &str) -> Option<Plane> {
         match name.to_ascii_uppercase().as_str() {

@@ -117,7 +117,7 @@ fn timeline_transport(app: &mut SolveApp, ui: &mut egui::Ui) {
                     Some(position) if position < n => json!({"position": position}),
                     _ => json!({}),
                 };
-                let _ = app.run("timeline.roll_to", params);
+                let _ = app.run_heavy("timeline.roll_to", params);
             }
         }
     });
@@ -794,11 +794,11 @@ fn vertical_features(app: &mut SolveApp, ui: &mut egui::Ui) {
                 ui.close();
             }
             if ui.button(if *suppressed { "Unsuppress Feature" } else { "Suppress Feature" }).clicked() {
-                let _ = app.run("timeline.suppress", json!({"feature": id}));
+                let _ = app.run_heavy("timeline.suppress", json!({"feature": id}));
                 ui.close();
             }
             if ui.button("Roll Back Here").clicked() {
-                let _ = app.run("timeline.roll_to", json!({"feature": id}));
+                let _ = app.run_heavy("timeline.roll_to", json!({"feature": id}));
                 ui.close();
             }
             ui.separator();
@@ -875,7 +875,7 @@ fn vertical_features(app: &mut SolveApp, ui: &mut egui::Ui) {
     {
         match active {
             Drag::Marker => {
-                let _ = app.run("timeline.roll_to", if slot.position >= n { json!({}) } else { json!({"position": slot.position}) });
+                let _ = app.run_heavy("timeline.roll_to", if slot.position >= n { json!({}) } else { json!({"position": slot.position}) });
             }
             Drag::Items(items) => {
                 let panel_left = ui.min_rect().left();

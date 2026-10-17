@@ -187,7 +187,7 @@ pub(crate) fn view_scene(app: &SolveApp, guides: solidcraft_engine::view::Guides
 }
 
 /// The grid and the origin's axes as the window shows them (the Grid and Origin switches).
-fn window_guides(app: &SolveApp) -> solidcraft_engine::view::Guides {
+pub(crate) fn window_guides(app: &SolveApp) -> solidcraft_engine::view::Guides {
     solidcraft_engine::view::Guides { grid: app.ui.show_grid && !crate::viewport::active_view(app).hide_grid, axes: app.origin_visible() }
 }
 
@@ -371,11 +371,19 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
             let Some(id) = s("command") else { return err("missing `command`") };
             // `params`: what the dialog opens on. Refused: nothing starts, or the dialog closes.
             let params = p.get("params").filter(|v| !v.is_null());
-            if params.is_some() && id != "joint.drive" {
-                return err(format!("`{id}` takes no ui.start params yet (joint.drive takes joint, values)"));
+            if params.is_some() && id != "joint.drive" && id != "motion.study" {
+                return err(format!("`{id}` takes no ui.start params yet (joint.drive takes joint, values; motion.study takes study)"));
             }
             app.start(id);
-            if let Some(params) = params {
+            if let Some(params) = params.filter(|_| id == "motion.study") {
+                let Some(crate::dialogs::Kind::Motion(k)) = app.dialog.as_mut().map(|d| &mut d.kind) else {
+                    return err("Motion Study did not open");
+                };
+                if let Err(e) = crate::dialogs_motion::preset(&app.session, k, params) {
+                    crate::dialogs::cancel(app);
+                    return err(e);
+                }
+            } else if let Some(params) = params {
                 if app.tree.capture_prompt.is_some() {
                     return err("Drive Joints waits for the Capture Position question (ui.capture)");
                 }

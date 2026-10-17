@@ -32,7 +32,8 @@ When updating from a build released under the previous product name, follow the
 The first time you open the AppImage it adds a menu entry and icons under `~/.local/share`
 (`applications/ai.storyteller.solidcraft.desktop`, `icons/hicolor`), so the desktop shows the
 right name and icon. It adds nothing if [appimaged](https://github.com/probonopd/go-appimage)
-already made an entry for the file (and removes the entry SolidCraft added before). To
+already made an entry for the file, or if a launcher such as Gear Lever or AppImageLauncher
+started it (and removes the entry SolidCraft added before). To
 turn it off for good, create an empty file `~/.local/share/solidcraft/no-desktop-integration`, or
 start the AppImage with `SOLIDCRAFT_NO_DESKTOP_INTEGRATION=1`.
 
@@ -170,6 +171,7 @@ cargo run --release -p solidcraft-cli -- run examples/bracket.json --out bracket
 cargo run --release -p solidcraft-cli -- eval examples/bracket.json     # volume, area, faces…
 cargo run --release -p solidcraft-cli -- snapshot examples/bracket.json --out bracket.png
 cargo run --release -p solidcraft-cli -- exec solid.box '{"length": 20, "width": 10, "height": 5}'
+cargo run --release -p solidcraft-cli -- run mechanism.json --in arm.solidcraft  # with a motion.export_animation step: a GIF
 ```
 
 A script is a list of commands:

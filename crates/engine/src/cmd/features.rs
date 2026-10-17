@@ -35,17 +35,17 @@ pub static COMMANDS: &[CommandSpec] = &[
         .at("SOLID", "MODIFY")
         .icon("fillet")
         .key("F")
-        .params("edges: [[x,y,z] point on edge | {body, index}]; radius: expr; body?; type?: constant|curvature (alias g2: curvature-continuous quintic between planar faces along straight edges, one perpendicular planar end face at each end; radius sets the equivalent circular setback, not constant curvature; exact fit only)|chord (radius is the width across)|variable (radius at the end nearest start, radius2 at the other; one end may be 0, where the round closes to the corner)|spline (the radius along the edge is a clamped B-spline from the end nearest start: radius is its first control radius, radii the rest, knots its knot vector from 0 to 1; one end may be 0); radius2?; start?: [x,y,z]; radii?: [expr, …]; knots?: [number, …]; mid?: [[position 0…1 from start, radius expr], …] (variable radii between the ends); smooth?: bool (smooth instead of straight between the radii); fit?: exact|reduce|taper (exact, the default: a radius too large for the geometry around the edges is refused; reduce: where it doesn't fit it is reduced to the largest that does, one radius for edges sharing a face; the smallest used is returned as `radius_applied`, each edge's as `radii_applied: [{edge: [x,y,z], radius}]`, and noted in the feature's warning; taper: along each straight edge between planar faces where it doesn't fit, the radius follows the room there as a smooth spline, down to 0 where a face closes to a point, noted in the feature's warning)"),
+        .params("edges: [[x,y,z] point on edge | {body, index}]; radius: expr; body?; type?: constant|curvature (alias g2: curvature-continuous quintic between planar faces along straight edges, one perpendicular planar end face at each end; radius sets the equivalent circular setback, not constant curvature; exact fit only)|chord (radius is the width across)|variable (radius at the end nearest start, radius2 at the other; one end may be 0, where the round closes to the corner)|spline (the radius along the edge is a clamped B-spline from the end nearest start: radius is its first control radius, radii the rest, knots its knot vector from 0 to 1; one end may be 0); radius2?; start?: [x,y,z]; radii?: [expr, …]; knots?: [number, …]; mid?: [[position 0…1 from start, radius expr], …] (variable radii between the ends); smooth?: bool (smooth instead of straight between the radii); corner?: rolling|g2 (rolling, the default: the corners where three blended edges meet are pieces of the rolling ball's sphere, tangent to each blend; g2: a patch repeating each blend's surface up to the second order, constant-radius exact fillets only, refused where it cannot be built); fit?: exact|reduce|taper (exact, the default: a radius too large for the geometry around the edges is refused; reduce: where it doesn't fit it is reduced to the largest that does, one radius for edges sharing a face; the smallest used is returned as `radius_applied`, each edge's as `radii_applied: [{edge: [x,y,z], radius}]`, and noted in the feature's warning; taper: along each straight edge between planar faces where it doesn't fit, the radius follows the room there as a smooth spline, down to 0 where a face closes to a point, noted in the feature's warning)"),
     CommandSpec::new("solid.chamfer", "Chamfer", chamfer).at("SOLID", "MODIFY").icon("chamfer").params("edges: [[x,y,z] | {body, index}]; distance: expr; distance2?: expr (along the second face) | angle?: expr (from the first face); flip?: bool (which face is first: by default the one facing up most); body?"),
     CommandSpec::new("solid.combine", "Combine", combine).at("SOLID", "MODIFY").icon("combine").params("target: body; tools: [body]; operation?: join|cut|intersect; keep_tools?: bool; new_component?: bool (the result goes into a new component; component_name?)"),
     CommandSpec::new("solid.pattern.rectangular", "Rectangular Pattern", pattern_rect)
         .at("SOLID", "CREATE")
         .icon("pattern_rect")
-        .params("features: [names] | bodies: [names] | components: [names]; dir1: [x,y,z]; count1; spacing1; dir2?, count2?, spacing2?"),
+        .params("features: [names] | bodies: [names] | components: [names]; dir1: [x,y,z]; count1; spacing1; dir2?, count2?, spacing2?; alignment?, alignment2?: left|center|right (default right; counts include the original); reversed?, reversed2?: bool (Flip)"),
     CommandSpec::new("solid.pattern.circular", "Circular Pattern", pattern_circ)
         .at("SOLID", "CREATE")
         .icon("pattern_circ")
-        .params("features: [names] | bodies: [names] | components: [names]; axis: X|Y|Z | {origin, dir}; count; angle? (default 360 deg)"),
+        .params("features: [names] | bodies: [names] | components: [names]; axis: X|Y|Z | {origin, dir}; count; angle? (default 360 deg; partial arcs include both ends); alignment?: left|center|right (default right; original stays fixed); reversed?: bool (Flip; selects the extra side for even centered counts)"),
     CommandSpec::new("solid.pattern.path", "Pattern on Path", pattern_path)
         .at("SOLID", "CREATE")
         .icon("pattern_rect")
@@ -55,7 +55,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .at("SOLID", "CREATE")
         .icon("hole")
         .key("H")
-        .params("position: [x,y,z] on a face | sketch + points: [sketch point ids] (one hole each, perpendicular to the sketch, into the material on whichever side of the sketch plane it is) | sketch alone (every sketch point: standalone points and circle centres); flip?: bool (sketch points: drill to the other side); direction?: [x,y,z] (default: into the face, against its outward normal; one that leaves the face is mirrored into it; ignored with sketch points); diameter | thread (a tapped hole: the tap drill, major − pitch) | clearance: \"M6\" with fit?: close|normal|loose (ISO 273); depth? (default through all) | to?: [x,y,z] (To Object: drill to that face or point); type?: simple|drilled|counterbore|countersink; tip_angle?; cb_diameter?, cb_depth?; cs_diameter?, cs_angle?; thread?: \"M6\" (cosmetic)"),
+        .params("position: [x,y,z] on a face (numbers, or length expressions the hole follows) | sketch + points: [sketch point ids] (one hole each, perpendicular to the sketch, into the material on whichever side of the sketch plane it is) | sketch alone (every sketch point: standalone points and circle centres); flip?: bool (sketch points: drill to the other side); direction?: [x,y,z] (default: into the face, against its outward normal; one that leaves the face is mirrored into it; ignored with sketch points); diameter | thread (a tapped hole: the tap drill, major − pitch) | clearance: \"M6\" with fit?: close|normal|loose (ISO 273); depth? (default through all) | to?: [x,y,z] (To Object: drill to that face or point); type?: simple|drilled|counterbore|countersink; tip_angle?; cb_diameter?, cb_depth?; cs_diameter?, cs_angle?; thread?: \"M6\" (cosmetic)"),
     CommandSpec::new("solid.pipe", "Pipe", pipe)
         .at("SOLID", "CREATE")
         .icon("pipe")
@@ -79,7 +79,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("solid.thread", "Thread", thread)
         .at("SOLID", "CREATE")
         .icon("thread")
-        .params("face: [x,y,z] on a cylindrical face; designation?: ISO metric (\"M8\", \"M8x1\"; default: the size that fits); length?: expr (default: the whole face). Cosmetic: the model is unchanged, model.threads lists it"),
+        .params("face: [x,y,z] on a cylindrical face; designation?: ISO metric (\"M8\", \"M8x1\"; default: the size that fits); length?: expr (default: the whole face); modeled?: bool (default false). Cosmetic: the model is unchanged, model.threads lists it. Modeled: cuts the thread profile into the body"),
     CommandSpec::new("solid.shell", "Shell", shell)
         .at("SOLID", "MODIFY")
         .icon("shell")
@@ -141,6 +141,20 @@ fn extrude_base(s: &Session, p: &Value) -> Option<(Vec3, Vec3)> {
     Some((ss.plane.to_world(q), ss.plane.normal()))
 }
 
+/// How far an extrude with these parameters goes from its profile along the profile's normal
+/// (negative: the other way). To an object, the target's height, on whichever side it is: the
+/// extrude goes there and its `direction` does not count (#1633). Otherwise its distance, turned
+/// round for the negative direction.
+pub fn extrude_reach(s: &Session, p: &Value) -> Option<f64> {
+    if let Some(t) = p.get("to").and_then(vec3) {
+        let (base, n) = extrude_base(s, p)?;
+        return Some((t - base).dot(n)).filter(|h| h.is_finite());
+    }
+    let d = s.doc.eval(&expr(p, "distance")?, Kind::Length).ok()?;
+    let dir = str_(p, "direction").map(str::to_ascii_lowercase);
+    Some(if matches!(dir.as_deref(), Some("negative" | "reverse" | "flip")) { -d } else { d })
+}
+
 /// How far past the profile [`auto_operation`] looks for material it starts in.
 const START_PROBE_MM: f64 = 0.1;
 
@@ -152,10 +166,8 @@ const START_PROBE_MM: f64 = 0.1;
 /// direction it grows, or halfway along it. With the halfway point alone, a cut dragged far
 /// past a body's far side read as a Join (#1257).
 pub fn auto_operation(s: &Session, p: &Value) -> Option<&'static str> {
-    let d = s.doc.eval(&expr(p, "distance")?, Kind::Length).ok()?;
-    let dir = str_(p, "direction").map(str::to_ascii_lowercase);
-    let symmetric = dir.as_deref() == Some("symmetric");
-    let d = if matches!(dir.as_deref(), Some("negative" | "reverse" | "flip")) { -d } else { d };
+    let d = extrude_reach(s, p)?;
+    let symmetric = p.get("to").is_none() && str_(p, "direction").is_some_and(|d| d.eq_ignore_ascii_case("symmetric"));
     let (base, n) = extrude_base(s, p)?;
     let st = s.model.state();
     if st.bodies.is_empty() || !d.is_finite() {
@@ -1051,10 +1063,26 @@ fn fillet(s: &mut Session, p: &Value) -> Result<Value> {
     if !fit.is_exact() && !style.is_constant() {
         return Err(bad(cmd, "`fit: reduce` and `fit: taper` take a constant radius"));
     }
+    // What fills the corners where three blended edges meet.
+    let corner = match str_(p, "corner").map(str::to_ascii_lowercase).as_deref() {
+        None | Some("rolling") => solidcraft_doc::FilletCorner::Rolling,
+        Some("g2") => solidcraft_doc::FilletCorner::G2,
+        Some(o) => return Err(bad(cmd, format!("unknown corner `{o}` (rolling or g2)"))),
+    };
+    if !corner.is_rolling() && (!style.is_constant() || !fit.is_exact()) {
+        return Err(bad(cmd, "`corner: g2` is built for a constant-radius fillet (`type: constant`, `fit: exact`) only"));
+    }
     let mut out = add_feature(
         s,
         p,
-        FeatureKind::Fillet { edges: edges.into_iter().map(Position).collect(), radius, body: str_(p, "body").map(BodyName::from), style, fit },
+        FeatureKind::Fillet {
+            edges: edges.into_iter().map(Position).collect(),
+            radius,
+            body: str_(p, "body").map(BodyName::from),
+            style,
+            fit,
+            corner,
+        },
     )?;
     // The radii the fillet used, when `fit: reduce` reduced it.
     if let Some(id) = out.get("feature").and_then(Value::as_u64)
@@ -1263,7 +1291,18 @@ fn pattern_rect(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(c) = &spacing2 {
         check_expr(s, c, Kind::Length, cmd, "spacing2")?;
     }
-    let pattern = solidcraft_doc::PatternKind::Rectangular { dir1: Dir(dir1), count1, spacing1, dir2: dir2.map(Dir), count2, spacing2 };
+    let pattern = solidcraft_doc::PatternKind::Rectangular {
+        dir1: Dir(dir1),
+        count1,
+        spacing1,
+        dir2: dir2.map(Dir),
+        count2,
+        spacing2,
+        alignment: super::alignment_param(p, "alignment", cmd)?,
+        alignment2: super::alignment_param(p, "alignment2", cmd)?,
+        reversed: super::reversed_param(p, "reversed", cmd)?,
+        reversed2: super::reversed_param(p, "reversed2", cmd)?,
+    };
     finish_pattern(s, p, features, pattern, bodies)
 }
 
@@ -1275,7 +1314,14 @@ fn pattern_circ(s: &mut Session, p: &Value) -> Result<Value> {
     check_expr(s, &count, Kind::Unitless, cmd, "count")?;
     let angle = expr(p, "angle").unwrap_or_else(|| "360 deg".into());
     check_expr(s, &angle, Kind::Angle, cmd, "angle")?;
-    let pattern = solidcraft_doc::PatternKind::Circular { origin: Position(origin), axis: Dir(axis), count, angle };
+    let pattern = solidcraft_doc::PatternKind::Circular {
+        origin: Position(origin),
+        axis: Dir(axis),
+        count,
+        angle,
+        alignment: super::alignment_param(p, "alignment", cmd)?,
+        reversed: super::reversed_param(p, "reversed", cmd)?,
+    };
     finish_pattern(s, p, features, pattern, bodies)
 }
 
@@ -1587,10 +1633,36 @@ fn hole(s: &mut Session, p: &Value) -> Result<Value> {
     {
         return Err(bad(cmd, format!("unknown thread `{t}` (ISO metric, like M6 or M6x0.75)")));
     }
-    let position = match (&points, p.get("position").and_then(vec3)) {
+    // A position given as length expressions (#1678), say `["leg_h*0.4", "width/2", "t"]`: kept,
+    // so the hole follows the parameters; drilled where they evaluate now.
+    let at: Option<solidcraft_doc::PointExpr> = match p.get("position").and_then(Value::as_array) {
+        Some(a) if points.is_none() && a.len() == 3 && a.iter().any(Value::is_string) => {
+            let mut coords = Vec::with_capacity(3);
+            for v in a {
+                let e = match v {
+                    Value::String(x) => x.trim().to_string(),
+                    Value::Number(n) => n.to_string(),
+                    _ => return Err(bad(cmd, "`position` must be [x, y, z]: numbers or length expressions")),
+                };
+                check_expr(s, &e, Kind::Length, cmd, "position")?;
+                coords.push(solidcraft_doc::Expr::new(e));
+            }
+            let [x, y, z]: [solidcraft_doc::Expr; 3] = coords.try_into().map_err(|_| bad(cmd, "`position` must be [x, y, z]"))?;
+            Some([x, y, z])
+        }
+        _ => None,
+    };
+    let at_value = match &at {
+        Some([x, y, z]) => {
+            let c = |e: &solidcraft_doc::Expr| s.doc.eval(e, Kind::Length).map_err(|e| bad(cmd, format!("`position`: {e}")));
+            Some(Vec3::new(c(x)?, c(y)?, c(z)?)).filter(|v| v.is_finite())
+        }
+        None => None,
+    };
+    let position = match (&points, at_value.or_else(|| p.get("position").and_then(vec3))) {
         (Some((_, first, _)), None) => *first,
         (_, Some(x)) => x,
-        (None, None) => return Err(bad(cmd, "`position` must be [x, y, z] (or give `sketch` and `points`)")),
+        (None, None) => return Err(bad(cmd, "`position` must be [x, y, z], numbers or length expressions (or give `sketch` and `points`)")),
     };
     let direction = match (p.get("direction").and_then(vec3), &points) {
         (None, Some((_, _, d))) => *d,
@@ -1660,6 +1732,7 @@ fn hole(s: &mut Session, p: &Value) -> Result<Value> {
         &p,
         FeatureKind::Hole {
             position: FacePick(position),
+            at,
             direction: Dir(direction),
             diameter,
             depth,
@@ -1975,6 +2048,10 @@ fn offset_face(s: &mut Session, p: &Value) -> Result<Value> {
 mod patterns_tests;
 
 #[cfg(test)]
+#[path = "prism_local_tests.rs"]
+mod prism_local_tests;
+
+#[cfg(test)]
 #[path = "revolve_convention_tests.rs"]
 mod revolve_convention_tests;
 
@@ -2020,6 +2097,55 @@ mod thin_extrude_tests;
 #[cfg(test)]
 #[path = "extrude_convention_tests.rs"]
 mod extrude_convention_tests;
+/// `solid.fillet corner?: rolling|g2`: the default keeps the rolling ball's sphere corner, `g2`
+/// is accepted and refuses (item 10's patch is built but not sewn in yet, see `corner_g2`), and an
+/// unknown word is refused.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod corner_tests {
+    use serde_json::{Value, json};
+
+    use crate::Session;
+
+    fn run(s: &mut Session, id: &str, p: &Value) -> Value {
+        s.execute(id, p).unwrap_or_else(|e| panic!("{id}: {e}"))
+    }
+
+    /// A 20 mm box with its three edges at one corner, filleted by 4 with `corner`.
+    fn cornered(corner: Option<&str>) -> (Session, Value) {
+        let mut s = Session::default();
+        run(&mut s, "solid.box", &json!({"length": 20, "width": 20, "height": 20, "body_name": "B"}));
+        let mut p = json!({"edges": [[10, 0, 0], [0, 10, 0], [0, 0, 10]], "radius": 4});
+        if let Some(c) = corner {
+            p["corner"] = json!(c);
+        }
+        let reply = run(&mut s, "solid.fillet", &p);
+        (s, reply)
+    }
+
+    #[test]
+    fn the_default_corner_is_the_rolling_ball_and_g2_refuses_clearly() {
+        let (default, reply) = cornered(None);
+        assert_eq!(reply["warning"], json!(null), "{reply}");
+        let (rolling, _) = cornered(Some("rolling"));
+        let ball = default.world_state().body("B").unwrap().body.clone();
+        let same = rolling.world_state().body("B").unwrap().body.clone();
+        // `corner: rolling` is the default: the same body, to the last bit of its area.
+        assert_eq!(solidcraft_kernel::measure(&ball).unwrap().area, solidcraft_kernel::measure(&same).unwrap().area);
+        assert!(solidcraft_kernel::measure(&ball).unwrap().volume > 7000.0);
+        // `corner: g2`: accepted, and refused with a clear message until the patch sews in.
+        let mut s = Session::default();
+        run(&mut s, "solid.box", &json!({"length": 20, "width": 20, "height": 20, "body_name": "B"}));
+        let err =
+            s.execute("solid.fillet", &json!({"edges": [[10, 0, 0], [0, 10, 0], [0, 0, 10]], "radius": 4, "corner": "g2"})).unwrap_err().to_string();
+        eprintln!("corner g2: {err}");
+        assert!(err.contains("not supported yet:") && err.contains("G2 corner"), "{err}");
+        // An unknown word, and a style the G2 corner has no patch for, are refused as parameters.
+        assert!(s.execute("solid.fillet", &json!({"edges": [[10, 0, 0]], "radius": 4, "corner": "round"})).is_err());
+        assert!(s.execute("solid.fillet", &json!({"edges": [[10, 0, 0]], "radius": 4, "corner": "g2", "type": "chord"})).is_err());
+        assert!(s.execute("solid.fillet", &json!({"edges": [[10, 0, 0]], "radius": 4, "corner": "g2", "fit": "reduce"})).is_err());
+    }
+}
 #[cfg(test)]
 #[path = "fillet_connected_rounds_tests.rs"]
 mod fillet_connected_rounds_tests;

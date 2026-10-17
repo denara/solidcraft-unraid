@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use solidcraft_doc::Document;
+use solidcraft_doc::joints::cam::CamProfile;
 use solidcraft_doc::joints::{Assembly, Coupling, JointOrigin, Size, Snap};
 
 use crate::{EngineError, Result};
@@ -102,8 +103,30 @@ fn budget(assembly: &Assembly) -> Result<()> {
             return Err(invalid("exploded view contains non-finite moves"));
         }
     }
-    if !assembly.links.iter().all(|l| l.ratio.is_finite() && l.offset.is_finite()) {
+    if !assembly.links.iter().all(|l| l.ratio.is_finite() && l.offset.is_finite() && l.lift.iter().all(|v| v.is_finite())) {
         return Err(invalid("motion link contains non-finite values"));
+    }
+    for cam in assembly.links.iter().filter_map(|l| match &l.coupling {
+        Some(Coupling::Cam(c)) => Some(c),
+        _ => None,
+    }) {
+        add_references(&mut references, cam.tip.iter().count())?;
+        if let Some(tip) = &cam.tip {
+            finite_origin(tip)?;
+        }
+        match &cam.profile {
+            CamProfile::Sketch { curves, .. } => {
+                add_references(&mut references, curves.len())?;
+                curves.iter().try_for_each(|c| text(c))?;
+            }
+            CamProfile::Edges { picks, names, .. } => {
+                add_references(&mut references, picks.len() + names.len())?;
+                if !picks.iter().all(|p| p.is_finite()) {
+                    return Err(invalid("motion link contains non-finite values"));
+                }
+                names.iter().try_for_each(|n| text(n))?;
+            }
+        }
     }
     for size in assembly.links.iter().filter_map(|l| l.coupling.as_ref()).flat_map(Coupling::sizes) {
         match size {
@@ -300,12 +323,26 @@ pub(super) fn clone_assembly(
             continue;
         }
         let mut item = old.clone();
-        // A gear's picked round faces are on occurrences of the copy too.
+        // A gear's picked round faces are on occurrences of the copy too, and so are a cam's
+        // profile and its follower's tip.
         let faces = item.coupling.as_mut().is_none_or(|c| {
-            c.sizes_mut().into_iter().all(|size| match size {
+            let sizes = c.sizes_mut().into_iter().all(|size| match size {
                 Size::Circle(o) => origin(o, occurrences, features, bodies).map(|new| *o = new).is_some(),
                 _ => true,
-            })
+            });
+            let Coupling::Cam(cam) = c else { return sizes };
+            let tip = match &mut cam.tip {
+                Some(t) => origin(t, occurrences, features, bodies).map(|new| *t = new).is_some(),
+                None => true,
+            };
+            let profile = match &mut cam.profile {
+                CamProfile::Sketch { sketch, .. } => features.get(sketch).map(|new| *sketch = *new).is_some(),
+                CamProfile::Edges { occurrence, names, .. } => {
+                    occurrences.get(occurrence).map(|new| *occurrence = *new).is_some()
+                        && names.iter_mut().all(|n| n.is_empty() || face_name(n, features, bodies).map(|new| *n = new).is_some())
+                }
+            };
+            sizes && tip && profile
         });
         match (joints.get(&old.a), joints.get(&old.b)) {
             (Some(aa), Some(bb)) if faces => {

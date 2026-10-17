@@ -667,7 +667,7 @@ mod tests {
         assert!(degree_2(&conic(2.0), Some(vec![1.0, 2.0, 1.0])));
         assert!(degree_2(&conic(1.0 - 1e-9), Some(vec![1.0, 1.0 - 1e-9, 1.0])));
         // A quintic piece: six control points and twelve knots.
-        let mut q = [Vec2::ZERO; 8];
+        let mut q = [Vec2::ZERO; solidcraft_geom::MAX_BEZIER_CTRL];
         for (i, s) in q.iter_mut().enumerate() {
             *s = Vec2::new(i as f64, (i * i) as f64);
         }

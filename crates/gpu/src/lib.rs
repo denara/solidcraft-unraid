@@ -21,12 +21,33 @@ use wgpu::util::DeviceExt;
 
 pub mod capture;
 mod pbr;
+pub mod pick;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod select;
 pub mod view;
 
 /// The tessellation compute shader (WGSL).
 pub const SHADER: &str = include_str!("tess.wgsl");
+
+/// The device feature for a 32-bit float depth buffer with a stencil, which the viewport draws
+/// with reversed depth ([`view::reversed_depth`]) where the device has it. A device is opened
+/// with it whenever its adapter offers it ([`depth_features`]).
+pub const FLOAT_DEPTH_STENCIL: wgpu::Features = wgpu::Features::DEPTH32FLOAT_STENCIL8;
+
+/// The depth features to open a device on `adapter` with: [`FLOAT_DEPTH_STENCIL`] if it has it.
+pub fn depth_features(adapter: &wgpu::Adapter) -> wgpu::Features {
+    adapter.features() & FLOAT_DEPTH_STENCIL
+}
+
+/// The depth format to draw with on `device`: 32-bit float (reversed depth) where it can, with a
+/// stencil when `stencil` (the section cap needs one), else 24 bits with a stencil.
+pub fn depth_format(device: &wgpu::Device, stencil: bool) -> wgpu::TextureFormat {
+    match (stencil, device.features().contains(FLOAT_DEPTH_STENCIL)) {
+        (false, _) => wgpu::TextureFormat::Depth32Float,
+        (true, true) => wgpu::TextureFormat::Depth32FloatStencil8,
+        (true, false) => wgpu::TextureFormat::Depth24PlusStencil8,
+    }
+}
 
 /// The error a popped error scope caught. Native devices answer at once; a browser's answer
 /// comes later, and is not waited for (no error is assumed).
@@ -47,6 +68,7 @@ fn open_headless() -> Result<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
     let (adapter, _) = select::pick(policy).ok_or(GpuError::NoAdapter(policy.name()))?;
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("solidcraft headless"),
+        required_features: depth_features(&adapter),
         required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
         ..Default::default()
     }))

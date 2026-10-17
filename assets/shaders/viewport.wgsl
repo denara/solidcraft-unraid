@@ -2,7 +2,7 @@
 struct U {
     vp: mat4x4<f32>,
     back: vec4<f32>,   // xyz = toward the eye, w = 1 for linear output
-    screen: vec4<f32>, // viewport width, height (px), depth bias (see `biased_z`), silhouettes on (1)
+    screen: vec4<f32>, // viewport width, height (px), unused, silhouettes on (1)
     clip: vec4<f32>,   // section plane: normal, d (zero normal: no section)
     cap: vec4<f32>,    // colour of the inside of cut bodies
     ana: vec4<f32>,    // surface analysis: mode (1 zebra, 2 draft, 3 curvature), parameter
@@ -14,7 +14,18 @@ struct U {
     // blocked; curvature flat, middle, tight
     ana_c: array<vec4<f32>, 8>,
     ana_f: vec4<f32>,  // x = 1: stripe the negative draft and blocked faces
+    depth: vec4<f32>,  // x = 1: reversed depth (1 near, 0 far); y, z: the faces' push (`FACE_BIAS`)
 };
+
+fn reversed() -> bool {
+    return u.depth.x > 0.5;
+}
+
+/// Clip-space depth measured the usual way (0 at the near plane, w at the far one), whichever
+/// way the depth buffer runs.
+fn near_z(c: vec4<f32>) -> f32 {
+    return select(c.z, c.w - c.z, reversed());
+}
 
 @group(1) @binding(2) var acc_t: texture_2d<f32>;
 
@@ -70,9 +81,20 @@ struct CutOut {
 @fragment
 fn fs_solid_cut(i: TOut, @builtin(front_facing) front: bool) -> CutOut {
     var o: CutOut;
+    // Derivatives (in `pushed`) first, before `solid` may discard.
+    o.depth = pushed(cap_depth(i.wp, i.pos.z));
     o.c = solid(i, front);
-    o.depth = cap_depth(i.wp, i.pos.z);
     return o;
+}
+
+/// A depth the shader writes itself, pushed back like the faces the GPU pushes (`FACE_BIAS`,
+/// which does not apply then): its own slope over `depth.z` pixels and `depth.y` depth steps.
+fn pushed(z: f32) -> f32 {
+    let slope = max(abs(dpdx(z)), abs(dpdy(z)));
+    // One step: 2⁻²⁴ in a 24-bit buffer; a float buffer's steps follow the value (2⁻²³ of it).
+    let step = select(1.0 / 16777216.0, abs(z) * 1.1920929e-7, reversed());
+    let push = slope * u.depth.z + step * u.depth.y;
+    return clamp(z - select(-push, push, reversed()), 0.0, 1.0);
 }
 
 /// Depth of the section plane on the view ray through `wp` (a far wall seen through the cut),
@@ -85,6 +107,7 @@ fn cap_depth(wp: vec3<f32>, z: f32) -> f32 {
     let p = wp + dir * ((u.clip.w - dot(u.clip.xyz, wp)) / dn);
     let c = u.vp * vec4<f32>(p, 1.0);
     if (c.w <= 0.0) { return z; }
+    if (reversed()) { return clamp(c.z / c.w, z, 1.0); }
     return clamp(c.z / c.w, 0.0, z);
 }
 
@@ -223,28 +246,8 @@ fn shade(i: TOut) -> vec4<f32> {
     return out_color(vec4<f32>(min(i.c.rgb * k + vec3<f32>(spec), vec3<f32>(1.0)), i.c.a));
 }
 
-/// Clip-space z of `p` (clipped to `c`) pulled `s` depth biases toward the eye (pushed away
-/// when negative). Orthographic depth is linear in distance, so the bias is a fixed step of it.
-/// Perspective depth is not: near the far plane a fixed step spans tens of millimetres (edges
-/// showed through walls), so the point moves toward the eye by a fraction of its distance.
-fn biased_z(p: vec3<f32>, c: vec4<f32>, s: f32) -> f32 {
-    if (u.eye.w > 0.5) {
-        let q = u.vp * vec4<f32>(mix(p, u.eye.xyz, u.screen.z * 8.0 * s), 1.0);
-        return q.z / max(q.w, 1e-6) * c.w;
-    }
-    return c.z - u.screen.z * s * c.w;
-}
-
-@vertex
-fn vs_ghost(@location(0) p: vec3<f32>, @location(1) n: vec3<f32>, @location(2) c: vec4<f32>) -> TOut {
-    var o: TOut;
-    o.pos = u.vp * vec4<f32>(p, 1.0);
-    o.pos.z = biased_z(p, o.pos, -4.0);
-    o.n = n;
-    o.c = c;
-    o.wp = p;
-    return o;
-}
+// Lines, decals and ghosts are drawn at their own depth: opaque faces are pushed back by their
+// slope instead (`FACE_BIAS`, #1434), so what lies on a face draws over it at any angle.
 
 struct LOut {
     @builtin(position) pos: vec4<f32>,
@@ -261,12 +264,14 @@ fn vs_line(@builtin(vertex_index) vi: u32, @location(0) a: vec3<f32>, @location(
     // An end behind the near plane (clip z < 0) has no screen point: its divide flips the
     // line or drops it whole (ground grid lines running past the eye at a low angle). Cut
     // the segment at the plane instead; clip space is linear in the world point.
-    if (ca.z < 0.0 && cb.z > 0.0) {
-        let k = ca.z / (ca.z - cb.z);
+    let za = near_z(ca);
+    let zb = near_z(cb);
+    if (za < 0.0 && zb > 0.0) {
+        let k = za / (za - zb);
         ca = mix(ca, cb, k);
         pa = mix(a, b, k);
-    } else if (cb.z < 0.0 && ca.z > 0.0) {
-        let k = cb.z / (cb.z - ca.z);
+    } else if (zb < 0.0 && za > 0.0) {
+        let k = zb / (zb - za);
         cb = mix(cb, ca, k);
         pb = mix(b, a, k);
     }
@@ -285,7 +290,7 @@ fn vs_line(@builtin(vertex_index) vi: u32, @location(0) a: vec3<f32>, @location(
     let base = select(ca, cb, t > 0.5);
     let off = nrm * s * w * 0.5 + dir * (t * 2.0 - 1.0) * w * 0.5;
     var o: LOut;
-    o.pos = vec4<f32>(base.xy + off / half * base.w, biased_z(select(pa, pb, t > 0.5), base, 1.0), base.w);
+    o.pos = vec4<f32>(base.xy + off / half * base.w, base.z, base.w);
     o.c = c;
     o.wp = select(pa, pb, t > 0.5);
     return o;
@@ -310,9 +315,8 @@ struct IOut {
 @vertex
 fn vs_img(@location(0) p: vec3<f32>, @location(1) uv: vec2<f32>, @location(2) a: f32) -> IOut {
     var o: IOut;
+    // On a face it shows over it: the face is pushed back (`FACE_BIAS`).
     o.pos = u.vp * vec4<f32>(p, 1.0);
-    // Pulled toward the eye like lines, so a decal on a face is not lost in it.
-    o.pos.z = biased_z(p, o.pos, 1.0);
     o.uv = uv;
     o.a = a;
     o.wp = p;

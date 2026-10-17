@@ -27,7 +27,9 @@ mod web {
 
     const CANVAS_ID: &str = "solidcraft_canvas";
     const LOADING_ID: &str = "solidcraft_loading";
-    const DEPTH_BITS: u8 = 24;
+    /// A 32-bit float depth buffer (no stencil): WebGPU and WebGL2 both have it, and the viewport
+    /// draws it with reversed depth, whose precision follows the distance from the eye (#1434).
+    const DEPTH_BITS: u8 = 32;
 
     /// Seconds between autosaves of unsaved work.
     const AUTOSAVE_S: f64 = 30.0;
@@ -479,7 +481,7 @@ mod web {
                         let panel = files.clone();
                         let services = Services {
                             // Open shows the browser's files (and the computer's, from there).
-                            pick_open: Some(Box::new(move || {
+                            pick_open: Some(Box::new(move |_: &[&str]| {
                                 panel.panel.set(true);
                                 Box::pin(std::future::ready(None))
                             })),

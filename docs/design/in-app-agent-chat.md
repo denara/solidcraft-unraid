@@ -8,7 +8,7 @@ Protocol and the agents that speak it, how the chat is built, and what's still o
 ## Goal
 
 A chat panel inside SolidCraft that drives a coding agent **the user already has and is already
-signed in to** (Claude Code, Codex, Gemini CLI, …). SolidCraft holds no API keys and no
+signed in to** (Claude Code, Codex, Antigravity, …). SolidCraft holds no API keys and no
 accounts: the agent runs as a child process under the user's own login, and SolidCraft gives
 it one thing, its MCP server bridged to the open window, so the agent models on the design the
 user is looking at.
@@ -48,7 +48,8 @@ with SolidCraft, the user installs the agent.
 |---|---|---|---|---|
 | Claude Code | `claude-agent-acp` adapter (renamed from `@zed-industries/claude-code-acp`, which is now deprecated) | `@agentclientprotocol/claude-agent-acp` 0.90.0, Apache-2.0. It depends on `@anthropic-ai/claude-agent-sdk`, which is under Anthropic's own terms ("SEE LICENSE IN README.md"): fine for the user to install, not something we would vendor. | `--version` prints `0.90.0` | Terminal method. Offered only when the client declares terminal login. On a desktop: "Claude Subscription" = `claude-agent-acp --cli auth login --claudeai`, "Anthropic Console" = `… --cli auth login --console`. Over SSH (no browser) it offers `claude-login` = `… --cli` (the TUI `/login`). The login is Claude Code's own: `~/.claude/.credentials.json` (Linux, Windows) or the macOS keychain. |
 | Codex | `codex-acp` adapter (`@zed-industries/codex-acp` 0.16 moved to `@agentclientprotocol/codex-acp`) | `@agentclientprotocol/codex-acp` 2.2.2, Apache-2.0 | `--version` (0.16 rejected the flag; 2.x prints it) | Agent method `chat-gpt` (the adapter opens the browser for the ChatGPT login when the client calls `authenticate`), and `api-key` for a key the user configures in Codex. 0.16 also listed `env_var` methods for `CODEX_API_KEY` / `OPENAI_API_KEY`. The login is Codex's own: `~/.codex/auth.json`. |
-| Gemini CLI | built in: `gemini --acp` (the ACP registry's current flag; older releases used `--experimental-acp`) | `@google/gemini-cli` 0.64, Apache-2.0 | `--version` | Its own Google login (`~/.gemini/oauth_creds.json`) or a key in the environment. |
+| Google Antigravity | a separate server, `agy_acp_server.par` (`.exe` on Windows), from the ACP registry's zip (`agy-acp-server-1.4.0-…`, with `localharness_external` beside it, ~330 MB). The `agy` command (1.4.0) rejects `--acp`; its `--input-format stream-json` print mode is not ACP. Started without arguments (the registry's Linux entry passes an empty `--uid=`, not needed here). | proprietary (Google's terms) | none: `--version` prints a build date and takes about two seconds, so it is not asked | Agent methods `oauth-personal`, `oauth-business`, `gemini-api-key` (`GEMINI_API_KEY`), `agent-platform`; `session/new` answers "Authentication required" until one is chosen. Settings in `~/.gemini/antigravity-acp/settings.json`. |
+| Gemini CLI (retired) | `gemini --acp` | `@google/gemini-cli` 0.64, Apache-2.0 | `--version` | Google ended it for consumer accounts on 2026-06-18 in favour of Antigravity. Still found when installed (enterprise licences may keep it working) but no longer offered for install. Its own login `~/.gemini/oauth_creds.json` or a key in the environment. |
 | OpenCode | built in: `opencode acp` | `opencode-ai` 1.19, MIT | `--version` | Its own providers' logins (`~/.local/share/opencode/auth.json`) or keys in the environment. |
 | XAI Grok | built in: `grok agent stdio` | [Grok Build](https://github.com/xai-org/grok-build), Apache-2.0; installed separately | `grok --version` prints `grok 1.0.58 (…) [alpha]` (checked 2026-10-15; in-app connection also checked with 1.0.60) | Its own `~/.grok/auth.json` or `XAI_API_KEY`. `grok login` signs in in the browser; ACP advertises `cached_token` and `grok.com` authentication methods. |
 | Others in the ACP registry | `copilot --acp`, `qwen --acp`, `opencode acp`, `goose acp`, `cline --acp`, `kimi acp`, … | mixed; several are proprietary, one is GPL and one AGPL (we only start them as programs, never link them) | `--version` | each its own |
@@ -61,7 +62,7 @@ the picker instead of the hard-coded table.
 
 - **SolidCraft never sees a credential.** It doesn't pass API keys, doesn't store tokens and
   doesn't open login pages by itself. Each agent keeps its own login where its CLI always does
-  (Claude Code: `~/.claude` or the keychain; Codex: `~/.codex`; Gemini: `~/.gemini`). A user
+  (Claude Code: `~/.claude` or the keychain; Codex: `~/.codex`; Gemini and Antigravity: `~/.gemini`). A user
   who already uses the agent in a terminal is already signed in, and the chat simply works.
 - **Not signed in:** the agent answers "Authentication required". The panel switches to
   *Sign-in needed* and lists the agent's own `authMethods`:
@@ -79,7 +80,7 @@ the picker instead of the hard-coded table.
 ## How it works
 
 ```
-SolidCraft window ──(child process, own process group, ACP over stdio)──> agent (claude-agent-acp, codex-acp, gemini --acp, opencode acp, …)
+SolidCraft window ──(child process, own process group, ACP over stdio)──> agent (claude-agent-acp, codex-acp, agy_acp_server, opencode acp, …)
       ▲                                                                     │ starts, per session/new
       │ the chat's own endpoint (loopback, fresh token, gate)               ▼
       └──────────────────────────────────────────────────── solidcraft-cli mcp --connect 127.0.0.1:PORT
@@ -96,6 +97,7 @@ Code: `crates/ui-egui/src/agent_chat/`.
 | `settings.rs` | Preferences → AI and the Add agent dialog. |
 | `process.rs` | The agent as a child process in a process group of its own; stopping it ends the group. |
 | `discover.rs` | Which agents are installed, their versions, whether they look signed in. |
+| `markdown.rs`, `markdown_view.rs` | The agent's text as Markdown: a bounded reader, and its drawing (parsed once per item, again only when the text changes). |
 | `gate.rs` | What the agent's tool requests may do: run, wait for Allow/Deny, or never. |
 | `mod.rs` | The conversation, turns (undo as one step, the per-turn limit), held requests. |
 | `panel.rs` | The panel: docking, minimising, picker, sign-in, conversation, input. |
@@ -208,7 +210,7 @@ returns the whole state, for tests and screenshots.
 
 | Area | Work |
 |---|---|
-| Conversation | Markdown rendering, diffs, history per design, resume (`session/load`) |
+| Conversation | Diffs, history per design, resume (`session/load`) |
 | Session controls | Model and mode pickers from `configOptions` / `modes`, slash commands |
 | Auth | An embedded terminal or "open a terminal here" for terminal logins on each OS; logout |
 | Discovery | Read the ACP registry; keychain-aware login check on macOS |

@@ -50,6 +50,11 @@ mod imp {
         check(path)?;
         std::fs::remove_file(path)
     }
+    /// A folder and the folders above it, where missing.
+    pub fn create_dir_all(path: &str) -> Result<()> {
+        check(path)?;
+        std::fs::create_dir_all(path)
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -93,6 +98,10 @@ mod imp {
     }
     pub fn remove(path: &str) -> Result<()> {
         FILES.with(|f| f.borrow_mut().remove(path)).map(|_| ()).ok_or_else(|| missing(path))
+    }
+    /// Files are keyed by their whole path here: a folder needs no making.
+    pub fn create_dir_all(_path: &str) -> Result<()> {
+        Ok(())
     }
     pub fn insert(path: &str, bytes: Vec<u8>) {
         FILES.with(|f| f.borrow_mut().insert(path.to_string(), bytes));

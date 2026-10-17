@@ -256,7 +256,7 @@ impl LinkGeom {
                 (!*periodic || (!*control && *degree == 3 && crate::periodic_beziers(pts).is_ok()))
                     && (2..=crate::curves::MAX_SPLINE_POINTS).contains(&pts.len())
                     && pts.iter().all(ok)
-                    && (1..=7).contains(degree)
+                    && (1..=solidcraft_geom::MAX_BEZIER_DEGREE as u8).contains(degree)
             }
         }
     }

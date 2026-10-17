@@ -1,10 +1,17 @@
 //! Rolling-ball blends along a closed chain of smooth edges between two smooth groups of faces
-//! of any surfaces (a branch pipe meeting a main pipe, a boss on a cylinder). A ball of the
-//! blend's radius rolls along the edge touching both sides; its centre traces the spine and its
-//! contacts the curves where the blend meets each side. The blend face is a rational B-spline
-//! through the circular cross-sections (exact arcs at the samples), the side faces are trimmed
-//! back to the contact curves, and seams that met the edge (lines, or arcs of an end face) are
-//! shortened to the contacts.
+//! of any surfaces (a branch pipe meeting a main pipe, a boss on a cylinder). A ball rolls along
+//! the edge touching both sides; its centre traces the spine and its contacts the curves where
+//! the blend meets each side. The blend face is a rational B-spline through the circular
+//! cross-sections (exact arcs at the samples), the side faces are trimmed back to the contact
+//! curves, and seams that met the edge (lines, or arcs of an end face) are shortened to the
+//! contacts.
+//!
+//! The ball's size along the chain is one of [`Size`]: one radius all along (the ordinary
+//! fillet), a chord width across the blend (each section spans the requested width from contact
+//! to contact, so its radius is `chord / (2 sin(ψ/2))` for the `ψ` between the two outward
+//! normals where the ball touches), or a radius law along the chain (a [`RadiusSpline`] whose
+//! positions are the fraction of the chain's arc length, zero only at an end, where the blend
+//! closes to the edge's end point as the straight-edge fillet does).
 
 use std::collections::HashMap;
 
@@ -12,6 +19,7 @@ use solidcraft_geom::Vec3;
 use truck_modeling::{self as mt, builder};
 
 use crate::blend::too_large;
+use crate::blend_variable::RadiusSpline;
 use crate::body::{Solid, from_p3, p3};
 use crate::record::Rebuild;
 use crate::{KernelError, Result};
@@ -40,21 +48,60 @@ const TANGENT_RETRIES: usize = 8;
 const MAX_STEP_STRETCH: f64 = 3.0;
 /// Slides of the ball's centre along a knife edge's faces, each 1.6 times the last.
 const KNIFE_STEPS: usize = 40;
+/// Corrections of the radius a chord fillet makes to the width it measures across the blend.
+const CHORD_STEPS: usize = 12;
+/// A section this close to a point is closed: the blend ends at the edge's end point (a radius
+/// that has run to zero there).
+const CLOSED: f64 = 1e-7;
+/// Parameters an edge is sampled at to measure the arc length a radius law is read off.
+const LENGTH_STEPS: usize = 64;
+
+/// The ball's size along the edge chain.
+#[derive(Clone, Copy)]
+enum Size<'a> {
+    /// One radius all along.
+    Constant(f64),
+    /// The width across the blend, from contact to contact, at every station.
+    Chord(f64),
+    /// The radius at the station's arc-length fraction along the chain, 0 at the front and 1 at
+    /// the back of its edge.
+    Law(&'a RadiusSpline),
+}
 
 struct Fit {
     surface: mt::Surface,
     contacts: [mt::Curve; 2],
     /// Parameter range belonging to this edge (the fit includes neighbouring sections).
     range: (f64, f64),
+    /// The part of the fit that is the chain's own run, as fractions of its parameter range.
+    span: (f64, f64),
 }
 
 struct Guide {
     sections: Vec<Section>,
+    /// The size law's parameter (the arc-length fraction along the chain) at each section: the
+    /// radius between the samples is read off the law there, not off the spine's own length.
+    law: Vec<f64>,
     lengths: Vec<f64>,
+    /// The part of the guide that is the chain itself, as fractions of its length: the sections
+    /// run on past the ends of the chain (only so that the fit can be cut back there) and the fit
+    /// is checked for accuracy on the chain alone.
+    span: (f64, f64),
 }
 
 impl Guide {
+    /// A guide whose law parameter is the section's own fraction of it (the size is one radius,
+    /// which needs no law).
     fn new(sections: Vec<Section>) -> Result<Self> {
+        let den = sections.len().max(2) - 1;
+        let law = (0..sections.len()).map(|i| i as f64 / den as f64).collect();
+        Self::with_law(sections, law)
+    }
+
+    fn with_law(sections: Vec<Section>, law: Vec<f64>) -> Result<Self> {
+        if sections.len() != law.len() {
+            return Err(unsupported("degenerate rolling-ball spine"));
+        }
         let mut lengths = vec![0.0];
         let mut total = 0.0;
         for pair in sections.windows(2) {
@@ -65,10 +112,16 @@ impl Guide {
         if !total.is_finite() || total <= 1e-12 {
             return Err(unsupported("degenerate rolling-ball spine"));
         }
-        Ok(Self { sections, lengths })
+        Ok(Self { sections, law, lengths, span: (0.0, 1.0) })
     }
 
+    /// The centre and tangent at `along` of the spine.
     fn anchor(&self, along: f64) -> Option<(Vec3, Vec3)> {
+        self.anchor_at(along).map(|(centre, tangent, _)| (centre, tangent))
+    }
+
+    /// [`Guide::anchor`] with the size law's parameter at that station.
+    fn anchor_at(&self, along: f64) -> Option<(Vec3, Vec3, f64)> {
         if self.lengths.len() < 2 || !along.is_finite() || !(0.0..=1.0).contains(&along) {
             return None;
         }
@@ -81,7 +134,8 @@ impl Guide {
             return None;
         }
         let fraction = (distance - lo) / span;
-        Some((a.c + (b.c - a.c) * fraction, (b.c - a.c).normalized()?))
+        let law = self.law.get(hi - 1)? * (1.0 - fraction) + self.law.get(hi)? * fraction;
+        Some((a.c + (b.c - a.c) * fraction, (b.c - a.c).normalized()?, law))
     }
 }
 
@@ -145,7 +199,7 @@ fn fit_strip(list: &[Section], before: &[Section], after: &[Section], round: boo
     };
     let contacts = [contact(0)?, contact(2)?];
     let bs = mt::BSplineSurface::try_new((mt::KnotVec::bezier_knot(2), vk), rows).map_err(|e| fail(&e.to_string()))?;
-    Ok(Fit { surface: mt::Surface::NurbsSurface(mt::NurbsSurface::new(bs)), contacts, range })
+    Ok(Fit { surface: mt::Surface::NurbsSurface(mt::NurbsSurface::new(bs)), contacts, range, span: (0.0, 1.0) })
 }
 
 /// Compare the fitted strip with a solved circular section between interpolation nodes.
@@ -263,7 +317,7 @@ fn end_cap(fit: &Fit, g: &mt::Face, at: &Section, seams: [Option<&mt::Edge>; 2],
             // Both contacts are cut there: strictly inside the strip's own part.
             let inside = |t: f64| t > fit.range.0 + 1e-6 && t < fit.range.1 - 1e-6;
             if !(inside(*t1) && inside(*t2)) {
-                return Err(too_large("the blend is larger than the neighbouring faces"));
+                return Err(too_large("the blend is larger than the neighbouring faces (site 309)"));
             }
             return Ok((*t1, *t2, mt::Curve::BSplineCurve(bs)));
         }
@@ -341,10 +395,10 @@ fn tangent_cap(fit: &Fit, g: &mt::Face, tangent_side: u8, seams: [Option<&mt::Ed
     };
     let (rt, ra) = (crossing(u_t, seam_t), crossing(u_o, seam_o));
     let v_t = rt.ok_or_else(fail)?;
-    let v_a = ra.ok_or_else(|| too_large("the blend is larger than the neighbouring faces"))?;
+    let v_a = ra.ok_or_else(|| too_large("the blend is larger than the neighbouring faces (site 387)"))?;
     let inside = |t: f64| t > lo + 1e-6 && t < hi - 1e-6;
     if !(inside(v_a) && inside(v_t)) || (v_a - v_t).abs() < 1e-9 {
-        return Err(too_large("the blend is larger than the neighbouring faces"));
+        return Err(too_large("the blend is larger than the neighbouring faces (site 390)"));
     }
     // How far the strip's point (u, v) is outside the end face (negative: inside the body).
     let outside = |u: f64, v: f64| -> Option<f64> {
@@ -599,6 +653,93 @@ fn solve_from(
     None
 }
 
+/// The section whose two contacts are `chord` apart: the ball's radius is `chord / (2 sin(ψ/2))`
+/// for the `ψ` between the two outward normals where it touches, `|q1 − q2| = 2 r sin(ψ/2)`. The
+/// normals turn as the ball grows against curved faces, so the width is measured on the solved
+/// section and the radius corrected until it matches (the width is proportional to the radius,
+/// so the corrections converge quickly). The normals at `p` give the first radius, exact where
+/// both faces are planar; `None` where the faces meet too nearly tangentially to span a chord.
+#[allow(clippy::too_many_arguments)]
+fn solve_chord(
+    f1: &[&mt::Face],
+    f2: &[&mt::Face],
+    p: Vec3,
+    t: Vec3,
+    chord: f64,
+    sigma: f64,
+    cusp: f64,
+    extra: Option<Extra<'_>>,
+    tol: f64,
+) -> Option<(Section, f64)> {
+    let normal = |fs: &[&mt::Face]| fs.iter().filter_map(|f| project(f, p, None)).min_by(|a, b| a.0.dist(p).total_cmp(&b.0.dist(p))).map(|x| x.1);
+    let (n1, n2) = (normal(f1)?, normal(f2)?);
+    let half = (n1.dot(n2).clamp(-1.0, 1.0).acos() / 2.0).sin();
+    if !(half > 1e-3) {
+        return None;
+    }
+    let mut r = chord / (2.0 * half);
+    for _ in 0..CHORD_STEPS {
+        if !(r.is_finite() && r > 0.0 && r < 1e9) {
+            return None;
+        }
+        let s = solve(f1, f2, p, t, r, sigma, cusp, extra, tol)?;
+        let width = s.q1.dist(s.q2);
+        if !width.is_finite() || width <= 0.0 {
+            return None;
+        }
+        if (width - chord).abs() <= (chord * 1e-9).max(tol * 0.5) {
+            return Some((s, r));
+        }
+        r *= chord / width;
+    }
+    None
+}
+
+/// The rolling ball at one station, sized by the blend's law.
+struct Sizer<'a> {
+    size: Size<'a>,
+    /// The tolerance the section's equations are solved at.
+    tol: f64,
+}
+
+impl Sizer<'_> {
+    /// The section at `p` (tangent `t`, the size law's parameter `s`) holding the third
+    /// condition `extra` when given, with the radius it was solved at.
+    #[allow(clippy::too_many_arguments)]
+    fn section(
+        &self,
+        f1: &[&mt::Face],
+        f2: &[&mt::Face],
+        p: Vec3,
+        t: Vec3,
+        s: f64,
+        sigma: f64,
+        cusp: f64,
+        extra: Option<Extra<'_>>,
+    ) -> Option<(Section, f64)> {
+        match self.size {
+            Size::Constant(r) => solve(f1, f2, p, t, r, sigma, cusp, extra, self.tol).map(|x| (x, r)),
+            Size::Chord(chord) => solve_chord(f1, f2, p, t, chord, sigma, cusp, extra, self.tol),
+            Size::Law(law) => {
+                let r = law_beyond(law, s)?;
+                if !(r.is_finite() && (0.0..1e6).contains(&r)) {
+                    return None;
+                }
+                solve(f1, f2, p, t, r, sigma, cusp, extra, self.tol).map(|x| (x, r))
+            }
+        }
+    }
+
+    /// What a station the ball does not fit at is refused with: a chord too large is about the
+    /// size asked for, anything else about where the ball is.
+    fn refusal(&self) -> KernelError {
+        match self.size {
+            Size::Chord(_) => too_large("the blend is larger than the neighbouring faces (site 704)"),
+            _ => unsupported("the ball doesn't fit along the edge"),
+        }
+    }
+}
+
 /// Whether the strip's curvature jumps where two runs of sections meet (each three sections from
 /// the joint outward, the joint's first): for the centres or either contact, the difference of
 /// the circles through them would move the middle section by more than a tenth of `tolerance`.
@@ -614,12 +755,23 @@ fn bends(a: [&Section; 3], b: [&Section; 3], tolerance: f64) -> bool {
         .any(|f| (curvature(a.map(f)) - curvature(b.map(f))).abs() * h * h > tolerance * 0.1)
 }
 
+/// Whether the section is a point: a blend whose radius has run to zero, closing to the edge's
+/// end point there.
+fn closed_section(s: &Section) -> bool {
+    s.c.dist(s.q1) <= CLOSED && s.c.dist(s.q2) <= CLOSED
+}
+
 /// Homogeneous control points of the circular (or straight) cross-section from q1 to q2.
 fn section_controls(s: &Section, round: bool) -> Option<[mt::Vector4; 3]> {
     let h = |p: Vec3, w: f64| mt::Vector4::new(p.x * w, p.y * w, p.z * w, w);
     if !round {
         let m = (s.q1 + s.q2) * 0.5;
         return Some([h(s.q1, 1.0), h(m, 1.0), h(s.q2, 1.0)]);
+    }
+    if closed_section(s) {
+        // A closed section: the arc has shrunk to the edge's end point, all three controls
+        // there, so the fitted strips of the neighbouring faces meet at that vertex.
+        return Some([h(s.c, 1.0), h(s.c, 1.0), h(s.c, 1.0)]);
     }
     let (a, b) = (s.q1 - s.c, s.q2 - s.c);
     let theta = a.normalized()?.dot(b.normalized()?).clamp(-1.0, 1.0).acos();
@@ -833,14 +985,14 @@ pub(crate) fn trim_curved_seam(seam: &mt::Edge, a: Option<mt::Vertex>, b: Option
             .unwrap_or(end);
         let t = curve.search_nearest_parameter(v.point(), hint, 100).ok_or_else(|| unsupported("the blend is larger than the neighbouring faces"))?;
         if !(t.is_finite() && from_p3(mt::ParametricCurve::subs(&curve, t)).dist(from_p3(v.point())) <= size * 1e-5) {
-            return Err(too_large("the blend is larger than the neighbouring faces"));
+            return Err(too_large("the blend is larger than the neighbouring faces (site 938)"));
         }
         Ok(t)
     };
     let (ta, tb) = (at(&a, lo)?, at(&b, hi)?);
     let margin = (hi - lo) * 1e-9;
     if ta < lo - margin || tb > hi + margin || tb - ta < (hi - lo) * 1e-6 {
-        return Err(too_large("the blend is larger than the neighbouring faces"));
+        return Err(too_large("the blend is larger than the neighbouring faces (site 945)"));
     }
     if tb < hi {
         let _ = curve.cut(tb);
@@ -851,15 +1003,99 @@ pub(crate) fn trim_curved_seam(seam: &mt::Edge, a: Option<mt::Vertex>, b: Option
     mt::Edge::try_new(&a, &b, piece).map_err(|e| KernelError::Failed(format!("curve blend: seam: {e}")))
 }
 
+/// A monotone curve's parameter read off a table of its values at uniform parameters (`None` for
+/// an empty table): the fraction of the way through it.
+fn sampled(table: &[f64], along: f64) -> Option<f64> {
+    if table.len() < 2 || !along.is_finite() {
+        return None;
+    }
+    let x = along.clamp(0.0, 1.0) * (table.len() - 1) as f64;
+    let i = (x.floor() as usize).min(table.len() - 2);
+    let f = x - i as f64;
+    Some(table.get(i)? * (1.0 - f) + table.get(i + 1)? * f)
+}
+
+/// The arc length of `edge` from its front to its back at each of `LENGTH_STEPS + 1` uniform
+/// parameters, accumulated. `None` for an edge that has no length (or runs back over itself).
+fn edge_lengths(edge: &mt::Edge) -> Option<Vec<f64>> {
+    use mt::{BoundedCurve, ParametricCurve};
+    let c = edge.oriented_curve();
+    let (a, b) = c.range_tuple();
+    let mut last = from_p3(c.subs(a));
+    let mut total = 0.0;
+    let mut out = Vec::with_capacity(LENGTH_STEPS + 1);
+    out.push(0.0);
+    for i in 1..=LENGTH_STEPS {
+        let p = from_p3(c.subs(a + (b - a) * i as f64 / LENGTH_STEPS as f64));
+        total += last.dist(p);
+        last = p;
+        out.push(total);
+    }
+    (total.is_finite() && total > 1e-12).then_some(out)
+}
+
+/// The radius a law gives at the chain fraction `s`, continued past 0 and 1 at the law's own end
+/// slope. The ball runs on past a chain end (to be cut back there by its end face), and holding
+/// the end radius would kink the strip exactly where the edge begins: a kink a cubic fit spreads
+/// back over the whole blend. Never below a fifth of the end radius, so that a law running down
+/// steeply still has a ball to run on with.
+fn law_beyond(law: &RadiusSpline, s: f64) -> Option<f64> {
+    if (0.0..=1.0).contains(&s) {
+        return Some(law.eval(s));
+    }
+    let (end, step) = if s < 0.0 { (0.0, s) } else { (1.0, s - 1.0) };
+    let h = 1e-3;
+    let slope = (law.eval(end + h) - law.eval(end)) / h;
+    let r = law.eval(end);
+    let r = (r + slope * step).max(0.2 * r);
+    (r.is_finite() && r > 0.0).then_some(r)
+}
+
 /// Blend the closed chain of edges (ids in any order) with radius `r`; with what it built from
 /// `solid` (each blend face in place of its chain edge).
 pub(crate) fn curve_blend(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, round: bool) -> Result<(Solid, Rebuild)> {
     curve_blend_with_limit(solid, ids, size, r, round, MAX_SAMPLES)
 }
 
+/// [`curve_blend`] with the blend `chord` wide across, from contact to contact, at every station.
+pub(crate) fn curve_blend_chord(solid: &Solid, ids: &[mt::EdgeID], size: f64, chord: f64, round: bool) -> Result<(Solid, Rebuild)> {
+    curve_blend_sized(solid, ids, size, Size::Chord(chord), round, MAX_SAMPLES)
+}
+
+/// [`curve_blend`] with the radius following `law` along the chain (its positions the fraction of
+/// the chain's arc length, from the front of its first edge to the back of its last).
+pub(crate) fn curve_blend_law(solid: &Solid, ids: &[mt::EdgeID], size: f64, law: &RadiusSpline, round: bool) -> Result<(Solid, Rebuild)> {
+    curve_blend_sized(solid, ids, size, Size::Law(law), round, MAX_SAMPLES)
+}
+
 fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, round: bool, max_samples: usize) -> Result<(Solid, Rebuild)> {
-    if !(size.is_finite() && size > 0.0 && r.is_finite() && r > 0.0) {
+    curve_blend_sized(solid, ids, size, Size::Constant(r), round, max_samples)
+}
+
+/// Blend the chain of edges (ids in any order) sized by `size`: one radius, a chord width, or a
+/// radius law. With what it built from `solid` (each blend face in place of its chain edge).
+fn curve_blend_sized(solid: &Solid, ids: &[mt::EdgeID], size: f64, size_law: Size<'_>, round: bool, max_samples: usize) -> Result<(Solid, Rebuild)> {
+    if !(size.is_finite() && size > 0.0) {
         return Err(KernelError::Invalid("curve blend size and radius must be finite and positive".into()));
+    }
+    match size_law {
+        Size::Constant(r) | Size::Chord(r) => {
+            if !(r.is_finite() && r > 1e-6 && r < 1e6) {
+                return Err(KernelError::Invalid("curve blend size and radius must be finite and positive".into()));
+            }
+        }
+        Size::Law(law) => {
+            let knots = law.knots.len() == law.radii.len() + law.degree + 1;
+            if law.radii.len() < 2 || !knots || law.radii.iter().any(|r| !(r.is_finite() && (0.0..1e6).contains(r))) {
+                return Err(KernelError::Invalid("a radius law along the edge must be finite and non-negative".into()));
+            }
+            // A law that runs to zero closes the blend at the edge's end point. The fitted strip
+            // pinches to a point there, and the sections' own interpolation cannot follow the last
+            // span of it: the straight-edge fillet, which builds that closure exactly, is the way.
+            if law.eval(0.0) <= CLOSED || law.eval(1.0) <= CLOSED {
+                return Err(unsupported("a radius law that runs to zero along a curved edge"));
+            }
+        }
     }
     if !(4..=MAX_SAMPLES).contains(&max_samples) {
         return Err(KernelError::Invalid("curve blend section limit is outside the supported range".into()));
@@ -991,10 +1227,21 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
     // below the first (against its outward normal) when the cusp is material, above when it is
     // a gap. The cross product of the normals, which tells the other edges apart, is zero here.
     let knife = 1.0 + n1.dot(n2) < KNIFE;
+    // The one radius, where the size is one radius (a chord or a law has none).
+    let fixed = match size_law {
+        Size::Constant(r) => Some(r),
+        _ => None,
+    };
+    // The blend's scale where the size itself is not what matters (the knife edge's probe): the
+    // radius asked for, or the law's middle value.
+    let scale = match size_law {
+        Size::Constant(r) | Size::Chord(r) => r,
+        Size::Law(law) => law.eval(0.5).max(1e-6),
+    };
     let (convex, cusp) = if knife {
         let w = n1.cross(t1).normalized().ok_or_else(|| KernelError::Failed("blend: cusp direction".into()))?;
         // Second order: from the point of face 1 a little way along `w`, face 2's nearest point.
-        let probe = project(f1, pm + w * r, None)
+        let probe = project(f1, pm + w * scale, None)
             .and_then(|(qa, na, _)| s2.first().and_then(|f| project(f, qa, None)).map(|(qb, _, _)| (qb - qa).dot(na)))
             .filter(|depth| depth.abs() > size * 1e-9)
             .ok_or_else(|| unsupported("a knife edge whose faces lie flat on each other"))?;
@@ -1008,10 +1255,41 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
     if n1.dot(n2) > 1.0 - 1e-6 {
         return Err(unsupported("blending a smooth edge"));
     }
+    // The chain's arc length, in fractions of its whole, at each station: where the size is one
+    // radius it is not read, but the sections take their parameter from it all the same.
+    let tables: Vec<Vec<f64>> = chain.iter().map(|e| edge_lengths(e).unwrap_or_else(|| vec![0.0; LENGTH_STEPS + 1])).collect();
+    let total: f64 = tables.iter().filter_map(|t| t.last().copied()).sum();
+    if !(matches!(size_law, Size::Constant(_)) || total.is_finite() && total > 1e-12) {
+        return Err(unsupported("a zero-length edge of the chain"));
+    }
+    let total = if total > 1e-12 { total } else { 1.0 };
+    let mut cum: Vec<f64> = Vec::with_capacity(n + 1);
+    let mut acc = 0.0;
+    for table in &tables {
+        cum.push(acc);
+        acc += table.last().copied().unwrap_or(0.0);
+    }
+    cum.push(acc);
+    // A law that runs around a closed chain meets itself: its two ends must agree there.
+    if closed
+        && let Size::Law(law) = size_law
+        && (law.eval(0.0) - law.eval(1.0)).abs() > 1e-9 * law.radii.iter().copied().fold(1.0_f64, f64::max)
+    {
+        return Err(KernelError::Invalid("a closed edge chain runs back into itself: give the same radius law at both ends".into()));
+    }
+    // The law's parameter at `along` of edge `k` (its front to its back).
+    let frac_at = |k: usize, along: f64| -> f64 {
+        let (Some(table), Some(lo)) = (tables.get(k), cum.get(k)) else { return if k >= n { 1.0 } else { 0.0 } };
+        let s = sampled(table, along).unwrap_or(0.0);
+        ((lo + s) / total).clamp(0.0, 1.0)
+    };
+    let sizer = Sizer { size: size_law, tol: tol * 100.0 };
     // Arcs on a planar side that curve round the ball: its centre runs round them at their
     // radius less the blend's. Less than nothing is too large; nothing is a pivot.
     let mut pivots: Vec<Option<Pivot>> = vec![None; n];
-    for (k, e) in chain.iter().enumerate() {
+    'pivots: for (k, e) in chain.iter().enumerate() {
+        // A size that varies along the edge has no one radius to compare a corner's arc with.
+        let Some(r) = fixed else { break 'pivots };
         let Some((o, rho, _)) = circle_of(e, tol * 1e3) else { continue };
         for side in [1, 2] {
             let Some(f) = (if side == 1 { side1.get(k) } else { side2.get(k) }).and_then(|i| faces.get(*i)) else { continue };
@@ -1032,7 +1310,7 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
                 continue;
             }
             if rho < r - tol * 1e3 {
-                return Err(too_large("the blend is larger than a corner radius"));
+                return Err(too_large("the blend is larger than a corner radius (site 1257)"));
             }
             if (rho - r).abs() > tol * 1e3 {
                 continue;
@@ -1145,6 +1423,8 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
         Some((from_p3(c.subs(t)), Vec3::new(d.x, d.y, d.z).normalized()?))
     };
     let mut vsec: Vec<Section> = Vec::with_capacity(nv);
+    // The radius each vertex section was solved at (the closed end of a law: zero).
+    let mut vradius: Vec<f64> = Vec::with_capacity(nv);
     for k in 0..nv {
         let (p, t) = if k < n {
             tangent_at(chain.get(k).ok_or_else(|| KernelError::Failed("edge".into()))?, 0.0)
@@ -1167,8 +1447,12 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
             }
             let q = pv.c + (p - pv.o);
             vsec.push(if pv.side == 1 { Section { c: pv.c, q1: pv.o, q2: q } } else { Section { c: pv.c, q1: q, q2: pv.o } });
+            vradius.push(fixed.unwrap_or_default());
             continue;
         }
+        // The law's parameter at this vertex: the front of its edge, or the back of the last
+        // edge at an open chain's end.
+        let law_s = if k < n { frac_at(k, 0.0) } else { frac_at(n - 1, 1.0) };
         if at_end {
             // A plane square to the edge holds the blend's end section. Any other end face: the
             // blend runs on past the end and is cut back where it meets that face.
@@ -1181,7 +1465,10 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
                 }
                 _ => false,
             };
-            if !square || split_ends.iter().any(|e| e.0 == k) {
+            // A radius that has run to zero closes the blend at the vertex itself: it does not run
+            // on past the end, and the end face keeps the corner it had there.
+            let closed_end = matches!(size_law, Size::Law(law) if law.eval(law_s) <= CLOSED);
+            if (!square || split_ends.iter().any(|e| e.0 == k)) && !closed_end {
                 slanted.push((k, fi, p, t, None));
             }
         }
@@ -1212,7 +1499,7 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
         // longer is (a wall past the round at a corner, which a ball rolling round it pokes
         // through).
         let (a1, a2) = edge_sides(&[k.min(n - 1)]);
-        let s = solve(&a1, &a2, p, t, r, sigma, cusp, extra, tol * 100.0).ok_or_else(|| unsupported("the ball doesn't fit along the edge"))?;
+        let (s, r) = sizer.section(&a1, &a2, p, t, law_s, sigma, cusp, extra).ok_or_else(|| sizer.refusal())?;
         // A seam on the other side too must pass through that side's contact.
         if let Some((side, seam)) = here.get(1).filter(|_| !at_end) {
             let q = if *side == 1 { s.q1 } else { s.q2 };
@@ -1222,10 +1509,11 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
             }
         }
         vsec.push(s);
+        vradius.push(r);
     }
     // Past a slanted end: sections of the same rolling ball beyond the end vertex (far to near
     // at the chain's start, near to far at its end), far enough to cross the end face.
-    let mut beyond: Vec<(usize, Vec<Section>)> = Vec::new();
+    let mut beyond: Vec<(usize, Vec<Section>, Vec<f64>)> = Vec::new();
     for (k, fi, p, t, tangent) in slanted.iter_mut() {
         let g = faces.get(*fi).ok_or_else(|| KernelError::Failed("end face".into()))?;
         let at = vsec.get(*k).copied().ok_or_else(|| KernelError::Failed("section".into()))?;
@@ -1250,12 +1538,16 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
         if cos < 0.15 && tangent.is_none() {
             return Err(unsupported("an end face almost along the edge"));
         }
-        let width = at.q1.dist(*p).max(at.q2.dist(*p)).max(at.c.dist(*p)) + r;
+        let width = at.q1.dist(*p).max(at.q2.dist(*p)).max(at.c.dist(*p)) + vradius.get(*k).copied().unwrap_or(scale);
         let reach = 1.5 * width / if tangent.is_some() { 1.0 } else { cos };
         let out = if *k == 0 { -*t } else { *t };
+        // The run on past the end only gives the fit its context (the end face cuts it back), but
+        // it keeps the law's end slope: the radius is read at the distance past the end.
+        let law_s = |d: f64| if *k == 0 { -d / total } else { 1.0 + d / total };
         // Past a tangent end the straight run along the tangent leaves the curved spine: where
         // the ball no longer fits, the run is shortened (it only gives the fit its context).
         let mut list = Vec::with_capacity(EXTENSION);
+        let mut laws = Vec::with_capacity(EXTENSION);
         let mut reach = reach;
         // Past the end of a curved edge the planes square to its end tangent cut the ring of
         // centres further and further round it, until a step jumps across the ring (#1255: a
@@ -1263,26 +1555,33 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
         // then, as long as one of its sections still lies wholly past the end face.
         let ng_out = if ng.dot(out) < 0.0 { -ng } else { ng };
         let past = |sec: &Section| [sec.c, sec.q1, sec.q2].iter().all(|x| (*x - *p).dot(ng_out) > tol);
-        let mut fallback: Option<Vec<Section>> = None;
+        // A run shortened when its centres jump across the ring (a knuckle's cap circle, #1255)
+        // stands if no full-length run works; a size law's own end slope is read at each station's
+        // distance past the end.
+        let mut fallback: Option<Vec<(f64, Section)>> = None;
         for attempt in 0..TANGENT_RETRIES {
             list.clear();
+            laws.clear();
             let step = reach / EXTENSION as f64;
             let sections = (1..=EXTENSION).map(|j| {
-                let anchor = *p + out * (step * j as f64);
-                solve(&e1, &e2, anchor, *t, r, sigma, cusp, None, tol * 100.0)
+                let d = step * j as f64;
+                let anchor = *p + out * d;
+                let s = law_s(d);
+                sizer.section(&e1, &e2, anchor, *t, s, sigma, cusp, None).map(|(section, _)| (s, section))
             });
             match sections.collect::<Option<Vec<_>>>() {
                 Some(all) => {
                     let smooth = tangent.is_some()
-                        || std::iter::once(at.c).chain(all.iter().map(|s| s.c)).collect::<Vec<_>>().windows(2).all(|w| match w {
+                        || std::iter::once(at.c).chain(all.iter().map(|(_, s)| s.c)).collect::<Vec<_>>().windows(2).all(|w| match w {
                             [a, b] => a.dist(*b) <= MAX_STEP_STRETCH * step,
                             _ => true,
                         });
                     if smooth {
                         // A shortened run must still cross the end face; else the first,
                         // full-length run stands.
-                        if fallback.is_none() || all.iter().any(past) {
-                            list = all;
+                        if fallback.is_none() || all.iter().any(|(_, s)| past(s)) {
+                            list = all.iter().map(|(_, s)| *s).collect();
+                            laws = all.iter().map(|(s, _)| *s).collect();
                         }
                         break;
                     }
@@ -1294,12 +1593,27 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
             reach *= if tangent.is_some() { 0.5 } else { 0.75 };
         }
         if list.is_empty() {
-            list = fallback.ok_or_else(|| unsupported("the ball doesn't fit past the end of the edge"))?;
+            match fallback {
+                // The shortened run stands when the ring's step jumped, whatever its size.
+                Some(all) => {
+                    list = all.iter().map(|(_, s)| *s).collect();
+                    laws = all.iter().map(|(s, _)| *s).collect();
+                }
+                // A size asked for beyond what the faces around the end hold is refused as such;
+                // one radius past the end is the rolling ball's own failure to fit.
+                None => {
+                    return Err(match size_law {
+                        Size::Constant(_) => unsupported("the ball doesn't fit past the end of the edge"),
+                        _ => too_large("the blend is larger than the neighbouring faces (site 1472)"),
+                    });
+                }
+            }
         }
         if *k == 0 {
             list.reverse();
+            laws.reverse();
         }
-        beyond.push((*k, list));
+        beyond.push((*k, list, laws));
     }
     // Uniform refinement preserves a common spacing across neighbouring patches. Work is
     // capped: a difficult strip returns an error instead of accepting an inaccurate fit.
@@ -1319,12 +1633,12 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
             Ok(((start.c - p0).dot(t0), (end.c - p1).dot(t1)))
         })
         .collect::<Result<_>>()?;
-    let section_at = |k: usize, edge: &mt::Edge, along: f64| -> Result<Section> {
+    let section_at = |k: usize, edge: &mt::Edge, along: f64| -> Result<(Section, f64)> {
         let (p, t) = tangent_at(edge, along).ok_or_else(|| KernelError::Failed("tangent".into()))?;
         let (start, end) = offsets.get(k).copied().ok_or_else(|| KernelError::Failed("section offset".into()))?;
         let anchor = p + t * (start * (1.0 - along) + end * along);
         let (a1, a2) = edge_sides(&[k]);
-        solve(&a1, &a2, anchor, t, r, sigma, cusp, None, tol * 100.0).ok_or_else(|| unsupported("the ball doesn't fit along the edge"))
+        sizer.section(&a1, &a2, anchor, t, frac_at(k, along), sigma, cusp, None).ok_or_else(|| sizer.refusal())
     };
     let mut samples = SAMPLES.min(max_samples);
     let (esec, fits) = loop {
@@ -1339,18 +1653,34 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
                 continue;
             }
             let mut list = vec![*vsec.get(k).ok_or_else(|| KernelError::Failed("section".into()))?];
+            let mut law = vec![frac_at(k, 0.0)];
+            let (mut front_beyond, mut back_beyond) = (0usize, 0usize);
             for j in 1..samples - 1 {
-                list.push(section_at(k, e, j as f64 / (samples - 1) as f64)?);
+                let along = j as f64 / (samples - 1) as f64;
+                let (section, _) = section_at(k, e, along)?;
+                list.push(section);
+                law.push(frac_at(k, along));
             }
             list.push(*vsec.get((k + 1) % nv).ok_or_else(|| KernelError::Failed("section".into()))?);
-            for (kv, ext) in &beyond {
+            law.push(frac_at(k, 1.0));
+            for (kv, ext, exts) in &beyond {
                 if *kv == k && k == 0 {
                     list.splice(0..0, ext.iter().copied());
+                    law.splice(0..0, exts.iter().copied());
+                    front_beyond = ext.len();
                 } else if *kv == k + 1 && k + 1 == nv - 1 {
                     list.extend(ext.iter().copied());
+                    law.extend(exts.iter().copied());
+                    back_beyond = ext.len();
                 }
             }
-            guides.push(Some(Guide::new(list)?));
+            let mut guide = Guide::with_law(list, law)?;
+            // The chain's own run: the spliced sections at either end are context for the fit
+            // only (the blend is cut back where it meets the end face there).
+            let last = guide.lengths.last().copied().unwrap_or(0.0);
+            let at = |i: usize| if last > 0.0 { guide.lengths.get(i).copied().unwrap_or(0.0) / last } else { 0.0 };
+            guide.span = (at(front_beyond), at(guide.sections.len().saturating_sub(1 + back_beyond)));
+            guides.push(Some(guide));
         }
         // Intersection curves inherit their leader's piecewise parameter speed. Fitting
         // those parameters creates oscillations even on a geometrically smooth spine.
@@ -1364,9 +1694,11 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
             if along == 1.0 {
                 return guide.sections.last().copied().ok_or_else(|| KernelError::Failed("section".into()));
             }
-            let (anchor, tangent) = guide.anchor(along).ok_or_else(|| unsupported("degenerate rolling-ball spine"))?;
+            let (anchor, tangent, law_s) = guide.anchor_at(along).ok_or_else(|| unsupported("degenerate rolling-ball spine"))?;
             let (a1, a2) = edge_sides(&[k]);
-            solve(&a1, &a2, anchor, tangent, r, sigma, cusp, None, tol * 100.0)
+            sizer
+                .section(&a1, &a2, anchor, tangent, law_s, sigma, cusp, None)
+                .map(|(section, _)| section)
                 .ok_or_else(|| unsupported("the ball doesn't fit along the resampled spine"))
         };
         let esec: Vec<Vec<Section>> = (0..n)
@@ -1391,10 +1723,14 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
                 continue;
             }
             let h = length(k) / (samples - 1) as f64;
-            let spaced = |nb: usize, from_end: bool| -> Result<Option<Vec<Section>>> {
+            // A neighbour shorter than two of the strip's steps lends none: its own sections are
+            // spaced far closer (a small round beside a long line), and borrowing them made the
+            // strip overshoot and fold back on itself past the joint, which its faces' meshes
+            // then folded with (#1667). The strip ends on the joint's section on its own.
+            let spaced = |nb: usize, from_end: bool| -> Result<Vec<Section>> {
                 let l = length(nb);
                 if !(l > 2.0 * h && h > 0.0) {
-                    return Ok(None);
+                    return Ok(Vec::new());
                 }
                 let mut out = Vec::with_capacity(2);
                 for j in [1.0, 2.0] {
@@ -1403,7 +1739,7 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
                 if from_end {
                     out.reverse();
                 }
-                Ok(Some(out))
+                Ok(out)
             };
             let (prev, next) = ((k + n - 1) % n, (k + 1) % n);
             let list = esec.get(k).ok_or_else(|| KernelError::Failed("section".into()))?;
@@ -1416,22 +1752,23 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
                 _ => false,
             };
             let before = match (closed || k > 0) && rolls(prev) {
-                true => spaced(prev, true)?
-                    .map(|b| if smooth([list.first(), list.get(1), list.get(2)], [list.first(), b.get(1), b.first()]) { b } else { Vec::new() }),
-                false => Some(Vec::new()),
+                true => {
+                    let b = spaced(prev, true)?;
+                    if smooth([list.first(), list.get(1), list.get(2)], [list.first(), b.get(1), b.first()]) { b } else { Vec::new() }
+                }
+                false => Vec::new(),
             };
             let after = match (closed || k + 1 < n) && rolls(next) {
-                true => spaced(next, false)?.map(|a| {
+                true => {
+                    let a = spaced(next, false)?;
                     let m = list.len();
                     let tail = [list.last(), m.checked_sub(2).and_then(|i| list.get(i)), m.checked_sub(3).and_then(|i| list.get(i))];
                     if smooth(tail, [list.last(), a.first(), a.get(1)]) { a } else { Vec::new() }
-                }),
-                false => Some(Vec::new()),
+                }
+                false => Vec::new(),
             };
-            let fit = match (before, after) {
-                (Some(b), Some(a)) => crate::guard("fit curve blend", || fit_strip(list, &b, &a, round))?,
-                _ => crate::guard("fit curve blend", || fit_sections(&esec, k, closed, round))?,
-            };
+            let mut fit = crate::guard("fit curve blend", || fit_strip(list, &before, &after, round))?;
+            fit.span = guides.get(k).and_then(Option::as_ref).map(|g| g.span).unwrap_or((0.0, 1.0));
             fits.push(Some(fit));
         }
         let mut accurate = true;
@@ -1440,6 +1777,14 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
             for j in 0..samples - 1 {
                 for fraction in [0.25, 0.5, 0.75] {
                     let along = (j as f64 + fraction) / (samples - 1) as f64;
+                    // A size that varies along the edge reaches past its ends only for the fit's
+                    // context (the end face cuts that away), so it is not held to the tolerance
+                    // there. One radius keeps the check it always had, the whole strip.
+                    if !matches!(size_law, Size::Constant(_))
+                        && fits.get(k).and_then(Option::as_ref).is_some_and(|f| along < f.span.0 || along > f.span.1)
+                    {
+                        continue;
+                    }
                     let section = uniform_section(k, along)?;
                     if !crate::guard("check curve blend fit", || Ok(section_fits(fit, &section, along, round, sigma, fit_tolerance)))? {
                         accurate = false;
@@ -1515,7 +1860,7 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
         && n == 1
         && !(s1 + 1e-6 < *e1 && s2 + 1e-6 < *e2)
     {
-        return Err(too_large("the blend is larger than the neighbouring faces"));
+        return Err(too_large("the blend is larger than the neighbouring faces (site 1668)"));
     }
     crate::guard("curve blend", || {
         let fail = |m: &str| KernelError::Failed(format!("curve blend: {m}"));
@@ -1528,6 +1873,18 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
             if let (Some(a), Some(b)) = (v1.get_mut(*k), v2.get_mut(*k)) {
                 *a = builder::vertex(curve.subs(lo));
                 *b = builder::vertex(curve.subs(hi));
+            }
+        }
+        // A closed section (a radius that has run to zero) has one vertex for both contacts, so
+        // the blend face's wire and the side faces' meet there.
+        for (k, s) in vsec.iter().enumerate() {
+            if !closed_section(s) {
+                continue;
+            }
+            if let Some(v) = v1.get(k).cloned()
+                && let Some(slot) = v2.get_mut(k)
+            {
+                *slot = v;
             }
         }
         // Along a pivot the planar side's contact is one point: one vertex at both its ends.
@@ -1557,18 +1914,28 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
                 }
             }
         }
-        let mut arcs = Vec::with_capacity(nv);
+        // The section's own radius, where the blend is sized by a law or a chord width (`r` is the
+        // one radius of a constant blend, exactly as before).
+        let rad = |s: &Section| match size_law {
+            Size::Constant(r) => r,
+            Size::Chord(_) | Size::Law(_) => s.c.dist(s.q1),
+        };
+        let mut arcs: Vec<Option<mt::Edge>> = Vec::with_capacity(nv);
         let mut split_arcs: HashMap<usize, Vec<mt::Edge>> = HashMap::new();
         for (k, s) in vsec.iter().enumerate() {
             let (a, b) = (v1.get(k).ok_or_else(|| fail("vertex"))?, v2.get(k).ok_or_else(|| fail("vertex"))?);
-            let e = if round {
-                let m = s.c + ((s.q1 - s.c) + (s.q2 - s.c)).normalized().ok_or_else(|| fail("arc"))? * r;
-                builder::circle_arc(a, b, p3(m))
+            // A closed section has no arc to run between the contacts: the blend meets itself
+            // there, at the edge's end point.
+            let e = if closed_section(s) {
+                None
+            } else if round {
+                let m = s.c + ((s.q1 - s.c) + (s.q2 - s.c)).normalized().ok_or_else(|| fail("arc"))? * rad(s);
+                Some(builder::circle_arc(a, b, p3(m)))
             } else {
-                builder::line(a, b)
+                Some(builder::line(a, b))
             };
             let e = match caps.iter().find(|c| c.0 == k) {
-                Some((_, _, _, _, curve)) => mt::Edge::try_new(a, b, curve.clone()).map_err(|e| fail(&e.to_string()))?,
+                Some((_, _, _, _, curve)) => Some(mt::Edge::try_new(a, b, curve.clone()).map_err(|e| fail(&e.to_string()))?),
                 None => e,
             };
             if let Some((_, _, c)) = split_caps.iter().find(|cap| cap.0 == k) {
@@ -1581,7 +1948,7 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
         let oriented = |mut surface: mt::Surface, list: &[Section]| -> Result<mt::Surface> {
             use mt::{ParametricSurface3D, SearchNearestParameter};
             let s = list.get(list.len() / 2).ok_or_else(|| fail("section"))?;
-            let mid = s.c + ((s.q1 - s.c) + (s.q2 - s.c)).normalized().ok_or_else(|| fail("mid"))? * r;
+            let mid = s.c + ((s.q1 - s.c) + (s.q2 - s.c)).normalized().ok_or_else(|| fail("mid"))? * rad(s);
             if let Some((u, v)) = surface.search_nearest_parameter(p3(mid), None, 100) {
                 let nn = surface.normal(u, v);
                 let want = (s.c - mid) * sigma;
@@ -1688,7 +2055,7 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
                         .filter(|f| f.edge_iter().any(|e| e.id() == id))
                         .any(|f| crate::blend::plane_normal(f).is_some() && crate::blend::extension_fits(f, from_p3(old.point()), q, tol));
                     if !fits || !crate::blend::on_extension(&seam, q, on_tol) {
-                        return Err(too_large("the blend is larger than the neighbouring faces"));
+                        return Err(too_large("the blend is larger than the neighbouring faces (site 1853)"));
                     }
                 }
                 seam_subst.insert(id, crate::blend::retarget(&seam, &old, &nv, on_tol)?);
@@ -1708,7 +2075,7 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
             let (ta, oa) = a.as_ref().map(at).unwrap_or((0.0, 0.0));
             let (tb, ob) = b.as_ref().map(at).unwrap_or((1.0, 0.0));
             if oa > size * 1e-5 || ob > size * 1e-5 || ta < -1e-9 || tb > 1.0 + 1e-9 || tb - ta < 1e-6 {
-                return Err(too_large("the blend is larger than the neighbouring faces"));
+                return Err(too_large("the blend is larger than the neighbouring faces (site 1873)"));
             }
             let a = a.unwrap_or_else(|| seam.front().clone());
             let b = b.unwrap_or_else(|| seam.back().clone());
@@ -1723,7 +2090,7 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
                 if corners.iter().any(|k| split_arcs.contains_key(k)) {
                     let connectors: Vec<mt::Edge> = corners
                         .iter()
-                        .flat_map(|k| split_arcs.get(k).cloned().unwrap_or_else(|| arcs.get(*k).cloned().into_iter().collect()))
+                        .flat_map(|k| split_arcs.get(k).cloned().unwrap_or_else(|| arcs.get(*k).cloned().flatten().into_iter().collect()))
                         .collect();
                     let rebuilt = crate::blend::rebuild_face(f, &seam_subst, &connectors)?;
                     rec.face(&rebuilt, f);
@@ -1754,8 +2121,11 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
                             es.push(ne.clone());
                         }
                         if let Some(k) = arrives {
-                            let arc = arcs.get(k).ok_or_else(|| fail("arc"))?;
-                            let (a1, a2) = (v1.get(k).ok_or_else(|| fail("vertex"))?, v2.get(k).ok_or_else(|| fail("vertex"))?);
+                            // A closed section has no blend arc at the corner: the blend ends at
+                            // the vertex itself and the end face keeps the corner it had.
+                            let (Some(arc), Some(a1), Some(a2)) = (arcs.get(k).and_then(Option::as_ref), v1.get(k), v2.get(k)) else {
+                                continue;
+                            };
                             let to = if used_up { e.front() } else { ne.back() };
                             let corner = if to == a1 {
                                 arc.clone()
@@ -1810,9 +2180,11 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
         }
         // Blend faces: each runs its side-1 contact the other way from side 1's face.
         for (k, bf) in blends.iter().enumerate() {
-            let (Some(e1), Some(e2), Some(ak), Some(ak1)) = (c1.get(k), c2.get(k), arcs.get(k), arcs.get((k + 1) % nv)) else {
+            let (Some(e1), Some(e2)) = (c1.get(k), c2.get(k)) else {
                 return Err(fail("blend"));
             };
+            let ak = arcs.get(k).and_then(Option::as_ref);
+            let ak1 = arcs.get((k + 1) % nv).and_then(Option::as_ref);
             let f1i = side1.get(k).ok_or_else(|| fail("side"))?;
             let f1 = faces.get(*f1i).ok_or_else(|| fail("side"))?;
             let chain_e = chain.get(k).ok_or_else(|| fail("edge"))?;
@@ -1824,20 +2196,23 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
                 .map(|e| e.front() == chain_e.front())
                 .ok_or_else(|| fail("edge use"))?;
             // Side 1 runs the contact forward (as the chain) when it ran the edge forward.
-            // A pivot's planar contact is a point: three sides.
-            let edges = if used_fwd {
-                [e1.as_ref().map(|e| e.inverse()), Some(ak.clone()), e2.clone(), Some(ak1.inverse())]
+            // A pivot's planar contact is a point: three sides. A closed section has no arc: two.
+            let edges: Vec<mt::Edge> = if used_fwd {
+                [e1.as_ref().map(|e| e.inverse()), ak.cloned(), e2.clone(), ak1.map(|e| e.inverse())]
             } else {
-                [e1.clone(), Some(ak1.clone()), e2.as_ref().map(|e| e.inverse()), Some(ak.inverse())]
+                [e1.clone(), ak1.cloned(), e2.as_ref().map(|e| e.inverse()), ak.map(|e| e.inverse())]
             }
             .into_iter()
             .flatten()
-            .collect::<Vec<_>>();
+            .collect();
+            // An arc the chamfer crossed is two lines through the crossing: the blend meets the
+            // shortened seam there.
             let wire: mt::Wire = edges
                 .into_iter()
                 .flat_map(|e| {
                     let split = [(k, ak), ((k + 1) % nv, ak1)]
                         .into_iter()
+                        .filter_map(|(i, arc)| arc.map(|arc| (i, arc.clone())))
                         .find(|(_, arc)| arc.id() == e.id())
                         .and_then(|(i, arc)| split_arcs.get(&i).map(|parts| (arc, parts)));
                     match split {
@@ -1861,8 +2236,15 @@ fn curve_blend_with_limit(solid: &Solid, ids: &[mt::EdgeID], size: f64, r: f64, 
 
 #[path = "curvecorner.rs"]
 mod corner;
+pub(crate) use corner::corner_blend_style;
+// The planar corner builder the G2 corner work left in place of `corner_blend_style`'s sphere.
+#[allow(unused_imports)]
 pub(crate) use corner::corner_blend;
 
 #[cfg(test)]
 #[path = "curveblend_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "curveblend_law_tests.rs"]
+mod law_tests;

@@ -34,6 +34,97 @@ fn plate_with_hole() -> Session {
 const PLATE: f64 = 100.0 * 50.0 * 5.0;
 const HOLE: f64 = PI * 4.0 * 5.0;
 
+fn feature_pattern_plate() -> Session {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length":120,"width":120,"height":5,"corner":[0,0,0],"name":"Plate"}));
+    run(&mut s, "solid.hole", json!({"position":[60,60,5],"diameter":2,"name":"Hole"}));
+    s
+}
+
+#[test]
+fn feature_rectangular_center_flip_and_oblique_direction_keep_source_and_recompute() {
+    use solidcraft_geom::Vec3;
+    for flipped in [false, true] {
+        let mut s = feature_pattern_plate();
+        let before = s.doc.to_json();
+        run(
+            &mut s,
+            "solid.pattern.rectangular",
+            json!({
+                "features":["Hole"],"dir1":[1,0,0],"count1":4,"spacing1":15,
+                "dir2":[0.6,0.8,0],"count2":2,"spacing2":20,
+                "alignment":"center","alignment2":"center","reversed":flipped,"reversed2":flipped,"name":"Pattern"
+            }),
+        );
+        let sign = if flipped { -1.0 } else { 1.0 };
+        let st = s.world_state();
+        let body = &st.bodies[0].body;
+        // Analytic slots: the source, +1, -1, +2. The second direction is independent.
+        for i in [0.0, 1.0, -1.0, 2.0] {
+            for j in [0.0, 1.0] {
+                let p = Vec3::new(60.0 + sign * (15.0 * i + 12.0 * j), 60.0 + sign * 16.0 * j, 2.5);
+                assert!(!body.contains(p), "hole at {p:?}");
+                assert!(body.contains(p + Vec3::new(0.0, 2.0, 0.0)));
+            }
+        }
+        assert!(rel(volume(&mut s), 120.0 * 120.0 * 5.0 - 8.0 * PI * 5.0) < 1e-5);
+        let saved = s.doc.to_json();
+        run(&mut s, "edit.undo", json!({}));
+        assert_eq!(s.doc.to_json(), before);
+        run(&mut s, "edit.redo", json!({}));
+        assert_eq!(s.doc.to_json(), saved);
+        let mut reopened = Session::new(solidcraft_doc::Document::from_json(&saved).unwrap());
+        assert!(rel(volume(&mut reopened), volume(&mut s)) < 1e-8);
+        // The copies replay the edited feature rather than freezing its original tool.
+        run(&mut reopened, "timeline.redefine", json!({"feature":"Hole","command":"solid.hole","params":{"position":[60,60,5],"diameter":3}}));
+        assert!(rel(volume(&mut reopened), 120.0 * 120.0 * 5.0 - 8.0 * PI * 2.25 * 5.0) < 1e-5);
+    }
+}
+
+#[test]
+fn feature_circular_center_flip_uses_partial_arc_endpoints_and_full_circle_spacing() {
+    use solidcraft_geom::Vec3;
+    for total in [90.0_f64, 360.0] {
+        for flipped in [false, true] {
+            let mut s = feature_pattern_plate();
+            run(
+                &mut s,
+                "solid.pattern.circular",
+                json!({
+                    "features":["Hole"],"axis":{"origin":[40,60,0],"dir":[0,0,1]},
+                    "count":6,"angle":total,"alignment":"center","reversed":flipped
+                }),
+            );
+            let step = total / if total == 360.0 { 6.0 } else { 5.0 };
+            let st = s.world_state();
+            for slot in [0.0, 1.0, -1.0, 2.0, -2.0, 3.0] {
+                let a = (step * slot * if flipped { -1.0 } else { 1.0 }).to_radians();
+                let p = Vec3::new(40.0 + 20.0 * a.cos(), 60.0 + 20.0 * a.sin(), 2.5);
+                assert!(!st.bodies[0].body.contains(p), "hole at {p:?}");
+                assert!(st.bodies[0].body.contains(p + Vec3::new(2.0 * a.cos(), 2.0 * a.sin(), 0.0)));
+            }
+            assert!(rel(volume(&mut s), 120.0 * 120.0 * 5.0 - 6.0 * PI * 5.0) < 1e-5);
+            let saved = s.doc.to_json();
+            let mut reopened = Session::new(solidcraft_doc::Document::from_json(&saved).unwrap());
+            assert!(rel(volume(&mut reopened), volume(&mut s)) < 1e-8);
+        }
+    }
+}
+
+#[test]
+fn feature_pattern_rejects_malformed_alignment_and_flip_atomically() {
+    let mut s = feature_pattern_plate();
+    let before = s.doc.to_json();
+    let undo = s.undo.len();
+    for (key, value) in [("alignment", json!("diagonal")), ("alignment2", json!(null)), ("reversed", json!(1)), ("reversed2", json!("true"))] {
+        let mut p = json!({"features":["Hole"],"dir1":[1,0,0],"count1":4,"spacing1":10});
+        p[key] = value;
+        assert!(s.execute("solid.pattern.rectangular", &p).is_err());
+        assert_eq!(s.doc.to_json(), before);
+        assert_eq!(s.undo.len(), undo);
+    }
+}
+
 #[test]
 fn circular_axis_origin_rejects_invalid_values_atomically() {
     let mut s = plate_with_hole();

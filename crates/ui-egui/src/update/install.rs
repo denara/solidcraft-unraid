@@ -107,6 +107,26 @@ pub fn sha256_file(path: &Path) -> Result<String, String> {
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// The command that runs an installer, waits for it to finish and then starts `exe` (the
+/// installed program), so the app comes back after an update. Windows has no `wait && start` in
+/// a plain process spawn, so PowerShell does the waiting; the installer's exit code is ignored on
+/// purpose: when the user cancels it, the old version is still there to start.
+pub fn relaunch_after(installer: &Path, args: &[String], exe: &Path) -> (PathBuf, Vec<String>) {
+    // PowerShell single-quoted string: only `'` needs doubling.
+    let q = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    // msiexec splits its command line itself, so an argument with spaces needs its own quotes.
+    let list = args.iter().map(|a| if a.contains(' ') { q(&format!("\"{a}\"")) } else { q(a) }).collect::<Vec<_>>().join(",");
+    let script = format!(
+        "Start-Process -FilePath {} -ArgumentList {list} -Wait; Start-Process -FilePath {}",
+        q(&installer.to_string_lossy()),
+        q(&exe.to_string_lossy())
+    );
+    (
+        PathBuf::from("powershell"),
+        vec!["-NoProfile".into(), "-NonInteractive".into(), "-WindowStyle".into(), "Hidden".into(), "-Command".into(), script],
+    )
+}
+
 /// `sums` is signed by `key` (minisign, prehashed) with a trusted comment naming `tag`.
 pub fn verify_signature(sums: &[u8], signature: &str, key: &str, tag: &str) -> Result<(), String> {
     let key = minisign_verify::PublicKey::from_base64(key.trim()).map_err(|e| format!("update signing key: {e}"))?;

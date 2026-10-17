@@ -22,12 +22,12 @@ fn helix(r: f64, z0: f64, pitch: f64, a0: f64, a1: f64) -> EdgeSpec {
         let (s, e) = (a0 + h * i as f64, a0 + h * (i + 1) as f64);
         ctrl.extend([at(s) + turn(s) + rise, at(e) - turn(e) - rise, at(e)]);
     }
-    EdgeSpec::Chain { ctrl: ctrl.into() }
+    EdgeSpec::Chain { degree: 3, ctrl: ctrl.into() }
 }
 
 fn rev(e: &EdgeSpec) -> EdgeSpec {
     match e {
-        EdgeSpec::Chain { ctrl } => EdgeSpec::Chain { ctrl: ctrl.iter().rev().copied().collect::<Arc<[Vec3]>>() },
+        EdgeSpec::Chain { degree, ctrl } => EdgeSpec::Chain { degree: *degree, ctrl: ctrl.iter().rev().copied().collect::<Arc<[Vec3]>>() },
         EdgeSpec::Line { a, b } => EdgeSpec::Line { a: *b, b: *a },
         EdgeSpec::Arc { a, b, mid } => EdgeSpec::Arc { a: *b, b: *a, mid: *mid },
     }
@@ -39,7 +39,7 @@ fn line(a: Vec3, b: Vec3) -> EdgeSpec {
 
 fn ends(e: &EdgeSpec) -> (Vec3, Vec3) {
     match e {
-        EdgeSpec::Chain { ctrl } => (ctrl[0], ctrl[ctrl.len() - 1]),
+        EdgeSpec::Chain { ctrl, .. } => (ctrl[0], ctrl[ctrl.len() - 1]),
         EdgeSpec::Line { a, b } | EdgeSpec::Arc { a, b, .. } => (*a, *b),
     }
 }

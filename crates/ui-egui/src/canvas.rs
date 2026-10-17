@@ -420,7 +420,20 @@ fn draw(app: &SolveApp, ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj,
             let px = 2.0 * half_height / f64::from(proj.rect.height().max(1.0));
             let ang = app.session.doc.eval(taper, ValueKind::Angle).ok().filter(|v| v.is_finite()).unwrap_or(0.0);
             let before = taper.clone();
-            taper_handle(ui, painter, proj, base - e * (40.0 * px), n * l, -e, ang, taper);
+            let st = app.session.world_state();
+            let regions: Vec<&solidcraft_engine::geom::Region2> = d
+                .inputs
+                .first()
+                .map(|i| &i.items[..])
+                .unwrap_or(&[])
+                .iter()
+                .filter_map(|x| match x {
+                    Sel::Profile { sketch, index } => st.sketch(*sketch).and_then(|ss| ss.profiles.get(*index)).map(|pr| &pr.region),
+                    _ => None,
+                })
+                .collect();
+            let limits = taper_limits(&regions, l.abs());
+            taper_handle(ui, painter, proj, base - e * (40.0 * px), n * l, -e, ang, limits, taper);
             if *taper != before {
                 *taper_present = true;
             }
@@ -504,8 +517,20 @@ fn value_box(ui: &mut egui::Ui, label: &str, value: &mut String, at: Pos2, selec
     });
 }
 
+/// How far (logical points) from an arrow's stem a press still takes the arrow.
+const ARROW_STEM_REACH: f32 = 6.0;
+
+/// The distance from `p` to the segment from `a` to `b` on screen.
+fn to_segment(p: Pos2, a: Pos2, b: Pos2) -> f32 {
+    let v = b - a;
+    let t = if v.length_sq() > 0.0 { ((p - a).dot(v) / v.length_sq()).clamp(0.0, 1.0) } else { 0.0 };
+    p.distance(a + v * t)
+}
+
 /// A draggable arrow from `base` along `n` showing `l` (at least a short stub); dragging writes
-/// the snapped length into `value`. Returns the tip's screen position.
+/// the snapped length into `value`. The tip and the stem take the drag (#1740): pressed on the
+/// stem, the arrow keeps its length until the pointer moves, and then moves with it as far as the
+/// pointer does. Returns the tip's screen position.
 #[allow(clippy::too_many_arguments)]
 fn drag_arrow(
     ui: &mut egui::Ui,
@@ -527,11 +552,28 @@ fn drag_arrow(
         proj.to_screen(base + n * shown)
     };
     let mut ts = tip(l)?;
-    let r = ui.interact(egui::Rect::from_center_size(ts, vec2(20.0, 20.0)), id, egui::Sense::drag());
+    let at_tip = egui::Rect::from_center_size(ts, vec2(20.0, 20.0));
+    // Over the stem, the arrow answers where the pointer is.
+    let on_stem = ui.input(|i| i.pointer.hover_pos()).filter(|p| !at_tip.contains(*p) && to_segment(*p, bs, ts) <= ARROW_STEM_REACH);
+    let area = on_stem.map_or(at_tip, |p| egui::Rect::from_center_size(p, vec2(2.0 * ARROW_STEM_REACH, 2.0 * ARROW_STEM_REACH)));
+    let r = ui.interact(area, id, egui::Sense::drag());
+    // How far along the arrow the press was short of its end: the drag keeps that gap.
+    let grab = id.with("stem grab");
+    if r.drag_started() {
+        let gap = on_stem.zip(r.interact_pointer_pos()).and_then(|(_, p)| along(proj, p, base, n)).map(|v| v - l);
+        ui.data_mut(|d| {
+            if let Some(g) = gap.filter(|g| g.is_finite()) {
+                d.insert_temp(grab, g);
+            } else {
+                d.remove::<f64>(grab);
+            }
+        });
+    }
     if r.dragged()
         && let Some(p) = r.interact_pointer_pos()
         && let Some(v) = along(proj, p, base, n)
     {
+        let v = v - ui.data(|d| d.get_temp::<f64>(grab)).unwrap_or(0.0);
         let free = ui.input(|i| i.modifiers.alt || i.modifiers.ctrl || i.modifiers.command);
         let step = snap_step(half_height);
         let mut v = if free { v } else { (v / step).round() * step };
@@ -852,16 +894,42 @@ fn measure_components(app: &SolveApp, painter: &egui::Painter, proj: &Proj, a: V
     }
 }
 
+/// The tapers (degrees, least and most) a drag of the taper handle may reach for `regions`
+/// extruded `height` (#1602): going in, the sides close the material where they have moved its
+/// inradius; going out, they close the smallest hole. Each stops just short, so the drag ends at
+/// the largest taper that builds instead of one that fails. A typed angle is not limited.
+pub(crate) fn taper_limits(regions: &[&solidcraft_engine::geom::Region2], height: f64) -> (f64, f64) {
+    const MAX: f64 = 89.0;
+    if !(height > 1e-9) || regions.is_empty() {
+        return (-MAX, MAX);
+    }
+    let at = |r: f64| (0.99 * r / height).atan().to_degrees().min(MAX);
+    let inward = regions.iter().map(|r| r.inradius(1e-3)).fold(f64::INFINITY, f64::min);
+    let outward = regions.iter().flat_map(|r| &r.holes).map(|h| h.inradius(1e-3)).fold(f64::INFINITY, f64::min);
+    (if inward.is_finite() { -at(inward) } else { -MAX }, if outward.is_finite() { at(outward) } else { MAX })
+}
+
 /// The taper handle: a line from `foot` along the extrude (`span`) leaning by `angle` towards
 /// `e`, with a ring at its end; dragging the ring sideways sets the angle (1° steps, Alt/Ctrl:
-/// free).
+/// free), within `limits` ([`taper_limits`]).
 #[allow(clippy::too_many_arguments)]
-fn taper_handle(ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj, foot: Vec3, span: Vec3, e: Vec3, angle: f64, value: &mut String) {
+fn taper_handle(
+    ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    proj: &Proj,
+    foot: Vec3,
+    span: Vec3,
+    e: Vec3,
+    angle: f64,
+    limits: (f64, f64),
+    value: &mut String,
+) {
     let t = Tokens::get();
     let l = span.len();
     let end = foot + span + e * (l * angle.tan().clamp(-10.0, 10.0));
     let (Some(fs), Some(es)) = (proj.to_screen(foot), proj.to_screen(end)) else { return };
     let r = ui.interact(egui::Rect::from_center_size(es, vec2(16.0, 16.0)), egui::Id::new("sc_taper"), egui::Sense::drag());
+    crate::scenario::publish_handle("taper", es);
     let hot = r.hovered() || r.dragged();
     let col = if hot { t.accent } else { t.manipulator };
     painter.add(egui::Shape::dashed_line(&[fs, es], Stroke::new(1.2, col), 5.0, 3.0));
@@ -874,8 +942,12 @@ fn taper_handle(ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj, foot: V
         && let Some(s) = along(proj, p, foot + span, e)
     {
         let mut deg = s.atan2(l).to_degrees();
-        if !ui.input(|i| i.modifiers.alt || i.modifiers.ctrl || i.modifiers.command) {
-            deg = deg.round();
+        let (lo, hi) = limits;
+        if ui.input(|i| i.modifiers.alt || i.modifiers.ctrl || i.modifiers.command) {
+            deg = deg.clamp(lo, hi);
+        } else {
+            // Whole degrees, rounded towards zero at a limit so they stay inside it.
+            deg = deg.round().clamp(lo.ceil().min(0.0), hi.floor().max(0.0));
         }
         let txt = format!("{deg:.1}");
         *value = format!("{} deg", txt.trim_end_matches('0').trim_end_matches('.'));
@@ -1255,5 +1327,34 @@ mod tests {
         assert_eq!(format_len(12.0), "12 mm");
         assert_eq!(format_len(-2.5), "-2.5 mm");
         assert_eq!(format_len(-0.0001), "0 mm");
+    }
+}
+
+#[cfg(test)]
+mod taper_limit_tests {
+    use super::taper_limits;
+    use solidcraft_engine::geom::{Loop2, Region2, Vec2};
+
+    /// #1602: a drag stops just short of the taper that closes the profile, either way.
+    #[test]
+    fn a_taper_drag_stops_before_the_profile_closes() {
+        let close = |a: f64, b: f64| (a - b).abs() < 0.05;
+        let deg = |r: f64, h: f64| (0.99 * r / h).atan().to_degrees();
+        // A 10 × 4 rectangle 26 high: going in closes at its half width; going out never does.
+        let rect = Region2 {
+            outer: Loop2::polygon(&[Vec2::new(0.0, 0.0), Vec2::new(10.0, 0.0), Vec2::new(10.0, 4.0), Vec2::new(0.0, 4.0)]),
+            holes: Vec::new(),
+        };
+        let (lo, hi) = taper_limits(&[&rect], 26.0);
+        assert!(close(lo, -deg(2.0, 26.0)) && hi == 89.0, "{lo} {hi}");
+        // A ring 10 to 6, 10 high: in, its 4 mm wall; out, its hole of radius 6.
+        let ring = Region2 { outer: Loop2::circle(Vec2::ZERO, 10.0), holes: vec![Loop2::circle(Vec2::ZERO, 6.0).reversed()] };
+        let (lo, hi) = taper_limits(&[&ring], 10.0);
+        assert!(close(lo, -deg(2.0, 10.0)) && close(hi, deg(6.0, 10.0)), "{lo} {hi}");
+        // The tightest of several profiles; no profile or no height, no limit.
+        let (lo, _) = taper_limits(&[&ring, &rect], 10.0);
+        assert!(close(lo, -deg(2.0, 10.0)));
+        assert_eq!(taper_limits(&[], 10.0), (-89.0, 89.0));
+        assert_eq!(taper_limits(&[&rect], 0.0), (-89.0, 89.0));
     }
 }

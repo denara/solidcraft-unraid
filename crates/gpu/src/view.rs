@@ -19,9 +19,9 @@ pub const TRI_SIZE: usize = 28;
 pub const PBR_SIZE: usize = pbr::VERTEX_SIZE;
 /// Line instance: a, b (3 × f32 each), colour (4 × u8), width in pixels (f32).
 pub const LINE_SIZE: usize = 32;
-/// The shader's `U`: the view-projection matrix, 9 `vec4`s, the 8 analysis colours and their
-/// flags (`uniform_bytes`).
-const UNIFORM_SIZE: u64 = 352;
+/// The shader's `U`: the view-projection matrix, 9 `vec4`s, the 8 analysis colours, their
+/// flags and the depth direction (`uniform_bytes`).
+const UNIFORM_SIZE: u64 = 368;
 
 /// A body drawn from its display plan, evaluated on the GPU: the plan, and a colour per face
 /// (the plan's face numbering; faces past the end take the last colour).
@@ -599,7 +599,25 @@ pub struct Renderer {
     ss: Option<Supersampled>,
     /// This frame was drawn supersampled (in `prepare`): `paint` only filters it down.
     ss_ready: bool,
+    /// Reversed depth drawn into the window's pass: egui clears its depth to 1, which is the near
+    /// plane then, so the viewport first sets its rectangle to the far plane (0).
+    depth_reset: Option<wgpu::RenderPipeline>,
 }
+
+/// A triangle over the whole viewport at depth 0 (the far plane of reversed depth), writing no
+/// colour: [`Renderer::depth_reset`].
+const DEPTH_RESET_SHADER: &str = r#"
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    let x = f32((i << 1u) & 2u);
+    let y = f32(i & 2u);
+    return vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
+}
+@fragment
+fn fs() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.0);
+}
+"#;
 
 /// A supersampled frame: the scene drawn at a multiple of the viewport's pixels.
 struct Supersampled {
@@ -735,6 +753,55 @@ pub struct GpuTarget {
     pub tess: bool,
 }
 
+impl GpuTarget {
+    /// Depth runs from 1 at the near plane to 0 at the far one: see [`reversed_depth`].
+    pub fn reversed_depth(&self) -> bool {
+        reversed_depth(self.depth)
+    }
+}
+
+/// Is depth reversed (1 at the near plane, 0 at the far one) in a buffer of `format`? It is with a
+/// 32-bit float buffer: a float's steps grow with its value, so with depth falling away from the
+/// eye they follow the distance, about 2⁻²⁴ of it everywhere, instead of piling up at the near
+/// plane (#1434: a face 0.3 mm in front of another speckled at 10 m). Other formats keep 0 near.
+pub fn reversed_depth(format: Option<wgpu::TextureFormat>) -> bool {
+    matches!(format, Some(wgpu::TextureFormat::Depth32Float | wgpu::TextureFormat::Depth32FloatStencil8))
+}
+
+/// The depth test `compare`, written for depth growing away from the eye, for a buffer whose depth
+/// may run the other way ([`reversed_depth`]). Every pass drawn with the viewport's depth takes
+/// its tests from here, so it agrees with the viewport whichever way depth runs.
+pub fn depth_compare(reversed: bool, compare: wgpu::CompareFunction) -> wgpu::CompareFunction {
+    use wgpu::CompareFunction::{Greater, GreaterEqual, Less, LessEqual};
+    match compare {
+        Less if reversed => Greater,
+        LessEqual if reversed => GreaterEqual,
+        Greater if reversed => Less,
+        GreaterEqual if reversed => LessEqual,
+        c => c,
+    }
+}
+
+/// A depth bias written for depth growing away from the eye (negative: toward it), turned round
+/// for reversed depth.
+pub fn depth_bias(reversed: bool, b: wgpu::DepthBiasState) -> wgpu::DepthBiasState {
+    if reversed { wgpu::DepthBiasState { constant: -b.constant, slope_scale: -b.slope_scale, clamp: -b.clamp } } else { b }
+}
+
+/// The depth of the far plane, which a depth buffer is cleared to.
+pub fn far_depth(reversed: bool) -> f32 {
+    if reversed { 0.0 } else { 1.0 }
+}
+
+/// The view-projection the GPU draws with: `vp` (depth 0 near, 1 far, as the CPU uses it), with
+/// depth turned round (z' = w - z) for reversed depth. Columns, as `Mat4::to_f32` gives them.
+pub fn gpu_view_proj(vp: [[f32; 4]; 4], reversed: bool) -> [[f32; 4]; 4] {
+    if !reversed {
+        return vp;
+    }
+    vp.map(|c| [c[0], c[1], c[3] - c[2], c[3]])
+}
+
 impl Renderer {
     /// The pipelines for target `t` on `device`; `tess` evaluates planned bodies on the GPU.
     pub fn new(device: &wgpu::Device, t: GpuTarget, tess: Option<crate::TessGpu>) -> Self {
@@ -766,14 +833,19 @@ impl Renderer {
             layout: &bgl,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() }],
         });
+        let reversed = t.reversed_depth();
         let depth = |compare: wgpu::CompareFunction, write: bool| -> Option<wgpu::DepthStencilState> {
             t.depth.map(|format| wgpu::DepthStencilState {
                 format,
                 depth_write_enabled: Some(write),
-                depth_compare: Some(compare),
+                depth_compare: Some(depth_compare(reversed, compare)),
                 stencil: Default::default(),
                 bias: Default::default(),
             })
+        };
+        // Opaque faces pushed back by their own slope (FACE_BIAS); ghosts twice as far.
+        let pushed = |compare: wgpu::CompareFunction, write: bool, bias: wgpu::DepthBiasState| -> Option<wgpu::DepthStencilState> {
+            depth(compare, write).map(|d| wgpu::DepthStencilState { bias: depth_bias(reversed, bias), ..d })
         };
         let pipeline = |label: &str,
                         vs: &str,
@@ -926,9 +998,9 @@ impl Renderer {
                 let mark = wgpu::DepthStencilState {
                     format,
                     depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    depth_compare: Some(depth_compare(reversed, wgpu::CompareFunction::Less)),
                     stencil: wgpu::StencilState { front: face(Zero), back: face(Replace), read_mask: 0xff, write_mask: 0xff },
-                    bias: Default::default(),
+                    bias: depth_bias(reversed, FACE_BIAS),
                 };
                 // Then the cap's back faces again, only there, at the section plane's depth.
                 let only = wgpu::StencilFaceState { compare: wgpu::CompareFunction::Equal, ..face(Keep) };
@@ -1002,7 +1074,41 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
+        let depth_reset = t.depth.filter(|_| reversed).map(|format| {
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("sc_depth_reset"),
+                source: wgpu::ShaderSource::Wgsl(DEPTH_RESET_SHADER.into()),
+            });
+            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("sc_depth_reset"),
+                bind_group_layouts: &[],
+                immediate_size: 0,
+            });
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("sc_depth_reset"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState { module: &module, entry_point: Some("vs"), buffers: &[], compilation_options: Default::default() },
+                primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, ..Default::default() },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Always),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: wgpu::MultisampleState { count: t.samples.max(1), mask: !0, alpha_to_coverage_enabled: false },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs"),
+                    targets: &[Some(wgpu::ColorTargetState { format: t.format, blend: None, write_mask: wgpu::ColorWrites::empty() })],
+                    compilation_options: Default::default(),
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        });
         Renderer {
+            depth_reset,
             target: t,
             max_texture: device.limits().max_texture_dimension_2d,
             ss_blit,
@@ -1014,20 +1120,20 @@ impl Renderer {
             sampler,
             textures: Default::default(),
             quads: Vec::new(),
-            tri: solid("sc_tris", "fs_solid", None, depth(wgpu::CompareFunction::Less, true), false),
+            tri: solid("sc_tris", "fs_solid", None, pushed(wgpu::CompareFunction::Less, true, FACE_BIAS), false),
             tri_cut: cut(false),
-            tri_planned: solid("sc_tris_planned", "fs_solid", None, depth(wgpu::CompareFunction::Less, true), true),
+            tri_planned: solid("sc_tris_planned", "fs_solid", None, pushed(wgpu::CompareFunction::Less, true, FACE_BIAS), true),
             tri_cut_planned: cut(true),
             tess,
             access_bgl,
             access_bind,
             access_version: 0,
             tri_hl: pipeline("sc_tris_hl", "vs_tri", "fs_tri", tri_layout(), highlight_depth(t.depth), alpha),
-            pbr: pipeline("sc_pbr", "vs_pbr", "fs_pbr", pbr_layout(), depth(wgpu::CompareFunction::Less, true), None),
+            pbr: pipeline("sc_pbr", "vs_pbr", "fs_pbr", pbr_layout(), pushed(wgpu::CompareFunction::Less, true, FACE_BIAS), None),
             trans: pipeline("sc_trans", "vs_tri", "fs_tri", tri_layout(), depth(wgpu::CompareFunction::LessEqual, false), alpha),
             glass_far: glass("sc_glass_far", wgpu::Face::Front),
             glass_near: glass("sc_glass_near", wgpu::Face::Back),
-            ghost: pipeline("sc_ghost", "vs_ghost", "fs_tri", tri_layout(), depth(wgpu::CompareFunction::LessEqual, false), alpha),
+            ghost: pipeline("sc_ghost", "vs_tri", "fs_tri", tri_layout(), pushed(wgpu::CompareFunction::LessEqual, false, GHOST_BIAS), alpha),
             xray: pipeline("sc_xray", "vs_tri", "fs_tri", tri_layout(), depth(wgpu::CompareFunction::Always, false), alpha),
             line: pipeline("sc_lines", "vs_line", "fs_line", line_layout(), depth(wgpu::CompareFunction::LessEqual, false), alpha),
             line_hidden: pipeline("sc_lines_hidden", "vs_line", "fs_line", line_layout(), depth(wgpu::CompareFunction::Greater, false), alpha),
@@ -1053,17 +1159,39 @@ impl Renderer {
 /// depths differ by rounding and an unbiased equal test lights the face in speckles and wedges.
 /// The bias is a few depth steps plus the face's own slope: far less than any real gap.
 fn highlight_depth(format: Option<wgpu::TextureFormat>) -> Option<wgpu::DepthStencilState> {
+    let reversed = reversed_depth(format);
     format.map(|format| wgpu::DepthStencilState {
         format,
         depth_write_enabled: Some(false),
-        depth_compare: Some(wgpu::CompareFunction::LessEqual),
+        depth_compare: Some(depth_compare(reversed, wgpu::CompareFunction::LessEqual)),
         stencil: Default::default(),
-        bias: HIGHLIGHT_BIAS,
+        bias: depth_bias(reversed, HIGHLIGHT_BIAS),
     })
 }
 
 /// See [`highlight_depth`]. Negative: toward the eye (depth grows away from it).
 const HIGHLIGHT_BIAS: wgpu::DepthBiasState = wgpu::DepthBiasState { constant: -8, slope_scale: -1.0, clamp: 0.0 };
+
+/// Opaque faces are drawn pushed back from the eye by a few depth steps and by their own depth
+/// slope over [`FACE_SLOPE`] pixels, so whatever lies on a face (its edges, an origin plane, a
+/// sketch, a decal) is drawn over it at any angle, and an edge behind it stays hidden however
+/// large the scene (#1434, #1739). The CPU renderer has the same rule (`raster.rs`, #983).
+/// Lines used to be pulled toward the eye by a share of the depth range instead, which on a large
+/// design reached tens of millimetres. Positive: away from the eye.
+pub const FACE_BIAS: wgpu::DepthBiasState = wgpu::DepthBiasState { constant: FACE_STEPS, slope_scale: FACE_SLOPE, clamp: 0.0 };
+/// The depth steps of [`FACE_BIAS`]: f32 rounding between a face and what lies on it (the GPU
+/// evaluates planned bodies in f32; edges and overlays come from the CPU).
+pub const FACE_STEPS: i32 = 8;
+/// The pixels of [`FACE_BIAS`]: half a 2 px line, so edges (1.2 px) draw whole on a steep face.
+/// It is also how far behind a face an edge may show, in that face's own depth per pixel: at 10 m
+/// a pixel is about 9 mm, and a face turned 25° gains 4 mm of depth across it, so a larger value
+/// let a washer 12 mm behind a plate show through it (#1434). A thicker line (a selected edge,
+/// 3.5 px) may lose its outer edge on one side where it lies on a steep face. The section cap,
+/// which writes its own depth, adds the same in the shader.
+pub const FACE_SLOPE: f32 = 1.0;
+/// The removed material of a preview, drawn translucent: behind the faces it shares with the new
+/// shape, so twice [`FACE_BIAS`].
+const GHOST_BIAS: wgpu::DepthBiasState = wgpu::DepthBiasState { constant: 2 * FACE_STEPS, slope_scale: 2.0 * FACE_SLOPE, clamp: 0.0 };
 
 fn upload(device: &wgpu::Device, label: &str, bytes: &[u8], stride: usize) -> Option<Batch> {
     upload_with(device, label, bytes, stride, wgpu::BufferUsages::VERTEX)
@@ -1162,7 +1290,7 @@ impl Renderer {
         if cb.product {
             res.product.take(device, cb.key, &cb.slot, None);
             res.product.sort_glass(queue, cb.back);
-            queue.write_buffer(&res.uniform, 0, &uniform_bytes(cb, cb.size_px[0], cb.size_px[1], res.linear_out));
+            queue.write_buffer(&res.uniform, 0, &uniform_bytes(cb, cb.size_px[0], cb.size_px[1], res.linear_out, res.target.reversed_depth()));
             return;
         }
         res.model.take(device, cb.key, &cb.slot, res.tess.as_ref().map(|t| (t, &mut *encoder)));
@@ -1170,7 +1298,7 @@ impl Renderer {
         res.highlight.take(device, cb.hl_key, &cb.hl_slot, None);
         res.preview.take(device, cb.pv_key, &cb.pv_slot, None);
         res.model.sort_glass(queue, cb.back);
-        queue.write_buffer(&res.uniform, 0, &uniform_bytes(cb, cb.size_px[0], cb.size_px[1], res.linear_out));
+        queue.write_buffer(&res.uniform, 0, &uniform_bytes(cb, cb.size_px[0], cb.size_px[1], res.linear_out, res.target.reversed_depth()));
         if let Some(a) = &cb.access
             && a.version != res.access_version
         {
@@ -1244,6 +1372,10 @@ impl Renderer {
             pass.set_bind_group(0, &ss.bind, &[]);
             pass.draw(0..3, 0..1);
             return;
+        }
+        if let Some(reset) = &self.depth_reset {
+            pass.set_pipeline(reset);
+            pass.draw(0..3, 0..1);
         }
         self.draw(frame, pass);
     }
@@ -1335,6 +1467,7 @@ impl Renderer {
         tris(pass, &res.trans, &h.trans);
         tris(pass, &res.guide_trans, &h.guide_trans);
         tris(pass, &res.xray, &pv.xray);
+        tris(pass, &res.xray, &h.xray);
         lines(pass, &res.overlay, &m.overlays);
         lines(pass, &res.overlay, &sk.overlays);
         lines(pass, &res.overlay, &h.overlays);
@@ -1366,7 +1499,10 @@ impl Renderer {
                 })],
                 depth_stencil_attachment: ss.depth.as_ref().map(|view| wgpu::RenderPassDepthStencilAttachment {
                     view,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(far_depth(self.target.reversed_depth())),
+                        store: wgpu::StoreOp::Discard,
+                    }),
                     stencil_ops: depth_format
                         .filter(|f| f.has_stencil_aspect())
                         .map(|_| wgpu::Operations { load: wgpu::LoadOp::Clear(0), store: wgpu::StoreOp::Discard }),
@@ -1419,10 +1555,10 @@ impl Renderer {
 }
 
 /// Uniform bytes for a frame.
-pub fn uniform_bytes(cb: &Frame, w: f32, h: f32, linear: bool) -> Vec<u8> {
-    let mut v: Vec<f32> = cb.view_proj.iter().flatten().copied().collect();
+pub fn uniform_bytes(cb: &Frame, w: f32, h: f32, linear: bool, reversed: bool) -> Vec<u8> {
+    let mut v: Vec<f32> = gpu_view_proj(cb.view_proj, reversed).iter().flatten().copied().collect();
     v.extend([cb.back[0], cb.back[1], cb.back[2], if linear { 1.0 } else { 0.0 }]);
-    v.extend([w.max(1.0), h.max(1.0), 2e-4, if cb.outline { 1.0 } else { 0.0 }]);
+    v.extend([w.max(1.0), h.max(1.0), 0.0, if cb.outline { 1.0 } else { 0.0 }]);
     v.extend(cb.clip);
     v.extend(cb.cap);
     v.extend(cb.analysis);
@@ -1435,6 +1571,7 @@ pub fn uniform_bytes(cb: &Frame, w: f32, h: f32, linear: bool) -> Vec<u8> {
     }
     v.extend(cb.eye);
     v.extend(cb.analysis_colors);
+    v.extend([if reversed { 1.0 } else { 0.0 }, FACE_STEPS as f32, FACE_SLOPE, 0.0]);
     v.iter().flat_map(|x| x.to_le_bytes()).collect()
 }
 

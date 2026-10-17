@@ -621,7 +621,7 @@ pub fn for_feature(app: &SolveApp, kind: &FeatureKind, frame: &Mat) -> Option<(K
                 ],
             )
         }
-        FeatureKind::SurfaceLoft { sections } => {
+        FeatureKind::SurfaceLoft { sections, .. } => {
             (Surf::Loft, vec![sections.iter().flat_map(|sec| sheet_sels(app, sec.sketch.0, sec.profiles.as_ref(), &sec.curves)).collect()])
         }
         FeatureKind::SurfaceExtrude { sketch, profiles, curves, extent } => {

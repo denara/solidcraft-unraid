@@ -116,9 +116,52 @@ impl Frame {
         if !(sa.is_finite() && sb.is_finite() && sa > 0.0 && sb > 0.0) {
             return None;
         }
+        self.prism(self.ta * sa, self.tb * sb)
+    }
+
+    /// For a round, the arc of its cross-section from the setback on face a to the one on face
+    /// b, in [`ARC_PIECES`] pieces, as offsets from the edge; `None` for a chamfer.
+    fn arc(&self, size: Size) -> Option<Vec<Vec3>> {
+        let Size::Round(r) = size else { return None };
+        let (sa, sb) = self.setbacks(size)?;
+        let half = 0.5 * self.ta.dot(self.tb).clamp(-1.0, 1.0).acos();
+        // The ball's centre, on the bisector, `r` from both faces.
+        let centre = (self.ta + self.tb).normalized()? * (r / half.sin());
+        let (a, b) = (self.ta * sa - centre, self.tb * sb - centre);
+        (0..=ARC_PIECES).map(|k| Some(centre + (a + (b - a) * (k as f64 / ARC_PIECES as f64)).normalized()? * r)).collect()
+    }
+
+    /// What a blend of the edge at `size` changes, within the wedge: for a round, the fan of
+    /// prisms from the edge to the pieces of its arc (between the edge and the arc lies all it
+    /// takes away or fills; the ball's side of the arc is left as it is), for a chamfer the
+    /// wedge itself.
+    fn pieces(&self, size: Size) -> Option<Vec<Wedge>> {
+        match self.arc(size) {
+            Some(arc) => arc.windows(2).map(|w| self.prism(*w.first()?, *w.get(1)?)).collect(),
+            None => Some(vec![self.wedge(size)?]),
+        }
+    }
+
+    /// The blend's own surface at `size`, as polygons: the strips between its arc's pieces, or
+    /// the chamfer's face.
+    fn surface(&self, size: Size) -> Option<Vec<Vec<Vec3>>> {
+        match self.arc(size) {
+            Some(arc) => arc
+                .windows(2)
+                .map(|w| {
+                    let (u, v) = (*w.first()?, *w.get(1)?);
+                    Some(vec![self.p0 + u, self.p0 + v, self.p1 + v, self.p1 + u])
+                })
+                .collect(),
+            None => Some(vec![self.wedge(size)?.faces.get(2)?.clone()]),
+        }
+    }
+
+    /// The triangle between the edge and the offsets `u` and `w` across it, swept along the edge.
+    fn prism(&self, u: Vec3, w: Vec3) -> Option<Wedge> {
         let d = (self.p1 - self.p0).normalized()?;
-        let (a0, b0) = (self.p0 + self.ta * sa, self.p0 + self.tb * sb);
-        let (a1, b1) = (self.p1 + self.ta * sa, self.p1 + self.tb * sb);
+        let (a0, b0) = (self.p0 + u, self.p0 + w);
+        let (a1, b1) = (self.p1 + u, self.p1 + w);
         // Each side's plane, facing away from the triangle's third corner.
         let side = |p: Vec3, q: Vec3, opposite: Vec3| -> Option<(Vec3, f64)> {
             let mut n = d.cross(q - p).normalized()?;
@@ -130,13 +173,18 @@ impl Frame {
         let planes = [side(self.p0, a0, b0)?, side(self.p0, b0, a0)?, side(a0, b0, self.p0)?, (-d, -d.dot(self.p0)), (d, d.dot(self.p1))];
         let faces =
             vec![vec![self.p0, a0, a1, self.p1], vec![self.p0, b0, b1, self.p1], vec![a0, b0, b1, a1], vec![self.p0, a0, b0], vec![self.p1, a1, b1]];
-        let area = 0.5 * (self.ta * sa).cross(self.tb * sb).len();
+        let area = 0.5 * u.cross(w).len();
         Some(Wedge { planes, faces, volume: area * self.p0.dist(self.p1) })
     }
 }
 
-/// `poly` clipped to the half-spaces, each moved `eps` inwards: is anything left?
-fn reaches_inside(poly: &[Vec3], planes: &[(Vec3, f64)], eps: f64) -> bool {
+/// Pieces a round's arc is divided into for [`Frame::pieces`] and [`Frame::surface`]: each
+/// chord sags under 0.5 % of the radius.
+const ARC_PIECES: usize = 8;
+
+/// `poly` clipped to the half-spaces `n·x <= c`, each moved `eps` inwards (empty when nothing
+/// is left).
+fn clip(poly: &[Vec3], planes: &[(Vec3, f64)], eps: f64) -> Vec<Vec3> {
     let mut cur: Vec<Vec3> = poly.to_vec();
     for (n, c) in planes {
         let c = c - eps;
@@ -152,11 +200,53 @@ fn reaches_inside(poly: &[Vec3], planes: &[(Vec3, f64)], eps: f64) -> bool {
             }
         }
         if next.is_empty() {
-            return false;
+            return next;
         }
         cur = next;
     }
-    true
+    cur
+}
+
+/// `poly` clipped to the half-spaces, each moved `eps` inwards: is anything left?
+fn reaches_inside(poly: &[Vec3], planes: &[(Vec3, f64)], eps: f64) -> bool {
+    !clip(poly, planes, eps).is_empty()
+}
+
+/// Most polygons [`reaches_inside_beyond`] clips before it gives up and answers yes.
+const MAX_CLIPS: usize = 4096;
+
+/// Whether the part of `poly` outside every one of the wedges `trimmed` (by more than `out`)
+/// reaches inside `planes` (by `eps`). A face beside or at the end of another edge the same
+/// feature blends is trimmed back to that blend, so its part inside that edge's wedge is gone
+/// (#1668).
+fn reaches_inside_beyond(poly: &[Vec3], planes: &[(Vec3, f64)], eps: f64, trimmed: &[&Wedge], out: f64) -> bool {
+    let mut parts = vec![poly.to_vec()];
+    for w in trimmed {
+        // Outside a convex wedge is outside one of its planes (pieces may overlap: only
+        // whether anything is left counts).
+        let mut next = Vec::new();
+        for part in &parts {
+            for (n, c) in &w.planes {
+                let piece = clip(part, &[(-*n, -*c)], out);
+                if !piece.is_empty() {
+                    next.push(piece);
+                }
+            }
+            if next.len() > MAX_CLIPS {
+                return true;
+            }
+        }
+        parts = next;
+    }
+    parts.iter().any(|p| reaches_inside(p, planes, eps))
+}
+
+/// Whether two sets of convex prisms overlap (by more than `eps`): a face of one reaches
+/// inside the other.
+fn overlap(a: &[Wedge], b: &[Wedge], eps: f64) -> bool {
+    a.iter().any(|x| {
+        b.iter().any(|y| y.faces.iter().any(|p| reaches_inside(p, &x.planes, eps)) || x.faces.iter().any(|p| reaches_inside(p, &y.planes, eps)))
+    })
 }
 
 /// The body's straight edges between planar faces nearest the points (each once; `None` for a
@@ -275,11 +365,22 @@ fn first_clash(sel: &Selection, size: Size) -> Option<Clash> {
     // Planar faces are exact in the mesh; curved ones are within the chord.
     let flat = (sel.size * 1e-7).max(1e-9);
     let curved = sel.chord * 2.0;
-    for (f, w) in sel.frames.iter().zip(&wedges) {
+    // Planar faces beside an edge lie in its wedge's side planes: outside it means further.
+    let out = (sel.size * 1e-6).max(1e-8);
+    for (i, (f, w)) in sel.frames.iter().zip(&wedges).enumerate() {
         let (Some(f), Some(w)) = (f, w) else { continue };
         let hit = sel.tris.iter().filter(|(_, face)| !f.allowed.contains(face)).any(|(t, face)| {
             let eps = if sel.planar.get(*face).copied().unwrap_or(false) { flat } else { curved };
-            reaches_inside(t, &w.planes, eps)
+            // The other blended edges this face runs along or ends them trim it back.
+            let trimmed: Vec<&Wedge> = sel
+                .frames
+                .iter()
+                .zip(&wedges)
+                .enumerate()
+                .filter(|(j, (fj, _))| *j != i && fj.as_ref().is_some_and(|fj| fj.allowed.contains(face)))
+                .filter_map(|(_, (_, wj))| wj.as_ref())
+                .collect();
+            reaches_inside_beyond(t, &w.planes, eps, &trimmed, out)
         });
         if hit {
             return Some(Clash::Face);
@@ -295,12 +396,21 @@ fn first_clash(sel: &Selection, size: Size) -> Option<Clash> {
                 continue;
             }
             let meet = wj.faces.iter().any(|p| reaches_inside(p, &wi.planes, eps)) || wi.faces.iter().any(|p| reaches_inside(p, &wj.planes, eps));
-            if meet {
+            if meet && blends_cross(fi, wi, fj, wj, size, eps) {
                 return Some(Clash::Blend);
             }
         }
     }
     None
+}
+
+/// Two blends whose wedges overlap: do they cross? Rounds on both sides of a wall (the outside
+/// round's wedge reaches past the inside corner, which the inside round fills) need not: they
+/// cross only where what one changes (between its edge and its arc) overlaps what the other
+/// does, or where either's surface runs into the other's wedge (#1668).
+fn blends_cross(fi: &Frame, wi: &Wedge, fj: &Frame, wj: &Wedge, size: Size, eps: f64) -> bool {
+    let (Some(pi), Some(pj), Some(si), Some(sj)) = (fi.pieces(size), fj.pieces(size), fi.surface(size), fj.surface(size)) else { return true };
+    overlap(&pi, &pj, eps) || sj.iter().any(|p| reaches_inside(p, &wi.planes, eps)) || si.iter().any(|p| reaches_inside(p, &wj.planes, eps))
 }
 
 /// The step the largest fitting size is given to: three significant digits.

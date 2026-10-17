@@ -29,6 +29,8 @@ pub enum Kind {
     Insert,
     /// Open a design an earlier run autosaved before it closed.
     Recover { id: String, dir: Option<String> },
+    /// Export a snapshot of the current design without adopting the worker's session.
+    ExportDxf,
 }
 
 pub struct Request {
@@ -63,6 +65,7 @@ impl Request {
             Kind::Insert if solidcraft_engine::io::is_mesh_path(&self.path) => ("file.insert_mesh", json!({"path": self.path})),
             Kind::Insert => ("file.insert_step", self.params()),
             Kind::Recover { id, dir } => ("doc.recover", json!({"id": id, "dir": dir})),
+            Kind::ExportDxf => ("file.export_view_dxf", Value::Object(self.options.clone())),
         }
     }
     fn answer(&self, r: Result<Value, String>) {
@@ -97,6 +100,14 @@ struct Running {
     built: Option<usize>,
     /// A STEP file read a piece per frame on this thread (the web app), instead of on a worker.
     staged: Option<Staged>,
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        if self.request.kind == Kind::ExportDxf {
+            self.progress.cancel();
+        }
+    }
 }
 
 /// A STEP import done a piece per frame, for the web app: it has one thread, which must keep
@@ -208,6 +219,14 @@ pub fn begin_request(app: &mut SolveApp, request: Request) -> Result<(), String>
                 }
                 r
             }
+            Kind::ExportDxf => {
+                let (command, params) = request.command();
+                let r = app.run(command, params);
+                if r.is_ok() && !request.path.is_empty() {
+                    app.set_status(crate::i18n::format("ui.saved_to", &[("path", &request.path)]), false);
+                }
+                r
+            }
         };
         request.answer(r);
         Ok(())
@@ -236,10 +255,15 @@ pub fn control(app: &mut SolveApp, req: crate::control::ControlRequest) -> Optio
     let kind = match command {
         Some("doc.open") => Kind::Open,
         Some("file.insert_step" | "file.insert_mesh") => Kind::Insert,
+        Some("file.export_view_dxf") => Kind::ExportDxf,
         _ => return Some(req),
     };
     let params = req.params.get("params");
-    let Some(path) = params.and_then(|p| p.get("path")).and_then(Value::as_str) else { return Some(req) };
+    let path = match params.and_then(|p| p.get("path")).and_then(Value::as_str) {
+        Some(path) => path,
+        None if kind == Kind::ExportDxf => "",
+        None => return Some(req),
+    };
     let scope = match crate::control::request_scope(app, &req.params) {
         Ok(scope) => scope,
         Err(e) => {
@@ -247,7 +271,11 @@ pub fn control(app: &mut SolveApp, req: crate::control::ControlRequest) -> Optio
             return None;
         }
     };
-    let options = ["up", "names"].iter().filter_map(|k| Some((k.to_string(), params?.get(*k).filter(|v| !v.is_null())?.clone()))).collect();
+    let options = if kind == Kind::ExportDxf {
+        params.and_then(Value::as_object).cloned().unwrap_or_default()
+    } else {
+        ["up", "names"].iter().filter_map(|k| Some((k.to_string(), params?.get(*k).filter(|v| !v.is_null())?.clone()))).collect()
+    };
     let _ = begin_request(app, Request { path: path.into(), kind, reply: Some(req.reply.clone()), scope, options });
     None
 }
@@ -281,7 +309,10 @@ fn start(app: &mut SolveApp) {
         return;
     }
     let Some(request) = app.file_load.queued.pop_front() else { return };
-    if !request.insert() && app.docs.count() >= crate::documents::MAX_OPEN && !crate::documents::active_is_blank(app) {
+    if matches!(request.kind, Kind::Open | Kind::Recover { .. })
+        && app.docs.count() >= crate::documents::MAX_OPEN
+        && !crate::documents::active_is_blank(app)
+    {
         let e = "too many open designs; close a tab before opening another";
         app.set_status(e, true);
         request.answer(Err(e.into()));
@@ -289,7 +320,7 @@ fn start(app: &mut SolveApp) {
     }
     let insert = request.insert();
     let before = if insert { app.session.world_state().bodies.iter().map(|b| b.name.clone()).collect() } else { Vec::new() };
-    let mut scratch = if insert { app.session.scratch() } else { Session::default() };
+    let mut scratch = if insert || request.kind == Kind::ExportDxf { app.session.scratch() } else { Session::default() };
     if insert {
         scratch.selection = app.session.selection.clone();
     }
@@ -679,6 +710,11 @@ fn compute(
     let result =
         solidcraft_engine::io::vfs::scoped(scope, || solidcraft_engine::doc::progress::watch(progress.clone(), || session.execute(command, params)))
             .map_err(|e| e.to_string())?;
+    if command == "file.export_view_dxf" {
+        // A successful export has already published its complete file. A Cancel arriving
+        // after that commit must not turn a completed save into a misleading cancellation.
+        return Ok(Made { session, result, image: None });
+    }
     if progress.is_cancelled() {
         return cancelled();
     }
@@ -739,6 +775,12 @@ pub fn tick(app: &mut SolveApp, ctx: &egui::Context) {
     {
         let request = &running.request;
         match job {
+            Ok(made) if request.kind == Kind::ExportDxf => {
+                if !request.path.is_empty() {
+                    app.set_status(crate::i18n::format("ui.saved_to", &[("path", &request.path)]), false);
+                }
+                request.answer(Ok(made.result));
+            }
             _ if running.cancelled() => request.answer(Err("file operation cancelled".into())),
             Ok(made) if running.matches(&app.session) => {
                 if request.insert() {
@@ -813,7 +855,8 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     let phase = r.phase.load(Ordering::Relaxed);
     let (done, total) = r.progress.features();
     // Long work inside one feature (a large STEP file) has progress of its own.
-    let work = r.progress.work().filter(|(_, d, t)| phase == 0 && d < t);
+    let export = r.request.kind == Kind::ExportDxf;
+    let work = r.progress.work().filter(|(_, d, t)| export || (phase == 0 && d < t));
     let screen = ctx.content_rect();
     // Leave the title bar to the window. The resize edges are a foreground layer above this.
     let cover = egui::Rect::from_min_max(egui::pos2(screen.left(), screen.top() + crate::toolbar::APP_BAR_HEIGHT), screen.max);
@@ -848,20 +891,23 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
             ui.set_width(width - 16.0);
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new(if cancelled {
+                    egui::RichText::new(if cancelled && export {
+                        crate::i18n::tr_label("dxf.cancelling")
+                    } else if cancelled {
                         "Waiting for file operation"
                     } else {
                         match r.request.kind {
                             Kind::Insert => "Inserting geometry",
                             Kind::Open => "Opening design",
                             Kind::Recover { .. } => "Recovering design",
+                            Kind::ExportDxf => crate::i18n::tr_label("dxf.exporting"),
                         }
                     })
                     .strong()
                     .size(14.0),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let b = ui.button("Cancel");
+                    let b = ui.button(crate::i18n::tr("ui.cancel"));
                     crate::scenario::publish_handle("file_loading:cancel", b.rect.center());
                     cancel |= b.clicked();
                 });
@@ -879,10 +925,13 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(if cancelled {
+                ui.label(if cancelled && export {
+                    crate::i18n::tr_label("dxf.cancel_wait").to_string()
+                } else if cancelled {
                     "Waiting for the previous operation to stop...".to_string()
                 } else {
                     match (phase, work) {
+                        (_, work) if r.request.kind == Kind::ExportDxf => crate::dialogs_view_dxf::progress_text(work),
                         (_, Some(("reading", d, t))) => format!("Reading the file... {}%", d * 100 / t.max(1)),
                         (_, Some((_, d, t))) => format!("Converting solid {} of {t}", d + 1),
                         (1, _) => "Preparing the view...".into(),
@@ -912,13 +961,84 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
         // import to overlap it in memory. The rebuild stops at its next feature and the
         // current design stays as it was.
         app.file_load.cancel();
-        app.set_status("file operation cancelled", false);
+        app.set_status(if export { crate::i18n::tr_label("dxf.cancelled") } else { "file operation cancelled" }, false);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dxf_export_progress_keeps_frames_alive_and_never_adopts_a_worker_document() {
+        let mut h = crate::scenario::Harness::new();
+        h.app.run("solid.box", json!({"length":10,"width":10,"height":10})).unwrap();
+        h.frames(3);
+        let base = h.app.session.doc.clone();
+        let undo = h.app.session.undo.len();
+        let cam = h.app.cam;
+        let progress = Arc::new(Progress::default());
+        solidcraft_engine::doc::progress::watch(progress.clone(), || {
+            solidcraft_engine::kernel::watch::current().unwrap().progress("dxf_occlusion", 64, 128);
+        });
+        let (tx, rx) = std::sync::mpsc::channel();
+        h.app.file_load.running = Some(Running {
+            request: Request::new("drawing.dxf", Kind::ExportDxf),
+            base: base.clone(),
+            base_revision: h.app.session.revision,
+            before: Vec::new(),
+            rx,
+            phase: Arc::new(AtomicU8::new(0)),
+            progress: progress.clone(),
+            preview_rx: None,
+            preview: None,
+            partial_rx: None,
+            built: None,
+            staged: None,
+        });
+        // No worker result is available: drawing a frame must not wait for one.
+        h.frames(4);
+        assert!(h.app.file_load.busy());
+        let at = crate::scenario::handle_at("file_loading:cancel").unwrap();
+        let (request, _reply) = crate::control::ControlRequest::new("ui.click", json!({"x":at.x,"y":at.y}));
+        let _ = crate::control::handle(&mut h.app, &h.ctx, &request);
+        h.frames(4);
+        assert!(progress.is_cancelled());
+        tx.send(Err("DXF export cancelled".into())).unwrap();
+        h.frames(2);
+        assert!(h.app.file_load.idle());
+        assert!(Arc::ptr_eq(&base, &h.app.session.doc));
+        assert_eq!(h.app.session.undo.len(), undo);
+        assert_eq!(h.app.cam, cam);
+
+        // The success path is equally read-only, even if the worker has another session.
+        let mut other = Session::default();
+        other.execute("file.new", &json!({"name":"Worker must not replace the current design"})).unwrap();
+        let mut request = Request::new("drawing.dxf", Kind::ExportDxf);
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        request.reply = Some(reply_tx);
+        let (tx, rx) = std::sync::mpsc::channel();
+        h.app.file_load.running = Some(Running {
+            request,
+            base: base.clone(),
+            base_revision: h.app.session.revision,
+            before: Vec::new(),
+            rx,
+            phase: Arc::new(AtomicU8::new(0)),
+            progress: Arc::new(Progress::default()),
+            preview_rx: None,
+            preview: None,
+            partial_rx: None,
+            built: None,
+            staged: None,
+        });
+        tx.send(Ok(Made { session: other, result: json!({"visible":12}), image: None })).unwrap();
+        h.frames(2);
+        assert_eq!(reply_rx.try_recv().unwrap()["result"]["visible"], 12);
+        assert!(Arc::ptr_eq(&base, &h.app.session.doc));
+        assert_eq!(h.app.session.undo.len(), undo);
+        assert_eq!(h.app.cam, cam);
+    }
 
     #[test]
     fn opening_result_and_preview_cannot_overwrite_a_newer_design() {

@@ -31,7 +31,7 @@ use serde_json::Value;
 use solidcraft_doc::{Document, Model, ModelState};
 use solidcraft_geom::Vec3;
 
-pub use cmd::{CommandInfo, CommandSpec, auto_operation, command_specs, find_command};
+pub use cmd::{CommandInfo, CommandSpec, auto_operation, command_specs, extrude_reach, find_command};
 pub use solidcraft_doc as doc;
 pub use solidcraft_doc::Visibility;
 pub use solidcraft_geom as geom;
@@ -156,6 +156,16 @@ pub struct Snapshot {
     pub pending_moves: std::collections::BTreeMap<u64, solidcraft_doc::Mat>,
 }
 
+/// A copy of a session that evaluates commands ahead of it ([`Session::ahead`]).
+pub struct Ahead(Session);
+
+impl Ahead {
+    /// Run `commands` (their results stay in the shared evaluation cache).
+    pub fn evaluate(self, commands: &[(String, Value)]) -> Result<()> {
+        self.0.preview_in_place(commands).map(|_| ())
+    }
+}
+
 /// What some commands would make, evaluated on a scratch copy of a session
 /// ([`Session::preview`]). The session itself is not changed.
 #[derive(Clone, Debug)]
@@ -229,6 +239,9 @@ pub struct Session {
     pub section: Option<(Vec3, Vec3)>,
     /// Surface analysis shading the model (zebra, draft, curvature map).
     pub analysis: Option<SurfaceAnalysis>,
+    /// The seams `inspect.continuity` last measured, for the viewport to shade. View state: not
+    /// part of the design and not an undo step.
+    pub continuity: Vec<ContinuitySeam>,
     /// What is hidden or shown in the view (`browser.visibility`): saved with the design, not an
     /// undo step. A design brings its saved visibility when it opens (`Session::new`).
     pub visibility: Visibility,
@@ -291,6 +304,16 @@ pub enum SurfaceAnalysis {
     Access { dir: Vec3 },
 }
 
+/// One seam measured by `inspect.continuity`, where the viewport shades it: the stations it was
+/// sampled at, in world coordinates, and how it reads. View state only: the design is untouched.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct ContinuitySeam {
+    /// Sample points along the seam, in world coordinates.
+    pub points: Vec<Vec3>,
+    /// The seam's worst verdict along its length.
+    pub verdict: kernel::SeamVerdict,
+}
+
 impl SurfaceAnalysis {
     /// How a picture shades the faces for this analysis.
     pub fn mode(self) -> render::AnalysisMode {
@@ -346,6 +369,7 @@ impl Session {
             sketch_clipboard: None,
             section: None,
             analysis: None,
+            continuity: Vec::new(),
             checkpoints: Vec::new(),
             next_checkpoint: 1,
             saved_visibility: visibility.clone(),
@@ -813,6 +837,7 @@ impl Session {
             sketch_clipboard: self.sketch_clipboard.clone(),
             section: None,
             analysis: None,
+            continuity: Vec::new(),
             checkpoints: Vec::new(),
             next_checkpoint: 1,
             visibility: self.visibility.clone(),
@@ -885,6 +910,17 @@ impl Session {
             Arc::new(shown)
         };
         self.scratch().preview_in_place(commands).map(|(after, replies)| Preview { before: visible(self), after: visible(&after), replies })
+    }
+
+    /// Run `commands` on a [`Session::scratch`] copy that keeps the undo and redo stacks: what
+    /// they evaluate lands in the evaluation cache the copy shares with this session, so running
+    /// them here afterwards finds it there. For a front end that computes a command which may
+    /// take a while (undo, the history marker moved) off its window thread first.
+    pub fn ahead(&self) -> Ahead {
+        let mut copy = self.scratch();
+        copy.undo.clone_from(&self.undo);
+        copy.redo.clone_from(&self.redo);
+        Ahead(copy)
     }
 
     fn preview_in_place(mut self, commands: &[(String, Value)]) -> Result<(Self, Vec<Value>)> {

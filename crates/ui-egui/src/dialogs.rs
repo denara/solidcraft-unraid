@@ -137,6 +137,11 @@ pub enum Kind {
     Thread {
         designation: String,
         length: String,
+        /// The last automatic size; a different value is a manual override. Keep automatic
+        /// features automatic when applying, even though their resolved size is visible.
+        suggested: Option<String>,
+        /// The picks used for the suggestion, so an unchanged dialog does no geometry work.
+        of: Vec<Sel>,
     },
     /// A rib (one wall along open curves) or a web (a wall per curve).
     Rib {
@@ -260,6 +265,7 @@ pub enum Kind {
     SaveMesh(crate::dialogs_save_mesh::SaveMesh),
     ViewDxf {
         dashed: bool,
+        tolerance: f64,
     },
     /// Plastic features (`dialogs_plastic`).
     Plastic(crate::dialogs_plastic::Pl),
@@ -528,9 +534,10 @@ impl Dialog {
             ),
             "solid.scale" => Dialog::new(Kind::Scale { factor: "2".into() }, vec![SelInput::new("Bodies", BODIES, true)]),
             "solid.offset_face" => Dialog::new(Kind::OffsetFaces { distance: "2 mm".into() }, vec![SelInput::new("Faces", PLANAR_FACES, true)]),
-            "solid.thread" => {
-                Dialog::new(Kind::Thread { designation: String::new(), length: String::new() }, vec![SelInput::new("Cylindrical face", FACES, false)])
-            }
+            "solid.thread" => Dialog::new(
+                Kind::Thread { designation: String::new(), length: String::new(), suggested: None, of: Vec::new() },
+                vec![SelInput::new("Cylindrical face", FACES, false)],
+            ),
             "material.assign" => Dialog::new(Kind::Material { index: 1 }, vec![SelInput::new("Bodies", BODIES, true)]),
             "inspect.section" => {
                 Dialog::new(Kind::Section { offset: "0 mm".into(), flip: false }, vec![SelInput::new("Plane", PLANES | PLANAR_FACES, false)])
@@ -699,8 +706,28 @@ impl Dialog {
         {
             inp.items = default_profiles(s);
         }
+        d.sync_thread(s);
         d.advance();
         Some(d)
+    }
+
+    /// Resolve a newly selected face without replacing an authored size or changing the
+    /// document. Clearing the face also clears a suggestion that no longer applies.
+    fn sync_thread(&mut self, s: &Session) {
+        let Kind::Thread { designation, suggested, of, .. } = &mut self.kind else { return };
+        if !designation.trim().is_empty() && suggested.as_deref() != Some(designation.as_str()) {
+            return;
+        }
+        let picks = self.inputs.first().map(|i| i.items.as_slice()).unwrap_or_default();
+        if picks == of.as_slice() {
+            return;
+        }
+        *of = picks.to_vec();
+        *suggested = picks.first().and_then(|sel| match sel {
+            Sel::Face { point, .. } => solidcraft_engine::doc::suggested_thread(&s.world_state(), *point).ok(),
+            _ => None,
+        });
+        *designation = suggested.clone().unwrap_or_default();
     }
 
     pub fn rename(feature: u64, name: &str) -> Dialog {
@@ -821,6 +848,7 @@ impl Dialog {
     /// Dialogs holding a table get the wide limit.
     pub fn is_wide(&self) -> bool {
         matches!(self.kind, Kind::Params { .. } | Kind::SketchModify(crate::sketch_modify_ui::Mod::PatternRect { .. }))
+            || (matches!(self.kind, Kind::PatternRect { .. }) && self.inputs.first().is_some_and(|i| i.accept == selection::FEATURES))
             || matches!(&self.kind, Kind::Motion(k) if k.wide())
     }
 
@@ -898,6 +926,9 @@ impl Dialog {
 
     /// A pick in the viewport (already accepted by the active input).
     pub fn pick(&mut self, s: &Session, sel: Sel) {
+        if let Some(key) = feature_pattern_reference_key(self, self.active) {
+            self.extra.remove(key);
+        }
         if let Kind::PathPlane { sketch, .. } = &mut self.kind {
             *sketch = None;
             self.extra.remove("path");
@@ -941,6 +972,7 @@ impl Dialog {
             self.advance();
         }
         self.error = None;
+        self.sync_thread(s);
     }
 
     /// Box selection result: replace (or add to) the active input.
@@ -971,6 +1003,7 @@ impl Dialog {
                 inp.items.push(x);
             }
         }
+        self.sync_thread(s);
     }
 }
 
@@ -1614,6 +1647,19 @@ fn input_rows(d: &mut Dialog, ui: &mut egui::Ui, s: &Session) {
     input_rows_range(d, ui, s, 0..d.inputs.len());
 }
 
+/// Saved vectors/axes are real inputs even when they have no origin-axis selection chip.
+fn feature_pattern_reference_key(d: &Dialog, index: usize) -> Option<&'static str> {
+    if d.inputs.first().is_none_or(|i| i.accept != selection::FEATURES) {
+        return None;
+    }
+    match (&d.kind, index) {
+        (Kind::PatternRect { .. }, 1) => Some("dir1"),
+        (Kind::PatternRect { .. }, 2) => Some("dir2"),
+        (Kind::PatternCirc { .. }, 1) => Some("axis"),
+        _ => None,
+    }
+}
+
 fn input_rows_range(d: &mut Dialog, ui: &mut egui::Ui, s: &Session, range: std::ops::Range<usize>) {
     // Edit Text shows its Path input among its own rows.
     if matches!(d.kind, Kind::Text(_)) {
@@ -1623,14 +1669,15 @@ fn input_rows_range(d: &mut Dialog, ui: &mut egui::Ui, s: &Session, range: std::
     let mut clear: Option<usize> = None;
     let mut activate: Option<usize> = None;
     for (i, inp) in d.inputs.iter().enumerate().skip(range.start).take(range.end.saturating_sub(range.start)) {
+        let stored_reference = feature_pattern_reference_key(d, i).and_then(|key| d.extra.get(key)).filter(|_| inp.items.is_empty());
         row_label(ui, inp.label);
         ui.horizontal(|ui| {
             let active = i == d.active;
             // A chip: "↖ Select" (outlined) while empty, "N selected" (filled) once picked.
             let custom_axis = i == 1 && inp.items.is_empty() && matches!(d.kind, Kind::Revolve { axis: Some(_), .. });
-            let filled = !inp.items.is_empty() || custom_axis;
+            let filled = !inp.items.is_empty() || custom_axis || stored_reference.is_some();
             let text = if filled {
-                RichText::new(if custom_axis {
+                RichText::new(if custom_axis || stored_reference.is_some() {
                     crate::i18n::tr("dialog.custom_axis").into()
                 } else if !inp.multi {
                     inp.items.first().map(|item| selection_label(s, item)).unwrap_or_default()
@@ -1651,7 +1698,9 @@ fn input_rows_range(d: &mut Dialog, ui: &mut egui::Ui, s: &Session, range: std::
                 .sense(egui::Sense::CLICK);
             let chip = crate::frame::add_outlined(ui, b, stroke.width);
             publish_row(&chip);
-            let tooltip = if custom_axis {
+            let tooltip = if let Some(reference) = stored_reference {
+                reference.to_string()
+            } else if custom_axis {
                 if let Kind::Revolve { axis: Some(axis), .. } = &d.kind {
                     format!(
                         "Custom axis\nOrigin: {}\nDirection: {}\nClick to select a replacement axis",
@@ -1667,7 +1716,7 @@ fn input_rows_range(d: &mut Dialog, ui: &mut egui::Ui, s: &Session, range: std::
             if chip.on_hover_text(tooltip).clicked() {
                 activate = Some(i);
             }
-            if !inp.items.is_empty() {
+            if !inp.items.is_empty() || stored_reference.is_some() {
                 let button = ui.small_button("×").on_hover_text(tr("Clear the selection"));
                 crate::scenario::publish_handle(&format!("dialog:clear:{}", inp.label), button.rect.center());
                 if button.clicked() {
@@ -1680,15 +1729,18 @@ fn input_rows_range(d: &mut Dialog, ui: &mut egui::Ui, s: &Session, range: std::
     if let Some(i) = activate {
         d.active = i;
     }
-    if let Some(i) = clear
-        && let Some(inp) = d.inputs.get_mut(i)
-    {
+    if let Some(i) = clear {
+        if let Some(key) = feature_pattern_reference_key(d, i) {
+            d.extra.remove(key);
+        }
+        let Some(inp) = d.inputs.get_mut(i) else { return };
         inp.items.clear();
         if i == 0 {
             d.profile_selection_changed = true;
         }
         d.active = i;
     }
+    d.sync_thread(s);
 }
 
 /// Each live reference sits with the independent values it drives.
@@ -1698,13 +1750,30 @@ fn rectangular_pattern_rows(d: &mut Dialog, ui: &mut egui::Ui, session: &Session
     let mut enter = false;
     ui.vertical(|ui| {
         ui.label(tr("dialog.selection_guidance"));
-        egui::Grid::new("pattern_source").spacing(vec2(10.0, 8.0)).show(ui, |ui| input_rows_range(d, ui, session, 0..1));
+        egui::Grid::new("pattern_source").spacing(vec2(10.0, 8.0)).show(ui, |ui| {
+            if matches!(d.kind, Kind::PatternRect { .. }) {
+                placement_row(d, ui);
+            }
+            input_rows_range(d, ui, session, 0..1);
+        });
         ui.separator();
         ui.columns(2, |columns| {
             for (index, ui) in columns.iter_mut().enumerate() {
                 ui.strong(tr(if index == 0 { "Direction 1" } else { "Direction 2" }));
                 egui::Grid::new(("pattern_direction", index)).spacing(vec2(8.0, 8.0)).show(ui, |ui| {
                     input_rows_range(d, ui, session, index + 1..index + 2);
+                    if let Kind::PatternRect { count, spacing, count2, spacing2 } = &mut d.kind {
+                        let (count, spacing, count_label, spacing_label) =
+                            if index == 0 { (count, spacing, "Quantity", "Spacing") } else { (count2, spacing2, "Quantity 2", "Spacing 2") };
+                        row_label(ui, count_label);
+                        enter |= field(ui, count);
+                        ui.end_row();
+                        row_label(ui, spacing_label);
+                        enter |= field(ui, spacing);
+                        ui.end_row();
+                        feature_pattern_alignment_row(ui, &mut d.extra, index);
+                        return;
+                    }
                     let Kind::SketchModify(Mod::PatternRect { count, spacing, count2, spacing2, alignment, alignment2, reversed, reversed2 }) =
                         &mut d.kind
                     else {
@@ -1738,8 +1807,31 @@ fn rectangular_pattern_rows(d: &mut Dialog, ui: &mut egui::Ui, session: &Session
     enter
 }
 
+/// Feature patterns use the same source-fixed slot ordering and controls as sketch patterns.
+fn feature_pattern_alignment_row(ui: &mut egui::Ui, extra: &mut serde_json::Map<String, Value>, index: usize) {
+    use solidcraft_engine::sketch::PatternAlignment;
+    let (label, alignment_key, reversed_key) =
+        if index == 0 { ("Alignment", "alignment", "reversed") } else { ("Alignment 2", "alignment2", "reversed2") };
+    let alignment = extra.get(alignment_key).cloned().and_then(|v| serde_json::from_value::<PatternAlignment>(v).ok()).unwrap_or_default();
+    let mut reversed = extra.get(reversed_key).and_then(Value::as_bool).unwrap_or(false);
+    // Retain programmatic Left placement until the user changes its alignment.
+    let mut centered = alignment == PatternAlignment::Center;
+    let was_centered = centered;
+    row_label(ui, label);
+    ui.horizontal(|ui| {
+        pattern_toggle(ui, label, "Flip direction", "pattern_flip", &mut reversed);
+        pattern_toggle(ui, label, "Center", "pattern_center", &mut centered);
+    });
+    extra.insert(reversed_key.into(), json!(reversed));
+    if centered != was_centered {
+        extra.insert(alignment_key.into(), json!(if centered { PatternAlignment::Center } else { PatternAlignment::Right }));
+    }
+    ui.end_row();
+}
+
 pub(crate) fn pattern_toggle(ui: &mut egui::Ui, row: &str, label: &str, icon: &str, selected: &mut bool) {
-    let response = ui.add(egui::Button::new("").selected(*selected).min_size(vec2(28.0, 24.0)));
+    // Tab moves between value fields; Enter after a value edit applies the dialog.
+    let response = ui.add(egui::Button::new("").selected(*selected).min_size(vec2(28.0, 24.0)).sense(egui::Sense::CLICK));
     let t = Tokens::get();
     crate::icons::paint(ui.painter(), response.rect.shrink(3.0), icon, t.icon, t.icon_fill, t.accent);
     response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, *selected, tr(label)));
@@ -1992,16 +2084,18 @@ fn auto_operation(app: &SolveApp, d: &mut Dialog) {
     }
     let Kind::Extrude { direction, distance, .. } = &d.kind else { return };
     let Ok(dist) = app.session.doc.eval(distance, solidcraft_engine::doc::expr::Kind::Length) else { return };
-    let side = crate::smart_extrude::side(dist, *direction);
+    let mut side = crate::smart_extrude::side(dist, *direction);
     if !matches!(d.kind, Kind::Extrude { auto_op: true, .. }) {
         return;
     }
-    let Some(fresh) = dialog_commands(app, d)
-        .ok()
-        .and_then(|c| c.into_iter().next())
-        .and_then(|(_, p)| solidcraft_engine::auto_operation(&app.session, &p))
-        .and_then(|op| OPS.iter().position(|o| *o == op))
-    else {
+    let Some(params) = dialog_commands(app, d).ok().and_then(|c| c.into_iter().next()).map(|(_, p)| p) else { return };
+    // To an object, the extrude goes to it on whichever side it is: that is the side (#1633).
+    if params.get("to").is_some()
+        && let Some(reach) = solidcraft_engine::extrude_reach(&app.session, &params)
+    {
+        side = crate::smart_extrude::side(reach, 0);
+    }
+    let Some(fresh) = solidcraft_engine::auto_operation(&app.session, &params).and_then(|op| OPS.iter().position(|o| *o == op)) else {
         return;
     };
     if let Kind::Extrude { operation, smart, .. } = &mut d.kind {
@@ -2045,6 +2139,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
         return;
     }
     auto_operation(app, &mut d);
+    d.sync_thread(&app.session);
     update_measure(app, &mut d);
     update_fill_cells(app, &mut d);
     // A refused OK's error is about the inputs it ran with (#641). Once a value (in the dialog,
@@ -2085,7 +2180,8 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     let mut cancel = false;
     let mut enter = false;
     let wide = d.is_wide();
-    let pattern_columns = matches!(d.kind, Kind::SketchModify(crate::sketch_modify_ui::Mod::PatternRect { .. }));
+    let pattern_columns = matches!(d.kind, Kind::SketchModify(crate::sketch_modify_ui::Mod::PatternRect { .. }))
+        || (matches!(d.kind, Kind::PatternRect { .. }) && d.inputs.first().is_some_and(|i| i.accept == selection::FEATURES));
     let raw_title = title(&d.kind);
     let heading = if d.editing.is_some() { crate::i18n::format("dialog.edit_title", &[("title", tr(raw_title))]) } else { tr(raw_title).to_string() };
     let frame = crate::frame::dock_frame(ctx, side);
@@ -2565,11 +2661,14 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                         ui.end_row();
                     }
                     Kind::Mirror => {
-                        row_label(ui, "Operation");
-                        let mut op = usize::from(d.extra.get("combine").and_then(Value::as_bool).unwrap_or(false));
-                        combo(ui, "mi_op", &["New Body", "Join"], &mut op);
-                        d.extra.insert("combine".into(), json!(op == 1));
-                        ui.end_row();
+                        // Feature replay retains the source operation; Join is for body copies.
+                        if d.inputs.first().is_none_or(|i| i.accept != selection::FEATURES) {
+                            row_label(ui, "Operation");
+                            let mut op = usize::from(d.extra.get("combine").and_then(Value::as_bool).unwrap_or(false));
+                            combo(ui, "mi_op", &["New Body", "Join"], &mut op);
+                            d.extra.insert("combine".into(), json!(op == 1));
+                            ui.end_row();
+                        }
                     }
                     Kind::Measure { result, show, .. } => measure_rows(app, ui, result.as_ref(), show),
                     Kind::OffsetPlane { offset } => {
@@ -2681,22 +2780,23 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                         enter |= field(ui, distance);
                         ui.end_row();
                     }
-                    Kind::Thread { designation, length } => {
-                        // Fusion's order: Modeled, Full Length, then the size; a length only when not
-                        // full.
+                    Kind::Thread { designation, length, suggested, of } => {
                         row_label(ui, "Modeled");
                         extra_check(ui, &mut d.extra, "modeled");
                         ui.end_row();
                         row_label(ui, "Full Length");
                         let mut full = length.trim().is_empty();
-                        if ui.checkbox(&mut full, "").changed() {
+                        let response = ui.checkbox(&mut full, "");
+                        publish_row(&response);
+                        if response.changed() {
                             *length = if full { String::new() } else { "10 mm".into() };
                         }
                         ui.end_row();
-                        row_label(ui, "Size");
-                        let r = ui.add(egui::TextEdit::singleline(designation).hint_text(tr("fits the face, e.g. M8")));
-                        enter |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        ui.end_row();
+                        let (submitted, reset) = crate::dialogs_thread::rows(ui, designation, suggested);
+                        enter |= submitted;
+                        if reset {
+                            of.clear();
+                        }
                         if !full {
                             row_label(ui, "Length");
                             enter |= field(ui, length);
@@ -2729,6 +2829,9 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                             row_label(ui, l);
                             enter |= field(ui, v);
                             ui.end_row();
+                        }
+                        if d.inputs.first().is_some_and(|i| i.accept == selection::FEATURES) {
+                            feature_pattern_alignment_row(ui, &mut d.extra, 0);
                         }
                     }
                     Kind::Loft { operation } => {
@@ -2877,7 +2980,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                     Kind::Surface(k) => enter |= crate::dialogs_surface::rows(ui, k),
                     Kind::SketchModify(k) => enter |= crate::sketch_modify_ui::rows(ui, k),
                     Kind::SaveMesh(k) => enter |= crate::dialogs_save_mesh::rows(app, ui, k),
-                    Kind::ViewDxf { dashed } => crate::dialogs_view_dxf::rows(app, ui, dashed),
+                    Kind::ViewDxf { dashed, tolerance } => crate::dialogs_view_dxf::rows(app, ui, dashed, tolerance),
                     Kind::Plastic(k) => enter |= crate::dialogs_plastic::rows(app, ui, k, &d.inputs),
                     Kind::Appearance(k) => enter |= crate::dialogs_appearance::rows(app, ui, k, &mut d.inputs),
                     Kind::Motion(k) => enter |= crate::dialogs_motion::rows(app, ui, k, &mut d.inputs),
@@ -3327,13 +3430,18 @@ pub(crate) fn change_param(app: &mut SolveApp, name: &str, expression: &str) -> 
 
 /// Start a sketch on a picked plane or planar face and turn the view to face it.
 pub fn start_sketch(app: &mut SolveApp, sel: &Sel) -> Result<(), String> {
-    let plane = match sel {
-        Sel::Plane { name } => json!(name),
-        Sel::Face { .. } => crate::sketch_attachment_ui::face_plane(app, sel).ok_or("Selected face placement no longer exists")?,
+    let mut params = match sel {
+        Sel::Plane { name } => json!({ "plane": name }),
+        Sel::Face { .. } => json!({ "plane": crate::sketch_attachment_ui::face_plane(app, sel).ok_or("Selected face placement no longer exists")? }),
         _ => return Err("Select an origin plane, construction plane or planar body face".into()),
     };
+    if let Sel::Plane { name } = sel
+        && let Some(flip) = flip_toward_viewer(app, name)
+    {
+        params["flip"] = json!(flip);
+    }
     let before = app.cam;
-    app.run("sketch.create", json!({ "plane": plane })).map_err(|error| crate::friendly_error("sketch.create", &error))?;
+    app.run("sketch.create", params).map_err(|error| crate::friendly_error("sketch.create", &error))?;
     app.pre_sketch_cam = Some(before);
     look_at_sketch(app);
     // On a face: look at the picked point, not the plane's origin (a corner of the face),
@@ -3345,6 +3453,40 @@ pub fn start_sketch(app: &mut SolveApp, sel: &Sel) -> Result<(), String> {
         app.animate_to(to);
     }
     Ok(())
+}
+
+/// A new sketch on origin or construction plane `name` faces the viewer: when the camera is
+/// behind the plane's normal, the in-plane axis to turn the plane about (`"x"` or `"y"`), chosen
+/// so the sketch's y axis stays as upright on screen as it can (x then runs to the right).
+fn flip_toward_viewer(app: &SolveApp, name: &str) -> Option<&'static str> {
+    let plane = plane_by_name(app, name)?;
+    let n = plane.normal();
+    // Where the eye is: in perspective its position, in orthographic only its direction counts.
+    let side = if app.cam.fov > 0.0 { (app.cam.eye() - plane.origin).dot(n) } else { app.cam.basis().2.dot(n) };
+    if side >= -1e-9 {
+        return None;
+    }
+    let up = app.cam.up.dir();
+    Some(if plane.y.dot(up) > 1e-9 { "y" } else { "x" })
+}
+
+/// The world plane of an origin plane or a construction plane by name.
+fn plane_by_name(app: &SolveApp, name: &str) -> Option<solidcraft_engine::geom::Plane> {
+    if let Some(p) = solidcraft_engine::geom::Plane::named(name) {
+        // In an active component its origin planes are the component's.
+        let m = app.session.active_component_frame();
+        let (o, x, y) = (
+            solidcraft_engine::doc::apply_point(&m, p.origin),
+            solidcraft_engine::doc::apply_vector(&m, p.x),
+            solidcraft_engine::doc::apply_vector(&m, p.y),
+        );
+        return solidcraft_engine::geom::Plane::new(o, x, y);
+    }
+    let st = app.session.world_state();
+    st.construct.iter().find(|c| c.name == name).and_then(|c| match &c.geom {
+        solidcraft_engine::doc::construct::ConstructGeom::Plane(pl) => Some(*pl),
+        _ => None,
+    })
 }
 
 /// Animate the camera to look straight at the active sketch plane.
@@ -3367,8 +3509,8 @@ fn sels(d: &Dialog, i: usize) -> &[Sel] {
 }
 
 pub(crate) fn run_dialog(app: &mut SolveApp, d: &Dialog) -> Result<(), String> {
-    if let Kind::ViewDxf { dashed } = &d.kind {
-        return crate::dialogs_view_dxf::run(app, *dashed);
+    if let Kind::ViewDxf { dashed, tolerance } = &d.kind {
+        return crate::dialogs_view_dxf::run(app, *dashed, *tolerance);
     }
     // Saving asks for a file name first; `Err("")` is the user backing out of that.
     if let Kind::SaveMesh(k) = &d.kind {
@@ -3698,7 +3840,12 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
             };
             let mut p = json!({"dir1": pt(d1), "count1": count, "spacing1": spacing});
             pattern_objects(s, sels(d, 0), &mut p);
-            if let Some((_, d2)) = sels(d, 2).first().and_then(|x| axis_of(app, x)) {
+            let kept2 = d.extra.get("dir2").and_then(|v| serde_json::from_value::<[f64; 3]>(v.clone()).ok()).map(|a| Vec3::new(a[0], a[1], a[2]));
+            let d2 = match sels(d, 2).first() {
+                Some(x) => Some(axis_of(app, x).ok_or("the second direction must be an axis, a sketch line or a straight edge")?.1),
+                None => kept2,
+            };
+            if let Some(d2) = d2 {
                 p["dir2"] = pt(d2);
                 p["count2"] = json!(count2);
                 p["spacing2"] = json!(spacing2);
@@ -3914,10 +4061,10 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
             need(0, "planar faces")?;
             ("solid.offset_face", json!({"faces": face_points(0), "distance": distance}))
         }
-        Kind::Thread { designation, length } => {
+        Kind::Thread { designation, length, suggested, .. } => {
             need(0, "a cylindrical face")?;
             let mut p = json!({"face": face_points(0).into_iter().next().unwrap_or(Value::Null)});
-            if !designation.trim().is_empty() {
+            if !designation.trim().is_empty() && suggested.as_deref() != Some(designation.as_str()) {
                 p["designation"] = json!(designation.trim());
             }
             if !length.trim().is_empty() {
@@ -3994,7 +4141,8 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
                         continue;
                     }
                     taken.extend(crate::viewport::grouped_selection(s, x));
-                    places.extend(face_point(x).map(|p| json!({ "position": p })));
+                    let kept = d.extra.get("position_exprs").filter(|k| face_point(x).is_some_and(|p| p == k["point"])).map(|k| k["at"].clone());
+                    places.extend(face_point(x).map(|p| json!({ "position": kept.unwrap_or(p) })));
                 }
             }
             let mut out = Vec::new();
@@ -4352,6 +4500,7 @@ pub(crate) fn plane_sel(s: &Session, pl: &PlaneRef) -> Option<Sel> {
         PlaneRef::Origin { name } => Some(Sel::Plane { name: name.clone() }),
         PlaneRef::Construction { name } => Some(Sel::Plane { name: name.to_string() }),
         PlaneRef::Custom { plane } | PlaneRef::Face { plane, .. } => face_sel(s, plane.origin),
+        PlaneRef::Flipped { base, .. } => plane_sel(s, base),
         _ => None,
     }
 }
@@ -4581,7 +4730,7 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
             d.extra.insert("pull".into(), pt3(pull.0));
             d
         }
-        FeatureKind::Hole { position, direction, diameter, depth, hole, points, thread, to } => {
+        FeatureKind::Hole { position, at, direction, diameter, depth, hole, points, thread, to } => {
             let mut d = start("solid.hole")?;
             let mut k = hole_defaults();
             if let Kind::Hole { diameter: dia, depth: dep, kind, cb_diameter, cb_depth, cs_diameter, cs_angle, opts } = &mut k {
@@ -4629,6 +4778,12 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
                         inp.items = vec![face_sel(s, position.0).unwrap_or(Sel::Face { body: String::new(), index: 0, point: position.0 })];
                     }
                     d.extra.insert("direction".into(), pt3(direction.0));
+                    // A position given as expressions (#1678) is sent again while the pick
+                    // stays where the hole is; a new pick places it by the point picked.
+                    if let Some(at) = at {
+                        let exprs: Vec<&str> = at.iter().map(|e| e.as_str()).collect();
+                        d.extra.insert("position_exprs".into(), json!({"at": exprs, "point": pt3(position.0)}));
+                    }
                 }
             }
             if to.is_some() {
@@ -4719,8 +4874,8 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
         FeatureKind::Mirror { features, plane, bodies, .. } => {
             let mut d = start("solid.mirror")?;
             let ids: Vec<u64> = features.iter().filter_map(|n| s.doc.find_feature(n).map(|f| f.id)).collect();
-            // Features that made no body of their own (a hole) were picked as features.
-            let as_features = ids.iter().any(|id| !st.bodies.iter().any(|b| b.feature == *id));
+            // Replay references stay features, including features that created a body.
+            let as_features = !features.is_empty();
             if let Some(inp) = d.inputs.get_mut(0) {
                 if !bodies.is_empty() {
                     inp.items = bodies.iter().map(|name| Sel::Body { name: name.to_string() }).collect();
@@ -4745,8 +4900,12 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
                 copied.iter().map(|name| Sel::Body { name: name.to_string() }).collect()
             };
             let mut d = match pattern {
-                PatternKind::Rectangular { dir1, count1, spacing1, dir2, count2, spacing2 } => {
+                PatternKind::Rectangular { dir1, count1, spacing1, dir2, count2, spacing2, alignment, alignment2, reversed, reversed2 } => {
                     let mut d = start("solid.pattern.rectangular")?;
+                    d.extra.insert("alignment".into(), json!(alignment));
+                    d.extra.insert("alignment2".into(), json!(alignment2));
+                    d.extra.insert("reversed".into(), json!(reversed));
+                    d.extra.insert("reversed2".into(), json!(reversed2));
                     d.kind = Kind::PatternRect {
                         count: count1.to_string(),
                         spacing: spacing1.to_string(),
@@ -4769,8 +4928,10 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
                     }
                     d
                 }
-                PatternKind::Circular { origin, axis, count, angle } => {
+                PatternKind::Circular { origin, axis, count, angle, alignment, reversed } => {
                     let mut d = start("solid.pattern.circular")?;
+                    d.extra.insert("alignment".into(), json!(alignment));
+                    d.extra.insert("reversed".into(), json!(reversed));
                     d.kind = Kind::PatternCirc { count: count.to_string(), angle: angle.to_string() };
                     match world_axis(axis.0).filter(|_| origin.len() < 1e-9) {
                         Some(name) => {
@@ -4787,8 +4948,8 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
                 // No dialog for a path pattern yet: edit it with timeline.redefine.
                 PatternKind::Path { .. } => return None,
             };
-            // Features that made no body of their own (a hole, a fillet) were picked as features.
-            let as_features = copied.is_empty() && ids.iter().any(|id| !st.bodies.iter().any(|b| b.feature == *id));
+            // Replay references stay features, including features that created a body.
+            let as_features = !features.is_empty();
             if let Some(inp) = d.inputs.first_mut() {
                 if as_features {
                     inp.accept = selection::FEATURES;
@@ -4928,10 +5089,13 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
             d.kind = Kind::Thread {
                 designation: designation.clone().unwrap_or_default(),
                 length: length.as_deref().map(str::to_string).unwrap_or_default(),
+                suggested: None,
+                of: Vec::new(),
             };
             if let Some(inp) = d.inputs.first_mut() {
                 inp.items = face_sel(s, face.0).into_iter().collect();
             }
+            d.sync_thread(s);
             d
         }
         FeatureKind::BoundingSolid { bodies, margin } => {

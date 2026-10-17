@@ -94,3 +94,28 @@ fn a_result_that_removes_more_than_the_blend_is_refused() {
     let m = too_large(crate::blend_fit::check_volume(&b, worse, &e, size));
     assert!(m.contains("more than the chamfer can"), "{m}");
 }
+
+/// #1668: a box shelled outward 2 mm, open at the bottom. R5 on its top outer edge alone would
+/// reach past the sharp inside corner 2 mm away; with the inside edge rounded in the same
+/// fillet, that corner is filled, and the two build as one feature as they do one after the
+/// other: the outer round takes (1 - π/4) · 25 mm² along 104 mm, the inner one adds it along
+/// 100 mm.
+#[test]
+fn rounds_on_both_sides_of_a_wall_build_as_one_fillet() {
+    let outer = box_solid(Vec3::new(-52.0, -32.0, 0.0), Vec3::new(52.0, 32.0, 42.0)).unwrap();
+    let shelled = cut(&outer, [-50.0, -30.0, -1.0], [50.0, 30.0, 40.0]);
+    let (out_edge, in_edge) = (Vec3::new(0.0, 32.0, 42.0), Vec3::new(0.0, 30.0, 40.0));
+    let m = too_large(crate::fillet(&shelled, &[out_edge], 5.0));
+    assert!(m.contains("runs past the faces beside the edge"), "{m}");
+    let both = crate::fillet(&shelled, &[out_edge, in_edge], 5.0).unwrap();
+    assert!(both.validity().is_empty(), "{:?}", both.validity());
+    let section = (1.0 - std::f64::consts::FRAC_PI_4) * 25.0;
+    let want = shelled.volume_at(0.01).unwrap() - section * 104.0 + section * 100.0;
+    let v = crate::measure(&both).unwrap().volume;
+    assert!((v - want).abs() < 1e-4 * want, "{v} vs {want}");
+    let stepped = crate::fillet(&crate::fillet(&shelled, &[in_edge], 5.0).unwrap(), &[out_edge], 5.0).unwrap();
+    assert!((crate::measure(&stepped).unwrap().volume - v).abs() < 1e-4 * want);
+    // Past the wall's own room they still cross: R7's outer round reaches the inner one's arc.
+    let m = too_large(crate::fillet(&shelled, &[out_edge, in_edge], 7.0));
+    assert!(m.contains("the largest radius that fits"), "{m}");
+}

@@ -71,11 +71,7 @@ pub(super) fn placement(s: &Session, inputs: &[SelInput]) -> Option<(Vec<u64>, V
 
 /// The trace's parameters (OK's `motion.trace.keep` and the preview's `motion.trace`).
 pub fn params(s: &Session, f: &TraceForm, inputs: &[SelInput]) -> Result<Value, String> {
-    let (path, at, shown, placed) = placement(s, inputs).ok_or("select a point on a component")?;
-    // The trace starts where the part is placed, not where it may be shown.
-    let at = mat_inverse(&shown).map(|m| apply_point(&placed, apply_point(&m, at))).ok_or("select a point on a component")?;
-    let occurrence = if path.is_empty() { json!(0) } else { json!(path) };
-    let mut p = json!({"occurrence": occurrence, "point": pt(at)});
+    let mut p = picked_point(s, inputs)?;
     if f.by_study {
         p["study"] = json!(s.doc.assembly.studies.get(f.study).ok_or("no motion study yet")?.id);
     } else {
@@ -89,6 +85,15 @@ pub fn params(s: &Session, f: &TraceForm, inputs: &[SelInput]) -> Result<Value, 
         p["samples"] = json!(f.samples.trim().parse::<f64>().map_err(|_| "samples must be a number")?);
     }
     Ok(p)
+}
+
+/// The picked point as `motion.trace` and `motion.plot` take it: `{occurrence, point}`.
+pub fn picked_point(s: &Session, inputs: &[SelInput]) -> Result<Value, String> {
+    let (path, at, shown, placed) = placement(s, inputs).ok_or("select a point on a component")?;
+    // The point starts where the part is placed, not where it may be shown.
+    let at = mat_inverse(&shown).map(|m| apply_point(&placed, apply_point(&m, at))).ok_or("select a point on a component")?;
+    let occurrence = if path.is_empty() { json!(0) } else { json!(path) };
+    Ok(json!({"occurrence": occurrence, "point": pt(at)}))
 }
 
 /// Where and why the motion stopped short, ending the trace (`None`: it went all the way).

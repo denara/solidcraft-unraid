@@ -5,7 +5,7 @@ members = ["crates/*", "apps/*", "xtask"]
 exclude = ["vendor"]
 
 [workspace.package]
-version = "0.13.1"
+version = "0.14.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.95"
@@ -71,6 +71,8 @@ ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
 # images
 image = { version = "0.25", default-features = false, features = ["png", "hdr"] }
 png = "0.18.1"
+# LZW for GIF animations (MIT OR Apache-2.0, pure Rust; already in the tree through image's tiff).
+weezl = "0.1.12"
 
 # ui
 egui = "0.36"

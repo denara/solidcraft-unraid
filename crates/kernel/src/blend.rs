@@ -1637,7 +1637,7 @@ fn lies_on(e: &mt::Edge, along: &[mt::Edge], tol: f64) -> bool {
 }
 
 /// [`smooth_chain`], walking on only over edges `keep` allows.
-fn smooth_chain_within(solid: &Solid, edge: &mt::Edge, keep: &dyn Fn(&mt::Edge) -> bool) -> Option<Vec<mt::EdgeID>> {
+pub(crate) fn smooth_chain_within(solid: &Solid, edge: &mt::Edge, keep: &dyn Fn(&mt::Edge) -> bool) -> Option<Vec<mt::EdgeID>> {
     use mt::{BoundedCurve, ParametricCurve};
     let all = Body::unique_edges(solid);
     // Along the edge as it runs from its front to its back (an edge may run against its curve).
@@ -1859,7 +1859,7 @@ fn fillet_built(body: &Body, edges: &[Vec3], radius: f64) -> Result<Body> {
         // trimmed by the face. Refused, the refusal above stands.
         .or_else(|e| blend_with(body, edges, radius, Shape::Round, "fillet", true).and_then(|b| closed(body, b)).map_err(|_| e))
         // Blends meeting at corners on curved faces: all at once.
-        .or_else(|e| corners(body, edges, radius, Shape::Round, "fillet").and_then(|b| closed(body, b)).map_err(|e2| keep_size(e, e2)))
+        .or_else(|e| corners(body, edges, radius, Shape::Round, "fillet", false).and_then(|b| closed(body, b)).map_err(|e2| keep_size(e, e2)))
 }
 
 /// The first refusal, unless only the second found the blend too large (a smaller one may fit).
@@ -1872,8 +1872,9 @@ fn keep_size(e: KernelError, e2: KernelError) -> KernelError {
 }
 
 /// Blend the edges together, rebuilding the corners where they meet on faces of any surface
-/// (see [`crate::curveblend::corner_blend`]).
-fn corners(body: &Body, edges: &[Vec3], r: f64, shape: Shape, what: &str) -> Result<Body> {
+/// (see [`crate::curveblend::corner_blend`]); with `g2`, the corners where three blends meet are
+/// G2 patches ([`crate::corner_g2`]) instead of pieces of the ball's sphere.
+fn corners(body: &Body, edges: &[Vec3], r: f64, shape: Shape, what: &str, g2: bool) -> Result<Body> {
     let counts = record::counts(&[body]);
     let cur = crate::boolean_record::healed(body)?;
     let size = cur.size();
@@ -1882,8 +1883,25 @@ fn corners(body: &Body, edges: &[Vec3], r: f64, shape: Shape, what: &str) -> Res
     if ids.len() != edges.len() {
         return Err(KernelError::Invalid("no edge near a selected point".into()));
     }
-    let (made, rec) = guard(what, || crate::curveblend::corner_blend(&solid, &ids, size, r, shape == Shape::Round))?;
+    let (made, rec) = guard(what, || match g2 {
+        // The corner blend as it always was, bit for bit.
+        false => crate::curveblend::corner_blend(&solid, &ids, size, r, shape == Shape::Round),
+        true => crate::curveblend::corner_blend_style(&solid, &ids, size, r, shape == Shape::Round, true),
+    })?;
     Ok(record::after(record::rebuilt(made, &[&solid], &rec)?, &cur, &counts))
+}
+
+/// [`fillet`] whose corners where three blended edges meet are G2 patches: the corner repeats each
+/// blend's surface up to the second order (see [`crate::corner_g2`]) instead of the rolling ball's
+/// sphere. The corner construction is the all-at-once corner blend, so a configuration it cannot
+/// hold is refused rather than quietly given the ball's sphere; [`fillet`] (the default) is
+/// unchanged.
+pub fn fillet_g2_corners(body: &Body, edges: &[Vec3], radius: f64) -> Result<Body> {
+    body.require_brep("fillet")?;
+    if !(radius.is_finite() && radius > 0.0) {
+        return Err(KernelError::Invalid("the blend radius must be finite and positive".into()));
+    }
+    corners(body, edges, radius, Shape::Round, "fillet", true).and_then(|b| closed(body, b))
 }
 
 /// The step of the radius search: three significant digits of the requested radius.
@@ -2191,7 +2209,7 @@ fn chamfer_built(body: &Body, edges: &[Vec3], distance: f64) -> Result<Body> {
         Ok(cur)
     };
     // Chamfers meeting at corners on curved faces: all at once.
-    one_by_one().or_else(|e| corners(body, edges, distance, Shape::Flat, "chamfer").map_err(|e2| keep_size(e, e2)))
+    one_by_one().or_else(|e| corners(body, edges, distance, Shape::Flat, "chamfer", false).map_err(|e2| keep_size(e, e2)))
 }
 
 /// `cur` cut by one cutter, with its history over `[cur]` (`None`: nothing left).

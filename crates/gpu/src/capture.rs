@@ -20,7 +20,6 @@ use crate::{GpuError, Result, popped};
 /// The colour format pictures are drawn in: sRGB bytes as they are, like the viewport's usual
 /// (non-sRGB) target.
 pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth24PlusStencil8;
 /// Samples per pixel (MSAA), as the desktop viewport's default; 1 where the device has no 4×.
 pub const SAMPLES: u32 = 4;
 /// The largest picture side (pixels); the device's texture limit may lower it.
@@ -39,6 +38,8 @@ pub struct Capturer {
     /// The adapter is a GPU driver running on the CPU (llvmpipe, lavapipe, WARP).
     software: bool,
     samples: u32,
+    /// The depth format: 32-bit float (reversed depth) where the device has it ([`crate::depth_format`]).
+    depth: wgpu::TextureFormat,
     max_side: u32,
     state: Mutex<State>,
 }
@@ -54,17 +55,25 @@ struct State {
 impl Capturer {
     /// The pipelines on an existing device (the application's).
     pub fn new(adapter: &wgpu::Adapter, device: wgpu::Device, queue: wgpu::Queue) -> Result<Self> {
+        let depth = crate::depth_format(&device, true);
+        Self::with_depth(adapter, device, queue, depth)
+    }
+
+    /// As [`Capturer::new`], drawing with the depth format `depth` (with a stencil): the fallback
+    /// `Depth24PlusStencil8` on a device that has a float one too, to compare the two.
+    pub fn with_depth(adapter: &wgpu::Adapter, device: wgpu::Device, queue: wgpu::Queue, depth: wgpu::TextureFormat) -> Result<Self> {
         let flags = |f: wgpu::TextureFormat| adapter.get_texture_format_features(f).flags;
-        let samples = if flags(FORMAT).sample_count_supported(SAMPLES) && flags(DEPTH).sample_count_supported(SAMPLES) { SAMPLES } else { 1 };
+        let samples = if flags(FORMAT).sample_count_supported(SAMPLES) && flags(depth).sample_count_supported(SAMPLES) { SAMPLES } else { 1 };
         let scopes = error_scopes(&device);
-        let renderer = Renderer::new(&device, GpuTarget { format: FORMAT, depth: Some(DEPTH), samples, tess: false }, None);
-        let background = background_pipeline(&device, samples);
+        let renderer = Renderer::new(&device, GpuTarget { format: FORMAT, depth: Some(depth), samples, tess: false }, None);
+        let background = background_pipeline(&device, samples, depth);
         caught(scopes).map_or(Ok(()), |e| Err(GpuError::Pipeline(e)))?;
         let max_side = device.limits().max_texture_dimension_2d.min(MAX_SIDE);
         Ok(Capturer {
             adapter: adapter.get_info().name,
             software: adapter.get_info().device_type == wgpu::DeviceType::Cpu,
             samples,
+            depth,
             max_side,
             state: Mutex::new(State { renderer, background, key: 0, access_version: 0 }),
             device,
@@ -80,6 +89,19 @@ impl Capturer {
         // Errors are caught per picture (error scopes); anything else is logged, never a panic.
         device.on_uncaptured_error(Arc::new(|e: wgpu::Error| log::error!("GPU: {e}")));
         Self::new(&adapter, device, queue)
+    }
+
+    /// As [`Capturer::headless`], drawing with the depth format `depth` ([`Capturer::with_depth`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn headless_with_depth(depth: wgpu::TextureFormat) -> Result<Self> {
+        let (adapter, device, queue) = crate::open_headless()?;
+        device.on_uncaptured_error(Arc::new(|e: wgpu::Error| log::error!("GPU: {e}")));
+        Self::with_depth(&adapter, device, queue, depth)
+    }
+
+    /// The depth format pictures are drawn with; float formats are drawn with reversed depth.
+    pub fn depth_format(&self) -> wgpu::TextureFormat {
+        self.depth
     }
 
     /// The adapter's name.
@@ -132,7 +154,7 @@ impl Capturer {
         };
         let resolved = texture("sc_capture", FORMAT, 1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
         let multisampled = (self.samples > 1).then(|| texture("sc_capture_ms", FORMAT, self.samples, wgpu::TextureUsages::RENDER_ATTACHMENT));
-        let depth = texture("sc_capture_depth", DEPTH, self.samples, wgpu::TextureUsages::RENDER_ATTACHMENT);
+        let depth = texture("sc_capture_depth", self.depth, self.samples, wgpu::TextureUsages::RENDER_ATTACHMENT);
         let (resolved_view, depth_view) = (resolved.create_view(&Default::default()), depth.create_view(&Default::default()));
         let multisampled_view = multisampled.as_ref().map(|t| t.create_view(&Default::default()));
         let (top, bottom) = scene.background.unwrap_or(BACKGROUND);
@@ -155,7 +177,10 @@ impl Capturer {
                     })],
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                         view: &depth_view,
-                        depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(crate::view::far_depth(crate::view::reversed_depth(Some(self.depth)))),
+                            store: wgpu::StoreOp::Discard,
+                        }),
                         stencil_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0), store: wgpu::StoreOp::Discard }),
                     }),
                     timestamp_writes: None,
@@ -387,7 +412,7 @@ fn background_vertices(device: &wgpu::Device, top: Rgb, bottom: Rgb) -> wgpu::Bu
     })
 }
 
-fn background_pipeline(device: &wgpu::Device, samples: u32) -> wgpu::RenderPipeline {
+fn background_pipeline(device: &wgpu::Device, samples: u32, depth: wgpu::TextureFormat) -> wgpu::RenderPipeline {
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("sc_capture_background"),
         source: wgpu::ShaderSource::Wgsl(BACKGROUND_SHADER.into()),
@@ -409,7 +434,7 @@ fn background_pipeline(device: &wgpu::Device, samples: u32) -> wgpu::RenderPipel
         },
         primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, ..Default::default() },
         depth_stencil: Some(wgpu::DepthStencilState {
-            format: DEPTH,
+            format: depth,
             depth_write_enabled: Some(false),
             depth_compare: Some(wgpu::CompareFunction::Always),
             stencil: Default::default(),

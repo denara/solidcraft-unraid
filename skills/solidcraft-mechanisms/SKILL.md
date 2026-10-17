@@ -42,6 +42,7 @@ Written against SolidCraft `main` after 0.11.1, which counts the degrees of free
 ## Linked and closed motion
 - **Motion links:** `joint.motion_link {"a":..., "b":..., "ratio":r, "offset":o}` sets b = r·a + o, clamped to b's own limits. `ratio` is b's units per a's: a pinion that moves its rack 0.5 mm per degree takes `ratio: 0.5`. `offset` is in b's units: degrees for an angle, mm for a distance, or an expression. A mirrored part takes `ratio: -1`, and limits mirrored too. Chains (a drives b, b drives c) work in any order of creation. Drive only the head of a chain.
 - **Gears, racks and screws:** links whose ratio comes from radii or a pitch, kept up to date when they change. `joint.gear {"a":..., "b":..., "ra":r1, "rb":r2}` turns b r1/r2 as far as a, the other way (`internal: true`: the same way). `joint.rack_pinion {"a":pinion, "b":rack, "radius":r}` moves the rack r·θ. `joint.screw {"joint":cylindrical, "pitch":p}` (or `a`, `b` for a revolute and a slider) advances p per turn. A size is mm, an expression (`"m*z1/2"`), or a round face `{"occurrence":..., "circle":[x,y,z]}` whose radius is read again after every edit. `reverse: true` turns b the other way (a left-hand thread). The driven joint keeps where it is. Drive a, never b.
+- **Cams:** `joint.cam {"a":camJoint, "b":follower, "profile":{"sketch":"CamSketch"}}` (or `{"edges":[[x,y,z]]}` on the cam's body) makes a slider or revolute follower ride the cam's outline. `follower`: `knife` (default), `roller` with `radius` (mm, an expression or the roller's round face), `flat`. A revolute follower needs `tip` (its knife's point or roller's centre). The table is worked out again after every edit; the follower keeps where it is, so model it touching. Drive the cam, never the follower.
 - **Closed loops:** an actuator between a frame and a hinged panel takes three joints besides the hinge:
   - a revolute root pin (frame and barrel)
   - a slider (barrel and rod), with z along the actuator from root to tip on both origins, both at the root pin, and the stroke as its limits
@@ -56,6 +57,8 @@ Written against SolidCraft `main` after 0.11.1, which counts the degrees of free
 - **Motion study:** `motion.study {"name":..., "steps":N, "keys":[{"joint":..., "points":[[step, value], ...]}]}`. Values are degrees or mm, linear between points. Key only the driving joints; linked joints and loops follow.
 - **Play:** `motion.play {"study":..., "step":s}` sets the joints there, which changes the design, and answers every occurrence's pose (about 0.2 KB per occurrence). `motion.export {"study":..., "samples":n}` gives the poses at every step without changing the design.
 - **Trace:** `motion.trace {"occurrence":..., "point":[x,y,z], "joint":..., "from":0, "to":360}` (or `"study":...` instead of joint, from and to) answers the world path of a point of a part, such as a coupler curve, without changing the design. It ends at `stopped_at` where a loop or contact stops the motion. `motion.trace.keep` with the same params keeps it as a 3D sketch spline.
+- **Plot:** `motion.plot {"study":..., "joints":[...], "duration":seconds}` answers each joint value's `value`, `velocity` and `acceleration` per sample (finite differences; per step, or per second with a duration), and with `"occurrence"` and `"point"` a point's `position`, `velocity`, `acceleration`, `speed`. Check a follower's rate against the analytic one this way, without changing the design.
+- **Collisions:** `motion.interference {"study":..., "occurrences":[...], "against":[...]}` plays the study (contact sets don't stop it) and lists each colliding pair with `first_step` and `steps` ranges; `clear: true` when none. It takes at most 256 bodies: on a big design list the moving part as `occurrences` and what it must miss as `against`. Parts joined at a knuckle often overlap by design and show up at every step.
 
 ## Verify
 - **Each joint:** `execute occurrence.properties {"occurrence":"Wing:1"}` (under 1 KB) gives the world bbox and centre of mass of one occurrence. Joining must not move them.
@@ -63,7 +66,7 @@ Written against SolidCraft `main` after 0.11.1, which counts the degrees of free
 - **Each stop:** solve for where the limit is reached, and compare with the value the drive stopped at. Stops are found by bisection, so they land within about 0.01 degrees.
 - **Links:** b must equal r·a + o exactly, unless that is outside b's limits; then b sits at the limit and the mirror stops following.
 - **The whole motion:** `motion.play` at a few steps, or one `motion.export`, and compare the poses with the values you planned.
-- **Look:** when the server is bridged, `screenshot` after `motion.play` shows the app window at that step.
+- **Look:** when the server is bridged, `screenshot` after `motion.play` shows the app window at that step. `motion.export_animation {"study":..., "path":"tour.gif"}` (or `joint`, `from`, `to`) writes the whole motion as an animated GIF without changing the design.
 
 ## Save
 - Drive the joints back to the pose you planned to keep (`motion.play` at step 0, or `joint.drive`), then `save {path}`.

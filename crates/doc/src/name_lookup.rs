@@ -271,6 +271,25 @@ pub fn locate_face(st: &ModelState, name: &str, p: Vec3) -> Option<FaceHit> {
     locate_in(st.bodies.iter().enumerate().filter(|(_, b)| !b.body.is_mesh()), name, p)
 }
 
+/// [`locate_face`] for a feature that works on the faces of the body called `body` (a shell, a
+/// draft…): the one face of that body with the very name, found without working out the names
+/// of every other body (a body named from geometry is meshed for it: seconds in a large model).
+/// Else as [`locate_face`], over every body: the name moved to another body (a combine took the
+/// face), or on this body it names a piece of a split face or a merged one. The same face on
+/// another body (a copy of this one) is not a piece of this body's face.
+pub(crate) fn locate_face_on_body(st: &ModelState, body: Option<&str>, name: &str, p: Vec3) -> Option<FaceHit> {
+    if legacy_name(name).is_none()
+        && let Some(i) = body.and_then(|n| st.bodies.iter().position(|b| b.name == n))
+        && let Some(b) = st.bodies.get(i).filter(|b| !b.body.is_mesh())
+        && let Some(hit) = locate_in(std::iter::once((i, b)), name, p)
+        && !hit.split
+        && naming::names(b).faces.get(hit.face).is_some_and(|n| n == name)
+    {
+        return Some(hit);
+    }
+    locate_face(st, name, p)
+}
+
 /// [`locate_face`] among `bodies` (with their indices).
 fn locate_in<'a>(bodies: impl Iterator<Item = (usize, &'a ModelBody)>, name: &str, p: Vec3) -> Option<FaceHit> {
     if let Some(old) = legacy_name(name) {

@@ -145,7 +145,7 @@ fn map_plane_ref(m: &Mat, p: &mut PlaneRef) {
             *plane = map_plane(m, plane);
             *at = apply_point(m, *at);
         }
-        PlaneRef::Offset { base, .. } => map_plane_ref(m, base),
+        PlaneRef::Offset { base, .. } | PlaneRef::Flipped { base, .. } => map_plane_ref(m, base),
         PlaneRef::AtAngle { base, axis_origin, axis_dir, .. } => {
             map_plane_ref(m, base);
             *axis_origin = apply_point(m, *axis_origin);

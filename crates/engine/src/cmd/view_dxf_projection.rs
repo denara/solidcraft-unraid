@@ -1,9 +1,26 @@
 //! Vector hidden-line removal: intersect each projected edge with triangle half planes and
 //! its depth plane, then union occluded parameter intervals. A BVH bounds the candidate work.
-use solidcraft_geom::{Aabb3, Mesh, Vec2, Vec3};
+#[cfg(test)]
+use solidcraft_geom::Mesh;
+use solidcraft_geom::{Aabb3, Vec2, Vec3};
 use solidcraft_io::{DxfEntity, DxfShape};
 use solidcraft_render::Camera;
 use std::collections::BTreeMap;
+
+#[path = "view_dxf_scene.rs"]
+mod scene;
+
+pub(super) struct Drawing {
+    pub lines: Vec<Line>,
+    pub work: usize,
+    pub segments: usize,
+    pub projection_ms: f64,
+    pub occlusion_ms: f64,
+}
+
+pub(super) fn drawing(meshes: &super::meshes::Scene, cam: &Camera) -> Result<Drawing, &'static str> {
+    scene::drawing(meshes, cam)
+}
 
 /// Keep the hidden curves connected: restarting a dash on every short chord would make a
 /// small circular hole look solid. Degree-two joins continue; junctions end the polyline.
@@ -50,6 +67,7 @@ pub(super) fn connect(entities: Vec<DxfEntity>) -> Vec<DxfEntity> {
     result
 }
 
+#[derive(Clone, Debug)]
 pub(super) struct Line {
     pub a: Vec2,
     pub b: Vec2,
@@ -73,15 +91,18 @@ fn overlap(a: &Aabb3, b: &Aabb3) -> bool {
     a.min.x <= b.max.x && b.min.x <= a.max.x && a.min.y <= b.max.y && b.min.y <= a.max.y
 }
 
+#[cfg(test)]
 struct Triangle {
     p: [Vec3; 3],
     bounds: Aabb3,
 }
+#[cfg(test)]
 struct Tree {
     bounds: Aabb3,
     children: Option<(Box<Tree>, Box<Tree>)>,
     triangles: Vec<Triangle>,
 }
+#[cfg(test)]
 impl Tree {
     fn new(mut triangles: Vec<Triangle>) -> Self {
         let b = triangles.iter().fold(Aabb3::EMPTY, |b, t| b.union(&t.bounds));
@@ -213,6 +234,7 @@ fn merge_lines(lines: Vec<Line>, eps: f64) -> Vec<Line> {
 
 /// B-rep edges plus curved silhouettes. Triangle adjacency is welded by position because
 /// different faces can have different vertex indices along their shared boundary.
+#[cfg(test)]
 fn edges(mesh: &Mesh, cam: &Camera, eps: f64) -> Vec<(Vec3, Vec3)> {
     let mut result = Vec::new();
     for (_, e) in mesh.edges.iter().enumerate().filter(|(i, _)| mesh.shaded_edge_visible(*i)) {
@@ -241,7 +263,8 @@ fn edges(mesh: &Mesh, cam: &Camera, eps: f64) -> Vec<(Vec3, Vec3)> {
     result
 }
 
-pub(super) fn drawing(meshes: &[Mesh], cam: &Camera) -> Result<Vec<Line>, &'static str> {
+#[cfg(test)]
+fn reference_drawing(meshes: &[Mesh], cam: &Camera) -> Result<Vec<Line>, &'static str> {
     let (right, up, back) = cam.basis();
     let scale = meshes.iter().fold(Aabb3::EMPTY, |b, m| b.union(&m.bounds())).diagonal().max(1.0);
     let eps = scale * 1e-8;

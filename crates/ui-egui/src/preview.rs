@@ -207,6 +207,7 @@ fn motion_key(cmds: &[(String, Value)], revision: u64, colors: Colors) -> Option
                     | "joint.gear"
                     | "joint.rack_pinion"
                     | "joint.screw"
+                    | "joint.cam"
             )
         })
     {
@@ -856,6 +857,15 @@ mod tests {
         };
         assert!(motion_key(&gear("0 deg"), 7, colors()).is_some());
         assert_eq!(motion_key(&gear("0 deg"), 7, colors()), motion_key(&gear("90 deg"), 7, colors()));
+        // So does a cam dialog turning its cam.
+        let cam = |angle: &str| {
+            vec![
+                ("joint.cam".to_string(), json!({"a": 1, "b": 2, "profile": {"sketch": 3}})),
+                ("joint.drive".to_string(), json!({"joint": 1, "values": [angle]})),
+            ]
+        };
+        assert!(motion_key(&cam("0 deg"), 7, colors()).is_some());
+        assert_eq!(motion_key(&cam("0 deg"), 7, colors()), motion_key(&cam("90 deg"), 7, colors()));
     }
 
     /// Combine previews its result (cut, join or intersect between existing bodies) without an

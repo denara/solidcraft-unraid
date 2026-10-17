@@ -3,7 +3,8 @@
 
 [profile.ci]
 # Heavy tests (one to four minutes each on a CI runner) that pull requests skip. They run on
-# every push to main and nightly (`--ignore-default-filter`), and in `cargo xtask test`.
+# every push to main and nightly (`--ignore-default-filter`), and in `cargo xtask test`. The
+# boolean_props property tests run only nightly (ci.yml excludes them from pushes to main).
 # Keep this list in sync with docs/book/src/dev/testing.md and CONTRIBUTING.md.
 default-filter = """
 not (

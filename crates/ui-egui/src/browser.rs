@@ -10,6 +10,13 @@
 #[path = "occurrence_ui_tests.rs"]
 mod occurrence_ui_tests;
 
+#[path = "browser_model.rs"]
+mod model;
+
+#[cfg(test)]
+#[path = "browser_model_tests.rs"]
+mod model_tests;
+
 use crate::icons::glyphs::badge;
 use std::collections::BTreeSet;
 
@@ -42,6 +49,8 @@ pub fn drawn_occurrences() -> Vec<(Vec<u64>, String, Rect, bool)> {
 /// Browser state kept between frames.
 #[derive(Default)]
 pub struct TreeState {
+    /// Geometry and assembly queries, independent of the camera, selection and row visibility.
+    model: Option<model::Model>,
     /// Folders closed by the user (keys like `c0/bodies`).
     pub collapsed: BTreeSet<String>,
     /// Folders opened by the user (folders that start closed).
@@ -547,7 +556,60 @@ fn browser_contents(app: &mut SolveApp, ui: &mut egui::Ui, acts: &mut Actions) {
     browser_rows(app, ui, acts);
 }
 
+fn prepare_model(app: &mut SolveApp) {
+    if app.tree.model.as_ref().is_none_or(|model| !model.matches(&app.session)) {
+        app.tree.model = Some(model::Model::new(&app.session));
+    }
+}
+
+fn model_placement(app: &mut SolveApp, path: &[u64]) -> Option<std::sync::Arc<solidcraft_engine::occurrences::OccurrencePlacement>> {
+    prepare_model(app);
+    app.tree.model.as_mut()?.placement(&app.session, path)
+}
+
+fn model_children(app: &SolveApp, component: u64) -> Vec<u64> {
+    match app.tree.model.as_ref().filter(|model| model.matches(&app.session)) {
+        Some(model) => model.children.get(&component).cloned().unwrap_or_default(),
+        None => app.session.doc.occurrences.iter().filter(|o| o.parent == component).map(|o| o.id).collect(),
+    }
+}
+
+fn model_body_indices(app: &SolveApp, component: u64) -> Vec<usize> {
+    match app.tree.model.as_ref().filter(|model| model.matches(&app.session)) {
+        Some(model) => model.bodies.get(&component).cloned().unwrap_or_default(),
+        None => app
+            .session
+            .model
+            .state()
+            .bodies
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| app.session.doc.model_body_component(b) == component)
+            .map(|(i, _)| i)
+            .collect(),
+    }
+}
+
+fn model_feature_indices(app: &SolveApp, component: u64, sketches: bool) -> Vec<usize> {
+    match app.tree.model.as_ref().filter(|model| model.matches(&app.session)) {
+        Some(model) => (if sketches { &model.sketches } else { &model.planes }).get(&component).cloned().unwrap_or_default(),
+        None => app
+            .session
+            .doc
+            .features
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| {
+                let kind =
+                    if sketches { matches!(f.kind, FeatureKind::Sketch { .. }) } else { matches!(f.kind, FeatureKind::ConstructionPlane { .. }) };
+                (f.component == component && kind).then_some(i)
+            })
+            .collect(),
+    }
+}
+
 fn browser_rows(app: &mut SolveApp, ui: &mut egui::Ui, acts: &mut Actions) {
+    prepare_model(app);
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .scroll_source(egui::scroll_area::ScrollSource { scroll_bar: true, mouse_wheel: true, ..egui::scroll_area::ScrollSource::NONE })
@@ -668,7 +730,7 @@ fn component_rows(app: &mut SolveApp, ui: &mut egui::Ui, id: u64, depth: usize, 
     if id == 0 {
         crate::dialogs_assembly::browser_joints(app, ui, d);
     }
-    let children: Vec<u64> = app.session.doc.occurrences.iter().filter(|o| o.parent == id).map(|o| o.id).collect();
+    let children = model_children(app, id);
     for occurrence in children {
         occurrence_rows(app, ui, vec![occurrence], d, acts);
     }
@@ -681,7 +743,7 @@ fn occurrence_key(path: &[u64]) -> String {
 /// A placement, rather than a component definition: repeated child IDs remain distinct
 /// because their complete paths are the selection and row identity.
 fn occurrence_rows(app: &mut SolveApp, ui: &mut egui::Ui, path: Vec<u64>, depth: usize, acts: &mut Actions) {
-    let Ok(placement) = app.session.occurrence_placement(&path) else { return };
+    let Some(placement) = model_placement(app, &path) else { return };
     let key = occurrence_key(&path);
     let open = is_open(app, &key, true);
     let active = app.session.active_occurrence_path.as_deref() == Some(path.as_slice())
@@ -765,7 +827,7 @@ fn occurrence_rows(app: &mut SolveApp, ui: &mut egui::Ui, path: Vec<u64>, depth:
     for folder in ["bodies", "sketches", "construction"] {
         occurrence_folder_rows(app, ui, placement.component, &path, folder, depth + 1, acts);
     }
-    let children: Vec<u64> = app.session.doc.occurrences.iter().filter(|o| o.parent == placement.component).map(|o| o.id).collect();
+    let children = model_children(app, placement.component);
     if path.len() < 64 {
         for occurrence in children {
             let mut child = path.clone();
@@ -1246,14 +1308,12 @@ fn entries(app: &SolveApp, comp: u64, folder: &str) -> Vec<Entry> {
     let t = Tokens::get();
     let doc = &app.session.doc;
     let sel = &app.session.selection;
+    let state = app.session.model.state();
     match folder {
-        "bodies" => app
-            .session
-            .model
-            .state()
-            .bodies
-            .iter()
-            .filter(|b| doc.model_body_component(b) == comp && !app.session.body_removed_later(&b.name))
+        "bodies" => model_body_indices(app, comp)
+            .into_iter()
+            .filter_map(|i| state.bodies.get(i))
+            .filter(|b| !app.session.body_removed_later(&b.name))
             .map(|b| Entry {
                 key: b.name.clone(),
                 row_key: format!("b:{}", b.name),
@@ -1268,10 +1328,9 @@ fn entries(app: &SolveApp, comp: u64, folder: &str) -> Vec<Entry> {
                 bodies: vec![b.name.clone()],
             })
             .collect(),
-        "sketches" => doc
-            .features
-            .iter()
-            .filter(|f| f.component == comp && matches!(f.kind, FeatureKind::Sketch { .. }))
+        "sketches" => model_feature_indices(app, comp, true)
+            .into_iter()
+            .filter_map(|i| doc.features.get(i))
             .map(|f| {
                 let active = app.session.active_sketch == Some(f.id);
                 let lost = app.session.model.result(f.id).is_some_and(|result| result.error.is_some())
@@ -1297,10 +1356,9 @@ fn entries(app: &SolveApp, comp: u64, folder: &str) -> Vec<Entry> {
                 }
             })
             .collect(),
-        _ => doc
-            .features
-            .iter()
-            .filter(|f| f.component == comp && matches!(f.kind, FeatureKind::ConstructionPlane { .. }))
+        _ => model_feature_indices(app, comp, false)
+            .into_iter()
+            .filter_map(|i| doc.features.get(i))
             .map(|f| Entry {
                 key: f.id.to_string(),
                 row_key: format!("p:{}", f.id),
@@ -1396,7 +1454,7 @@ fn folder_rows_at(app: &mut SolveApp, ui: &mut egui::Ui, comp: u64, path: Option
     let mut all = entries(app, comp, folder);
     let prefix = path.map(occurrence_key).unwrap_or_else(|| format!("c{comp}"));
     if let Some(path) = path {
-        let Ok(placement) = app.session.occurrence_placement(path) else { return };
+        let Some(placement) = model_placement(app, path) else { return };
         // Each row's placed body by its definition's name (a search per row was quadratic in a
         // component's bodies, every frame).
         let mut placed: std::collections::HashMap<&str, &_> = std::collections::HashMap::with_capacity(placement.bodies.len());

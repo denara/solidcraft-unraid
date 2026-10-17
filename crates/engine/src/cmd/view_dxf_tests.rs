@@ -22,6 +22,49 @@ fn export(s: &mut Session, c: Camera, hidden: &str) -> Value {
 }
 
 #[test]
+fn view_dxf_cancellation_at_each_stage_preserves_the_destination_and_document() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    struct CancelAt {
+        stage: &'static str,
+        cancelled: AtomicBool,
+        reached: AtomicBool,
+    }
+    impl solidcraft_kernel::watch::Watch for CancelAt {
+        fn cancelled(&self) -> bool {
+            self.cancelled.load(Ordering::Relaxed)
+        }
+        fn progress(&self, stage: &'static str, done: usize, _total: usize) {
+            if stage == self.stage && (done > 0 || stage == "dxf_write") {
+                self.reached.store(true, Ordering::Relaxed);
+                self.cancelled.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("solidcraft-dxf-cancel-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("drawing.dxf");
+    let mut s = sample();
+    let doc = s.doc.clone();
+    let undo = s.undo.len();
+    for stage in ["dxf_meshes", "dxf_index", "dxf_projection", "dxf_occlusion", "dxf_write"] {
+        std::fs::write(&path, b"previous drawing").unwrap();
+        let watch = Arc::new(CancelAt { stage, cancelled: AtomicBool::new(false), reached: AtomicBool::new(false) });
+        let result = solidcraft_kernel::watch::watching(watch.clone(), || {
+            s.execute(CMD, &json!({"camera":camera(StandardView::Top),"path":path.to_string_lossy()}))
+        });
+        assert!(result.unwrap_err().to_string().contains("cancelled"), "{stage}");
+        assert!(watch.reached.load(Ordering::Relaxed), "{stage}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"previous drawing", "{stage}");
+        assert!(Arc::ptr_eq(&doc, &s.doc));
+        assert_eq!(s.undo.len(), undo);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn view_dxf_blind_back_hole_is_omitted_or_dashed_and_front_hole_is_visible() {
     let mut s = sample();
     let undo = s.undo.len();
@@ -99,4 +142,33 @@ fn view_dxf_rejects_invalid_options_and_near_eye_geometry_without_panicking() {
     assert!(s.execute(CMD, &json!({"camera":c})).is_err());
     c.fov = 4.;
     assert!(s.execute(CMD, &json!({"camera":c})).is_err());
+}
+
+#[test]
+fn view_dxf_keeps_every_occurrence_while_sharing_geometry() {
+    let mut s = Session::default();
+    let component = run(&mut s, "component.create", json!({"name":"Repeated part"}))["component"].as_u64().unwrap();
+    run(&mut s, "solid.box", json!({"length":8,"width":6,"height":3}));
+    for x in [15., 30.] {
+        run(&mut s, "occurrence.copy", json!({"component":component,"translate":[x,0,0]}));
+    }
+    run(&mut s, "component.activate", json!({"component":0}));
+    let doc = s.doc.clone();
+    let result = export(&mut s, camera(StandardView::Top), "dashed");
+    assert_eq!(result["stats"]["bodies"], 3);
+    assert_eq!(result["stats"]["shared_meshes"], 1);
+    assert_eq!(result["stats"]["worker_limit"], meshes::WORKERS);
+    assert!(result["hidden"].as_u64().unwrap() > 0);
+    let lines = solidcraft_io::read_dxf(result["dxf"].as_str().unwrap()).unwrap();
+    let mut centers = std::collections::BTreeSet::new();
+    for line in lines {
+        if let solidcraft_io::Geom2::Line(a, b) = line {
+            // Each translated copy has a visible top perimeter, including the offscreen one.
+            if (a.y - b.y).abs() > 5.9 {
+                centers.insert(((a.x + 20.) / 15.).floor() as i64);
+            }
+        }
+    }
+    assert!(centers.len() >= 3, "{centers:?}");
+    assert!(std::sync::Arc::ptr_eq(&doc, &s.doc));
 }

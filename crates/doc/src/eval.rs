@@ -209,6 +209,12 @@ const ISO_COARSE: [(f64, f64); 22] = [
     (56.0, 5.5),
 ];
 
+/// Nominal diameters and coarse pitches (mm) used for automatic ISO metric thread sizing.
+/// Other diameter/pitch pairs can be supplied as explicit designations.
+pub fn metric_thread_sizes() -> &'static [(f64, f64)] {
+    &ISO_COARSE
+}
+
 /// "M8" or "M8x1" → (nominal diameter, pitch).
 pub fn parse_metric_thread(s: &str) -> Option<(f64, f64)> {
     let t = s.trim().to_ascii_uppercase();
@@ -221,7 +227,7 @@ pub fn parse_metric_thread(s: &str) -> Option<(f64, f64)> {
         Some(p) => p,
         None => ISO_COARSE.iter().find(|(n, _)| (n - d).abs() < 1e-9)?.1,
     };
-    (d > 0.0 && pitch > 0.0 && pitch < d).then_some((d, pitch))
+    (d.is_finite() && pitch.is_finite() && d > 0.0 && pitch > 0.0 && pitch < d).then_some((d, pitch))
 }
 
 /// The metric thread a cylinder of this diameter takes: a shaft is the major diameter, a hole
@@ -239,6 +245,12 @@ fn format_thread(d: f64, p: f64) -> String {
     let coarse = ISO_COARSE.iter().any(|(n, q)| (n - d).abs() < 1e-9 && (q - p).abs() < 1e-9);
     let num = |x: f64| if (x - x.round()).abs() < 1e-9 { format!("{}", x.round()) } else { format!("{x}") };
     if coarse { format!("M{}", num(d)) } else { format!("M{}x{}", num(d), num(p)) }
+}
+
+/// The automatic ISO metric designation for a cylindrical face, using the same fit check as
+/// a thread feature without an explicit size. This query does not change the model.
+pub fn suggested_thread(st: &ModelState, p: Vec3) -> Result<String> {
+    thread_on(st, 0, p, None, None).map(|t| t.designation)
 }
 
 /// A cosmetic thread on the cylindrical face at `p`.
@@ -1171,7 +1183,8 @@ impl Model {
                 b.made = crate::lineage::Made::Before;
             }
             let mut warning = None;
-            // Face references by name: move each face point onto its named face.
+            // Face references by name: move each face point onto its named face (on the body the
+            // feature names, when it names one and the face is there).
             let renamed;
             // Cylindrical emboss resolves its named face in the selected body's frame
             // and certifies an analytic anchor; mesh projection here would undo that.
@@ -1191,7 +1204,7 @@ impl Model {
                     if n.is_empty() {
                         continue;
                     }
-                    match crate::naming::locate_face(&fst, n, *p) {
+                    match crate::name_lookup::locate_face_on_body(&fst, f.kind.face_body(), n, *p) {
                         Some(hit) => {
                             if let Some(note) = hit.note(n) {
                                 notes.push(note);
@@ -1929,6 +1942,39 @@ fn extend_for_coplanar(st: &ModelState, plane: &Plane, r: &Region2, lo: f64, hi:
     (lo2, hi2)
 }
 
+/// Whether a tapered tool, run on by `depth` behind the plane it starts in (`dir` the way it
+/// extrudes), stays where running on changes nothing: in the targets for a join, out of them for
+/// a cut. Its sides keep their slope, so the section there is the profile grown by up to `widen`
+/// all round; that grown outline is probed at two depths.
+#[allow(clippy::too_many_arguments)]
+fn taper_run_on_fits(st: &ModelState, start: &Plane, dir: Vec3, r: &Region2, depth: f64, widen: f64, op: Operation, targets: &[String]) -> bool {
+    const MAX_SEGMENTS: usize = 2_000;
+    let meshes: Vec<Arc<Mesh>> = st.bodies.iter().filter(|b| targets.is_empty() || targets.contains(&b.name)).map(|b| b.mesh()).collect();
+    if meshes.is_empty() || !depth.is_finite() || !widen.is_finite() {
+        return false;
+    }
+    let want = op == Operation::Join;
+    // Each loop counterclockwise with the side away from the material: right of the outer loop,
+    // left of a hole.
+    let loops: Vec<(solidcraft_geom::Loop2, f64)> = std::iter::once((r.outer.ccw(), 1.0)).chain(r.holes.iter().map(|h| (h.ccw(), -1.0))).collect();
+    let count: usize = loops.iter().map(|(l, _)| l.segs.len()).sum();
+    if count > MAX_SEGMENTS {
+        return false;
+    }
+    loops.iter().all(|(lp, side)| {
+        lp.segs.iter().all(|seg| {
+            [0.0, 0.25, 0.5, 0.75].iter().all(|t| {
+                let Some(d) = seg.derivative(*t).normalized() else { return true };
+                let out = Vec2::new(d.y, -d.x) * *side;
+                [0.5, 1.0].iter().all(|k| {
+                    let p = start.to_world(seg.point_at(*t) + out * (widen * k)) - dir * (depth * k);
+                    meshes.iter().any(|m| m.contains(p)) == want
+                })
+            })
+        })
+    })
+}
+
 /// How high (mm) a tapered tool's sides stand straight where it starts on a face it can't run
 /// on into.
 const TAPER_FOOT: f64 = 0.01;
@@ -2299,8 +2345,8 @@ fn sketch_hole_dir(st: &ModelState, spots: &[Vec3], n: Vec3) -> Vec3 {
 
 /// Where a hole feature drills (each on the surface) and in which direction: at its sketch
 /// points perpendicular to the sketch (into the material), else at its position.
-fn hole_spots(st: &ModelState, f: &Feature) -> Result<(Vec<Vec3>, Vec3)> {
-    let FeatureKind::Hole { position, direction, points, .. } = &f.kind else { return Err(DocError::Invalid("not a hole".into())) };
+fn hole_spots(vals: &BTreeMap<String, Value>, st: &ModelState, f: &Feature) -> Result<(Vec<Vec3>, Vec3)> {
+    let FeatureKind::Hole { position, at, direction, points, .. } = &f.kind else { return Err(DocError::Invalid("not a hole".into())) };
     let (spots, dir) = match points {
         Some(sp) => {
             let ss =
@@ -2316,7 +2362,7 @@ fn hole_spots(st: &ModelState, f: &Feature) -> Result<(Vec<Vec3>, Vec3)> {
         }
         None => {
             let dir = direction.normalized().ok_or_else(|| DocError::Invalid("hole direction".into()))?;
-            let at = hole_on_surface(st, position.0, dir);
+            let at = hole_on_surface(st, hole_position(vals, position, at)?, dir);
             let dir = hole_dir_into_face(st, at, dir);
             return Ok((vec![hole_on_surface(st, at, dir)], dir));
         }
@@ -2350,8 +2396,8 @@ fn hole_depth_to(st: &ModelState, at: &Vec3, dir: Vec3, to: &Option<Vec3>, depth
 }
 
 /// A hole's spots as given (not yet moved onto the surface) and its direction.
-fn hole_spots_raw(st: &ModelState, f: &Feature) -> Result<(Vec<Vec3>, Vec3)> {
-    let FeatureKind::Hole { position, direction, points, .. } = &f.kind else { return Err(DocError::Invalid("not a hole".into())) };
+fn hole_spots_raw(vals: &BTreeMap<String, Value>, st: &ModelState, f: &Feature) -> Result<(Vec<Vec3>, Vec3)> {
+    let FeatureKind::Hole { position, at, direction, points, .. } = &f.kind else { return Err(DocError::Invalid("not a hole".into())) };
     match points {
         Some(sp) => {
             let ss = st.sketch(sp.sketch.0).ok_or_else(|| DocError::Unknown(format!("sketch {}", sp.sketch)))?;
@@ -2363,16 +2409,29 @@ fn hole_spots_raw(st: &ModelState, f: &Feature) -> Result<(Vec<Vec3>, Vec3)> {
         }
         None => {
             let dir = direction.normalized().ok_or_else(|| DocError::Invalid("hole direction".into()))?;
-            Ok((vec![position.0], hole_dir_into_face(st, hole_on_surface(st, position.0, dir), dir)))
+            let p = hole_position(vals, position, at)?;
+            Ok((vec![p], hole_dir_into_face(st, hole_on_surface(st, p, dir), dir)))
         }
     }
+}
+
+/// Where a hole placed by position is drilled: its `at` expressions evaluated, so it follows the
+/// parameters (#1678), else the point it was given.
+fn hole_position(vals: &BTreeMap<String, Value>, position: &crate::FacePick, at: &Option<crate::PointExpr>) -> Result<Vec3> {
+    let Some([x, y, z]) = at else { return Ok(position.0) };
+    let p =
+        Vec3::new(Document::eval_in(vals, x, Kind::Length)?, Document::eval_in(vals, y, Kind::Length)?, Document::eval_in(vals, z, Kind::Length)?);
+    if ![p.x, p.y, p.z].iter().all(|c| c.is_finite() && c.abs() < 1e9) {
+        return Err(DocError::Invalid("the hole's position is out of range".into()));
+    }
+    Ok(p)
 }
 
 /// The cutting tools of a hole feature at every spot, each with its exact geometry when it is a
 /// straight cylinder (see [`hole_tools_and_prisms`]).
 fn hole_feature_tools(vals: &BTreeMap<String, Value>, st: &ModelState, f: &Feature) -> Result<Vec<(Traced, Option<more::PrimitivePrism>)>> {
     let FeatureKind::Hole { diameter, depth, hole, to, .. } = &f.kind else { return Err(DocError::Invalid("not a hole".into())) };
-    let (spots, dir) = hole_spots(st, f)?;
+    let (spots, dir) = hole_spots(vals, st, f)?;
     if spots.is_empty() || spots.len() > 10_000 {
         return Err(DocError::Invalid("a hole needs 1…10000 points".into()));
     }
@@ -2814,16 +2873,40 @@ fn feature_tools_with_constructor(
                         // sides standing on a face are curved where they meet it (along text, say),
                         // and the boolean finds no result there. The sides keep their slope, so
                         // the profile stays the section at the start.
+                        let roles = crate::lineage::ProfileRoles { sketch: Some(&ss), region: Some(r), caps: caps.clone() };
+                        // A start that is a whole face of the target (a foot under a part's base) is sewn on
+                        // along it, as it lies: run on, the sides would leave the face through its edges.
+                        if on_face
+                            && *operation == Operation::Join
+                            && let Ok(exact) = kernel::extrude_tapered_between(&start_plane, r, 0.0, len, 0.0, sign, taper)
+                            && st
+                                .bodies
+                                .iter()
+                                .filter(|t| targets.is_empty() || targets.iter().any(|x| *x == t.name))
+                                .any(|t| kernel::can_join_touching_faces(&t.body, &exact))
+                        {
+                            growth = growth.max(len * taper.tan().abs());
+                            return Ok(roles.tool(exact, None));
+                        }
                         let (lo, hi) = if sign < 0.0 { (from - len, from) } else { (from, from + len) };
                         let (l2, h2) = extend_for_coplanar(st, &ss.plane, r, lo, hi, *operation, &crate::plain(targets));
-                        let (a, b) = if sign < 0.0 { (from - h2, from - l2) } else { (l2 - from, h2 - from) };
+                        let (mut a, b) = if sign < 0.0 { (from - h2, from - l2) } else { (l2 - from, h2 - from) };
+                        // A taper that narrows the tool away from the face widens it as it runs on into it, past
+                        // the profile (where the profile is the whole face, out through the body's sides, #1534):
+                        // then it starts on the face instead.
+                        if a < 0.0 && a * taper.tan() > 0.0 {
+                            let dir = n * sign;
+                            if !taper_run_on_fits(st, &start_plane, dir, r, -a, a * taper.tan(), *operation, &crate::plain(targets)) {
+                                a = 0.0;
+                            }
+                        }
                         // A start that can't run on (the profile hangs over the face's edge):
                         // the sides stand straight for a hair first, so the boolean can push the
                         // face the tool stands on into the body.
                         let foot = if a >= 0.0 && on_face { TAPER_FOOT.min((b - a) * 0.01) } else { 0.0 };
                         let body = kernel::extrude_tapered_between(&start_plane, r, a, b, foot, sign, taper)?;
                         growth = growth.max(a.abs().max(b.abs()) * taper.tan().abs());
-                        Ok(crate::lineage::ProfileRoles { sketch: Some(&ss), region: Some(r), caps: caps.clone() }.tool(body, None))
+                        Ok(roles.tool(body, None))
                     })
                     .collect::<Result<_>>()?;
                 // Profiles apart by more than the tools grow (the letters of a text): the tools
@@ -3084,6 +3167,9 @@ fn feature_tools_with_constructor(
             {
                 return build_curved(&regions, -axis_w, tb);
             }
+            // A new body is final: its planar faces come out whole. A boolean's tool is not
+            // healed (the boolean heals its result).
+            let revolve = if operation == Operation::NewBody { kernel::revolve_whole } else { kernel::revolve };
             if *convention == crate::RevolveConvention::SketchNormal {
                 let mut out = Vec::new();
                 for (region, region_extent) in regions.iter().zip(&region_extents) {
@@ -3092,7 +3178,7 @@ fn feature_tools_with_constructor(
                         out.extend(build_curved(std::slice::from_ref(region), rotation_axis, tb)?);
                         continue;
                     }
-                    let bodies = kernel::revolve(&ss.plane, std::slice::from_ref(region), o, d, region_extent.sweep)?;
+                    let bodies = revolve(&ss.plane, std::slice::from_ref(region), o, d, region_extent.sweep)?;
                     let m = crate::rigid(Vec3::ZERO, origin_w, rotation_axis, region_extent.start);
                     for body in bodies {
                         out.push(if region_extent.start.abs() < 1e-12 {
@@ -3104,7 +3190,7 @@ fn feature_tools_with_constructor(
                 }
                 return Ok(out);
             }
-            let bodies = kernel::revolve(&ss.plane, &regions, o, d, ang)?;
+            let bodies = revolve(&ss.plane, &regions, o, d, ang)?;
             if start.abs() < 1e-12 {
                 return Ok(regions.iter().zip(bodies).map(|(r, body)| tool(r, body, None)).collect());
             }
@@ -3561,7 +3647,7 @@ fn pattern_transforms(doc: &Document, vals: &BTreeMap<String, Value>, st: &Model
     };
     let mut out = Vec::new();
     match p {
-        crate::PatternKind::Rectangular { dir1, count1, spacing1, dir2, count2, spacing2 } => {
+        crate::PatternKind::Rectangular { dir1, count1, spacing1, dir2, count2, spacing2, alignment, alignment2, reversed, reversed2 } => {
             let (n1, s1) = (count(count1)?, val(vals, spacing1, Kind::Length)?);
             let d1 = dir1.normalized().ok_or_else(|| DocError::Invalid("pattern direction".into()))?;
             let (n2, s2, d2) = match (dir2, count2, spacing2) {
@@ -3578,7 +3664,7 @@ fn pattern_transforms(doc: &Document, vals: &BTreeMap<String, Value>, st: &Model
                     if i == 0 && j == 0 {
                         continue;
                     }
-                    out.push(translation(d1 * (s1 * i as f64) + d2 * (s2 * j as f64)));
+                    out.push(translation(d1 * (s1 * alignment.multiplier(i, *reversed)) + d2 * (s2 * alignment2.multiplier(j, *reversed2))));
                 }
             }
         }
@@ -3615,7 +3701,7 @@ fn pattern_transforms(doc: &Document, vals: &BTreeMap<String, Value>, st: &Model
                 out.push(m);
             }
         }
-        crate::PatternKind::Circular { origin, axis, count: c, angle } => {
+        crate::PatternKind::Circular { origin, axis, count: c, angle, alignment, reversed } => {
             let n = count(c)?;
             let total = val(vals, angle, Kind::Angle)?;
             let full = (total.abs() - std::f64::consts::TAU).abs() < 1e-9;
@@ -3627,7 +3713,7 @@ fn pattern_transforms(doc: &Document, vals: &BTreeMap<String, Value>, st: &Model
                 0.0
             };
             for i in 1..n {
-                out.push(rotation(origin.0, axis.0, step * i as f64));
+                out.push(rotation(origin.0, axis.0, step * alignment.multiplier(i, *reversed)));
             }
         }
     }
@@ -3754,7 +3840,7 @@ fn replay(
             // A hole is drilled again at each copy of its spot (found on the surface there), so
             // a blind hole's depth counts from the face at the copy, not from the bottom of the
             // original hole under the original spot.
-            let (spots, dir) = hole_spots_raw(st, src)?;
+            let (spots, dir) = hole_spots_raw(vals, st, src)?;
             for (k, m) in mats.iter().enumerate() {
                 let d = crate::apply_vector(m, dir).normalized().ok_or_else(|| DocError::Invalid("hole direction".into()))?;
                 for p in &spots {
@@ -3998,6 +4084,9 @@ pub(crate) fn sheet_face_plane_in_frame(doc: &Document, st: &ModelState, comp: u
             axis_dir: *axis_dir,
             angle: angle.clone(),
         },
+        PlaneRef::Flipped { base, about_y } => {
+            PlaneRef::Flipped { base: Box::new(sheet_face_plane_in_frame(doc, st, comp, base)?), about_y: *about_y }
+        }
         other => other.clone(),
     })
 }
@@ -4130,6 +4219,9 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
         | FeatureKind::SurfaceSweep { .. }
         | FeatureKind::SurfaceLoft { .. }
         | FeatureKind::SurfaceBlend { .. }
+        | FeatureKind::SurfaceBoundary { .. }
+        | FeatureKind::SurfaceMatch { .. }
+        | FeatureKind::SurfaceFair { .. }
         | FeatureKind::SurfaceOffset { .. }
         | FeatureKind::SurfaceRuled { .. }
         | FeatureKind::SurfaceUntrim { .. } => surface::eval(doc, vals, f, st, warning),
@@ -4201,7 +4293,7 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
             apply_traced(st, f, tools, *operation, &crate::plain(targets))
         }
         FeatureKind::Hole { thread, diameter, .. } => {
-            let (spots, dir) = hole_spots(st, f)?;
+            let (spots, dir) = hole_spots(vals, st, f)?;
             let tools = hole_feature_tools(vals, st, f)?;
             let handled = sheet_hole_cut(st, f, &tools, warning)?;
             let tools: Vec<Traced> = tools.into_iter().map(|(tool, _)| tool).collect();
@@ -4403,31 +4495,35 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
         FeatureKind::Split { body, plane, tool, sketch, line } => {
             let i = st.bodies.iter().position(|b| &b.name == body).ok_or_else(|| DocError::Unknown(format!("body `{body}`")))?;
             let Some(mb) = st.bodies.get(i).cloned() else { return Err(DocError::Unknown(format!("body `{body}`"))) };
+            let input = mb.traced();
             let parts = match tool {
                 // A sketch line: the plane through it along the sketch's normal.
                 _ if sketch.is_some() || line.is_some() => {
                     let (Some(sketch), Some(line)) = (sketch, line) else {
                         return Err(DocError::Invalid("a sketch line tool needs both its sketch and its line".into()));
                     };
-                    kernel::split_by_plane(&mb.body, &sketch_line_plane(st, sketch.0, line)?)?
+                    split_by_plane_traced(&input, &sketch_line_plane(st, sketch.0, line)?)?
                 }
                 // A face of a body (its surface extended).
                 Some(t) => {
                     let tb = st.body(&t.body).ok_or_else(|| DocError::Unknown(format!("body `{}`", t.body)))?;
                     let face = crate::appearance::face_index_at(tb, t.point.0)
                         .ok_or_else(|| DocError::Invalid(format!("no face of `{}` at the tool point", t.body)))?;
+                    // The pieces keep the planar roles of the faces they share with the body (#565).
                     kernel::split_body(&mb.body, &kernel::SplitTool::Face { body: &tb.body, face })?
+                        .into_iter()
+                        .map(|part| Ok(Traced::step(part.with_preserved_planar_sources(&mb.body)?, &[&input])))
+                        .collect::<Result<Vec<_>>>()?
                 }
                 None => {
                     let pl = doc.resolve_plane_in(vals, plane, 0, Some(st))?;
-                    kernel::split_by_plane(&mb.body, &pl)?
+                    split_by_plane_traced(&input, &pl)?
                 }
             };
             if parts.len() < 2 {
                 return Err(DocError::Invalid("the tool does not split the body".into()));
             }
-            let input = mb.traced();
-            let mut it = parts.into_iter().map(|part| Traced::step(part, &[&input]));
+            let mut it = parts.into_iter();
             if let (Some(first), Some(slot)) = (it.next(), st.bodies.get_mut(i)) {
                 *slot = ModelBody::traced_new(mb.name.clone(), first, mb.feature);
             }
@@ -4544,8 +4640,16 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
             };
             st.blend_edges.insert(f.id, edges.clone());
             let input = mb.traced();
+            // A G2 corner is built by the corner construction alone, for a constant radius: any
+            // other style (or a fitted radius) has no corner patch to repeat.
+            if let FeatureKind::Fillet { corner: crate::FilletCorner::G2, style, fit, .. } = &f.kind
+                && (!matches!(style, crate::FilletStyle::Constant) || !matches!(fit, crate::FilletFit::Exact))
+            {
+                return Err(DocError::Invalid("a G2 corner is built for a constant-radius fillet (type: constant, fit: exact) only".into()));
+            }
             // The blended body, and the lineage of what the last blend started from.
             let (nb, from) = match &f.kind {
+                FeatureKind::Fillet { corner: crate::FilletCorner::G2, .. } => (kernel::fillet_g2_corners(&mb.body, &edges, r)?, input),
                 FeatureKind::Fillet { style: crate::FilletStyle::Curvature, .. } => (kernel::fillet_g2(&mb.body, &edges, r)?, input),
                 FeatureKind::Fillet { style: crate::FilletStyle::Chord, .. } => (kernel::fillet_chord(&mb.body, &edges, r)?, input),
                 FeatureKind::Fillet { style: crate::FilletStyle::Variable { radius2, start, mid, smooth }, .. } => {
@@ -5231,6 +5335,7 @@ mod chain_tests {
                 body: None,
                 style: crate::FilletStyle::Constant,
                 fit: Default::default(),
+                corner: Default::default(),
             },
             None,
         )
@@ -5275,6 +5380,23 @@ mod body_name_tests {
     }
 }
 
+/// The parts of a body split by a plane, on its positive side first (only the non-empty ones).
+/// Each part's cut face is named `section` after the half-space box that cut it, so it takes an
+/// attachment that follows the plane (#565); the box's other faces never reach the part.
+fn split_by_plane_traced(input: &Traced, plane: &Plane) -> Result<Vec<Traced>> {
+    let mut parts = Vec::new();
+    for positive in [true, false] {
+        let (part, tool) = kernel::half_space(&input.body, plane, positive)?;
+        let Some(part) = part else { continue };
+        // The box's cap in the plane: its start cap on the positive side, its end cap on the other.
+        let section = Some("section".to_string());
+        let caps = if positive { [section, None] } else { [None, section] };
+        let tool = crate::lineage::ProfileRoles { sketch: None, region: None, caps }.tool(tool, None);
+        parts.push(Traced::step(part, &[input, &tool]));
+    }
+    Ok(parts)
+}
+
 /// The plane a straight sketch line sweeps along its sketch's normal: through the line, its x
 /// along the line and its y along the normal (a Split Body tool, #1552).
 pub fn sketch_line_plane(st: &ModelState, sketch: u64, line: &str) -> Result<Plane> {
@@ -5287,4 +5409,89 @@ pub fn sketch_line_plane(st: &ModelState, sketch: u64, line: &str) -> Result<Pla
     let (wa, wb) = (ss.plane.to_world(a), ss.plane.to_world(b));
     let x = (wb - wa).normalized().ok_or_else(|| DocError::Invalid(format!("`{line}` has no length")))?;
     Ok(Plane { origin: wa, x, y: ss.plane.normal() })
+}
+
+#[cfg(test)]
+mod named_face_lookup_tests {
+    use super::*;
+    use crate::naming::FaceHit;
+
+    /// A row of `n` 10 mm cubes `Part0`, `Part1`… 20 mm apart along x, without history: their
+    /// faces are named from geometry, which meshes them.
+    fn parts(n: usize) -> ModelState {
+        let mut st = ModelState::default();
+        for i in 0..n {
+            let x = 20.0 * i as f64;
+            let cube = kernel::box_solid(Vec3::new(x, 0.0, 0.0), Vec3::new(x + 10.0, 10.0, 10.0)).unwrap();
+            st.bodies.push(ModelBody::new(format!("Part{i}"), cube, 1));
+        }
+        st
+    }
+
+    /// The name of the face of `body` at `p`.
+    fn name_at(st: &ModelState, body: &str, p: Vec3) -> String {
+        let b = st.body(body).unwrap();
+        let face = crate::appearance::face_index_at(b, p).unwrap();
+        crate::naming::face_names(b)[face].clone()
+    }
+
+    /// Everything a lookup found, to compare two lookups.
+    fn found(hit: Option<FaceHit>) -> String {
+        format!("{hit:?}")
+    }
+
+    /// A shell late in a long timeline spent seconds meshing every body of the model to find its
+    /// face by name (#287). A feature that names its body finds the face there without naming
+    /// the other bodies, and finds what looking over every body finds.
+    #[test]
+    fn a_face_is_found_on_the_body_the_feature_names_without_meshing_the_others() {
+        let st = parts(12);
+        let top = Vec3::new(145.0, 5.0, 10.0);
+        let name = name_at(&st, "Part7", top);
+        let hit = crate::name_lookup::locate_face_on_body(&st, Some("Part7"), &name, top);
+        for b in st.bodies.iter().filter(|b| b.name != "Part7") {
+            assert!(b.mesh.get().is_none(), "{} was meshed", b.name);
+        }
+        let h = hit.unwrap();
+        assert_eq!((h.body, h.split, h.merged), (7, false, false));
+        assert_eq!(found(hit), found(crate::naming::locate_face(&st, &name, top)));
+        // Looking over every body names (and so meshes) them all.
+        assert!(st.bodies.iter().all(|b| b.mesh.get().is_some()));
+    }
+
+    /// A name the named body has no face of (it moved to another body: a combine took the face),
+    /// a body that is not there, no body, a name saved before format 14 or a name no face has:
+    /// looked for over every body, as without a body.
+    #[test]
+    fn a_name_not_on_the_named_body_is_looked_for_over_every_body() {
+        let st = parts(4);
+        let top = Vec3::new(45.0, 5.0, 10.0);
+        let name = name_at(&st, "Part2", top);
+        for name in [name.clone(), format!("{}{name}", crate::naming::LEGACY_MARK), "Part2:face:99".into()] {
+            let everywhere = found(crate::naming::locate_face(&st, &name, top));
+            for body in [Some("Part1"), Some("Part2"), Some("Nope"), None] {
+                assert_eq!(found(crate::name_lookup::locate_face_on_body(&st, body, &name, top)), everywhere, "{name} on {body:?}");
+            }
+        }
+        let moved = crate::name_lookup::locate_face_on_body(&st, Some("Part1"), &name, top).unwrap();
+        assert_eq!((moved.body, moved.split), (2, false));
+    }
+
+    /// A copy of a body has its source's face names. Over every body the name finds the face on
+    /// both, and the one nearest the point is taken as a piece of a split face. A feature on the
+    /// copy takes the copy's face, whole.
+    #[test]
+    fn the_same_face_on_a_copy_is_not_a_piece_of_the_named_bodys_face() {
+        let mut st = parts(2);
+        let source = st.bodies[0].clone();
+        st.bodies[1].names = crate::naming::NameCell::same(&source);
+        let top = Vec3::new(25.0, 5.0, 10.0);
+        let name = name_at(&st, "Part1", top);
+        assert_eq!(name, name_at(&st, "Part0", Vec3::new(5.0, 5.0, 10.0)));
+        let on_copy = crate::name_lookup::locate_face_on_body(&st, Some("Part1"), &name, top).unwrap();
+        let everywhere = crate::naming::locate_face(&st, &name, top).unwrap();
+        assert_eq!((on_copy.body, on_copy.face, on_copy.point), (everywhere.body, everywhere.face, everywhere.point));
+        assert_eq!((on_copy.split, everywhere.split), (false, true));
+        assert_eq!(on_copy.note(&name), None);
+    }
 }

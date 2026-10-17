@@ -21,7 +21,8 @@
 //!   `|i: usize, n: usize| -> &'static str`; it may read the other fields;
 //! - `pinned`: a face pick that stays where it is when the feature moves;
 //!   `pick_if = cond`: a face pick when `cond` holds, else a position;
-//! - `placement`: a primitive's placement point (its X, Y and Z expressions are not inputs);
+//! - `placement`: a primitive's placement point, or an optional one (its X, Y and Z expressions
+//!   are not inputs);
 //! - `profiles_of = sketch_field`, optionally with `when = cond`: a profile selection;
 //! - `after = field`: visit this field right after `field` instead of in declaration order (where
 //!   the parameter names already given need it);
@@ -162,7 +163,8 @@ fn walk_field(b: &Ident, r: &Roles, which: Which, mutable: bool) -> Tokens {
                     #w::Each::<#w::Vec3>::#each(#b, &mut |p| f(if #pick { #w::Geo::Pick(p) } else { #w::Geo::Pos(p) }));
                 }
             }
-            Some(Geo::Placement) => quote! { f(#w::Geo::Placement(#b)); },
+            // A point or an optional one (a hole's `at`, #1678).
+            Some(Geo::Placement) => quote! { #w::Each::<crate::PointExpr>::#each(#b, &mut |p| f(#w::Geo::Placement(p))); },
             Some(Geo::Profiles { .. }) => {
                 let (id, when) = (pre(b, "sketch"), pre(b, "when"));
                 quote! {

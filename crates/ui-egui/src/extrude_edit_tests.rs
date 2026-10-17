@@ -394,3 +394,62 @@ fn extrusion_arrow_tracks_the_current_drag_frame() {
         assert!((drawn[0] - expected[0]).hypot(drawn[1] - expected[1]) < 0.1, "arrow {drawn:?} trails current value {expected:?}");
     }
 }
+
+/// The world point `at` mm along the open extrude's arrow.
+fn on_arrow(h: &Harness, at: f64) -> Value {
+    let d = h.app.dialog.as_ref().unwrap();
+    let (base, normal) = crate::canvas::anchor(&h.app, d).unwrap();
+    let p = base + normal.unwrap() * at;
+    json!({"world":[p.x, p.y, p.z]})
+}
+
+fn dialog_distance(h: &Harness) -> f64 {
+    let d = h.app.dialog.as_ref().unwrap();
+    let crate::dialogs::Kind::Extrude { distance, .. } = &d.kind else { panic!("extrude") };
+    h.app.session.doc.eval(distance, solidcraft_engine::doc::expr::Kind::Length).unwrap()
+}
+
+/// The arrow's stem takes the drag as its tip does (#1740): pressed 4 mm along a 10 mm arrow and
+/// moved to 9 mm, it grows by the 5 mm the pointer moved, not to where the pointer is.
+#[test]
+fn the_extrude_arrow_drags_from_its_stem() {
+    let mut h = make(json!({"distance":10}));
+    open(&mut h);
+    let (from, to) = (on_arrow(&h, 4.0), on_arrow(&h, 9.0));
+    h.step(&json!({"drag":[from, to]})).unwrap();
+    assert!((dialog_distance(&h) - 15.0).abs() < 1e-9, "{}", dialog_distance(&h));
+    h.step(&json!({"widget":"OK"})).unwrap();
+    let bounds = h.app.session.world_state().body("Main").unwrap().mesh().bounds();
+    assert!((bounds.max.z - 15.0).abs() < 1e-7, "{bounds:?}");
+}
+
+/// A click on the arrow's stem is the arrow's (#1740): a new extrude of a square sketched on a
+/// block keeps its profile picked and its distance. Before, the click went through to the square
+/// under the stem and unpicked it.
+#[test]
+fn a_click_on_the_extrude_arrow_stem_keeps_the_profile() {
+    let mut h = Harness::new();
+    h.app.home.open = false;
+    for (id, p) in [
+        ("sketch.create", json!({"plane": "XY"})),
+        ("sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [60, 20]})),
+        ("sketch.finish", json!({})),
+        ("solid.extrude", json!({"distance": 10})),
+        ("sketch.create", json!({"plane": {"origin": [0, 0, 10], "x_dir": [1, 0, 0], "y_dir": [0, 1, 0]}})),
+        ("sketch.rectangle.two_point", json!({"p0": [5, 5], "p1": [15, 15]})),
+    ] {
+        h.app.run(id, p).unwrap();
+    }
+    h.app.finish_sketch();
+    h.app.start("solid.extrude");
+    h.frames(4);
+    let picked = |h: &Harness| h.app.dialog.as_ref().unwrap().inputs.iter().map(|i| i.items.len()).collect::<Vec<_>>();
+    let before = picked(&h);
+    assert!(before.iter().any(|n| *n > 0), "{before:?}");
+    let distance = dialog_distance(&h);
+    let at = on_arrow(&h, distance * 0.3);
+    h.step(&json!({"click": at})).unwrap();
+    h.frames(2);
+    assert_eq!(picked(&h), before);
+    assert!((dialog_distance(&h) - distance).abs() < 1e-9, "{} for {distance}", dialog_distance(&h));
+}

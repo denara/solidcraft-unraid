@@ -257,7 +257,7 @@ resolves; it is recorded as `<action>+edit`.
 
 ## Causes
 
-Every failure, grouped by cause (5025 in all). Faces that can't take an attached sketch fail four
+Every failure, grouped by cause (5013 in all). Faces that can't take an attached sketch fail four
 actions each (`face.sketch`, `face.offset_plane`, and `face.press_pull` and `face.extrude`, which
 make a legacy face sketch there).
 
@@ -283,7 +283,6 @@ make a legacy face sketch there).
 | 56 | #563 | Draft and tapered Extrude drop the faces' sources | `face.extrude` 14, `face.offset_plane` 14, `face.press_pull` 14, `face.sketch` 14 | 3 | oracle/05-taper-extrude `Frustum/F2:start` |
 | 48 | #564 | The rim a Shell leaves has no source | `face.extrude` 12, `face.offset_plane` 12, `face.press_pull` 12, `face.sketch` 12 | 8 | demo/pi-case `Body1/F2:top` |
 | 18 | #567 | Axis or tangent plane on a drill tip: no face at NaN | `curved.axis` 9, `curved.tangent_plane` 9 | 3 | oracle/18-hole-features `Plate/F5:face:15` |
-| 12 | #565 | Split Body and Combine Intersect drop the faces' sources | `face.offset_plane` 4, `face.sketch` 4, `face.extrude` 2, `face.press_pull` 2 | 1 | oracle/22-split-body `Cyl (1)/F2:bottom` |
 | 9 | #568 | Construction geometry on model edges, faces and vertices is lost when a parameter moves it | `vertex.plane_three_points+edit` 5, `edge.normal_plane+edit` 2, `face.midplane+edit` 1, `face.shell+edit` 1 | 4 | demo/enclosure_steps `Enclosure/v[F2:top & F4:inner:F2:side:l4 & F4:inner:F3:blend:F2:side:l` |
 | 9 |  | Axis through a face the kernel sees as a cylinder that the command doesn't (sensor enclosure slot ends; not filed yet) | `curved.axis` 9 | 1 | examples/sensor_enclosure `Lid/F15:blend:F14:side:l2\|F14:side:l3` |
 | 7 |  | Other failures in the edit round: the hole cut and blend sizes above, and an extrude from the M0 box's top face whose profile isn't found again (not filed yet) | `face.hole+edit` 3, `face.extrude+edit` 1, `face.press_pull+edit` 1, `edge.chamfer+edit` 1 | 4 | corpus/m0-box-fillet-hole `Body1/F2:top` |
@@ -297,5 +296,6 @@ chamfers, pattern and mirror copies, sides a Join merged, revolves, lofts, sweep
 shell rims, the plastic features' faces and the faces around them, and pieces of a split face (by
 the piece's own name where Offset Face moved it off the others' plane). Sheet metal panels, their
 rims and the flat ends of bends attach by name. What still refuses a sketch is what makes faces
-without recording their history (some cuts, Split Body, Intersect): press-pull and
-extrude-from-face then fall back to a legacy face sketch found again by a point.
+without recording their history (some cuts, the face a Split Body cuts with another body's
+face): press-pull and extrude-from-face then fall back to a legacy face sketch found again by a
+point.

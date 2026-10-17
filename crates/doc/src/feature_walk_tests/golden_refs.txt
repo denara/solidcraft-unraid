@@ -177,6 +177,15 @@ surface_blend
   remap_bodies: from.body
 surface_offset
   remap_bodies: body
+surface_blend
+  remap_bodies: from.body
+surface_boundary
+  sketches: [1]
+  remap_refs: sketch
+surface_match
+  remap_bodies: body
+surface_fair
+  remap_bodies: body
 unstitch
   remap_bodies: body
 reverse_normal

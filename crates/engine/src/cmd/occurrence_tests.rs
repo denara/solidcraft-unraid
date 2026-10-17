@@ -67,6 +67,22 @@ fn instance_selection_survives_rename_move_capture_and_serde() {
 }
 
 #[test]
+fn component_rename_carries_into_placement_names() {
+    // #1665: the browser row shows the placement's name, so a rename has to reach it.
+    let mut s = Session::default();
+    let (component, first) = created(&mut s, "Block");
+    let second = run(&mut s, "occurrence.copy", json!({"component": component, "translate": [20,0,0]}))["occurrence"].as_u64().unwrap();
+    let third = run(&mut s, "occurrence.copy", json!({"component": component, "translate": [40,0,0]}))["occurrence"].as_u64().unwrap();
+    let name = |s: &Session, id: u64| s.doc.occurrences.iter().find(|o| o.id == id).unwrap().name.clone();
+    assert_eq!(name(&s, second), "Block:2");
+    // A placement named otherwise (an import's own name) keeps it.
+    s.doc_mut().occurrences.iter_mut().find(|o| o.id == third).unwrap().name = "Blockade:3".into();
+    run(&mut s, "component.rename", json!({"component": component, "name": "box"}));
+    assert_eq!([name(&s, first), name(&s, second), name(&s, third)], ["box:1", "box:2", "Blockade:3"]);
+    assert_eq!(run(&mut s, "component.list", json!({}))["components"][0]["children"][0]["name"], "box:1");
+}
+
+#[test]
 fn instance_selection_delete_removes_only_selected_instance() {
     let mut s = Session::default();
     let (component, first) = created(&mut s, "Block");

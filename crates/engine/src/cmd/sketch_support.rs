@@ -5,6 +5,11 @@ use solidcraft_sketch::{Shape, intersections};
 
 use crate::{Result, params::bad};
 
+/// Degrees the exact extend intersection handles: a round support squares the piece's degree in
+/// homogeneous form, and both the root finder and its `evaluate` buffer hold at most 15
+/// coefficients, so 2·7 + 1 fits.
+const MAX_EXACT_EXTEND_DEGREE: u8 = 7;
+
 fn choose(n: usize, k: usize) -> f64 {
     (0..k.min(n - k)).fold(1.0, |value, i| value * (n - i) as f64 / (i + 1) as f64)
 }
@@ -113,7 +118,7 @@ pub(super) fn hits(support: &Shape, seg: &Seg2, budget: &mut usize) -> Result<Ve
     let (points, weights): (Vec<Vec2>, Vec<f64>) = match *seg {
         Seg2::Cubic { p0, p1, p2, p3 } => (vec![p0, p1, p2, p3], vec![1.0; 4]),
         Seg2::Conic { a, apex, b, w } if w.is_finite() && w > 0.0 => (vec![a, apex, b], vec![1.0, w, 1.0]),
-        Seg2::Bezier { n, p } if (1..=7).contains(&n) => (p[..=usize::from(n)].to_vec(), vec![1.0; usize::from(n) + 1]),
+        Seg2::Bezier { n, p } if (1..=MAX_EXACT_EXTEND_DEGREE).contains(&n) => (p[..=usize::from(n)].to_vec(), vec![1.0; usize::from(n) + 1]),
         _ => return Err(bad("sketch.extend", "invalid exact curve piece")),
     };
     if points.iter().any(|p| !p.is_finite()) {
@@ -195,8 +200,8 @@ mod tests {
             elevated.push(y[n - 1]);
             y = elevated;
         }
-        let mut points = [Vec2::ZERO; 8];
-        for (i, p) in points.iter_mut().enumerate() {
+        let mut points = [Vec2::ZERO; solidcraft_geom::MAX_BEZIER_CTRL];
+        for (i, p) in points.iter_mut().take(8).enumerate() {
             *p = Vec2::new(10.0 + i as f64 * 20.0 / 7.0, y[i]);
         }
         let target = Seg2::Bezier { n: 7, p: points };

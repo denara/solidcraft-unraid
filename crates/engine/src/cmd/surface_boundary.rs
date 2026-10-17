@@ -1,0 +1,197 @@
+//! Boundary surfaces: one patch through a network of two to four sketch curves (`surface.boundary`,
+//! issue #763). The kernel builds the face from the curves' own frames; this is the command's
+//! parameters and its checks, so that a loop it cannot hold is refused before anything is built.
+
+use serde_json::Value;
+use solidcraft_doc::{FeatureKind, SketchId};
+use solidcraft_kernel::Continuity;
+
+use super::CommandSpec;
+use super::features::{add_feature, feature_sketch};
+use crate::params::{bad, string_list};
+use crate::{Result, Session};
+
+/// The stations a boundary carries by default (the patch's resolution along the loop).
+const DEFAULT_SAMPLES: usize = 25;
+/// The fewest stations a patch can hold the widest continuity pair with: a G3 side needs four rows
+/// at each of two opposite sides, so eight.
+const MIN_SAMPLES: usize = 8;
+/// The most stations a boundary may carry (the kernel's own cap).
+const MAX_SAMPLES: usize = 512;
+
+pub static COMMANDS: &[CommandSpec] = &[CommandSpec::new("surface.boundary", "Boundary Surface", boundary)
+    .at("SURFACE", "CREATE")
+    .icon("boundary")
+    .params(
+        "sketch?: id|name (default: the sketch being edited); curves: [2 to 4 sketch curve ids in loop order] (each one ends where the next begins and the last where the first does; the patch runs through them and leaves each boundary along the tangent across it); continuity?: g0|g1|g2|g3 | [one per curve] (default g1: how much of the surface across each boundary the patch repeats — a sketch curve's own plane, so g1 and up hold exactly and g0 lets the middle bow); crown?: number -0.9…3 (default 0: how full the middle is, without touching a boundary); samples?: 8…512 stations per boundary (default 25); name?, body_name? (a surface body)",
+    )];
+
+/// `surface.boundary`: one patch through a network of two to four sketch curves.
+fn boundary(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "surface.boundary";
+    let sketch = feature_sketch(s, p, cmd)?;
+    let curves = string_list(p, "curves");
+    if !(2..=4).contains(&curves.len()) {
+        return Err(bad(cmd, "`curves` must list 2 to 4 sketch curves in loop order"));
+    }
+    // The curves must be the sketch's own, and they must run on into one another: the last station
+    // of each is the first of the next, and the last boundary's end is the first one's start.
+    let state = s.model.state();
+    let sk = state.sketch(sketch).ok_or_else(|| bad(cmd, "the sketch has not been solved"))?;
+    let mut ends: Vec<(solidcraft_geom::Vec2, solidcraft_geom::Vec2)> = Vec::with_capacity(curves.len());
+    for id in &curves {
+        let ci = sk.sketch.curve_index(id).ok_or_else(|| bad(cmd, format!("no sketch curve `{id}`")))?;
+        let pieces = sk.sketch.exact_pieces(ci);
+        let (Some(first), Some(last)) = (pieces.first(), pieces.last()) else {
+            return Err(bad(cmd, format!("curve `{id}` has no exact geometry to build on")));
+        };
+        if last.end().dist(first.start()) < 1e-9 {
+            return Err(bad(cmd, format!("curve `{id}` is closed: a boundary must be one side of the loop")));
+        }
+        ends.push((first.start(), last.end()));
+    }
+    // Two boundaries are the two sides of a bridge, which do not meet; three or four run round a
+    // loop, so each has to end where the next begins.
+    let scale = ends.iter().map(|(a, b)| a.dist(*b)).fold(1.0_f64, f64::max);
+    let tol = scale * 1e-4 + 1e-9;
+    for i in 0..if curves.len() >= 3 { ends.len() } else { 0 } {
+        let next = (i + 1) % ends.len();
+        let (Some(end), Some(start)) = (ends.get(i).map(|e| e.1), ends.get(next).map(|e| e.0)) else {
+            return Err(bad(cmd, "a curve is missing its ends"));
+        };
+        let gap = end.dist(start);
+        if gap > tol {
+            return Err(bad(
+                cmd,
+                format!("curve `{}` ends {gap:.4} mm from where `{}` starts: list the curves in loop order", curves[i], curves[next]),
+            ));
+        }
+    }
+    drop(state);
+    let orders = match p.get("continuity") {
+        None | Some(Value::Null) => vec![Continuity::G1; curves.len()],
+        Some(Value::String(w)) => {
+            let one = Continuity::parse(w).ok_or_else(|| bad(cmd, "`continuity` must be g0, g1, g2 or g3"))?;
+            vec![one; curves.len()]
+        }
+        Some(v) => {
+            let list = v.as_array().filter(|a| a.len() == curves.len()).ok_or_else(|| bad(cmd, "`continuity` must be one word, or one per curve"))?;
+            let mut out = Vec::with_capacity(list.len());
+            for x in list {
+                out.push(x.as_str().and_then(Continuity::parse).ok_or_else(|| bad(cmd, "`continuity` entries must be g0, g1, g2 or g3"))?);
+            }
+            out
+        }
+    };
+    let crown = match p.get("crown") {
+        None | Some(Value::Null) => 0.0,
+        Some(v) => v
+            .as_f64()
+            .filter(|x| x.is_finite() && (solidcraft_geom::fill::MIN_CROWN..=solidcraft_geom::fill::MAX_CROWN).contains(x))
+            .ok_or_else(|| bad(cmd, "`crown` must be a number between -0.9 and 3"))?,
+    };
+    let samples = match p.get("samples") {
+        None | Some(Value::Null) => DEFAULT_SAMPLES,
+        Some(v) => {
+            let n = v.as_f64().filter(|x| x.is_finite() && x.fract() == 0.0).map(|x| x as usize);
+            n.filter(|x| (MIN_SAMPLES..=MAX_SAMPLES).contains(x))
+                .ok_or_else(|| bad(cmd, format!("`samples` must be a whole number of stations between {MIN_SAMPLES} and {MAX_SAMPLES}")))?
+        }
+    };
+    add_feature(s, p, FeatureKind::SurfaceBoundary { sketch: SketchId(sketch), curves, orders, crown, samples })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use crate::Session;
+
+    fn run(s: &mut Session, id: &str, p: Value) -> Value {
+        match s.execute(id, &p) {
+            Ok(v) => v,
+            Err(e) => panic!("{id} {p}: {e}"),
+        }
+    }
+
+    fn ids(v: &Value) -> Vec<String> {
+        v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default()
+    }
+
+    fn new_sketch() -> Session {
+        let mut s = Session::default();
+        run(&mut s, "sketch.create", json!({"plane": "XY"}));
+        s
+    }
+
+    /// Two parallel 20 mm lines 10 mm apart, and the patch between them.
+    fn two_walls(s: &mut Session) -> Vec<String> {
+        let a = ids(&run(s, "sketch.line", json!({"points": [[0, 0], [20, 0]]}))["created"]["curves"])[0].clone();
+        let b = ids(&run(s, "sketch.line", json!({"points": [[0, 10], [20, 10]]}))["created"]["curves"])[0].clone();
+        vec![a, b]
+    }
+
+    #[test]
+    fn a_boundary_patch_between_two_sketch_curves_is_the_sheet_they_span() {
+        for continuity in [json!("g0"), json!("g1"), json!("g2"), json!(["g1", "g2"])] {
+            let mut s = new_sketch();
+            let curves = two_walls(&mut s);
+            let r = run(&mut s, "surface.boundary", json!({"curves": curves, "continuity": continuity}));
+            let body = ids(&r["created_bodies"])[0].clone();
+            // It is one face, its boundary is the two lines themselves, and it covers exactly the
+            // 20 × 10 sheet between them — all four frames lie in the sketch's plane.
+            let f = run(&mut s, "model.faces", json!({"body": body}));
+            let faces = f["faces"].as_array().cloned().unwrap_or_default();
+            assert_eq!(faces.len(), 1, "{continuity}: {f}");
+            assert!((faces[0]["area"].as_f64().unwrap_or(f64::NAN) - 200.0).abs() < 1e-4, "{continuity}: {f}");
+            let normal = faces[0]["plane_normal"].as_array().cloned().unwrap_or_default();
+            assert_eq!(normal.len(), 3, "{continuity}: the patch is planar: {f}");
+            assert!(normal[2].as_f64().unwrap_or(0.0).abs() > 1.0 - 1e-9, "{continuity}: it lies in the sketch's plane: {f}");
+            let m = run(&mut s, "inspect.measure", json!({}));
+            let area = m["total"]["area_mm2"].as_f64().unwrap_or(f64::NAN);
+            assert!((area - 200.0).abs() < 1e-4, "{continuity}: {area}");
+        }
+    }
+
+    #[test]
+    fn a_boundary_patch_refuses_a_loop_and_values_it_cannot_hold() {
+        let mut s = new_sketch();
+        let curves = two_walls(&mut s);
+        let extra = ids(&run(&mut s, "sketch.line", json!({"points": [[30, 30], [40, 40]]}))["created"]["curves"])[0].clone();
+        // A loop of three or four: the kernel refuses it with its own reason (a tensor-product patch
+        // cannot hold two sides' data at a corner, issue #763) rather than building it approximately.
+        let triangle = ["l1", "l2", "l3"].map(|id| {
+            let _ = id;
+            String::new()
+        });
+        let _ = triangle;
+        let a = ids(&run(&mut s, "sketch.line", json!({"points": [[0, 0], [20, 0]]}))["created"]["curves"])[0].clone();
+        let b = ids(&run(&mut s, "sketch.line", json!({"points": [[20, 0], [10, 15]]}))["created"]["curves"])[0].clone();
+        let c = ids(&run(&mut s, "sketch.line", json!({"points": [[10, 15], [0, 0]]}))["created"]["curves"])[0].clone();
+        let e = s.execute("surface.boundary", &json!({"curves": [a, b, c], "continuity": "g2"})).unwrap_err().to_string();
+        assert!(e.contains("not supported yet") && e.contains("#763"), "three boundaries: {e}");
+        // A closed square of four lines, in loop order.
+        let sq = [[[0, 0], [10, 0]], [[10, 0], [10, 10]], [[10, 10], [0, 10]], [[0, 10], [0, 0]]];
+        let square: Vec<String> = sq.iter().map(|p| ids(&run(&mut s, "sketch.line", json!({"points": p}))["created"]["curves"])[0].clone()).collect();
+        let e = s.execute("surface.boundary", &json!({"curves": square})).unwrap_err().to_string();
+        assert!(e.contains("not supported yet") && e.contains("#763"), "four boundaries: {e}");
+        // Parameters and curves that make no sense.
+        let cases: Vec<(Value, &str)> = vec![
+            (json!({"curves": [curves[0]]}), "2 to 4"),
+            (json!({"curves": [curves[0], curves[1], extra.clone(), extra.clone(), extra.clone()]}), "2 to 4"),
+            (json!({"curves": [curves[0], "nope"]}), "no sketch curve"),
+            (json!({"curves": curves, "continuity": "g9"}), "continuity"),
+            (json!({"curves": curves, "continuity": ["g1", "g2", "g3"]}), "continuity"),
+            (json!({"curves": curves, "crown": 5}), "crown"),
+            (json!({"curves": curves, "crown": "full"}), "crown"),
+            (json!({"curves": curves, "samples": 3}), "samples"),
+            (json!({"curves": curves, "samples": 2.5}), "samples"),
+        ];
+        for (params, want) in cases {
+            let e = s.execute("surface.boundary", &params).unwrap_err().to_string();
+            assert!(e.contains(want), "{params}: {e}");
+        }
+        // Nothing was built by any of them.
+        assert!(s.model.state().bodies.is_empty(), "a refused patch left a body behind");
+    }
+}

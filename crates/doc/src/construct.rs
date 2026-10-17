@@ -633,7 +633,7 @@ impl PlaneRef {
             PlaneRef::ThreePoints { a, b, c } => vec![a.as_mut(), b.as_mut(), c.as_mut()],
             PlaneRef::Tangent { face, .. } => vec![face.as_mut()],
             PlaneRef::AlongPath { path, .. } => vec![path.as_mut()],
-            PlaneRef::Offset { base, .. } | PlaneRef::AtAngle { base, .. } => base.refs_mut(),
+            PlaneRef::Offset { base, .. } | PlaneRef::AtAngle { base, .. } | PlaneRef::Flipped { base, .. } => base.refs_mut(),
             _ => Vec::new(),
         }
     }

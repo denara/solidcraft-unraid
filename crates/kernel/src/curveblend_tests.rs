@@ -693,3 +693,39 @@ fn chamfer_a_chain_of_a_line_and_an_arc_into_a_slanted_end() {
     let got = volume(&body) - volume(&made);
     assert!((got - want).abs() < want * 1e-3, "removed {got} vs {want}");
 }
+
+/// #1667: an R1 round around the end of a long bar whose four long edges are R5. The chain is
+/// 290 mm lines and quarter turns of 7.85 mm, so the lines' sections are spaced far wider than
+/// the turns'; borrowing the turns' sections for the lines' ends made their strips overshoot and
+/// fold back past the joints, the strips' meshes folded with them, and the measured volume came
+/// out thousands of mm³ off. The R1 pipe is exact: the corner's section, `1 - π/4`, along the
+/// lines, and round each turn's axis at the section's centroid (Pappus).
+#[test]
+fn round_along_long_lines_and_small_turns_measures_its_volume() {
+    use std::f64::consts::{FRAC_PI_2, FRAC_PI_4};
+    let (w, d, h) = (300.0, 60.0, 40.0);
+    let bar = crate::build::box_solid(Vec3::new(-w / 2.0, 0.0, 0.0), Vec3::new(w / 2.0, d, h)).unwrap();
+    let long = [Vec3::new(-w / 2.0, d / 2.0, 0.0), Vec3::new(w / 2.0, d / 2.0, 0.0), Vec3::new(-w / 2.0, d / 2.0, h), Vec3::new(w / 2.0, d / 2.0, h)];
+    let rounded = fillet(&bar, &long, 5.0).unwrap();
+    // The rolling ball along the end face's loop (the exact blends would take this loop; a
+    // loop next to free-form faces, as in the issue, comes here).
+    let ids: Vec<mt::EdgeID> = crate::body::Body::unique_edges(&rounded.solid)
+        .into_iter()
+        .filter(|e| [e.front(), e.back()].iter().all(|v| crate::blend::vtx(v).y.abs() < 1e-9))
+        .map(|e| e.id())
+        .collect();
+    assert_eq!(ids.len(), 8);
+    let (solid, _) = crate::guard("test", || curve_blend(&rounded.solid, &ids, rounded.size(), 1.0, true)).unwrap();
+    let body = Body::new(solid).unwrap();
+    assert!(body.validity().is_empty(), "{:?}", body.validity());
+    let section = 1.0 - FRAC_PI_4;
+    // The section's centroid lies this far from its corner along each side.
+    let inset = (5.0 / 6.0 - FRAC_PI_4) / section;
+    let lines = 2.0 * (w - 10.0) + 2.0 * (h - 10.0);
+    let turns = 4.0 * FRAC_PI_2 * (5.0 - inset);
+    let want = w * d * h - 4.0 * 25.0 * section * d - section * (lines + turns);
+    let m = crate::measure(&body).unwrap();
+    assert!((m.volume - want).abs() < 1e-5 * want, "{} vs {want}", m.volume);
+    // Centred across the bar, as the part is.
+    assert!(m.centroid.x.abs() < 1e-3, "centre of mass x {}", m.centroid.x);
+}
