@@ -771,3 +771,31 @@ Before updating Unraid, back up server files and separately export browser desig
 the existing token, data mapping and settings, then reload the browser. Format26 saves need
 this snapshot or a compatible newer build; upstream's released 0.14.0 reads up to format25.
 Retain pre-update design copies and the previous image for rollback.
+
+Publication passed [container workflow 39013719874](https://github.com/denara/solidcraft-unraid/actions/runs/39013719874)
+from validated integration/source commit `8d476cedf3b90671a4ca347a5f3d168b6d5651ad`
+on codex/unraid-mcp-web. The fresh CI image passed modelling/PNG/STEP, independent sessions,
+auth/origin/file/font/diagnostic/stored-link confinement, persisted reopen after restart,
+browser assets and operational logging/privacy checks before registry publication.
+Public image: `ghcr.io/denara/solidcraft-unraid:latest`, immutable tag
+`sha-8d476cedf3b90671a4ca347a5f3d168b6d5651ad` (Linux amd64).
+Digest: `sha256:05b66b15a73a33be6fcbb970281ca24d98d2f4f937b8ae8976787a320bc71a7b`.
+Both tags pulled anonymously using an empty Docker configuration. An anonymous registry
+manifest request returned HTTP 200 and matched the digest, OCI source revision and architecture.
+
+The sole remaining local runtime `solvecraft-solvecraft-1` runs that immutable public image,
+healthy at 0.14.0. Its private pre-replacement data/config backup and previous public 0.13.1
+image `solvecraft-unraid:rollback-before-c5992386` remain available. The data volume, MCP token,
+complete environment, user, ports/origins and all resource/security settings were preserved.
+Authenticated SDK modelling/PNG and read-only reopen of the known public saved example at
+24000 mm3 passed after replacement without saving over existing designs. The actual browser
+independently rendered Sample Plate at 0.14.0 after replacement.
+Five owned obsolete checks, fixture, offline, supplement and candidate containers were removed
+only after inspecting fresh labels, images, mounts and activity. No volumes were deleted.
+Diagnostics, reusable toolchain/browser images, Cargo/build caches, private backups, compatibility
+fixtures, archives and rollback images remain. No CA metadata commit, portal action, Unraid
+installation or nginx/DNS change was required. On Unraid, back up server files and separately
+export browser designs, update the existing container with the same settings/data/token and
+reload the browser. Newly saved format26 documents need this snapshot or a compatible newer build.
+
+The final upstream fetch observed `c59923865324cb487ff90def4361ad9c7d8a2556`. The selected target was still current.
