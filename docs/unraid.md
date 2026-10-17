@@ -15,8 +15,8 @@ The fork is hosted at [denara/solidcraft-unraid](https://github.com/denara/solid
 The public Unraid template names a new container `SolidCraft`; the existing local Compose service,
 image tags, command names, data format and environment variables retain compatibility.
 The first prototype used upstream commit `af536a7`. The current validated snapshot is
-`c59923865324cb487ff90def4361ad9c7d8a2556`, packaged as
-`solvecraft-unraid:upstream-c5992386`. See [update records](unraid-updates.md) for checks,
+`72145d4aba05eab66e7a49b383bee9c9f5764da3`, packaged as
+`solvecraft-unraid:upstream-72145d4a`. See [update records](unraid-updates.md) for checks,
 the transferable image archive and installation instructions for this update.
 
 For future requested updates, use the repository skill

@@ -871,3 +871,61 @@ commit or portal action was required. No Unraid installation or nginx/DNS change
 On Unraid, save active models, preserve/back up existing files and browser designs, then update
 the container with its existing settings/data/token. Open `/workspace` and sign in with the
 existing MCP token; reconnect MCP clients to discover the two new gateway tools.
+
+## 2026-10-17 — Upstream 72145d4a with preserved Unraid extensions
+
+Selected `72145d4aba05eab66e7a49b383bee9c9f5764da3` once at the start and merged it directly
+into `codex/unraid-mcp-web`, advancing the validated upstream baseline from `c5992386`.
+Origin's integration branch was synchronized and origin/main was an ancestor. Upstream PR2035
+was confirmed merged at the selected commit. Later upstream movement is tracked separately.
+The application remains version 0.14.0; this is a container snapshot, not an app release/tag.
+
+This snapshot includes geometry and STEP-import corrections, sweep guide rails, clearance
+and silhouette analysis, script/batch timings, a safer ZIP dependency, reader mutation
+coverage, the original SVG icon system, translations, browser-local command bindings and
+the ground-plane grid preference. All published fork extensions remain: independent web
+CAD and MCP models, protected `/workspace`, authoritative session metadata, cookie/Bearer
+separation, file confinement/revisions, operational category colors and token-location logs.
+
+Resolved the agent-instruction conflict with all fork safeguards retained, accepted the
+replacement of the superseded HID parser by the upstream pure-Rust shared input crate,
+and regenerated shipped licences from the merged dependency graph including the gateway.
+Two equivalent boolean simplifications satisfy warning-denied Clippy (mixed fractions and
+STEP whole-sphere validation). The icon registry test caught a missing icon on the new
+programmatic `inspect.silhouette` command; it now uses the established inspection icon.
+No artwork or accepted review hashes were changed. Narrow Git attributes retain canonical
+LF bytes for SVG masters and their palette, avoiding Windows CRLF hash/revision failures.
+
+Validation was scoped to the changes, not the entire unrelated test suite:
+
+- 402 selected Rust tests passed across gateway/MCP, all file readers, format/feature walks,
+  expressions, confined file access, clearance/silhouette, sweep rails, sheet cuts, placed
+  mirrors, timing, relevant kernel/STEP cases, icon rendering, navigation, shared HID input
+  and CLI connections/results. Existing ignored cases remain ignored. The large-sphere
+  distance regression passed in 229 seconds. The missing-icon failure was fixed and the
+  affected gates/tests rerun, rather than suppressing or weakening the check.
+- All-target workspace Clippy with warnings denied, formatting, 369 attributed assets,
+  268 icon masters and their 13 Python tool regressions, sorted catalogs, 17-crate layering,
+  regenerated licence inventory and twelve-crate Wasm checks passed. Linux amd64 CLI/gateway
+  release and the independent Trunk browser build succeeded.
+- The actual candidate used a fresh named volume, free loopback port and disposable token.
+  Real HTTP MCP modelling at 24000 mm3, PNG/STEP, independent sessions, authentication/origin/
+  path checks, restart reopen, category-color log/privacy checks and all workspace proofs
+  passed, including stale-save rejection with the model retained and conditional uploads.
+- Official MCP SDK 1.32.1 reopened eight public older designs at 24000 mm3, including the
+  previous snapshot's format26 with its three pending changes. New native/3MF ZIP saves
+  were verified; new format26 saves list five pending changes, adding `mirror-placements`
+  and `sweep-guide-rails`. Batch profiling, a 1 mm3 clearance overlap and a 40x60 silhouette
+  passed. A guide-rail frustum saved and reopened at 7329.7796 mm3 (analytic 7330.3829 mm3,
+  within the upstream 0.2 percent mesh-volume tolerance) and produced an actual native PNG.
+- The real browser rendered Sample Plate with the new icons. Native dashboard login and
+  file search passed while MCP models stayed independent. Public-safe screenshots, models,
+  logs and private local recovery data stay under ignored `target/unraid-update-72145d4a`,
+  excluded from Git and container build contexts.
+
+Before updating Unraid, save active models and back up server files and browser designs
+separately. Preserve the existing data mapping, token and settings. Older format26 builds
+may refuse files carrying the new pending markers; keep pre-update copies and the prior
+image for rollback. No Unraid installation, nginx/DNS change or application release is
+performed here. Registry publication, archive checksum, local replacement/cleanup and the
+description-only catalog synchronization are recorded below after verification.

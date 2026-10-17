@@ -1,0 +1,3 @@
+# Icon review approvals hash the canonical SVG bytes, including line endings.
+assets/icons/ui/design/svg/** text eol=lf
+assets/icons/ui/design/palette.toml text eol=lf

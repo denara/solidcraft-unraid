@@ -16,7 +16,7 @@ new uses of it anywhere else. Public docs/web/Flatpak deployments use project Pa
 
 ## Container prototype baseline
 The first Unraid prototype used upstream commit `af536a7`. The current validated
-container baseline is `c59923865324cb487ff90def4361ad9c7d8a2556`.
+container baseline is `72145d4aba05eab66e7a49b383bee9c9f5764da3`.
 Keep later upstream CAD/UI feature updates separate from this deployment addition;
 advance the baseline only as a separate, validated update. See [update records](docs/unraid-updates.md).
 
@@ -54,8 +54,8 @@ upstream update adds file-writing commands, review their entire output set again
 Run `packaging/unraid/workspace-test.ps1` against an isolated candidate along with
 the existing modelling, persistence, logging and browser checks.
 
-The next validated update must merge one selected upstream snapshot and publish it
-together with the existing integration features. Preserve the canonical Unraid template's
+Requested upstream updates merge one selected upstream snapshot and retain all published
+integration features in the combined image. Preserve the canonical Unraid template's
 Overview as a product description, not a dated changelog: link to upstream for SolidCraft
 features/changes and list only this fork's additional integration features as bullet points.
 Keep the original authorship and unofficial-integration notice explicit. Synchronize changed
@@ -110,8 +110,11 @@ People trust SolidCraft with their designs; a crash loses their work. **This out
   nothing from FreeCAD is linked, vendored or shipped.) The sketch solver and the blend
   operations are our own.
 - **Assets — absolutely essential.** SolidCraft contains **no iconography, images, fonts or
-  artwork from commercial CAD products — ever.** Every UI icon is drawn in collected code
-  (`assets/icons/ui/source/`, compiled through `crates/ui-egui/src/icons.rs`). Any file asset must be original or openly licensed and **must have a row in ATTRIBUTION.md**
+  artwork from commercial CAD products — ever.** Command icons are the original SVG masters in
+  `assets/icons/ui/design/svg/`, compiled through `crates/ui-egui/src/icon_svg.rs`.
+  **Before any icon, icon assignment or media edit, read `assets/AGENTS.md`,
+  `assets/icons/ui/AGENTS.md` and `assets/icons/ui/STYLE_GUIDE.md`.** Use the canonical
+  bases and named finished references there; never invent a parallel icon style. Any file asset must be original or openly licensed and **must have a row in ATTRIBUTION.md**
   (`cargo xtask assets` enforces it). Screenshots of commercial CAD software are never committed.
   Breaking this rule is the most serious mistake you can make in this repo.
 - **Everything is a command.** User-visible behaviour = a command in `crates/engine/src/cmd/*`
@@ -130,7 +133,9 @@ People trust SolidCraft with their designs; a crash loses their work. **This out
   preview, future flat pattern or drawing pages) calls `navigation::handle` with its `NavCaps`
   (orbit off for flat 2D pages). New canvases must use `navigation::handle`; never hand-roll
   camera input (a test rejects it).
-- **Rust only.** Units are millimetres and radians internally; Z is up. The one exception is
+- **Application code is Rust only.** Units are millimetres and radians internally; Z is up.
+  Local asset authoring, lint and review tools use Python 3.11+ as documented in
+  `assets/AGENTS.md`; Python is not an application runtime dependency. The application exception is
   JavaScript the browser requires: the service worker `apps/solidcraft-web/sw.js` (browsers only
   run service workers as JavaScript) and the small inline scripts in `apps/solidcraft-web/index.html`.
   Keep them minimal; `cargo xtask web-offline-test` covers the service worker.

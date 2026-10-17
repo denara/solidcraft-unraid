@@ -22,6 +22,11 @@ pub trait Backend {
     fn design_path(&self) -> Option<String> {
         None
     }
+    /// Commands run in this process, on this thread (the kernel's time in them can be measured
+    /// here, #1833).
+    fn in_process(&self) -> bool {
+        false
+    }
 }
 
 /// Longest reply line accepted from the app.
@@ -343,6 +348,9 @@ impl Backend for Headless {
     }
     fn design_path(&self) -> Option<String> {
         self.session.path.clone()
+    }
+    fn in_process(&self) -> bool {
+        true
     }
 }
 
