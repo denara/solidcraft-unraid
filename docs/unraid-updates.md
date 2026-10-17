@@ -799,3 +799,75 @@ export browser designs, update the existing container with the same settings/dat
 reload the browser. Newly saved format26 documents need this snapshot or a compatible newer build.
 
 The final upstream fetch observed `c59923865324cb487ff90def4361ad9c7d8a2556`. The selected target was still current.
+
+## 2026-10-17 — Protected file and session workspace
+
+Implemented the approved dashboard on `codex/unraid-mcp-web`, published from source
+`51b53cf9c562e14ae3fad5598631be1b5fc09241`. This deployment feature keeps the validated
+CAD baseline `c59923865324cb487ff90def4361ad9c7d8a2556`, version 0.14.0 and format26.
+It also publishes the preceding Unraid category-color correction `dfbaf6ed`.
+The final upstream check observed `6bde126a` (grid-union regression seed, #1813);
+those newer CAD changes are separate from this feature and were not integrated here.
+Origin's integration branch was synchronized; origin/main remained an ancestor.
+
+`/workspace` now provides the approved dark file/session overview, search, filters and
+authenticated downloads. It distinguishes opened files, in-flight requests, confirmed
+unsaved changes and new unsaved models. The existing MCP token grants a bounded browser
+session through an HttpOnly, SameSite=Strict cookie, with Origin/Host and CSRF checks;
+the cookie does not authenticate `/mcp` or the Bearer file API. Browser CAD stays independent.
+The gateway adds `workspace_list_files` and `session_status`, strong file revisions,
+conditional uploads and stale-save rejection across shared files. No private identifiers,
+credentials or filesystem roots are included in the dashboard metadata.
+
+Validation focused on the changed boundaries: 44 gateway tests, 48 MCP tests and three
+CLI MCP-connect tests passed (95 total), plus formatting, warning-denied workspace/all-target
+Clippy, 95 attributed assets, layering for 16 crates, sorted catalogs, licence inventory
+and Wasm checks for eleven crates. The unrelated full CAD/kernel suite was not repeated.
+The isolated candidate used a fresh test volume, loopback listener and disposable credential.
+Real HTTP MCP modelling, PNG/STEP export, authentication/origin/path confinement, independent
+sessions, restart persistence and operational logging/privacy passed. The new proof exercised
+two sessions sharing a file, a rejected stale save with the in-memory 36000 mm3 model retained,
+an unrelated export that cannot reset a stale baseline, conditional PUT responses 428/412/201,
+internal-method rejection and dashboard login/filter/download/logout with credential separation.
+
+Native browser checks in the in-app browser and Chrome/Vivaldi found and verified a fix for
+form authentication: `Referrer-Policy: same-origin` preserves the required same-origin POST
+Origin while suppressing external referrers. Actual dashboard screenshots use public example
+models and real session metadata. The independent CAD browser rendered Sample Plate at 0.14.0.
+Proofs and screenshots remain in ignored `target/workspace-proof`, outside the build context.
+
+[Container workflow 39024407871](https://github.com/denara/solidcraft-unraid/actions/runs/39024407871)
+rebuilt the full image and passed modelling/export, restart reopen, browser assets, logging/privacy
+and workspace/concurrent-revision checks before publishing. Public Linux amd64 image:
+`ghcr.io/denara/solidcraft-unraid:latest`, immutable tag
+`sha-51b53cf9c562e14ae3fad5598631be1b5fc09241`.
+Digest: `sha256:1a3b54ed9c363168e217ff332cdd65b405c0fc43063b8b1277a67d1de9938dbf`.
+Both tags pulled anonymously using an empty Docker configuration; an anonymous registry
+manifest request returned HTTP 200 with the matching digest, source label and architecture.
+
+Archive: `target/solidcraft-unraid-workspace-51b53cf9.tar` (146,164,224 bytes), tagged
+`solvecraft-unraid:workspace-51b53cf9`.
+SHA256: `d0e70fe3ad985204878372328c2ed064b93db2381d7df1aff1e5a9bf4cd5a332`.
+
+After a private data/config backup and an idle-process check, the sole local test runtime
+`solvecraft-solvecraft-1` was replaced with the immutable public image. Health, authenticated
+SDK modelling/PNG, read-only reopen of the known public 24000 mm3 saved example, dashboard
+cookie login/API/logout and the actual independent browser CAD passed after replacement.
+The data volume, MCP token, complete environment, user, ports/origins and security/resource
+settings were preserved. The owned disposable workspace candidate was then stopped and removed
+after fresh label/image/mount/port checks; its diagnostics were retained. Build containers
+used automatic removal. No volumes were deleted or global prune used. Toolchain images,
+build caches, private backups, proof fixtures and the previous image tagged
+`solvecraft-unraid:rollback-before-workspace` remain available.
+
+Limits: manual refresh, bounded inventory and a shared-token trust model; no filesystem lock
+against external writers. Batch rollback cannot undo filesystem writes. To avoid bypassing
+the new revision guards, the network gateway conservatively rejects multi-target URDF,
+per-body DXF file output and PNG animation frame directories. Ordinary STEP/3MF/PNG and GIF
+exports remain available. This adds no new design format or application version.
+
+The canonical Community Applications template and original icon are unchanged, so no catalog
+commit or portal action was required. No Unraid installation or nginx/DNS change was performed.
+On Unraid, save active models, preserve/back up existing files and browser designs, then update
+the container with its existing settings/data/token. Open `/workspace` and sign in with the
+existing MCP token; reconnect MCP clients to discover the two new gateway tools.
