@@ -1206,3 +1206,43 @@ passed again. The actual browser rendered the thumbnails and new surface, opened
 box model through the clicked edit link, and opened a public native ZIP surface design;
 handoff fragments disappeared from the address bar. Public-safe screenshots and all
 checks remain under `target/workspace-live-20261018/`.
+
+Publication passed [container workflow 39131938693](https://github.com/denara/solidcraft-unraid/actions/runs/39131938693)
+from validated source `4bb74c6bd236a595e6bf9cc10314363151c69297` on
+`codex/unraid-mcp-web`. The fresh CI image passed real MCP modelling/PNG/STEP,
+restart persistence, browser assets, logging/privacy, concurrent file revisions,
+live workspace/preview/import checks and remembered-login restart/revocation before
+publication. Public Linux amd64 tags are `ghcr.io/denara/solidcraft-unraid:latest`
+and immutable `sha-4bb74c6bd236a595e6bf9cc10314363151c69297`.
+Digest: `sha256:234fdd6cc3f68ce86f67e9d53ca32f0a445fa15ee5b6ca6e4d84cf8e54eb5a91`.
+Both tags pulled anonymously with an empty Docker configuration; the anonymous
+registry manifest matched the source, architecture and local image digest.
+
+Archive: `target/solidcraft-unraid-workspace-live-20261018.tar` (150,417,408 bytes),
+tagged `solvecraft-unraid:workspace-live-20261018`.
+SHA256: `de40ea9b4c8a857ed7a39bec41f475c20d1a132c042641fa52275ed0554d3355`.
+
+The sole remaining local test container `solvecraft-solvecraft-1` runs the immutable
+public image, healthy at 0.15.0. Fresh private data/config backups and the prior
+image `solvecraft-unraid:rollback-before-workspace-live-20261018` are retained.
+The data volume, MCP token, complete runtime environment, user, port/origin settings
+and resource/security limits were verified unchanged. Authenticated MCP modelling
+and PNG rendering, read-only reopening of the public 24000 mm3 fixture, workspace
+cookie login/logout, saved properties, the SSE endpoint, Rust browser assets and
+independent CAD startup passed after replacement. No real saved file was overwritten.
+The owned idle candidate and its three unused prototype images were removed after
+label, image, volume and activity checks; diagnostics remain in the ignored proof
+directory. No volumes or unrelated Docker resources were removed. Build caches,
+toolchain images, backups and rollback images remain; no global prune was used.
+
+The canonical seven-bullet Overview was synchronized to `denara/unraid-templates`
+on `main` in commit `4cac094`, preserving the original icon, catalog profile,
+license and other template settings. No new CA submission or application release
+was created. The final fetch observed upstream/main at
+`2b8e85a7c60b3cff0ef694d26a12ccadb304d345`; the validated CAD baseline remains
+`8f768b65c801b255e48fd5892b3c50c136fa0992`. Later upstream work is deferred to a
+separate validated update. Fork `origin/main` remains an ancestor of this branch.
+To install, save active work, update the existing Unraid container while retaining
+its data/token/settings and reload the browser. Browser editing opens an independent
+copy and does not save changes back to the server. No Unraid deployment, nginx/DNS
+change or file migration was performed.
