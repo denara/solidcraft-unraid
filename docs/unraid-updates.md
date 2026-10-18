@@ -1103,3 +1103,40 @@ files. Save active work and keep pre-update server/browser-design backups and th
 before a production update. No Unraid installation or nginx/DNS change is performed here.
 Publication, archive checksum and the preserved local runtime/cleanup are recorded after the
 exact-source container workflow passes. No catalog commit is needed for unchanged metadata.
+
+Publication passed [container workflow 39108655415](https://github.com/denara/solidcraft-unraid/actions/runs/39108655415)
+from validated merge/source `135d04e65f12702ac82c8d5f8b35b43b4f4d0ed2`.
+The fresh CI image passed real HTTP MCP modelling/PNG/STEP, independent sessions,
+authentication/origin/path guards, restart persistence, browser assets, operational log
+privacy/colors and the extended workspace/revision proofs before registry push.
+Public Linux amd64 tags: `ghcr.io/denara/solidcraft-unraid:latest` and immutable
+`sha-135d04e65f12702ac82c8d5f8b35b43b4f4d0ed2`.
+Digest: `sha256:34a81391af66de083e3369c89f74c168fc80d1df9da1c143050cf1a2cd2641f9`.
+Both tags pulled anonymously using an empty Docker configuration; the anonymous manifest
+matched digest, source revision and architecture.
+
+Archive: `target/solidcraft-unraid-upstream-8f768b65.tar` (149,224,960 bytes), tagged
+`solvecraft-unraid:upstream-8f768b65`.
+SHA256: `2f8d9c913c7471a096616a49c1d1df7af059d6f3647dd65f8b227359b91a5d91`.
+
+The sole local test runtime `solvecraft-solvecraft-1` now runs that immutable public image,
+healthy at 0.15.0. Ownership/idle checks, fresh private data/config backups and
+`solvecraft-unraid:rollback-before-8f768b65` preserve the prior state. The original data
+volume, MCP token, complete environment, user, port/origin and resource/security settings
+were verified unchanged. Authenticated SDK modelling/PNG, read-only reopen of the public
+24000 mm3 fixture, workspace cookie login/API/logout and browser startup passed after
+replacement. No real saved file was overwritten. The owned idle candidate and its untagged
+unused prototype image were removed after ownership/image/volume/activity checks, with
+final diagnostics retained. Build, extra-test and browser containers removed themselves.
+No volumes were deleted or global prune used; toolchains, caches, backups and rollback
+images remain. The canonical catalog template/icon are unchanged, so no new catalog commit
+or submission was needed. No Unraid deployment, nginx/DNS change or fork release was made.
+
+The final fetch observed one later upstream commit, `b685b7301f35948ab75015d48ec8b89cfd8252b7`
+(horizontal-pan direction preference, PR2047). The chosen and validated snapshot remains
+fixed; the later change is left for the next scheduled check. To install, save active work,
+back up server and independent browser designs, update the existing Unraid container while
+preserving data/token/settings, and reload the browser. Keep pre-update files for rollback:
+new format27 designs are not readable by the previous build.
+
+The actual local browser also rendered Sample Plate at 0.15.0 after replacement; its public-safe screenshot is retained in the ignored proof directory.
