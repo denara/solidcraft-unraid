@@ -25,6 +25,7 @@ mod boolean_guard;
 mod boolean_record;
 mod bore_guard;
 mod boundary;
+mod boundary_network;
 mod bridge;
 mod build;
 mod clearance;
@@ -58,6 +59,8 @@ mod issue_1038_tests;
 mod issue_1080_tests;
 #[cfg(test)]
 mod issue_1510_tests;
+#[cfg(test)]
+mod issue_2005_tests;
 #[cfg(test)]
 mod issue_324_tests;
 #[cfg(test)]
@@ -119,6 +122,8 @@ mod surface_extend;
 mod surface_kind;
 mod surface_offset;
 mod surface_ruled;
+#[cfg(test)]
+mod surface_second_derivative_tests;
 mod surface_untrim;
 mod surfaces;
 mod sweep_path;
@@ -143,6 +148,7 @@ pub use blend_variable::{RadiusSpline, Taper, fillet_chord, fillet_tapered, fill
 pub use body::{Body, CapSignature, DISPLAY_ANGLE, EdgeInfo, FaceInfo, FacePaint, FaceSource, Paint};
 pub use boolean_diagnostics::{BooleanDiagnostics, BooleanFallback, BooleanStrategy, capture_boolean_diagnostics};
 pub use boundary::{Boundary, boundary_patch};
+pub use boundary_network::{BoundaryCurve, CurveSource, MAX_CHAIN_CURVES, MAX_EDGE_PICKS, boundary_join, boundary_surface};
 pub use bridge::{Continuity, Frame, blend_between, bridge, chain, chain_closes, frames, frames_across, sample_grid};
 pub use build::{
     PathSeg, box_solid, canonical_revolve_axis, cylinder, extrude, extrude_tapered, extrude_tapered_between, loft, path_polyline, revolve,
@@ -173,7 +179,10 @@ pub use mesh_convert::convert_prismatic_mesh;
 pub use meshbody::{MAX_TRIANGLES, mesh_body};
 pub use native::{decode_native_body, encode_native_body, native_preview_mesh};
 pub use offset::with_same_surface;
-pub use ops::{BoolOp, boolean, can_join_touching_faces, half_space, join_apart, split_by_plane, transform, transform_matrix, union_apart};
+pub use ops::{
+    BoolOp, boolean, can_join_all_touching_faces, can_join_touching_faces, compound_disjoint_extrusions, half_space, is_planar, join_apart,
+    split_by_plane, transform, transform_matrix, union_apart,
+};
 pub use polybool::{faceted_boolean, planar_boolean};
 pub use polyhedron::{HalfSpace, convex_polyhedron, draft, offset_faces, shell};
 pub use prism::{PLANAR_FIT_TOL, extrude_planar_regions, planar_regions_boolean};

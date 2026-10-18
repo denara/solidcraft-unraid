@@ -901,7 +901,8 @@ pub enum FeatureKind {
         targets: Vec<BodyName>,
     },
     /// A thin wall from open sketch curves: `thickness` across the sketch plane, filling from
-    /// the curves toward the body (to the next face, or `depth`). A web makes one per curve.
+    /// the curves toward the body (to the next face, or `depth`), or with `normal` along the
+    /// sketch normal. A web makes one per curve.
     Rib {
         sketch: SketchId,
         curves: Vec<String>,
@@ -917,6 +918,10 @@ pub enum FeatureKind {
         /// Web: each curve is its own wall.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         web: bool,
+        /// Grow the wall along the sketch normal (thickness across the curves, in the sketch
+        /// plane) instead of across the plane from the curves.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        normal: bool,
     },
     /// Move planar faces (at the given points) onto a target plane parallel to them.
     ReplaceFace {
@@ -1460,6 +1465,19 @@ pub enum FeatureKind {
         #[serde(default = "boundary_samples")]
         samples: usize,
     },
+    /// One surface through a curve network (`surface.boundary` with `u` and `v`, issue #763): the
+    /// curves `u` run one way (two or more: the surface lofts through them) and `v` cross them the
+    /// other way (two each way: a Coons patch; more: a Gordon surface through every curve). A side
+    /// may be a point (a three-sided patch). A curve that is a chain of a surface's open edges may
+    /// carry G1 or G2 with the face beside it. `operation` join sews the surface into the body of
+    /// its first edge curve (a solid when it closes the gap there).
+    SurfaceNetwork {
+        u: Vec<NetworkCurve>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        v: Vec<NetworkCurve>,
+        #[serde(default)]
+        operation: Operation,
+    },
     /// One face of a surface body rebuilt against another body (`surface.match`): the rebuilt
     /// boundary nearest the chain of `edges` on `target` takes that chain's place and repeats the
     /// target's own shape along the seam up to `order`, while the boundary opposite it, and the
@@ -1687,6 +1705,27 @@ pub struct BlendSide {
     pub edges: Vec<Position>,
 }
 
+/// One curve of a boundary surface's network ([`FeatureKind::SurfaceNetwork`]): a chain of a
+/// sketch's `curves` (planar or 3D, meeting end to end), a chain of `body`'s edges picked by points
+/// on them (`edges`), or a side collapsed to the point `point` (the apex of a three-sided patch).
+/// A chain of a surface's open edges may carry `continuity` with the face beside it (G0, the
+/// default, G1 or G2).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, solidcraft_derive::Walk)]
+pub struct NetworkCurve {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sketch: Option<SketchId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub curves: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<BodyName>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edges: Vec<Position>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub point: Option<Position>,
+    #[serde(default = "patch_g0", skip_serializing_if = "is_g0")]
+    pub continuity: Continuity,
+}
+
 /// How a patch on a loop of edges meets the faces beside the loop: every edge with `all`, but the
 /// edges picked in `edges` with their own.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, solidcraft_derive::Walk)]
@@ -1728,8 +1767,11 @@ fn is_g0(g: &Continuity) -> bool {
 /// The continuity a blend repeats by default: the tangent plane on both sides.
 /// The stations a boundary patch carries by default.
 fn boundary_samples() -> usize {
-    25
+    BOUNDARY_SAMPLES
 }
+
+/// The stations a boundary patch carries when a design does not say.
+pub const BOUNDARY_SAMPLES: usize = 25;
 
 fn blend_orders() -> [Continuity; 2] {
     [Continuity::G1, Continuity::G1]
@@ -2083,7 +2125,7 @@ impl FeatureKind {
             FeatureKind::SurfaceSweep { .. } => "SurfaceSweepFeature",
             FeatureKind::SurfaceLoft { .. } => "SurfaceLoftFeature",
             FeatureKind::SurfaceBlend { .. } => "BlendFeature",
-            FeatureKind::SurfaceBoundary { .. } => "BoundaryFeature",
+            FeatureKind::SurfaceBoundary { .. } | FeatureKind::SurfaceNetwork { .. } => "BoundaryFeature",
             FeatureKind::SurfaceMatch { .. } => "MatchFeature",
             FeatureKind::SurfaceFair { .. } => "FairFeature",
             FeatureKind::Stitch { .. } => "StitchFeature",
@@ -2163,7 +2205,7 @@ impl FeatureKind {
             FeatureKind::SurfaceSweep { .. } => "SurfaceSweep",
             FeatureKind::SurfaceLoft { .. } => "SurfaceLoft",
             FeatureKind::SurfaceBlend { .. } => "Blend",
-            FeatureKind::SurfaceBoundary { .. } => "Boundary",
+            FeatureKind::SurfaceBoundary { .. } | FeatureKind::SurfaceNetwork { .. } => "Boundary",
             FeatureKind::SurfaceMatch { .. } => "Match",
             FeatureKind::SurfaceFair { .. } => "Fair",
             FeatureKind::Stitch { .. } => "Stitch",

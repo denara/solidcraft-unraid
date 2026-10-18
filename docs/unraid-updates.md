@@ -1031,3 +1031,75 @@ rollback image or backups were deleted. Catalog metadata is unchanged, so no cat
 was needed. No Unraid deployment, application version bump or release tag was made.
 The login-address correction works with the prior image; update the installed container
 when the improved rejection logs and explanations are desired.
+
+## 2026-10-18: upstream 8f768b65 with all published integration features
+
+Selected once after fetching: `8f768b65c801b255e48fd5892b3c50c136fa0992`
+([merged PR1907](https://github.com/bherbruck/solidcraft/pull/1907)), advancing the
+validated upstream baseline from `72145d4aba05eab66e7a49b383bee9c9f5764da3`.
+The sole integration/publication branch remains `codex/unraid-mcp-web`, synchronized
+with origin. Fork main was checked separately and is already an ancestor. The starting
+published integration includes the `25f3e228` workspace-login diagnostics correction.
+No additional branch, rewritten history, fork application release or release tag is made.
+The upstream author's existing 0.15.0 version is retained.
+
+The selected snapshot includes boundary loops/networks, grouped-profile/face extrusion,
+rib direction and boolean/STEP corrections, constrained sketch dragging, dimensions and
+loose-end tools, viewport picking/grid and toolbar/timeline changes, translations and the
+web service-worker sign-in correction. Upstream's separate web-only Docker packaging is
+retained alongside our combined gateway/web packaging; it does not replace the latter.
+For product features and changes, the canonical Unraid Overview continues to link upstream
+and lists only this fork's additional integration features, with original authorship and
+unofficial status explicit. The template and original icon did not change in this update.
+
+Resolved three conflicts: agent instructions preserve the fork's safety/privacy/update
+rules, the upstream original `project` icon supersedes our equivalent silhouette assignment,
+and the app keeps unsafe native crash/frame/Finder bridges omitted while retaining the
+shared Rust HID changes. The new unsafe macOS 3Dconnexion framework bridge is likewise
+omitted; its API returns Unsupported without invoking a callback or starting a thread.
+A targeted regression and workspace forbid-unsafe lints cover this compatibility stub.
+Linux/container CAD and input behavior are preserved. Licences were regenerated from the
+merged dependency graph, including the gateway, without adding external dependencies.
+
+All previously published gateway features remain: independent browser CAD and MCP models,
+cookie-only workspace login (including actionable 403/audit reasons and cross-tab challenge
+reuse), authoritative per-session file/dirty metadata, bounded slots, cookie/Bearer separation,
+confined files, stale-save and HTTP revision checks, category colors and token-location logs.
+Review of the new/changed commands found no new filesystem writer: sketch loose-end commands
+read/mutate sketches; boundary surfaces and grouped-face extrusion mutate the document;
+occurrence paths refer to model occurrences. Existing multi-output export guards remain.
+
+Validation was scoped to the changed code:
+
+- 457 selected Rust tests passed across geometry/network/section validation, sketch motion
+  and ends, format/display/feature walks, boundary surfaces, STEP/trimmed projections,
+  revolve/sweep and multi-profile/face/rib regressions, viewport/device navigation, dimensions,
+  icons/localization, shared input, MCP, CLI and all 47 gateway tests. Existing ignored cases
+  remain ignored. Unrelated whole-suite tests were not repeated.
+- Workspace all-target Clippy with warnings denied, formatting, 377 attributed assets,
+  original SVG icon checks, sorted catalogs, 18-crate layers, shipped licences and Wasm gates
+  passed. Linux amd64 CLI/gateway release and the independent release browser bundle built.
+- A fresh-volume, loopback-only candidate with disposable token passed real HTTP MCP
+  modelling at 24000 mm3, PNG/STEP, independent sessions, authentication/origin/path checks,
+  restart persistence, operational color/log privacy and the extended workspace test.
+  Actual browser login, file filtering and CAD rendering at 0.15.0 passed.
+- The official SDK reopened nine public older box designs at 24000 mm3, including the
+  previous format26 with five pending markers, and the previous guide-rail model at
+  7329.7796 mm3. Native and 3MF ZIP round trips passed. Loose ends/ties and a boundary-loop
+  slab saved/reopened at 200 mm3. A new boundary network saved/reopened at 128.1018 mm2
+  (within 0.1 percent of independent surface integration) and produced a real native PNG.
+  The individual new public analytic oracle case83 also passed through the actual CLI.
+- The built browser command API passed its actual model/undo/redo/error/queue proof.
+  All 20 offline/update scenarios (22 launches) passed, including the new expired-sign-in
+  scenario: it displays the sign-in page instead of serving a retained build past the gate.
+  Screenshots, public models and logs stay under ignored `target/unraid-update-8f768b65`.
+  Docker cp refuses staging into a read-only rootfs even at this tmpfs path; the public
+  oracle JSONs were instead streamed into the writable tmpfs, preserving the security flag.
+
+This snapshot writes `solidcraft/27`, with `boundary-surface-networks` and
+`rib-normal-direction` pending. The previous five markers are folded into v26 by upstream.
+Older saved files were verified in the new reader; previous builds cannot read new format27
+files. Save active work and keep pre-update server/browser-design backups and the prior image
+before a production update. No Unraid installation or nginx/DNS change is performed here.
+Publication, archive checksum and the preserved local runtime/cleanup are recorded after the
+exact-source container workflow passes. No catalog commit is needed for unchanged metadata.

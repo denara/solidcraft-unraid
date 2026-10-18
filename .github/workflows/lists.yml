@@ -1,9 +1,10 @@
 # Files many pull requests add to are kept so that additions don't conflict: one file per change
 # or one sorted line per item (CONTRIBUTING.md, "Lists many changes add to"). Fast, no build.
+# Pull requests get the same checks in CI's "Format and repository checks" job (one runner slot
+# per PR instead of three); this copy keeps main honest.
 name: Lists
 
 on:
-  pull_request:
   push:
     branches: [main]
 

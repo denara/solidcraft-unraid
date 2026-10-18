@@ -1,0 +1,10 @@
+[package]
+name = "solidcraft-3dx-client"
+description = "SolidCraft: a client of the 3Dconnexion driver on macOS (3DxWare), loaded at run time"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true

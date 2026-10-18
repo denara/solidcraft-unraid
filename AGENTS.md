@@ -16,7 +16,7 @@ new uses of it anywhere else. Public docs/web/Flatpak deployments use project Pa
 
 ## Container prototype baseline
 The first Unraid prototype used upstream commit `af536a7`. The current validated
-container baseline is `72145d4aba05eab66e7a49b383bee9c9f5764da3`.
+container baseline is `8f768b65c801b255e48fd5892b3c50c136fa0992`.
 Keep later upstream CAD/UI feature updates separate from this deployment addition;
 advance the baseline only as a separate, validated update. See [update records](docs/unraid-updates.md).
 
@@ -178,9 +178,13 @@ People trust SolidCraft with their designs; a crash loses their work. **This out
 - Before working on issue #N, check nobody has it: `gh pr list -R bherbruck/solidcraft --state open --search "#N"`.
 - If none, branch from the latest `origin/main`, `git commit --allow-empty -m "claim: #N"`, push,
   and open a **draft** PR titled `<summary> (#N)` right away. **The lowest-numbered open PR for an
-  issue wins**; if yours lost, close it. Don't claim by commenting or by editing files.
+  issue wins**; if yours lost, close it. A comment or file edit alone does not replace the draft PR.
+- After opening the draft PR, comment `/claim` on the issue so the bot records the claimant and
+  adds the `in progress` label. **Do both:** the draft PR establishes ownership and `/claim` marks
+  the issue as taken. Reference `#N` in the PR so the bot can find it.
 - Push work in progress at least daily. A draft with no pushes for 72 hours may be taken over:
   comment on it first, then open your own claim (you may start from its branch).
+  This takeover policy is separate from the bot's automatic cleanup deadlines in CONTRIBUTING.md.
 - On a shared build machine, check the load before a big build (`cut -d' ' -f1 /proc/loadavg`)
   and wait while it is over 24; build with `nice`.
 
@@ -224,8 +228,8 @@ before the draft is verified.
 milestone task lands. `cargo xtask features` regenerates `docs/features.md` (SolidCraft's
 commands by area, from the registry) when commands are added or renamed.
 
-The container integration omits upstream's macOS Finder and Windows native-crash/resize-border unsafe bridges; command-line
-file opening and all Linux/container behavior are preserved. CAD and UI logic remain Rust.
+The container integration omits upstream's macOS Finder, 3Dconnexion driver FFI and Windows native-crash/resize-border unsafe bridges; command-line
+file opening and all Linux/container behavior are preserved. The driver compatibility API reports Unsupported without starting a thread; shared pure-Rust HID handling is retained. CAD and UI logic remain Rust.
 The upstream JavaScript service worker is browser infrastructure, independent of HTTP MCP.
 
 Design-format additions follow upstream's per-change files under crates/doc/src/format/pending/.

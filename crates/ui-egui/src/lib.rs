@@ -98,6 +98,7 @@ mod apply_off_thread_tests;
 mod expression_complete;
 #[cfg(test)]
 mod extrude_edit_tests;
+mod extrude_preview;
 mod file_load;
 mod file_picker;
 #[cfg(test)]
@@ -105,6 +106,8 @@ mod history_off_thread_tests;
 pub use file_picker::FilePickerFuture;
 #[cfg(test)]
 mod blend_arrow_tests;
+#[cfg(test)]
+mod boundary_dialog_tests;
 pub(crate) mod display_lod;
 #[cfg(test)]
 mod file_load_ui_tests;
