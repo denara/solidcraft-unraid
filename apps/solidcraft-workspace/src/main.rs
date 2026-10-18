@@ -12,7 +12,9 @@ mod browser {
     use wasm_bindgen::closure::Closure;
     use wasm_bindgen::{JsCast as _, JsValue};
     use wasm_bindgen_futures::{JsFuture, spawn_local};
-    use web_sys::{Document, Element, Event, EventSource, HtmlDetailsElement, HtmlDialogElement, HtmlElement, MessageEvent, MouseEvent};
+    use web_sys::{
+        Document, Element, Event, EventSource, HtmlDetailsElement, HtmlDialogElement, HtmlElement, HtmlImageElement, MessageEvent, MouseEvent,
+    };
 
     fn document() -> Option<Document> {
         web_sys::window()?.document()
@@ -166,12 +168,46 @@ mod browser {
         Ok(())
     }
 
+    fn remove_failed_preview(image: &Element) {
+        if image.tag_name() != "IMG" || !image.has_attribute("data-file-preview") {
+            return;
+        }
+        if let Ok(Some(figure)) = image.closest(".detailpreview") {
+            let _ = figure.set_attribute("hidden", "");
+        }
+        image.remove();
+    }
+
+    fn install_preview_fallback(doc: &Document) -> Result<(), JsValue> {
+        // Image errors do not bubble. Capture also covers thumbnails inserted
+        // by a later server push or a subsequently opened details popup.
+        let error = Closure::<dyn FnMut(Event)>::new(move |event: Event| {
+            let Some(image) = event.target().and_then(|target| target.dyn_into::<Element>().ok()) else { return };
+            remove_failed_preview(&image);
+        });
+        doc.add_event_listener_with_callback_and_bool("error", error.as_ref().unchecked_ref(), true)?;
+        error.forget();
+        // A cached error can finish before the Wasm bindings have loaded.
+        let previews = doc.query_selector_all("img[data-file-preview]")?;
+        for index in 0..previews.length().min(2000) {
+            if let Some(preview) = previews.item(index)
+                && let Ok(image) = preview.dyn_into::<HtmlImageElement>()
+                && image.complete()
+                && image.natural_width() == 0
+            {
+                remove_failed_preview(&image);
+            }
+        }
+        Ok(())
+    }
+
     pub fn start() -> Result<(), JsValue> {
         let document = document().ok_or_else(|| JsValue::from_str("document unavailable"))?;
         if document.get_element_by_id("workspace-live").is_none() {
             return Ok(());
         }
         install_details(&document)?;
+        install_preview_fallback(&document)?;
         let query = web_sys::window().and_then(|window| window.location().search().ok()).unwrap_or_default();
         connect(query, Rc::new(Cell::new(0)))
     }

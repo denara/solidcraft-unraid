@@ -70,6 +70,8 @@ const CSS: &str = r#"
 .bottom{display:grid;grid-template-columns:1.2fr 1fr;gap:20px;margin-top:20px}.explain{padding:17px 20px}.explain h3{font-size:12px;margin:0 0 7px}.explain p{font-size:11px;line-height:1.7}.legend{display:flex;gap:16px;flex-wrap:wrap;margin-top:10px;font-size:10px;color:var(--dim)}footer{display:flex;justify-content:space-between;gap:16px;color:#8193a4;font-size:10px;margin-top:19px}.loginpanel{max-width:460px;margin:70px auto 30px;padding:28px}.loginpanel h1{font-size:25px;margin:7px 0 12px}.loginpanel p{font-size:12px}.loginform{display:flex;flex-direction:column;gap:10px;margin-top:24px}.loginform label{font-size:12px}.loginform input{width:100%;padding:11px 12px;background:#111820;border:1px solid var(--line);border-radius:7px;color:var(--text)}.loginform button{margin-top:6px}.loginhint{margin-top:20px!important;font-size:11px!important}.error{margin-top:18px;padding:10px 12px;border:1px solid #815253;border-radius:7px;color:#ffb6b6;background:#352327;font-size:12px}
 @media(max-width:1150px){.work{grid-template-columns:1fr}.sessionslist{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}.session{border-right:1px solid var(--line)}.capacity{max-width:240px}.bottom{grid-template-columns:1fr 1fr}}@media(max-width:760px){.top{padding:14px 20px}.brandnote{display:none}.shell{padding:25px 18px}.topright{gap:12px}.topright>span{display:none}.cards{grid-template-columns:1fr 1fr}.heading{align-items:flex-start;flex-direction:column}.sessionslist{display:block}.bottom{grid-template-columns:1fr}h1{font-size:25px}.toolbar .secondary{flex:1}.loginpanel{margin-top:30px}footer{flex-direction:column;gap:4px}.stat{padding:14px}.statlabel{font-size:11px}}@media(max-width:400px){.cards{grid-template-columns:1fr}.panelhead{flex-wrap:wrap}}
 .nativeicon{width:30px;height:30px;display:block;flex-shrink:0}.fileicon{border:0;background:none;padding:0;height:34px;width:34px}.fileicon .nativeicon{width:34px;height:34px}.project{border-top:1px solid var(--line)}.project>summary{padding:14px 20px;display:flex;align-items:center;gap:10px;cursor:pointer;list-style:none;background:#1b2530}.project>summary::-webkit-details-marker{display:none}.project>summary:before{content:'›';font-size:22px;color:var(--dim);width:12px;transition:transform .15s}.project[open]>summary:before{transform:rotate(90deg)}.project>summary:focus-visible{outline:2px solid var(--green);outline-offset:-3px}.projectname{font-weight:650;overflow-wrap:anywhere}.projectmeta{font-size:10px;color:var(--dim);margin-top:2px}.projectcount{margin-left:auto;color:var(--dim);font-size:11px;white-space:nowrap}.project table{table-layout:auto}.actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.detailslink{color:var(--text);text-decoration:none}.detailslink:hover{text-decoration:underline;color:var(--blue)}.livebar{display:flex;align-items:center;gap:8px;color:var(--dim);font-size:11px;margin-bottom:14px;min-height:20px}.livebar .dot{background:var(--amber)}.livebar[data-state=connected] .dot{background:var(--green)}.livebar a{margin-left:auto;text-decoration:none;color:var(--blue)}.filters{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:0 0 18px}.filters .toolbar{margin:0}.filesintro{padding:0 20px 16px;font-size:11px;color:var(--dim)}.remember{padding:10px 12px;background:#111820;border:1px solid var(--line);border-radius:7px;color:var(--text);width:100%}.remembernote{font-size:11px!important;margin-top:0!important}.filedialog{color:var(--text);background:var(--panel);border:1px solid #496071;border-radius:14px;padding:0;width:min(680px,calc(100% - 32px));max-height:85vh;overflow:auto;box-shadow:0 24px 90px #0009}.filedialog::backdrop{background:#080d13b8;backdrop-filter:blur(3px)}.dialoghead{position:sticky;top:0;display:flex;justify-content:space-between;gap:20px;align-items:center;background:var(--panel);padding:16px 24px;border-bottom:1px solid var(--line);z-index:1}.dialoghead h2{font-size:14px}.dialogclose{width:32px;height:32px;border:1px solid var(--line);border-radius:7px;background:var(--raised);font-size:20px;line-height:1}.detailsbody{padding:24px}.detailsbody h1{font-size:23px;overflow-wrap:anywhere;margin-top:0}.detailspath{font-size:11px;overflow-wrap:anywhere;color:var(--dim);margin:6px 0 20px}.detailgrid{display:grid;grid-template-columns:minmax(130px,.8fr) minmax(0,1.3fr);margin:0}.detailgrid dt,.detailgrid dd{margin:0;padding:10px 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere;font-size:12px}.detailgrid dt{color:var(--dim);padding-right:20px}.detailgrid dd{white-space:pre-wrap}.detailheading{font-size:13px;margin:26px 0 8px}.detailnote{font-size:11px;line-height:1.7;margin-bottom:12px}.detailpanel{max-width:760px;margin:0 auto}.detailsbody .actions{margin-top:24px}.detailfallback{margin-top:18px}.filedialog .detailfallback{display:none}.filedialog:focus{outline:none}.filedialog .detailsbody{border:0}.visuallyhidden{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}@media(prefers-reduced-motion:reduce){.project>summary:before{transition:none}}@media(max-width:760px){.projectcount{font-size:10px}.project>summary{padding:12px 16px}.detailgrid{grid-template-columns:110px minmax(0,1fr)}.detailsbody{padding:20px}.dialoghead{padding:12px 20px}.filters{padding:12px}.actions{gap:8px}.project table th:nth-child(3),.project table td:nth-child(3){display:none}}
+.file-explorer{background:#1a2530;border-color:#354857}.file-explorer>.panelhead,.file-explorer>.filesintro{background:#1d2b37}.file-explorer .panelhead{padding-bottom:12px}.file-explorer .filesintro{margin:0;padding-bottom:17px}.file-explorer .project{border-top-color:#354857}.file-explorer .project>summary{background:#223241}.file-explorer .project>summary:hover{background:#273b4c}.file-explorer .project table{background:#19242e}.file-explorer th{background:#17212b;border-color:#30414f}.file-explorer td{border-bottom-color:#30414f}.file-explorer tbody tr:hover{background:#1e2e3c}.filepreview{position:relative;width:48px;height:40px;display:grid;place-items:center;overflow:hidden;border:1px solid #40576a;border-radius:6px;background:#111b24}.filepreview .nativeicon{width:30px;height:30px}.filepreview:has(img) .nativeicon{visibility:hidden}.filethumb{position:absolute;inset:0;display:block;width:48px;height:40px;object-fit:cover;border-radius:inherit}.detailpreview{display:grid;place-items:center;margin:0 0 22px;padding:12px;background:#101923;border:1px solid #354857;border-radius:9px;min-height:90px}.detailpreview img{display:block;max-width:100%;max-height:320px;object-fit:contain;border-radius:4px}.detailpreview figcaption{font-size:10px;color:var(--dim);padding-top:9px}.detailpreview[hidden]{display:none}
+
 "#;
 
 fn escape(text: &str) -> String {
@@ -205,12 +207,22 @@ fn file_row(html: &mut String, file: &Value) {
         "export" => (ICON_EXPORT, "Exportdatei"),
         _ => (ICON_FILE, "Datei"),
     };
-    let icon = icon(source);
+    let mut preview = icon(source);
+    let preview_class = if is_png(name) {
+        let _ = write!(
+            preview,
+            "<img class=\"filethumb\" src=\"{}\" loading=\"lazy\" decoding=\"async\" width=\"48\" height=\"40\" alt=\"\" data-file-preview>",
+            preview_url(name)
+        );
+        " filepreview"
+    } else {
+        ""
+    };
     let short_name = name.rsplit('/').next().unwrap_or(name);
     let details = download_url(name).replacen("/workspace/files/", "/workspace/details/", 1);
     let _ = write!(
         html,
-        "<tr><td><span class=\"fileicon\" aria-hidden=\"true\">{icon}</span><div class=\"file\"><a class=\"detailslink\" href=\"{details}\" data-file-details=\"{details}\">{}</a></div><div class=\"filetype\">{label} · {}</div></td><td>",
+        "<tr><td><span class=\"fileicon{preview_class}\" aria-hidden=\"true\">{preview}</span><div class=\"file\"><a class=\"detailslink\" href=\"{details}\" data-file-details=\"{details}\">{}</a></div><div class=\"filetype\">{label} · {}</div></td><td>",
         escape(short_name),
         escape(text(file, "format"))
     );
@@ -243,12 +255,31 @@ fn file_row(html: &mut String, file: &Value) {
         .unwrap_or_else(|_| "Unbekannt".into());
     let _ = write!(
         html,
-        "</td><td class=\"nowrap\"><time datetime=\"{}\">{}</time></td><td class=\"nowrap\">{}</td><td><div class=\"actions\"><a class=\"action\" href=\"{details}\" data-file-details=\"{details}\">Details</a><a class=\"action\" href=\"{}\" download>Download ↓</a></div></td></tr>",
+        "</td><td class=\"nowrap\"><time datetime=\"{}\">{}</time></td><td class=\"nowrap\">{}</td><td><div class=\"actions\"><a class=\"action\" href=\"{details}\" data-file-details=\"{details}\">Details</a>",
         escape(modified),
         escape(&date),
-        size(number(file, "size_bytes")),
-        download_url(name)
+        size(number(file, "size_bytes"))
     );
+    edit_link(html, file, "action", "Bearbeiten ↗");
+    let _ = write!(html, "<a class=\"action\" href=\"{}\" download>Download ↓</a></div></td></tr>", download_url(name));
+}
+
+fn is_png(name: &str) -> bool {
+    name.rsplit_once('.').is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("png"))
+}
+
+fn preview_url(name: &str) -> String {
+    download_url(name).replacen("/workspace/files/", "/workspace/preview/", 1)
+}
+
+fn edit_link(html: &mut String, file: &Value, class: &str, label: &str) {
+    if text(file, "kind") == "model" && text(file, "name").to_ascii_lowercase().ends_with(".solidcraft") {
+        let url = download_url(text(file, "name")).replacen("/workspace/files/", "/workspace/open/", 1);
+        let _ = write!(
+            html,
+            "<a class=\"{class}\" href=\"{url}\" target=\"_blank\" rel=\"noopener\" title=\"Gespeicherte Kopie in einem neuen Browser-CAD-Tab öffnen\">{label}</a>"
+        );
+    }
 }
 
 fn session_row(html: &mut String, session: &Value) {
@@ -372,12 +403,15 @@ pub fn details(file: &Value) -> String {
         "<div class=\"panel detailpanel\"><section id=\"file-details\" class=\"detailsbody\"><div class=\"eyebrow\">Gespeicherte Datei</div>",
     );
     let name = text(file, "name");
-    let _ = write!(
-        html,
-        "<h1>{}</h1><p class=\"detailspath\">{}</p><dl class=\"detailgrid\">",
-        escape(name.rsplit('/').next().unwrap_or(name)),
-        escape(name)
-    );
+    let _ = write!(html, "<h1>{}</h1><p class=\"detailspath\">{}</p>", escape(name.rsplit('/').next().unwrap_or(name)), escape(name));
+    if is_png(name) {
+        let _ = write!(
+            html,
+            "<figure class=\"detailpreview\"><img src=\"{}\" loading=\"lazy\" decoding=\"async\" alt=\"Gespeicherte PNG-Datei\" data-file-preview><figcaption>Gespeicherte Bildvorschau</figcaption></figure>",
+            preview_url(name)
+        );
+    }
+    html.push_str("<dl class=\"detailgrid\">");
     detail_value(&mut html, "Dateiformat", text(file, "format"));
     detail_value(&mut html, "Dateigröße", &size(number(file, "size_bytes")));
     detail_value(&mut html, "Erstellt", &date(text(file, "created_at")));
@@ -403,9 +437,11 @@ pub fn details(file: &Value) -> String {
         "not_applicable" => html.push_str("<p class=\"detailnote\">Für dieses Dateiformat sind keine SolidCraft-Modelleigenschaften verfügbar.</p>"),
         _ => html.push_str("<p class=\"detailnote\">Modelleigenschaften konnten für diesen gespeicherten Stand nicht gelesen werden. Die Datei bleibt zum Herunterladen verfügbar.</p>"),
     }
+    html.push_str("<div class=\"actions\">");
+    edit_link(&mut html, file, "primary", "In Browser-CAD bearbeiten ↗");
     let _ = write!(
         html,
-        "<div class=\"actions\"><a class=\"primary\" href=\"{}\" download>Datei herunterladen ↓</a><a class=\"secondary detailfallback\" href=\"/workspace\">Zurück zum Arbeitsbereich</a></div></section></div></main></body></html>",
+        "<a class=\"secondary\" href=\"{}\" download>Datei herunterladen ↓</a><a class=\"secondary detailfallback\" href=\"/workspace\">Zurück zum Arbeitsbereich</a></div></section></div></main></body></html>",
         download_url(name)
     );
     html
@@ -439,7 +475,7 @@ pub fn fragment(snapshot: &Value, query: &str, kind: &str) -> String {
     );
     let _ = write!(
         html,
-        "<div class=\"work\"><section class=\"panel\"><div class=\"panelhead\"><div><h2>Projekte &amp; Dateien <span class=\"counter\">{}</span></h2><div class=\"sub\">Im gemeinsamen Serverspeicher</div></div></div><p class=\"filesintro\">Ordner und passende Modell-/Exportnamen bündeln die Dateien automatisch.</p>",
+        "<div class=\"work\"><section class=\"panel file-explorer\" aria-labelledby=\"files-heading\"><div class=\"panelhead\"><div><h2 id=\"files-heading\">Projekte &amp; Dateien <span class=\"counter\">{}</span></h2><div class=\"sub\">Im gemeinsamen Serverspeicher</div></div></div><p class=\"filesintro\">Ordner und passende Modell-/Exportnamen bündeln die Dateien automatisch.</p>",
         files.len()
     );
     project_files(&mut html, files);
@@ -490,7 +526,7 @@ pub fn fragment(snapshot: &Value, query: &str, kind: &str) -> String {
     if sessions.is_empty() && used == 0 {
         html.push_str("<div class=\"empty\"><strong>Alle Sitzungen frei</strong>Sobald sich ein MCP-Client verbindet, erscheint seine Sitzung hier automatisch.</div>");
     }
-    html.push_str("</div><div class=\"unsaved\">Ungespeicherte Änderungen gehen beim Sitzungsende oder Container-Neustart verloren.</div></aside></div><div class=\"bottom\"><section class=\"panel explain\"><h3>Was bedeutet „in Bearbeitung“?</h3><p>Eine Sitzung enthält bestätigte Änderungen, die noch nicht in einer Datei gespeichert sind. „Geöffnet“ bedeutet nur, dass eine Sitzung eine Datei geladen hat. „Führt aus“ beschreibt eine gerade laufende Anfrage. Ein unbekannter Änderungsstatus zählt nicht als bestätigte Bearbeitung.</p><div class=\"legend\"><span><span class=\"dot amber\" aria-hidden=\"true\"></span> Ungespeichert / führt aus</span><span><span class=\"dot blue\" aria-hidden=\"true\"></span> Neuer Entwurf</span><span><span class=\"dot\" aria-hidden=\"true\"></span> Sitzungsplatz belegt</span></div></section><section class=\"panel explain\"><h3>Browser-CAD bleibt unabhängig</h3><p>Diese Übersicht zeigt Dateien und Sitzungen des MCP-Dienstes. Deine Browsermodelle leben weiterhin im Browser. Lade einen gespeicherten Stand herunter und importiere ihn in der CAD-App, wenn du ihn dort ansehen möchtest.</p><div class=\"small\">Lesende Übersicht · Sitzungen werden hier nicht beendet</div></section></div><footer><span>SolidCraft · Inoffizielle Unraid-Integration</span><span>Gespeicherte Dateistände · Zeiten in UTC</span></footer>");
+    html.push_str("</div><div class=\"unsaved\">Ungespeicherte Änderungen gehen beim Sitzungsende oder Container-Neustart verloren.</div></aside></div><div class=\"bottom\"><section class=\"panel explain\"><h3>Was bedeutet „in Bearbeitung“?</h3><p>Eine Sitzung enthält bestätigte Änderungen, die noch nicht in einer Datei gespeichert sind. „Geöffnet“ bedeutet nur, dass eine Sitzung eine Datei geladen hat. „Führt aus“ beschreibt eine gerade laufende Anfrage. Ein unbekannter Änderungsstatus zählt nicht als bestätigte Bearbeitung.</p><div class=\"legend\"><span><span class=\"dot amber\" aria-hidden=\"true\"></span> Ungespeichert / führt aus</span><span><span class=\"dot blue\" aria-hidden=\"true\"></span> Neuer Entwurf</span><span><span class=\"dot\" aria-hidden=\"true\"></span> Sitzungsplatz belegt</span></div></section><section class=\"panel explain\"><h3>Browser-CAD bleibt unabhängig</h3><p>Diese Übersicht zeigt Dateien und Sitzungen des MCP-Dienstes. Deine Browsermodelle leben weiterhin im Browser. „Bearbeiten“ öffnet eine Kopie des gespeicherten Modells in einem neuen CAD-Tab. Alternativ kannst du Dateien herunterladen und selbst importieren.</p><div class=\"small\">Lesende Übersicht · Sitzungen werden hier nicht beendet</div></section></div><footer><span>SolidCraft · Inoffizielle Unraid-Integration</span><span>Gespeicherte Dateistände · Zeiten in UTC</span></footer>");
     html
 }
 
@@ -620,5 +656,47 @@ mod tests {
         assert!(!html.contains("<script"));
         assert!(details(&json!({"metadata":{"status":"unavailable"}})).contains("nicht gelesen"));
         assert!(details(&json!({"metadata":{"status":"not_applicable"}})).contains("keine SolidCraft-Modelleigenschaften"));
+    }
+
+    #[test]
+    fn png_thumbnails_use_only_encoded_cookie_authenticated_preview_routes() {
+        let name = "renders/öffentlich #1 &\".PNG";
+        let mut row = String::new();
+        file_row(&mut row, &json!({"name":name,"kind":"export","format":"PNG"}));
+        assert!(row.contains("src=\"/workspace/preview/renders/%C3%B6ffentlich%20%231%20%26%22.PNG\""));
+        assert!(row.contains("loading=\"lazy\" decoding=\"async\" width=\"48\" height=\"40\""));
+        assert!(row.contains("class=\"fileicon filepreview\""));
+        assert!(row.contains("data-file-preview"));
+        assert!(row.contains("<title>Export</title>"));
+        assert!(row.contains("öffentlich #1 &amp;&quot;.PNG"));
+        assert!(!row.contains("data:image"));
+        assert!(!row.contains("src=\"/files/"));
+        assert!(!row.contains("token="));
+        let popup = details(&json!({"name":name,"kind":"export","format":"PNG","metadata":{"status":"not_applicable"}}));
+        assert!(popup.contains("class=\"detailpreview\""));
+        assert!(popup.contains("src=\"/workspace/preview/"));
+        let mut other = String::new();
+        file_row(&mut other, &json!({"name":"part.step","kind":"export"}));
+        assert!(!other.contains("<img"));
+        assert!(!is_png("png"));
+    }
+
+    #[test]
+    fn only_native_models_offer_an_independent_browser_edit_action() {
+        let native = json!({"name":"projects/teil #1.solidcraft","kind":"model"});
+        let mut row = String::new();
+        file_row(&mut row, &native);
+        assert!(row.contains("href=\"/workspace/open/projects/teil%20%231.solidcraft\" target=\"_blank\" rel=\"noopener\""));
+        assert!(row.contains(">Bearbeiten ↗</a>"));
+        assert!(details(&native).contains("In Browser-CAD bearbeiten ↗"));
+        for file in [json!({"name":"part.step","kind":"export"}), json!({"name":"not-native.solidcraft","kind":"other"})] {
+            let mut row = String::new();
+            file_row(&mut row, &file);
+            assert!(!row.contains("/workspace/open/"));
+            assert!(!details(&file).contains("/workspace/open/"));
+        }
+        let dashboard = fragment(&json!({}), "", "all");
+        assert!(dashboard.contains("class=\"panel file-explorer\""));
+        assert!(dashboard.contains("aria-labelledby=\"files-heading\""));
     }
 }

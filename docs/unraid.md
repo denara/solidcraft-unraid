@@ -205,6 +205,23 @@ file remains downloadable. Metadata is read on demand with bounded ZIP/JSON pars
 without loading geometry or exposing arbitrary design fields. Unsaved session changes
 are separate from these saved properties. Original upstream file/folder icons are reused.
 
+PNG rows use a small authenticated image thumbnail, with the original icon as fallback.
+The server validates static PNG data (up to 8 MiB and 4096 pixels per side) and generates
+a fresh thumbnail no larger than 160 × 120; embedded image metadata is not forwarded.
+Other file types retain their original icons. The file explorer uses a subtly distinct
+surface from the status and information cards.
+
+**Bearbeiten** opens a saved native design in a new CAD browser tab as an independent
+browser copy. A short-lived, one-use handoff is bound to the workspace login; it contains
+no MCP token and is removed from the address bar before loading the model. The copy gets
+a cryptographically unique local filename, preserving existing browser files and tabs.
+Both JSON and native ZIP designs use the original `doc.open` path. Changes and saves in
+that tab stay in browser storage: there is no automatic save back to the server, and
+running MCP models are unaffected. The source file must remain unchanged during handoff;
+otherwise open it again. Links expire after two minutes. Files larger than 256 MiB and
+full browser tab capacity are rejected. Companion files of linked assemblies are not
+silently fetched; missing dependencies are reported by the original CAD importer.
+
 Sessions show an independent display ID, their current file, confirmed unsaved changes,
 the last request and whether a request is running. The display ID is not a usable MCP
 session credential. An open file is not locked: multiple sessions can load it into

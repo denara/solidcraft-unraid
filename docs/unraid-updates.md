@@ -1179,3 +1179,30 @@ upstream CAD features are linked, and only the unofficial integration additions 
 listed separately. Publication, archive checksum, catalog synchronization and local
 runtime replacement are recorded after their final checks. No Unraid installation,
 nginx/DNS change, application release or design migration is performed.
+
+The same update was extended before image publication with real PNG thumbnails,
+a subtly separate file-explorer surface and **Bearbeiten** links. The intermediate
+source `19337a0b` was preserved; its container workflow was intentionally cancelled
+before registry publication so the requested additions could ship together.
+PNG inputs are fully decoded under file/dimension/memory limits and re-encoded as
+small static thumbnails without ancillary metadata. Cookie-bound one-use design
+handoffs expire after 120 seconds, enforce ownership and file revision, and hold a
+bounded memory permit until the response is consumed or abandoned. No server file is
+changed. The original CAD `doc.open` opens JSON/native ZIP designs as independent
+browser files with cryptographically unique names, preserving existing browser work.
+Companion linked-design files are not silently fetched and browser edits are not
+automatically saved back to the server.
+
+Final relevant checks: 85 gateway tests, six browser-import tests, native clippy for
+the changed apps, scoped Wasm clippy, formatting, licensing/assets/icons/layers, both
+Trunk release builds, actual browser API/queue behavior and the complete 20-case
+offline/update regression. The existing unrelated IO Wasm-only clippy warning is
+outside the scoped browser lint; no kernel/geometry code was changed. Two redundant
+browser install-prompt error conversions were removed without changing behavior.
+The isolated candidate passed the extended real MCP/live/file-revision proof with a
+rendered PNG preview, one-use native transfer, replay rejection, unchanged saved bytes
+and unchanged MCP model. Remembered login/revocation/restarts and operational logging
+passed again. The actual browser rendered the thumbnails and new surface, opened the
+box model through the clicked edit link, and opened a public native ZIP surface design;
+handoff fragments disappeared from the address bar. Public-safe screenshots and all
+checks remain under `target/workspace-live-20261018/`.

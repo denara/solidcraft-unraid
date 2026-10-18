@@ -61,6 +61,9 @@ Remembered browser sessions use hashed opaque identifiers in a private store out
 the shared files; never retain the MCP token in browser storage. Test logout/expiry,
 restart persistence and cookie/Bearer separation. Run `workspace-live-test.ps1` against
 the isolated candidate when changing the dashboard or gateway.
+Preserve validated PNG thumbnails and cookie-bound, expiring one-use native-design
+handoffs to independent browser copies. Never overwrite browser files, send the MCP
+token to browser storage, or silently write browser edits back into server files.
 
 Requested upstream updates merge one selected upstream snapshot and retain all published
 integration features in the combined image. Preserve the canonical Unraid template's

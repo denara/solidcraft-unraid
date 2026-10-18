@@ -183,7 +183,7 @@ async fn monitor(state: Arc<AppState>, sender: watch::Sender<Update>) {
     }
 }
 
-fn source_allowed(state: &AppState, headers: &HeaderMap) -> bool {
+pub(crate) fn source_allowed(state: &AppState, headers: &HeaderMap) -> bool {
     if headers.get("sec-fetch-site").and_then(|value| value.to_str().ok()).is_some_and(|site| !matches!(site, "same-origin" | "none")) {
         return false;
     }

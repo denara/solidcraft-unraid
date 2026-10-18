@@ -10,6 +10,7 @@ mod sessions;
 mod workspace;
 mod workspace_files;
 mod workspace_live;
+mod workspace_media;
 mod workspace_model;
 mod workspace_view;
 

@@ -10,6 +10,7 @@ $BaseUrl = $BaseUrl.TrimEnd('/')
 $taskStem = 'workspace-live-proof-' + [guid]::NewGuid().ToString('N')
 $taskModel = "$taskStem.solidcraft"
 $taskExport = "$taskStem.step"
+$taskPng = "$taskStem.png"
 $taskHeaders = @{Authorization = "Bearer $Token"; Accept = 'application/json, text/event-stream'; 'MCP-Protocol-Version' = '2025-06-18'}
 $taskRequestId = 0
 $taskEventCount = 0
@@ -112,6 +113,39 @@ try {
     if ($details.Content.Contains($Token) -or $details.Content.Contains('/data/files')) { throw 'Model details exposed private transport metadata' }
     if ((Invoke-WebRequest "$BaseUrl/workspace/details/$taskModel" -Headers @{Authorization = "Bearer $Token"} -SkipHttpErrorCheck).StatusCode -ne 401) { throw 'Details accepted Bearer authentication as a browser login' }
 
+    $null = Tool screenshot @{path = $taskPng; view = 'iso'; width = 320; height = 240}
+    $grouped = Wait-Workspace { param($html) $html.Contains($taskModel) -and $html.Contains($taskExport) -and $html.Contains($taskPng) }
+    $preview = Invoke-WebRequest "$BaseUrl/workspace/preview/$taskPng" -WebSession $browser
+    if ($preview.StatusCode -ne 200 -or $preview.Headers.'Content-Type' -ne 'image/png' -or $preview.Headers.'X-Content-Type-Options' -ne 'nosniff' -or $preview.Headers.'Cache-Control' -ne 'no-store') { throw 'Protected PNG thumbnail response incorrect' }
+    [byte[]]$thumbnail = $preview.RawContentStream.ToArray()
+    if ($thumbnail.Length -lt 33 -or [Convert]::ToHexString($thumbnail[0..7]) -ne '89504E470D0A1A0A') { throw 'Thumbnail is not a PNG image' }
+    $thumbnailWidth = [Convert]::ToUInt32([Convert]::ToHexString($thumbnail[16..19]), 16)
+    $thumbnailHeight = [Convert]::ToUInt32([Convert]::ToHexString($thumbnail[20..23]), 16)
+    if ($thumbnailWidth -lt 1 -or $thumbnailWidth -gt 160 -or $thumbnailHeight -lt 1 -or $thumbnailHeight -gt 120) { throw 'Thumbnail dimensions exceed the bounded preview size' }
+    if ((Invoke-WebRequest "$BaseUrl/workspace/preview/$taskPng" -Headers @{Authorization = "Bearer $Token"} -SkipHttpErrorCheck).StatusCode -ne 401) { throw 'Thumbnail accepted Bearer authentication as a browser login' }
+
+    $beforeCopy = Tool-Json (Tool session_status)
+    $handoff = $taskClient.GetAsync("$BaseUrl/workspace/open/$taskModel").GetAwaiter().GetResult()
+    try {
+        if ([int]$handoff.StatusCode -ne 303) { throw 'Native browser-copy handoff was not issued' }
+        $destination = $handoff.Headers.Location.OriginalString
+        if ($destination -notmatch '^/#workspace-import=([a-f0-9]{64})$' -or $destination.Contains($Token)) { throw 'Native handoff did not use a private one-use fragment' }
+        $importUrl = "$BaseUrl/workspace/import/" + $Matches[1]
+    } finally { $handoff.Dispose() }
+    $copy = $taskClient.GetAsync($importUrl).GetAwaiter().GetResult()
+    try {
+        if ([int]$copy.StatusCode -ne 200 -or $copy.Content.Headers.ContentType.MediaType -ne 'application/octet-stream' -or ($copy.Headers.GetValues('X-SolidCraft-Filename') | Select-Object -First 1) -ne $taskModel) { throw 'Native browser-copy bytes or filename missing' }
+        [byte[]]$copyBytes = $copy.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
+        if ([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($copyBytes)) -ne [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($updatedBytes))) { throw 'Browser handoff returned a different saved native design' }
+    } finally { $copy.Dispose() }
+    $replayed = $taskClient.GetAsync($importUrl).GetAwaiter().GetResult()
+    try { if ([int]$replayed.StatusCode -ne 404) { throw 'Native browser-copy ticket was reusable' } } finally { $replayed.Dispose() }
+    $afterCopy = Tool-Json (Tool session_status)
+    if ($beforeCopy.current_file -ne $afterCopy.current_file -or $beforeCopy.loaded_revision -ne $afterCopy.loaded_revision -or $beforeCopy.dirty -ne $afterCopy.dirty) { throw 'Browser handoff changed the independent MCP model state' }
+    $savedAfterCopy = Invoke-WebRequest "$BaseUrl/files/$taskModel" -Headers @{Authorization = "Bearer $Token"}
+    if ([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($savedAfterCopy.RawContentStream.ToArray())) -ne [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($updatedBytes))) { throw 'Browser handoff modified the saved native file' }
+    $importUrl = $null
+
     $null = Invoke-WebRequest "$BaseUrl/workspace/logout" -Method Post -WebSession $browser -Headers @{Origin = $BaseUrl} -Body @{csrf = $logoutCsrf}
     $expired = $null
     for ($attempt = 0; $attempt -lt 10; $attempt++) {
@@ -121,7 +155,8 @@ try {
     if ($expired.name -ne 'expired') { throw 'Logout did not terminate the open event stream' }
     $grouped | Set-Content (Join-Path $OutputDirectory 'live-fragment.html') -Encoding utf8
     $details.Content | Set-Content (Join-Path $OutputDirectory 'saved-model-details.html') -Encoding utf8
-    @{transport = 'SSE'; workspace_events = $taskEventCount; model = $taskModel; export = $taskExport; project = $model.project; file_creation = 'pass'; conditional_replacement = 'pass'; grouping = 'pass'; saved_properties = 'pass'; cookie_only_authentication = 'pass'; logout_closes_stream = 'pass'} |
+    [IO.File]::WriteAllBytes((Join-Path (Resolve-Path $OutputDirectory).Path 'thumbnail.png'), $thumbnail)
+    @{transport = 'SSE'; workspace_events = $taskEventCount; model = $taskModel; export = $taskExport; project = $model.project; file_creation = 'pass'; conditional_replacement = 'pass'; grouping = 'pass'; saved_properties = 'pass'; cookie_only_authentication = 'pass'; thumbnail = 'pass'; native_browser_copy = 'pass'; native_saved_file_unchanged = 'pass'; independent_mcp_model = 'pass'; logout_closes_stream = 'pass'} |
         ConvertTo-Json -Depth 10 | Set-Content (Join-Path $OutputDirectory 'live-checks.json') -Encoding utf8
 } finally {
     if ($taskReader) { $taskReader.Dispose() }
@@ -129,4 +164,4 @@ try {
     if ($taskClient) { $taskClient.Dispose() }
     if ($taskHeaders['Mcp-Session-Id']) { try { $null = Invoke-WebRequest "$BaseUrl/mcp" -Method Delete -Headers $taskHeaders } catch {} }
 }
-'PASS: cookie-only SSE, live saved-file creation and conditional replacement, model/export projects, saved properties and immediate logout revocation.'
+'PASS: cookie-only SSE, live file changes, project grouping, saved properties, bounded PNG thumbnails, one-use native browser copy with saved file and MCP model preserved, and logout revocation.'

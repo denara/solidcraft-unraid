@@ -37,11 +37,12 @@ struct AuthStore {
 pub struct BrowserAuth {
     inner: Mutex<AuthStore>,
     pub(crate) live: crate::workspace_live::Live,
+    pub(crate) media: crate::workspace_media::Media,
 }
 
 impl BrowserAuth {
     pub fn new(config: &crate::config::Config) -> Self {
-        Self { inner: Mutex::new(remember::load(config)), live: Default::default() }
+        Self { inner: Mutex::new(remember::load(config)), live: Default::default(), media: Default::default() }
     }
 }
 
@@ -56,6 +57,9 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/workspace/boot.js", get(boot))
         .route("/workspace/assets/{*name}", get(client_asset))
         .route("/workspace/events", get(crate::workspace_live::events))
+        .route("/workspace/preview/{*name}", get(crate::workspace_media::preview))
+        .route("/workspace/open/{*name}", get(crate::workspace_media::open))
+        .route("/workspace/import/{ticket}", get(crate::workspace_media::import))
         .route("/workspace/files/{*name}", get(download))
 }
 

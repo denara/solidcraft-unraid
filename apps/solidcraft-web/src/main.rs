@@ -14,6 +14,8 @@ mod files;
 mod install;
 #[cfg(any(target_arch = "wasm32", test))]
 mod space_mouse;
+#[cfg(any(target_arch = "wasm32", test))]
+mod workspace_import;
 
 #[cfg(target_arch = "wasm32")]
 mod web {
@@ -102,9 +104,51 @@ mod web {
         font: solidcraft_ui_egui::fonts::CjkFontLoader,
         font_result: FontLoadResult,
         space_mouse: SpaceMouse,
+        workspace_import: crate::workspace_import::Slot,
     }
 
     impl Shell {
+        /// Adopt a saved server stand as an independent browser file. OPFS must be
+        /// inventoried first so its existing names and recovery are never replaced.
+        fn workspace_import_tick(&mut self, ctx: &egui::Context) {
+            if !self.files.ready.get()
+                || self.app.file_picker_busy()
+                || !self.app.file_load.idle()
+                || self.app.docs.closing.is_some()
+                || self.app.docs.quitting.is_some()
+            {
+                return;
+            }
+            let Some(result) = self.workspace_import.borrow_mut().take() else { return };
+            let imported = match result {
+                Ok(imported) => imported,
+                Err(error) => {
+                    self.app.set_status(error, true);
+                    return;
+                }
+            };
+            let path = files::free_name(&imported.name);
+            if let Err(error) = vfs::write(&path, &imported.bytes) {
+                self.app.set_status(format!("Die Browserkopie konnte nicht angelegt werden: {error}"), true);
+                return;
+            }
+            drop(imported);
+            // This invokes the same doc.open command as the original file panel,
+            // including native JSON/ZIP validation and geometry reconstruction.
+            if crate::workspace_import::open_copy(&mut self.app, &path) {
+                files::flush(&self.files);
+                self.app.set_status(
+                    "Eigenständige Browserkopie geöffnet. Änderungen bleiben im Browser und werden nicht auf den Server zurückgeschrieben.",
+                    false,
+                );
+                self.recents_synced = false;
+            } else {
+                // No queued persistence is flushed for a rejected design.
+                let _ = vfs::remove(&path);
+            }
+            ctx.request_repaint();
+        }
+
         /// Files from the computer, writes to store, messages and the autosave.
         fn files_tick(&mut self, ctx: &egui::Context) {
             if self.files.ctx.borrow().is_none() {
@@ -420,6 +464,7 @@ mod web {
             self.api.poll();
             self.space_mouse.logic(&mut self.app, ctx);
             self.files_tick(ctx);
+            self.workspace_import_tick(ctx);
             UNSAVED.with(|u| u.set(solidcraft_ui_egui::documents::any_dirty(&self.app)));
         }
         fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
@@ -549,6 +594,10 @@ mod web {
                             app.home.show(rev);
                         }
                         let api = Api::install(sender, cc.egui_ctx.clone()).map_err(|e| format!("SolidCraft browser API: {e:?}"))?;
+                        let (workspace_import, importing) = crate::workspace_import::start(&cc.egui_ctx);
+                        if importing {
+                            app.set_status("Gespeichertes Modell wird als eigenständige Browserkopie geladen …", false);
+                        }
                         Ok(Box::new(Shell {
                             app,
                             api,
@@ -561,6 +610,7 @@ mod web {
                             font: Default::default(),
                             font_result: Rc::new(std::cell::RefCell::new(None)),
                             space_mouse: SpaceMouse::default(),
+                            workspace_import,
                         }))
                     }),
                 )

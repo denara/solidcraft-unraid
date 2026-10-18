@@ -15,7 +15,9 @@ with independent browser authentication, downloads and optimistic file revisions
 MCP and HTTP uploads. Browser CAD remains independent; see the Unraid setup for limits.
 The dashboard also provides cookie-authenticated server-push updates, virtual project
 groups, bounded saved-design metadata, original upstream icons and optional remembered
-browser logins. Grouping preserves existing files and paths; no migration is required.
+browser logins, plus validated PNG thumbnails and a protected shortcut to open native
+models as independent browser copies. Grouping preserves existing files and paths;
+no migration is required. Browser edits are not automatically saved back to the server.
 Requested upstream updates use the repository's
 [update skill](.agents/skills/update-solvecraft-unraid/SKILL.md), with a fixed target snapshot,
 isolated validation and local-only private deployment settings.
