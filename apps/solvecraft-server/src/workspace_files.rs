@@ -7,6 +7,11 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+#[path = "workspace_grouping.rs"]
+mod grouping;
+#[path = "workspace_metadata.rs"]
+mod metadata;
+
 const MAX_DEPTH: usize = 8;
 const MAX_ENTRIES: usize = 4096;
 const MAX_FILES: usize = 512;
@@ -61,7 +66,19 @@ pub fn list(root: &Path) -> Result<Listing, String> {
     let mut visited = 0;
     scan(root, "", 0, &mut visited, &mut listing)?;
     listing.files.sort_by(|left, right| left.get("name").and_then(Value::as_str).cmp(&right.get("name").and_then(Value::as_str)));
+    grouping::assign(&mut listing.files);
     Ok(listing)
+}
+
+/// Saved file properties only; reading details never loads a design into a session.
+pub fn details(root: &Path, name: &str) -> Result<Value, String> {
+    if !visible_name(name) {
+        return Err("file name is unavailable".into());
+    }
+    let mut file = list(root)?.files.into_iter().find(|file| file.get("name").and_then(Value::as_str) == Some(name)).ok_or("file is unavailable")?;
+    let path = crate::paths::resolve(root, name).map_err(|_| "file is unavailable")?;
+    file["metadata"] = if kind(name) == "model" { metadata::read(&path) } else { json!({"status":"not_applicable"}) };
+    Ok(file)
 }
 
 fn scan(root: &Path, parent: &str, depth: usize, visited: &mut usize, listing: &mut Listing) -> Result<bool, String> {
@@ -113,11 +130,14 @@ fn scan(root: &Path, parent: &str, depth: usize, visited: &mut usize, listing: &
             return Ok(true);
         }
         let modified_at = metadata.modified().ok().map(|time| DateTime::<Utc>::from(time).to_rfc3339_opts(SecondsFormat::Millis, true));
+        let created_at = metadata.created().ok().map(|time| DateTime::<Utc>::from(time).to_rfc3339_opts(SecondsFormat::Millis, true));
         listing.files.push(json!({
             "name": name,
             "kind": kind(&name),
             "size_bytes": metadata.len(),
             "modified_at": modified_at,
+            "created_at": created_at,
+            "format": grouping::format(&name),
             "opened_by": [],
             "dirty": null,
         }));
@@ -251,6 +271,31 @@ mod tests {
         }
         fs::create_dir(root.0.join("folder")).unwrap();
         assert!(revision(&root.0, "folder").is_err());
+    }
+
+    #[test]
+    fn file_details_are_read_only_and_never_guess_project_prefixes() {
+        let root = Fixture::new();
+        let design = br#"{"format":"solidcraft/1","name":"House","units":"mm","features":[],"params":[],"metadata":{"author":"Example"}}"#;
+        fs::write(root.0.join("house.solidcraft"), design).unwrap();
+        fs::write(root.0.join("house.step"), b"export").unwrap();
+        fs::write(root.0.join("house_render.png"), b"image").unwrap();
+        let before = revision(&root.0, "house.solidcraft").unwrap();
+        let modified = fs::metadata(root.0.join("house.solidcraft")).unwrap().modified().unwrap();
+        let file = details(&root.0, "house.solidcraft").unwrap();
+        assert_eq!(file["metadata"]["author"], "Example");
+        assert_eq!(file["metadata"]["status"], "available");
+        assert_eq!(file["project"]["name"], "house");
+        assert_eq!(details(&root.0, "house.step").unwrap()["project"], file["project"]);
+        assert_eq!(details(&root.0, "house.step").unwrap()["metadata"]["status"], "not_applicable");
+        assert_eq!(details(&root.0, "house_render.png").unwrap()["project"]["basis"], "ungrouped");
+        assert_eq!(revision(&root.0, "house.solidcraft").unwrap(), before);
+        assert_eq!(fs::metadata(root.0.join("house.solidcraft")).unwrap().modified().unwrap(), modified);
+        assert_eq!(fs::read(root.0.join("house.solidcraft")).unwrap(), design);
+        assert_eq!(fs::read_dir(&root.0).unwrap().count(), 3);
+        for name in ["../secret", "a/.hidden", "missing.solidcraft", "/etc/passwd"] {
+            assert!(details(&root.0, name).is_err());
+        }
     }
 
     #[test]

@@ -9,6 +9,7 @@ mod paths;
 mod sessions;
 mod workspace;
 mod workspace_files;
+mod workspace_live;
 mod workspace_model;
 mod workspace_view;
 
@@ -41,17 +42,19 @@ async fn run() -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| format!("listen {addr}: {e}"))?;
     eprintln!("SolidCraft web: http://{addr}/ ; workspace: /workspace ; MCP: /mcp (Bearer authentication required)");
     state.audit.startup(&state.config);
-    let audit = Arc::clone(&state.audit);
-    axum::serve(listener, http::router(state)).with_graceful_shutdown(shutdown(audit)).await.map_err(|e| e.to_string())
+    let stopping = Arc::clone(&state);
+    axum::serve(listener, http::router(state)).with_graceful_shutdown(shutdown(stopping)).await.map_err(|e| e.to_string())
 }
 
-async fn shutdown(audit: Arc<audit::Audit>) {
+async fn shutdown(state: Arc<sessions::State>) {
     #[cfg(unix)]
     if let Ok(mut terminate) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
         tokio::select! { _ = terminate.recv() => {}, _ = tokio::signal::ctrl_c() => {} }
-        audit.emit(audit::Event::Stopping, serde_json::json!({}));
+        state.audit.emit(audit::Event::Stopping, serde_json::json!({}));
+        state.browser.live.stop();
         return;
     }
     let _ = tokio::signal::ctrl_c().await;
-    audit.emit(audit::Event::Stopping, serde_json::json!({}));
+    state.audit.emit(audit::Event::Stopping, serde_json::json!({}));
+    state.browser.live.stop();
 }

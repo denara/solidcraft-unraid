@@ -467,6 +467,18 @@ copied into SolidCraft.
 | vendor/truck-geometry | truck-geometry 0.5.0, https://github.com/ricosjp/truck (RICOS Co. Ltd.) | Apache-2.0 | intersection curves divided from their neighbours' surface parameters; surface second derivatives (vendor/README.md) |
 | vendor/matext4cgmath | matext4cgmath 0.1.0, https://github.com/ricosjp/matext4cgmath (RICOS Co. Ltd.) | Apache-2.0 | root refinement stops after 100 Newton steps (vendor/README.md) |
 
+## Workspace browser transport
+
+| File | Author | Origin | Licence |
+| --- | --- | --- | --- |
+| apps/solidcraft-workspace/index.html | SolidCraft Unraid integration contributors | Original build entry for the Rust workspace browser client | MIT OR Apache-2.0 |
+| apps/solidcraft-workspace/Trunk.toml | SolidCraft Unraid integration contributors | Original workspace client build configuration | MIT OR Apache-2.0 |
+
+The workspace dashboard reuses the original SolidCraft folder, box, export and library
+SVG masters and their canonical palette already inventoried above. No additional artwork
+or third-party icon set is introduced. Browser transport and dialog behavior are Rust/Wasm;
+the generated bindings and their minimal module bootstrap are browser infrastructure.
+
 ## Vendored renderer compatibility fix
 
 `vendor/egui-wgpu` is egui-wgpu 0.36.2 from https://github.com/emilk/egui

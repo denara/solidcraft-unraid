@@ -355,6 +355,7 @@ fn wasm_check() -> Result<(Command, usize), String> {
     let mut set: Vec<String> =
         crates.iter().filter(|c| matches!(layers::classify(&c.name), Some(layers::Class::Layer(_)))).map(|c| c.name.clone()).collect();
     set.push("solidcraft-web".into());
+    set.push("solidcraft-workspace".into());
     let mut c = cargo();
     c.args(["check", "--target", "wasm32-unknown-unknown", "--profile", "ci"]);
     for p in &set {

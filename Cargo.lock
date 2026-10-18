@@ -4452,6 +4452,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "solidcraft-workspace"
+version = "0.15.0"
+dependencies = [
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "solvecraft-server"
 version = "0.15.0"
 dependencies = [
@@ -4464,6 +4474,7 @@ dependencies = [
  "tower",
  "tower-http",
  "uuid",
+ "zip 9.0.4",
 ]
 
 [[package]]

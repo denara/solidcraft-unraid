@@ -55,6 +55,7 @@ mod tests {
                 cli: cli.to_string_lossy().into_owned(),
                 web: directory.clone(),
                 files: directory.clone(),
+                browser_auth: directory.join(".workspace-sessions.json"),
                 token: "private-test-bearer-never-log".into(),
                 token_source: crate::config::TokenSource::Environment,
                 log_color: false,
@@ -291,12 +292,13 @@ pub struct State {
 impl State {
     pub fn new(config: Config) -> Self {
         let audit = Arc::new(Audit::new(config.log_color));
+        let browser = crate::workspace::BrowserAuth::new(&config);
         Self {
             slots: Arc::new(Semaphore::new(config.max_sessions)),
             config,
             sessions: Mutex::new(HashMap::new()),
             audit,
-            browser: Default::default(),
+            browser,
             file_gate: Arc::new(Mutex::new(())),
         }
     }

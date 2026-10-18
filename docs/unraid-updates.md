@@ -1140,3 +1140,42 @@ preserving data/token/settings, and reload the browser. Keep pre-update files fo
 new format27 designs are not readable by the previous build.
 
 The actual local browser also rendered Sample Plate at 0.15.0 after replacement; its public-safe screenshot is retained in the ignored proof directory.
+
+## 2026-10-18 — live workspace, project groups and saved properties
+
+This integration update retains the validated upstream snapshot `8f768b65` and all
+published HTTP MCP, browser CAD, workspace, file-revision and logging behavior.
+The independent read-only dashboard now receives cookie-authenticated server-sent
+events, with bounded connections and one shared change monitor. The small browser
+client is Rust/Wasm; it preserves search input, folder state and dialogs during pushes.
+Graceful shutdown closes streams promptly, and valid remembered logins reconnect
+without a page reload, including after consecutive container restarts.
+
+Virtual groups use existing parent directories or exact model/export filename stems;
+no saved file or MCP path is moved. File details show bounded, whitelisted properties
+from saved JSON/native ZIP designs without loading geometry. Original SolidCraft icon
+masters and their palette are reused. Browser logins optionally persist for seven days,
+30 days or until revoked, using hashed random identifiers in a private mode-0600 store
+outside shared files. The MCP token is never retained in browser storage.
+
+Validation on the development computer: 71 gateway tests, scoped native/Wasm clippy
+with denied warnings, formatting, asset/icon attribution, layering, sorted catalogs,
+shipped licenses and the 13-crate Wasm check. A fresh-volume isolated container passed
+real HTTP MCP modelling/PNG/STEP, independent sessions, authenticated workspace and
+shared revisions, live file creation/replacement, grouping, saved properties, logout
+revocation, remembered-login restart/revocation and operational log privacy/colors.
+The existing public 24000 mm3 fixture reopened after restart. The actual browser showed
+new saved files and unsaved session state without reloading, preserved typed search and
+collapsed groups across two restarts, and rendered the details dialog and independent
+CAD sample. The two final isolated restarts and their login checks completed in 2.63 s.
+An earlier log-check invocation lacked its documented restart precondition; after the
+candidate restart, the complete log check passed. No unrelated geometry suite was rerun.
+
+Private evidence, screenshots and runtime backups are under the ignored
+`target/workspace-live-20261018/` directory. The public container workflow now checks
+the Rust client assets, live workspace proof and remembered-login restart proof before
+registry publication. The canonical Unraid Overview remains a product description:
+upstream CAD features are linked, and only the unofficial integration additions are
+listed separately. Publication, archive checksum, catalog synchronization and local
+runtime replacement are recorded after their final checks. No Unraid installation,
+nginx/DNS change, application release or design migration is performed.

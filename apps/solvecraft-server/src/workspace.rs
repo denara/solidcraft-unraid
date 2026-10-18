@@ -14,6 +14,9 @@ use tokio::sync::Mutex;
 
 use crate::sessions::State as AppState;
 
+#[path = "workspace_remember.rs"]
+mod remember;
+
 const COOKIE: &str = "solidcraft-workspace";
 const CHALLENGE: &str = "solidcraft-workspace-login";
 const LIFETIME: Duration = Duration::from_secs(3600);
@@ -21,6 +24,7 @@ const LIFETIME: Duration = Duration::from_secs(3600);
 struct BrowserSession {
     csrf: String,
     expires: Instant,
+    remembered: Option<remember::Expiry>,
 }
 
 #[derive(Default)]
@@ -30,9 +34,15 @@ struct AuthStore {
     failures: VecDeque<Instant>,
 }
 
-#[derive(Default)]
 pub struct BrowserAuth {
     inner: Mutex<AuthStore>,
+    pub(crate) live: crate::workspace_live::Live,
+}
+
+impl BrowserAuth {
+    pub fn new(config: &crate::config::Config) -> Self {
+        Self { inner: Mutex::new(remember::load(config)), live: Default::default() }
+    }
 }
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -42,10 +52,14 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/workspace/login", get(login_page).post(login))
         .route("/workspace/logout", post(logout))
         .route("/workspace/api", get(api))
+        .route("/workspace/details/{*name}", get(details))
+        .route("/workspace/boot.js", get(boot))
+        .route("/workspace/assets/{*name}", get(client_asset))
+        .route("/workspace/events", get(crate::workspace_live::events))
         .route("/workspace/files/{*name}", get(download))
 }
 
-fn protect(mut response: Response) -> Response {
+pub(crate) fn protect(mut response: Response) -> Response {
     let headers = response.headers_mut();
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
@@ -55,7 +69,7 @@ fn protect(mut response: Response) -> Response {
     headers.insert(header::REFERRER_POLICY, HeaderValue::from_static("same-origin"));
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"),
+        HeaderValue::from_static("default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'; img-src 'self' data:; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"),
     );
     response
 }
@@ -93,7 +107,7 @@ fn set_cookie(response: &mut Response, name: &str, value: &str, max_age: u64, se
     }
 }
 
-fn check_origin(state: &AppState, headers: &HeaderMap) -> Result<(), &'static str> {
+pub(crate) fn check_origin(state: &AppState, headers: &HeaderMap) -> Result<(), &'static str> {
     let host = headers.get(header::HOST).and_then(|h| h.to_str().ok());
     let origin = headers.get(header::ORIGIN).and_then(|h| h.to_str().ok()).ok_or("origin_missing")?;
     if !state.config.origins.iter().any(|allowed| allowed == origin) {
@@ -128,7 +142,7 @@ fn decode(value: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-fn fields(input: &str) -> Option<HashMap<String, String>> {
+pub(crate) fn fields(input: &str) -> Option<HashMap<String, String>> {
     if input.len() > 4096 {
         return None;
     }
@@ -151,11 +165,23 @@ fn clean(store: &mut AuthStore) {
     }
 }
 
-async fn browser_session(state: &AppState, headers: &HeaderMap) -> Option<String> {
+pub(crate) async fn browser_session(state: &AppState, headers: &HeaderMap) -> Option<String> {
     let id = cookie_value(headers, COOKIE)?;
     let mut store = state.browser.inner.lock().await;
     clean(&mut store);
-    store.sessions.get(id).map(|session| session.csrf.clone())
+    let session = store.sessions.get_mut(&remember::hash(id))?;
+    if matches!(session.remembered, Some(remember::Expiry::Forever)) {
+        session.expires = Instant::now() + Duration::from_secs(remember::Expiry::Forever.cookie_seconds());
+    }
+    Some(session.csrf.clone())
+}
+
+fn renew_remembered(state: &AppState, headers: &HeaderMap, response: &mut Response, store: &AuthStore) {
+    if let Some(id) = cookie_value(headers, COOKIE)
+        && store.sessions.get(&remember::hash(id)).is_some_and(|session| matches!(session.remembered, Some(remember::Expiry::Forever)))
+    {
+        set_cookie(response, COOKIE, id, remember::Expiry::Forever.cookie_seconds(), secure(state, headers));
+    }
 }
 
 async fn challenge(state: &AppState, headers: &HeaderMap, error: bool) -> Response {
@@ -209,6 +235,10 @@ async fn login(State(state): State<Arc<AppState>>, headers: HeaderMap, bytes: By
     let Some(csrf) = form.get("csrf").filter(|csrf| cookie == csrf.as_str()) else {
         return login_rejected(&state, StatusCode::FORBIDDEN, "csrf_mismatch");
     };
+    let remembered = match remember::choice(form.get("remember").map(String::as_str)) {
+        Ok(value) => value,
+        Err(()) => return login_rejected(&state, StatusCode::BAD_REQUEST, "invalid_form"),
+    };
     let mut store = state.browser.inner.lock().await;
     clean(&mut store);
     if store.failures.len() >= 12 {
@@ -228,10 +258,16 @@ async fn login(State(state): State<Arc<AppState>>, headers: HeaderMap, bytes: By
         return challenge(&state, &headers, true).await;
     }
     let id = secret();
-    store.sessions.insert(id.clone(), BrowserSession { csrf: secret(), expires: Instant::now() + LIFETIME });
+    let key = remember::hash(&id);
+    let lifetime = remembered.map_or(LIFETIME.as_secs(), |value| value.cookie_seconds());
+    store.sessions.insert(key.clone(), BrowserSession { csrf: secret(), expires: Instant::now() + Duration::from_secs(lifetime), remembered });
+    if remembered.is_some() && remember::save(&state.config, &store).is_err() {
+        store.sessions.remove(&key);
+        return login_rejected(&state, StatusCode::SERVICE_UNAVAILABLE, "browser_storage_unavailable");
+    }
     state.audit.emit(crate::audit::Event::AuthAccepted, json!({"endpoint":"workspace"}));
     let mut response = redirect("/workspace");
-    set_cookie(&mut response, COOKIE, &id, LIFETIME.as_secs(), secure(&state, &headers));
+    set_cookie(&mut response, COOKIE, &id, lifetime, secure(&state, &headers));
     set_cookie(&mut response, CHALLENGE, "", 0, secure(&state, &headers));
     response
 }
@@ -246,7 +282,15 @@ async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap, bytes: B
         return protect(StatusCode::FORBIDDEN.into_response());
     }
     if let Some(id) = cookie_value(&headers, COOKIE) {
-        state.browser.inner.lock().await.sessions.remove(id);
+        let mut store = state.browser.inner.lock().await;
+        let key = remember::hash(id);
+        if let Some(session) = store.sessions.remove(&key)
+            && session.remembered.is_some()
+            && remember::save(&state.config, &store).is_err()
+        {
+            store.sessions.insert(key, session);
+            return login_rejected(&state, StatusCode::SERVICE_UNAVAILABLE, "browser_storage_unavailable");
+        }
     }
     let mut response = redirect("/workspace/login");
     set_cookie(&mut response, COOKIE, "", 0, secure(&state, &headers));
@@ -300,7 +344,9 @@ async fn dashboard(State(state): State<Arc<AppState>>, headers: HeaderMap, uri: 
                         && (kind.is_empty() || kind == "all" || file["kind"] == kind)
                 });
             }
-            protect(Html(crate::workspace_view::page(&data, query, kind)).into_response())
+            let mut response = protect(Html(crate::workspace_view::page(&data, query, kind)).into_response());
+            renew_remembered(&state, &headers, &mut response, &*state.browser.inner.lock().await);
+            response
         }
         Err(_) => protect((StatusCode::SERVICE_UNAVAILABLE, "Dateiübersicht vorübergehend nicht verfügbar.").into_response()),
     }
@@ -324,6 +370,43 @@ async fn download(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(n
         return protect(StatusCode::BAD_REQUEST.into_response());
     }
     protect(crate::http::download(State(state), Path(name)).await)
+}
+
+async fn details(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(name): Path<String>) -> Response {
+    if browser_session(&state, &headers).await.is_none() {
+        return protect(StatusCode::UNAUTHORIZED.into_response());
+    }
+    let root = state.config.files.clone();
+    match tokio::task::spawn_blocking(move || crate::workspace_files::details(&root, &name)).await {
+        Ok(Ok(data)) => protect(Html(crate::workspace_view::details(&data)).into_response()),
+        _ => protect((StatusCode::NOT_FOUND, "Dateidetails nicht verfügbar.").into_response()),
+    }
+}
+
+async fn boot() -> Response {
+    // Only wasm-bindgen's generated module bootstrap is JavaScript; application
+    // behavior, EventSource handling and dialogs are implemented in Rust/Wasm.
+    protect(
+        (
+            [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+            "import init from '/workspace/assets/solidcraft-workspace.js';init().catch(()=>{});",
+        )
+            .into_response(),
+    )
+}
+
+async fn client_asset(State(state): State<Arc<AppState>>, Path(name): Path<String>) -> Response {
+    let content_type = match name.as_str() {
+        "solidcraft-workspace.js" => "text/javascript; charset=utf-8",
+        "solidcraft-workspace_bg.wasm" => "application/wasm",
+        _ => return protect(StatusCode::NOT_FOUND.into_response()),
+    };
+    let Some(parent) = state.config.web.parent() else { return protect(StatusCode::NOT_FOUND.into_response()) };
+    let path = parent.join("workspace").join(name);
+    match tokio::fs::read(path).await {
+        Ok(bytes) => protect(([(header::CONTENT_TYPE, content_type)], bytes).into_response()),
+        Err(_) => protect(StatusCode::NOT_FOUND.into_response()),
+    }
 }
 
 pub fn tools() -> [Value; 2] {

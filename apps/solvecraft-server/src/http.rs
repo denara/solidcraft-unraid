@@ -327,6 +327,7 @@ mod tests {
             cli: "not-started-in-authorization-tests".into(),
             web: std::env::temp_dir(),
             files: std::env::temp_dir(),
+            browser_auth: std::env::temp_dir().join(format!("solidcraft-unused-auth-{}", uuid::Uuid::new_v4())),
             token: "test-token-for-http-authorization".into(),
             token_source: crate::config::TokenSource::Environment,
             log_color: false,

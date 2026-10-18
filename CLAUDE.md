@@ -54,6 +54,14 @@ upstream update adds file-writing commands, review their entire output set again
 Run `packaging/unraid/workspace-test.ps1` against an isolated candidate along with
 the existing modelling, persistence, logging and browser checks.
 
+Preserve workspace server-push updates, virtual project groups and bounded read-only
+design metadata. The small browser client is Rust/Wasm; generated bindings and its
+module bootstrap are infrastructure, not a second application implementation.
+Remembered browser sessions use hashed opaque identifiers in a private store outside
+the shared files; never retain the MCP token in browser storage. Test logout/expiry,
+restart persistence and cookie/Bearer separation. Run `workspace-live-test.ps1` against
+the isolated candidate when changing the dashboard or gateway.
+
 Requested upstream updates merge one selected upstream snapshot and retain all published
 integration features in the combined image. Preserve the canonical Unraid template's
 Overview as a product description, not a dated changelog: link to upstream for SolidCraft

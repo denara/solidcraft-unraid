@@ -22,7 +22,7 @@ pub fn relative(root: &Path, value: &str) -> Option<String> {
 
 impl ModelStatus {
     pub fn snapshot(&self) -> Value {
-        json!({"current_file":self.current_file,"dirty":self.dirty,"has_model":self.has_model,
+        json!({"current_file":self.current_file,"dirty":self.dirty,"has_model":self.has_model,"model_revision":self.revision,
             "loaded_revision":self.loaded_revision,"last_model_change_seconds":self.last_change.map(|t|t.elapsed().as_secs())})
     }
 
@@ -226,7 +226,7 @@ mod tests {
         assert!(check_revisions(&root, &status, &ops, &Value::Null).is_err());
         assert!(check_revisions(&root, &status, &[FileOperation::Write("copy.solidcraft".into())], &Value::Null).is_ok());
         let revision = crate::workspace_files::revision(&root, "part.solidcraft").unwrap();
-        assert!(check_revisions(&root, &status, &ops, &json!({"part.solidcraft":revision})).is_ok());
+        assert!(check_revisions(&root, &status, &ops, &json!({ "part.solidcraft": revision })).is_ok());
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -1,6 +1,15 @@
 //! Browser authentication stays separate from stateless MCP authentication.
 #![allow(clippy::unwrap_used)]
 
+#[path = "workspace_remember_tests.rs"]
+mod remember_tests;
+
+#[path = "workspace_live_tests.rs"]
+mod live_tests;
+
+#[path = "workspace_details_tests.rs"]
+mod details_tests;
+
 use super::*;
 use axum::body::{Body, to_bytes};
 use axum::http::Request;
@@ -25,6 +34,7 @@ impl Fixture {
             cli: "not-started-in-workspace-auth-tests".into(),
             web: directory.clone(),
             files: directory.clone(),
+            browser_auth: directory.join(".workspace-sessions.json"),
             token: TOKEN.into(),
             token_source: crate::config::TokenSource::Environment,
             log_color: false,

@@ -61,7 +61,7 @@ jobs:
       - name: Start a private test instance
         # Deliberately disposable test credential; never used for a deployment.
         run: >-
-          docker run -d --name proof --init -p 127.0.0.1:8781:8080
+          docker run -d --name proof --init --label solidcraft.proof=true -p 127.0.0.1:8781:8080
           --read-only --tmpfs /tmp:rw,nosuid,nodev,size=256m,mode=1777
           --cap-drop ALL --security-opt no-new-privileges:true
           --memory 4g --cpus 4 --pids-limit 128
@@ -95,12 +95,22 @@ jobs:
           curl -fsS http://localhost:8781/ | grep -q 'SolidCraft'
           curl -fsS http://localhost:8781/sw.js >/dev/null
           curl -fsS http://localhost:8781/build.json | jq -e '.files | length > 0' >/dev/null
+          curl -fsS http://localhost:8781/workspace/boot.js | grep -q 'solidcraft-workspace'
+          curl -fsS http://localhost:8781/workspace/assets/solidcraft-workspace.js >/dev/null
+          curl -fsS http://localhost:8781/workspace/assets/solidcraft-workspace_bg.wasm -o /tmp/workspace-client.wasm
+          test "$(od -An -tx1 -N4 /tmp/workspace-client.wasm | tr -d ' \n')" = 0061736d
       - name: Verify operational logging and privacy
         shell: pwsh
         run: ./packaging/unraid/log-test.ps1 -Token disposable-container-proof-token-only
       - name: Verify workspace and concurrent file revisions
         shell: pwsh
         run: ./packaging/unraid/workspace-test.ps1 -Token disposable-container-proof-token-only
+      - name: Verify live workspace events and saved properties
+        shell: pwsh
+        run: ./packaging/unraid/workspace-live-test.ps1 -Token disposable-container-proof-token-only
+      - name: Verify remembered browser logins across isolated restarts
+        shell: pwsh
+        run: ./packaging/unraid/workspace-login-test.ps1 -Token disposable-container-proof-token-only -ContainerName proof
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: container-mcp-proof
@@ -108,6 +118,7 @@ jobs:
             target/unraid-proof/
             target/unraid-log-proof/
             target/unraid-workspace-proof/
+            target/unraid-workspace-live-proof/
           retention-days: 30
       - name: Authenticate to the container registry
         if: github.event_name == 'push' && github.repository == 'denara/solidcraft-unraid'

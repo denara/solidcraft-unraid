@@ -155,10 +155,17 @@ after 30 minutes, and container restarts end all sessions. Start a new MCP sessi
 
 Open `/workspace` on the same service and sign in with the existing MCP token. Its
 location is reported as `token.location` in the container log. Authentication creates
-a separate server-side browser session with a one-hour lifetime and a random
+a separate server-side browser session with a default one-hour lifetime and a random
 `HttpOnly`, `SameSite=Strict` cookie scoped to `/workspace`. The token is not stored in
-that cookie, a URL or application browser storage. Logout and container restarts end
-the browser login; a dashboard login never authenticates `/mcp` or `/files` requests.
+that cookie, a URL or application browser storage. The login offers **7 days**, **30 days**
+and **permanent** in addition to the default. Remembered sessions survive container
+restarts: only hashed random cookie identifiers, CSRF values and expiry are retained in
+the private `/data/workspace-sessions.json` store (mode 0600), outside the shared files.
+Logout revokes the session, including its other open tabs; changing the MCP token
+invalidates remembered logins. Ordinary logins still end on restart. Permanent means
+until logout, token change or browser-cookie removal; browsers impose a maximum cookie
+lifetime (400 days here), renewed when the dashboard is visited. A dashboard login never
+authenticates `/mcp` or `/files` requests. Remember login only on a trusted device.
 
 Use HTTPS through the configured origin. Login and logout require both a CSRF value
 and an explicit `Origin` matching `SOLVECRAFT_ALLOWED_ORIGINS` and the request's `Host`
@@ -170,10 +177,33 @@ file contents and names require authentication.
 
 The page lists saved models, exports and other files, with size, UTC modification time
 and download links. Search by filename, select a file type and choose **Anzeigen**.
-Use **Aktualisieren** to obtain a new snapshot; the page does not poll automatically.
+Updates arrive through a cookie-authenticated **server-sent events** connection at
+`/workspace/events`; the browser does not poll or reload the page. One shared server
+monitor checks for file/session changes once per second while viewers are connected,
+and sends only meaningful changes. Connection state and automatic reconnection are
+visible; collapsed groups, keyboard focus, filters and open details dialogs survive
+updates. The manual refresh and standalone details pages remain usable without the
+optional Rust/Wasm browser client. Streams are limited to four per login and 32 overall.
+The reverse proxy must preserve streaming (no response buffering); the endpoint sends
+`X-Accel-Buffering: no` and a keepalive every 15 seconds.
 Filters affect displayed file counts, while the session overview remains global.
 Downloads under `/workspace/files/<relative-name>` use the dashboard cookie and do
 not reveal the Bearer token to the browser.
+
+**Virtual project groups** leave all files and MCP paths unchanged. Existing parent
+directories take precedence; in the root, an exact case-sensitive design/export stem
+groups `bracket.solidcraft`, `bracket.step` and `bracket.png`. Unrelated names are not
+guessed into a project. MCP clients choose filenames freely: there is no global project
+naming convention. For reliable grouping, reuse a stem or save to a shared relative
+directory. No file migration or design rewrite is performed.
+
+**Details** opens a popup with saved `.solidcraft` properties: title, author, project,
+part number, revision, description, units, format and model counts where present.
+File size and filesystem timestamps are shown separately. Missing properties are not
+invented; unsupported/corrupt/oversized metadata gets an explanatory fallback and the
+file remains downloadable. Metadata is read on demand with bounded ZIP/JSON parsing,
+without loading geometry or exposing arbitrary design fields. Unsaved session changes
+are separate from these saved properties. Original upstream file/folder icons are reused.
 
 Sessions show an independent display ID, their current file, confirmed unsaved changes,
 the last request and whether a request is running. The display ID is not a usable MCP

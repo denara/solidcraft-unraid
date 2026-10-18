@@ -13,6 +13,9 @@ with timestamps, severity labels and icons, while omitting sensitive data and ro
 Its protected `/workspace` page lists saved files and actual per-session model/dirty state,
 with independent browser authentication, downloads and optimistic file revisions shared by
 MCP and HTTP uploads. Browser CAD remains independent; see the Unraid setup for limits.
+The dashboard also provides cookie-authenticated server-push updates, virtual project
+groups, bounded saved-design metadata, original upstream icons and optional remembered
+browser logins. Grouping preserves existing files and paths; no migration is required.
 Requested upstream updates use the repository's
 [update skill](.agents/skills/update-solvecraft-unraid/SKILL.md), with a fixed target snapshot,
 isolated validation and local-only private deployment settings.

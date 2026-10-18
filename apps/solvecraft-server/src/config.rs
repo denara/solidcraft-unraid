@@ -22,6 +22,7 @@ pub struct Config {
     pub cli: String,
     pub web: PathBuf,
     pub files: PathBuf,
+    pub browser_auth: PathBuf,
     pub token: String,
     pub token_source: TokenSource,
     pub log_color: bool,
@@ -74,6 +75,7 @@ impl Config {
             cli: env("SOLVECRAFT_CLI", "solidcraft-cli"),
             web: PathBuf::from(env("SOLVECRAFT_WEB_DIR", "/opt/solvecraft/web")),
             files: fs::canonicalize(data.join("files")).map_err(|e| e.to_string())?,
+            browser_auth: data.join("workspace-sessions.json"),
             token,
             token_source,
             log_color: crate::audit::color_enabled(
