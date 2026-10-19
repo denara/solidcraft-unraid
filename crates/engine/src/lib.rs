@@ -819,6 +819,10 @@ impl Session {
     /// A scratch copy of the session (same design and model, no history or log) to try
     /// commands on without touching this one.
     pub fn scratch(&self) -> Session {
+        self.scratch_internal(false)
+    }
+
+    fn scratch_internal(&self, observer: bool) -> Session {
         Session {
             doc: self.doc.clone(),
             model: self.model.clone(),
@@ -835,14 +839,14 @@ impl Session {
             active_component: self.active_component,
             active_occurrence_path: self.active_occurrence_path.clone(),
             pending_moves: self.pending_moves.clone(),
-            world_cache: std::sync::Mutex::new(self.world_cache.lock().ok().and_then(|cache| cache.clone())),
+            world_cache: std::sync::Mutex::new(if observer { None } else { self.world_cache.lock().ok().and_then(|cache| cache.clone()) }),
             occurrence_visibility_cache: Default::default(),
             removed_later_cache: Default::default(),
-            clipboard: self.clipboard.clone(),
-            sketch_clipboard: self.sketch_clipboard.clone(),
-            section: None,
-            analysis: None,
-            continuity: Vec::new(),
+            clipboard: if observer { Vec::new() } else { self.clipboard.clone() },
+            sketch_clipboard: if observer { None } else { self.sketch_clipboard.clone() },
+            section: if observer { self.section } else { None },
+            analysis: if observer { self.analysis } else { None },
+            continuity: if observer { self.continuity.clone() } else { Vec::new() },
             checkpoints: Vec::new(),
             next_checkpoint: 1,
             visibility: self.visibility.clone(),
@@ -854,6 +858,20 @@ impl Session {
             evaluations: 0,
             crash_journal: false,
         }
+    }
+
+    /// A read-only observer's display copy, including unsaved view state. Cold
+    /// tessellation and world-placement caches are isolated from the editing
+    /// session, so background scene preparation cannot hold its mesh cache lock.
+    /// The document and already evaluated geometry remain immutable shared data.
+    pub fn observation_snapshot(&self) -> Session {
+        let mut copy = self.scratch_internal(true);
+        if let Some(result) = copy.model.results.iter_mut().rev().find(|result| !result.skipped) {
+            for body in &mut Arc::make_mut(&mut result.state).bodies {
+                *body = body.isolated_display_copy();
+            }
+        }
+        copy
     }
 
     /// Refresh UI caches when adopting a session or switching tabs, without discarding its

@@ -71,6 +71,7 @@ const CSS: &str = r#"
 @media(max-width:1150px){.work{grid-template-columns:1fr}.sessionslist{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}.session{border-right:1px solid var(--line)}.capacity{max-width:240px}.bottom{grid-template-columns:1fr 1fr}}@media(max-width:760px){.top{padding:14px 20px}.brandnote{display:none}.shell{padding:25px 18px}.topright{gap:12px}.topright>span{display:none}.cards{grid-template-columns:1fr 1fr}.heading{align-items:flex-start;flex-direction:column}.sessionslist{display:block}.bottom{grid-template-columns:1fr}h1{font-size:25px}.toolbar .secondary{flex:1}.loginpanel{margin-top:30px}footer{flex-direction:column;gap:4px}.stat{padding:14px}.statlabel{font-size:11px}}@media(max-width:400px){.cards{grid-template-columns:1fr}.panelhead{flex-wrap:wrap}}
 .nativeicon{width:30px;height:30px;display:block;flex-shrink:0}.fileicon{border:0;background:none;padding:0;height:34px;width:34px}.fileicon .nativeicon{width:34px;height:34px}.project{border-top:1px solid var(--line)}.project>summary{padding:14px 20px;display:flex;align-items:center;gap:10px;cursor:pointer;list-style:none;background:#1b2530}.project>summary::-webkit-details-marker{display:none}.project>summary:before{content:'›';font-size:22px;color:var(--dim);width:12px;transition:transform .15s}.project[open]>summary:before{transform:rotate(90deg)}.project>summary:focus-visible{outline:2px solid var(--green);outline-offset:-3px}.projectname{font-weight:650;overflow-wrap:anywhere}.projectmeta{font-size:10px;color:var(--dim);margin-top:2px}.projectcount{margin-left:auto;color:var(--dim);font-size:11px;white-space:nowrap}.project table{table-layout:auto}.actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.detailslink{color:var(--text);text-decoration:none}.detailslink:hover{text-decoration:underline;color:var(--blue)}.livebar{display:flex;align-items:center;gap:8px;color:var(--dim);font-size:11px;margin-bottom:14px;min-height:20px}.livebar .dot{background:var(--amber)}.livebar[data-state=connected] .dot{background:var(--green)}.livebar a{margin-left:auto;text-decoration:none;color:var(--blue)}.filters{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:0 0 18px}.filters .toolbar{margin:0}.filesintro{padding:0 20px 16px;font-size:11px;color:var(--dim)}.remember{padding:10px 12px;background:#111820;border:1px solid var(--line);border-radius:7px;color:var(--text);width:100%}.remembernote{font-size:11px!important;margin-top:0!important}.filedialog{color:var(--text);background:var(--panel);border:1px solid #496071;border-radius:14px;padding:0;width:min(680px,calc(100% - 32px));max-height:85vh;overflow:auto;box-shadow:0 24px 90px #0009}.filedialog::backdrop{background:#080d13b8;backdrop-filter:blur(3px)}.dialoghead{position:sticky;top:0;display:flex;justify-content:space-between;gap:20px;align-items:center;background:var(--panel);padding:16px 24px;border-bottom:1px solid var(--line);z-index:1}.dialoghead h2{font-size:14px}.dialogclose{width:32px;height:32px;border:1px solid var(--line);border-radius:7px;background:var(--raised);font-size:20px;line-height:1}.detailsbody{padding:24px}.detailsbody h1{font-size:23px;overflow-wrap:anywhere;margin-top:0}.detailspath{font-size:11px;overflow-wrap:anywhere;color:var(--dim);margin:6px 0 20px}.detailgrid{display:grid;grid-template-columns:minmax(130px,.8fr) minmax(0,1.3fr);margin:0}.detailgrid dt,.detailgrid dd{margin:0;padding:10px 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere;font-size:12px}.detailgrid dt{color:var(--dim);padding-right:20px}.detailgrid dd{white-space:pre-wrap}.detailheading{font-size:13px;margin:26px 0 8px}.detailnote{font-size:11px;line-height:1.7;margin-bottom:12px}.detailpanel{max-width:760px;margin:0 auto}.detailsbody .actions{margin-top:24px}.detailfallback{margin-top:18px}.filedialog .detailfallback{display:none}.filedialog:focus{outline:none}.filedialog .detailsbody{border:0}.visuallyhidden{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}@media(prefers-reduced-motion:reduce){.project>summary:before{transition:none}}@media(max-width:760px){.projectcount{font-size:10px}.project>summary{padding:12px 16px}.detailgrid{grid-template-columns:110px minmax(0,1fr)}.detailsbody{padding:20px}.dialoghead{padding:12px 20px}.filters{padding:12px}.actions{gap:8px}.project table th:nth-child(3),.project table td:nth-child(3){display:none}}
 .file-explorer{background:#1a2530;border-color:#354857}.file-explorer>.panelhead,.file-explorer>.filesintro{background:#1d2b37}.file-explorer .panelhead{padding-bottom:12px}.file-explorer .filesintro{margin:0;padding-bottom:17px}.file-explorer .project{border-top-color:#354857}.file-explorer .project>summary{background:#223241}.file-explorer .project>summary:hover{background:#273b4c}.file-explorer .project table{background:#19242e}.file-explorer th{background:#17212b;border-color:#30414f}.file-explorer td{border-bottom-color:#30414f}.file-explorer tbody tr:hover{background:#1e2e3c}.filepreview{position:relative;width:48px;height:40px;display:grid;place-items:center;overflow:hidden;border:1px solid #40576a;border-radius:6px;background:#111b24}.filepreview .nativeicon{width:30px;height:30px}.filepreview:has(img) .nativeicon{visibility:hidden}.filethumb{position:absolute;inset:0;display:block;width:48px;height:40px;object-fit:cover;border-radius:inherit}.detailpreview{display:grid;place-items:center;margin:0 0 22px;padding:12px;background:#101923;border:1px solid #354857;border-radius:9px;min-height:90px}.detailpreview img{display:block;max-width:100%;max-height:320px;object-fit:contain;border-radius:4px}.detailpreview figcaption{font-size:10px;color:var(--dim);padding-top:9px}.detailpreview[hidden]{display:none}
+.observebutton{margin-top:12px;width:100%;font-size:11px}.observerdialog{width:min(880px,calc(100% - 32px))}.observerbody{padding:20px 24px}.observerstatus{display:flex;gap:8px;align-items:center;font-size:12px;min-height:24px}.observerstatus .dot{background:var(--amber)}.observerstatus[data-state=ready] .dot{background:var(--green)}.observerstage{margin:16px 0 10px;min-height:250px;aspect-ratio:8/5;display:grid;place-items:center;background:#101923;border:1px solid #354857;border-radius:9px;overflow:hidden;position:relative}.observerstage img{width:100%;height:100%;object-fit:contain;display:block;grid-area:1/1}.observerstage img[hidden]{display:none}.observerplaceholder{grid-area:1/1;color:var(--dim);font-size:13px;padding:24px;text-align:center}.observerplaceholder[hidden]{display:none}.observermeta{font-size:11px;color:var(--dim);min-height:20px;overflow-wrap:anywhere}.observernote{font-size:11px;color:var(--dim);line-height:1.7;margin:12px 0 0}.observerdialog[data-state=busy] .observerstage img,.observerdialog[data-state=rendering] .observerstage img,.observerdialog[data-state=unavailable] .observerstage img{opacity:.65}@media(max-width:760px){.observerbody{padding:16px}.observerstage{min-height:180px;aspect-ratio:4/3}}
 
 "#;
 
@@ -325,7 +326,16 @@ fn session_row(html: &mut String, session: &Value) {
     } else if has_model {
         html.push_str("<br>Modell ist nur in dieser Sitzung vorhanden");
     }
-    html.push_str("</div></section>");
+    html.push_str("</div>");
+    let handle = text(session, "observer_handle");
+    if handle.len() == 36 && uuid::Uuid::parse_str(handle).is_ok() {
+        let _ = write!(
+            html,
+            "<button class=\"secondary observebutton\" type=\"button\" data-observe=\"{}\" aria-haspopup=\"dialog\" aria-controls=\"observer-dialog\">Live-Vorschau ansehen</button>",
+            escape(handle)
+        );
+    }
+    html.push_str("</section>");
 }
 
 fn project_files(html: &mut String, files: &[Value]) {
@@ -384,7 +394,8 @@ pub fn page(snapshot: &Value, query: &str, kind: &str) -> String {
     }
     html.push_str("</select><button class=\"secondary\" type=\"submit\">Anzeigen</button></form></section><noscript><p class=\"note\">Aktualisiere diese Seite, um neue Dateien und Sitzungsänderungen zu sehen. Dateidetails lassen sich als eigene Seite öffnen.</p></noscript><div id=\"workspace-live\">");
     html.push_str(&fragment(snapshot, query, kind));
-    html.push_str("</div><dialog id=\"file-dialog\" class=\"filedialog\" aria-labelledby=\"file-dialog-title\"><div class=\"dialoghead\"><h2 id=\"file-dialog-title\">Dateidetails</h2><button id=\"file-dialog-close\" class=\"dialogclose\" type=\"button\" aria-label=\"Dateidetails schließen\">×</button></div><div id=\"file-dialog-content\"></div></dialog></main><script type=\"module\" src=\"/workspace/boot.js\"></script></body></html>");
+    html.push_str("</div><dialog id=\"file-dialog\" class=\"filedialog\" aria-labelledby=\"file-dialog-title\"><div class=\"dialoghead\"><h2 id=\"file-dialog-title\">Dateidetails</h2><button id=\"file-dialog-close\" class=\"dialogclose\" type=\"button\" aria-label=\"Dateidetails schließen\">×</button></div><div id=\"file-dialog-content\"></div></dialog>");
+    html.push_str("<dialog id=\"observer-dialog\" class=\"filedialog observerdialog\" aria-labelledby=\"observer-title\" aria-describedby=\"observer-note\"><div class=\"dialoghead\"><h2 id=\"observer-title\">Live-Vorschau der MCP-Sitzung</h2><button id=\"observer-close\" class=\"dialogclose\" type=\"button\" autofocus aria-label=\"Live-Vorschau schließen\">×</button></div><div class=\"observerbody\"><div id=\"observer-status\" class=\"observerstatus\" role=\"status\" aria-live=\"polite\"><span class=\"dot\" aria-hidden=\"true\"></span><span id=\"observer-status-text\">Vorschau wird verbunden …</span></div><figure class=\"observerstage\"><img id=\"observer-image\" alt=\"Aktueller Modellstand der beobachteten MCP-Sitzung\" decoding=\"async\" width=\"800\" height=\"500\" hidden><img id=\"observer-next\" alt=\"Aktueller Modellstand der beobachteten MCP-Sitzung\" decoding=\"async\" width=\"800\" height=\"500\" hidden><figcaption id=\"observer-placeholder\" class=\"observerplaceholder\">Das erste Modellbild wird vorbereitet.</figcaption></figure><div id=\"observer-meta\" class=\"observermeta\"></div><div id=\"observer-warning\" class=\"observernote\" role=\"note\"></div><p id=\"observer-note\" class=\"observernote\">Nur ansehen · Echte Bilder des Sitzungsmodells, auch vor dem Speichern. Neue Bilder erscheinen nach abgeschlossenen Befehlen oder Stapeln; während einer Berechnung bleibt der vorherige Stand sichtbar. Die Ansicht verändert weder Modell noch Kamera der KI.</p></div></dialog></main><script type=\"module\" src=\"/workspace/boot.js\"></script></body></html>");
     html
 }
 
@@ -684,6 +695,41 @@ mod tests {
         let mut unselected = String::new();
         session_row(&mut unselected, &json!({"project":null}));
         assert!(unselected.contains("Projekt noch nicht gewählt"));
+    }
+
+    #[test]
+    fn observer_buttons_expose_only_a_valid_opaque_handle() {
+        let handle = "b84ca986-1593-4acc-855c-7db6287b2871";
+        let mut row = String::new();
+        session_row(&mut row, &json!({"observer_handle":handle,"display_id":"s-display","transport_id":"secret-transport"}));
+        assert!(row.contains(&format!("data-observe=\"{handle}\"")));
+        assert!(row.contains("aria-haspopup=\"dialog\" aria-controls=\"observer-dialog\""));
+        assert!(!row.contains("secret-transport"));
+        for invalid in ["", "------------------------------------", "not-a-handle", "\"><script>bad</script>"] {
+            let mut row = String::new();
+            session_row(&mut row, &json!({"observer_handle":invalid}));
+            assert!(!row.contains("data-observe="));
+        }
+    }
+
+    #[test]
+    fn observer_modal_survives_workspace_fragment_replacement() {
+        let snapshot = json!({"sessions":[{"observer_handle":"b84ca986-1593-4acc-855c-7db6287b2871"}]});
+        let live = fragment(&snapshot, "", "all");
+        assert!(live.contains("data-observe="));
+        assert!(!live.contains("<dialog"));
+        let html = page(&snapshot, "", "all");
+        assert_eq!(html.matches("id=\"observer-dialog\"").count(), 1);
+        let modal = html.find("<dialog id=\"observer-dialog\"").expect("observer dialog");
+        assert!(html[..modal].ends_with("</div></dialog>"));
+        assert!(html[modal..].contains("aria-labelledby=\"observer-title\" aria-describedby=\"observer-note\""));
+        assert!(html[modal..].contains("id=\"observer-close\" class=\"dialogclose\" type=\"button\" autofocus"));
+        assert!(html[modal..].contains("role=\"status\" aria-live=\"polite\""));
+        assert_eq!(html[modal..].matches("<img ").count(), 2);
+        assert!(!html[modal..].contains("src=\"/workspace/observe/"));
+        assert!(html[modal..].contains("id=\"observer-warning\""));
+        assert!(html[modal..].contains("auch vor dem Speichern"));
+        assert!(html[modal..].contains("verändert weder Modell noch Kamera"));
     }
 
     #[test]

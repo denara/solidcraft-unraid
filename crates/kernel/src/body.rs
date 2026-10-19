@@ -914,7 +914,19 @@ impl Body {
         self.splits.as_ref().map(|l| l.as_slice()).unwrap_or(&[])
     }
 
-    /// The same body with the lines its faces were split along on purpose.
+    /// A display-only copy whose cold placed-instance tessellation cache is
+    /// independent of the editing session. A completed immutable cache can be
+    /// shared safely: get() never waits for an in-progress initialization.
+    pub fn isolated_display_copy(&self) -> Body {
+        let mut copy = self.clone();
+        if let Some((shared, transform)) = self.display_of.as_deref()
+            && shared.mesh.get().is_none()
+        {
+            copy.display_of = Some(std::sync::Arc::new((std::sync::Arc::new(SharedDisplay::new(shared.original.clone())), *transform)));
+        }
+        copy
+    }
+
     /// This body shows `shared`'s mesh placed by `t` (it is that body's solid, placed by `t`).
     pub(crate) fn with_display_of(mut self, shared: std::sync::Arc<SharedDisplay>, t: [[f64; 4]; 4]) -> Body {
         if self.splits.is_none() && !self.is_mesh() {
@@ -923,6 +935,7 @@ impl Body {
         self
     }
 
+    /// The same body with the lines its faces were split along on purpose.
     pub fn with_split_lines(mut self, s: Option<std::sync::Arc<Vec<Vec<Vec3>>>>) -> Body {
         self.splits = s.filter(|l| !l.is_empty());
         // Split lines are drawn: the shared mesh does not have them.
@@ -1668,6 +1681,48 @@ impl Body {
                 })
                 .collect()
         })
+    }
+}
+
+#[cfg(test)]
+mod observer_display_cache_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn instance() -> (Body, Arc<SharedDisplay>) {
+        let definition = crate::box_solid(Vec3::ZERO, Vec3::new(2., 3., 4.)).unwrap();
+        let shared = Arc::new(SharedDisplay::new(definition.clone()));
+        let transform = [[1., 0., 0., 0.], [0., 1., 0., 0.], [0., 0., 1., 0.], [10., 0., 0., 1.]];
+        (crate::transform_matrix(&definition, transform).unwrap().with_display_of(Arc::clone(&shared), transform), shared)
+    }
+
+    #[test]
+    fn observer_instance_mesh_does_not_initialize_the_editors_cold_inner_cache() {
+        let (original, shared) = instance();
+        let copy = original.isolated_display_copy();
+        let (isolated, _) = copy.display_of.as_deref().unwrap();
+        assert!(!Arc::ptr_eq(&shared, isolated));
+        assert!(Arc::ptr_eq(&original.solid, &copy.solid), "immutable evaluated geometry remains shared");
+        assert!(shared.mesh.get().is_none());
+        assert!(isolated.mesh.get().is_none());
+        let mesh = copy.reference_display_mesh_angular(0.001, DISPLAY_ANGLE).unwrap();
+        assert!(!mesh.triangles.is_empty());
+        assert!((mesh.bounds().min.x - 10.).abs() < 1e-6);
+        assert!(shared.mesh.get().is_none(), "the observer must not take the editor's inner instance mesh lock");
+        assert!(isolated.mesh.get().is_some());
+    }
+
+    #[test]
+    fn observer_instance_mesh_reuses_an_already_completed_immutable_inner_cache() {
+        let (original, shared) = instance();
+        let expected = original.reference_display_mesh_angular(0.001, DISPLAY_ANGLE).unwrap();
+        assert!(shared.mesh.get().is_some());
+        let copy = original.isolated_display_copy();
+        let (reused, _) = copy.display_of.as_deref().unwrap();
+        assert!(Arc::ptr_eq(&shared, reused));
+        let actual = copy.reference_display_mesh_angular(0.001, DISPLAY_ANGLE).unwrap();
+        assert_eq!(actual.positions, expected.positions);
+        assert_eq!(actual.triangles, expected.triangles);
     }
 }
 

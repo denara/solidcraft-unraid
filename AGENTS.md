@@ -74,6 +74,14 @@ legacy root files. Run `packaging/unraid/project-test.ps1` on the isolated candi
 when changing gateway path handling or project binding. Initial dashboard groups are
 collapsed; live updates retain the user's current folder choices.
 
+Preserve the workspace's read-only live session observer: cookie-only SSE/images,
+independent opaque observer handles, background snapshot preparation/rendering and
+bounded shared image caches. Observation must not write files, change the agent's
+camera/document/history or create observer-induced MCP busy errors. Preserve isolated
+cold display caches, render priority/budgets, image-body authorization/leases and
+logout/expiry/session-end invalidation. Run `packaging/unraid/observer-test.ps1`
+against the isolated candidate when changing the worker, observation or gateway.
+
 Requested upstream updates merge one selected upstream snapshot and retain all published
 integration features in the combined image. Preserve the canonical Unraid template's
 Overview as a product description, not a dated changelog: link to upstream for SolidCraft

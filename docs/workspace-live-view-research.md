@@ -1,8 +1,9 @@
 # Live observation of MCP modelling sessions
 
-Status: architecture proposal only. No live CAD viewer is implemented by this
-document. The existing workspace streams file and session metadata; browser CAD
-remains an independent application with independent documents.
+Status: the first-stage read-only snapshot observer is implemented in this fork;
+see [usage and limits](unraid.md#watching-a-live-mcp-model). The notes below record
+its architecture and the separate proposal for a later interactive viewer.
+Browser CAD remains an independent application with independent documents.
 
 ## Existing building blocks
 

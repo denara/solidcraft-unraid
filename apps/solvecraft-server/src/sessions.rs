@@ -146,6 +146,8 @@ mod tests {
     async fn concurrent_request_logs_busy_without_ending_the_working_session() {
         let f = Fixture::new();
         let (id, worker, log_id) = f.state.create("2025-06-18".into()).await.unwrap();
+        let observation = Arc::clone(&f.state.sessions.lock().await.get(&id).unwrap().observer);
+        let _activity = crate::workspace_observer::CadActivity::acquire(observation).unwrap();
         let mut held = worker.lock().await;
         let result = f.state.exchange(Arc::clone(&worker), json!({"jsonrpc":"2.0","id":1,"method":"ping"}), log_id.clone()).await;
         assert!(result.is_err() && !held.failed);
@@ -156,6 +158,24 @@ mod tests {
         drop(held);
         f.state.remove(&id, EndReason::Client).await;
         drop(worker);
+    }
+
+    #[tokio::test]
+    async fn observer_protocol_lock_queues_cad_instead_of_reporting_a_concurrent_agent() {
+        let fixture = Fixture::new();
+        let (_id, worker, log_id) = fixture.state.create("2025-06-18".into()).await.unwrap();
+        // A short internal start/poll owns the pipe without being a real CAD
+        // request. The authenticated request must wait for that exchange.
+        let held = worker.lock().await;
+        let (result, ()) =
+            tokio::join!(fixture.state.exchange(Arc::clone(&worker), json!({"jsonrpc":"2.0","id":1,"method":"ping"}), log_id), async {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                drop(held);
+            });
+        // The deliberately silent fixture eventually hits its regular CAD
+        // timeout; it must never be rejected merely because observation ran.
+        assert!(result.unwrap_err().contains("timed out"));
+        assert!(!fixture.rows().iter().any(|row| row.contains("session.busy")));
     }
 
     #[tokio::test]
@@ -280,7 +300,7 @@ impl Worker {
         Ok(Self { _slot: slot, child, input, output, failed: false, model, lease })
     }
 
-    async fn exchange(&mut self, message: &Value) -> Result<Option<Value>, String> {
+    pub(crate) async fn exchange(&mut self, message: &Value) -> Result<Option<Value>, String> {
         if self.failed {
             return Err("CAD session has ended; initialize a new session and reopen your saved design".into());
         }
@@ -310,7 +330,14 @@ pub struct Entry {
     pub version: String,
     pub log_id: String,
     pub model: Arc<std::sync::Mutex<crate::workspace_model::ModelStatus>>,
+    pub observer: Arc<crate::workspace_observer::Observation>,
     reason: Arc<AtomicU8>,
+}
+
+impl Drop for Entry {
+    fn drop(&mut self) {
+        self.observer.end();
+    }
 }
 
 pub struct State {
@@ -320,6 +347,7 @@ pub struct State {
     pub audit: Arc<Audit>,
     pub browser: crate::workspace::BrowserAuth,
     pub file_gate: Arc<Mutex<()>>,
+    pub observer: crate::workspace_observer::Hub,
 }
 
 impl State {
@@ -333,6 +361,7 @@ impl State {
             audit,
             browser,
             file_gate: Arc::new(Mutex::new(())),
+            observer: Default::default(),
         }
     }
 
@@ -393,12 +422,31 @@ impl State {
         let worker = Arc::new(Mutex::new(Worker::start(&self.config, slot, lease, Arc::clone(&model)).inspect_err(|_| {
             self.audit.emit(Event::StartFailed, json!({"reason":"process_start_failed"}));
         })?));
-        sessions.insert(id.clone(), Entry { worker: Arc::clone(&worker), touched: Instant::now(), version, log_id: log_id.clone(), reason, model });
+        sessions.insert(
+            id.clone(),
+            Entry {
+                worker: Arc::clone(&worker),
+                touched: Instant::now(),
+                version,
+                log_id: log_id.clone(),
+                reason,
+                model,
+                observer: Arc::new(crate::workspace_observer::Observation::default()),
+            },
+        );
         self.audit.emit(Event::Opened, json!({"session":log_id,"active_sessions":sessions.len(),"slots_used":self.config.max_sessions.saturating_sub(self.slots.available_permits()),"slots_total":self.config.max_sessions}));
         Ok((id, worker, log_id))
     }
 
     pub async fn exchange(&self, worker: Arc<Mutex<Worker>>, mut message: Value, log_id: String) -> Result<Option<Value>, String> {
+        let observer = self.sessions.lock().await.values().find(|entry| entry.log_id == log_id).map(|entry| Arc::clone(&entry.observer));
+        let activity = match observer {
+            Some(observer) => Some(crate::workspace_observer::CadActivity::acquire(observer).ok_or_else(|| {
+                self.audit.emit(Event::Busy, json!({"session":log_id,"reason":"concurrent_request"}));
+                "CAD session is busy; send one request at a time".to_string()
+            })?),
+            None => None,
+        };
         let timeout = self.config.timeout;
         let audit = Arc::clone(&self.audit);
         let file_gate = Arc::clone(&self.file_gate);
@@ -406,10 +454,15 @@ impl State {
         // A disconnected HTTP client must not abandon a read and leave a late reply in
         // the pipe. The spawned task finishes the transaction even if its caller leaves.
         tokio::spawn(async move {
-            let mut worker = worker.try_lock().map_err(|_| {
+            let _activity = activity;
+            // Observer protocol requests are short start/poll exchanges. A real CAD
+            // request queues behind them rather than being rejected as session busy.
+            let mut worker = if _activity.is_some() {
+                worker.lock().await
+            } else { worker.try_lock().map_err(|_| {
                 audit.emit(Event::Busy, json!({"session":log_id,"reason":"concurrent_request"}));
                 "CAD session is busy; send one request at a time".to_string()
-            })?;
+            })? };
             let is_tool = message.get("method").and_then(Value::as_str) == Some("tools/call");
             if is_tool && message.get("id").is_none() {
                 return Ok(None);

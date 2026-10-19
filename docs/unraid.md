@@ -120,8 +120,31 @@ The file-detail “Projektgruppe” is derived by this integration. The separate
 property comes from the design's optional `metadata.project`; it does not select or
 rename a server directory.
 
-A possible read-only live view of unsaved AI models is researched separately in
-[the viewer proposal](workspace-live-view-research.md); it is not implemented.
+## Watching a live MCP model
+
+Choose **Live-Vorschau ansehen** on an active MCP session card in `/workspace`. The protected
+dialog shows a real image of that session's current model, including unsaved sketches
+and solids. Updates arrive automatically after completed commands. While a long command
+or batch is running, the previous picture remains visible with a calculation status;
+intermediate geometry inside a command or batch is not streamed.
+
+Pictures are calculated in an isolated background snapshot, without changing the
+agent's camera, document, undo history, saved path or dirty state. The viewer is
+read-only and offers no camera controls or model commands. The original browser CAD
+app and its saved-design copies remain independent.
+
+Observation starts only while an authenticated browser watches a session. Viewers
+share the latest bounded image; no preview PNG or design is written to server files.
+Rendering is limited globally, rate-limited per session and bounded in memory and
+resolution. Closing the dialog stops its subscription. A slow, oversized or failed
+preview reports its own unavailable state while MCP modelling remains usable.
+
+The events and images use the existing workspace browser cookie, not the MCP Bearer
+token. Logout or login expiry revokes access; ending a CAD session invalidates its
+preview and cannot silently attach the viewer to a replacement session. CPU-rendered
+pictures identify their renderer and limitations. These are model snapshots rather
+than a desktop-window stream. The [viewer architecture](workspace-live-view-research.md)
+also describes the separate, future interactive 3D stage.
 
 ## Build and run locally
 

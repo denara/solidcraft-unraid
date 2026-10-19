@@ -50,7 +50,7 @@ impl Default for Live {
     }
 }
 
-struct Lease {
+pub(crate) struct Lease {
     _slot: OwnedSemaphorePermit,
     browsers: Arc<Mutex<HashMap<String, usize>>>,
     browser: String,
@@ -90,6 +90,9 @@ impl Drop for Lease {
 }
 
 impl Live {
+    pub(crate) fn stopping(&self) -> watch::Receiver<bool> {
+        self.stopping.subscribe()
+    }
     /// End long-lived responses before axum waits for graceful HTTP shutdown.
     /// Closing the transport preserves authentication and lets browsers reconnect.
     pub(crate) fn stop(&self) {
@@ -101,7 +104,7 @@ impl Live {
         MAX_STREAMS.saturating_sub(self.slots.available_permits())
     }
 
-    fn reserve(&self, browser: String) -> Result<Lease, StatusCode> {
+    pub(crate) fn reserve(&self, browser: String) -> Result<Lease, StatusCode> {
         if *self.stopping.borrow() {
             return Err(StatusCode::SERVICE_UNAVAILABLE);
         }

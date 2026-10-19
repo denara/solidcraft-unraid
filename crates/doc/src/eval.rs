@@ -53,6 +53,20 @@ pub struct ModelBody {
 }
 
 impl ModelBody {
+    /// An immutable display copy with its own cold mesh cache. A background
+    /// observer may tessellate this copy without making the editing thread wait
+    /// on the same OnceLock. Already completed immutable meshes remain shared.
+    pub fn isolated_display_copy(&self) -> Self {
+        let mut copy = self.clone();
+        copy.body = self.body.isolated_display_copy();
+        let mesh = OnceLock::new();
+        if let Some(ready) = self.mesh.get() {
+            let _ = mesh.set(Arc::clone(ready));
+        }
+        copy.mesh = Arc::new(mesh);
+        copy
+    }
+
     pub fn new(name: String, body: Body, feature: u64) -> Self {
         ModelBody {
             name,
@@ -5812,6 +5826,26 @@ pub fn world_state_reusing(doc: &Document, st: &ModelState, placed_before: &mut 
     }
     *placed_before = placed_now;
     out
+}
+
+#[cfg(test)]
+mod observer_display_cache_tests {
+    use super::*;
+
+    #[test]
+    fn observer_tessellation_leaves_original_cache_cold_and_reuses_completed_meshes() {
+        let original = ModelBody::new("Sample".into(), kernel::box_solid(Vec3::ZERO, Vec3::new(2., 3., 4.)).unwrap(), 7);
+        let copy = original.isolated_display_copy();
+        assert!(!Arc::ptr_eq(&original.mesh, &copy.mesh));
+        assert!(original.mesh.get().is_none());
+        assert!(copy.mesh.get().is_none());
+        let displayed = copy.mesh();
+        assert!(!displayed.triangles.is_empty());
+        assert!(original.mesh.get().is_none(), "observer must not acquire the editing session's cold mesh cache");
+        let ready = copy.isolated_display_copy();
+        assert!(Arc::ptr_eq(&ready.mesh(), &displayed));
+        assert_eq!((ready.name.as_str(), ready.feature, ready.component), ("Sample", 7, 0));
+    }
 }
 
 #[cfg(test)]

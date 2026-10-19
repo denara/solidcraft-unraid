@@ -13,6 +13,7 @@ mod workspace_files;
 mod workspace_live;
 mod workspace_media;
 mod workspace_model;
+mod workspace_observer;
 mod workspace_view;
 
 use std::process::ExitCode;

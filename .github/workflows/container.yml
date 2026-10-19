@@ -108,6 +108,9 @@ jobs:
       - name: Verify mandatory project selection and directory boundaries
         shell: pwsh
         run: ./packaging/unraid/project-test.ps1 -Token disposable-container-proof-token-only
+      - name: Verify read-only live model observation
+        shell: pwsh
+        run: ./packaging/unraid/observer-test.ps1 -Token disposable-container-proof-token-only
       - name: Verify live workspace events and saved properties
         shell: pwsh
         run: ./packaging/unraid/workspace-live-test.ps1 -Token disposable-container-proof-token-only
@@ -122,6 +125,7 @@ jobs:
             target/unraid-log-proof/
             target/unraid-workspace-proof/
             target/unraid-project-proof/
+            target/unraid-observer-proof/
             target/unraid-workspace-live-proof/
           retention-days: 30
       - name: Authenticate to the container registry

@@ -4,6 +4,9 @@
 #![forbid(unsafe_code)]
 
 #[cfg(target_arch = "wasm32")]
+mod observer;
+
+#[cfg(target_arch = "wasm32")]
 mod browser {
     use std::cell::Cell;
     use std::collections::HashMap;
@@ -36,7 +39,8 @@ mod browser {
         document()?.get_element_by_id("file-dialog")?.dyn_into().ok()
     }
 
-    fn expired() {
+    pub(crate) fn expired() {
+        crate::observer::stop();
         if let Some(dialog) = dialog() {
             dialog.close();
         }
@@ -62,6 +66,7 @@ mod browser {
         }
         let focused = document.active_element().filter(|element| live.contains(Some(element)));
         let focused_href = focused.as_ref().and_then(|element| element.get_attribute("href"));
+        let focused_observer = focused.as_ref().and_then(|element| element.get_attribute("data-observe"));
         let focused_project =
             focused.and_then(|element| element.closest("[data-project]").ok().flatten()).and_then(|element| element.get_attribute("data-project"));
         live.set_inner_html(html);
@@ -73,12 +78,26 @@ mod browser {
                 {
                     details.set_open(*open);
                     if focused_href.is_none()
+                        && focused_observer.is_none()
                         && details.get_attribute("data-project") == focused_project
                         && let Ok(Some(summary)) = details.query_selector("summary")
                         && let Ok(summary) = summary.dyn_into::<HtmlElement>()
                     {
                         let _ = summary.focus();
                     }
+                }
+            }
+        }
+        if let Some(handle) = focused_observer
+            && let Ok(nodes) = live.query_selector_all("button[data-observe]")
+        {
+            for index in 0..nodes.length().min(2000) {
+                if let Some(node) = nodes.item(index)
+                    && let Ok(element) = node.dyn_into::<HtmlElement>()
+                    && element.get_attribute("data-observe").as_deref() == Some(handle.as_str())
+                {
+                    let _ = element.focus();
+                    break;
                 }
             }
         }
@@ -208,6 +227,7 @@ mod browser {
         }
         install_details(&document)?;
         install_preview_fallback(&document)?;
+        crate::observer::install(&document)?;
         let query = web_sys::window().and_then(|window| window.location().search().ok()).unwrap_or_default();
         connect(query, Rc::new(Cell::new(0)))
     }

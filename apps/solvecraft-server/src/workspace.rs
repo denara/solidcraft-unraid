@@ -57,6 +57,8 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/workspace/boot.js", get(boot))
         .route("/workspace/assets/{*name}", get(client_asset))
         .route("/workspace/events", get(crate::workspace_live::events))
+        .route("/workspace/observe/{handle}/events", get(crate::workspace_observer::events))
+        .route("/workspace/observe/{handle}/image", get(crate::workspace_observer::image))
         .route("/workspace/preview/{*name}", get(crate::workspace_media::preview))
         .route("/workspace/open/{*name}", get(crate::workspace_media::open))
         .route("/workspace/import/{ticket}", get(crate::workspace_media::import))
@@ -309,7 +311,8 @@ pub async fn snapshot(state: &AppState) -> Result<Value, String> {
     for entry in entries.values() {
         let mut row = entry.model.lock().map_err(|_| "model status unavailable")?.snapshot();
         row["display_id"] = json!(entry.log_id.chars().take(14).collect::<String>());
-        row["request_in_flight"] = json!(entry.worker.try_lock().is_err());
+        row["observer_handle"] = json!(entry.observer.handle);
+        row["request_in_flight"] = json!(entry.observer.cad_requested.load(std::sync::atomic::Ordering::Acquire));
         row["last_request_seconds"] = json!(entry.touched.elapsed().as_secs());
         sessions.push(row);
     }

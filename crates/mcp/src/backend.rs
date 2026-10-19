@@ -223,6 +223,7 @@ pub struct Headless {
     workspace_document: Arc<solidcraft_engine::doc::Document>,
     workspace_visibility: solidcraft_engine::Visibility,
     workspace_revision: u64,
+    observer: observer::Capture,
 }
 
 impl Default for Headless {
@@ -245,6 +246,7 @@ impl Headless {
             workspace_document: Arc::clone(&session.doc),
             workspace_visibility: session.visibility.clone(),
             workspace_revision: 1,
+            observer: observer::Capture::default(),
             session,
             view: StandardView::Iso,
         }
@@ -278,6 +280,9 @@ fn dim(p: &Value, k: &str, default: f64) -> u32 {
 
 impl Backend for Headless {
     fn call(&mut self, method: &str, p: Value) -> Result<Value, String> {
+        if method == "workspace.snapshot" {
+            return self.observer_snapshot(&p);
+        }
         if method == "workspace.status" {
             return Ok(self.workspace_status());
         }
@@ -357,3 +362,6 @@ impl Backend for Headless {
 #[cfg(test)]
 #[path = "backend_workspace_tests.rs"]
 mod workspace_tests;
+
+#[path = "backend_observer.rs"]
+mod observer;

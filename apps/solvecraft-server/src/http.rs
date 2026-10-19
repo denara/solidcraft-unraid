@@ -113,7 +113,7 @@ async fn mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, bytes: Byte
     if let Err(e) = validate(&message) {
         return failure(StatusCode::BAD_REQUEST, id, e);
     }
-    if message.get("method").and_then(Value::as_str) == Some("solidcraft/workspaceStatus") {
+    if matches!(message.get("method").and_then(Value::as_str), Some("solidcraft/workspaceStatus" | "solidcraft/workspaceSnapshot")) {
         return failure(StatusCode::BAD_REQUEST, id, "internal method is unavailable through HTTP; use session_status");
     }
     let initialize = message.get("method").and_then(Value::as_str) == Some("initialize");
@@ -170,7 +170,7 @@ async fn mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, bytes: Byte
             sessions.get(&session_id).ok_or_else(|| "session ended".to_string()).and_then(|entry| {
                 let mut status = entry.model.lock().map_err(|_| "model status unavailable")?.snapshot();
                 status["display_id"] = json!(entry.log_id.chars().take(14).collect::<String>());
-                status["request_in_flight"] = json!(entry.worker.try_lock().is_err());
+                status["request_in_flight"] = json!(entry.observer.cad_requested.load(std::sync::atomic::Ordering::Acquire));
                 Ok(status)
             })
         };
