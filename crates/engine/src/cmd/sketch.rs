@@ -275,6 +275,8 @@ pub(super) fn edit_solved<T>(
     // The stored sketch is solved for its stored values.
     let stored = sk.driving_values();
     let (out, left) = f(&mut sk, &mut doc)?;
+    // A curve that took an offset spline's generated node (drawn from its end) gets its own point there.
+    sk.detach_offset_points()?;
     let offsets = !sk.offsets.is_empty() || !sk.freeform_offsets.is_empty();
     let rep = match left {
         // A drag step solved it (held, with the dimensions' values applied).
@@ -1435,7 +1437,7 @@ fn keep_size(sk: &Sketch, e: Ent) -> Vec<ConstraintKind> {
     }
 }
 
-/// Satisfy a just-added constraint the way Fusion applies it: the first-picked entities stay
+/// Satisfy a just-added constraint the way a dimensional-constraint tool applies it: the first-picked entities stay
 /// put and only the second moves (first keeping its size, so it turns and slides, then also
 /// resizing).
 /// If the second can't move (fixed, projected or fully determined), the first moves instead;

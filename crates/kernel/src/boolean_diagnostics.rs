@@ -18,6 +18,8 @@ pub enum BooleanStrategy {
     GrownBoss,
     PlanarFallback,
     ToolNudge,
+    /// A rotationally symmetric tool turned about its own axis; its volume is unchanged.
+    ToolReseam,
     Piecewise,
     /// No retry gave a result, and the answer from sample points was kept although the bodies'
     /// facetings disagree with it.
@@ -61,6 +63,7 @@ impl BooleanFallback {
             BooleanStrategy::GrownBoss => format!("boss grown {:.6e} mm into the material around the bore it fills", self.face_shift_mm),
             BooleanStrategy::PlanarFallback => "exact planar fallback (no displacement)".into(),
             BooleanStrategy::ToolNudge => format!("tool displacement {:.6e} mm, rotation {:.6e} rad", self.translation_mm, self.rotation_rad),
+            BooleanStrategy::ToolReseam => format!("axisymmetric tool reseamed by {:.6e} rad (no displacement)", self.rotation_rad),
             BooleanStrategy::Piecewise => "piecewise retry (no displacement)".into(),
             BooleanStrategy::UnverifiedShortcut => format!(
                 "not verified: the bodies' facets pass through each other by more than {:.6e} mm, but they could not be intersected there; that part is ignored",

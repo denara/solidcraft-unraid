@@ -50,7 +50,7 @@
 use std::collections::BTreeMap;
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
-use solidcraft_geom::{Loop2, Mesh, Plane, Region2, Seg2, Vec2, Vec3};
+use solidcraft_geom::{Loop2, Mesh, Plane, Region2, Seg2, UnitVec3, Vec2, Vec3};
 use solidcraft_kernel::{Body, FaceSurface, face_surface};
 
 use super::{FlatWork, ReliefOverride, RuleValues, SheetBody, SheetFlange, base_flange, point_in, polys_cross, signed_area, snap};
@@ -71,7 +71,7 @@ fn at(p: Vec3) -> String {
 /// arc where that face is a round wall (`round[i]`: the circle's centre and the arc's middle).
 /// `holes`: its inner loops, in `plane`, each with the faces of its walls.
 struct Face {
-    n: Vec3,
+    n: UnitVec3,
     pts: Vec<Vec3>,
     across: Vec<Option<usize>>,
     round: Vec<Option<(Vec3, Vec3)>>,
@@ -89,7 +89,7 @@ struct Panel {
 }
 
 /// Area of a loop in space, positive when it runs counter-clockwise about `n`.
-fn area_about(pts: &[Vec3], n: Vec3) -> f64 {
+fn area_about(pts: &[Vec3], n: UnitVec3) -> f64 {
     let Some(&o) = pts.first() else { return 0.0 };
     pts.windows(2).map(|w| (w[0] - o).cross(w[1] - o).dot(n)).sum::<f64>() / 2.0
 }
@@ -227,7 +227,7 @@ fn outline(b: &Body, mesh: &Mesh, f: usize, tol: f64) -> Result<Face> {
         loops.push(lp);
     }
     let mut walls = std::collections::HashMap::new();
-    let mut wall = |g: u32| *walls.entry(g).or_insert_with(|| round_wall(b, &plane, n, g));
+    let mut wall = |g: u32| *walls.entry(g).or_insert_with(|| round_wall(b, &plane, *n, g));
     // Each loop with the faces of its walls.
     let mut shaped: Vec<(Vec<(Seg2, Option<u32>)>, Vec<usize>)> = loops
         .iter()
@@ -388,7 +388,7 @@ fn bend_cylinder(b: &Body, mesh: &Mesh, f: usize, tol: f64) -> Option<Chamfer> {
         let Some(FaceSurface::Plane { normal: n, .. }) = face_surface(b, g) else { continue };
         let radial = (p - origin) - axis * (p - origin).dot(axis);
         if radial.normalized().is_some_and(|out| n.dot(out).abs() >= 1.0 - 1e-6) {
-            sides.push((g, n));
+            sides.push((g, *n));
         }
     }
     let &[(a, na), (bb, nb)] = sides.as_slice() else { return None };

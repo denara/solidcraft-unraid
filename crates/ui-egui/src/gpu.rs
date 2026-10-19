@@ -281,6 +281,7 @@ fn offscreen(
         access: None,
         outline: false,
         eye,
+        ao_radius: 0.0,
         ssaa,
     });
     let texture = |format, usage| {

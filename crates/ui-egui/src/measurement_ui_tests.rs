@@ -127,6 +127,9 @@ fn measurement_axis_distances_can_be_disabled_saved_and_restored_in_preferences(
     let mut h = vertex_measurement([0., 0., 0.], [-3., 4., -12.]);
     let measurement = result(&h).clone();
     h.call("ui.prefs", json!({"open":"Graphics"}));
+    // The graphics page scrolls; the checkbox sits below the fold since the graphics preset
+    // and ambient occlusion rows were added, so scroll to it as the scenario tests do.
+    h.call("ui.scroll", json!({"x":800.0,"y":500.0,"delta":-3000.0}));
     let checkbox = crate::scenario::rect_of("prefs:measure_axis_distances").unwrap().center();
     h.call("ui.click", json!({"x":checkbox.x,"y":checkbox.y}));
     assert!(!h.app.preferences.measure_axis_distances);

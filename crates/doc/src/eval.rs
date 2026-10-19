@@ -6,7 +6,7 @@ use std::sync::{Arc, OnceLock};
 
 use serde::Serialize;
 use solidcraft_geom::tess::TessPlan;
-use solidcraft_geom::{Mesh, Plane, Region2, Vec2, Vec3, regions_apart};
+use solidcraft_geom::{Mesh, Plane, Region2, UnitVec3, Vec2, Vec3, regions_apart};
 use solidcraft_kernel::{self as kernel, Body, BoolOp};
 use solidcraft_sketch::{CurveKind, Profile, SolveReport, find_profiles};
 
@@ -179,7 +179,7 @@ pub struct ThreadInfo {
     pub pitch: f64,
     pub internal: bool,
     pub axis_point: Vec3,
-    pub axis: Vec3,
+    pub axis: UnitVec3,
     /// Threaded part along the axis from `axis_point`.
     pub start: f64,
     pub end: f64,
@@ -365,10 +365,10 @@ fn thread_groove(t: &ThreadInfo, radius: f64, open: (bool, bool)) -> Result<soli
     // at the threaded length's end.
     let (s0, s1) = (if open.0 { t.start - p } else { t.start }, if open.1 { t.end + p } else { t.end });
     let base = t.axis_point + k * s0;
-    let plane = Plane { origin: base, x: u, y: k };
+    let plane = Plane { origin: base, x: u, y: *k };
     let section = [Vec2::new(r0, -w0), Vec2::new(r1, -w1), Vec2::new(r1, w1), Vec2::new(r0, w0)];
     // Sections 7.5° apart: the chords sag 0.2% of the radius.
-    Ok(kernel::sweep_helix_mesh(&plane, &section, base, k, p, (s1 - s0) / p, 48)?)
+    Ok(kernel::sweep_helix_mesh(&plane, &section, base, *k, p, (s1 - s0) / p, 48)?)
 }
 
 /// A constant fillet of `edges`; with [`FilletFit::Reduce`](crate::FilletFit::Reduce), a radius too
@@ -428,6 +428,12 @@ fn one_by_one(input: Traced, edges: &[Vec3], blend: impl Fn(&kernel::Body, Vec3)
         Some(prev) => Ok((b.body, prev)),
         None => Err(DocError::Invalid("no edges to fillet".into())),
     }
+}
+
+/// `Posts` for `Posts (1)`: the body a split piece was numbered after.
+fn split_piece_of(name: &str) -> Option<&str> {
+    let (base, n) = name.strip_suffix(')')?.rsplit_once(" (")?;
+    (!n.starts_with('0') && n.parse::<u32>().is_ok()).then_some(base)
 }
 
 /// Add `note` to a feature's warning.
@@ -1281,7 +1287,7 @@ impl Model {
                 // the face along the hole's axis and never slides sideways to the face's nearest
                 // point when the face no longer reaches it.
                 let hole_axis = match &f.kind {
-                    FeatureKind::Hole { direction, points: None, .. } => direction.normalized(),
+                    FeatureKind::Hole { direction, points: None | Some(crate::SketchPoints { single: true, .. }), .. } => direction.normalized(),
                     _ => None,
                 };
                 let fst = face_point_state(doc, &state, &f.kind, f.component);
@@ -1764,8 +1770,9 @@ fn apply_traced(state: &mut ModelState, f: &Feature, tools: Vec<Traced>, op: Ope
         Operation::Cut | Operation::Intersect => {
             let bop = if op == Operation::Cut { BoolOp::Cut } else { BoolOp::Intersect };
             let tools = if op == Operation::Cut { clear_tools_as_one(tools) } else { tools };
-            let affected: std::collections::BTreeSet<String> =
-                target_idx.iter().filter_map(|i| state.bodies.get(*i).map(|b| b.name.clone())).collect();
+            // Each target's pieces before the cut: a body joined from separate pieces stays one.
+            let affected: std::collections::BTreeMap<String, usize> =
+                target_idx.iter().filter_map(|i| state.bodies.get(*i)).map(|b| (b.name.clone(), b.body.lumps().map_or(1, |l| l.len()))).collect();
             let mut remove = Vec::new();
             for &ti in &target_idx {
                 let Some(mut acc) = state.bodies.get(ti).map(|b| Some(b.traced())) else { continue };
@@ -1793,16 +1800,19 @@ fn apply_traced(state: &mut ModelState, f: &Feature, tools: Vec<Traced>, op: Ope
             let live: std::collections::BTreeSet<&str> = state.bodies.iter().map(|b| b.name.as_str()).collect();
             state.threads.retain(|t| live.contains(t.body.as_str()));
             // A cut can leave a body in pieces: each piece becomes its own body ("Bar", "Bar (1)"),
-            // numbered on past names already taken (a body cut in pieces before).
+            // numbered on past names already taken (a body cut in pieces before). Only a cut that
+            // made more pieces than the body had splits it: the pieces of a join stay together.
+            // Not yet: a cut that splits one piece of such a body still splits all of them; keeping
+            // the untouched ones together needs each new piece traced to the piece it came from.
             let mut taken: std::collections::BTreeSet<String> = state.bodies.iter().map(|b| b.name.clone()).collect();
             let mut split: Vec<ModelBody> = Vec::new();
             for mb in std::mem::take(&mut state.bodies) {
-                if !affected.contains(&mb.name) || state.sheets.iter().any(|s| s.body == mb.name) {
+                let Some(&had) = affected.get(&mb.name).filter(|_| !state.sheets.iter().any(|s| s.body == mb.name)) else {
                     split.push(mb);
                     continue;
-                }
+                };
                 let pieces = mb.body.lumps().unwrap_or_else(|_| vec![mb.body.clone()]);
-                if pieces.len() < 2 {
+                if pieces.len() <= had {
                     split.push(mb);
                     continue;
                 }
@@ -2380,7 +2390,7 @@ fn faces_through(st: &ModelState, p: Vec3, reach: f64) -> Vec<(f64, Vec3, Option
         }
         for (f, (d, facet)) in near {
             let (exact, off) = match kernel::face_surface(&b.body, f as usize) {
-                Some(kernel::FaceSurface::Plane { normal, point }) => (Some(normal), Some((p - point).dot(normal).abs())),
+                Some(kernel::FaceSurface::Plane { normal, point }) => (Some(*normal), Some((p - point).dot(normal).abs())),
                 Some(kernel::FaceSurface::Cylinder { origin, axis, .. }) => {
                     let v = p - origin;
                     ((v - axis * v.dot(axis)).normalized(), None)
@@ -2669,7 +2679,7 @@ fn sketch_hole_dir(st: &ModelState, spots: &[Vec3], n: Vec3) -> Vec3 {
 fn hole_spots(vals: &BTreeMap<String, Value>, st: &ModelState, f: &Feature) -> Result<(Vec<Vec3>, Vec3)> {
     let FeatureKind::Hole { position, at, direction, points, .. } = &f.kind else { return Err(DocError::Invalid("not a hole".into())) };
     let (spots, dir) = match points {
-        Some(sp) => {
+        Some(sp) if !sp.single => {
             let ss =
                 st.sketch(sp.sketch.0).ok_or_else(|| DocError::Unknown(format!("sketch {} (it must come earlier in the timeline)", sp.sketch)))?;
             let mut v = Vec::new();
@@ -2681,9 +2691,9 @@ fn hole_spots(vals: &BTreeMap<String, Value>, st: &ModelState, f: &Feature) -> R
             let dir = if sp.flip { -dir } else { dir };
             (v, dir)
         }
-        None => {
+        _ => {
             let dir = direction.normalized().ok_or_else(|| DocError::Invalid("hole direction".into()))?;
-            let at = hole_on_surface(st, hole_position(vals, position, at)?, dir);
+            let at = hole_on_surface(st, single_hole_position(vals, st, position, at, points)?, dir);
             let dir = hole_dir_into_face(st, at, dir);
             return Ok((vec![hole_on_surface(st, at, dir)], dir));
         }
@@ -2720,7 +2730,7 @@ fn hole_depth_to(st: &ModelState, at: &Vec3, dir: Vec3, to: &Option<Vec3>, depth
 fn hole_spots_raw(vals: &BTreeMap<String, Value>, st: &ModelState, f: &Feature) -> Result<(Vec<Vec3>, Vec3)> {
     let FeatureKind::Hole { position, at, direction, points, .. } = &f.kind else { return Err(DocError::Invalid("not a hole".into())) };
     match points {
-        Some(sp) => {
+        Some(sp) if !sp.single => {
             let ss = st.sketch(sp.sketch.0).ok_or_else(|| DocError::Unknown(format!("sketch {}", sp.sketch)))?;
             let v: Vec<Vec3> =
                 sp.ids.iter().filter_map(|id| ss.sketch.points.iter().find(|p| &p.id == id)).map(|p| ss.plane.to_world(p.pos)).take(10_000).collect();
@@ -2728,12 +2738,28 @@ fn hole_spots_raw(vals: &BTreeMap<String, Value>, st: &ModelState, f: &Feature) 
             let dir = if sp.flip { -dir } else { dir };
             Ok((v, dir))
         }
-        None => {
+        _ => {
             let dir = direction.normalized().ok_or_else(|| DocError::Invalid("hole direction".into()))?;
-            let p = hole_position(vals, position, at)?;
+            let p = single_hole_position(vals, st, position, at, points)?;
             Ok((vec![p], hole_dir_into_face(st, hole_on_surface(st, p, dir), dir)))
         }
     }
+}
+
+/// Where a hole placed by position is drilled: at its sketch point where the sketch has it now,
+/// for a Single hole snapped to one (#2110), else as [`hole_position`].
+fn single_hole_position(
+    vals: &BTreeMap<String, Value>,
+    st: &ModelState,
+    position: &crate::FacePick,
+    at: &Option<crate::PointExpr>,
+    points: &Option<crate::SketchPoints>,
+) -> Result<Vec3> {
+    let Some(sp) = points else { return hole_position(vals, position, at) };
+    let ss = st.sketch(sp.sketch.0).ok_or_else(|| DocError::Unknown(format!("sketch {} (it must come earlier in the timeline)", sp.sketch)))?;
+    let id = sp.ids.first().ok_or_else(|| DocError::Invalid("a Single hole needs its sketch point".into()))?;
+    let p = ss.sketch.points.iter().find(|p| &p.id == id).ok_or_else(|| DocError::Unknown(format!("sketch point `{id}`")))?;
+    Ok(ss.plane.to_world(p.pos))
 }
 
 /// Where a hole placed by position is drilled: its `at` expressions evaluated, so it follows the
@@ -3079,7 +3105,8 @@ fn centered_extrude(plane: &Plane, region: &Region2, start: f64, end: f64, sketc
     };
     // Fit cap surfaces in their own coordinates. Fitting a distant world-space
     // wire can tilt an otherwise exact planar cap through numeric cancellation.
-    let bodies = kernel::extrude(&Plane::XY, std::slice::from_ref(region), start, end)?;
+    // A side drawn in collinear pieces is one face (#1788).
+    let bodies = kernel::extrude_whole_sides(&Plane::XY, std::slice::from_ref(region), start, end)?;
     if *plane == Plane::XY {
         return Ok(bodies.into_iter().map(|body| roles.tool(body, None)).collect());
     }
@@ -3190,21 +3217,30 @@ fn feature_tools_with_constructor(
             };
             if let Some(tp) = &extent.taper {
                 let taper = val(vals, tp, Kind::Angle)?;
-                if extent.distance2.is_some() || extent.start_offset.is_some() || extent.direction == crate::Direction::Symmetric {
-                    return Err(DocError::Invalid("not supported yet: taper with two-sided, symmetric or offset extents".into()));
+                if extent.distance2.is_some() || extent.direction == crate::Direction::Symmetric {
+                    return Err(DocError::Invalid("not supported yet: taper with two-sided or symmetric extents".into()));
                 }
                 let sign = if extent.to.is_none() && extent.direction == crate::Direction::Negative { -1.0 } else { 1.0 };
                 let (len, sign) = if d < 0.0 { (-d, -sign) } else { (d, sign) };
-                let start_plane = ss.plane.offset(from);
+                // Where the extrude starts: the From Object's level and a start offset along the
+                // normal from it. The offset moves the profile that far and the sides are drafted
+                // from there, so the profile stays the section at the start whatever the offset
+                // (`d` is measured from the start already, To Object included).
+                let base = from
+                    + match &extent.start_offset {
+                        Some(e) => val(vals, e, Kind::Length)?,
+                        None => 0.0,
+                    };
+                let start_plane = ss.plane.offset(base);
                 let caps = [
-                    Some(crate::lineage::extrude_cap_role(from)),
-                    Some(crate::lineage::extrude_cap_role(if sign < 0.0 { from - len } else { from + len })),
+                    Some(crate::lineage::extrude_cap_role(base)),
+                    Some(crate::lineage::extrude_cap_role(if sign < 0.0 { base - len } else { base + len })),
                 ];
                 // How far a tool grows past its profile at either end, at most.
                 let mut growth: f64 = 0.0;
                 // A face of the targets in the profile's plane (the same for every profile).
                 let plain_targets: Vec<String> = crate::plain(targets);
-                let on_face = matches!(operation, Operation::Join | Operation::Cut) && face_level_at(st, &ss.plane, from, &plain_targets);
+                let on_face = matches!(operation, Operation::Join | Operation::Cut) && face_level_at(st, &ss.plane, base, &plain_targets);
                 let surroundings = Surroundings::of(st, *operation, &plain_targets);
                 let tools: Vec<Traced> = regions
                     .iter()
@@ -3228,9 +3264,9 @@ fn feature_tools_with_constructor(
                             growth = growth.max(len * taper.tan().abs());
                             return Ok(roles.tool(exact, None));
                         }
-                        let (lo, hi) = if sign < 0.0 { (from - len, from) } else { (from, from + len) };
+                        let (lo, hi) = if sign < 0.0 { (base - len, base) } else { (base, base + len) };
                         let (l2, h2) = surroundings.as_ref().map_or((lo, hi), |sur| extend_for_coplanar(sur, &ss.plane, r, lo, hi));
-                        let (mut a, b) = if sign < 0.0 { (from - h2, from - l2) } else { (l2 - from, h2 - from) };
+                        let (mut a, b) = if sign < 0.0 { (base - h2, base - l2) } else { (l2 - base, h2 - base) };
                         // A taper that narrows the tool away from the face widens it as it runs on into it, past
                         // the profile (where the profile is the whole face, out through the body's sides, #1534):
                         // then it starts on the face instead.
@@ -5241,10 +5277,28 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
             }
             let mut tb = Vec::new();
             for t in tools {
-                tb.push(st.body(t).ok_or_else(|| DocError::Unknown(format!("body `{t}`")))?.traced());
+                match st.body(t) {
+                    Some(b) => tb.push(b.traced()),
+                    // Designs saved before #2247 combined the pieces a cut split off a body that
+                    // was already several pieces (`Posts`, `Posts (1)`). A cut keeps them in one
+                    // body now: the piece is in `Posts`, which is a tool too or the body joined to.
+                    None => match split_piece_of(t) {
+                        Some(base)
+                            if st.body(base).is_some()
+                                && (tools.iter().any(|o| **o == *base)
+                                    || (**target == *base && matches!(operation, Operation::Join | Operation::NewBody))) =>
+                        {
+                            append_warning(warning, format!("`{t}` is part of `{base}` now"));
+                        }
+                        _ => return Err(DocError::Unknown(format!("body `{t}`"))),
+                    },
+                }
             }
             if st.body(target).is_none() {
                 return Err(DocError::Unknown(format!("body `{target}`")));
+            }
+            if tb.is_empty() && !tools.is_empty() {
+                return Ok(()); // the pieces were all joined back into the body they are part of
             }
             let op = if *operation == Operation::NewBody { Operation::Join } else { *operation };
             apply_traced(st, f, tb, op, std::slice::from_ref(&target.0))?;
@@ -5751,7 +5805,7 @@ pub fn world_state_reusing(doc: &Document, st: &ModelState, placed_before: &mut 
                 let mut t2 = t.clone();
                 let frame = st.body(&t.body).and_then(|body| doc.model_body_offset(body)).map(|offset| crate::mat_mul(&m, offset)).unwrap_or(m);
                 t2.axis_point = crate::apply_point(&frame, t.axis_point);
-                t2.axis = crate::apply_vector(&frame, t.axis);
+                t2.axis = crate::apply_vector(&frame, *t.axis).unit().unwrap_or(t.axis);
                 out.threads.push(t2);
             }
         }

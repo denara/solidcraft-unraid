@@ -27,6 +27,7 @@ pub mod section;
 pub mod spline_space;
 pub mod tess;
 pub mod tspline;
+mod unit_vec3;
 mod vec;
 
 pub use arcfit::MAX_FIT_PIECES;
@@ -35,6 +36,7 @@ pub use bvh::{Bvh, MeshIndex};
 pub use mesh::{Aabb3, BoxedTriangle, InsideIndex, MassProperties, Mesh, MeshMeasure, find_close_pair};
 pub use plane::Plane;
 pub use profile::{Loop2, MAX_BEZIER_CTRL, MAX_BEZIER_DEGREE, MAX_DERIVATIVE_ORDER, Region2, Seg2, bezier, regions_apart};
+pub use unit_vec3::UnitVec3;
 pub use vec::{Vec2, Vec3};
 
 /// Geometric tolerance for coincidence tests (mm).

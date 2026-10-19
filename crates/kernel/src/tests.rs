@@ -2477,7 +2477,7 @@ fn tangent_holes_pinch_alike() {
 }
 
 /// A d10 tube bent at R5: the inside of the bend is a horn torus pinched to a point. One torus
-/// face, with a degenerate loop at the pinch (counted as Fusion does: 5 faces, 6 edges, 4 vertices).
+/// face, with a degenerate loop at the pinch (5 faces, 6 edges, 4 vertices).
 #[test]
 fn tight_bend_counts() {
     use crate::build::PathSeg;

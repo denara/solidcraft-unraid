@@ -191,6 +191,17 @@ Changes:
   the face, many degrees round: those triangles cut through the surface and folded over each
   other (a cone face with a small hole meshed several mm² too large, and the boolean that made
   it was refused for its volume).
+- `tessellation/triangulation.rs`: a face that comes out of the triangulation with no triangle
+  at all, though the points of its one boundary loop enclose an area in space, is given the
+  triangles of that loop (ears clipped on the plane of the loop, no point added, so the faces on
+  either side of its edges still meet it). Its two edges can be different curves that, sampled
+  as they are, run along the same line in the face's parameters (a lens thinner than the
+  tolerance), and the loop then has no area there. The shell's mesh had a hole. Faces that
+  mesh are untouched, and so are preview meshes (they have their own step grid). Only a face
+  with one loop of at most 256 points is filled, and not one whose loop crosses itself, whose
+  ears would overlap (the pinched face of #1648 is one): it stays as it was.
+  `crates/kernel/src/thin_face_tests.rs` holds it, `crates/kernel/tests/tess_loop_fill.rs` the
+  ear clipping (through the `test-hooks` feature).
 
 ## matext4cgmath 0.1.0 (Apache-2.0, © RICOS Co. Ltd., https://github.com/ricosjp/matext4cgmath)
 
@@ -234,3 +245,14 @@ SolidCraft changes:
   an unsupported surface no longer unwrap.
 - `src/winit.rs`: acquire a drawable before preparing paint callbacks, so a skipped
   surface frame cannot discard initialization commands for cached viewport meshes.
+- `src/lib.rs`, `src/winit.rs`: surfaces are configured under `capture_errors` (error scopes):
+  a configuration the device refuses (D3D12 "Failed to wait for GPU to come idle before
+  reconfiguring the Surface", #1935) is logged, the frame is skipped and the configure is tried
+  again, instead of the device's uncaptured-error handler panicking. A streak of refusals warns
+  once (debug after), waits 16 ms doubling up to 1 s between tries and recreates the surface
+  every `SURFACE_RECREATE_AFTER` refusals (`ConfigureRetry`). Each surface keeps the deadline of
+  its next try: until it is due, no configure or recreate happens, whether the repaint comes
+  from input, an animation, a resize (its size is kept for the retry) or an outdated surface,
+  and the frame is skipped with a repaint asked for when it is due. The streak and the deadline
+  survive a recreate; a configure the device takes ends the streak, a recreate it asked for
+  included. A recreate for a lost surface goes ahead as before.

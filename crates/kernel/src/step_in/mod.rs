@@ -933,7 +933,7 @@ impl Reader {
 /// Check a STEP file's structure: it parses, no entity id is defined twice, every reference
 /// names a defined entity, nothing but root entities (relationships, definitions,
 /// presentation) is left unreferenced, and ids are dense (`#1`…`#n`). Returns the entity count.
-/// Faces whose boundary runs the wrong way round their normal, as a strict reader (Fusion)
+/// Faces whose boundary runs the wrong way round their normal, as a strict reader
 /// sees them: each face's normal is its surface's own parametric normal (∂S/∂u × ∂S/∂v, ISO
 /// 10303-42), reversed when `same_sense` is false, and the outer loop must run counter-clockwise
 /// seen from that side. Checked on faces whose loop spans a clear direction (patches, not bands

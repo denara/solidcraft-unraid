@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 
 use mt::{BoundedCurve, InnerSpace, MetricSpace, ParametricCurve, ParametricSurface, ParametricSurface3D, SearchNearestParameter};
-use solidcraft_geom::{Plane, Seg2, Vec2, Vec3};
+use solidcraft_geom::{Plane, Seg2, UnitVec3, Vec2, Vec3};
 use truck_meshalgo::tessellation::RobustMeshableShape;
 use truck_modeling as mt;
 
@@ -41,7 +41,7 @@ enum Field {
     /// +1 when the tool's normal points away from the axis.
     Cylinder {
         o: Vec3,
-        axis: Vec3,
+        axis: UnitVec3,
         r: f64,
         out: f64,
     },
@@ -464,7 +464,7 @@ fn fit_on(g: &Field, face: &mt::Face, pts: &[mt::Point3], scale: f64) -> Result<
         && a.distance(*b) > scale * 1e-9
     {
         let n = pl.normal();
-        if n.cross(crate::body::v3(*axis)).magnitude() < 1e-9 {
+        if n.cross(crate::body::v3(axis.vec())).magnitude() < 1e-9 {
             let (va, vb) = (mt::Vertex::new(*a), mt::Vertex::new(*b));
             let e = guard("split arc", || Ok(mt::builder::circle_arc(&va, &vb, *m)))?;
             return Ok(e.curve());
@@ -908,7 +908,7 @@ fn surface_field(s: &mt::Surface) -> Field {
     for along_v in [true, false] {
         let pt = |t: f64, w: f64| if along_v { at(t, w) } else { at(w, t) };
         let d = pt(0.0, 1.0) - pt(0.0, 0.0);
-        let Some(axis) = d.normalized() else { continue };
+        let Some(axis) = d.unit() else { continue };
         let straight = (0..=6).all(|k| {
             let t = k as f64 / 6.0;
             (0..=4).all(|m| (pt(t, m as f64 / 4.0) - pt(t, 0.0) - d * (m as f64 / 4.0)).len() <= tol)
@@ -940,7 +940,7 @@ fn surface_field(s: &mt::Surface) -> Field {
 /// A plane or circular cylinder behind a surface (for offsetting).
 pub(crate) enum Analytic {
     Plane { n: Vec3 },
-    Cylinder { o: Vec3, axis: Vec3, r: f64, out: f64 },
+    Cylinder { o: Vec3, axis: UnitVec3, r: f64, out: f64 },
 }
 
 pub(crate) fn analytic_field(s: &mt::Surface) -> Option<Analytic> {
@@ -998,9 +998,12 @@ fn fields(tool: &SplitTool) -> Result<Vec<Field>> {
                         let n = plane.normal().cross(wb - wa).normalized().ok_or_else(|| KernelError::Invalid("a zero-length split line".into()))?;
                         Field::Plane { o: wa, n }
                     }
-                    [Seg2::Arc { center, radius, .. }] if radius.is_finite() && *radius > 0.0 => {
-                        Field::Cylinder { o: plane.to_world(*center), axis: plane.normal(), r: *radius, out: 1.0 }
-                    }
+                    [Seg2::Arc { center, radius, .. }] if radius.is_finite() && *radius > 0.0 => Field::Cylinder {
+                        o: plane.to_world(*center),
+                        axis: plane.normal().unit().ok_or_else(|| KernelError::Invalid("a sketch plane with no normal".into()))?,
+                        r: *radius,
+                        out: 1.0,
+                    },
                     segs => {
                         let mut pts: Vec<Vec2> = Vec::new();
                         for sg in segs {
@@ -1265,7 +1268,7 @@ pub fn split_body(body: &Body, tool: &SplitTool) -> Result<Vec<Body>> {
             let x = (if axis.x.abs() < 0.9 { Vec3::X } else { Vec3::Y }).cross(*axis).normalized().unwrap_or(Vec3::X);
             let (a, b) = (*o + *axis * lo + x * *r, *o + *axis * hi + x * *r);
             let line = mt::Curve::Line(mt::Line(p3(a), p3(b)));
-            crate::step_in::geom::revolved_oriented(line, p3(*o), crate::body::v3(*axis), 0.5, crate::body::v3(x * *out))
+            crate::step_in::geom::revolved_oriented(line, p3(*o), crate::body::v3(axis.vec()), 0.5, crate::body::v3(x * *out))
         }
         Field::Surface(s) => s.clone(),
         Field::Curve { .. } => return Err(KernelError::Invalid("a body is split by a plane or a face".into())),

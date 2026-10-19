@@ -967,8 +967,128 @@ fn trimming_with_steps<S: PreMeshableSurface>(surface: &S, polyboundary: &PolyBo
         surface,
         polyboundary,
     );
+    // SolidCraft: a face that came out with no triangles at all, though its boundary encloses
+    // an area in space (a lens thinner than the tolerance: its two edges are different curves,
+    // but sampled as they are, in the face's parameters they run along the same line), left a
+    // hole in the shell's mesh. Its boundary points are triangulated as they are, so it still
+    // meets the faces on either side of it.
+    if steps.is_none() && mesh.faces().is_empty() {
+        if let Some(filled) = loop_triangles(surface, polyboundary) {
+            mesh = filled;
+        }
+    }
     mesh.make_face_compatible_to_normal();
     mesh
+}
+
+/// SolidCraft: most points of a loop [`loop_triangles`] triangulates.
+const MAX_LOOP_POINTS: usize = 256;
+
+/// SolidCraft: the triangles of a face's one boundary loop, taken in space on the plane the loop
+/// lies near and with no point added, for a face whose parameters give none (see
+/// [`trimming_with_steps`]). `None` when the face has several loops, too many points, or no
+/// area in space.
+fn loop_triangles(surface: &impl ParametricSurface3D, polyline: &PolyBoundary) -> Option<PolygonMesh> {
+    let [curve] = polyline.0.as_slice() else { return None };
+    if !(3..=MAX_LOOP_POINTS).contains(&curve.len()) {
+        return None;
+    }
+    let positions: Vec<Point3> = curve.iter().map(|p| surface.subs(p.x, p.y)).collect();
+    if positions.iter().any(|p| !(p.x.is_finite() && p.y.is_finite() && p.z.is_finite())) {
+        return None;
+    }
+    let normal = newell_normal(&positions);
+    if normal.magnitude() * 0.5 <= TOLERANCE {
+        return None;
+    }
+    // The loop seen along the axis its normal points along most.
+    let axis = (0..3).max_by(|&i, &j| normal[i].abs().total_cmp(&normal[j].abs()))?;
+    let flat: Vec<[f64; 2]> = positions
+        .iter()
+        .map(|p| match axis {
+            0 => [p.y, p.z],
+            1 => [p.z, p.x],
+            _ => [p.x, p.y],
+        })
+        .collect();
+    let triangles: Vec<[StandardVertex; 3]> = ear_clipping(&flat)?
+        .into_iter()
+        .filter(|&[a, b, c]| (positions[b] - positions[a]).cross(positions[c] - positions[a]).magnitude() * 0.5 > TOLERANCE)
+        .map(|corners| corners.map(|i| (i, Some(i), Some(i)).into()))
+        .collect();
+    if triangles.is_empty() {
+        return None;
+    }
+    // The normals orient the triangles ([`NormalFilters::make_face_compatible_to_normal`]).
+    let normals = curve.iter().map(|p| surface.normal(p.x, p.y)).collect();
+    let uv_coords = curve.iter().map(|p| Vector2::new(p.x, p.y)).collect();
+    Some(PolygonMesh::debug_new(
+        StandardAttributes { positions, uv_coords, normals },
+        Faces::from_tri_and_quad_faces(triangles, Vec::new()),
+    ))
+}
+
+/// SolidCraft: twice the vector area of a closed polygon: the direction of its plane, as long as
+/// it is large.
+fn newell_normal(points: &[Point3]) -> Vector3 {
+    let next = points.iter().cycle().skip(1);
+    points.iter().zip(next).fold(Vector3::zero(), |sum, (p, q)| {
+        sum + Vector3::new((p.y - q.y) * (p.z + q.z), (p.z - q.z) * (p.x + q.x), (p.x - q.x) * (p.y + q.y))
+    })
+}
+
+/// SolidCraft: twice the signed area of the triangle `a b c`: positive when it turns left.
+fn turn(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
+    (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+}
+
+/// SolidCraft: whether two sides of the closed polygon that do not share a corner cross each other.
+/// Ears of a polygon that crosses itself overlap, so it is not triangulated.
+fn crosses_itself(points: &[[f64; 2]]) -> bool {
+    let n = points.len();
+    let side = |i: usize| (points[i], points[(i + 1) % n]);
+    (0..n).any(|i| {
+        let (a, b) = side(i);
+        (i + 2..n).filter(|&j| !(i == 0 && j == n - 1)).any(|j| {
+            let (c, d) = side(j);
+            turn(a, b, c) * turn(a, b, d) < 0.0 && turn(c, d, a) * turn(c, d, b) < 0.0
+        })
+    })
+}
+
+/// SolidCraft: the triangles of a simple polygon, as indices into its points, by clipping ears.
+/// `None` when no ear is left to clip (the polygon crosses itself) or it has no area.
+fn ear_clipping(points: &[[f64; 2]]) -> Option<Vec<[usize; 3]>> {
+    if points.len() < 3 {
+        return None;
+    }
+    let next = points.iter().cycle().skip(1);
+    let area2: f64 = points.iter().zip(next).map(|(p, q)| p[0] * q[1] - q[0] * p[1]).sum();
+    if area2 == 0.0 || crosses_itself(points) {
+        return None;
+    }
+    // Every turn of an ear, and of a point inside it, is on the polygon's own side.
+    let side = area2.signum();
+    let is_ear = |left: &[usize], k: usize| {
+        let m = left.len();
+        let corner = [left[(k + m - 1) % m], left[k], left[(k + 1) % m]];
+        let [a, b, c] = corner.map(|i| points[i]);
+        turn(a, b, c) * side > 0.0
+            && left.iter().filter(|q| !corner.contains(q)).all(|&q| {
+                let p = points[q];
+                [turn(a, b, p), turn(b, c, p), turn(c, a, p)].iter().any(|t| t * side < 0.0)
+            })
+    };
+    let mut left: Vec<usize> = (0..points.len()).collect();
+    let mut triangles = Vec::with_capacity(points.len() - 2);
+    while left.len() > 3 {
+        let m = left.len();
+        let k = (0..m).find(|&k| is_ear(&left, k))?;
+        triangles.push([left[(k + m - 1) % m], left[k], left[(k + 1) % m]]);
+        left.remove(k);
+    }
+    triangles.push([left[0], left[1], left[2]]);
+    Some(triangles)
 }
 
 /// Inserts parameter divisions into triangulation.
@@ -1548,5 +1668,19 @@ pub mod include_test_hooks {
     fn hook_passes() {
         let n = include_answers_as_before(0..120);
         assert!(matches!(n, Ok(n) if n > 100_000), "{n:?}");
+    }
+}
+
+/// SolidCraft: the fallback that triangulates a face's boundary loop when the face has no
+/// triangle, for kernel tests (the vendored crates' own tests do not run in CI).
+///
+/// Not part of the API. Built only for tests, or with the `test-hooks` feature.
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub mod loop_fill_test_hooks {
+    /// The triangles of a closed polygon, as indices into its points, or `None` when it has no
+    /// area, fewer than three points, or crosses itself.
+    pub fn ear_clipping(points: &[[f64; 2]]) -> Option<Vec<[usize; 3]>> {
+        super::ear_clipping(points)
     }
 }

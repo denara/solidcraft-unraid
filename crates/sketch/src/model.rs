@@ -390,7 +390,7 @@ impl ConstraintKind {
     pub fn is_angle(&self) -> bool {
         matches!(self, ConstraintKind::Angle { .. } | ConstraintKind::LineAngle { .. } | ConstraintKind::ArcSweep { .. })
     }
-    /// Short type name (Fusion-like) for listings.
+    /// Short type name for listings.
     pub fn name(&self) -> &'static str {
         use ConstraintKind::*;
         match self {

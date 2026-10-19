@@ -59,6 +59,8 @@ pub mod i18n;
 #[cfg(test)]
 mod i18n_menu_tests;
 #[cfg(test)]
+mod i18n_painted_tests;
+#[cfg(test)]
 mod i18n_ui_tests;
 pub mod icon_svg;
 pub mod icons;
@@ -73,7 +75,11 @@ mod measurement_ui_tests;
 #[cfg(test)]
 mod menu_tests;
 #[cfg(test)]
+mod pattern_arrow_tests;
+#[cfg(test)]
 mod surface_clamp_tests;
+#[cfg(test)]
+mod surface_errors_tests;
 #[cfg(test)]
 mod timeline_marks_tests;
 #[cfg(test)]
@@ -173,6 +179,7 @@ pub mod stand_up;
 #[cfg(test)]
 mod sweep_dialog_tests;
 pub mod theme;
+pub mod theme_files;
 #[cfg(test)]
 mod thin_extrude_tests;
 pub mod timeline;
@@ -262,6 +269,10 @@ pub struct Services {
     /// the picker's first filter (`&[]`: designs, CAD files and meshes, #1801).
     pub pick_open: Option<Box<dyn Fn(&[&str]) -> FilePickerFuture>>,
     pub pick_save: Option<Box<dyn Fn(&str, &[&str]) -> FilePickerFuture>>,
+    /// Open a dialog for one file of a kind (its name, its extensions): on macOS a dialog allows
+    /// only the types it names, so the agent chat's files need a dialog of their own. `None`: the
+    /// Open dialog.
+    pub pick_file: Option<Box<dyn Fn(&str, &[&str]) -> FilePickerFuture>>,
     /// Open a dialog asking for a program (a slicer); `None` when the host has no such dialog.
     pub pick_program: Option<Box<dyn Fn() -> FilePickerFuture>>,
     pub show_in_folder: Option<Box<dyn Fn(&str)>>,
@@ -630,6 +641,14 @@ impl SolveApp {
         let r = self.session.execute(id, &params).map_err(|e| e.to_string());
         self.big_operation |= now_ms() - t0 >= recovery_ui::BIG_OPERATION_MS;
         if let Ok(v) = &r {
+            if matches!(id, "view.ambient_occlusion" | "view.graphics_preset") {
+                self.preferences.ambient_occlusion = v.get("enabled").and_then(Value::as_bool).unwrap_or(false);
+                if id == "view.graphics_preset" {
+                    self.preferences.display_quality = v.get("display_quality").and_then(Value::as_str).unwrap_or("normal").to_string();
+                    self.preferences.supersampling = v.get("supersampling").and_then(Value::as_f64).unwrap_or(1.0) as f32;
+                    self.preferences.supersampling_adaptive = v.get("supersampling_adaptive").and_then(Value::as_bool).unwrap_or(true);
+                }
+            }
             if id == "view.navigate" {
                 let to: Camera = serde_json::from_value(v.get("camera").cloned().unwrap_or_default()).map_err(|e| e.to_string())?;
                 if v.get("continuous").and_then(Value::as_bool).unwrap_or(false) {
@@ -721,6 +740,11 @@ impl SolveApp {
         if id == "material.properties.validate" {
             self.material_card_review = Some(material_card_review::ReviewWindow::default());
             self.home.open = false;
+            return;
+        }
+        // A display toggle leaves the current modelling tool and camera in place.
+        if id == "view.ambient_occlusion" {
+            let _ = self.run(id, json!({"enabled": !self.preferences.ambient_occlusion}));
             return;
         }
         // Another command ends Edit Text (its dialog is not a feature edit to keep).
@@ -869,7 +893,7 @@ impl SolveApp {
         let _ = self.run(id, json!({}));
     }
 
-    /// Edit a feature the way Fusion does: sketches open in sketch mode; other features roll the
+    /// Edit a feature: sketches open in sketch mode; other features roll the
     /// timeline back to just before themselves and reopen their dialog, filled in.
     pub fn edit_feature(&mut self, id: u64) {
         use solidcraft_engine::doc::FeatureKind;
@@ -897,7 +921,7 @@ impl SolveApp {
         }
     }
 
-    /// Edit a sketch the way Fusion does: roll the timeline back to just after it (so later
+    /// Edit a sketch: roll the timeline back to just after it (so later
     /// features don't hide it), turn the camera to face it, and remember both so Finish Sketch
     /// puts them back. Editing the sketch that is already open does nothing; editing another one
     /// finishes the current sketch first, so edit sessions never nest.
@@ -1275,6 +1299,8 @@ impl SolveApp {
         recovery_ui::tick(self);
         update::tick(self, ctx);
         if self.issue_report.draft.is_none() && self.file_picker.is_none() {
+            // Files dropped on the agent chat attach to its next message instead.
+            agent_chat::take_drops(self, ctx);
             for f in ctx.input(|i| i.raw.dropped_files.clone()) {
                 let p = f.path().to_string_lossy().to_string();
                 if !p.is_empty() {
@@ -1376,7 +1402,9 @@ impl SolveApp {
             timeline::timeline(self, ui);
         }
         palette::palette_bar(self, ui);
-        if self.ui.show_browser {
+        // A floating browser keeps the workspace the whole width: it is drawn over the view below.
+        let browser_float = self.ui.show_browser && self.preferences.browser_float;
+        if self.ui.show_browser && !browser_float {
             if left_timeline {
                 browser::browser_below_timeline(self, ui);
             } else {
@@ -1390,6 +1418,11 @@ impl SolveApp {
         }
         agent_chat::show(self, ui);
         preview::update(self, ui.ctx());
+        if browser_float {
+            // The room the central view is about to take, before it takes it.
+            let viewport = ui.available_rect_before_wrap();
+            browser::floating(self, ui, viewport);
+        }
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
             if render_workspace::active(self) {
                 render_workspace::show(self, ui);

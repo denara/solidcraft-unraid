@@ -292,13 +292,16 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let (tx, rx) = channel::<ControlRequest>();
+        // The slow request is held until the test has seen it time out, so the test does not
+        // race the clock on a loaded machine.
+        let (gate_tx, gate_rx) = channel::<()>();
         let ran = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let seen = ran.clone();
         std::thread::spawn(move || {
             for req in rx {
                 seen.lock().unwrap().push(req.method.clone());
                 if req.method == "slow" {
-                    std::thread::sleep(Duration::from_millis(400));
+                    let _ = gate_rx.recv();
                 }
                 let _ = req.reply.send(json!({"ok": true, "result": req.method}));
             }
@@ -325,8 +328,15 @@ mod tests {
         assert!(r["busy"] == true && r["id"] == 2, "{r}");
         let r = ask(json!({"id": 3, "method": "control.pending"}));
         assert_eq!((&r["result"]["pending"], &r["result"]["done"]), (&json!(1), &json!(false)), "{r}");
-        std::thread::sleep(Duration::from_millis(600));
-        let r = ask(json!({"id": 4, "method": "control.pending"}));
+        gate_tx.send(()).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let r = loop {
+            let r = ask(json!({"id": 4, "method": "control.pending"}));
+            if r["result"]["done"] == true || std::time::Instant::now() > deadline {
+                break r;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
         assert_eq!(
             (&r["result"]["pending"], &r["result"]["done"], &r["result"]["reply"]["result"]),
             (&json!(1), &json!(true), &json!("slow")),

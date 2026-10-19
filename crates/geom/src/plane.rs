@@ -31,8 +31,8 @@ impl Plane {
     }
 
     /// Plane through `origin` with normal `n` (in-plane axes chosen deterministically).
-    pub fn from_normal(origin: Vec3, n: Vec3) -> Option<Plane> {
-        let n = n.normalized()?;
+    pub fn from_normal(origin: Vec3, n: impl Into<Vec3>) -> Option<Plane> {
+        let n = n.into().normalized()?;
         // Horizontal planes keep world X as sketch x; others use the horizontal direction Z × n.
         let cand = if n.dot(Vec3::Z).abs() > 0.9 { Vec3::X } else { Vec3::Z.cross(n) };
         let x = (cand - n * cand.dot(n)).normalized()?;

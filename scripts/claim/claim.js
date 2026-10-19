@@ -251,6 +251,79 @@ async function handleComment({ github, context, now = Date.now() }) {
   return cmd;
 }
 
+// Issue numbers a PR claims: `#N` in its title (`<summary> (#N)`) and closing keywords in its body.
+const MAX_REFS = 5;
+function referencedIssues(title, body) {
+  const found = new Set();
+  for (const m of String(title || '').matchAll(/(?:^|[\s(])#(\d{1,7})\b/g)) found.add(Number(m[1]));
+  const closing = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#(\d{1,7})\b/gi;
+  for (const m of String(body || '').matchAll(closing)) found.add(Number(m[1]));
+  return [...found].filter((n) => n > 0).slice(0, MAX_REFS);
+}
+
+// A pull request was opened (or its title or body edited): it claims each open issue it
+// references that nobody holds yet, so a draft PR alone is enough (CONTRIBUTING.md).
+async function handlePull({ github, context }) {
+  const pull = context.payload.pull_request;
+  if (!pull || pull.state !== 'open') return [];
+  const author = pull.user && pull.user.login;
+  if (!author || pull.user.type === 'Bot' || author.endsWith('[bot]')) return [];
+  const claimed = [];
+  for (const n of referencedIssues(pull.title, pull.body)) {
+    if (n === pull.number) continue;
+    let issue;
+    try {
+      ({ data: issue } = await github.rest.issues.get({ ...repoArgs(context), issue_number: n }));
+    } catch (e) {
+      if (e.status === 404 || e.status === 410) continue;
+      throw e;
+    }
+    if (issue.pull_request || issue.state !== 'open' || issue.locked) continue;
+    const assignees = (issue.assignees || []).map((a) => a.login);
+    if (assignees.includes(author)) {
+      if (!hasLabel(issue)) {
+        await ensureLabel(github, context);
+        await github.rest.issues.addLabels({ ...repoArgs(context), issue_number: n, labels: [LABEL] });
+      }
+      continue;
+    }
+    if (assignees.length || hasLabel(issue)) {
+      const who = assignees.length ? assignees.map((a) => '@' + a).join(', ') : 'someone else';
+      await github.rest.issues.createComment({
+        ...repoArgs(context),
+        issue_number: pull.number,
+        body: `#${n} is already claimed by ${who}. If this PR duplicates their work, please close it or offer to help there.`,
+      });
+      continue;
+    }
+    // An older open PR for the issue wins (lowest number), even if it never recorded its claim.
+    const timeline = await getTimeline(github, context, n);
+    const older = linkedPulls(timeline).find((p) => p.number < pull.number && p.user && p.user.login !== author);
+    if (older) {
+      await github.rest.issues.createComment({
+        ...repoArgs(context),
+        issue_number: pull.number,
+        body: `#${older.number} claimed #${n} first (the lowest-numbered open PR wins). Please close this one or offer to help there.`,
+      });
+      continue;
+    }
+    await ensureLabel(github, context);
+    await github.rest.issues.addLabels({ ...repoArgs(context), issue_number: n, labels: [LABEL] });
+    try {
+      await github.rest.issues.addAssignees({ ...repoArgs(context), issue_number: n, assignees: [author] });
+    } catch (e) {
+      // Assignment can be refused; the label and the comment naming them still stand.
+    }
+    await github.rest.issues.createComment({
+      ...repoArgs(context),
+      issue_number: n,
+      body: `Claimed by @${author} through #${pull.number}. The claim lapses after ${PR_IDLE_DAYS} days without pushes.`,
+    });
+    claimed.push(n);
+  }
+  return claimed;
+}
+
 // The daily sweep over open issues labelled `in progress`.
 async function sweep({ github, context, now = Date.now() }) {
   const issues = await github.paginate(github.rest.issues.listForRepo, {
@@ -286,9 +359,11 @@ async function sweep({ github, context, now = Date.now() }) {
 module.exports = {
   LABEL,
   parseCommand,
+  referencedIssues,
   isMaintainer,
   linkedPulls,
   claimStatus,
   handleComment,
+  handlePull,
   sweep,
 };

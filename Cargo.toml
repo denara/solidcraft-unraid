@@ -5,7 +5,7 @@ members = ["crates/*", "apps/*", "xtask"]
 exclude = ["vendor"]
 
 [workspace.package]
-version = "0.15.0"
+version = "0.16.2"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.95"
@@ -123,6 +123,9 @@ incremental = false
 
 [profile.ci.package."*"]
 opt-level = 2
+# No line tables for dependencies: they were over a third of the test archive every CI shard
+# downloads. Our own crates keep theirs, so a backtrace still names file:line in them.
+debug = false
 
 [profile.release]
 opt-level = 3
@@ -142,3 +145,9 @@ matext4cgmath = { path = "vendor/matext4cgmath" }
 
 # Keep OpenGL pipelines, resolve textures and CAD callbacks at the same safe sample count.
 egui-wgpu = { path = "vendor/egui-wgpu" }
+
+# Mutation testing (cargo-mutants, docs/mutation-testing.md): the ci profile with incremental
+# builds, since every mutant rebuilds the crates above the one it changes.
+[profile.mutants]
+inherits = "ci"
+incremental = true

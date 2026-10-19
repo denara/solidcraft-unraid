@@ -303,6 +303,15 @@ fn grid_sphere_box_union_is_sound() {
     check(identity(&a, &b));
 }
 
+/// A small sphere on the top of a thin box: a patch of the sphere sticks out of the box's side
+/// by less than the tolerance, a face of about 0.35 mm² that had no triangle when meshed at 1 % of the body.
+#[test]
+fn grid_small_sphere_thin_box_union_is_sound() {
+    let a = Prim::Sph { at: [20.0, 10.0, 27.5], r: 3.75 };
+    let b = Prim::Box { at: [15.0, 0.0, 22.5], size: [7.5, 20.0, 5.0] };
+    check(identity(&a, &b));
+}
+
 /// Two crossing cylinders: the union moved 1000 mm away loses about a tenth of its volume.
 #[test]
 #[ignore = "kernel bug, #1649"]

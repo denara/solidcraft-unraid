@@ -201,7 +201,7 @@ mod tests {
         assert!(h.widget("Add Row").is_some());
     }
 
-    /// Fusion's layout: joints on every tab's ASSEMBLE panel, sheet metal and plastic tabs
+    /// Layout: joints on every tab's ASSEMBLE panel, sheet metal and plastic tabs
     /// reach the shared solid commands, the plastic rules sit on SETUP.
     #[test]
     fn tabs_share_commands_in_fusion_order() {

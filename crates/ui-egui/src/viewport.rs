@@ -96,6 +96,8 @@ pub struct ViewportState {
     pub hover_bodies: Vec<String>,
     /// The model point an orbit turns around (Preferences: orbit around the cursor).
     pub orbit_pivot: Option<Vec3>,
+    /// The orbit drag under way, summed from where it began (see [`crate::navigation::orbit`]).
+    pub orbit_from: Option<crate::navigation::OrbitFrom>,
     /// Continuous orbit: the view turns about the vertical until the next click or key.
     pub spin: bool,
     /// The 3D mouse's motion this frame, for the page showing the camera to apply with what its
@@ -276,7 +278,7 @@ pub fn projection(app: &SolveApp, rect: Rect) -> Proj {
 }
 
 /// Sketches drawn in the viewport: the active one, and finished ones not yet used by a feature.
-fn visible_sketches(app: &SolveApp) -> Vec<u64> {
+pub(crate) fn visible_sketches(app: &SolveApp) -> Vec<u64> {
     let st = app.session.world_state();
     st.sketches.iter().filter(|s| solidcraft_engine::view::sketch_drawn(&app.session, s.feature, app.ui.show_sketches)).map(|s| s.feature).collect()
 }
@@ -305,6 +307,7 @@ fn scene_key(app: &SolveApp) -> u64 {
     app.session.visibility.hidden_occurrences.hash(&mut h);
     app.session.visibility.hidden_sketches.hash(&mut h);
     app.session.visibility.shown_sketches.hash(&mut h);
+    app.session.visibility.hidden_folders.hash(&mut h);
     app.ui.hidden_profiles.hash(&mut h);
     app.session.active_component.hash(&mut h);
     app.session.active_occurrence_path.hash(&mut h);
@@ -733,33 +736,39 @@ fn build_sketch_scene(app: &SolveApp, proj: &Proj) -> GpuScene {
     let s = &app.session;
     let st = s.world_state();
     let mut fill_budget = 131_072;
-    if app.ui.show_grid && !active_view(app).hide_grid {
+    let sketch_plane = solidcraft_engine::view::open_sketch_plane(s);
+    if sketch_plane.is_some() || (app.ui.show_grid && !active_view(app).hide_grid) {
         let (minor, major) = grid_step(app.cam.half_height());
         let ext = (app.cam.half_height() * 3.0 / major).ceil() * major;
-        // The ground plane: XY with Z up, XZ with Y up (laid out in the camera's Z-up frame), or
-        // the upright origin plane facing the view when the ground is seen edge-on.
-        let tf = app.cam.to_frame(app.cam.target);
-        // On the ground (XY) unless the Grid follows the view preference is on (#1470); then on
-        // the plane the last frame drew, so the choice is hysteretic near the thresholds (#1993).
-        let (u, v) = if app.preferences.grid_follows_view {
-            app.viewport.grid_plane.lock().map_or((Vec3::X, Vec3::Y), |mut last| {
-                *last = grid_plane(app.cam.to_frame(app.cam.back()), *last);
-                last.axes()
-            })
+        // An open sketch always has its grid on its own plane; otherwise the ground plane: XY with
+        // Z up, XZ with Y up (laid out in the camera's Z-up frame), or the upright origin plane
+        // facing the view when the ground is seen edge-on.
+        let (c, u, v, w3): (Vec3, Vec3, Vec3, Box<dyn Fn(Vec3) -> [f32; 3]>) = if let Some(pl) = &sketch_plane {
+            let (c, u, v) = solidcraft_engine::view::sketch_grid_frame(pl, app.cam.target, major);
+            (c, u, v, Box::new(|p| p.to_f32()))
         } else {
-            (Vec3::X, Vec3::Y)
+            let tf = app.cam.to_frame(app.cam.target);
+            // On the ground (XY) unless the Grid follows the view preference is on (#1470); then on
+            // the plane the last frame drew, so the choice is hysteretic near the thresholds (#1993).
+            let (u, v) = if app.preferences.grid_follows_view {
+                app.viewport.grid_plane.lock().map_or((Vec3::X, Vec3::Y), |mut last| {
+                    *last = grid_plane(app.cam.to_frame(app.cam.back()), *last);
+                    last.axes()
+                })
+            } else {
+                (Vec3::X, Vec3::Y)
+            };
+            let snap = |a: Vec3| a * ((tf.dot(a) / major).round() * major);
+            (snap(u) + snap(v), u, v, Box::new(|p| app.cam.from_frame(p).to_f32()))
         };
-        let snap = |a: Vec3| a * ((tf.dot(a) / major).round() * major);
-        let c = snap(u) + snap(v);
-        let w3 = |p: Vec3| app.cam.from_frame(p).to_f32();
         let n = ((ext / minor) as i64).clamp(1, 300);
         for i in -n..=n {
             let t = i as f64 * minor;
             let maj = (t / major).round() * major == t;
             let col = if maj { c4(tk.grid_major) } else { c4(tk.grid) };
-            let w = if maj { 1.0 } else { 0.7 };
-            sc.under_line(w3(c + u * t - v * ext), w3(c + u * t + v * ext), col, w);
-            sc.under_line(w3(c - u * ext + v * t), w3(c + u * ext + v * t), col, w);
+            let wd = if maj { 1.0 } else { 0.7 };
+            sc.under_line(w3(c + u * t - v * ext), w3(c + u * t + v * ext), col, wd);
+            sc.under_line(w3(c - u * ext + v * t), w3(c + u * ext + v * t), col, wd);
         }
     }
     for sid in visible_sketches(app) {
@@ -942,10 +951,8 @@ pub fn origin_axes(app: &SolveApp) -> Vec<(&'static str, Vec3)> {
 /// past it either side), at least the origin axes' length around the axis's origin: (name,
 /// from, to).
 pub fn construction_axis_segments(app: &SolveApp) -> Vec<(String, Vec3, Vec3)> {
-    let axes: Vec<_> = solidcraft_engine::view::construction_axes(&app.session)
-        .into_iter()
-        .filter(|(_, n, _, _)| !app.session.visibility.hidden_origin.contains(n))
-        .collect();
+    let axes: Vec<_> =
+        solidcraft_engine::view::construction_axes(&app.session).into_iter().filter(|(_, n, _, _)| app.session.construction_visible(n)).collect();
     if axes.is_empty() {
         return Vec::new();
     }
@@ -975,7 +982,7 @@ pub fn construction_axis_segments(app: &SolveApp) -> Vec<(String, Vec3, Vec3)> {
 pub fn construction_points(app: &SolveApp) -> Vec<(String, Vec3)> {
     solidcraft_engine::view::construction_points(&app.session)
         .into_iter()
-        .filter(|(_, n, _)| !app.session.visibility.hidden_origin.contains(n))
+        .filter(|(_, n, _)| app.session.construction_visible(n))
         .map(|(_, n, p)| (n, p))
         .collect()
 }
@@ -985,7 +992,7 @@ pub fn construction_quads(app: &SolveApp) -> Vec<(String, Vec3, [Vec3; 4])> {
     let h = origin_size(app.cam.half_height()) * 1.2;
     solidcraft_engine::view::construction_planes(&app.session)
         .into_iter()
-        .filter(|(_, n, _)| !app.session.visibility.hidden_origin.contains(n))
+        .filter(|(_, n, _)| app.session.construction_visible(n))
         .map(|(_, name, pl)| {
             let (o, x, y) = (pl.origin, pl.x * h, pl.y * h);
             (name, pl.normal(), [o - x - y, o + x - y, o + x + y, o - x + y])
@@ -1902,6 +1909,7 @@ fn highlight_geometry_key(app: &SolveApp) -> u64 {
     app.session.visibility.hidden_origin.hash(&mut h);
     app.session.visibility.hidden_bodies.hash(&mut h);
     app.session.visibility.hidden_occurrences.hash(&mut h);
+    app.session.visibility.hidden_folders.hash(&mut h);
     h.finish()
 }
 
@@ -2414,6 +2422,11 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
             analysis_colors: crate::gpu::analysis_colors(&t.analysis),
             access: crate::access::map(app),
             outline: matches!(app.ui.visual_style, 0 | 3),
+            ao_radius: if app.preferences.ambient_occlusion && app.ui.visual_style != 2 {
+                (model_bounds(app).diagonal() * 0.04).clamp(1e-4, 1e6) as f32
+            } else {
+                0.0
+            },
             eye: {
                 let e = proj.cam.eye().to_f32();
                 [e[0], e[1], e[2], if proj.cam.fov > 0.0 { 1.0 } else { 0.0 }]
@@ -3440,7 +3453,7 @@ fn nav_bar(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect) {
         ("home", "Home view"),
         ("perspective", "Perspective / orthographic"),
         ("style", "Visual style: shaded with edges, shaded, wireframe, shaded with hidden edges"),
-        ("settings", "View settings: grid, ground shadow, agent cursor"),
+        ("settings", "View settings: grid, ground shadow, ambient occlusion, agent cursor"),
     ];
     let menu_id = ui.id().with("nav_view_menu");
     let mut menu_open = ui.data(|d| d.get_temp::<bool>(menu_id)).unwrap_or(false);
@@ -3513,6 +3526,8 @@ fn nav_bar(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect) {
 /// The View settings above the navigation bar's last button: grid, ground shadow and the agent
 /// cursor (#35). False once it should close (a click outside it).
 fn view_menu(app: &mut SolveApp, ui: &mut egui::Ui, button: Rect) -> bool {
+    // A preset dropdown extends beyond this menu; let it consume its own clicks.
+    let child_popup_open = egui::Popup::is_any_open(ui.ctx());
     let area = crate::frame::area(egui::Id::new("sc_view_menu"))
         .order(egui::Order::Foreground)
         .pivot(Align2::RIGHT_BOTTOM)
@@ -3521,8 +3536,12 @@ fn view_menu(app: &mut SolveApp, ui: &mut egui::Ui, button: Rect) -> bool {
         egui::Frame::popup(ui.style()).show(ui, |ui| {
             ui.set_width(220.0);
             ui.label(egui::RichText::new(crate::i18n::tr_label("VIEW")).strong().size(11.5));
+            ui.label(app.tr("ui.graphics_preset"));
+            crate::prefs::graphics_preset_selector(app, ui);
+            ui.separator();
             ui.checkbox(&mut app.ui.show_grid, crate::i18n::tr_label("Grid"));
             ui.checkbox(&mut app.ui.ground_shadow, crate::i18n::tr_label("Ground shadow"));
+            crate::prefs::ambient_occlusion_checkbox(app, ui, "Ambient occlusion");
             ui.separator();
             let s = &mut app.ui.agent_cursor;
             let show = ui.checkbox(&mut s.show, crate::i18n::tr_label("Show Agent Cursor"));
@@ -3547,7 +3566,8 @@ fn view_menu(app: &mut SolveApp, ui: &mut egui::Ui, button: Rect) -> bool {
             }
         });
     });
-    let clicked_out = ui.input(|i| i.pointer.any_pressed())
+    let clicked_out = !child_popup_open
+        && ui.input(|i| i.pointer.any_pressed())
         && ui.input(|i| i.pointer.interact_pos()).is_some_and(|p| !r.response.rect.contains(p) && !button.contains(p));
     !clicked_out
 }
@@ -5911,6 +5931,84 @@ mod tests {
         }
     }
 
+    /// An orbit drag that starts on the model turns about the point under the cursor, which
+    /// stays on its pixel, in perspective as in parallel views. The perspective view used to
+    /// correct with a pan at the target's depth, so the point slid away and the view swung
+    /// about the camera instead.
+    #[test]
+    fn cursor_orbit_keeps_the_picked_point_on_its_pixel() {
+        for perspective in [false, true] {
+            for offset in [vec2(30.0, 20.0), vec2(-60.0, 10.0), vec2(120.0, -40.0)] {
+                let mut h = crate::scenario::Harness::new();
+                h.app.preferences.orbit_around = crate::prefs::OrbitAround::Cursor;
+                h.app.ui.perspective = perspective;
+                h.app.run("solid.box", json!({"length":80,"width":50,"height":20})).unwrap();
+                h.app.fit_view();
+                let rect = h.app.viewport.rect.unwrap();
+                let at = rect.center() + offset;
+                let proj = projection(&h.app, rect);
+                assert!(pick(&h.app, &proj, at).iter().any(|hit| matches!(hit, Hit::Face { .. })), "the drag starts on the box");
+                let pivot = crate::prefs::pivot_under(&h.app, &proj, at);
+                let before = h.app.cam;
+                h.call("ui.drag", json!({"x0":at.x,"y0":at.y,"x1":at.x+150.0,"y1":at.y+60.0,"button":"middle","shift":true,"steps":20}));
+                assert!((h.app.cam.yaw - before.yaw).abs() > 0.5, "the view turned");
+                let after = projection(&h.app, rect).to_screen(pivot).unwrap();
+                assert!(after.distance(at) < 0.5, "perspective={perspective}: {at:?} -> {after:?}");
+            }
+        }
+    }
+
+    /// An erratic orbit drag (big jumps, reversals, the pointer over the panels and back) keeps
+    /// the point picked when it began on its pixel the whole way, and coming back to where it
+    /// began brings back the view it began with (up to the rounding of the pointer's f32 steps).
+    #[test]
+    fn an_erratic_cursor_orbit_keeps_its_pivot_and_comes_back() {
+        for perspective in [false, true] {
+            let mut h = crate::scenario::Harness::new();
+            h.app.preferences.orbit_around = crate::prefs::OrbitAround::Cursor;
+            h.app.ui.perspective = perspective;
+            h.app.run("solid.box", json!({"length":80,"width":50,"height":20})).unwrap();
+            h.app.fit_view();
+            h.frames(2);
+            let rect = h.app.viewport.rect.unwrap();
+            let at = rect.center() + vec2(30.0, 20.0);
+            let pivot = crate::prefs::pivot_under(&h.app, &projection(&h.app, rect), at);
+            let start = h.app.cam;
+            let shift = egui::Modifiers { shift: true, ..Default::default() };
+            let send = |h: &mut crate::scenario::Harness, e: egui::Event| {
+                h.app.synthetic.push(e);
+                h.frame();
+            };
+            send(&mut h, egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+            send(&mut h, egui::Event::PointerMoved(at));
+            send(&mut h, egui::Event::PointerButton { pos: at, button: egui::PointerButton::Middle, pressed: true, modifiers: shift });
+            let mut seed: u32 = 12345;
+            let mut next = move || {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                f32::from((seed >> 16) as u16) / 65535.0
+            };
+            for i in 0..300 {
+                // Mostly small moves, now and then a big jump, some of them over the panels.
+                let p = if i % 17 == 0 { pos2(next() * 1600.0, next() * 1000.0) } else { at + vec2((next() - 0.5) * 900.0, (next() - 0.5) * 200.0) };
+                send(&mut h, egui::Event::PointerMoved(p));
+                assert_eq!(h.app.viewport.orbit_pivot, Some(pivot), "move {i}: the pivot is picked once, when the drag begins");
+                let s = projection(&h.app, rect).to_screen(pivot).unwrap();
+                assert!(s.distance(at) < 1.0, "perspective={perspective}, move {i} to {p:?}: the pivot moved to {s:?}");
+            }
+            send(&mut h, egui::Event::PointerMoved(at));
+            let s = projection(&h.app, rect).to_screen(pivot).unwrap();
+            assert!(s.distance(at) < 1.0, "{s:?}");
+            let back = h.app.cam;
+            assert!(
+                (back.yaw - start.yaw).rem_euclid(std::f64::consts::TAU).min((start.yaw - back.yaw).rem_euclid(std::f64::consts::TAU)) < 1e-6,
+                "{start:?} -> {back:?}"
+            );
+            assert!((back.pitch - start.pitch).abs() < 1e-6, "{start:?} -> {back:?}");
+            assert!((back.target - start.target).len() < 1e-4, "back where it began: {start:?} -> {back:?}");
+            send(&mut h, egui::Event::PointerButton { pos: at, button: egui::PointerButton::Middle, pressed: false, modifiers: shift });
+        }
+    }
+
     #[test]
     fn shift_orbit_keeps_cursor_pivot_and_default_middle_pan() {
         let mut h = crate::scenario::Harness::new();
@@ -6270,6 +6368,29 @@ mod grid_plane_tests {
         app.cam.pitch = 0.3;
         let _ = build_sketch_scene(&app, &projection(&app, rect));
         assert_eq!(*app.viewport.grid_plane.lock().unwrap(), GridPlane::Ground, "a clear turn off the ground returns");
+    }
+
+    /// An open sketch always has its grid, on its own plane, whatever the Grid switch and the
+    /// follow-the-view preference say; outside a sketch the switch decides.
+    #[test]
+    fn an_open_sketch_always_shows_a_grid_on_its_plane() {
+        let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let mut app = SolveApp::new(solidcraft_engine::Session::default(), crate::Services::default());
+        app.ui.show_grid = false;
+        let grid = |app: &SolveApp| build_sketch_scene(app, &projection(app, rect)).under;
+        assert!(grid(&app).is_empty(), "no grid outside a sketch with the switch off");
+        app.run("sketch.create", json!({"plane": "XZ"})).unwrap();
+        for follows in [false, true] {
+            app.preferences.grid_follows_view = follows;
+            let under = grid(&app);
+            assert!(!under.is_empty(), "the open sketch shows a grid (follows the view: {follows})");
+            // Each line is 32 bytes: two f32 points, a colour and a width; the XZ plane is Y = 0.
+            let ys: Vec<f32> =
+                under.as_chunks::<32>().0.iter().flat_map(|l| [&l[4..8], &l[16..20]]).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+            assert!(ys.iter().all(|y| y.abs() < 1e-3), "the grid lies on the sketch plane");
+        }
+        app.ui.show_grid = true;
+        assert!(!grid(&app).is_empty());
     }
 
     /// A sketch is drawn in a parallel view even when the preference asks for perspective; the

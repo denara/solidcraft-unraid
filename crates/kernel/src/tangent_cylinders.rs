@@ -10,7 +10,7 @@
 //! through the touching points (the solids are unchanged), and the result's history is composed
 //! back over the operands as they were given.
 
-use solidcraft_geom::{Plane, Vec3};
+use solidcraft_geom::{Plane, UnitVec3, Vec3};
 use truck_modeling::{ParametricCurve, SearchNearestParameter};
 
 use crate::body::{Body, from_p3, p3};
@@ -27,22 +27,23 @@ const MAX_SPLITS: usize = 16;
 pub(crate) struct Cylinder {
     face: usize,
     origin: Vec3,
-    axis: Vec3,
+    axis: UnitVec3,
     radius: f64,
 }
 
 impl Cylinder {
     #[cfg(test)]
-    pub(crate) fn new(face: usize, origin: Vec3, axis: Vec3, radius: f64) -> Self {
-        Self { face, origin, axis, radius }
+    /// `None` for an axis with no direction.
+    pub(crate) fn new(face: usize, origin: Vec3, axis: Vec3, radius: f64) -> Option<Self> {
+        Some(Self { face, origin, axis: axis.unit()?, radius })
     }
 }
 
 fn cylinders(body: &Body) -> Vec<Cylinder> {
     (0..body.face_count())
         .filter_map(|face| match face_surface(body, face)? {
-            FaceSurface::Cylinder { origin, axis, radius } if origin.is_finite() && axis.is_finite() && radius.is_finite() => {
-                Some(Cylinder { face, origin, axis: axis.normalized()?, radius })
+            FaceSurface::Cylinder { origin, axis, radius } if origin.is_finite() && radius.is_finite() => {
+                Some(Cylinder { face, origin, axis, radius })
             }
             _ => None,
         })
@@ -58,12 +59,10 @@ pub(crate) struct Crossing {
 }
 
 pub(crate) fn crossing(x: &Cylinder, y: &Cylinder, tol: f64) -> Option<Crossing> {
-    let finite = [x, y].iter().all(|c| c.origin.is_finite() && c.axis.is_finite() && c.radius.is_finite() && c.radius > 0.0);
+    let finite = [x, y].iter().all(|c| c.origin.is_finite() && c.radius.is_finite() && c.radius > 0.0);
     if !finite || !tol.is_finite() || (x.radius - y.radius).abs() > tol {
         return None;
     }
-    // Unit axes, as the cross product below and the planes take them.
-    let (x, y) = (&Cylinder { axis: x.axis.normalized()?, ..*x }, &Cylinder { axis: y.axis.normalized()?, ..*y });
     let across = x.axis.cross(y.axis);
     // Axes within a hair of parallel touch along a line, which is another matter.
     let sine = across.len();

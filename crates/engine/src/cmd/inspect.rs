@@ -88,7 +88,7 @@ fn measure(s: &mut Session, p: &Value) -> Result<Value> {
     if !want.is_empty() && bodies.len() != want.len() {
         return Err(bad("inspect.measure", "unknown body name"));
     }
-    // Sheet metal keeps the edges where bends meet flat faces (as Fusion does): count its
+    // Sheet metal keeps the edges where bends meet flat faces (so bends stay visible): count its
     // B-rep faces as they are, without merging coplanar neighbours.
     let sheets = s.model.state().sheets.clone();
     for b in &mut bodies {

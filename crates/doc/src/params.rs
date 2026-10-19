@@ -486,6 +486,9 @@ pub enum ParamUser {
     Dimension { feature: u64, name: String, constraint: String },
     /// A configured column or an expression saved in a configuration row.
     Configuration { row: Option<String>, column: String },
+    /// A joint's offset, angle or value, or a motion link's gear, rack or screw length (`input`
+    /// says which; a link is named by the joint it drives).
+    Joint { joint: u64, name: String, input: String },
 }
 
 impl ParamUser {
@@ -498,6 +501,7 @@ impl ParamUser {
                 Some(row) => format!("configuration `{row}` ({column})"),
                 None => format!("configuration column {column}"),
             },
+            ParamUser::Joint { name, input, .. } => format!("joint {name} ({input})"),
         }
     }
 }
@@ -615,6 +619,12 @@ impl Document {
                 }
             }
         }
+        for (joint, input, e) in self.assembly.exprs() {
+            if expr::references(e).iter().any(|r| r == name) {
+                let jname = self.assembly.joints.iter().find(|j| j.id == joint).map(|j| j.name.clone()).unwrap_or_else(|| joint.to_string());
+                out.push(ParamUser::Joint { joint, name: jname, input });
+            }
+        }
         out
     }
 
@@ -717,6 +727,13 @@ impl Document {
                 if matches!(column, crate::config::Column::Param(_)) {
                     *cell = expr::rename_reference(cell, old, new);
                 }
+            }
+        }
+        for e in self.assembly.exprs_mut() {
+            let r = expr::rename_reference(e, old, new);
+            if r != *e {
+                *e = r;
+                n += 1;
             }
         }
         if let Some(c) = self.param_comments.remove(old) {

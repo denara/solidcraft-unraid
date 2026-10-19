@@ -36,7 +36,7 @@ thread_local! {
     static DEFERRED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Commands registered on one panel that Fusion also lists on another: the analyses (sketch
+/// Commands registered on one panel that another panel also lists: the analyses (sketch
 /// INSPECT) on SOLID INSPECT, and Interference (SOLID INSPECT) on sketch INSPECT.
 const ALSO_IN: &[(&str, &str, &str)] = &[
     ("SOLID", "INSPECT", "inspect.zebra"),
@@ -106,8 +106,9 @@ fn continuity_legend(app: &SolveApp, painter: &egui::Painter, proj: &Proj) {
     }
     let tk = crate::theme::Tokens::get();
     let [smooth, jump, sharp, gap] = tk.continuity;
-    let tr = crate::i18n::tr_label;
-    let rows = [(tr("G2 curvature"), smooth), (tr("G1 tangent"), jump), (tr("G0 crease"), sharp), (tr("Gap"), gap)];
+    // Stable ids: this Gap is a hole between faces, not the sheet-metal gap (`ui.sheet_gap`).
+    let tr = crate::i18n::tr;
+    let rows = [(tr("ui.continuity_g2"), smooth), (tr("ui.continuity_g1"), jump), (tr("ui.continuity_g0"), sharp), (tr("ui.continuity_gap"), gap)];
     let font = egui::FontId::proportional(12.0);
     let (row, pad, swatch) = (18.0, 8.0, 22.0);
     let text_width = rows.iter().map(|(label, _)| painter.layout_no_wrap(label.to_string(), font.clone(), tk.text).size().x).fold(0.0, f32::max);
@@ -257,7 +258,7 @@ fn combs(app: &SolveApp, painter: &egui::Painter, proj: &Proj) {
     });
 }
 
-/// Snap a cursor point on the sketch plane to what Fusion infers while drawing: a line's
+/// Snap a cursor point on the sketch plane to what is inferred while drawing: a line's
 /// midpoint, or alignment (horizontal/vertical) with the previous point of the tool. None:
 /// nothing near, use the grid.
 pub fn refine_snap(

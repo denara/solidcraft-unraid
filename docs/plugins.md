@@ -48,7 +48,7 @@ FeatureKind::Plugin {
 | `label` | Primary timeline / browser text |
 | `icon_id` | Host icon registry name (same system as [`feature_icon`](https://github.com/bherbruck/solidcraft/blob/main/crates/ui-egui/src/workspace.rs)) |
 | `tooltip` | Hover text, `inspect` type string |
-| `type_name` | Fusion-like feature type for power users |
+| `type_name` | short feature type name for power users |
 
 The timeline renders **any** `Plugin` feature through one code path: read `display`, draw icon +
 label, wire suppress/rename/delete/reorder like built-in features. No per-plugin egui in milestone 2.

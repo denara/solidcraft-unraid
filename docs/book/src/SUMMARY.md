@@ -37,3 +37,4 @@
 # Reference
 
 - [Command reference](reference/commands.md)
+- [Glossary](reference/glossary.md)

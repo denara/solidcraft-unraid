@@ -33,6 +33,7 @@ pub struct AcpBackend {
     session: Option<String>,
     agent: String,
     images: bool,
+    documents: bool,
     auth: Vec<acp::AuthMethod>,
     /// Open permission questions: our key → the agent's request id.
     permissions: HashMap<u64, Value>,
@@ -54,6 +55,7 @@ impl AcpBackend {
             session: None,
             agent: String::new(),
             images: false,
+            documents: false,
             auth: Vec::new(),
             permissions: HashMap::new(),
             next_key: 0,
@@ -82,6 +84,7 @@ impl AcpBackend {
                     (Pending::Initialize, Ok(v)) => {
                         self.agent = acp::agent_info(&v);
                         self.images = acp::takes_images(&v);
+                        self.documents = acp::takes_documents(&v);
                         self.auth = acp::auth_methods(&v);
                         self.new_session();
                     }
@@ -94,6 +97,7 @@ impl AcpBackend {
                             if let Some((current, available)) = acp::models(&v) {
                                 out.push(Event::Models { current, available });
                             }
+                            out.push(Event::Documents(self.documents));
                             out.push(Event::Ready { agent: self.agent.clone(), images: self.images });
                         }
                         None => out.push(Event::Error("session/new: no sessionId".into())),

@@ -30,7 +30,7 @@ curl -fs "$BASE/" | grep -q 'solidcraft_canvas' || fail "index.html is not the a
 curl -fs "$BASE/sw.js" | grep -q 'const VERSION = "dev"' && fail "sw.js is the unbuilt template (not a release build)"
 [ "$(header "$BASE/build.json" Cache-Control)" = no-cache ] || fail "build.json must not be cached"
 
-WASM="$(curl -fs "$BASE/" | grep -o 'solidcraft-web-[0-9a-f]*_bg\.wasm' | head -n1)"
+WASM="$(curl -fs "$BASE/" | grep -o 'solidcraft-web-[0-9a-f]\{8,16\}_bg\.wasm' | head -n1)"
 [ -n "$WASM" ] || fail "index.html names no wasm"
 [ "$(header "$BASE/$WASM" Content-Type)" = application/wasm ] || fail "$WASM is not served as application/wasm"
 header "$BASE/$WASM" Cache-Control | grep -q immutable || fail "$WASM should be cached as immutable"

@@ -1246,3 +1246,67 @@ To install, save active work, update the existing Unraid container while retaini
 its data/token/settings and reload the browser. Browser editing opens an independent
 copy and does not save changes back to the server. No Unraid deployment, nginx/DNS
 change or file migration was performed.
+
+## 2026-10-19 — upstream snapshot 5122b98a, SolidCraft 0.16.2
+
+Merged the fixed snapshot `5122b98af3fc5fe287c2e6d4beee8587a503244b` directly into
+`codex/unraid-mcp-web`, advancing the validated CAD baseline from `8f768b65`.
+The selected upstream range contains 90 commits; upstream CAD features and changes
+are described by the [original project](https://github.com/bherbruck/solidcraft).
+The tree began clean and matched the published integration branch. Fork main is
+already an ancestor. Published merge history and all HTTP MCP/workspace extensions
+are preserved. Nextest scheduling, private/local ignores and fork agent instructions
+were retained when resolving conflicts; shipped notices were regenerated with the
+HTTP gateway and Rust workspace client included. New image codec dependencies are
+permissively licensed; unrelated dependency upgrades were not introduced.
+
+Two integration corrections were required. A boolean simplification leaves the new
+agent-chat paste behavior unchanged while satisfying clippy. Upstream's new ambient
+occlusion prevented even an unoccluded viewport from compiling on OpenGL/WebGL:
+GLSL cannot load a depth texel directly. A failing pure translation regression and
+actual GPU captures reproduced this. The prepass now keeps a bounded RGBA8 copy of
+24-bit depth for portable color-texture loads, while depth testing retains its
+original precision and direction. All seven actual OpenGL capture cases passed
+with the correction, and the real browser rendered Sample Plate with contact
+shading enabled. Geometry/kernel behavior was not patched.
+
+File-writing review found no new output commands: the added joint-edit/view commands
+are memory operations. Matrix placement on STEP insertion retains its existing
+confined input path. Save As warm-cache changes write inside the same native file,
+without new sibling outputs. Existing multi-output export restrictions, authoritative
+session status and shared HTTP/MCP revision checks remain in place. The protected
+live dashboard, remembered login, project groups, metadata, PNG previews and expiring
+one-use browser-copy handoffs are retained; browser editing remains independent.
+
+Relevant local checks passed: workspace-wide native clippy, formatting, 385 attributed
+assets, 268 original icon masters, layers, sorted catalogs, shipped notices and the
+13-crate Wasm build. Tests include 85 gateway cases, 49 MCP cases, six browser-import
+cases, the GLSL regression, seven GPU capture cases, document-format/joint migration,
+14 3MF cases, changed geometry helpers/kernel cases, 25 occurrence/matrix cases,
+102 joint cases, 14 browser-visibility cases, warm Save As caches and changed browser
+UI/attachment/paste/theme/navigation behavior. Focused test binaries were reused for
+extra joint/visibility checks while the browser release built. No unrelated full
+geometry suite was run. The actual browser API/queue proof and all 20 offline/update
+cases passed. Initial lint/render failures and final passing logs remain under the
+ignored `target/unraid-update-5122b98a/` directory.
+
+A fresh-volume candidate on a free loopback port passed actual HTTP MCP sketch/
+extrude modelling at 24000 mm3, PNG/STEP, independent sessions, authentication,
+origin/path denial, persistence after restart, logging/privacy/colors, workspace
+revision conflicts, live file events, saved properties, bounded PNG previews and
+cookie/Bearer separation. Remembered login and durable logout revocation passed
+across two isolated restarts. The official SDK reopened three public older designs,
+including format27 pending boundary surfaces, verified 24000 mm3 and 200 mm3 solids
+and a 128.1018 mm2 surface, and round-tripped native/3MF files. A rigid matrix placement
+reopened at the independently expected center [9.5,21,30.5] mm. The actual browser
+showed live workspace/model properties at format28 and opened the migrated native
+file as an independent CAD copy, consuming its one-use fragment.
+
+New native saves use `solidcraft/28` with `joint-expressions`, `joint-origin-edge`
+and `joint-origin-frame-x` pending. Previous builds cannot read format28 files.
+Before an Unraid update, save active work and keep pre-update backups of both server
+files and independent browser designs, along with the previous image. No Unraid
+installation, nginx/DNS change, application release or file migration is performed
+by this update task. Publication, archive checksum and local replacement are recorded
+after the exact-source container workflow and anonymous download checks pass. The
+canonical Unraid product Overview is unchanged, so no catalog commit is needed.

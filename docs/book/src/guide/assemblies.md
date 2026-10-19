@@ -28,6 +28,24 @@ made. Contact sets stop motion where bodies would pass through each other,
 **Motion Study** keys joint values along a timeline, and **Interference** shows overlapping
 volumes in red, lists the pairs closer than its **Clearance** and each body's nearest neighbour.
 
+A joint origin on a face or a hole keeps the turn it had when it was picked: when the face tilts
+(a bend angle or a rotation changing with a parameter) the part on it tilts with the face but
+doesn't spin about it.
+
+A joint origin can also sit on an edge of a flat face (`"edge": [x, y, z]`): at the edge's middle,
+pointing out of the face with its y into it, or with `"corner": [x, y, z]` at the corner near that
+point, its x and y running along the two edges into the face. The edge, the face and the corner
+are found again by name, so a bracket set 40 mm in from a panel's corner (a planar joint with
+values `[40, 40, 0]`) stays 40 mm in from that corner when the panel changes size.
+
+A joint's offset, angle and values can be typed as expressions over the design's parameters
+(`"offset": "gap + 2"`, `"values": ["travel"]`). The joint keeps them and works them out again
+whenever the design changes, so a part seated `gap` above a panel moves with `gap`. Renaming a
+parameter carries into the joints that use it, and deleting one they use is refused. If an
+expression stops working out (say a parameter becomes an angle), the joint is left out of the
+solve and `joint.solve` gives the reason, instead of placing the part from old numbers. Typing a
+plain number, or driving the value, drops that expression.
+
 The check behind it, `inspect.clearance`, does all of that in one call for any number of bodies,
 which suits scripts and agents checking a whole assembly:
 

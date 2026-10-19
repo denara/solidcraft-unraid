@@ -39,6 +39,14 @@ pub struct ParamsDialog {
     pub error: Option<String>,
     /// The expression edit to preview: (name, expression).
     pub preview: Option<(String, String)>,
+    /// The rows as the engine listed them at one revision of the design (#2723): listing
+    /// evaluates every parameter, so it happens when the design changes, not every frame.
+    listed: Option<(u64, Arc<Vec<Row>>)>,
+    /// The add row's live check, by (revision, unit, expression).
+    new_check: Option<((u64, String, String), Result<String, String>)>,
+    /// How many times the rows were listed and the add row checked (for the tests).
+    pub lists: u32,
+    pub checks: u32,
 }
 
 impl ParamsDialog {
@@ -131,7 +139,15 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     let Some(mut d) = app.params.take() else { return };
     let t = Tokens::get();
     let mut open = true;
-    let all = rows(app);
+    let all = if let Some((rev, r)) = d.listed.as_ref().filter(|(rev, _)| *rev == app.session.revision) {
+        let _ = rev;
+        r.clone()
+    } else {
+        let r = Arc::new(rows(app));
+        d.listed = Some((app.session.revision, r.clone()));
+        d.lists += 1;
+        r
+    };
     crate::frame::window(ctx, RichText::new(crate::i18n::tr_label("PARAMETERS")).strong().size(13.0), crate::frame::Width::Wide)
         .id(egui::Id::new("sc_params_dialog"))
         .open(&mut open)
@@ -219,6 +235,25 @@ fn check(app: &mut SolveApp, e: &str, unit: &str) -> Result<String, String> {
     }
 }
 
+/// The add row's check of its expression, kept until the design, unit or text changes.
+fn new_check(app: &mut SolveApp, d: &mut ParamsDialog, unit: &str) -> Result<String, String> {
+    let key = (app.session.revision, unit.to_string(), d.new_expr.clone());
+    if let Some((k, r)) = &d.new_check
+        && *k == key
+    {
+        return r.clone();
+    }
+    let r = check(app, &d.new_expr, unit);
+    d.checks += 1;
+    d.new_check = Some((key, r.clone()));
+    r
+}
+
+/// Height of a row in the tables: tall enough for the text boxes and the combo box.
+fn row_height(ui: &egui::Ui) -> f32 {
+    ui.spacing().interact_size.y.max(20.0)
+}
+
 fn table(app: &mut SolveApp, ui: &mut egui::Ui, d: &mut ParamsDialog, rows: &[&Row], salt: &str) {
     let t = Tokens::get();
     egui::Grid::new(("ptable", salt)).num_columns(7).striped(true).spacing([10.0, 4.0]).show(ui, |ui| {
@@ -226,8 +261,21 @@ fn table(app: &mut SolveApp, ui: &mut egui::Ui, d: &mut ParamsDialog, rows: &[&R
             ui.label(RichText::new(h).color(t.text_dim).small());
         }
         ui.end_row();
+        // Only the rows in view are laid out (#2723); the others take their height, so the
+        // scroll bar and the columns stay as they are. A row being edited stays drawn.
+        let row_h = row_height(ui);
+        let clip = ui.clip_rect();
         for (i, r) in rows.iter().enumerate() {
+            let top = ui.cursor().min.y;
+            let in_view = top + row_h >= clip.min.y && top <= clip.max.y;
+            let busy = d.editing.contains_key(&r.name) || d.comments.contains_key(&r.name) || d.renaming.as_ref().is_some_and(|(o, _)| *o == r.name);
+            if !in_view && !busy {
+                ui.allocate_space(egui::vec2(0.0, row_h));
+                ui.end_row();
+                continue;
+            }
             ui.horizontal(|ui| {
+                ui.set_min_height(row_h);
                 // Favourite star.
                 let star = if r.favorite { RichText::new("★").color(t.accent) } else { RichText::new("☆").color(t.text_dim) };
                 if ui.add(egui::Button::new(star).frame(false)).on_hover_text(crate::i18n::tr_label("Favourite")).clicked() {
@@ -401,7 +449,7 @@ fn add_row(app: &mut SolveApp, ui: &mut egui::Ui, d: &mut ParamsDialog) {
             });
         crate::scenario::publish_handle("param:new:unit", unit_response.response.rect.center());
         let unit = UNITS.get(d.new_unit).copied().unwrap_or("mm");
-        let bad = check(app, &d.new_expr, unit).is_err();
+        let bad = new_check(app, d, unit).is_err();
         let mut te = egui::TextEdit::singleline(&mut d.new_expr).id(expr_id).desired_width(170.0);
         if bad {
             te = te.text_color(t.error);
@@ -409,7 +457,7 @@ fn add_row(app: &mut SolveApp, ui: &mut egui::Ui, d: &mut ParamsDialog) {
         let resp = ui.add(te);
         crate::scenario::publish_handle("param:new:expression", resp.rect.center());
         let completed = complete(ui, &resp, &mut d.new_expr);
-        let live = check(app, &d.new_expr, unit);
+        let live = new_check(app, d, unit);
         match &live {
             Ok(v) => ui.label(RichText::new(v).color(t.text_dim)),
             Err(m) => ui.label(RichText::new(m).color(t.error)),
@@ -577,5 +625,58 @@ mod tests {
             let editing = h.app.params.as_ref().unwrap().editing.get("width").cloned();
             assert_eq!(editing.as_deref(), Some("1.1"), "favourite {favourite}, row {row}");
         }
+    }
+
+    /// A design with hundreds of chained parameters.
+    fn big_design() -> crate::scenario::Harness {
+        let mut h = crate::scenario::Harness::new();
+        h.app.home.open = false;
+        h.app.run("parameters.add", json!({"name": "p0", "expression": "10 mm"})).unwrap();
+        for i in 1..400 {
+            h.app.run("parameters.add", json!({"name": format!("p{i}"), "expression": format!("p{} + 1 mm", i - 1)})).unwrap();
+        }
+        h
+    }
+
+    /// Mean milliseconds per frame over `n` frames.
+    fn frame_ms(h: &mut crate::scenario::Harness, n: usize) -> f64 {
+        let start = std::time::Instant::now();
+        h.frames(n);
+        start.elapsed().as_secs_f64() * 1000.0 / n as f64
+    }
+
+    /// Frame times with the window closed and open (`cargo test -p solidcraft-ui-egui params_frame_time -- --nocapture`).
+    #[test]
+    fn params_frame_time() {
+        let mut h = big_design();
+        h.frames(5);
+        let closed = frame_ms(&mut h, 20);
+        h.step(&json!({"start": "parameters.change"})).unwrap();
+        h.frames(5);
+        let open = frame_ms(&mut h, 20);
+        assert!(h.app.params.is_some());
+        eprintln!("params frame time: closed {closed:.2} ms, open {open:.2} ms");
+    }
+
+    /// An open window lists and checks once per revision of the design, not once per frame
+    /// (#2723), and shows a change at once.
+    #[test]
+    fn the_window_does_not_re_evaluate_every_frame() {
+        let mut h = big_design();
+        h.step(&json!({"start": "parameters.change"})).unwrap();
+        h.frames(30);
+        let d = h.app.params.as_ref().unwrap();
+        assert_eq!((d.lists, d.checks), (1, 1), "30 frames of an unchanged design");
+        h.app.run("parameters.change", json!({"name": "p0", "expression": "20 mm"})).unwrap();
+        h.frames(30);
+        let d = h.app.params.as_ref().unwrap();
+        assert_eq!((d.lists, d.checks), (2, 2), "one more for the change");
+        let shown = d.listed.as_ref().unwrap().1.iter().find(|r| r.name == "p399").and_then(|r| r.value);
+        assert_eq!(shown, Some(20.0 + 399.0));
+        // A comment is a change too.
+        h.app.run("parameters.comment", json!({"name": "p1", "comment": "hello"})).unwrap();
+        h.frames(2);
+        let d = h.app.params.as_ref().unwrap();
+        assert!(d.listed.as_ref().unwrap().1.iter().any(|r| r.name == "p1" && r.comment == "hello"));
     }
 }

@@ -712,6 +712,147 @@ mod msaa_tests {
     }
 }
 
+/// SolidCraft: run `f` with `device`'s errors captured, and the first error it caused. Uncaptured,
+/// an error goes to the device's handler, which panics by default: a surface the driver can't
+/// reconfigure (D3D12 "Failed to wait for GPU to come idle", #1935) crashed the app. Native error
+/// scopes resolve at once; on the web the scope still keeps the error from the handler.
+pub fn capture_errors<T>(device: &wgpu::Device, f: impl FnOnce() -> T) -> (T, Option<wgpu::Error>) {
+    let scopes = [
+        wgpu::ErrorFilter::OutOfMemory,
+        wgpu::ErrorFilter::Internal,
+        wgpu::ErrorFilter::Validation,
+    ]
+    .map(|filter| device.push_error_scope(filter));
+    let value = f();
+    let mut failed = None;
+    for scope in scopes.into_iter().rev() {
+        let mut popped = std::pin::pin!(scope.pop());
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        if let std::task::Poll::Ready(Some(error)) =
+            std::future::Future::poll(popped.as_mut(), &mut cx)
+        {
+            failed.get_or_insert(error);
+        }
+    }
+    (value, failed)
+}
+
+/// SolidCraft: refused configures in a row after which the surface is recreated (#1935).
+pub const SURFACE_RECREATE_AFTER: u32 = 3;
+
+/// SolidCraft: a surface's streak of refused configures (#1935) and when the next try is due.
+/// A refusal waits 16 ms, doubling with each refusal in a row up to 1 s, and every
+/// [`SURFACE_RECREATE_AFTER`] refusals the surface is recreated before the next try. Until the
+/// try is due, no configure or recreate happens however often the window repaints, so a device
+/// that keeps refusing costs a try a second instead of one a frame. A configure the device takes
+/// ends the streak, a recreate still pending included. The clock is passed in, for tests.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConfigureRetry {
+    failures: u32,
+    due: Option<web_time::Instant>,
+    /// The streak asked for a recreate that hasn't happened yet.
+    recreate: bool,
+}
+
+/// SolidCraft: what follows a refused configure ([`ConfigureRetry::refused`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RetryPlan {
+    /// Refusals in a row, this one included.
+    pub failures: u32,
+    /// The first refusal of the streak: the one worth a warning.
+    pub first: bool,
+    /// How long until the next try.
+    pub delay: std::time::Duration,
+    /// This refusal asked for the surface to be recreated before the next try.
+    pub recreate: bool,
+}
+
+impl ConfigureRetry {
+    /// Refusals in a row so far.
+    pub fn failures(&self) -> u32 {
+        self.failures
+    }
+
+    /// How long until the next try is due at `now`; `None` when a configure may go ahead (no
+    /// refusal pending, or its delay has passed).
+    pub fn wait(&self, now: web_time::Instant) -> Option<std::time::Duration> {
+        self.due
+            .and_then(|due| due.checked_duration_since(now))
+            .filter(|left| !left.is_zero())
+    }
+
+    /// Whether a configure (or recreate) may go ahead at `now`.
+    pub fn is_due(&self, now: web_time::Instant) -> bool {
+        self.wait(now).is_none()
+    }
+
+    /// Whether the streak asked for a recreate that hasn't happened yet.
+    pub fn recreate_pending(&self) -> bool {
+        self.recreate
+    }
+
+    /// Whether the surface should be recreated at `now`: a recreate is pending and its try is due.
+    pub fn recreate_due(&self, now: web_time::Instant) -> bool {
+        self.recreate && self.is_due(now)
+    }
+
+    /// The surface was recreated: no recreate is pending. The streak and its deadline stay.
+    pub fn recreated(&mut self) {
+        self.recreate = false;
+    }
+
+    /// The device refused a configure at `now`: the streak grows and the next try waits.
+    pub fn refused(&mut self, now: web_time::Instant) -> RetryPlan {
+        self.failures = self.failures.saturating_add(1);
+        let doublings = self.failures.saturating_sub(1).min(6);
+        let delay = std::time::Duration::from_millis((16u64 << doublings).min(1000));
+        // A deadline past the clock's range can't happen in practice; it would make the try due.
+        self.due = now.checked_add(delay);
+        let recreate = self.failures % SURFACE_RECREATE_AFTER == 0;
+        self.recreate |= recreate;
+        RetryPlan {
+            failures: self.failures,
+            first: self.failures == 1,
+            delay,
+            recreate,
+        }
+    }
+
+    /// The device took a configure: the streak ends, and a pending recreate with it. Returns how
+    /// many refusals it had.
+    pub fn took(&mut self) -> u32 {
+        std::mem::take(self).failures
+    }
+
+    /// Runs `configure` at `now` unless a refused one's retry isn't due yet, and keeps the
+    /// streak. The surface's configures all go through here, so an early repaint (input, an
+    /// animation) can't bring a retry forward.
+    pub fn attempt<E>(
+        &mut self,
+        now: web_time::Instant,
+        configure: impl FnOnce() -> Result<(), E>,
+    ) -> Attempt<E> {
+        if let Some(left) = self.wait(now) {
+            return Attempt::Waiting(left);
+        }
+        match configure() {
+            Ok(()) => Attempt::Took(self.took()),
+            Err(error) => Attempt::Refused(self.refused(now), error),
+        }
+    }
+}
+
+/// SolidCraft: what came of [`ConfigureRetry::attempt`].
+#[derive(Debug)]
+pub enum Attempt<E> {
+    /// Not tried: the retry after a refusal is due in this long.
+    Waiting(std::time::Duration),
+    /// The configure was taken, after this many refusals in a row (0 when none).
+    Took(u32),
+    /// The configure was refused with this error; the plan says what follows.
+    Refused(RetryPlan, E),
+}
+
 /// SolidCraft: the surface size for a window of `width` x `height` pixels on a device whose
 /// textures are at most `max_side` on a side, and the scale it is drawn at. A window that fits is
 /// unchanged (scale 1); a larger one shrinks uniformly, keeping its aspect ratio, so the image

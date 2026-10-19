@@ -898,7 +898,7 @@ fn shell_direction_and_tangent_chain_round_trip() {
     let mut app = boxed();
     let top = face(&app, Vec3::new(20.0, 15.0, 20.0));
     let mut d = start(&mut app, vec![top], "solid.shell");
-    // Tangent Chain is on, as in Fusion; Direction Outside.
+    // Tangent Chain is on; Direction Outside.
     assert_eq!(d.extra.get("tangent_chain"), Some(&json!(true)));
     d.extra.insert("direction".into(), json!("outside"));
     let p = apply_commands(&app, &d).unwrap().remove(0).1;
@@ -1716,4 +1716,75 @@ fn midplane_asks_for_two_planes_then_builds_the_one_between_them() {
         solidcraft_engine::view::construction_planes(&h.app.session).into_iter().find(|(_, name, _)| name != "Shelf").expect("the midplane");
     assert!(pl.normal().cross(Vec3::Z).len() < 1e-6, "{pl:?}");
     assert!((pl.origin.z - 10.0).abs() < 1e-6, "{pl:?}");
+}
+
+/// #2474, #2494: every construct tool asks for what it needs. Started from the toolbar with
+/// nothing selected, none of them runs its command and reports that `a` (or `face`, `edge`…)
+/// is required; a construct command added later without a dialog fails here too.
+#[test]
+fn every_construct_tool_opens_a_dialog_instead_of_failing() {
+    let mut h = crate::scenario::Harness::new();
+    // A body, so the tools that need one are enabled.
+    h.app.run("solid.box", json!({"length":20,"width":20,"height":20})).unwrap();
+    let commands = h.app.session.execute("engine.commands", &json!({})).unwrap();
+    let ids: Vec<String> =
+        commands.as_array().unwrap().iter().filter_map(|c| c["id"].as_str()).filter(|id| id.starts_with("construct.")).map(String::from).collect();
+    assert!(ids.len() >= 17, "{ids:?}");
+    for id in &ids {
+        h.app.session.selection.clear();
+        h.app.status = None;
+        h.app.start(id);
+        h.frames(1);
+        let status = h.app.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert!(!status.contains("is required"), "{id}: {status}");
+        assert!(h.app.dialog.as_ref().is_some_and(|d| !d.inputs.is_empty()), "{id} opens a dialog that asks for picks");
+        crate::dialogs::cancel(&mut h.app);
+    }
+}
+
+/// #2494: two planes selected first, Axis Through Two Planes takes both and makes the axis
+/// where they meet.
+#[test]
+fn axis_through_two_preselected_planes_builds_their_intersection() {
+    let mut h = crate::scenario::Harness::new();
+    h.app.session.selection = vec![Sel::Plane { name: "XY".into() }, Sel::Plane { name: "XZ".into() }];
+    h.app.start("construct.axis.two_planes");
+    h.frames(1);
+    let d = h.app.dialog.as_ref().unwrap();
+    assert!(matches!(d.kind, Kind::Construct { .. }));
+    assert_eq!((d.inputs[0].items.len(), d.inputs[1].items.len()), (1, 1), "each plane fills one input");
+    h.step(&json!({"key":"Enter"})).unwrap();
+    assert!(h.app.dialog.is_none(), "{:?}", h.app.dialog.as_ref().and_then(|d| d.error.clone()));
+    let axes = solidcraft_engine::view::construction_axes(&h.app.session);
+    let (_, _, _, dir) = axes.first().expect("the axis");
+    assert!(dir.cross(Vec3::X).len() < 1e-6, "XY and XZ meet along X: {dir:?}");
+}
+
+/// #2474: Plane Through Two Edges takes two edges picked in the dialog.
+#[test]
+fn plane_through_two_picked_edges() {
+    let mut h = crate::scenario::Harness::new();
+    h.app.run("solid.box", json!({"length":20,"width":20,"height":20})).unwrap();
+    h.app.start("construct.plane.two_edges");
+    h.frames(1);
+    let edge = |p: Vec3| Sel::Edge { body: "Body1".into(), index: 0, point: p };
+    let d = h.app.dialog.as_mut().unwrap();
+    d.inputs[0].items = vec![edge(Vec3::new(10.0, 0.0, 20.0))];
+    d.inputs[1].items = vec![edge(Vec3::new(0.0, 10.0, 20.0))];
+    h.step(&json!({"key":"Enter"})).unwrap();
+    assert!(h.app.dialog.is_none(), "{:?}", h.app.dialog.as_ref().and_then(|d| d.error.clone()));
+    let (_, _, pl) = solidcraft_engine::view::construction_planes(&h.app.session).into_iter().next().expect("the plane");
+    assert!(pl.normal().cross(Vec3::Z).len() < 1e-6 && (pl.origin.z - 20.0).abs() < 1e-6, "the top face's plane: {pl:?}");
+}
+
+/// Point Along Path asks for its position too, and a missing pick names the input.
+#[test]
+fn point_along_path_has_its_position_and_missing_picks_are_named() {
+    let mut h = crate::scenario::Harness::new();
+    h.app.start("construct.point.along_path");
+    h.frames(1);
+    assert!(matches!(&h.app.dialog.as_ref().unwrap().kind, Kind::Construct { t: Some(t), .. } if t == "0.5"));
+    h.step(&json!({"key":"Enter"})).unwrap();
+    let e = h.app.dialog.as_ref().and_then(|d| d.error.clone()).unwrap_or_default();
+    assert!(e.contains("path"), "{e}");
 }

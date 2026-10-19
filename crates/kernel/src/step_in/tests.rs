@@ -974,7 +974,7 @@ fn hostile_boundaries_mesh_in_bounded_time() {
 }
 
 /// A cylinder written as a surface of revolution, oriented the ISO 10303-42 way (normal
-/// ∂S/∂angle × ∂S/∂profile, outward here, so `same_sense` .T.). Fusion reads such faces this
+/// ∂S/∂angle × ∂S/∂profile, outward here, so `same_sense` .T.). Strict readers read such faces this
 /// way; reading them with truck's profile-first normal turned faces inside out.
 #[test]
 fn surface_of_revolution_sense_follows_iso() {

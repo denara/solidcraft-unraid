@@ -286,18 +286,23 @@ fn folder_and_group_menus_make_rename_and_drop_groups() {
     let names: Vec<String> = app.session.model.state().bodies.iter().map(|b| b.name.clone()).collect();
     let items: Vec<_> = names.iter().map(|n| json!({"type": "body", "name": n})).collect();
     app.run("select.set", json!({ "items": items })).unwrap();
-    let folder = Target::Folder { component: 0, folder: "bodies".into() };
+    let folder = Target::Folder { component: 0, folder: "bodies".into(), scope: "c0".into() };
     act(&mut app, &folder, "Group Selected");
     let g = app.session.doc.browser_groups[0].clone();
     assert_eq!(g.items.len(), 2);
     // A body's menu offers grouping too while several are selected.
     assert!(context_menu::items(&app, &Target::Body { name: names[0].clone() }).iter().any(|i| i.label == "Group Selected"));
-    let t = Target::Group { id: g.id };
+    let t = Target::Group { id: g.id, scope: "c0".into() };
     act(&mut app, &t, "Rename");
     assert!(context_menu::finish_rename(&mut app, Some("Parts"), true));
     assert_eq!(app.session.doc.browser_groups[0].name, "Parts");
+    // Show/Hide hides the group itself: its bodies keep their own state but aren't drawn.
     act(&mut app, &t, "Show/Hide");
-    assert_eq!(app.session.visibility.hidden_bodies.len(), 2);
+    assert!(app.session.visibility.hidden_bodies.is_empty());
+    assert!(app.session.folder_hidden(&format!("c0/g{}", g.id)));
+    assert!(g.items.iter().all(|b| !app.session.body_visible(b)));
+    act(&mut app, &t, "Show/Hide");
+    assert!(g.items.iter().all(|b| app.session.body_visible(b)));
     act(&mut app, &t, "Ungroup");
     assert!(app.session.doc.browser_groups.is_empty());
     act(&mut app, &folder, "New Group");
@@ -419,7 +424,7 @@ fn canvas_menu_hides_renames_calibrates_and_deletes() {
     assert!(app.session.doc.canvases.is_empty());
 }
 
-/// The canvas and browser menus keep Fusion's items in Fusion's order (the ones we have).
+/// The canvas and browser menus keep their items in a fixed order.
 #[test]
 fn menus_follow_fusion_order() {
     let mut app = sample_app();
@@ -484,7 +489,7 @@ fn menus_follow_fusion_order() {
             "Find in Timeline",
         ],
     );
-    let folder = context_menu::items(&app, &Target::Folder { component: 0, folder: "bodies".into() });
+    let folder = context_menu::items(&app, &Target::Folder { component: 0, folder: "bodies".into(), scope: "c0".into() });
     order(&folder, &["Create Components from Bodies", "New Group", "Show/Hide", "Show All"]);
     let origin = context_menu::items(&app, &Target::Origin);
     order(&origin, &["Show/Hide", "Show All", "Hide Planes", "Hide Axes"]);

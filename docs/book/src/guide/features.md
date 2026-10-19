@@ -24,7 +24,11 @@ spline and conic sides the slope is approximate: the moved outline is a curve of
 within 2 % of the taper's offset (or 10 µm) of the true one, a curve that turns too much for
 that being cut into pieces first; where a curve bends tighter than the offset, the offset folds
 and is smoothed over. A taper steeper than the profile's details (a stroke, a curve or a gap
-narrower than it) is refused with that reason; a smaller taper or distance builds.
+narrower than it) is refused with that reason; a smaller taper or distance builds. A taper
+composes with a start offset (a drafted pocket that starts part way up a part): the offset moves
+the profile along the normal and the sides are drafted from there, so the profile is the section
+at the start whatever the offset. A taper with a two-sided or symmetric extent is not built yet
+and says so.
 
 **Thin Extrude** (`thin: true` on `solid.extrude`, the Thin Extrude box in its dialog) builds a
 wall of constant thickness along sketch curves instead of filling profiles: open chains (a single

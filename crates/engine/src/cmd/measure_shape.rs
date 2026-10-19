@@ -4,7 +4,7 @@
 //! round item measures from its centre or axis, with the closest and farthest distances too.
 
 use serde_json::{Value, json};
-use solidcraft_geom::Vec3;
+use solidcraft_geom::{UnitVec3, Vec3};
 
 use std::f64::consts::{PI, TAU};
 
@@ -17,7 +17,7 @@ pub(crate) enum Shape {
     /// around the axis (2π all the way round).
     Round {
         center: Vec3,
-        axis: Vec3,
+        axis: UnitVec3,
         radius: f64,
         angle: f64,
         planar: bool,
@@ -26,7 +26,7 @@ pub(crate) enum Shape {
     },
     Plane {
         point: Vec3,
-        normal: Vec3,
+        normal: UnitVec3,
     },
     Line {
         a: Vec3,
@@ -70,8 +70,7 @@ pub(crate) fn add_round(v: &mut Value, shape: &Shape) {
 
 /// Cylinder `axis` through `origin` of radius `radius` over the points of its face: the
 /// round shape, centred level with the middle of the face, with its extent and coverage.
-pub(crate) fn cylinder(origin: Vec3, axis: Vec3, radius: f64, pts: &[Vec3]) -> Option<Shape> {
-    let axis = axis.normalized()?;
+pub(crate) fn cylinder(origin: Vec3, axis: UnitVec3, radius: f64, pts: &[Vec3]) -> Option<Shape> {
     if pts.is_empty() || !(radius.is_finite() && radius > 0.0) {
         return None;
     }
@@ -83,7 +82,7 @@ pub(crate) fn cylinder(origin: Vec3, axis: Vec3, radius: f64, pts: &[Vec3]) -> O
 }
 
 /// The angle around the axis the points cover: a whole turn less the widest gap between them.
-pub(crate) fn coverage(center: Vec3, axis: Vec3, pts: &[Vec3]) -> f64 {
+pub(crate) fn coverage(center: Vec3, axis: UnitVec3, pts: &[Vec3]) -> f64 {
     let x = axis.any_perp();
     let y = axis.cross(x);
     let mut angles: Vec<f64> = pts
@@ -105,7 +104,7 @@ pub(crate) fn coverage(center: Vec3, axis: Vec3, pts: &[Vec3]) -> f64 {
 }
 
 /// The unit direction a point leaves the axis at, towards the middle of the face's points.
-fn bulge(center: Vec3, axis: Vec3, pts: &[Vec3]) -> Option<Vec3> {
+fn bulge(center: Vec3, axis: UnitVec3, pts: &[Vec3]) -> Option<Vec3> {
     let sum = pts.iter().fold(Vec3::ZERO, |acc, p| {
         let d = *p - center;
         acc + (d - axis * d.dot(axis)).normalized().unwrap_or(Vec3::ZERO)
@@ -114,7 +113,7 @@ fn bulge(center: Vec3, axis: Vec3, pts: &[Vec3]) -> Option<Vec3> {
 }
 
 /// Closest points of two infinite lines (a point and a unit direction each).
-fn line_line(p1: Vec3, d1: Vec3, p2: Vec3, d2: Vec3) -> (Vec3, Vec3) {
+fn line_line(p1: Vec3, d1: UnitVec3, p2: Vec3, d2: UnitVec3) -> (Vec3, Vec3) {
     let w = p1 - p2;
     let b = d1.dot(d2);
     let denom = 1.0 - b * b;
@@ -127,8 +126,8 @@ fn line_line(p1: Vec3, d1: Vec3, p2: Vec3, d2: Vec3) -> (Vec3, Vec3) {
     (p1 + d1 * s, p2 + d2 * t)
 }
 
-fn parallel(a: Vec3, b: Vec3) -> bool {
-    a.cross(b).len() < 1e-6
+fn parallel(a: impl Into<Vec3>, b: impl Into<Vec3>) -> bool {
+    a.into().cross(b).len() < 1e-6
 }
 
 /// A measurement from a round item's centre or axis.
@@ -214,7 +213,7 @@ fn from_round(a: &Shape, b: &Shape) -> Option<Centre> {
             }
         }
         Shape::Line { a: la, b: lb } => {
-            let dir = (lb - la).normalized()?;
+            let dir = (lb - la).unit()?;
             let across = dir.dot(na).abs() < 1e-6;
             if pa {
                 // A circle/arc has a fixed centre. Project that point onto the picked
@@ -342,7 +341,7 @@ mod tests {
     use solidcraft_geom::Vec2;
 
     fn circle(c: Vec3, r: f64) -> Shape {
-        Shape::Round { center: c, axis: Vec3::Z, radius: r, angle: TAU, planar: true, lo: 0.0, hi: 0.0 }
+        Shape::Round { center: c, axis: UnitVec3::Z, radius: r, angle: TAU, planar: true, lo: 0.0, hi: 0.0 }
     }
 
     #[test]
@@ -367,8 +366,8 @@ mod tests {
 
     #[test]
     fn arcs_on_different_planes_measure_between_their_centres() {
-        let a = Shape::Round { center: Vec3::ZERO, axis: Vec3::Z, radius: 2.0, angle: PI, planar: true, lo: 0.0, hi: 0.0 };
-        let b = Shape::Round { center: Vec3::new(3.0, 4.0, 12.0), axis: Vec3::X, radius: 4.0, angle: PI / 2.0, planar: true, lo: 0.0, hi: 0.0 };
+        let a = Shape::Round { center: Vec3::ZERO, axis: UnitVec3::Z, radius: 2.0, angle: PI, planar: true, lo: 0.0, hi: 0.0 };
+        let b = Shape::Round { center: Vec3::new(3.0, 4.0, 12.0), axis: UnitVec3::X, radius: 4.0, angle: PI / 2.0, planar: true, lo: 0.0, hi: 0.0 };
         let c = centre(&a, &b).unwrap();
         assert_eq!((c.from, c.to, c.distance), (Vec3::ZERO, Vec3::new(3.0, 4.0, 12.0), 13.0));
         assert!(c.min.is_none() && c.max.is_none());
@@ -377,10 +376,10 @@ mod tests {
     #[test]
     fn a_circle_to_a_cylinder_uses_its_fixed_centre_and_the_cylinders_axis() {
         let a = circle(Vec3::new(0.0, 0.0, 10.0), 4.0);
-        for axis in [Vec3::Z, Vec3::X] {
+        for axis in [UnitVec3::Z, UnitVec3::X] {
             let b = Shape::Round { center: Vec3::new(34.0, 19.0, 27.0), axis, radius: 4.0, angle: TAU, planar: false, lo: -5.0, hi: 5.0 };
             let c = centre(&a, &b).unwrap();
-            let expected = if axis == Vec3::Z { Vec3::new(34.0, 19.0, 10.0) } else { Vec3::new(0.0, 19.0, 27.0) };
+            let expected = if axis == UnitVec3::Z { Vec3::new(34.0, 19.0, 10.0) } else { Vec3::new(0.0, 19.0, 27.0) };
             assert_eq!((c.from, c.to), (Vec3::new(0.0, 0.0, 10.0), expected));
             assert!((c.distance - c.from.dist(expected)).abs() < 1e-12);
             let swapped = centre(&b, &a).unwrap();
@@ -390,8 +389,8 @@ mod tests {
 
     #[test]
     fn two_cylindrical_faces_still_measure_axis_pitch() {
-        let a = Shape::Round { center: Vec3::new(0.0, 0.0, 5.0), axis: Vec3::Z, radius: 4.0, angle: TAU, planar: false, lo: -5.0, hi: 5.0 };
-        let b = Shape::Round { center: Vec3::new(34.0, 19.0, 27.0), axis: Vec3::Z, radius: 4.0, angle: TAU, planar: false, lo: -5.0, hi: 5.0 };
+        let a = Shape::Round { center: Vec3::new(0.0, 0.0, 5.0), axis: UnitVec3::Z, radius: 4.0, angle: TAU, planar: false, lo: -5.0, hi: 5.0 };
+        let b = Shape::Round { center: Vec3::new(34.0, 19.0, 27.0), axis: UnitVec3::Z, radius: 4.0, angle: TAU, planar: false, lo: -5.0, hi: 5.0 };
         let c = centre(&a, &b).unwrap();
         assert_eq!((c.from, c.to), (Vec3::new(0.0, 0.0, 5.0), Vec3::new(34.0, 19.0, 5.0)));
         assert!((c.distance - 1517_f64.sqrt()).abs() < 1e-12);
@@ -399,8 +398,8 @@ mod tests {
 
     #[test]
     fn a_cylinder_to_a_side_plane_measures_from_its_axis() {
-        let cyl = Shape::Round { center: Vec3::new(10.0, 15.0, 5.0), axis: Vec3::Z, radius: 2.5, angle: TAU, planar: false, lo: -5.0, hi: 5.0 };
-        let plane = Shape::Plane { point: Vec3::ZERO, normal: Vec3::new(-1.0, 0.0, 0.0) };
+        let cyl = Shape::Round { center: Vec3::new(10.0, 15.0, 5.0), axis: UnitVec3::Z, radius: 2.5, angle: TAU, planar: false, lo: -5.0, hi: 5.0 };
+        let plane = Shape::Plane { point: Vec3::ZERO, normal: -UnitVec3::X };
         let c = centre(&cyl, &plane).unwrap();
         assert!((c.distance - 10.0).abs() < 1e-12);
         assert!((c.min.unwrap() - 7.5).abs() < 1e-12 && (c.max.unwrap() - 12.5).abs() < 1e-12);
@@ -408,12 +407,12 @@ mod tests {
         let d = centre(&plane, &cyl).unwrap();
         assert_eq!((d.from, d.to), (c.to, c.from));
         // A cylinder crossing a plane has no single axis distance.
-        assert!(centre(&cyl, &Shape::Plane { point: Vec3::ZERO, normal: Vec3::Z }).is_none());
+        assert!(centre(&cyl, &Shape::Plane { point: Vec3::ZERO, normal: UnitVec3::Z }).is_none());
     }
 
     #[test]
     fn an_axis_to_a_crossing_edge_is_the_distance_between_the_lines() {
-        let cyl = Shape::Round { center: Vec3::new(10.0, 15.0, 5.0), axis: Vec3::Z, radius: 2.5, angle: TAU, planar: false, lo: -5.0, hi: 5.0 };
+        let cyl = Shape::Round { center: Vec3::new(10.0, 15.0, 5.0), axis: UnitVec3::Z, radius: 2.5, angle: TAU, planar: false, lo: -5.0, hi: 5.0 };
         let edge = Shape::Line { a: Vec3::new(0.0, 0.0, 10.0), b: Vec3::new(40.0, 0.0, 10.0) };
         let c = centre(&cyl, &edge).unwrap();
         assert!((c.distance - 15.0).abs() < 1e-12);
@@ -425,7 +424,7 @@ mod tests {
     fn a_circle_or_arc_to_a_line_keeps_its_real_center() {
         let edge = Shape::Line { a: Vec3::new(0.0, 0.0, 6.0), b: Vec3::new(68.0, 0.0, 6.0) };
         for angle in [TAU, PI / 2.0] {
-            let round = Shape::Round { center: Vec3::new(34.0, 25.0, 20.0), axis: Vec3::Z, radius: 12.0, angle, planar: true, lo: 0.0, hi: 0.0 };
+            let round = Shape::Round { center: Vec3::new(34.0, 25.0, 20.0), axis: UnitVec3::Z, radius: 12.0, angle, planar: true, lo: 0.0, hi: 0.0 };
             let c = centre(&round, &edge).unwrap();
             assert_eq!((c.from, c.to), (Vec3::new(34.0, 25.0, 20.0), Vec3::new(34.0, 0.0, 6.0)));
             assert!((c.distance - 25_f64.hypot(14.0)).abs() < 1e-12);
@@ -442,7 +441,7 @@ mod tests {
     #[test]
     fn a_tilted_arc_to_a_sloped_line_keeps_all_components() {
         let edge = Shape::Line { a: Vec3::ZERO, b: Vec3::new(6.0, 0.0, 6.0) };
-        for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+        for axis in [UnitVec3::X, UnitVec3::Y, UnitVec3::Z] {
             let arc = Shape::Round { center: Vec3::new(3.0, 4.0, 6.0), axis, radius: 2.0, angle: PI, planar: true, lo: 0.0, hi: 0.0 };
             let c = centre(&arc, &edge).unwrap();
             assert!(c.from.dist(Vec3::new(3.0, 4.0, 6.0)) < 1e-12);
@@ -468,8 +467,8 @@ mod tests {
         let ring = |n: usize, span: f64| -> Vec<Vec3> {
             (0..=n).map(|i| Vec3::new((span * i as f64 / n as f64).cos(), (span * i as f64 / n as f64).sin(), 0.0)).collect()
         };
-        assert!((coverage(Vec3::ZERO, Vec3::Z, &ring(32, PI)) - PI).abs() < 1e-9);
-        assert_eq!(coverage(Vec3::ZERO, Vec3::Z, &ring(32, TAU)), TAU);
+        assert!((coverage(Vec3::ZERO, UnitVec3::Z, &ring(32, PI)) - PI).abs() < 1e-9);
+        assert_eq!(coverage(Vec3::ZERO, UnitVec3::Z, &ring(32, TAU)), TAU);
     }
 
     #[test]

@@ -40,6 +40,8 @@ static GALICIAN: Catalog = Catalog::new("gl", "Galego", include_str!(concat!(env
 static ITALIAN: Catalog = Catalog::new("it", "Italiano", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/it.json")));
 static JAPANESE: Catalog = Catalog::new("ja", "日本語", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/ja.json")));
 static KOREAN: Catalog = Catalog::new("ko", "한국어", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/ko.json")));
+static MALAY: Catalog = Catalog::new("ms", "Bahasa Melayu", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/ms.json")));
+static POLISH: Catalog = Catalog::new("pl", "Polski", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/pl.json")));
 static PORTUGUESE_BR: Catalog =
     Catalog::new("pt-BR", "Português (Brasil)", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/pt-BR.json")));
 static RUSSIAN: Catalog = Catalog::new("ru", "Русский", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/ru.json")));
@@ -59,6 +61,8 @@ pub const LOCALES: &[&Catalog] = &[
     &ITALIAN,
     &JAPANESE,
     &KOREAN,
+    &MALAY,
+    &POLISH,
     &PORTUGUESE_BR,
     &RUSSIAN,
     &TURKISH,
@@ -102,8 +106,12 @@ impl Locale {
         interpolate(self.text(id), args)
     }
 
-    /// The default names SolidCraft gives (`Sketch1`, `Body2`, `Component3`), translated.
+    /// The default names SolidCraft gives (`Untitled` for a new design, `Sketch1`, `Body2`,
+    /// `Component3`), translated.
     fn default_name(self, text: &str) -> Option<String> {
+        if text == "Untitled" {
+            return Some(self.text("ui.untitled").to_string());
+        }
         for (prefix, id) in [("Sketch", "browser.sketch_name"), ("Body", "browser.body_name"), ("Component", "browser.component_name")] {
             if let Some(number) = text.strip_prefix(prefix)
                 && !number.is_empty()
@@ -193,6 +201,11 @@ impl Drop for LanguageScope {
     }
 }
 
+/// This thread's language, to carry into a worker thread with [`scope`].
+pub fn language() -> &'static str {
+    CURRENT.with(|current| current.get().0.id)
+}
+
 pub fn tr(id: &str) -> &str {
     CURRENT.with(|current| current.get().text(id))
 }
@@ -221,6 +234,19 @@ mod tests {
         assert_eq!(ids.first(), Some(&"en"));
         assert!(ids[1..].is_sorted(), "{ids:?}");
     }
+
+    /// A new design's name, `Untitled`, is a default name like `Sketch1`: it shows translated
+    /// wherever the design's name is shown (the tab, the browser's top row, the save prompt).
+    #[test]
+    fn a_new_designs_name_is_translated_like_the_other_default_names() {
+        let ja = Locale::for_language("ja");
+        assert_eq!(ja.given_name("Untitled"), ja.text("ui.untitled"));
+        assert_ne!(ja.given_name("Untitled"), "Untitled");
+        assert_eq!(Locale::for_language("en").given_name("Untitled"), "Untitled");
+        // Only the whole default name: names people type stay as typed.
+        assert_eq!(ja.given_name("Untitled bracket"), "Untitled bracket");
+        assert_eq!(ja.given_name("Boss"), "Boss");
+    }
     use std::collections::BTreeSet;
 
     fn placeholders(text: &str) -> BTreeSet<&str> {
@@ -241,7 +267,7 @@ mod tests {
     }
 
     /// Catalogs delivered complete. English is the source catalog; Czech, Italian, Japanese and Chinese
-    /// are complete. German, Korean, Russian, French and Ukrainian
+    /// are complete. German, Korean, Malay, Russian, French and Ukrainian
     /// are partial (German and Korean predate the coverage guards; Russian, French and Ukrainian
     /// are kept partial so a new label doesn't need more translations), so their gaps fall back
     /// to English and are reported by `cargo xtask i18n` without failing the build, while
@@ -324,6 +350,7 @@ mod tests {
             ("ja", "フランジ", "ゼブラ解析", "モーション スタディ"),
             ("de", "Flansch", "Zebra-Analyse", "Bewegungsuntersuchung"),
             ("ko", "플랜지", "얼룩말줄무늬 분석", "운동 연구"),
+            ("pl", "Kołnierz", "Analiza zebry", "Badanie ruchu"),
             ("ru", "Фланец", "Зебра-анализ", "Исследование движения"),
             ("fr", "Bord tombé", "Analyse zébrée", "Étude de mouvement"),
             ("uk", "Фланець", "Зебра-аналіз", "Дослідження руху"),
@@ -542,6 +569,27 @@ mod tests {
         assert_eq!(ko.dynamic("Parameters (5)"), "매개변수 (5)");
         assert_eq!(ko.dynamic("4 degrees of freedom"), "자유도 4개");
         assert_eq!(ko.dynamic("Sketch of bracket"), "Sketch of bracket");
+    }
+
+    #[test]
+    fn malay_catalog_translates_keys_labels_and_browser_patterns() {
+        let ms = Locale::for_language("ms");
+        assert!(is_supported("ms"));
+        assert_eq!(ms.name(), "Bahasa Melayu");
+        assert_eq!(ms.text("ui.preferences"), "Tetapan");
+        assert_eq!(ms.label("Extrude"), "Semperit");
+        assert_eq!(ms.label("CREATE SKETCH"), "CIPTA LAKARAN");
+        assert_eq!(ms.format("document.save_changes", &[("name", "My {design}")]), "Simpan perubahan pada My {design}?");
+        assert_eq!(ms.format("dialog.selected_count", &[("count", "2")]), "↖ 2 dipilih");
+        assert_eq!(ms.dynamic("Sketch1"), "Lakaran1");
+        assert_eq!(ms.dynamic("Body2"), "Jasad2");
+        assert_eq!(ms.dynamic("Component12"), "Komponen12");
+        assert_eq!(ms.dynamic("Units: mm"), "Unit: mm");
+        assert_eq!(ms.dynamic("Precision: 3"), "Ketepatan: 3");
+        assert_eq!(ms.dynamic("Parameters (5)"), "Parameter (5)");
+        assert_eq!(ms.dynamic("4 degrees of freedom"), "4 darjah kebebasan");
+        assert_eq!(ms.given_name("Sketch of bracket"), "Sketch of bracket");
+        assert_eq!(ms.label("NonExistentKey"), "NonExistentKey");
     }
 
     #[test]

@@ -138,6 +138,29 @@ fn edit_joint_runs_edit_and_limits() {
     assert!((j.offset - 2.0).abs() < 1e-12);
 }
 
+/// Edit Joint shows an offset typed as an expression as that expression, and OK keeps it; the
+/// dialog's plain numbers keep no expression.
+#[test]
+fn edit_joint_keeps_an_offset_typed_as_an_expression() {
+    let mut app = two_boxes();
+    let (a, b) = (occ(&app, "A"), occ(&app, "B"));
+    app.run("parameters.add", json!({"name": "gap", "expression": "3 mm"})).unwrap();
+    let (fa, fb) = (json!({"occurrence": a, "face": [10, 10, 10]}), json!({"occurrence": b, "face": [40, 10, 0]}));
+    app.run("joint.create", json!({"type": "rigid", "a": fa, "b": fb, "offset": "gap", "angle": "0 deg"})).unwrap();
+    let id = app.session.doc.assembly.joints[0].id;
+    let mut d = edit_joint(&app, id).unwrap();
+    if let Kind::Assembly(Asm::Joint(f)) = &mut d.kind {
+        assert_eq!(f.offset[2], "gap");
+        f.flip = true;
+    }
+    for (id, p) in apply_commands(&app, &d).unwrap() {
+        app.run(&id, p).unwrap();
+    }
+    let j = &app.session.doc.assembly.joints[0];
+    assert!(j.flip);
+    assert_eq!((j.exprs.offset.as_deref(), j.exprs.angle.as_deref()), (Some("gap"), None));
+}
+
 /// As-built joints and rigid groups take components from body picks; New Component makes one
 /// from bodies when bodies are picked.
 #[test]
@@ -273,7 +296,7 @@ fn picks_on_one_component_say_why_and_offer_components() {
     assert!(text_at(&out, &why).is_none(), "nothing left to say");
 }
 
-/// Two top faces mate face to face as in Fusion: B ends up upside down on A, not inside it;
+/// Two top faces mate face to face: B ends up upside down on A, not inside it;
 /// Flip turns it back over (into A).
 #[test]
 fn face_snaps_mate_face_to_face() {

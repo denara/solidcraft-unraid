@@ -26,5 +26,5 @@ solidcraft-kernel = { workspace = true }
 # Headless pictures of real designs (capture tests).
 solidcraft-engine = { workspace = true }
 serde_json = { workspace = true }
-# The HLSL the D3D12 backend compiles (tests check it suits FXC).
-naga = { workspace = true, features = ["wgsl-in", "hlsl-out"] }
+# Shader translation checks: D3D12 HLSL for FXC, and portable WebGL/OpenGL GLSL.
+naga = { workspace = true, features = ["wgsl-in", "hlsl-out", "glsl-out"] }

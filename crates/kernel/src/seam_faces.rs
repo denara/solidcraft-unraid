@@ -36,7 +36,6 @@ fn next_split(body: &Body) -> Option<(usize, Plane)> {
             FaceSurface::Cone { apex, axis, .. } => (apex, axis),
             _ => return None,
         };
-        let axis = axis.normalized()?;
         let p = from_p3(seam.front().point());
         let off = p - origin;
         let radial: Vec3 = (off - axis * off.dot(axis)).normalized()?;

@@ -14,7 +14,7 @@
 //! band, a hole that is not round all the way, a pin end inside the hole), the overlap is not
 //! answered here and the caller takes the general boolean.
 
-use solidcraft_geom::{Aabb3, Vec3};
+use solidcraft_geom::{Aabb3, UnitVec3, Vec3};
 
 use crate::body::Body;
 use crate::{BoolOp, FaceSurface};
@@ -43,7 +43,7 @@ const STEP: f64 = 0.1;
 struct Wall {
     faces: Vec<usize>,
     origin: Vec3,
-    axis: Vec3,
+    axis: UnitVec3,
     radius: f64,
     /// Material inside the cylinder (a pin), not outside it (a hole).
     boss: bool,
@@ -209,7 +209,7 @@ fn cylinders(b: &Body) -> Vec<Wall> {
     (0..b.face_count())
         .filter_map(|i| match crate::face_surface(b, i)? {
             FaceSurface::Cylinder { origin, axis, radius } if origin.is_finite() && radius.is_finite() && radius > 0.0 => {
-                Some(Wall { faces: vec![i], origin, axis: axis.normalized()?, radius, boss: false, spans: Vec::new() })
+                Some(Wall { faces: vec![i], origin, axis, radius, boss: false, spans: Vec::new() })
             }
             _ => None,
         })

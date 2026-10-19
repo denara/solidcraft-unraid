@@ -290,7 +290,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Sm, inputs: &mut [Sel
             row_label(ui, "Length");
             enter |= field(ui, length);
             ui.end_row();
-            row_label(ui, "Gap");
+            row_label(ui, "ui.sheet_gap");
             let r = ui.add(egui::TextEdit::singleline(gap).hint_text(crate::i18n::tr_label("from the rule")));
             crate::params_dialog::complete(ui, &r, gap);
             enter |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));

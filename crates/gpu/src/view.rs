@@ -14,14 +14,17 @@ use wgpu::util::DeviceExt;
 
 use crate::pbr;
 
+mod ao;
+
 /// Triangle vertex: position (3 × f32), normal (3 × f32), sRGB colour (4 × u8).
 pub const TRI_SIZE: usize = 28;
 pub const PBR_SIZE: usize = pbr::VERTEX_SIZE;
 /// Line instance: a, b (3 × f32 each), colour (4 × u8), width in pixels (f32).
 pub const LINE_SIZE: usize = 32;
-/// The shader's `U`: the view-projection matrix, 9 `vec4`s, the 8 analysis colours, their
-/// flags and the depth direction (`uniform_bytes`).
-const UNIFORM_SIZE: u64 = 368;
+/// The shader's `U`: the view-projection matrix, 10 `vec4`s (the tenth carries the ambient
+/// occlusion radius), the 8 analysis colours, their flags and the depth direction
+/// (`uniform_bytes`).
+const UNIFORM_SIZE: u64 = 384;
 
 /// A body drawn from its display plan, evaluated on the GPU: the plan, and a colour per face
 /// (the plan's face numbering; faces past the end take the last colour).
@@ -245,6 +248,8 @@ pub struct Frame {
     /// Eye position and 1 for a perspective camera (0: orthographic), for the section cap's depth
     /// and the depth bias.
     pub eye: [f32; 4],
+    /// World-space occlusion radius; zero skips the depth prepass and all AO sampling.
+    pub ao_radius: f32,
     /// Supersampling (#1288): draw the frame this many times the viewport's pixels in each
     /// direction and filter it down (1: off). Under 1 the frame is drawn smaller and filtered up
     /// (the product preview past its pixel budget, #1464).
@@ -541,6 +546,8 @@ impl Batches {
 
 /// The viewport's pipelines and the scenes uploaded to one device, for one kind of target.
 pub struct Renderer {
+    /// The AO depth prepass resources (a 1 × 1 stand-in while ambient occlusion is off).
+    ao: ao::Resources,
     tri: wgpu::RenderPipeline,
     /// `tri` and `tri_cut` for planned bodies (positions and normals from the GPU evaluation,
     /// colours per vertex, indexed).
@@ -959,9 +966,10 @@ impl Renderer {
                 count: None,
             }],
         });
+        let ao = ao::Resources::new(device, &bgl, &module, reversed);
         let solid_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("sc_solid"),
-            bind_group_layouts: &[Some(&bgl), Some(&access_bgl)],
+            bind_group_layouts: &[Some(&bgl), Some(&access_bgl), Some(&ao.layout)],
             immediate_size: 0,
         });
         let built = [Some(tri_layout())];
@@ -1108,6 +1116,7 @@ impl Renderer {
             })
         });
         Renderer {
+            ao,
             depth_reset,
             target: t,
             max_texture: device.limits().max_texture_dimension_2d,
@@ -1305,6 +1314,7 @@ impl Renderer {
             res.access_bind = access_texture(device, Some(queue), &res.access_bgl, a.size, &a.depth);
             res.access_version = a.version;
         }
+        res.ao.prepare(device, encoder, &res.bind, cb.ao_radius, cb.size_px, res.target.reversed_depth(), [&res.model, &res.preview]);
         // Images: upload new or changed textures, drop removed ones, rebuild the quads.
         res.textures.retain(|id, _| cb.images.iter().any(|i| i.id == *id));
         res.quads.clear();
@@ -1414,6 +1424,7 @@ impl Renderer {
         lines(pass, &res.overlay, &m.under);
         lines(pass, &res.overlay, &sk.under);
         pass.set_bind_group(1, &res.access_bind, &[]);
+        pass.set_bind_group(2, &res.ao.bind, &[]);
         let planned = |pass: &mut wgpu::RenderPass<'static>, p: &wgpu::RenderPipeline| {
             for d in &m.planned {
                 pass.set_pipeline(p);
@@ -1570,6 +1581,7 @@ pub fn uniform_bytes(cb: &Frame, w: f32, h: f32, linear: bool, reversed: bool) -
         None => v.extend([0.0; 8]),
     }
     v.extend(cb.eye);
+    v.extend([cb.ao_radius, 0.0, 0.0, 0.0]);
     v.extend(cb.analysis_colors);
     v.extend([if reversed { 1.0 } else { 0.0 }, FACE_STEPS as f32, FACE_SLOPE, 0.0]);
     v.iter().flat_map(|x| x.to_le_bytes()).collect()

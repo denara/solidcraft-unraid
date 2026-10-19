@@ -166,7 +166,7 @@ fn filleting_a_side_keeps_its_original_midpoint() {
 /// The spout of a basin: a vertical riser and a horizontal top, the top's length dimensioned
 /// to the corner and the corner's height dimensioned from the origin. Filleting the corner used
 /// to drop the height and leave the length on the shortened straight part, so the top came out
-/// a fillet radius too long. Like Fusion, the corner now stays as a virtual sharp corner (a point
+/// a fillet radius too long. The corner now stays as a virtual sharp corner (a point
 /// on both lines' extensions) and the dimensions measure to it.
 #[test]
 fn a_fillet_keeps_the_dimensions_of_its_corner_on_a_virtual_sharp() {

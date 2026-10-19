@@ -1,7 +1,7 @@
 //! What surface a face lies on (plane, cylinder, cone, sphere, torus), for construction
 //! geometry: axes through round faces, centres of spheres and tori.
 
-use solidcraft_geom::Vec3;
+use solidcraft_geom::{UnitVec3, Vec3};
 
 use truck_modeling as mt;
 
@@ -9,23 +9,23 @@ use crate::Body;
 use crate::body::from_p3;
 use crate::offset::{Surf, surf_of};
 
-/// A face's analytic surface. Axes are unit vectors.
+/// A face's analytic surface.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FaceSurface {
     /// Outward unit normal and a point on the plane.
     Plane {
-        normal: Vec3,
+        normal: UnitVec3,
         point: Vec3,
     },
     Cylinder {
         origin: Vec3,
-        axis: Vec3,
+        axis: UnitVec3,
         radius: f64,
     },
     /// Apex, axis pointing into the cone, half-angle (radians).
     Cone {
         apex: Vec3,
-        axis: Vec3,
+        axis: UnitVec3,
         half_angle: f64,
     },
     Sphere {
@@ -35,7 +35,7 @@ pub enum FaceSurface {
     /// Centre of the ring, its axis, the ring (major) and tube (minor) radii.
     Torus {
         center: Vec3,
-        axis: Vec3,
+        axis: UnitVec3,
         major: f64,
         minor: f64,
     },
@@ -50,11 +50,11 @@ pub fn face_surface(b: &Body, face: usize) -> Option<FaceSurface> {
 pub(crate) fn surface_of(f: &mt::Face, size: f64) -> Option<FaceSurface> {
     let tol = (size * 1e-7).max(1e-9) * 100.0;
     Some(match surf_of(f, tol)? {
-        Surf::Plane { n, d } => FaceSurface::Plane { normal: n, point: n * d },
-        Surf::Cylinder { o, a, r, .. } => FaceSurface::Cylinder { origin: o, axis: a, radius: r },
-        Surf::Cone { v, a, half, .. } => FaceSurface::Cone { apex: v, axis: a, half_angle: half },
+        Surf::Plane { n, d } => FaceSurface::Plane { normal: n.unit()?, point: n * d },
+        Surf::Cylinder { o, a, r, .. } => FaceSurface::Cylinder { origin: o, axis: a.unit()?, radius: r },
+        Surf::Cone { v, a, half, .. } => FaceSurface::Cone { apex: v, axis: a.unit()?, half_angle: half },
         Surf::Sphere { c, r, .. } => FaceSurface::Sphere { center: c, radius: r },
-        Surf::Torus { o, a, big, h, r, .. } => FaceSurface::Torus { center: o + a * h, axis: a, major: big, minor: r },
+        Surf::Torus { o, a, big, h, r, .. } => FaceSurface::Torus { center: o + a * h, axis: a.unit()?, major: big, minor: r },
     })
 }
 
@@ -62,8 +62,8 @@ pub(crate) fn surface_of(f: &mt::Face, size: f64) -> Option<FaceSurface> {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EdgeCircle {
     pub center: Vec3,
-    /// Unit normal of the circle's plane, oriented so the edge runs counter-clockwise about it.
-    pub axis: Vec3,
+    /// Normal of the circle's plane, oriented so the edge runs counter-clockwise about it.
+    pub axis: UnitVec3,
     pub radius: f64,
     /// The edge's ends (the same point for a closed circle).
     pub start: Vec3,
@@ -106,7 +106,7 @@ fn circle_through(s: &[Vec3], tol: f64) -> Option<EdgeCircle> {
         return None;
     }
     let center = a + (v * u.len2() - u * v.len2()).cross(w) * (1.0 / (2.0 * w.len2()));
-    let axis = w.normalized()?;
+    let axis = w.unit()?;
     let radius = center.dist(a);
     if !(radius.is_finite() && radius > tol) || s.iter().any(|p| (p.dist(center) - radius).abs() > tol || (*p - center).dot(axis).abs() > tol) {
         return None;
@@ -132,7 +132,7 @@ fn circle_through(s: &[Vec3], tol: f64) -> Option<EdgeCircle> {
         angle += d;
         last = t;
     }
-    let (axis, angle) = if angle < 0.0 { (axis * -1.0, -angle) } else { (axis, angle) };
+    let (axis, angle) = if angle < 0.0 { (-axis, -angle) } else { (axis, angle) };
     let angle = if closed { std::f64::consts::TAU } else { angle.min(std::f64::consts::TAU) };
     Some(EdgeCircle { center, axis, radius, start, end, angle })
 }
@@ -180,19 +180,19 @@ mod tests {
     /// Each surface's nearest point, worked out by hand.
     #[test]
     fn the_nearest_point_of_each_surface() {
-        let plane = FaceSurface::Plane { normal: Vec3::Z, point: Vec3::new(0.0, 0.0, 4.0) };
+        let plane = FaceSurface::Plane { normal: UnitVec3::Z, point: Vec3::new(0.0, 0.0, 4.0) };
         assert!(near(plane.nearest(Vec3::new(3.0, 5.0, 9.0)), Vec3::new(3.0, 5.0, 4.0)));
         // A cylinder of radius 5 about the line x = 1, y = 2: (7, 10, 3) is 10 from it along (3, 4)/5.
-        let cylinder = FaceSurface::Cylinder { origin: Vec3::new(1.0, 2.0, 0.0), axis: Vec3::Z, radius: 5.0 };
+        let cylinder = FaceSurface::Cylinder { origin: Vec3::new(1.0, 2.0, 0.0), axis: UnitVec3::Z, radius: 5.0 };
         assert!(near(cylinder.nearest(Vec3::new(7.0, 10.0, 3.0)), Vec3::new(4.0, 6.0, 3.0)));
         assert!(cylinder.nearest(Vec3::new(1.0, 2.0, 3.0)).is_none(), "on the axis every direction is as near");
         let sphere = FaceSurface::Sphere { center: Vec3::new(1.0, 2.0, 3.0), radius: 5.0 };
         assert!(near(sphere.nearest(Vec3::new(1.0, 2.0, 13.0)), Vec3::new(1.0, 2.0, 8.0)));
         // A torus of ring radius 10 and tube radius 2 about Z: (14, 0, 0) is 2 beyond the tube's outside.
-        let torus = FaceSurface::Torus { center: Vec3::ZERO, axis: Vec3::Z, major: 10.0, minor: 2.0 };
+        let torus = FaceSurface::Torus { center: Vec3::ZERO, axis: UnitVec3::Z, major: 10.0, minor: 2.0 };
         assert!(near(torus.nearest(Vec3::new(14.0, 0.0, 0.0)), Vec3::new(12.0, 0.0, 0.0)));
         // A cone of half-angle 45 degrees: (2, 0, 0) is √2 along its line (1, 0, 1)/√2.
-        let cone = FaceSurface::Cone { apex: Vec3::ZERO, axis: Vec3::Z, half_angle: std::f64::consts::FRAC_PI_4 };
+        let cone = FaceSurface::Cone { apex: Vec3::ZERO, axis: UnitVec3::Z, half_angle: std::f64::consts::FRAC_PI_4 };
         assert!(cone.nearest(Vec3::new(2.0, 0.0, 0.0)).is_some_and(|q| q.dist(Vec3::new(1.0, 0.0, 1.0)) < 1e-12));
         assert!(plane.nearest(Vec3::new(f64::NAN, 0.0, 0.0)).is_none());
     }

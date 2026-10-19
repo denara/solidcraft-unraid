@@ -415,7 +415,7 @@ pub fn app_bar(app: &mut SolveApp, ui: &mut egui::Ui) {
         if response.on_hover_text(crate::i18n::tr_label("Report a bug — review a screenshot and open a GitHub draft")).clicked() {
             crate::help::run(app, &ui.ctx().clone(), "report");
         }
-        // Preferences, at the top right like Fusion's profile menu (also Ctrl+,).
+        // Preferences, at the top right (also Ctrl+,).
         let gear = Rect::from_center_size(pos2(r.right() - captions - 70.0, r.center().y), vec2(24.0, 24.0));
         let gresp = ui.interact(gear, ui.id().with("sc_prefs_button"), Sense::click());
         if gresp.hovered() {

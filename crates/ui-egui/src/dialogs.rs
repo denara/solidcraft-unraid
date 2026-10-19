@@ -116,6 +116,14 @@ pub enum Kind {
     },
     /// Halfway between two planes or planar faces.
     Midplane,
+    /// A construction axis, point or plane made from picks alone (#2474): input `i` is the
+    /// command's parameter `keys[i]`, and `t` (along a path) when it takes one.
+    Construct {
+        command: &'static str,
+        title: &'static str,
+        keys: Vec<&'static str>,
+        t: Option<String>,
+    },
     /// A construction plane through an axis at an angle to a plane.
     AnglePlane {
         angle: String,
@@ -481,7 +489,7 @@ impl Dialog {
             "solid.chamfer" => Dialog::new(fillet_kind("1 mm", true), vec![SelInput::new("Edges", EDGES | FACES, true)]),
             "solid.shell" => {
                 let mut d = Dialog::new(Kind::Shell { thickness: "2 mm".into() }, vec![SelInput::new("Faces/Body", FACES, true)]);
-                // Fusion opens faces joined smoothly to the picked ones too.
+                // Faces joined smoothly to the picked ones too.
                 d.extra.insert("tangent_chain".into(), json!(true));
                 d
             }
@@ -523,12 +531,19 @@ impl Dialog {
             "solid.pipe" => Dialog::new(Kind::Pipe { diameter: "5 mm".into(), wall: String::new() }, vec![SelInput::new("Path", CURVES, true)]),
             "solid.bounding_solid" => Dialog::new(Kind::Stock { margin: "2 mm".into() }, vec![SelInput::new("Bodies (all if none)", BODIES, true)]),
             "construct.plane.offset" => {
-                Dialog::new(Kind::OffsetPlane { offset: "10 mm".into() }, vec![SelInput::new("Plane", PLANES | PLANAR_FACES, false)])
+                Dialog::new(Kind::OffsetPlane { offset: "0 mm".into() }, vec![SelInput::new("Plane", PLANES | PLANAR_FACES, false)])
             }
             "construct.plane.midplane" => Dialog::new(
                 Kind::Midplane,
                 vec![SelInput::new("First plane", PLANES | PLANAR_FACES, false), SelInput::new("Second plane", PLANES | PLANAR_FACES, false)],
             ),
+            id if construct_picks(id).is_some() => {
+                let (command, title, picks) = construct_picks(id)?;
+                let inputs = picks.iter().map(|(label, accept, _)| SelInput::new(label, *accept, false)).collect();
+                let keys = picks.iter().map(|(_, _, key)| *key).collect();
+                let t = (command == "construct.point.along_path").then(|| "0.5".to_string());
+                Dialog::new(Kind::Construct { command, title, keys, t }, inputs)
+            }
             "construct.plane.along_path" => {
                 Dialog::new(Kind::PathPlane { t: "0.5".into(), sketch: None }, vec![SelInput::new("Path", CURVES | EDGES, false)])
             }
@@ -805,6 +820,7 @@ impl Dialog {
                 | Kind::Sweep { .. }
                 | Kind::PathPlane { .. }
                 | Kind::Midplane
+                | Kind::Construct { .. }
                 | Kind::Move { .. }
                 | Kind::Hole { .. }
                 | Kind::Primitive { .. }
@@ -1034,6 +1050,22 @@ fn default_profiles(s: &Session) -> Vec<Sel> {
         Some((id, 1)) => vec![Sel::Profile { sketch: id, index: 0 }],
         _ => Vec::new(),
     }
+}
+
+/// The sketch point (its sketch and id) a Single hole's face place `x` sits on: the one it was
+/// opened at, else a point a shown sketch shows exactly there (where a pick snapped to it).
+fn single_hole_point(app: &SolveApp, d: &Dialog, x: &Sel) -> Option<(u64, String)> {
+    let Sel::Face { point, .. } = x else { return None };
+    if let Some(k) = d.extra.get("single_point").filter(|k| k["point"] == pt3(*point)) {
+        return Some((k["sketch"].as_u64()?, k["id"].as_str()?.to_string()));
+    }
+    let st = app.session.world_state();
+    crate::viewport::visible_sketches(app).into_iter().find_map(|sid| {
+        let ss = st.sketch(sid)?;
+        let shown = SnapPoints::of(&ss.sketch);
+        let p = ss.sketch.points.iter().find(|p| shown.takes(p) && ss.plane.to_world(p.pos).dist(*point) < 1e-9)?;
+        Some((sid, p.id.clone()))
+    })
 }
 
 /// Does an input take face places that snap to sketch points on the face (the Single hole's)?
@@ -1377,7 +1409,7 @@ fn tr(text: &str) -> &str {
 }
 
 /// A dialog row's widget, for scenarios and demos: the handle `dialog:<row label>`.
-fn publish_row(r: &egui::Response) {
+pub(crate) fn publish_row(r: &egui::Response) {
     ROW.with(|row| crate::scenario::publish_handle(&format!("dialog:{}", row.borrow()), r.rect.center()));
 }
 
@@ -1395,6 +1427,7 @@ fn title(k: &Kind) -> &'static str {
         Kind::Material { .. } => "PHYSICAL MATERIAL",
         Kind::OffsetPlane { .. } => "OFFSET PLANE",
         Kind::Midplane => "MIDPLANE",
+        Kind::Construct { title, .. } => title,
         Kind::PathPlane { .. } => "PLANE ALONG PATH",
         Kind::Rib { web: false, .. } => "RIB",
         Kind::Rib { web: true, .. } => "WEB",
@@ -1864,6 +1897,11 @@ fn error_rows(app: &mut SolveApp, ctx: &egui::Context, d: &mut Dialog, ui: &mut 
     {
         d.refuse(app, error);
     }
+    // For Corner dialogs (fillet/chamfer), propagate preview errors to `d.error`
+    // so impossible sizes still show a refusal message and tests can check it.
+    if matches!(d.kind, Kind::SketchModify(crate::sketch_modify_ui::Mod::Corner { .. })) && app.preview.error.is_some() && d.error.is_none() {
+        d.error = app.preview.error.clone();
+    }
     if let Some(error) = d.error.as_ref().or(app.preview.error.as_ref()).cloned() {
         if !full_width {
             row_label(ui, "");
@@ -2208,6 +2246,11 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     let has_ok = !matches!(d.kind, Kind::Sketch | Kind::Params { .. } | Kind::Measure { .. });
     let valid = match &d.kind {
         Kind::SaveMesh(_) => crate::dialogs_save_mesh::ready(&d.inputs),
+        Kind::SketchModify(crate::sketch_modify_ui::Mod::Corner { .. }) => {
+            // Corner dialogs: preview errors are visual only; validation errors from
+            // `apply_commands` go to `d.error`. OK stays enabled when the preview fails.
+            !has_ok || (built.unwrap_or_else(|| apply_commands(app, &d).is_ok()))
+        }
         _ => !has_ok || !d.previews() || (built.unwrap_or_else(|| apply_commands(app, &d).is_ok()) && app.preview.error.is_none()),
     };
     let width = if wide { crate::frame::Width::Wide } else { crate::frame::Width::Normal };
@@ -2702,7 +2745,12 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                         enter |= field(ui, t);
                         ui.end_row();
                     }
-                    Kind::Split | Kind::ReplaceFace | Kind::Remove | Kind::Midplane => {}
+                    Kind::Split | Kind::ReplaceFace | Kind::Remove | Kind::Midplane | Kind::Construct { t: None, .. } => {}
+                    Kind::Construct { t: Some(t), .. } => {
+                        row_label(ui, "Position (0 to 1)");
+                        enter |= field(ui, t);
+                        ui.end_row();
+                    }
                     Kind::Rib { thickness, depth, flip, normal, .. } => {
                         row_label(ui, "Direction");
                         let mut i = usize::from(*normal);
@@ -3370,6 +3418,19 @@ fn stored_length(s: &Session, e: &str) -> String {
     if s.doc.with_design_unit(e, ValueKind::Length) == e { e.to_string() } else { format!("{} mm", e.trim()) }
 }
 
+/// A stored value as its edit field shows it (#1936): a bare number is written with the unit the
+/// engine reads it in, "2" as "2 mm" for a length and "5" as "5 deg" for an angle, so the field
+/// and the on-canvas tag name the unit as the other dialogs do. The number keeps its stored text.
+/// Counts, units already written, parameter names, expressions and empty text show as stored.
+pub(crate) fn shown_expr(e: &str, kind: ValueKind) -> String {
+    let unit = match kind {
+        ValueKind::Length => "mm",
+        ValueKind::Angle => "deg",
+        _ => return e.to_string(),
+    };
+    if solidcraft_engine::doc::expr::is_bare_number(e) { format!("{} {unit}", e.trim()) } else { e.to_string() }
+}
+
 fn hole_defaults() -> Kind {
     Kind::Hole {
         diameter: "5 mm".into(),
@@ -3974,6 +4035,18 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
             let b = plane_arg(app, sels(d, 1).first())?;
             ("construct.plane.midplane", json!({"a": a, "b": b}))
         }
+        Kind::Construct { command, keys, t, .. } => {
+            let mut p = serde_json::Map::new();
+            for (i, key) in keys.iter().enumerate() {
+                let input = d.inputs.get(i).map_or("", |inp| inp.label);
+                let sel = sels(d, i).first().ok_or_else(|| format!("pick the {}", input.to_lowercase()))?;
+                p.insert((*key).to_string(), construct_ref(app, sel)?);
+            }
+            if let Some(t) = t {
+                p.insert("t".into(), json!(t));
+            }
+            (*command, Value::Object(p))
+        }
         Kind::PathPlane { t, sketch } => {
             need(0, "a path")?;
             let path = match sels(d, 0).first() {
@@ -4213,7 +4286,12 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
                     }
                     taken.extend(crate::viewport::grouped_selection(s, x));
                     let kept = d.extra.get("position_exprs").filter(|k| face_point(x).is_some_and(|p| p == k["point"])).map(|k| k["at"].clone());
-                    places.extend(face_point(x).map(|p| json!({ "position": kept.unwrap_or(p) })));
+                    // A place snapped to a sketch point keeps the point, so the hole follows it (#2110).
+                    let snapped = if kept.is_none() { single_hole_point(app, d, x) } else { None };
+                    places.extend(face_point(x).map(|p| match snapped {
+                        Some((sk, id)) => json!({"sketch": sk, "points": [id], "single": true}),
+                        None => json!({ "position": kept.unwrap_or(p) }),
+                    }));
                 }
             }
             let mut out = Vec::new();
@@ -4566,6 +4644,87 @@ fn emboss_face_sel(s: &Session, component: u64, face: &solidcraft_engine::doc::E
     Some(Sel::Face { body: world_name, index, point })
 }
 
+/// The construct tools that take only picks (#2474, #2494): their command, dialog title and
+/// inputs as (label, what it accepts, parameter). Offset Plane, Midplane, Plane Along Path and
+/// Plane At Angle have dialogs of their own.
+fn construct_picks(id: &str) -> Option<(&'static str, &'static str, &'static [(&'static str, Accept, &'static str)])> {
+    const PLANE: Accept = PLANES | PLANAR_FACES;
+    const POINT: Accept = selection::VERTICES | selection::POINTS;
+    const LINE: Accept = EDGES | AXES;
+    const CURVE: Accept = EDGES | CURVES;
+    Some(match id {
+        "construct.axis.through_cylinder" => ("construct.axis.through_cylinder", "AXIS THROUGH CYLINDER", &[("Face", FACES | EDGES, "face")]),
+        "construct.axis.normal_to_face" => {
+            ("construct.axis.normal_to_face", "AXIS PERPENDICULAR TO FACE", &[("Face", FACES, "face"), ("Point", POINT, "point")])
+        }
+        "construct.axis.two_planes" => {
+            ("construct.axis.two_planes", "AXIS THROUGH TWO PLANES", &[("First plane", PLANE, "a"), ("Second plane", PLANE, "b")])
+        }
+        "construct.axis.two_points" => {
+            ("construct.axis.two_points", "AXIS THROUGH TWO POINTS", &[("First point", POINT, "a"), ("Second point", POINT, "b")])
+        }
+        "construct.axis.edge" => ("construct.axis.edge", "AXIS THROUGH EDGE", &[("Edge", LINE, "edge")]),
+        "construct.point.vertex" => ("construct.point.vertex", "POINT AT VERTEX", &[("Point", POINT, "point")]),
+        "construct.point.two_edges" => {
+            ("construct.point.two_edges", "POINT THROUGH TWO EDGES", &[("First edge", CURVE, "a"), ("Second edge", CURVE, "b")])
+        }
+        "construct.point.three_planes" => (
+            "construct.point.three_planes",
+            "POINT THROUGH THREE PLANES",
+            &[("First plane", PLANE, "a"), ("Second plane", PLANE, "b"), ("Third plane", PLANE, "c")],
+        ),
+        "construct.point.center" => ("construct.point.center", "POINT AT CENTER", &[("Circle or sphere", FACES | CURVE, "of")]),
+        "construct.point.edge_plane" => {
+            ("construct.point.edge_plane", "POINT AT EDGE AND PLANE", &[("Edge", CURVE, "edge"), ("Plane", PLANE, "plane")])
+        }
+        "construct.point.along_path" => ("construct.point.along_path", "POINT ALONG PATH", &[("Path", CURVE, "path")]),
+        "construct.plane.two_edges" => {
+            ("construct.plane.two_edges", "PLANE THROUGH TWO EDGES", &[("First edge", LINE, "a"), ("Second edge", LINE, "b")])
+        }
+        "construct.plane.three_points" => (
+            "construct.plane.three_points",
+            "PLANE THROUGH THREE POINTS",
+            &[("First point", POINT, "a"), ("Second point", POINT, "b"), ("Third point", POINT, "c")],
+        ),
+        "construct.plane.tangent" => ("construct.plane.tangent", "TANGENT PLANE", &[("Face", FACES, "face")]),
+        "construct.plane.perpendicular" => {
+            ("construct.plane.perpendicular", "PERPENDICULAR PLANE", &[("Plane", PLANE, "plane"), ("Line", LINE, "line")])
+        }
+        _ => return None,
+    })
+}
+
+/// A dialog pick as a construction reference (`construct.*`'s `{face|edge|vertex: [x,y,z]}`,
+/// `{plane}`, `{axis}` or `{sketch, point|curve}`).
+fn construct_ref(app: &SolveApp, sel: &Sel) -> Result<Value, String> {
+    Ok(match sel {
+        Sel::Face { point, .. } => json!({"face": pt(*point)}),
+        Sel::Edge { point, .. } => json!({"edge": pt(*point)}),
+        Sel::Vertex { point, .. } => json!({"vertex": pt(*point)}),
+        Sel::Plane { name } => json!({"plane": name}),
+        Sel::Axis { name } => json!({"axis": name}),
+        // Picked across sketches as "<sketch id>:<point id>".
+        Sel::SketchPoint { id } => match id.split_once(':').and_then(|(sk, p)| Some((sk.parse::<u64>().ok()?, p))) {
+            Some((sketch, point)) => json!({"sketch": sketch, "point": point}),
+            None => return Err("pick the point in the viewport".into()),
+        },
+        Sel::SketchCurve { id } => {
+            let st = app.session.world_state();
+            let sketches: Vec<u64> = st
+                .sketches
+                .iter()
+                .filter(|ss| ss.sketch.curve_index(id).is_some() || ss.sketch.wire_index(id).is_some())
+                .map(|ss| ss.feature)
+                .collect();
+            match sketches.as_slice() {
+                [sketch] => json!({"sketch": sketch, "curve": id}),
+                _ => return Err("pick a model edge, or a sketch curve in only one sketch".into()),
+            }
+        }
+        _ => return Err("this pick can't be used here".into()),
+    })
+}
+
 /// A picked plane or planar face as `construct.plane.*` takes it.
 fn plane_arg(app: &SolveApp, sel: Option<&Sel>) -> Result<Value, String> {
     match sel {
@@ -4826,7 +4985,7 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
                 *dia = diameter.to_string();
                 opts.all = depth.is_none();
                 opts.angled = matches!(hole, HoleKind::Drilled { .. });
-                opts.multiple = points.is_some();
+                opts.multiple = points.as_ref().is_some_and(|sp| !sp.single);
                 if let Some(th) = thread {
                     opts.tapped = true;
                     opts.thread = th.clone();
@@ -4853,6 +5012,20 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
             }
             d.kind = k;
             match points {
+                Some(sp) if sp.single => {
+                    // A Single hole at a sketch point: picked on its face where the point is now.
+                    let id = sp.ids.first().cloned().unwrap_or_default();
+                    let st = s.world_state();
+                    let at = st
+                        .sketch(sp.sketch.0)
+                        .and_then(|ss| ss.sketch.points.iter().find(|p| p.id == id).map(|p| ss.plane.to_world(p.pos)))
+                        .unwrap_or(position.0);
+                    if let Some(inp) = d.inputs.first_mut() {
+                        inp.items = vec![face_sel(s, at).unwrap_or(Sel::Face { body: String::new(), index: 0, point: at })];
+                    }
+                    d.extra.insert("direction".into(), pt3(direction.0));
+                    d.extra.insert("single_point".into(), json!({"point": pt3(at), "sketch": sp.sketch.0, "id": id}));
+                }
                 Some(sp) => {
                     d.inputs = vec![SelInput::new("Points", selection::POINTS, true)];
                     if let Some(inp) = d.inputs.first_mut() {

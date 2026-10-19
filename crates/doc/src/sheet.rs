@@ -290,7 +290,7 @@ fn rule_hem_gap() -> String {
 }
 
 impl SheetRule {
-    /// Fusion's default: Steel (mm), 2.5 mm, K 0.44, bend radius = Thickness.
+    /// Default: Steel (mm), 2.5 mm, K 0.44, bend radius = Thickness.
     pub fn steel() -> SheetRule {
         SheetRule {
             name: "Steel (mm)".into(),
@@ -1989,7 +1989,7 @@ impl SheetBody {
             .sum()
     }
 
-    /// Topology counted as Fusion does: a round hole is one face bounded by two closed circular
+    /// Topology counted by faces and loops: a round hole is one face bounded by two closed circular
     /// edges (one vertex each), where the sewn solid splits it into arcs. Returns the change to
     /// the sewn (faces, edges, vertices).
     pub fn round_hole_correction(&self) -> (i64, i64, i64) {

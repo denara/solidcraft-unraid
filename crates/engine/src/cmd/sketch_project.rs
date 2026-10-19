@@ -550,7 +550,7 @@ pub(super) fn project_internal_faces(s: &mut Session, id: u64, body: &str, indic
     Ok(links)
 }
 
-/// Project the edges of the face a new sketch was created on (Fusion's default).
+/// Project the edges of the face a new sketch was created on (the default).
 pub(super) fn auto_project_face(s: &mut Session, id: u64, _at: Vec3) -> Result<Option<String>> {
     let mut doc = (*s.doc).clone();
     let Some(anchor) = doc

@@ -395,7 +395,7 @@ fn lex_spans(s: &str) -> Result<Vec<(Tok, usize, usize)>, DocError> {
             out.push((Tok::Op('-'), at(i), at(i + 1)));
             i += 1;
         } else if c == ';' {
-            // Fusion separates function arguments with `;` in some locales.
+            // Some CAD tools separate function arguments with `;` in some locales.
             out.push((Tok::Op(','), at(i), at(i + 1)));
             i += 1;
         } else if "+-*/^(),%".contains(c) {

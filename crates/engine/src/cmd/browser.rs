@@ -40,7 +40,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("browser.visibility", "Show/Hide", visibility).icon("eye").noundo().params(
         "visible: bool; items?: [sketch id or name | body name | construction name | joint name | O|X|Y|Z|XY|XZ|YZ]; \
          or joints?: [joint id or name] (their glyphs; they still constrain and move parts); \
-         or folder?: bodies|sketches|construction|origin|joints (all of it); or paths?: [[occurrence ids]] (exact placements and descendants), isolate?: bool (requires paths and visible:true). Saved with the design; not an undo step",
+         or folder?: bodies|sketches|construction|origin|joints (all of it; showing also shows its browser folders and groups); \
+         or tree_folders?: [browser folder or group key: c0/bodies, o:4/sketches, c0/g7, c0/joints, c0/canvases] (the folder or group itself: its items keep their own state); \
+         or paths?: [[occurrence ids]] (exact placements and descendants), isolate?: bool (requires paths and visible:true). Saved with the design; not an undo step",
     ),
 ];
 
@@ -87,7 +89,7 @@ fn group(s: &mut Session, p: &Value) -> Result<Value> {
     let component = component_of(s, p, cmd)?;
     let items = keys(p, "items", cmd)?;
     let d = s.doc_mut();
-    let id = d.browser_groups.iter().map(|g| g.id).max().unwrap_or(0) + 1;
+    let id = super::next_free_id(cmd, d.browser_groups.iter().map(|g| g.id))?;
     let name = match str_(p, "name").map(str::trim).filter(|n| !n.is_empty()) {
         Some(n) if n.len() <= 128 => n.to_string(),
         Some(_) => return Err(bad(cmd, "`name` is too long")),
@@ -197,9 +199,46 @@ fn shown_item(s: &Session, key: &str) -> Option<Shown> {
     ORIGIN.iter().find(|o| o.eq_ignore_ascii_case(key)).map(|o| Shown::Origin(o.to_string()))
 }
 
+/// A browser folder or group key (`Visibility::hidden_folders`): `c0` or `o:<ids>`, then
+/// `/bodies`, `/sketches`, `/construction`, `/joints`, `/canvases` or `/g<group id>`.
+fn tree_folder_key(k: &str) -> bool {
+    let Some((scope, last)) = k.rsplit_once('/') else { return false };
+    let scope_ok =
+        scope == "c0" || scope.strip_prefix("o:").is_some_and(|ids| ids.split('/').count() <= 64 && ids.split('/').all(|i| i.parse::<u64>().is_ok()));
+    let last_ok =
+        FOLDERS.contains(&last) || ["joints", "canvases"].contains(&last) || last.strip_prefix('g').is_some_and(|g| g.parse::<u64>().is_ok());
+    k.len() <= 2048 && scope_ok && last_ok
+}
+
 fn visibility(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "browser.visibility";
     let visible = bool_(p, "visible").ok_or_else(|| bad(cmd, "`visible` must be true or false"))?;
+    if let Some(value) = p.get("tree_folders") {
+        if ["items", "folder", "joints", "paths"].iter().any(|k| p.get(*k).is_some()) {
+            return Err(bad(cmd, "give `tree_folders`, `items`, `folder`, `joints` or `paths`, not several"));
+        }
+        let keys = value
+            .as_array()
+            .filter(|a| !a.is_empty() && a.len() <= 10_000)
+            .ok_or_else(|| bad(cmd, "`tree_folders` must list 1..10000 browser folder or group keys"))?;
+        // Every key is checked before anything changes.
+        let keys: Vec<String> = keys
+            .iter()
+            .map(|k| {
+                k.as_str().filter(|k| tree_folder_key(k)).map(str::to_string).ok_or_else(|| {
+                    bad(cmd, "a browser folder or group key is `<c0 | o:ids>/<folder | g<group id>>`, such as `c0/bodies` or `o:4/g7`")
+                })
+            })
+            .collect::<Result<_>>()?;
+        for k in &keys {
+            s.visibility.hidden_folders.retain(|h| h != k);
+            if !visible {
+                s.visibility.hidden_folders.push(k.clone());
+            }
+        }
+        s.revision += 1;
+        return Ok(json!({"visible":visible,"changed":keys.len(),"visibility":s.visibility}));
+    }
     if let Some(value) = p.get("paths") {
         if p.get("items").is_some() || p.get("folder").is_some() {
             return Err(bad(cmd, "give paths, items or folder, not several"));
@@ -291,6 +330,12 @@ fn visibility(s: &mut Session, p: &Value) -> Result<Value> {
         }
         (None, None) => return Err(bad(cmd, "`items` or `folder` is required")),
     };
+    // Showing all of a kind also shows the browser folders and groups that hold it.
+    if visible && let Some(f) = str_(p, "folder") {
+        let groups: Vec<String> = s.doc.browser_groups.iter().filter(|g| g.folder == f).map(|g| format!("/g{}", g.id)).collect();
+        let own = format!("/{f}");
+        s.visibility.hidden_folders.retain(|k| !k.ends_with(&own) && !groups.iter().any(|g| k.ends_with(g.as_str())));
+    }
     let v = &mut s.visibility;
     if visible && str_(p, "folder") == Some("bodies") {
         v.hidden_occurrences.clear();
@@ -979,6 +1024,13 @@ mod tests {
         assert!(std::sync::Arc::ptr_eq(&s.doc, &doc0) && s.undo.len() == undo0, "view state, not a design change");
         run(&mut s, "browser.visibility", json!({"folder": "sketches", "visible": true}));
         assert_eq!(lines(&s), n0);
+        // The browser's Sketches folder hidden: sketches shown one by one aren't drawn either,
+        // only the sketch being edited.
+        assert!(s.visibility.shown_sketches.contains(&floor));
+        assert!([floor, drain].iter().all(|id| !crate::view::sketch_drawn(&s, *id, false)));
+        s.active_sketch = Some(floor);
+        assert!(crate::view::sketch_drawn(&s, floor, false) && !crate::view::sketch_drawn(&s, drain, false));
+        s.active_sketch = None;
         // Bodies (following a rename) and construction planes.
         run(&mut s, "browser.visibility", json!({"items": [body.clone(), "Floor", "xy"], "visible": false}));
         assert!(crate::view::scene(&s, &cam).meshes.is_empty());
@@ -1002,6 +1054,31 @@ mod tests {
             assert!(s.execute("browser.visibility", &p).is_err(), "{p}");
         }
         assert_eq!(s.visibility, before);
+    }
+
+    /// A design file can carry any id, the largest a `u64` holds too: a new group then has no id
+    /// to take. That is an error, not an overflow (a panic where overflow is checked, a duplicate
+    /// id where it is not).
+    #[test]
+    fn a_new_group_after_the_largest_id_is_an_error_not_an_overflow() {
+        let mut s = Session::default();
+        run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10}));
+        let a = names(&s)[0].clone();
+        run(&mut s, "browser.group", json!({"folder": "bodies", "items": [a.clone()]}));
+        s.doc_mut().browser_groups[0].id = u64::MAX;
+        let result = s.execute("browser.group", &json!({"folder": "bodies", "items": [a]}));
+        assert!(!matches!(result, Err(crate::EngineError::Internal(..))), "panicked inside the command: {result:?}");
+        assert!(result.is_err(), "no id is left to give: {result:?}");
+        assert_eq!(s.doc.browser_groups.len(), 1, "nothing was added");
+    }
+
+    #[test]
+    fn the_next_free_id_is_one_past_the_largest_and_never_wraps() {
+        use super::super::next_free_id;
+        assert_eq!(next_free_id("t", std::iter::empty()).unwrap(), 1);
+        assert_eq!(next_free_id("t", [3, 9, 4].into_iter()).unwrap(), 10);
+        assert_eq!(next_free_id("t", [u64::MAX - 1].into_iter()).unwrap(), u64::MAX);
+        assert!(next_free_id("t", [1, u64::MAX].into_iter()).is_err());
     }
 
     #[test]
@@ -1040,5 +1117,68 @@ mod tests {
         }
         run(&mut s, "edit.undo", json!({}));
         assert_eq!(s.doc.browser_groups.len(), 1, "ungroup undoes");
+    }
+
+    #[test]
+    fn hidden_folders_and_groups_keep_their_items_state() {
+        let mut s = Session::default();
+        run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10}));
+        run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10, "corner": [20, 0, 0]}));
+        run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10, "corner": [40, 0, 0]}));
+        let [a, b, c] = [names(&s)[0].clone(), names(&s)[1].clone(), names(&s)[2].clone()];
+        let shown = |s: &Session| [&a, &b, &c].map(|n| s.body_visible(n));
+        run(&mut s, "browser.visibility", json!({"items": [a.clone()], "visible": false}));
+
+        // Hiding the folder hides every body; their own state is kept.
+        run(&mut s, "browser.visibility", json!({"tree_folders": ["c0/bodies"], "visible": false}));
+        assert_eq!(shown(&s), [false; 3]);
+        assert_eq!(s.visibility.hidden_bodies, vec![a.clone()]);
+        // Showing a body in a hidden folder doesn't show the folder, nor draw the body.
+        run(&mut s, "browser.visibility", json!({"items": [b.clone()], "visible": true}));
+        assert!(s.folder_hidden("c0/bodies") && !s.body_visible(&b));
+        // Showing the folder brings back what was shown before.
+        run(&mut s, "browser.visibility", json!({"tree_folders": ["c0/bodies"], "visible": true}));
+        assert_eq!(shown(&s), [false, true, true]);
+        // Hiding every body leaves the folder shown.
+        run(&mut s, "browser.visibility", json!({"items": [a.clone(), b.clone(), c.clone()], "visible": false}));
+        assert!(!s.folder_hidden("c0/bodies"), "hiding every item doesn't hide the folder");
+        run(&mut s, "browser.visibility", json!({"items": [b.clone(), c.clone()], "visible": true}));
+
+        // A group the same way.
+        let g = run(&mut s, "browser.group", json!({"folder": "bodies", "items": [a.clone(), b.clone()]}))["group"].as_u64().unwrap();
+        let key = format!("c0/g{g}");
+        run(&mut s, "browser.visibility", json!({"tree_folders": [key], "visible": false}));
+        assert_eq!(shown(&s), [false, false, true]);
+        run(&mut s, "browser.visibility", json!({"tree_folders": [key], "visible": true}));
+        assert_eq!(shown(&s), [false, true, true]);
+        run(&mut s, "browser.visibility", json!({"items": [a.clone(), b.clone()], "visible": false}));
+        assert!(!s.folder_hidden(&key), "hiding every item doesn't hide the group");
+
+        // Saved with the design.
+        run(&mut s, "browser.visibility", json!({"tree_folders": [key, "o:4/sketches"], "visible": false}));
+        let v: solidcraft_doc::Visibility = serde_json::from_value(serde_json::to_value(&s.visibility).unwrap()).unwrap();
+        assert_eq!(v.hidden_folders, vec![key.clone(), "o:4/sketches".to_string()]);
+        // Showing every body also shows the folders and groups that hold bodies.
+        run(&mut s, "browser.visibility", json!({"folder": "bodies", "visible": true}));
+        assert_eq!(shown(&s), [true; 3]);
+        assert_eq!(s.visibility.hidden_folders, vec!["o:4/sketches".to_string()]);
+
+        // Hostile keys are refused, and nothing changes.
+        for p in [
+            json!({"tree_folders": [], "visible": false}),
+            json!({"tree_folders": "c0/bodies", "visible": false}),
+            json!({"tree_folders": ["bodies"], "visible": false}),
+            json!({"tree_folders": ["c1/bodies"], "visible": false}),
+            json!({"tree_folders": ["o:/bodies"], "visible": false}),
+            json!({"tree_folders": ["o:x/bodies"], "visible": false}),
+            json!({"tree_folders": ["c0/gx"], "visible": false}),
+            json!({"tree_folders": ["c0/nope"], "visible": false}),
+            json!({"tree_folders": [7], "visible": false}),
+            json!({"tree_folders": ["c0/bodies"], "items": [c.clone()], "visible": false}),
+            json!({"tree_folders": [format!("o:{}1/bodies", "1/".repeat(70))], "visible": false}),
+        ] {
+            assert!(s.execute("browser.visibility", &p).is_err(), "{p}");
+        }
+        assert_eq!(s.visibility.hidden_folders, vec!["o:4/sketches".to_string()]);
     }
 }

@@ -638,7 +638,7 @@ struct CornerKept {
 /// when anything measures to it: a constraint or dimension on the point, the length of either
 /// line, or it is the origin or still ends another curve. It stays as a virtual sharp corner,
 /// held on both curves' extensions (their intersection), and the line lengths become distances
-/// from the far end to it, so the part keeps its size, as in Fusion. Otherwise None: the
+/// from the far end to it, so the part keeps its size. Otherwise None: the
 /// caller removes the point.
 fn keep_corner(sk: &mut Sketch, c: usize, [(ca, na), (cb, nb)]: [(usize, usize); 2]) -> Result<Option<CornerKept>> {
     let used = sk.curves.iter().any(|x| uses(x, c));

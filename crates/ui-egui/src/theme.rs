@@ -1,6 +1,6 @@
 //! Colours and widget style: a dark theme (the default, a blue-grey in the spirit of desktop CAD
-//! tools, viewport #2e3440) and a light one, each with colour vision modes. Every colour the UI
-//! uses comes from [`Tokens`].
+//! tools, viewport #2e3440) and a light one, each with colour vision modes, and theme files that
+//! set any of their colours (`theme_files`). Every colour the UI uses comes from [`Tokens`].
 
 use std::cell::Cell;
 
@@ -22,6 +22,22 @@ thread_local! {
     /// it: the preview thread is handed its colours (`preview::Colors`) and thumbnails are drawn by
     /// the engine in the model's colours, so a new thread starts Off and stays Off.
     static VISION: Cell<ColorVision> = const { Cell::new(ColorVision::Off) };
+    /// The palette of a theme file (`theme_files`) in place of the built-in one of its base
+    /// (dark or light), per thread like the rest. `None`: the built-in palettes.
+    static CUSTOM: Cell<Option<Custom>> = const { Cell::new(None) };
+}
+
+/// A theme file's palette and whether it is dark.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Custom {
+    pub dark: bool,
+    pub tokens: Tokens,
+}
+
+/// Use a theme file's palette for its base, or the built-in palettes (`None`). Returns whether
+/// that changed anything (the visuals follow on the next [`apply`]).
+pub fn set_custom(custom: Option<Custom>) -> bool {
+    CUSTOM.with(|c| c.replace(custom) != custom)
 }
 
 /// Is the dark theme on?
@@ -306,9 +322,11 @@ impl Tokens {
         Tokens::themed(is_dark(), vision())
     }
 
-    /// The tokens of a theme and colour vision mode.
+    /// The tokens of a theme and colour vision mode: a theme file's palette when one is on for
+    /// that base ([`set_custom`]), else the built-in one; the colour vision mode on top.
     pub fn themed(dark: bool, mode: ColorVision) -> Tokens {
-        (if dark { Tokens::dark() } else { Tokens::light() }).with_vision(dark, mode)
+        let custom = CUSTOM.get().filter(|c| c.dark == dark).map(|c| c.tokens);
+        custom.unwrap_or(if dark { Tokens::dark() } else { Tokens::light() }).with_vision(dark, mode)
     }
 
     /// These tokens with a colour vision mode's values on top (the tables in `palettes.rs`); Off

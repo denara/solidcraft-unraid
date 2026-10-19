@@ -14,7 +14,8 @@ pub(crate) fn has_patterns(app: &SolveApp, sketch: u64) -> bool {
 
 /// Shared by the parts browser and the vertical feature history. The stored document is the
 /// source, so rolled-back sketches retain their children without showing preview-only copies.
-pub(crate) fn rows(app: &mut SolveApp, ui: &mut egui::Ui, sketch: u64, depth: usize, scope: &str, occurrence: Option<(u64, &[u64])>) {
+/// `dim`: the sketch is hidden (or a placement above it), so its patterns fade with it.
+pub(crate) fn rows(app: &mut SolveApp, ui: &mut egui::Ui, sketch: u64, depth: usize, scope: &str, occurrence: Option<(u64, &[u64])>, dim: bool) {
     let patterns: Vec<_> = app.session.doc.sketch(sketch).map(|sk| sk.patterns.clone()).unwrap_or_default();
     for pattern in patterns {
         let (name, icon) = match pattern.kind {
@@ -41,7 +42,7 @@ pub(crate) fn rows(app: &mut SolveApp, ui: &mut egui::Ui, sketch: u64, depth: us
         let response = draw_row(
             ui,
             ui.id().with(("sketch_pattern", sketch, &pattern.id)),
-            &Row { depth, icon, label: &label, name: true, selected, ..Default::default() },
+            &Row { depth, icon, label: &label, name: true, selected, dim, ..Default::default() },
         );
         if let Some(rect) = response.rect {
             crate::scenario::publish_handle(&format!("{scope}:sketch-pattern:{sketch}:{}", pattern.id), rect.center());

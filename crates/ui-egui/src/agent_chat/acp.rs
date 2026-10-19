@@ -149,6 +149,12 @@ pub fn set_model_params(session: &str, model: &str) -> Value {
     json!({"sessionId": session, "modelId": model})
 }
 
+/// Whether the agent takes embedded documents in a message
+/// (`agentCapabilities.promptCapabilities.embeddedContext`: it reads `resource` blocks).
+pub fn takes_documents(init: &Value) -> bool {
+    init.pointer("/agentCapabilities/promptCapabilities/embeddedContext").and_then(Value::as_bool).unwrap_or(false)
+}
+
 /// Whether the agent takes pictures in a message (`agentCapabilities.promptCapabilities.image`).
 pub fn takes_images(init: &Value) -> bool {
     init.pointer("/agentCapabilities/promptCapabilities/image").and_then(Value::as_bool).unwrap_or(false)
@@ -460,6 +466,14 @@ pub fn split_command(line: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn documents_are_taken_only_when_the_agent_says_so() {
+        let yes = json!({"agentCapabilities": {"promptCapabilities": {"image": true, "embeddedContext": true}}});
+        let no = json!({"agentCapabilities": {"promptCapabilities": {"image": true}}});
+        assert!(takes_documents(&yes) && takes_images(&yes));
+        assert!(!takes_documents(&no) && !takes_documents(&json!({})));
+    }
 
     #[test]
     fn commands_split_like_a_shell_without_one() {

@@ -169,6 +169,7 @@ pub(crate) fn modifier_motion(
     let previous = app.viewport.modifier_nav;
     if previous.map(|(m, _)| m) != next.map(|(m, _)| m) {
         app.viewport.orbit_pivot = None;
+        app.viewport.orbit_from = None;
         app.viewport.orbit_free = None;
         app.viewport.orbit_snap = None;
     }
@@ -307,7 +308,8 @@ pub(crate) fn handle(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, resp: &e
         // (its End was lost); a stuck flag would pan future mouse input.
         app.viewport.trackpad_gesture = false;
     }
-    let pan = if trackpad_pan { raw.pan } else { egui::Vec2::ZERO } + raw.mouse_pan;
+    let mut pan = if trackpad_pan { raw.pan } else { egui::Vec2::ZERO } + raw.mouse_pan;
+    pan.x *= crate::prefs::pan_sign_x(app);
     let scroll = if app.viewport.wheel_zoom_raw_until_idle || (trackpad_pan && app.viewport.trackpad_until_idle) {
         raw.zoom + if trackpad_pan { 0.0 } else { raw.point_zoom }
     } else {
@@ -450,7 +452,7 @@ pub(crate) fn handle(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, resp: &e
     } else if mode == Some(NavMode::Orbit) {
         let press = ui.input(|i| i.pointer.press_origin());
         app.cancel_view_animation();
-        // Shift can be required to enter orbit (Fusion/Inventor middle drag, Alias Shift+Alt),
+        // Shift can be required to enter orbit (middle drag, Alias Shift+Alt),
         // rather than an additional request for snapping. Only an extra modifier snaps.
         let without_shift = egui::Modifiers { shift: false, ..mods };
         let snap = app.preferences.nav != crate::prefs::OPENSCAD_NAV
@@ -480,6 +482,7 @@ pub(crate) fn handle(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, resp: &e
     }
     if !dragging && motion.is_none() {
         app.viewport.orbit_pivot = None;
+        app.viewport.orbit_from = None;
     }
     if app.viewport.spin {
         // A click on the navigation bar (its own button) is not a stop.
@@ -573,7 +576,8 @@ pub(crate) struct OrbitSnap {
     pub(crate) target: Camera,
     pub(crate) yaw_velocity: f64,
     pub(crate) pitch_velocity: f64,
-    pub(crate) pivot: Option<(Vec3, Pos2)>,
+    /// The pivot and where it lies in the camera's frame ([`Camera::frame_coords`]).
+    pub(crate) pivot: Option<(Vec3, Vec3)>,
 }
 
 /// Pointer motion accumulates independently of the spring preview, so many small deltas
@@ -609,10 +613,7 @@ pub(crate) fn orbit_drag(app: &mut SolveApp, rect: Rect, dx: f64, dy: f64, press
         } else {
             None
         }
-        .and_then(|p| {
-            app.cam = displayed;
-            projection(app, rect).to_screen(p).map(|at| (p, at))
-        });
+        .map(|p| (p, displayed.frame_coords(p)));
         let spring = app.viewport.orbit_snap.get_or_insert(OrbitSnap { target, yaw_velocity: 0.0, pitch_velocity: 0.0, pivot });
         spring.target = target;
         spring.pivot = pivot;
@@ -622,7 +623,7 @@ pub(crate) fn orbit_drag(app: &mut SolveApp, rect: Rect, dx: f64, dy: f64, press
 
 /// A lightly damped spring: mostly settled in about a third of a second, with a small
 /// elastic finish. Bounded substeps keep the behavior consistent across frame rates.
-pub(crate) fn step_orbit_snap(app: &mut SolveApp, rect: Rect, dt: f64) {
+pub(crate) fn step_orbit_snap(app: &mut SolveApp, _rect: Rect, dt: f64) {
     let Some(mut spring) = app.viewport.orbit_snap.take() else { return };
     let dt = if dt.is_finite() { dt.clamp(0.0, 0.05) } else { 1.0 / 60.0 };
     let steps = (dt * 240.0).ceil().max(1.0) as usize;
@@ -644,10 +645,8 @@ pub(crate) fn step_orbit_snap(app: &mut SolveApp, rect: Rect, dt: f64) {
     if done {
         app.cam = spring.target;
     }
-    if let Some((pivot, at)) = spring.pivot
-        && let Some(after) = projection(app, rect).to_screen(pivot)
-    {
-        app.cam.pan(f64::from(at.x - after.x), f64::from(at.y - after.y), f64::from(rect.height().max(1.0)));
+    if let Some((pivot, coords)) = spring.pivot {
+        app.cam.place(pivot, coords);
     }
     if !done {
         app.viewport.orbit_snap = Some(spring);
@@ -702,22 +701,32 @@ pub fn orbit(app: &mut SolveApp, rect: egui::Rect, dx: f64, dy: f64, press: Opti
             }
         }),
     };
-    let Some(pivot) = pivot else {
-        app.cam.orbit(dx, dy);
-        return;
+    // The drag's whole turn so far, applied to the camera it began with: the view depends on
+    // where the pointer is, not on the path it took, so fast or erratic drags (a pitch held at
+    // straight up or down for a while, many tiny steps) can't drift. Anything else that moves
+    // the camera meanwhile (a wheel zoom, a new pivot) starts the sum again from there.
+    let from = match app.viewport.orbit_from {
+        Some(f) if f.last == app.cam && f.pivot == pivot => f,
+        _ => OrbitFrom { start: app.cam, dx: 0.0, dy: 0.0, pivot, last: app.cam },
     };
-    orbit_about(app, rect, dx, dy, pivot);
+    let (dx, dy) = (from.dx + dx, from.dy + dy);
+    app.cam = from.start;
+    match pivot {
+        Some(p) => app.cam.orbit_about(dx, dy, p),
+        None => app.cam.orbit(dx, dy),
+    }
+    app.viewport.orbit_from = Some(OrbitFrom { dx, dy, last: app.cam, ..from });
 }
 
-/// Orbit by pixel deltas, keeping `pivot` still on screen: the camera turns about it and a pan
-/// correction puts it back where it was.
-pub(crate) fn orbit_about(app: &mut SolveApp, rect: egui::Rect, dx: f64, dy: f64, pivot: Vec3) {
-    let before = crate::viewport::projection(app, rect).to_screen(pivot);
-    app.cam.orbit(dx, dy);
-    let after = crate::viewport::projection(app, rect).to_screen(pivot);
-    if let (Some(a), Some(b)) = (before, after) {
-        app.cam.pan(f64::from(a.x - b.x), f64::from(a.y - b.y), f64::from(rect.height().max(1.0)));
-    }
+/// An orbit drag so far: the camera it began with, the pointer's total motion since, the pivot
+/// and the camera that produced.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OrbitFrom {
+    start: Camera,
+    dx: f64,
+    dy: f64,
+    pivot: Option<Vec3>,
+    last: Camera,
 }
 
 #[cfg(test)]

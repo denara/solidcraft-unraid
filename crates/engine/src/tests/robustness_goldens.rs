@@ -11,8 +11,8 @@
 //!
 //! Each seed is its own test (`seed_00` … `seed_95`), so the runner spreads them over the CI
 //! shards and their cores: a few seeds take minutes, and grouped four ways they made one test
-//! of half an hour. Pull requests that touch `crates/kernel` run every 8th seed (ci.yml);
-//! pushes to main and the nightly run every seed.
+//! of half an hour. Pull requests that can change them run every seed but the slowest few
+//! (`SLOW_SEEDS` in ci.yml); the merge queue, pushes to main and the nightly run every seed.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

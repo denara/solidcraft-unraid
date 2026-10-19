@@ -350,7 +350,7 @@ fn actions(s: &Session) -> Vec<Action> {
         // The surface's normal at `p` (either way round): exact on analytic faces.
         let normal_at = |f: u32, p: Vec3| -> Option<Vec3> {
             match face_surface(&b.body, f as usize) {
-                Some(FaceSurface::Plane { normal, .. }) => Some(normal),
+                Some(FaceSurface::Plane { normal, .. }) => Some(*normal),
                 Some(FaceSurface::Cylinder { origin, axis, .. }) => {
                     let v = p - origin;
                     (v - axis * v.dot(axis)).normalized()

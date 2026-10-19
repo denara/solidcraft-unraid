@@ -46,7 +46,7 @@ fn drawn(h: &Harness) -> Vec<(u64, bool)> {
 }
 
 #[test]
-fn eyes_hide_and_show_joints_and_the_folder_toggles_all() {
+fn eyes_hide_and_show_joints_and_the_folder_keeps_their_state() {
     let mut h = harness();
     let (hinge, glue) = (id(&h, "Hinge"), id(&h, "Glue"));
     assert_eq!(drawn(&h), [(hinge, false), (glue, false)], "every joint draws by default");
@@ -56,11 +56,20 @@ fn eyes_hide_and_show_joints_and_the_folder_toggles_all() {
     assert_eq!(drawn(&h), [(glue, false)], "a hidden joint isn't drawn");
     assert!(crate::scenario::handle_at("row:Hinge").is_some(), "a hidden joint stays listed");
 
-    // The folder's eye: some shown → all hidden; none shown → all shown.
+    // The folder's eye is its own: hiding it hides every glyph without changing a joint's
+    // eye, and showing it brings back what was shown before (Hinge stays hidden).
     click(&mut h, "eye:Joints");
     assert!(drawn(&h).is_empty());
+    assert!(!h.app.session.joint_visible(hinge) && h.app.session.joint_visible(glue));
+    click(&mut h, "eye:Hinge");
+    assert!(drawn(&h).is_empty(), "a joint shown in a hidden folder stays undrawn");
+    assert!(h.app.session.folder_hidden("c0/joints"), "a joint's eye doesn't change the folder's");
+    click(&mut h, "eye:Hinge");
     click(&mut h, "eye:Joints");
-    assert_eq!(drawn(&h), [(hinge, false), (glue, false)]);
+    assert_eq!(drawn(&h), [(glue, false)]);
+    // Hiding every joint leaves the folder shown.
+    click(&mut h, "eye:Glue");
+    assert!(!h.app.session.folder_hidden("c0/joints"));
 }
 
 #[test]

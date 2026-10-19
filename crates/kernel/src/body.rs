@@ -1326,6 +1326,10 @@ impl Body {
     /// The reference mesher's angular display mesh: what [`Body::display_mesh_angular`] falls
     /// back to when no plan can be made.
     pub fn reference_display_mesh_angular(&self, tol: f64, angle: f64) -> Result<Mesh> {
+        crate::profile::timed(crate::profile::Kind::Tessellate, || self.reference_display_mesh_angular_untimed(tol, angle))
+    }
+
+    fn reference_display_mesh_angular_untimed(&self, tol: f64, angle: f64) -> Result<Mesh> {
         if let Some((shared, t)) = self.display_of.as_deref()
             && let Some(placed) =
                 shared.mesh.get_or_init(|| shared.original.reference_display_mesh_angular(tol, angle).ok()).as_ref().and_then(|m| placed_mesh(m, t))
@@ -1359,6 +1363,29 @@ impl Body {
                 EdgeInfo { index, points, mid, length }
             })
             .collect())
+    }
+
+    /// Edges `indices` (as in [`Body::tessellate`]'s `edges`) in `plane`'s coordinates,
+    /// exactly: lines, circular arcs, and free-form curves as the Bézier spans they are, for a
+    /// sketch to project them. `None` for an edge that doesn't lie in a plane parallel to
+    /// `plane`, isn't read exactly or isn't there, and for every edge of a mesh body.
+    pub fn planar_edges(&self, plane: &solidcraft_geom::Plane, indices: &[usize]) -> Vec<Option<Vec<solidcraft_geom::Seg2>>> {
+        let none = || vec![None; indices.len()];
+        if self.is_mesh() {
+            return none();
+        }
+        let tol = (self.size() * 1e-7).max(1e-9) * 10.0;
+        guard("planar edges", || {
+            let edges = Self::unique_edges(&self.solid);
+            Ok(indices
+                .iter()
+                .map(|i| {
+                    let mut work = 262_144usize;
+                    edges.get(*i).and_then(|e| crate::prism_curve::projected(e, plane, tol, &mut work))
+                })
+                .collect())
+        })
+        .unwrap_or_else(|_| none())
     }
 
     /// Faces with area and centroid.

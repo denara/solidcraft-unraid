@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use mt::{BoundedCurve, InnerSpace, MetricSpace, ParametricCurve, ParametricSurface3D, SearchNearestParameter};
-use solidcraft_geom::{Plane, Region2, Seg2, Vec2, Vec3};
+use solidcraft_geom::{Plane, Region2, Seg2, UnitVec3, Vec2, Vec3};
 use truck_modeling as mt;
 
 use crate::body::{Body, from_p3, p3};
@@ -706,7 +706,7 @@ pub fn stitch(bodies: &[&Body], tol: f64) -> Result<Body> {
 #[derive(Clone, Copy)]
 pub(crate) enum Offset {
     Plane { n: Vec3 },
-    Cylinder { o: Vec3, axis: Vec3, r: f64, out: f64 },
+    Cylinder { o: Vec3, axis: UnitVec3, r: f64, out: f64 },
 }
 
 impl Offset {

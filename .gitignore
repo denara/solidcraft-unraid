@@ -9,3 +9,6 @@
 __pycache__/
 .env
 /solvecraft-unraid-prototype.tar
+
+# cargo-mutants output (docs/mutation-testing.md)
+mutants.out*/

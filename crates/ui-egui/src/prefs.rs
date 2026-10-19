@@ -1,4 +1,4 @@
-//! Preferences, one dialog in the spirit of Fusion's, opened from the gear at the top right of the
+//! Preferences, one dialog, opened from the gear at the top right of the
 //! window, File › Preferences or Ctrl+, (Cmd+, on macOS): General (theme, UI scale, units of new
 //! designs, autosave, display precision, timeline layout, the agent cursor), Navigation (mouse presets, zoom
 //! direction, zoom to the cursor, orbit centre, Look At animation), Keyboard Shortcuts (search,
@@ -251,6 +251,10 @@ pub enum OrbitAround {
     Cursor,
 }
 
+/// The browser sidebar's first width, and the width [`Prefs::default`] restores; the panel
+/// itself clamps what the user drags to its own range.
+pub const DEFAULT_BROWSER_WIDTH: f32 = 250.0;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Prefs {
@@ -281,6 +285,8 @@ pub struct Prefs {
     pub space_mouse_axis_speed: [f32; 6],
     /// Anti-aliasing samples (applies on restart).
     pub msaa: u32,
+    /// Soft contact shading in the GPU viewport; optional and applied immediately.
+    pub ambient_occlusion: bool,
     /// The grid turns to the upright origin plane facing a side view (#1470). Off by default: the
     /// grid stays on the ground plane (XY) whatever the view.
     pub grid_follows_view: bool,
@@ -299,8 +305,11 @@ pub struct Prefs {
     /// Decimals shown for lengths and angles.
     pub length_decimals: u8,
     pub angle_decimals: u8,
-    /// `dark`, `light` or `system` (follow the operating system).
+    /// `dark`, `light` or `system` (follow the operating system), or a theme file's id: a
+    /// built-in one (`gruvbox-dark`, …) or one of `custom_themes` (#2255).
     pub theme: String,
+    /// Imported theme files (`theme_files`), kept here so they also work in the browser.
+    pub custom_themes: Vec<crate::theme_files::ThemeFile>,
     /// Interface language (a registered locale ID).
     pub language: String,
     /// Interface scale (1 = 100 %).
@@ -315,12 +324,20 @@ pub struct Prefs {
     pub timeline_left_height: f32,
     /// Whether the browser below the left feature history is collapsed.
     pub timeline_left_browser_collapsed: bool,
+    /// Width of the left sidebar holding the browser (and the feature history above it), which
+    /// the user drags wider or narrower at its right edge.
+    pub browser_width: f32,
+    /// Draw the parts browser on a translucent card over the 3D view instead of a column of its
+    /// own, so the workspace keeps the whole window width.
+    pub browser_float: bool,
     /// The wheel zooms toward the point under the cursor (else toward the view's centre).
     pub zoom_to_cursor: bool,
     /// Spread discrete wheel input across frames (off: apply each event immediately).
     pub smooth_wheel_zoom: bool,
     /// Two-finger trackpad scroll pans (off: it zooms like the wheel); pinch always zooms.
     pub trackpad_pan: bool,
+    /// Horizontal trackpad and thumb-wheel scrolling pans the view the other way (#2007).
+    pub pan_reverse_x: bool,
     /// View changes (axis view, Look At, Home) animate; `look_at_speed` scales how fast.
     pub look_at_anim: bool,
     pub look_at_speed: f32,
@@ -367,6 +384,11 @@ pub struct Prefs {
     pub agent_chat_side: String,
     pub agent_chat_width: f32,
     pub agent_chat_minimized: bool,
+    /// Whether the chat is in its own window instead of the side panel, and that window's place
+    /// and size as the system last reported them (`[x, y, width, height]`, points; `x` can be
+    /// negative or past the main screen when the window sits on another one).
+    pub agent_chat_popped: bool,
+    pub agent_chat_window: Option<[f32; 4]>,
     /// Changes the agent may make for one message.
     pub agent_chat_turn_limit: u32,
 }
@@ -414,6 +436,7 @@ impl Default for Prefs {
             space_mouse_reverse: [false; 6],
             space_mouse_axis_speed: [1.0; 6],
             msaa: 4,
+            ambient_occlusion: false,
             grid_follows_view: false,
             display_quality: "normal".into(),
             supersampling: 1.0,
@@ -423,15 +446,19 @@ impl Default for Prefs {
             length_decimals: 2,
             angle_decimals: 1,
             theme: "dark".into(),
+            custom_themes: Vec::new(),
             language: "en".into(),
             ui_scale: 1.0,
             ui_font: String::new(),
             timeline_left: false,
             timeline_left_height: 360.0,
             timeline_left_browser_collapsed: false,
+            browser_width: DEFAULT_BROWSER_WIDTH,
+            browser_float: false,
             zoom_to_cursor: true,
             smooth_wheel_zoom: true,
             trackpad_pan: true,
+            pan_reverse_x: false,
             look_at_anim: true,
             look_at_speed: 1.0,
             up_axis: "z".into(),
@@ -457,6 +484,8 @@ impl Default for Prefs {
             agent_chat_side: "right".into(),
             agent_chat_width: 380.0,
             agent_chat_minimized: false,
+            agent_chat_popped: false,
+            agent_chat_window: None,
             agent_chat_turn_limit: crate::agent_chat::gate::DEFAULT_TURN_LIMIT,
         }
     }
@@ -537,6 +566,81 @@ impl Snapshot {
     }
 }
 
+/// The colour theme (#2255): Dark, Light, System, the built-in theme files and the imported
+/// ones, with Import…, Export… (the theme on now as a complete file, to start a new one from)
+/// and Remove (an imported theme). Like the other preferences, a choice applies at once.
+fn theme_row(app: &mut SolveApp, ui: &mut egui::Ui) {
+    let choices = theme_choices(app);
+    let current = choices.iter().find(|(id, _)| *id == app.preferences.theme).map_or_else(|| app.preferences.theme.clone(), |(_, name)| name.clone());
+    let first_imported = THEMES.len() + crate::theme_files::builtin().len();
+    let imported = app.preferences.custom_themes.iter().any(|t| t.id == app.preferences.theme);
+    let mut chosen: Option<String> = None;
+    let mut action: Option<&str> = None;
+    ui.horizontal(|ui| {
+        let combo = egui::ComboBox::from_id_salt("pref_theme").width(200.0).height(340.0).selected_text(current).show_ui(ui, |ui| {
+            for (i, (id, name)) in choices.iter().enumerate() {
+                if i == THEMES.len() || i == first_imported {
+                    ui.separator();
+                }
+                let item = ui.selectable_label(app.preferences.theme == *id, name);
+                crate::scenario::publish_handle(&format!("prefs:theme:{id}"), item.rect.center());
+                if item.clicked() {
+                    chosen = Some(id.clone());
+                }
+            }
+        });
+        crate::scenario::publish_handle("prefs:theme", combo.response.rect.center());
+        if ui.button(app.tr_label("Import…")).on_hover_text(app.tr_label("Add a theme file (.json) and use it")).clicked() {
+            action = Some("import");
+        }
+        if ui
+            .button(app.tr_label("Export…"))
+            .on_hover_text(app.tr_label("Save the theme on now as a complete theme file, to start a new one from"))
+            .clicked()
+        {
+            action = Some("export");
+        }
+        if imported && ui.button(app.tr_label("Remove")).on_hover_text(app.tr_label("Remove this imported theme")).clicked() {
+            action = Some("remove");
+        }
+    });
+    if let Some(id) = chosen {
+        select_theme(app, &id);
+    }
+    match action {
+        Some("import") => app.pick_open_for(&["json"], |app, path| {
+            let Some(path) = path else { return };
+            let r = std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|text| import_theme(app, &serde_json::Value::String(text)));
+            match r {
+                Ok(id) => {
+                    let name = crate::theme_files::find(&id, &app.preferences.custom_themes).map(|t| t.name.clone()).unwrap_or(id);
+                    app.set_status(format!("Theme imported: {name}"), false);
+                }
+                Err(e) => app.set_status(format!("Theme import: {e}"), true),
+            }
+        }),
+        Some("export") => {
+            let file = current_theme_file(app);
+            let name = file.get("name").and_then(serde_json::Value::as_str).unwrap_or("Theme").to_string();
+            let text = serde_json::to_string_pretty(&file).unwrap_or_default();
+            app.pick_save(&format!("{name}.json"), &["json"], move |app, path| {
+                if let Some(path) = path
+                    && let Err(e) = std::fs::write(&path, text)
+                {
+                    app.set_status(format!("Theme export: {e}"), true);
+                }
+            });
+        }
+        Some("remove") => {
+            let id = app.preferences.theme.clone();
+            if let Err(e) = remove_theme(app, &id) {
+                app.set_status(e, true);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// The interface font (#1290): the built-in font first, then the installed families, with a
 /// search box. The choice applies at once, like the other preferences.
 fn ui_font_row(app: &mut SolveApp, ui: &mut egui::Ui) {
@@ -554,8 +658,12 @@ fn ui_font_row(app: &mut SolveApp, ui: &mut egui::Ui) {
             ui.add(search.desired_width(f32::INFINITY));
             let filter = app.prefs_window.font_filter.trim().to_lowercase();
             egui::ScrollArea::vertical().max_height(280.0).min_scrolled_height(280.0).auto_shrink([false, false]).show(ui, |ui| {
-                if builtin.to_lowercase().contains(&filter) && ui.selectable_label(app.preferences.ui_font.trim().is_empty(), &builtin).clicked() {
-                    chosen = Some(String::new());
+                if builtin.to_lowercase().contains(&filter) {
+                    let item = ui.selectable_label(app.preferences.ui_font.trim().is_empty(), &builtin);
+                    crate::scenario::publish_handle("prefs:font_builtin", item.rect.center());
+                    if item.clicked() {
+                        chosen = Some(String::new());
+                    }
                 }
                 match &families {
                     Some(list) => {
@@ -572,6 +680,11 @@ fn ui_font_row(app: &mut SolveApp, ui: &mut egui::Ui) {
                     }
                 }
             });
+            // Close the list from inside it: outside, `ui.close()` folds the Preferences
+            // window's body instead, which egui keeps folded between runs (#1800).
+            if chosen.is_some() {
+                ui.close();
+            }
         });
     crate::scenario::publish_handle("prefs:ui_font", combo.response.rect.center());
     if let Some(name) = chosen {
@@ -581,7 +694,6 @@ fn ui_font_row(app: &mut SolveApp, ui: &mut egui::Ui) {
             app.set_status(format!("The font `{name}` could not be read"), true);
         }
         app.prefs_window.font_filter.clear();
-        ui.close();
     }
 }
 
@@ -598,6 +710,8 @@ fn defaults(app: &mut SolveApp, page: usize) {
             p.timeline_left = d.timeline_left;
             p.timeline_left_height = d.timeline_left_height;
             p.timeline_left_browser_collapsed = d.timeline_left_browser_collapsed;
+            p.browser_width = d.browser_width;
+            p.browser_float = d.browser_float;
             p.default_units = d.default_units;
             p.length_decimals = d.length_decimals;
             p.angle_decimals = d.angle_decimals;
@@ -616,6 +730,8 @@ fn defaults(app: &mut SolveApp, page: usize) {
             p.agent_chat_side = d.agent_chat_side;
             p.agent_chat_width = d.agent_chat_width;
             p.agent_chat_minimized = d.agent_chat_minimized;
+            p.agent_chat_popped = d.agent_chat_popped;
+            p.agent_chat_window = d.agent_chat_window;
             p.agent_chat_turn_limit = d.agent_chat_turn_limit;
         }
         1 => {
@@ -626,6 +742,7 @@ fn defaults(app: &mut SolveApp, page: usize) {
             p.zoom_to_cursor = d.zoom_to_cursor;
             p.smooth_wheel_zoom = d.smooth_wheel_zoom;
             p.trackpad_pan = d.trackpad_pan;
+            p.pan_reverse_x = d.pan_reverse_x;
             p.orbit_around = d.orbit_around;
             p.orbit_cursor = d.orbit_cursor;
             p.space_mouse_enabled = d.space_mouse_enabled;
@@ -644,6 +761,7 @@ fn defaults(app: &mut SolveApp, page: usize) {
         PAGE_GRAPHICS => {
             let msaa = p.msaa != d.msaa;
             p.msaa = d.msaa;
+            p.ambient_occlusion = d.ambient_occlusion;
             p.display_quality = d.display_quality;
             p.supersampling = d.supersampling;
             p.supersampling_adaptive = d.supersampling_adaptive;
@@ -678,6 +796,15 @@ pub fn apply(app: &mut SolveApp, ctx: &egui::Context) {
         && let Some(t) = ctx.system_theme()
     {
         app.ui.dark = t == egui::Theme::Dark;
+    }
+    // A theme file's palette, in place of its base's (dark or light); the visuals follow.
+    let file = crate::theme_files::find(&app.preferences.theme, &app.preferences.custom_themes);
+    if let Some(f) = file {
+        app.ui.dark = f.base.is_dark();
+    }
+    let custom = file.map(|f| crate::theme::Custom { dark: f.base.is_dark(), tokens: crate::theme_files::resolve(f) });
+    if crate::theme::set_custom(custom) {
+        app.styled = false;
     }
     // egui's end-of-frame shortcuts only change its context; the saved preference would
     // overwrite that change next frame. Consume the desktop shortcuts into the preference.
@@ -727,6 +854,11 @@ pub fn set_autosave(app: &mut SolveApp) {
 /// Which navigation dragging `button` with `mods` held does under the preset.
 pub fn nav_mode(app: &SolveApp, button: NavButton, mods: Modifiers) -> Option<NavMode> {
     nav_preset(&app.preferences.nav).mode(button, mods)
+}
+
+/// +1, or −1 when horizontal scrolling pans the other way (#2007).
+pub fn pan_sign_x(app: &SolveApp) -> f32 {
+    if app.preferences.pan_reverse_x { -1.0 } else { 1.0 }
 }
 
 /// +1, or −1 when the wheel zooms the other way.
@@ -887,6 +1019,18 @@ pub fn show_reset_notice(app: &mut SolveApp, ctx: &egui::Context) {
     }
 }
 
+/// The Preferences window can't be folded (`collapsible(false)`), but 0.14 and 0.15 folded it
+/// when a font was picked, and egui keeps that in the saved window state: it then opened as its
+/// title bar alone, for good (#1800). Unfold it.
+fn unfold(ctx: &egui::Context) {
+    if let Some(mut body) = egui::collapsing_header::CollapsingState::load(ctx, egui::Id::new("sc_prefs").with("collapsing"))
+        && !body.is_open()
+    {
+        body.set_open(true);
+        body.store(ctx);
+    }
+}
+
 pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     // File › Keyboard Shortcuts and Help › Keyboard Shortcuts open this dialog at that page.
     if app.keymap.open {
@@ -900,6 +1044,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     if app.prefs_window.snapshot.is_none() {
         app.prefs_window.snapshot = Some(Snapshot::take(app));
     }
+    unfold(ctx);
     let t = Tokens::get();
     let mut open = true;
     let mut button: Option<&str> = None;
@@ -1041,16 +1186,7 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
             );
             ui.end_row();
             ui.label(app.tr("ui.theme"));
-            ui.horizontal(|ui| {
-                for (id, label) in THEMES {
-                    if ui.radio(app.preferences.theme == id, app.tr_label(label)).clicked() {
-                        app.preferences.theme = id.to_string();
-                        if id != "system" {
-                            app.ui.dark = id == "dark";
-                        }
-                    }
-                }
-            });
+            theme_row(app, ui);
             ui.end_row();
             ui.label(app.tr("ui.ui_scale"));
             let scale = ui.add(
@@ -1072,6 +1208,11 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
             });
             ui.end_row();
             note(ui, app.tr("ui.timeline_left_note"));
+            ui.label(app.tr_label("Parts browser"));
+            let float_label = app.tr_label("Float it over the workspace").to_string();
+            ui.checkbox(&mut app.preferences.browser_float, float_label);
+            ui.end_row();
+            note(ui, app.tr_label("The tree draws on a translucent card over the 3D view instead of a column of its own."));
             ui.label(app.tr("ui.units_of_new_designs"));
             egui::ComboBox::from_id_salt("pref_units").selected_text(app.preferences.default_units.clone()).show_ui(ui, |ui| {
                 for u in UNITS {
@@ -1158,6 +1299,10 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
                 crate::i18n::tr_label("Trackpad gestures pan (off: they zoom like the wheel); mouse wheel zooms, thumb wheel pans sideways, pinch always zooms")
             });
             ui.end_row();
+            ui.label(crate::i18n::tr_label("Reverse horizontal pan direction"));
+            ui.checkbox(&mut app.preferences.pan_reverse_x, "")
+                .on_hover_text(crate::i18n::tr_label("Horizontal two-finger scrolling and the thumb wheel pan the other way"));
+            ui.end_row();
             ui.label(crate::i18n::tr_label("Orbit around"));
             // Wrapped: three choices, and German or Russian labels are long.
             ui.horizontal_wrapped(|ui| {
@@ -1226,6 +1371,9 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
             ui.end_row();
         }
         4 => {
+            ui.label(app.tr("ui.graphics_preset"));
+            graphics_preset_selector(app, ui);
+            ui.end_row();
             ui.label(crate::i18n::tr_label("Visual style"));
             let styles = ["Shaded with edges", "Shaded", "Wireframe", "Shaded with hidden edges"];
             let selected_label = crate::i18n::tr_label(styles[usize::from(app.ui.visual_style.min(3))]);
@@ -1245,9 +1393,35 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
             ui.label(crate::i18n::tr_label("Ground shadow"));
             ui.checkbox(&mut app.ui.ground_shadow, "");
             ui.end_row();
+            ui.label(crate::i18n::tr_label("Ambient occlusion"));
+            ambient_occlusion_checkbox(app, ui, "");
+            ui.end_row();
             ui.label(crate::i18n::tr_label("Perspective view"));
             ui.checkbox(&mut app.ui.perspective, "");
             ui.end_row();
+            // Keep accessibility controls visible before the longer rendering-quality controls.
+            ui.label("");
+            ui.end_row();
+            ui.label(RichText::new(app.tr("ui.colour_vision")).strong());
+            ui.label("");
+            ui.end_row();
+            ui.label(app.tr("ui.colour_vision_mode"));
+            let mode = app.preferences.color_vision;
+            let response = egui::ComboBox::from_id_salt("pref_color_vision").selected_text(app.tr(mode.label_id())).show_ui(ui, |ui| {
+                for m in crate::theme::ColorVision::ALL {
+                    ui.selectable_value(&mut app.preferences.color_vision, m, crate::i18n::tr(m.label_id())).on_hover_text(crate::i18n::tr(m.help_id()));
+                }
+            });
+            crate::scenario::publish_handle("prefs:color_vision", response.response.rect.center());
+            if app.preferences.color_vision != mode {
+                // At once, like the theme: the next frame draws in the new colours.
+                ui.ctx().request_repaint();
+            }
+            ui.end_row();
+            ui.label(app.tr("ui.colour_vision_sample"));
+            colour_vision_sample(ui, t);
+            ui.end_row();
+            note(ui, app.tr("ui.colour_vision_note"));
             ui.label(app.tr("ui.anti_aliasing"));
             egui::ComboBox::from_id_salt("pref_msaa").selected_text(format!("{}×", app.preferences.msaa)).show_ui(ui, |ui| {
                 for m in MSAA {
@@ -1300,26 +1474,6 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
             crate::scenario::publish_rect("prefs:measure_axis_distances", response.rect);
             response.on_hover_text(app.tr("settings.measure_axis_distances_help"));
             ui.end_row();
-            // Colour vision (#778): its own section at the end of the page.
-            ui.label(RichText::new(app.tr("ui.colour_vision")).strong());
-            ui.label("");
-            ui.end_row();
-            ui.label(app.tr("ui.colour_vision_mode"));
-            let mode = app.preferences.color_vision;
-            egui::ComboBox::from_id_salt("pref_color_vision").selected_text(app.tr(mode.label_id())).show_ui(ui, |ui| {
-                for m in crate::theme::ColorVision::ALL {
-                    ui.selectable_value(&mut app.preferences.color_vision, m, crate::i18n::tr(m.label_id())).on_hover_text(crate::i18n::tr(m.help_id()));
-                }
-            });
-            if app.preferences.color_vision != mode {
-                // At once, like the theme: the next frame draws in the new colours.
-                ui.ctx().request_repaint();
-            }
-            ui.end_row();
-            ui.label(app.tr("ui.colour_vision_sample"));
-            colour_vision_sample(ui, t);
-            ui.end_row();
-            note(ui, app.tr("ui.colour_vision_note"));
             // Last, so the colour vision section above keeps its place on the page.
             ui.label("");
             ui.end_row();
@@ -1416,8 +1570,10 @@ fn colour_vision_sample(ui: &mut egui::Ui, t: &Tokens) {
 
 /// The control channel's `ui.prefs`: `open` (a page name) opens the dialog there, `button`
 /// presses OK, Cancel, Apply or Restore Defaults, `stand_up: true` answers the stand-up offer
-/// (`false` leaves the file as it is, like "Leave it"); any other keys set preferences. Returns
-/// them all, the open page and the offer.
+/// (`false` leaves the file as it is, like "Leave it"), `theme_import` (a theme file's JSON or
+/// text) adds a theme and turns it on, `theme_remove` (an id) removes an imported one and
+/// `theme_export: true` returns the theme on now as `theme_file`; any other keys set
+/// preferences. Returns them all, the open page, the offer and the theme ids.
 pub fn control(app: &mut SolveApp, p: &serde_json::Value) -> Result<serde_json::Value, String> {
     let mut rest = p.as_object().cloned().unwrap_or_default();
     if let Some(page) = rest.remove("open") {
@@ -1433,6 +1589,14 @@ pub fn control(app: &mut SolveApp, p: &serde_json::Value) -> Result<serde_json::
         Some(false) => crate::stand_up::leave(app),
         None => {}
     }
+    let imported = match rest.remove("theme_import") {
+        Some(v) => Some(import_theme(app, &v)?),
+        None => None,
+    };
+    if let Some(id) = rest.remove("theme_remove") {
+        remove_theme(app, id.as_str().unwrap_or_default())?;
+    }
+    let export = rest.remove("theme_export").and_then(|v| v.as_bool()).unwrap_or(false);
     let button = rest.remove("button");
     let mut out = set(app, &serde_json::Value::Object(rest))?;
     match button.as_ref().and_then(|b| b.as_str()) {
@@ -1450,8 +1614,67 @@ pub fn control(app: &mut SolveApp, p: &serde_json::Value) -> Result<serde_json::
         o.insert("dialog".into(), json!(app.prefs_window.open.then(|| PAGES.get(app.prefs_window.section).copied().unwrap_or_default())));
         o.insert("stand_up_offer".into(), json!(app.stand_up));
         o.insert("dark".into(), json!(app.ui.dark));
+        o.insert("theme_ids".into(), json!(theme_choices(app).into_iter().map(|(id, _)| id).collect::<Vec<_>>()));
+        if let Some(id) = imported {
+            o.insert("theme_imported".into(), json!(id));
+        }
+        if export {
+            o.insert("theme_file".into(), current_theme_file(app));
+        }
     }
     Ok(out)
+}
+
+/// Every theme the Theme list offers, as (id, name): the modes, the built-in theme files, then
+/// the imported ones.
+fn theme_choices(app: &SolveApp) -> Vec<(String, String)> {
+    let modes = THEMES.iter().map(|(id, label)| ((*id).to_string(), crate::i18n::tr_label(label).to_string()));
+    let files = crate::theme_files::builtin().iter().chain(&app.preferences.custom_themes).map(|t| (t.id.clone(), t.name.clone()));
+    modes.chain(files).collect()
+}
+
+/// Turn a theme on (a mode or a theme file's id); dark follows it.
+fn select_theme(app: &mut SolveApp, id: &str) {
+    app.preferences.theme = id.to_string();
+    match crate::theme_files::find(id, &app.preferences.custom_themes) {
+        Some(f) => app.ui.dark = f.base.is_dark(),
+        None if id != "system" => app.ui.dark = id == "dark",
+        None => {}
+    }
+}
+
+/// Import a theme file (its text, or its JSON) into the preferences and turn it on; returns
+/// the id it is kept under.
+pub fn import_theme(app: &mut SolveApp, v: &serde_json::Value) -> Result<String, String> {
+    let theme = match v {
+        serde_json::Value::String(text) => crate::theme_files::parse(text)?,
+        other => crate::theme_files::from_value(other)?,
+    };
+    let id = crate::theme_files::add(&mut app.preferences.custom_themes, theme)?;
+    select_theme(app, &id);
+    Ok(id)
+}
+
+/// Remove an imported theme; when it is on, its base (dark or light) takes over.
+fn remove_theme(app: &mut SolveApp, id: &str) -> Result<(), String> {
+    let Some(i) = app.preferences.custom_themes.iter().position(|t| t.id == id) else {
+        return Err(format!("no imported theme `{id}`"));
+    };
+    let gone = app.preferences.custom_themes.remove(i);
+    if app.preferences.theme == id {
+        select_theme(app, if gone.base.is_dark() { "dark" } else { "light" });
+    }
+    Ok(())
+}
+
+/// The theme on now as a complete theme file, a starting point for a new one.
+fn current_theme_file(app: &SolveApp) -> serde_json::Value {
+    use crate::theme_files::{Base, export, find, resolve};
+    match find(&app.preferences.theme, &app.preferences.custom_themes) {
+        Some(f) => export(&f.name, f.base, &resolve(f)),
+        None if app.ui.dark => export("Dark", Base::Dark, &crate::theme::Tokens::dark()),
+        None => export("Light", Base::Light, &crate::theme::Tokens::light()),
+    }
 }
 
 /// Fold a setting an older release kept in its own field into the one this version reads.
@@ -1516,8 +1739,12 @@ pub fn set(app: &mut SolveApp, p: &serde_json::Value) -> Result<serde_json::Valu
     if new.msaa != app.preferences.msaa && !app.msaa_supported.is_empty() && !app.msaa_supported.contains(&new.msaa) {
         return Err(format!("this graphics device doesn't support `msaa` {}; it supports {:?}", new.msaa, app.msaa_supported));
     }
-    if !THEMES.iter().any(|(id, _)| *id == new.theme) || !["z", "y"].contains(&new.up_axis.as_str()) {
-        return Err("`theme` must be dark, light or system and `up_axis` z or y".into());
+    let file = crate::theme_files::find(&new.theme, &new.custom_themes);
+    if (!THEMES.iter().any(|(id, _)| *id == new.theme) && file.is_none()) || !["z", "y"].contains(&new.up_axis.as_str()) {
+        return Err("`theme` must be dark, light, system or a theme's id (see `theme_ids`) and `up_axis` z or y".into());
+    }
+    if new.custom_themes.len() > crate::theme_files::MAX_CUSTOM || new.custom_themes.iter().any(|t| t.colors.len() > crate::theme_files::MAX_COLORS) {
+        return Err(format!("at most {} imported themes of {} colours each", crate::theme_files::MAX_CUSTOM, crate::theme_files::MAX_COLORS));
     }
     if !crate::i18n::is_supported(&new.language) {
         return Err(format!("`language` must be one of: {}", crate::i18n::LOCALES.iter().map(|locale| locale.id).collect::<Vec<_>>().join(", ")));
@@ -1538,7 +1765,7 @@ pub fn set(app: &mut SolveApp, p: &serde_json::Value) -> Result<serde_json::Valu
         return Err("`middle_double_click` must be home, fit or off".into());
     }
     if new.theme != app.preferences.theme && new.theme != "system" {
-        app.ui.dark = new.theme == "dark";
+        app.ui.dark = file.map_or(new.theme == "dark", |f| f.base.is_dark());
     }
     let up_changed = new.up_axis != app.preferences.up_axis;
     let msaa_changed = new.msaa != app.preferences.msaa;
@@ -1572,6 +1799,95 @@ mod tests {
         assert_eq!(other.preferences.ui_font, family);
         super::defaults(&mut app, 0);
         assert_eq!(app.preferences.ui_font, "");
+    }
+
+    /// Theme files (#2255): a built-in one and an imported one turn on through `ui.prefs`, the
+    /// next frame draws with their colours (dark following the base), an export gives the theme
+    /// back complete, imported themes are saved with the preferences, Remove falls back to the
+    /// base and Cancel takes an import back.
+    #[test]
+    fn theme_files_import_apply_export_save_and_remove() {
+        use crate::theme::{ColorVision, Tokens};
+        use serde_json::json;
+        let mut h = crate::scenario::Harness::new();
+        let out = h.call("ui.prefs", json!({"theme": "gruvbox-dark-hard"}));
+        assert_eq!(out["result"]["theme"], "gruvbox-dark-hard", "{out}");
+        assert!(out["result"]["theme_ids"].as_array().is_some_and(|ids| ids.len() == 9), "{out}");
+        h.frames(2);
+        let hard = crate::theme_files::find("gruvbox-dark-hard", &[]).map(crate::theme_files::resolve).unwrap();
+        assert!(h.app.ui.dark);
+        assert_eq!(Tokens::get().panel, hard.panel);
+        assert_eq!(
+            crate::viewport::scene_palette(true, ColorVision::Off).background.0,
+            solidcraft_engine::render::Rgb(hard.viewport_top.r(), hard.viewport_top.g(), hard.viewport_top.b())
+        );
+
+        let file = json!({"format": "solidcraft-theme/1", "name": "Paper", "base": "light", "colors": {"panel": "#fffdf0", "accent": "#aa3300"}});
+        let out = h.call("ui.prefs", json!({"theme_import": file, "theme_export": true}));
+        assert_eq!(out["result"]["theme_imported"], "paper", "{out}");
+        assert_eq!((out["result"]["theme"].as_str(), out["result"]["dark"].as_bool()), (Some("paper"), Some(false)));
+        let exported = &out["result"]["theme_file"];
+        assert_eq!((exported["name"].as_str(), exported["base"].as_str()), (Some("Paper"), Some("light")));
+        assert_eq!(exported["colors"]["panel"], "#fffdf0");
+        assert_eq!(exported["colors"]["text"].as_str().map(str::len), Some(7), "an export is complete: {exported}");
+        h.frames(2);
+        assert_eq!((Tokens::get().panel, Tokens::get().text), (egui::Color32::from_rgb(0xff, 0xfd, 0xf0), Tokens::light().text));
+        let out = h.call(
+            "ui.prefs",
+            json!({"theme_import": "{\"format\":\"solidcraft-theme/1\",\"name\":\"x\",\"base\":\"dark\",\"colors\":{\"nope\":\"#000000\"}}"}),
+        );
+        assert!(out["error"].as_str().is_some_and(|e| e.contains("nope")), "{out}");
+        assert_eq!(h.app.preferences.theme, "paper", "a refused file changes nothing");
+        assert!(h.call("ui.prefs", json!({"theme": "no-such-theme"}))["error"].is_string());
+
+        let mut other = crate::SolveApp::new(solidcraft_engine::Session::default(), crate::Services::default());
+        other.load_prefs(&h.app.prefs());
+        assert_eq!((other.preferences.theme.as_str(), other.preferences.custom_themes.len()), ("paper", 1));
+
+        let out = h.call("ui.prefs", json!({"theme_remove": "paper"}));
+        assert_eq!((out["result"]["theme"].as_str(), out["result"]["dark"].as_bool()), (Some("light"), Some(false)), "{out}");
+        assert!(h.app.preferences.custom_themes.is_empty());
+        assert!(h.call("ui.prefs", json!({"theme_remove": "paper"}))["error"].is_string());
+
+        h.call("ui.prefs", json!({"theme": "dark"}));
+        h.call("ui.prefs", json!({"open": "General"}));
+        h.call("ui.prefs", json!({"theme_import": file}));
+        let out = h.call("ui.prefs", json!({"button": "cancel"}));
+        assert_eq!(out["result"]["theme"], "dark", "{out}");
+        assert!(h.app.preferences.custom_themes.is_empty(), "Cancel takes the import back");
+        h.frames(2);
+        assert_eq!(Tokens::get().panel, Tokens::dark().panel);
+    }
+
+    /// Picking a font closes the font list, not the Preferences window's body: that folded the
+    /// window to its title bar, and egui kept it folded between runs (#1800). A window folded by
+    /// an earlier release unfolds when Preferences opens.
+    #[test]
+    fn picking_a_font_keeps_the_preferences_window_unfolded() {
+        use egui::collapsing_header::CollapsingState;
+        use serde_json::json;
+        let body = egui::Id::new("sc_prefs").with("collapsing");
+        let folded = |h: &crate::scenario::Harness| CollapsingState::load(&h.ctx, body).is_some_and(|s| !s.is_open());
+        let mut h = crate::scenario::Harness::new();
+        h.call("ui.prefs", json!({"open":"General"}));
+        let combo = crate::scenario::handle_at("prefs:ui_font").unwrap();
+        h.call("ui.click", json!({"x":combo.x,"y":combo.y}));
+        let builtin = crate::scenario::handle_at("prefs:font_builtin").expect("the font list is open");
+        h.call("ui.click", json!({"x":builtin.x,"y":builtin.y}));
+        h.frames(2);
+        assert!(!folded(&h), "picking a font must not fold the Preferences window");
+        assert!(crate::scenario::handle_at("prefs:font_builtin").is_none(), "the font list closes");
+        assert!(crate::scenario::rect_of("prefs:ok").is_some(), "the window's body is still drawn");
+        h.call("ui.prefs", json!({"button":"cancel"}));
+
+        // The state 0.14 and 0.15 saved: the window's body folded.
+        let mut state = CollapsingState::load_with_default_open(&h.ctx, body, true);
+        state.set_open(false);
+        state.store(&h.ctx);
+        h.call("ui.prefs", json!({"open":"General"}));
+        h.frames(2);
+        assert!(!folded(&h), "a folded Preferences window unfolds when it opens");
+        assert!(crate::scenario::rect_of("prefs:ok").is_some());
     }
 
     #[test]
@@ -1836,6 +2152,18 @@ mod tests {
         let mut other = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
         other.load_prefs(&app.prefs());
         assert_eq!(other.preferences.nav, OPENSCAD_NAV);
+    }
+
+    #[test]
+    fn pan_reverse_x_defaults_off_persists_and_flips_the_sign() {
+        assert!(!serde_json::from_value::<Prefs>(json!({})).unwrap().pan_reverse_x);
+        let mut app = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
+        assert_eq!(pan_sign_x(&app), 1.0);
+        set(&mut app, &json!({"pan_reverse_x": true})).unwrap();
+        assert_eq!(pan_sign_x(&app), -1.0);
+        let mut other = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
+        other.load_prefs(&app.prefs());
+        assert!(other.preferences.pan_reverse_x);
     }
 
     #[test]
@@ -2169,5 +2497,157 @@ mod ui_scale_regression_tests {
         h.call("ui.prefs", json!({"button":"cancel"}));
         assert_eq!(h.app.preferences.ui_scale, 1.0, "Cancel restores the original scale");
         assert_eq!(h.ctx.zoom_factor(), 1.0);
+    }
+}
+
+/// Both display-setting surfaces dispatch the same programmatic command.
+pub(crate) fn ambient_occlusion_checkbox(app: &mut SolveApp, ui: &mut egui::Ui, label: &str) {
+    let mut enabled = app.preferences.ambient_occlusion;
+    let response = ui
+        .checkbox(&mut enabled, crate::i18n::tr_label(label))
+        .on_hover_text(crate::i18n::tr_label("Soft shading where opaque surfaces meet. Requires the GPU viewport."));
+    crate::scenario::publish_handle("view:ambient_occlusion", response.rect.center());
+    if response.changed() {
+        let _ = app.run("view.ambient_occlusion", json!({"enabled": enabled}));
+    }
+}
+
+#[cfg(test)]
+mod ambient_occlusion_tests {
+    use super::*;
+
+    #[test]
+    fn ambient_occlusion_is_optional_persistent_and_cancelable() {
+        let old: Prefs = serde_json::from_value(json!({"msaa": 4})).unwrap();
+        assert!(!old.ambient_occlusion);
+        let mut h = crate::scenario::Harness::new();
+        let camera = h.app.cam;
+        let design = h.app.session.doc.to_json();
+        h.call("ui.prefs", json!({"open":"Graphics"}));
+        let checkbox = crate::scenario::handle_at("view:ambient_occlusion").unwrap();
+        h.call("ui.click", json!({"x":checkbox.x,"y":checkbox.y}));
+        assert!(h.app.preferences.ambient_occlusion);
+        let mut restored = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
+        restored.load_prefs(&h.app.prefs());
+        assert!(restored.preferences.ambient_occlusion);
+        h.call("ui.prefs", json!({"button":"cancel"}));
+        assert!(!h.app.preferences.ambient_occlusion);
+        h.call("ui.prefs", json!({"open":"Graphics", "ambient_occlusion":true}));
+        h.call("ui.prefs", json!({"button":"apply"}));
+        h.call("ui.prefs", json!({"button":"defaults"}));
+        assert!(!h.app.preferences.ambient_occlusion);
+        h.call("ui.prefs", json!({"button":"cancel"}));
+        assert!(h.app.preferences.ambient_occlusion);
+        h.call("engine.execute", json!({"command":"view.ambient_occlusion","params":{"enabled":false}}));
+        assert!(!h.app.preferences.ambient_occlusion);
+        h.call("engine.execute", json!({"command":"view.ambient_occlusion","params":{"enabled":"yes"}}));
+        assert!(!h.app.preferences.ambient_occlusion);
+        h.app.start("view.ambient_occlusion");
+        assert!(h.app.preferences.ambient_occlusion);
+        assert_eq!(h.app.cam, camera);
+        assert_eq!(h.app.session.doc.to_json(), design);
+        assert!(h.app.session.undo.is_empty());
+    }
+}
+
+/// Manual edits are preserved and shown as Custom rather than claiming to match a preset.
+fn graphics_preset(prefs: &Prefs) -> &'static str {
+    match (prefs.ambient_occlusion, prefs.display_quality.as_str(), prefs.supersampling, prefs.supersampling_adaptive) {
+        (false, "normal", 1.0, _) => "performance",
+        (true, "fine", 2.0, true) => "quality",
+        _ => "custom",
+    }
+}
+
+pub(crate) fn graphics_preset_selector(app: &mut SolveApp, ui: &mut egui::Ui) {
+    let current = graphics_preset(&app.preferences);
+    let label = format!("ui.graphics_{current}");
+    let response = egui::ComboBox::from_id_salt("graphics_preset")
+        .selected_text(app.tr(&label))
+        .show_ui(ui, |ui| {
+            for (preset, label) in [("performance", "ui.graphics_performance"), ("quality", "ui.graphics_quality")] {
+                let item = ui.selectable_label(current == preset, app.tr(label));
+                crate::scenario::publish_handle(&format!("view:graphics_preset:{preset}"), item.rect.center());
+                if item.clicked() {
+                    let _ = app.run("view.graphics_preset", json!({"preset":preset}));
+                }
+            }
+        })
+        .response
+        .on_hover_text(app.tr("ui.graphics_preset_help"));
+    crate::scenario::publish_handle("view:graphics_preset", response.rect.center());
+}
+
+#[cfg(test)]
+mod graphics_preset_tests {
+    use super::*;
+
+    #[test]
+    fn viewport_preset_popup_accepts_quality_and_performance() {
+        let mut h = crate::scenario::Harness::new();
+        h.call("ui.inspect", json!({}));
+        for handle in ["nav:view", "view:graphics_preset", "view:graphics_preset:quality"] {
+            let pos = crate::scenario::handle_at(handle).unwrap();
+            h.call("ui.click", json!({"x":pos.x,"y":pos.y}));
+        }
+        assert!(h.app.preferences.ambient_occlusion);
+        for handle in ["view:graphics_preset", "view:graphics_preset:performance"] {
+            let pos = crate::scenario::handle_at(handle).unwrap();
+            h.call("ui.click", json!({"x":pos.x,"y":pos.y}));
+        }
+        assert!(!h.app.preferences.ambient_occlusion);
+    }
+
+    #[test]
+    fn quality_selector_enables_ao_and_supports_persistence_and_cancel() {
+        let mut h = crate::scenario::Harness::new();
+        let camera = h.app.cam;
+        let design = h.app.session.doc.to_json();
+        let msaa = h.app.preferences.msaa;
+        h.call("ui.prefs", json!({"open":"Graphics"}));
+        for handle in ["view:graphics_preset", "view:graphics_preset:quality"] {
+            let pos = crate::scenario::handle_at(handle).unwrap();
+            h.call("ui.click", json!({"x":pos.x,"y":pos.y}));
+        }
+        assert!(h.app.preferences.ambient_occlusion);
+        let mut restored = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
+        restored.load_prefs(&h.app.prefs());
+        assert!(restored.preferences.ambient_occlusion);
+        h.call("ui.prefs", json!({"button":"cancel"}));
+        assert_eq!(graphics_preset(&h.app.preferences), "performance");
+        assert!(!h.app.preferences.ambient_occlusion);
+        h.call("engine.execute", json!({"command":"view.graphics_preset","params":{"preset":"quality"}}));
+        assert!(h.app.preferences.ambient_occlusion);
+        h.call("engine.execute", json!({"command":"view.graphics_preset","params":{"preset":"invalid"}}));
+        assert!(h.app.preferences.ambient_occlusion);
+        h.call("engine.execute", json!({"command":"view.graphics_preset","params":{"preset":"performance"}}));
+        assert!(!h.app.preferences.ambient_occlusion);
+        assert_eq!(graphics_preset(&h.app.preferences), "performance");
+        assert_eq!(h.app.preferences.display_quality, "normal");
+        assert_eq!(h.app.preferences.supersampling, 1.0);
+        h.call("engine.execute", json!({"command":"view.graphics_preset","params":{"preset":"quality"}}));
+        assert_eq!(graphics_preset(&h.app.preferences), "quality");
+        assert_eq!(h.app.preferences.display_quality, "fine");
+        assert_eq!(h.app.preferences.supersampling, 2.0);
+        assert!(h.app.preferences.supersampling_adaptive);
+        for edit in [
+            json!({"display_quality":"ultra"}),
+            json!({"supersampling":1.5}),
+            json!({"supersampling_adaptive":false}),
+            json!({"ambient_occlusion":false}),
+        ] {
+            h.call("engine.execute", json!({"command":"view.graphics_preset","params":{"preset":"quality"}}));
+            h.call("ui.prefs", edit);
+            assert_eq!(graphics_preset(&h.app.preferences), "custom");
+        }
+        assert_eq!(graphics_preset(&restored.preferences), "quality");
+        h.call("ui.prefs", json!({"open":"Graphics"}));
+        h.call("ui.prefs", json!({"button":"defaults"}));
+        assert_eq!(graphics_preset(&h.app.preferences), "performance");
+        h.call("ui.prefs", json!({"button":"ok"}));
+        assert_eq!(h.app.preferences.msaa, msaa);
+        assert_eq!(h.app.cam, camera);
+        assert_eq!(h.app.session.doc.to_json(), design);
+        assert!(h.app.session.undo.is_empty());
     }
 }

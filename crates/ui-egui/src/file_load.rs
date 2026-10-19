@@ -163,6 +163,9 @@ pub struct FileLoad {
     /// Tests: the next load waits before this feature until cancelled.
     #[cfg(test)]
     pub hold_at: Option<usize>,
+    /// Tests: report the worker thread, then wait for the window's explicit release.
+    #[cfg(test)]
+    pub worker_gate: Option<(Sender<std::thread::ThreadId>, Receiver<()>)>,
 }
 
 impl FileLoad {
@@ -369,7 +372,18 @@ fn start(app: &mut SolveApp) {
         partial_rx
     });
     let worker_finished = finished;
+    #[cfg(test)]
+    let worker_gate = app.file_load.worker_gate.take();
     let spawned = std::thread::Builder::new().name("file-load".into()).spawn(move || {
+        #[cfg(test)]
+        if let Some((started, release)) = worker_gate {
+            let _ = started.send(std::thread::current().id());
+            if release.recv_timeout(std::time::Duration::from_secs(60)).is_err() {
+                worker_finished.store(true, Ordering::Relaxed);
+                let _ = tx.send(Err("test file worker was not released".into()));
+                return;
+            }
+        }
         let preview_began = std::time::Instant::now();
         if command == "doc.open" {
             let progress = worker_progress.clone();

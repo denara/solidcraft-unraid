@@ -10,7 +10,7 @@ use crate::{SolveApp, dialogs, help};
 
 const MAX_BODY: usize = 24_000;
 const MAX_IMAGE_PIXELS: usize = 16_000_000;
-const ISSUE_URL: &str = "https://github.com/bherbruck/solidcraft/issues/new";
+const ISSUE_URL: &str = "https://github.com/tangency-labs/solidcraft/issues/new";
 
 thread_local! {
     static CAD_INPUT_BLOCKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };

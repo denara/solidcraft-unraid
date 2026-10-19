@@ -10,6 +10,7 @@ struct U {
     acc_u: vec4<f32>,  // accessibility map axes (xyz, offset)
     acc_v: vec4<f32>,
     eye: vec4<f32>,    // eye position, w = 1 for perspective (0: orthographic, looking along -back)
+    ao: vec4<f32>,     // radius in world units (zero: disabled)
     // analysis colours (`theme::AnalysisColors`): draft positive, between, negative; reachable,
     // blocked; curvature flat, middle, tight
     ana_c: array<vec4<f32>, 8>,
@@ -28,6 +29,7 @@ fn near_z(c: vec4<f32>) -> f32 {
 }
 
 @group(1) @binding(2) var acc_t: texture_2d<f32>;
+@group(2) @binding(0) var ao_depth: texture_2d<f32>;
 
 fn clipped(p: vec3<f32>) -> bool {
     return length(u.clip.xyz) > 0.5 && dot(u.clip.xyz, p) > u.clip.w;
@@ -119,7 +121,7 @@ fn solid(i: TOut, front: bool) -> vec4<f32> {
     let fw = fwidth(ndv);
     if (clipped(i.wp)) { discard; }
     if (!front && length(u.clip.xyz) > 0.5) {
-        // The cut face in its body's colour (as Fusion's "from component"), tinted toward the
+        // The cut face in its body's colour ("from component" colouring), tinted toward the
         // cap colour so it reads as a cut, hatched at 45 degrees on screen.
         let base = mix(i.c.rgb, u.cap.rgb, 0.35);
         let h = fract((i.pos.x + i.pos.y) / 9.0);
@@ -128,7 +130,7 @@ fn solid(i: TOut, front: bool) -> vec4<f32> {
     if (u.ana.x > 0.5 && length(i.n) > 0.5) {
         return analysis(i, k);
     }
-    let c = shade(i);
+    let c = lit(i, occlusion(i));
     // Silhouettes (styles with edges): where a curved surface turns away from the eye, a line
     // about 1.5 px wide, on the visible surface only (depth-correct).
     if (u.screen.w > 0.5 && length(i.n) > 0.5 && fw > 1e-6) {
@@ -136,6 +138,68 @@ fn solid(i: TOut, front: bool) -> vec4<f32> {
         return vec4<f32>(mix(c.rgb, out_color(vec4<f32>(0.07, 0.08, 0.10, 1.0)).rgb, a), c.a);
     }
     return c;
+}
+
+// A single-sample opaque depth map, independent of the window's MSAA and its UI offsets.
+// A color copy of the prepass depth can be loaded on WebGL/OpenGL too; GLSL cannot
+// textureLoad a depth texture, even while AO is switched off.
+struct AoDepth { @location(0) sampled: vec4<f32>, @builtin(frag_depth) tested: f32 }
+@fragment
+fn fs_ao_depth(i: TOut, @builtin(front_facing) front: bool) -> AoDepth {
+    if (clipped(i.wp) || length(i.n) < 0.5) { discard; }
+    var depth = i.pos.z;
+    if (!front && length(u.clip.xyz) > 0.5) { depth = cap_depth(i.wp, i.pos.z); }
+    // Linear RGBA8 is renderable on WebGL too. RGB carries 24 depth bits; depth
+    // testing itself still uses the original full-precision value.
+    let q = u32(round(clamp(depth, 0.0, 1.0) * 16777215.0));
+    let packed = vec4<f32>(f32(q & 255u), f32((q >> 8u) & 255u), f32((q >> 16u) & 255u), 255.0) / 255.0;
+    return AoDepth(packed, depth);
+}
+
+// Deterministic cosine-weighted hemisphere samples. Projecting the sample and a point one
+// radius toward the eye supplies a depth range in both orthographic and perspective views;
+// distant foreground geometry cannot cast a dark halo onto a background surface.
+fn occlusion(i: TOut) -> f32 {
+    let radius = u.ao.x;
+    if (radius <= 0.0 || length(i.n) < 0.5) { return 1.0; }
+    var n = normalize(i.n);
+    if (dot(n, u.back.xyz) < 0.0) { n = -n; }
+    let axis = select(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 1.0, 0.0), abs(n.z) > 0.9);
+    let tangent = normalize(cross(axis, n));
+    let bitangent = cross(n, tangent);
+    let size = vec2<i32>(textureDimensions(ao_depth));
+    // The map is a 1 × 1 stand-in until a frame draws into it (the product preview draws no
+    // prepass): sampling it tells nothing, so leave the surface unoccluded.
+    if (size.x < 2 || size.y < 2) { return 1.0; }
+    // One comparison for both depth directions: depths read as 0 near / 1 far (mirrored when
+    // the buffer runs reversed). The map is cleared to its far plane either way, so a texel
+    // with nothing in it reads as 1 and the `d < 1.0` test below skips it.
+    let flip = reversed();
+    var blocked = 0.0;
+    for (var j = 0u; j < 32u; j = j + 1u) {
+        let f = (f32(j) + 0.5) / 32.0;
+        let angle = f32(j) * 2.39996323;
+        let direction = tangent * (cos(angle) * sqrt(f)) + bitangent * (sin(angle) * sqrt(f)) + n * sqrt(1.0 - f);
+        let reach = radius * (0.2 + 0.8 * fract(f32(j) * 0.61803399 + 0.5));
+        let sample = i.wp + n * (radius * 0.025) + direction * reach;
+        let q = u.vp * vec4<f32>(sample, 1.0);
+        let near = u.vp * vec4<f32>(sample + u.back.xyz * radius, 1.0);
+        if (q.w <= 0.0 || near.w <= 0.0) { continue; }
+        let ndc = q.xyz / q.w;
+        let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+        if (any(uv < vec2<f32>(0.0)) || any(uv >= vec2<f32>(1.0)) || ndc.z < 0.0 || ndc.z > 1.0) { continue; }
+        let packed = textureLoad(ao_depth, vec2<i32>(uv * vec2<f32>(size)), 0).rgb;
+        let d0 = dot(packed, vec3<f32>(255.0, 65280.0, 16711680.0)) / 16777215.0;
+        let zs = select(ndc.z, 1.0 - ndc.z, flip);
+        let zn = select(near.z / near.w, 1.0 - near.z / near.w, flip);
+        let d = select(d0, 1.0 - d0, flip);
+        let span = max(zs - zn, 1e-7);
+        let delta = (zs - d) / span;
+        if (d < 1.0 && delta > 0.005 && delta < 1.0) {
+            blocked = blocked + smoothstep(0.005, 0.15, delta) * (1.0 - smoothstep(0.5, 1.0, delta));
+        }
+    }
+    return 1.0 - 0.85 * blocked / 32.0;
 }
 
 /// How fast the normal turns across the pixel (per mm).
@@ -230,6 +294,10 @@ fn fs_tri_all(i: TOut) -> @location(0) vec4<f32> {
 }
 
 fn shade(i: TOut) -> vec4<f32> {
+    return lit(i, 1.0);
+}
+
+fn lit(i: TOut, visibility: f32) -> vec4<f32> {
     // A zero normal marks flat colour (selection fills, translucent planes).
     if (length(i.n) < 0.5) {
         return out_color(i.c);
@@ -242,7 +310,7 @@ fn shade(i: TOut) -> vec4<f32> {
     let fill = max(dot(n, v), 0.0);
     let h = normalize(key + v);
     let spec = pow(max(dot(n, h), 0.0), 40.0) * 0.25;
-    let k = 0.42 + 0.38 * diff + 0.25 * fill;
+    let k = 0.42 + 0.38 * diff + 0.25 * fill - (0.42 + 0.25 * fill) * (1.0 - visibility);
     return out_color(vec4<f32>(min(i.c.rgb * k + vec3<f32>(spec), vec3<f32>(1.0)), i.c.a));
 }
 

@@ -1118,7 +1118,7 @@ pub(crate) fn surface(cx: &Ctx, id: u64, extent: &[mt::Point3], seam: &[mt::Poin
             };
             // ISO 10303-42 parameterises a surface of revolution by the angle u and the profile
             // v, so its normal is ∂S/∂angle × ∂S/∂profile: the opposite of truck's revolution
-            // (profile first). Fusion reads it this way. Reversed sense turns it back.
+            // (profile first). Strict readers take it this way. Reversed sense turns it back.
             Ok(revolved(profile, o, -axis * sign))
         }
         "SURFACE_OF_LINEAR_EXTRUSION" => {

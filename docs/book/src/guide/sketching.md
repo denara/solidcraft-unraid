@@ -129,6 +129,9 @@ error bound of 0.002 mm. Singular tangents, curvature cusps, possible self-inter
 excessive subdivisions are refused. Offset these curves individually: mixed chain junctions
 currently require separate geometry. `sketch.offset.break` releases an offset for independent
 editing, and undo restores its association. Older independently sampled offsets remain independent.
+The fit points of such an offset stay hidden, except the two ends of an open one: lines and
+arcs snap to them and stay coincident with them as the offset follows its source, so the gap
+between a spline and its offset can be closed into a profile.
 Smooth open and newly created smooth closed offsets can be offset again, including bounded
 refinement after a source edit. New closed outputs use a periodic cubic fit with continuous
 tangent and curvature at the seam. Break Offset Association preserves that interpolation,

@@ -141,6 +141,21 @@ pub fn anchor(app: &SolveApp, d: &Dialog) -> Option<(Vec3, Option<Vec3>)> {
     })
 }
 
+/// The direction a rectangular pattern's Spacing 2 grows along (#2462): a solid pattern's picked
+/// (or kept) second direction, none until it has one; a sketch pattern's second direction, which
+/// is square to the first unless one is picked.
+fn pattern_dir2(app: &SolveApp, d: &Dialog) -> Option<Vec3> {
+    match &d.kind {
+        Kind::PatternRect { .. } => match d.inputs.get(2).and_then(|i| i.items.first()) {
+            Some(x) => crate::dialogs::axis_of(app, x).map(|a| a.1),
+            None => d.extra.get("dir2").and_then(|v| serde_json::from_value::<[f64; 3]>(v.clone()).ok()).map(|a| Vec3::new(a[0], a[1], a[2])),
+        },
+        Kind::SketchModify(_) => crate::sketch_modify_ui::arrow2(app, d),
+        _ => None,
+    }
+    .and_then(Vec3::normalized)
+}
+
 /// The point halfway along a polyline, with the unit tangent there. Indexing the middle sample
 /// instead would land on a two-point line's far end, putting the value box and its arrow on a
 /// corner. None for a polyline with no length.
@@ -396,6 +411,19 @@ fn draw(app: &SolveApp, ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj,
         && let Some(l2) = app.session.doc.eval(distance2, ValueKind::Length).ok().filter(|v| v.is_finite())
     {
         drag_arrow(ui, painter, proj, base, bs, -n, l2, true, egui::Id::new("sc_manipulator2"), half_height, distance2);
+    }
+    // A rectangular pattern's second direction gets its own arrow for Spacing 2 (#2462), as the
+    // first direction's arrow sets Spacing.
+    if let Some(n2) = pattern_dir2(app, d) {
+        let spacing2 = match &mut d.kind {
+            Kind::PatternRect { spacing2, .. } | Kind::SketchModify(crate::sketch_modify_ui::Mod::PatternRect { spacing2, .. }) => Some(spacing2),
+            _ => None,
+        };
+        if let Some(spacing2) = spacing2
+            && let Some(l2) = app.session.doc.eval(spacing2, ValueKind::Length).ok().filter(|v| v.is_finite())
+        {
+            drag_arrow(ui, painter, proj, base, bs, n2, l2, false, egui::Id::new("sc_manipulator2"), half_height, spacing2);
+        }
     }
     // An offset plane shows where it will be.
     if let (Kind::OffsetPlane { offset }, Some(n)) = (&d.kind, dir)

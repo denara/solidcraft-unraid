@@ -148,10 +148,10 @@ fn transferred_thread_follows_body_frame_without_changing_world_axis() {
     run(&mut s, "component.move_bodies", json!({"component":to,"bodies":["Shaft"]}));
     let after = s.world_state().threads[0].clone();
     assert!(after.axis_point.dist(before.axis_point) < 1e-6);
-    assert!(after.axis.dist(before.axis) < 1e-6);
+    assert!(after.axis.dist(*before.axis) < 1e-6);
     let mut reopened = Session { doc: solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap().into(), ..Session::default() };
     reopened.refresh();
-    assert!(reopened.world_state().threads[0].axis.dist(before.axis) < 1e-6);
+    assert!(reopened.world_state().threads[0].axis.dist(*before.axis) < 1e-6);
 }
 
 #[test]

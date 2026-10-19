@@ -24,7 +24,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("file.insert_step", "Insert STEP", insert_step)
         .at("SOLID", "INSERT")
         .icon("import")
-        .params("path: STEP, IGES, FreeCAD .FCStd or Rhino .3dm file (its bodies join the design as an Import base feature in a new component named after the file, placed in the active component; an assembly's products become nested components, a repeated part one component with an occurrence per placement, all held as one rigid group until component.unlock → component, component_name, occurrence, subcomponents?, rigid_joints?); name? (the feature's and the component's); up?: z|y (default z: the file's axes are kept; y: the file has Y up, so the import's component is turned a quarter turn about X, Y becoming Z → stand_up: its occurrence); names?: solid|product|instance (what the bodies are named after: the solid's own name, else the product's (default); the name of the product (part) that holds the body; the name of the assembly occurrence (instance), else the product's)"),
+        .params("path: STEP, IGES, FreeCAD .FCStd or Rhino .3dm file (its bodies join the design as an Import base feature in a new component named after the file, placed in the active component; an assembly's products become nested components, a repeated part one component with an occurrence per placement, all held as one rigid group until component.unlock → component, component_name, occurrence, subcomponents?, rigid_joints?); name? (the feature's and the component's); up?: z|y (default z: the file's axes are kept; y: the file has Y up, so the import's component is turned a quarter turn about X, Y becoming Z → stand_up: its occurrence); names?: solid|product|instance (what the bodies are named after: the solid's own name, else the product's (default); the name of the product (part) that holds the body; the name of the assembly occurrence (instance), else the product's); matrix?: [12 or 16 numbers] (where the new component's occurrence sits in the active component, after `up`: a rigid row-major 3x4 rotation-and-translation or 4x4 matrix, flat or as rows, as occurrence.move takes it; a scale, shear or mirror is refused before the file is read); tolerance? (see occurrence.move)"),
     CommandSpec::new("file.insert_mesh", "Insert Mesh", insert_mesh)
         .at("SOLID", "INSERT")
         .icon("import")
@@ -218,7 +218,20 @@ fn insert_step(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad(cmd, "only STEP, IGES, FreeCAD and Rhino files (.step, .stp, .igs, .iges, .fcstd, .3dm) can be inserted"));
     }
     let options = step_options(p, cmd)?;
-    add_step(s, path, str_(p, "name"), &options)
+    let placement = match p.get("matrix") {
+        None | Some(Value::Null) => None,
+        Some(m) => Some(super::component::matrix::rigid(m, super::component::matrix::tolerance(p, cmd)?, cmd)?),
+    };
+    let mut out = add_step(s, path, str_(p, "name"), &options)?;
+    if let Some(m) = placement {
+        let occ = out["occurrence"].as_u64().ok_or_else(|| EngineError::Other("the import has no placement to move".into()))?;
+        if let Some(o) = s.doc_mut().occurrences.iter_mut().find(|o| o.id == occ) {
+            o.transform = solidcraft_doc::mat_mul(&m, &o.transform);
+            out["transform"] = json!(o.transform);
+        }
+        s.refresh();
+    }
+    Ok(out)
 }
 
 fn open(s: &mut Session, p: &Value) -> Result<Value> {
@@ -294,11 +307,22 @@ fn saved_name(name: &str, old_path: Option<&str>, path: &str) -> Option<String> 
 /// Rename the design, and the undo and redo states that still carry the old name, so undo
 /// does not bring the default name back and leave the design looking changed.
 fn rename_design(s: &mut Session, from: &str, to: &str) {
+    // A prepared world is keyed by the document's Arc. Changing only its name
+    // must not make an opted-in save lose warm geometry and display caches.
+    // Retag only a cache that already matches: cold or stale placements stay so.
+    let model = s.model.state();
+    let keep_world = s.world_cache.lock().ok().is_some_and(|cache| cache.as_ref().is_some_and(|cache| cache.matches(s, &model)));
     s.doc_mut().name = to.to_string();
     for snap in s.undo.iter_mut().chain(s.redo.iter_mut()) {
         if snap.doc.name == from {
             std::sync::Arc::make_mut(&mut snap.doc).name = to.to_string();
         }
+    }
+    if keep_world
+        && let Ok(mut cache) = s.world_cache.lock()
+        && let Some(cache) = cache.as_mut()
+    {
+        cache.doc = std::sync::Arc::clone(&s.doc);
     }
 }
 

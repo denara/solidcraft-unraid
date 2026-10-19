@@ -19,11 +19,21 @@ pub enum PromptPart {
         mime: String,
         base64: String,
     },
+    /// A file the agent reads as a document (a PDF), sent only to agents that take documents.
+    Document {
+        name: String,
+        /// Where it is on this machine (a `file://` link).
+        uri: String,
+        mime: String,
+        base64: String,
+    },
 }
 
 /// What a backend reports to the panel.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
+    /// Whether the agent takes documents (PDFs) in a message; sent before [`Event::Ready`].
+    Documents(bool),
     /// Ready for a message. `agent`: its name and version; `images`: it takes pictures.
     Ready { agent: String, images: bool },
     /// Text it streams (`thought`: its reasoning, shown dimmed).
@@ -136,6 +146,9 @@ pub fn content_blocks(parts: &[PromptPart]) -> Vec<Value> {
         .map(|p| match p {
             PromptPart::Text(t) => serde_json::json!({"type": "text", "text": t}),
             PromptPart::Image { mime, base64 } => serde_json::json!({"type": "image", "mimeType": mime, "data": base64}),
+            PromptPart::Document { uri, mime, base64, .. } => {
+                serde_json::json!({"type": "resource", "resource": {"uri": uri, "mimeType": mime, "blob": base64}})
+            }
         })
         .collect()
 }
@@ -157,5 +170,20 @@ mod tests {
         let b = content_blocks(&[PromptPart::Text("hi".into()), PromptPart::Image { mime: "image/png".into(), base64: "AA==".into() }]);
         assert_eq!(b[1]["type"], "image");
         assert_eq!(b[1]["mimeType"], "image/png");
+    }
+
+    #[test]
+    fn documents_go_as_embedded_resources() {
+        let doc = PromptPart::Document {
+            name: "brief.pdf".into(),
+            uri: "file:///a/brief.pdf".into(),
+            mime: "application/pdf".into(),
+            base64: "AA==".into(),
+        };
+        let b = content_blocks(&[doc]);
+        assert_eq!(b[0]["type"], "resource");
+        assert_eq!(b[0]["resource"]["uri"], "file:///a/brief.pdf");
+        assert_eq!(b[0]["resource"]["mimeType"], "application/pdf");
+        assert_eq!(b[0]["resource"]["blob"], "AA==");
     }
 }

@@ -42,8 +42,10 @@ rejected before any jobs or output directories are created. The maximum seed
 its steps, how it ended (ok, or the kind and the start of the error it was refused with), and
 for the design it left the bodies' total volume and area (within a relative 1e-6) and their
 face, edge and shell counts (exact). `tests::robustness_goldens` fails on any change, better or
-worse, so a kernel change shows every seed it moves. Pull requests that touch `crates/kernel`
-run every 8th seed; pushes to `main` and the nightly run them all. Each seed is its own test
+worse, so a kernel change shows every seed it moves. Pull requests that can change them (the
+kernel, engine, doc, sketch and geom crates) run every seed but the slowest few (`SLOW_SEEDS` in
+`.github/workflows/ci.yml`, about four fifths of their time); the merge queue, pushes to `main`
+and the nightly run them all. Each seed is its own test
 (`seed_00` … `seed_95`), so the CI shards and their cores share them out.
 
 Explicit `platforms.<os>.seeds` records override only the listed seeds on that
@@ -177,7 +179,7 @@ Found by QA on new users' first steps, each with an engine test against the anal
   round runs round the corners as spindle tori (the tube wider than its circle), which the
   offset now takes. Volume within 1e-5 of the analytic one.
 - **Shell thicker than or equal to a round** (r2 rounds shelled 2 mm): the round's inside
-  collapses to a sharp edge, as in Fusion, instead of "a cylinder shrinks to nothing".
+  collapses to a sharp edge, as intended, instead of "a cylinder shrinks to nothing".
 - **Shell thinner than a round tangent to the open face** (1.5 mm): every face moves in
   (tangencies keep) and the opening is the open face's copy swept out through the body.
 - **Shell after a drilled hole** (its tip a cone).
@@ -192,7 +194,7 @@ Found by QA on new users' first steps, each with an engine test against the anal
 ### Known limitations (counted as "not supported", with a clear message)
 
 - A shell thicker than a wall or a step: the moved faces would cross and the cavity turn
-  inside out. Fusion fills such places solid; we need a topology-changing offset.
+  inside out. The intended behaviour fills such places solid; we need a topology-changing offset.
 - Fillets and chamfers between two curved faces, or ending at faces that aren't planar.
 
 ### Still failing

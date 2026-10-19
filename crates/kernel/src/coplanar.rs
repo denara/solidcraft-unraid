@@ -24,7 +24,7 @@
 
 use std::collections::HashMap;
 
-use solidcraft_geom::{Aabb3, Vec3};
+use solidcraft_geom::{Aabb3, UnitVec3, Vec3};
 use truck_modeling::{self as mt, builder};
 
 use crate::body::shell_groups::boxes_separate;
@@ -1475,7 +1475,7 @@ fn inset_into(outer: &Body, inner: &Body, outer_operand: usize) -> Option<Result
 struct CylFace {
     index: usize,
     origin: Vec3,
-    axis: Vec3,
+    axis: UnitVec3,
     radius: f64,
 }
 
@@ -1637,7 +1637,7 @@ pub(crate) fn bore_union(a: &Body, b: &Body, accept: &dyn Fn(&Body) -> bool) -> 
                     return Err(KernelError::Failed("narrowing a bore: an unsound result".into()));
                 }
                 let Some(joined) = crate::ops::boolean(target, &narrowed, BoolOp::Union)? else { return Ok(None) };
-                let cut = crate::build::cylinder(at(lo, 0.0, 0.0), c.axis, c.radius, hi - lo)?;
+                let cut = crate::build::cylinder(at(lo, 0.0, 0.0), *c.axis, c.radius, hi - lo)?;
                 let Some(r) = crate::ops::boolean(&joined, &cut, BoolOp::Cut)? else { return Ok(None) };
                 let h = recut(&r, &joined, &narrowed, &cut, &bore, tool_operand);
                 Ok(Some(r.with_checked_history(h, &record::counts(&[a, b]))))

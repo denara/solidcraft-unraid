@@ -36,18 +36,43 @@ pub enum Snap {
         x: Option<Vec3>,
     },
     /// The centre of the planar face nearest `pick`, z along its outward normal. `face` is the
-    /// face's persistent name (found first).
+    /// face's persistent name: when it names a planar face, that face's own plane and centre are
+    /// taken (the pick only tells the pieces of a split face apart).
     FaceCenter {
         pick: Vec3,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         face: Option<String>,
+        /// What turns the frame about z (default: any direction square to z).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        x: Option<XRef>,
     },
-    /// The centre of the circular end nearest `pick` of the cylindrical face there, z along its
-    /// axis (pointing out of the face's end).
+    /// The centre of a circular end of the cylindrical face at `pick`, z along its axis
+    /// (pointing out of the face's end). `face` is the face's persistent name: when it names a
+    /// cylindrical face, that face's own axis, radius and extent are taken. `end` is the name of
+    /// the face across the rim at the chosen end (the plate's face a hole opens onto), so the
+    /// end stays the same when the design changes; without it (or when neither end has that
+    /// face any more), the end nearer `pick` along the axis.
     CircleCenter {
         pick: Vec3,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         face: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end: Option<String>,
+        /// What turns the frame about z (default: any direction square to z).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        x: Option<XRef>,
+    },
+    /// A point on an edge of a planar face: the edge's middle, or the corner where it meets the
+    /// edge `corner` names (`joints_edge.rs`). `edge` and `face` are the persistent names of the
+    /// edge and the face (found first); `pick` is a point on the edge as it was picked.
+    Edge {
+        pick: Vec3,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        edge: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        face: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        corner: Option<String>,
     },
     /// A point, z along `z` (default +Z).
     Point {
@@ -55,6 +80,103 @@ pub enum Snap {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         z: Option<Vec3>,
     },
+}
+
+/// What sets a joint origin's x axis (its turn about z): a direction, or a face found by its
+/// persistent name, so a round origin keeps its turn when the design changes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum XRef {
+    /// A direction (component coordinates); its part square to z is taken.
+    Dir(Vec3),
+    /// A face: a plane's outward normal, a cylinder's way from the origin to its axis (another
+    /// hole), any other face's way from the origin to the point of it nearest `pick` (component
+    /// coordinates; it also tells the pieces of a split face apart, default the origin).
+    Face {
+        face: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pick: Option<Vec3>,
+    },
+}
+
+impl Snap {
+    /// The persistent face and edge names the snap refers to (its face, its end's, its x reference's;
+    /// an edge origin's edge, face and corner edge).
+    pub fn face_names(&self) -> Vec<&String> {
+        let mut out = Vec::new();
+        if let Snap::FaceCenter { face, x, .. } | Snap::CircleCenter { face, x, .. } = self {
+            out.extend(face.iter());
+            if let Some(XRef::Face { face, .. }) = x {
+                out.push(face);
+            }
+        }
+        if let Snap::CircleCenter { end: Some(end), .. } = self {
+            out.push(end);
+        }
+        if let Snap::Edge { edge, face, corner, .. } = self {
+            out.extend(edge.iter().chain(face.iter()).chain(corner.iter()));
+        }
+        out
+    }
+
+    /// [`Snap::face_names`], to rewrite them (a copied component's faces have new names).
+    pub fn face_names_mut(&mut self) -> Vec<&mut String> {
+        let mut out = Vec::new();
+        match self {
+            Snap::FaceCenter { face, x, .. } => {
+                out.extend(face.iter_mut());
+                if let Some(XRef::Face { face, .. }) = x {
+                    out.push(face);
+                }
+            }
+            Snap::CircleCenter { face, end, x, .. } => {
+                out.extend(face.iter_mut());
+                out.extend(end.iter_mut());
+                if let Some(XRef::Face { face, .. }) = x {
+                    out.push(face);
+                }
+            }
+            Snap::Edge { edge, face, corner, .. } => out.extend(edge.iter_mut().chain(face.iter_mut()).chain(corner.iter_mut())),
+            _ => {}
+        }
+        out
+    }
+
+    /// The direction a face or circle snap keeps as its frame's x (`XRef::Dir`), in the
+    /// component's coordinates; `None` for a face reference or none.
+    pub fn frame_x(&self) -> Option<Vec3> {
+        match self {
+            Snap::FaceCenter { x: Some(XRef::Dir(d)), .. } | Snap::CircleCenter { x: Some(XRef::Dir(d)), .. } => Some(*d),
+            _ => None,
+        }
+    }
+
+    /// A face or circle snap given no x reference keeps `x` (the frame's x as it is now): each
+    /// solve lays it onto the face, or square to the hole's axis, as the geometry is then, so a
+    /// part on a face that tilts keeps its turn about z. Without it (designs made before) x
+    /// follows from z alone, and turns through a right angle where z crosses 0.9 along the
+    /// component's X. A snap with a reference keeps it.
+    pub fn with_frame_x(mut self, x: Vec3) -> Snap {
+        if let Snap::FaceCenter { x: slot @ None, .. } | Snap::CircleCenter { x: slot @ None, .. } = &mut self {
+            *slot = Some(XRef::Dir(x));
+        }
+        self
+    }
+
+    /// Whether every point and direction in the snap is finite.
+    pub fn is_finite(&self) -> bool {
+        let x_ok = |x: &Option<XRef>| match x {
+            Some(XRef::Dir(d)) => d.is_finite(),
+            Some(XRef::Face { pick, .. }) => pick.is_none_or(|p| p.is_finite()),
+            None => true,
+        };
+        match self {
+            Snap::Frame { origin, z, x } => origin.is_finite() && z.is_finite() && x.is_none_or(|x| x.is_finite()),
+            Snap::FaceCenter { pick, x, .. } | Snap::CircleCenter { pick, x, .. } => pick.is_finite() && x_ok(x),
+            Snap::Point { point, z } => point.is_finite() && z.is_none_or(|z| z.is_finite()),
+            Snap::Edge { pick, .. } => pick.is_finite(),
+        }
+    }
 }
 
 /// A joint origin: a snap on an occurrence's component (occurrence 0 = the root design).
@@ -138,6 +260,92 @@ pub struct Joint {
     pub angle: f64,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub suppressed: bool,
+    /// The expressions the offset, the angle and the values were typed as: they are worked out
+    /// again whenever the design changes, so a joint follows the parameters it is defined by.
+    #[serde(default, skip_serializing_if = "JointExprs::is_empty")]
+    pub exprs: JointExprs,
+}
+
+/// Expressions a joint's numbers follow (over the design's parameters): the offset (a length),
+/// the angle and each value (angles or lengths as the joint's values are). A number typed in
+/// place of one drops it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct JointExprs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub angle: Option<String>,
+    /// By value index, as in `Joint::values`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<Option<String>>,
+}
+
+impl JointExprs {
+    pub fn is_empty(&self) -> bool {
+        self.offset.is_none() && self.angle.is_none() && self.values.iter().all(Option::is_none)
+    }
+
+    /// The expression value `i` follows.
+    pub fn value(&self, i: usize) -> Option<&str> {
+        self.values.get(i).and_then(Option::as_deref)
+    }
+
+    /// Value `i` follows `e` (or nothing).
+    pub fn set_value(&mut self, i: usize, e: Option<String>) {
+        if e.is_some() && self.values.len() <= i {
+            self.values.resize(i + 1, None);
+        }
+        if let Some(slot) = self.values.get_mut(i) {
+            *slot = e;
+        }
+        while self.values.last().is_some_and(Option::is_none) {
+            self.values.pop();
+        }
+    }
+}
+
+/// Largest offset or value an expression may give a joint (mm, or radians for an angle).
+const MAX_EXPR_VALUE: f64 = 1e9;
+
+/// A joint's offset, angle and values worked out from its expressions (those without one keep
+/// their numbers), or why one can't be: an unknown name, a wrong unit, or a number too large.
+pub fn expressed(doc: &Document, j: &Joint) -> Result<(f64, f64, Vec<f64>)> {
+    let eval = |e: &str, kind: crate::expr::Kind, what: &str| -> Result<f64> {
+        let v = doc.eval(e, kind).map_err(|err| DocError::Invalid(format!("joint {}: {what} `{e}`: {err}", j.name)))?;
+        if v.is_finite() && v.abs() < MAX_EXPR_VALUE { Ok(v) } else { Err(DocError::Invalid(format!("joint {}: {what} `{e}` gives {v}", j.name))) }
+    };
+    let x = &j.exprs;
+    let offset = match &x.offset {
+        Some(e) => eval(e, crate::expr::Kind::Length, "offset")?,
+        None => j.offset,
+    };
+    let angle = match &x.angle {
+        Some(e) => eval(e, crate::expr::Kind::Angle, "angle")?,
+        None => j.angle,
+    };
+    let mut values = j.values.clone();
+    for (i, e) in x.values.iter().enumerate().take(j.kind.dofs().len()) {
+        let Some(e) = e else { continue };
+        let kind = if j.kind.is_angle(i) { crate::expr::Kind::Angle } else { crate::expr::Kind::Length };
+        let name = j.kind.dofs().get(i).copied().unwrap_or("value");
+        let v = eval(e, kind, name)?;
+        if values.len() <= i {
+            values.resize(i + 1, 0.0);
+        }
+        if let Some(slot) = values.get_mut(i) {
+            *slot = v;
+        }
+    }
+    Ok((offset, angle, values))
+}
+
+/// Values the loop solver leaves alone: those a motion link sets and those an expression does.
+fn set_values(asm: &Assembly) -> BTreeSet<(u64, usize)> {
+    let mut set: BTreeSet<(u64, usize)> = asm.links.iter().map(|l| (l.b, l.ib)).collect();
+    for j in &asm.joints {
+        set.extend(j.exprs.values.iter().enumerate().filter(|(_, e)| e.is_some()).map(|(i, _)| (j.id, i)));
+    }
+    set
 }
 
 /// Value of joint `b` (index `ib`) = ratio · value of joint `a` (index `ia`) + offset, or for a
@@ -257,7 +465,7 @@ fn size_of(doc: &Document, st: &ModelState, s: &Size) -> Result<f64> {
     let v = match s {
         Size::Length(v) => *v,
         Size::Expr(e) => doc.eval(e, crate::expr::Kind::Length)?,
-        Size::Circle(o) => circle_at(doc, st, o)?.1.radius,
+        Size::Circle(o) => circle_at(doc, st, o)?.radius,
     };
     if v.is_finite() && v > 1e-9 && v <= MAX_SIZE {
         Ok(v)
@@ -324,6 +532,49 @@ pub struct Assembly {
 }
 
 impl Assembly {
+    /// Every expression the joints and motion links keep, with the joint (or the driven joint of
+    /// a link) and what it sets: `offset`, `angle`, a value's name, or a coupling's length.
+    pub fn exprs(&self) -> Vec<(u64, String, &str)> {
+        let mut out = Vec::new();
+        for j in &self.joints {
+            let x = &j.exprs;
+            out.extend(x.offset.as_deref().map(|e| (j.id, "offset".to_string(), e)));
+            out.extend(x.angle.as_deref().map(|e| (j.id, "angle".to_string(), e)));
+            for (i, e) in x.values.iter().enumerate() {
+                if let Some(e) = e {
+                    out.push((j.id, j.kind.dofs().get(i).copied().unwrap_or("value").to_string(), e.as_str()));
+                }
+            }
+        }
+        for l in &self.links {
+            for s in l.coupling.as_ref().map(Coupling::sizes).unwrap_or_default() {
+                if let Size::Expr(e) = s {
+                    out.push((l.b, "coupling".to_string(), e.as_str()));
+                }
+            }
+        }
+        out
+    }
+
+    /// The expressions of `exprs`, to rewrite (a renamed parameter).
+    pub fn exprs_mut(&mut self) -> Vec<&mut String> {
+        let mut out = Vec::new();
+        for j in &mut self.joints {
+            let x = &mut j.exprs;
+            out.extend(x.offset.as_mut());
+            out.extend(x.angle.as_mut());
+            out.extend(x.values.iter_mut().flatten());
+        }
+        for l in &mut self.links {
+            for s in l.coupling.as_mut().map(Coupling::sizes_mut).unwrap_or_default() {
+                if let Size::Expr(e) = s {
+                    out.push(e);
+                }
+            }
+        }
+        out
+    }
+
     pub fn is_empty(&self) -> bool {
         self.joints.is_empty()
             && self.origins.is_empty()
@@ -385,58 +636,85 @@ fn component_of(doc: &Document, occ: u64) -> Result<u64> {
     doc.occurrences.iter().find(|o| o.id == occ).map(|o| o.component).ok_or_else(|| DocError::Unknown(format!("occurrence {occ}")))
 }
 
-/// Resolve a joint origin to a frame in its component's coordinates.
 /// A snap's pick point moved onto its named face (an error when the face is gone: a joint must
 /// not quietly attach elsewhere).
-fn named_pick(st: &ModelState, pick: Vec3, face: Option<&str>) -> Result<Vec3> {
+fn named_pick(doc: &Document, st: &ModelState, pick: Vec3, face: Option<&str>) -> Result<Vec3> {
     match face {
-        Some(n) => crate::naming::point_on_face(st, n, pick)
-            .map(|(q, _)| q)
-            .ok_or_else(|| DocError::Invalid(format!("joint origin: the face `{n}` no longer exists (edit the joint to pick again)"))),
+        Some(n) => face::named_face(doc, st, pick, n).map(|f| f.point),
         None => Ok(pick),
     }
 }
 
+/// The centre and outward normal of the planar face nearest `pick` (component coordinates; a
+/// body moved in from another component placed by its offset, as a named face is).
+fn nearest_plane(doc: &Document, st: &ModelState, o: &JointOrigin, pick: Vec3) -> Result<(Vec3, Vec3)> {
+    let comp = component_of(doc, o.occurrence)?;
+    let mut best: Option<(f64, Vec3, Vec3)> = None;
+    for b in component_bodies(doc, st, comp) {
+        let offset = doc.model_body_offset(b);
+        let tol = (b.body.size() * 2e-3).max(1e-3);
+        for f in b.body.faces(tol)? {
+            let Some(n) = f.plane_normal else { continue };
+            let (c, n) = match offset {
+                Some(m) => (apply_point(m, f.centroid), apply_vector(m, n)),
+                None => (f.centroid, n),
+            };
+            let d = (pick - c).dot(n).abs() + 1e-3 * (pick - c).len();
+            if best.as_ref().is_none_or(|(bd, _, _)| d < *bd) {
+                best = Some((d, c, n));
+            }
+        }
+    }
+    best.map(|(_, c, n)| (c, n)).ok_or_else(|| DocError::Invalid("joint origin: no planar face there".into()))
+}
+
+/// Resolve a joint origin to a frame in its component's coordinates.
 pub fn resolve_origin(doc: &Document, st: &ModelState, o: &JointOrigin) -> Result<Mat> {
     let bad = || DocError::Invalid("joint origin: degenerate frame".into());
     match &o.snap {
         Snap::Frame { origin, z, x } => frame(*origin, *z, *x).ok_or_else(bad),
         Snap::Point { point, z } => frame(*point, z.unwrap_or(Vec3::Z), None).ok_or_else(bad),
-        Snap::FaceCenter { pick, face } => {
-            let pick = &named_pick(st, *pick, face.as_deref())?;
-            let comp = component_of(doc, o.occurrence)?;
-            let mut best: Option<(f64, Vec3, Vec3)> = None;
-            for b in component_bodies(doc, st, comp) {
-                let tol = (b.body.size() * 2e-3).max(1e-3);
-                for f in b.body.faces(tol)? {
-                    let Some(n) = f.plane_normal else { continue };
-                    let d = (*pick - f.centroid).dot(n).abs() + 1e-3 * (*pick - f.centroid).len();
-                    if best.as_ref().is_none_or(|(bd, _, _)| d < *bd) {
-                        best = Some((d, f.centroid, n));
-                    }
-                }
-            }
-            let (_, c, n) = best.ok_or_else(|| DocError::Invalid("joint origin: no planar face there".into()))?;
-            frame(c, n, None).ok_or_else(bad)
+        Snap::FaceCenter { pick, face, x } => {
+            // A named planar face gives its own centre and normal; another face (or none) the
+            // planar face nearest the point.
+            let named = match face.as_deref() {
+                Some(n) => Some(face::named_face(doc, st, *pick, n)?),
+                None => None,
+            };
+            let (c, n) = match named.as_ref().map(face::NamedFace::plane).transpose()?.flatten() {
+                Some(cn) => cn,
+                None => nearest_plane(doc, st, o, named.as_ref().map_or(*pick, |f| f.point))?,
+            };
+            frame(c, n, face::x_axis(doc, st, x.as_ref(), c)?).ok_or_else(bad)
         }
-        Snap::CircleCenter { .. } => {
-            let (pick, cyl) = circle_at(doc, st, o)?;
-            let s = (pick - cyl.axis_point).dot(cyl.axis);
-            let (at, dir) = if (s - cyl.start).abs() <= (cyl.end - s).abs() { (cyl.start, -1.0) } else { (cyl.end, 1.0) };
-            frame(cyl.axis_point + cyl.axis * at, cyl.axis * dir, None).ok_or_else(bad)
+        Snap::Edge { .. } => edge::edge_frame(doc, st, component_of(doc, o.occurrence)?, &o.snap),
+        Snap::CircleCenter { x, .. } => {
+            let r = round_of(doc, st, o)?;
+            frame(r.centre, r.z, face::x_axis(doc, st, x.as_ref(), r.centre)?).ok_or_else(bad)
         }
     }
 }
 
-/// The pick of a circle-centre snap (on its named face) and the cylindrical face there
-/// (component coordinates). Any other snap is refused.
-fn circle_at(doc: &Document, st: &ModelState, o: &JointOrigin) -> Result<(Vec3, solidcraft_kernel::CylinderFace)> {
-    let Snap::CircleCenter { pick, face } = &o.snap else { return Err(DocError::Invalid("pick a round face".into())) };
-    let pick = named_pick(st, *pick, face.as_deref())?;
+/// A circle-centre snap's cylinder and the end it takes (component coordinates): through its
+/// named face when it names a cylinder, else the cylindrical face at its pick and the end nearer
+/// it, as older builds found them. Any other snap is refused.
+fn round_of(doc: &Document, st: &ModelState, o: &JointOrigin) -> Result<face::Round> {
+    let Snap::CircleCenter { pick, face, end, .. } = &o.snap else { return Err(DocError::Invalid("pick a round face".into())) };
+    if let Some(n) = face.as_deref()
+        && let Some(r) = face::named_round(doc, st, *pick, n, end.as_deref())?
+    {
+        return Ok(r);
+    }
+    let pick = named_pick(doc, st, *pick, face.as_deref())?;
     let comp = component_of(doc, o.occurrence)?;
+    // A body moved in from another component: looked at in its own coordinates, its cylinder
+    // placed by its offset (as a named face is).
     let cyl = component_bodies(doc, st, comp)
         .into_iter()
-        .filter_map(|b| solidcraft_kernel::cylinder_face_at(&b.body, pick))
+        .filter_map(|b| match doc.model_body_offset(b) {
+            Some(m) => solidcraft_kernel::cylinder_face_at(&b.body, apply_point(&mat_inverse(m)?, pick)).map(|c| face::placed(m, c)),
+            None => solidcraft_kernel::cylinder_face_at(&b.body, pick),
+        })
         .min_by(|a, b| {
             let off = |c: &solidcraft_kernel::CylinderFace| {
                 let v = pick - c.axis_point;
@@ -445,7 +723,14 @@ fn circle_at(doc: &Document, st: &ModelState, o: &JointOrigin) -> Result<(Vec3, 
             off(a).total_cmp(&off(b))
         })
         .ok_or_else(|| DocError::Invalid("joint origin: no cylindrical face there".into()))?;
-    Ok((pick, cyl))
+    let s = (pick - cyl.axis_point).dot(cyl.axis);
+    let (at, dir) = if (s - cyl.start).abs() <= (cyl.end - s).abs() { (cyl.start, -1.0) } else { (cyl.end, 1.0) };
+    Ok(face::Round { cylinder: cyl, centre: cyl.axis_point + cyl.axis * at, z: cyl.axis * dir })
+}
+
+/// The cylindrical face of a circle-centre snap (component coordinates).
+fn circle_at(doc: &Document, st: &ModelState, o: &JointOrigin) -> Result<solidcraft_kernel::CylinderFace> {
+    round_of(doc, st, o).map(|r| r.cylinder)
 }
 
 /// World transform of an occurrence (through its parents).
@@ -702,7 +987,7 @@ fn close_loops(tree: &Tree, closing: &[u64], asm: &Assembly, held: &Held, vals: 
     if closing.len() > MAX_LOOPS {
         return (Values::new(), stuck);
     }
-    let linked: BTreeSet<(u64, usize)> = asm.links.iter().map(|l| (l.b, l.ib)).collect();
+    let linked = set_values(asm);
     let groups = loop_groups(tree, closing, asm, &linked);
     let spent = std::cell::Cell::new(0usize);
     for (group, around, touches) in &groups {
@@ -897,7 +1182,7 @@ fn loop_dof(tree: &Tree, closing: &[u64], asm: &Assembly, vals: &Values, dof: &m
     if closing.len() > MAX_LOOPS {
         return;
     }
-    let linked: BTreeSet<(u64, usize)> = asm.links.iter().map(|l| (l.b, l.ib)).collect();
+    let linked = set_values(asm);
     let groups = loop_groups(tree, closing, asm, &linked);
     // The joints loops depend on: those around them, those whose values they read, and those a
     // motion link carries any of these values into.
@@ -1310,6 +1595,14 @@ fn build<'a>(doc: &'a Document, st: &ModelState, vals: &Values, sol: &mut Soluti
     // Joint frames in component coordinates (errors leave the joint out).
     let mut frames: BTreeMap<u64, (Mat, Mat)> = BTreeMap::new();
     for j in &joints {
+        // A joint whose expressions can't be worked out (a parameter gone) is left out rather
+        // than placed by numbers that no longer say what it was defined by.
+        if !j.exprs.is_empty()
+            && let Err(e) = expressed(doc, j)
+        {
+            sol.errors.push((j.id, j.name.clone(), e.to_string()));
+            continue;
+        }
         match (resolve_origin(doc, st, &j.a), resolve_origin(doc, st, &j.b)) {
             (Ok(fa), Ok(fb)) => {
                 frames.insert(j.id, (fa, fb));
@@ -1432,8 +1725,16 @@ impl Document {
 #[path = "joints_cam.rs"]
 pub mod cam;
 
+#[path = "joints_edge.rs"]
+mod edge;
+pub use edge::edge_snap;
+
 #[path = "joints_reach.rs"]
 mod reach;
+
+#[path = "joints_face.rs"]
+mod face;
+pub use face::{end_faces, face_name_at, named_face_spot, pin_end, round_end_at};
 pub use reach::{REACH_TOL, Reach, Reached, reach};
 
 /// The frame matrix for an explicit origin / z / x (public for commands).
@@ -1467,6 +1768,7 @@ mod tests {
                 offset: 0.0,
                 angle: 0.0,
                 suppressed: false,
+                exprs: Default::default(),
             })
             .collect();
         let links =

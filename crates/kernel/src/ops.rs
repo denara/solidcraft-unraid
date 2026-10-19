@@ -15,6 +15,9 @@ use crate::{KernelError, Result, guard, record};
 #[path = "bore_union_tests.rs"]
 mod bore_union_tests;
 
+#[path = "tool_reseam.rs"]
+mod tool_reseam;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BoolOp {
@@ -572,6 +575,13 @@ fn boolean_untimed(a: &Body, b: &Body, op: BoolOp) -> Result<Option<Body>> {
         }
     }
     let r = boolean_via(a, b, op, &boolean_whole);
+    if r.is_err()
+        && op == BoolOp::Cut
+        && !APART.with(|c| c.get())
+        && let Some(result) = tool_reseam::cut(a, b)
+    {
+        return Ok(Some(result));
+    }
     if r.is_ok() || !crate::tangent_cylinders::needed(a, b) {
         return r;
     }

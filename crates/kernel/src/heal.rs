@@ -1,5 +1,5 @@
 //! Clean-up after operations: coplanar neighbouring faces become one face, and two straight
-//! edges meeting in line at a vertex nothing else uses become one edge (as Fusion keeps them).
+//! edges meeting in line at a vertex nothing else uses become one edge (they are kept as one).
 
 use std::collections::{BTreeSet, HashMap};
 

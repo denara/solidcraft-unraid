@@ -282,3 +282,20 @@ fn bench_plate() {
         println!("| {tol} | {:.1} ms | {:.1} ms | {:.1} ms | {g} | {nr} / {np} |", median(r), median(p), median(c));
     }
 }
+
+/// WebGL/OpenGL must compile the opaque viewport even while AO is disabled. A depth
+/// textureLoad was rejected by GLSL translation before any frame could be drawn.
+#[test]
+fn viewport_ambient_occlusion_compiles_for_glsl() {
+    use naga::back::glsl;
+    let module = ok(naga::front::wgsl::parse_str(crate::view::SHADER));
+    let info = ok(naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::default()).validate(&module));
+    let options = glsl::Options { version: glsl::Version::new_gles(300), ..Default::default() };
+    for entry_point in ["fs_solid", "fs_solid_cut", "fs_ao_depth"] {
+        let pipeline = glsl::PipelineOptions { shader_stage: naga::ShaderStage::Fragment, entry_point: entry_point.into(), multiview: None };
+        let mut output = String::new();
+        let mut writer = ok(glsl::Writer::new(&mut output, &module, &info, &options, &pipeline, Default::default()));
+        ok(writer.write());
+        assert!(!output.is_empty());
+    }
+}

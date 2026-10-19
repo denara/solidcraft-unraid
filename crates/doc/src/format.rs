@@ -16,7 +16,7 @@
 //! - 5: joins, cuts and intersects change only their own component's bodies unless bodies are
 //!   named as `participants`; older features in designs with components get `participants:
 //!   ["*"]` (every body), which is what they did, so those designs keep their shape.
-//! - 4: joint origins mate by default (B's z against A's, as Fusion does); `flip` now means
+//! - 4: joint origins mate by default (B's z against A's); `flip` now means
 //!   "don't mate". Older joints keep their placement: their `flip` is inverted.
 //! - 6: XZ origin planes use sketch y = -Z and normal +Y. Older XZ references become
 //!   explicit planes retaining their previous axes, including offset-plane expressions.

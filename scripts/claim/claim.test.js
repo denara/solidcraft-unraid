@@ -39,6 +39,11 @@ function fake(world = {}) {
         removeAssignees: rec('removeAssignees'),
         createComment: rec('comment'),
         listForRepo: async () => ({ data: world.issues || [] }),
+        get: async ({ issue_number }) => {
+          const found = (world.byNumber || {})[issue_number];
+          if (!found) throw Object.assign(new Error('nf'), { status: 404 });
+          return { data: found };
+        },
         listEventsForTimeline: async () => ({ data: world.timeline || [] }),
       },
     },
@@ -230,4 +235,63 @@ test('sweep is idempotent: a released issue is no longer listed', async () => {
   assert.deepEqual(await claim.sweep({ github: w.github, context: { repo }, now: NOW }), [7]);
   world.issues = [];
   assert.deepEqual(await claim.sweep({ github: w.github, context: { repo }, now: NOW }), []);
+});
+
+test('referencedIssues reads the title and closing keywords, capped', () => {
+  assert.deepEqual(claim.referencedIssues('Fillet: chain (#123)', 'Fixes #9, closes: #10, see #11'), [123, 9, 10]);
+  assert.deepEqual(claim.referencedIssues('no refs', 'mentions #4 only'), []);
+  assert.deepEqual(claim.referencedIssues('#1 #2 #3 #4 #5 #6 #7', ''), [1, 2, 3, 4, 5]);
+  assert.deepEqual(claim.referencedIssues(undefined, null), []);
+});
+
+const openIssue = (number, assignees = [], labels = []) => ({
+  number,
+  state: 'open',
+  locked: false,
+  assignees: assignees.map((login) => ({ login })),
+  labels: labels.map((name) => ({ name })),
+});
+const pullCtx = (number, title, body = '', login = 'alice') => ({
+  repo,
+  payload: { pull_request: { number, state: 'open', title, body, user: { login, type: 'User' } } },
+});
+
+test('a PR referencing a free issue claims it for the author', async () => {
+  const { github, calls } = fake({ byNumber: { 7: openIssue(7) } });
+  assert.deepEqual(await claim.handlePull({ github, context: pullCtx(50, 'Thing (#7)') }), [7]);
+  assert.deepEqual(find(calls, 'addAssignees')[1], { ...repo, issue_number: 7, assignees: ['alice'] });
+  assert.deepEqual(find(calls, 'addLabels')[1].labels, ['in progress']);
+  assert.match(find(calls, 'comment')[1].body, /Claimed by @alice through #50/);
+});
+
+test('a PR on an issue someone else holds comments on the PR and changes nothing', async () => {
+  const { github, calls } = fake({ byNumber: { 7: openIssue(7, ['bob'], ['in progress']) } });
+  assert.deepEqual(await claim.handlePull({ github, context: pullCtx(50, 'Thing (#7)') }), []);
+  assert.equal(find(calls, 'addAssignees'), undefined);
+  const c = find(calls, 'comment')[1];
+  assert.equal(c.issue_number, 50);
+  assert.match(c.body, /@bob/);
+});
+
+test('the lowest-numbered open PR wins an unrecorded claim', async () => {
+  const { github, calls } = fake({ byNumber: { 7: openIssue(7) }, timeline: [pr(42, 'bob')] });
+  assert.deepEqual(await claim.handlePull({ github, context: pullCtx(50, 'Thing (#7)') }), []);
+  assert.match(find(calls, 'comment')[1].body, /#42 claimed #7 first/);
+});
+
+test('the claimant\'s own PR just makes sure the label is there', async () => {
+  const { github, calls } = fake({ byNumber: { 7: openIssue(7, ['alice']) } });
+  assert.deepEqual(await claim.handlePull({ github, context: pullCtx(50, 'Thing (#7)') }), []);
+  assert.deepEqual(names(calls), ['addLabels']);
+});
+
+test('PRs from bots, references to PRs, closed and missing issues are ignored', async () => {
+  const w = fake({
+    byNumber: { 7: { ...openIssue(7), pull_request: {} }, 8: { ...openIssue(8), state: 'closed' } },
+  });
+  assert.deepEqual(await claim.handlePull({ github: w.github, context: pullCtx(50, 'x (#7) (#8) (#9)') }), []);
+  const bot = pullCtx(51, 'x (#1)');
+  bot.payload.pull_request.user = { login: 'dependabot[bot]', type: 'Bot' };
+  assert.deepEqual(await claim.handlePull({ github: w.github, context: bot }), []);
+  assert.equal(w.calls.length, 0);
 });

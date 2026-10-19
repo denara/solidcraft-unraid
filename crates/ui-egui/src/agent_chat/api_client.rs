@@ -404,9 +404,11 @@ fn user_message(parts: &[PromptPart]) -> Value {
     }
     let content: Vec<Value> = parts
         .iter()
-        .map(|p| match p {
-            PromptPart::Text(t) => json!({"type": "text", "text": t}),
-            PromptPart::Image { mime, base64 } => json!({"type": "image_url", "image_url": {"url": format!("data:{mime};base64,{base64}")}}),
+        .filter_map(|p| match p {
+            PromptPart::Text(t) => Some(json!({"type": "text", "text": t})),
+            PromptPart::Image { mime, base64 } => Some(json!({"type": "image_url", "image_url": {"url": format!("data:{mime};base64,{base64}")}})),
+            // This endpoint takes no documents (the chat doesn't send any); the message names the file.
+            PromptPart::Document { .. } => None,
         })
         .collect();
     json!({"role": "user", "content": content})

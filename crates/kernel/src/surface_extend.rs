@@ -26,8 +26,8 @@
 use std::collections::HashMap;
 
 use mt::{BoundedCurve, ParametricCurve, ParametricSurface};
-use solidcraft_geom::Vec3;
 use solidcraft_geom::tess::EvalSurface;
+use solidcraft_geom::{UnitVec3, Vec3};
 use truck_modeling as mt;
 
 use crate::body::{Body, from_p3, p3};
@@ -145,9 +145,9 @@ struct Local {
     /// Its parameters on the surface (unwrapped along the loop).
     q: [f64; 2],
     /// The surface's unit normal (`S_u × S_v`, as the parameters run).
-    n: Vec3,
+    n: UnitVec3,
     /// The edge's unit direction as the loop runs, in the tangent plane.
-    d: Vec3,
+    d: UnitVec3,
     /// Unit, in the tangent plane, square to the edge, away from the face.
     out: Vec3,
     su: Vec3,
@@ -247,7 +247,7 @@ impl Frame {
         let n = normal(su, sv)?;
         let dc = curve.der(t);
         let dc = Vec3::new(dc.x, dc.y, dc.z);
-        let d = (dc - n * dc.dot(n)).normalized().ok_or_else(|| KernelError::Invalid("an edge to extend has no direction".into()))?;
+        let d = (dc - n * dc.dot(n)).unit().ok_or_else(|| KernelError::Invalid("an edge to extend has no direction".into()))?;
         Ok(Local { p, q, n, d, out: d.cross(n) * self.ccw, su, sv })
     }
 
@@ -262,12 +262,12 @@ impl Frame {
 }
 
 /// The unit normal from the parameter derivatives; refused at a pole (where it has none).
-fn normal(su: Vec3, sv: Vec3) -> Result<Vec3> {
+fn normal(su: Vec3, sv: Vec3) -> Result<UnitVec3> {
     let c = su.cross(sv);
     if !(c.len() > 1e-12 * (su.len2() + sv.len2())) {
         return Err(KernelError::Invalid("the extension runs into a pole of the surface (a point with no normal)".into()));
     }
-    c.normalized().ok_or_else(|| KernelError::Invalid("the extension runs into a pole of the surface".into()))
+    c.unit().ok_or_else(|| KernelError::Invalid("the extension runs into a pole of the surface".into()))
 }
 
 /// The parameter step `(a, b)` with `a·S_u + b·S_v = w` for `w` in the tangent plane, its
@@ -392,11 +392,11 @@ impl<'a> Extension<'a> {
                     .ok_or_else(|| KernelError::Invalid("two extended edges turn back on each other at a corner".into()))?;
                 (r, None)
             } else if pc {
-                if !self.opts.neighbours || smooth { (prev.out, None) } else { (-next.d, Some(i)) }
+                if !self.opts.neighbours || smooth { (prev.out, None) } else { ((-next.d).vec(), Some(i)) }
             } else if !self.opts.neighbours || smooth {
                 (next.out, None)
             } else {
-                (prev.d, Some(pi))
+                (prev.d.vec(), Some(pi))
             };
             for (chosen, l) in [(pc, &prev), (nc, &next)] {
                 if chosen && r.dot(l.out) < MIN_COS {
@@ -996,7 +996,7 @@ fn arc_param(fr: &Frame, q: [f64; 2], ab: [f64; 2], length: f64) -> Result<f64> 
 
 /// The surface's normal curvature along the tangent `a·S_u + b·S_v` (unit) at `q`, signed
 /// toward `n`.
-fn normal_curvature(s: &mt::Surface, q: [f64; 2], ab: [f64; 2], n: Vec3) -> f64 {
+fn normal_curvature(s: &mt::Surface, q: [f64; 2], ab: [f64; 2], n: UnitVec3) -> f64 {
     let (uu, uv, vv) = (s.uuder(q[0], q[1]), s.uvder(q[0], q[1]), s.vvder(q[0], q[1]));
     let second = uu * (ab[0] * ab[0]) + uv * (2.0 * ab[0] * ab[1]) + vv * (ab[1] * ab[1]);
     let k = Vec3::new(second.x, second.y, second.z).dot(n);

@@ -89,6 +89,15 @@ pub(crate) fn pin_icon(p: &egui::Painter, r: Rect, on: bool, col: Color32) {
     p.line_segment([at(0.0, -2.0), at(0.0, 7.0)], stroke);
 }
 
+/// A breadcrumb separator ("Sketch › Create"): a thin chevron about 3 by 6 px, centred on `c`.
+/// Drawn rather than typed, because a font's "›" sits on the baseline in some languages
+/// (Japanese), where it reads as a comma.
+pub(crate) fn breadcrumb(p: &egui::Painter, c: egui::Pos2, col: Color32) {
+    let s = Stroke::new(1.0, col);
+    p.line_segment([pos2(c.x - 1.5, c.y - 3.0), pos2(c.x + 1.5, c.y)], s);
+    p.line_segment([pos2(c.x + 1.5, c.y), pos2(c.x - 1.5, c.y + 3.0)], s);
+}
+
 pub(crate) fn caret(p: &egui::Painter, c: egui::Pos2, col: Color32) {
     p.add(egui::Shape::convex_polygon(vec![pos2(c.x - 3.5, c.y - 2.0), pos2(c.x + 3.5, c.y - 2.0), pos2(c.x, c.y + 2.5)], col, Stroke::NONE));
 }

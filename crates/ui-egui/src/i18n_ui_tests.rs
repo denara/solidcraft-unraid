@@ -290,3 +290,34 @@ fn long_panel_label_wraps_centred_and_its_button_is_centred() {
     assert!(rows.iter().all(|row| lr.contains_rect(*row)), "the highlight holds both lines: {lr:?} {rows:?}");
     out.textures_delta.clear();
 }
+
+/// The Interference dialog's title, input and Compute button come from the catalogs: they were
+/// English in every language.
+#[test]
+fn interference_dialog_renders_in_the_active_language() {
+    let mut h = Harness::new();
+    h.app.preferences.language = "fr".into();
+    h.app.home.open = false;
+    h.call("ui.start", json!({"command":"inspect.interference"}));
+    h.frames(3);
+    for word in ["INTERFÉRENCE", "Corps (tous si aucun)", "Calculer"] {
+        assert!(h.widget(word).is_some(), "{word:?} must be shown");
+    }
+    for english in ["INTERFERENCE", "Bodies (all if none)", "Compute"] {
+        assert!(h.widget(english).is_none(), "{english:?} is still shown in English");
+    }
+    let fr = crate::i18n::Locale::for_language("fr");
+    assert_eq!(fr.format("dialog.bodies_count", &[("count", "3")]), "3 corps");
+    assert_eq!(fr.text("dialog.compute_again"), "Recalculer");
+}
+
+/// The continuity legend's Gap (an opening between faces) and the sheet-metal hem's gap are
+/// different words in some languages, so each has its own message.
+#[test]
+fn continuity_gap_and_sheet_metal_gap_are_separate_messages() {
+    for (lang, legend, sheet) in [("fr", "Écart", "Jeu"), ("de", "Lücke", "Spalt")] {
+        let locale = crate::i18n::Locale::for_language(lang);
+        assert_eq!(locale.text("ui.continuity_gap"), legend, "{lang}");
+        assert_eq!(locale.text("ui.sheet_gap"), sheet, "{lang}");
+    }
+}

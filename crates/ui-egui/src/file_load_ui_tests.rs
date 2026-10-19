@@ -25,8 +25,8 @@ impl Win {
         w
     }
 
-    /// One frame: (the viewport commands it sent, how long it took).
-    fn frame(&mut self, events: Vec<Event>) -> (Vec<ViewportCommand>, std::time::Duration) {
+    /// One frame: the viewport commands it sent.
+    fn frame(&mut self, events: Vec<Event>) -> Vec<ViewportCommand> {
         self.time += 1.0 / 60.0;
         let raw = RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1600.0, 1000.0))),
@@ -35,14 +35,13 @@ impl Win {
             events,
             ..Default::default()
         };
-        let began = std::time::Instant::now();
         let app = &mut self.app;
         let mut out = self.ctx.run_ui(raw, |ui| {
             app.logic(ui.ctx());
             app.ui(ui);
         });
         out.textures_delta.clear();
-        (out.viewport_output.remove(&ViewportId::ROOT).map(|v| v.commands).unwrap_or_default(), began.elapsed())
+        out.viewport_output.remove(&ViewportId::ROOT).map(|v| v.commands).unwrap_or_default()
     }
 
     /// The frames of a press-drag-release along `path`: the viewport commands they sent.
@@ -51,7 +50,7 @@ impl Win {
         let mut events = vec![vec![Event::PointerMoved(path[0])], vec![button(path[0], true)]];
         events.extend(path[1..].iter().map(|p| vec![Event::PointerMoved(*p)]));
         events.push(vec![button(*path.last().unwrap(), false)]);
-        events.into_iter().flat_map(|e| self.frame(e).0).collect()
+        events.into_iter().flat_map(|e| self.frame(e)).collect()
     }
 }
 
@@ -97,46 +96,42 @@ fn fingerprint(s: &Session) -> serde_json::Value {
 fn the_window_keeps_drawing_and_moving_while_a_large_design_opens() {
     let dir = scratch("drag");
     let path = large_design(&dir, 4);
-    let began = std::time::Instant::now();
     let mut sync = Session::default();
     sync.execute("doc.open", &json!({"path": path})).unwrap();
-    let sync_ms = began.elapsed().as_secs_f64() * 1000.0;
 
     let mut w = Win::new();
     let blank = w.app.session.doc.clone();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    w.app.file_load.worker_gate = Some((started_tx, release_rx));
     w.app.open_path_async(&path);
-    assert!(w.app.file_load.busy(), "the open runs off the window thread");
+    // The deadline only bounds a broken test; responsiveness is proved by ordering, not time.
+    let worker = started_rx.recv_timeout(std::time::Duration::from_secs(60)).expect("file worker started");
+    assert_ne!(worker, std::thread::current().id(), "opening runs on another thread");
+    for _ in 0..3 {
+        w.frame(vec![]);
+        assert!(w.app.file_load.busy(), "frames finish before the file worker is released");
+        assert!(std::sync::Arc::ptr_eq(&w.app.session.doc, &blank), "the old design stays intact");
+    }
     let bar = pos2(500.0, 17.0);
     let viewport = w.app.viewport.rect.map_or(pos2(800.0, 500.0), |r| r.center());
-    let (mut busy_frames, mut slowest) = (0, std::time::Duration::ZERO);
-    let (mut moved, mut overlay, mut viewport_ignored) = (false, false, false);
-    for _ in 0..100_000 {
-        if !w.app.file_load.busy() {
-            break;
-        }
-        busy_frames += 1;
-        if busy_frames == 2 {
-            // The title bar still moves the window, and maximizes it on a double click.
-            let cmds = w.gesture(&[bar, bar + vec2(12.0, 4.0), bar + vec2(40.0, 10.0)]);
-            moved = cmds.iter().any(|c| matches!(c, ViewportCommand::StartDrag)) && w.app.file_load.busy();
-            // A drag on the design reaches the overlay, not the viewport (no orbit).
-            let cam = serde_json::to_value(w.app.cam).unwrap();
-            w.gesture(&[viewport, viewport + vec2(30.0, 0.0), viewport + vec2(80.0, 20.0)]);
-            viewport_ignored = serde_json::to_value(w.app.cam).unwrap() == cam && w.app.tool.is_none();
-            overlay = crate::scenario::handle_at("file_loading:cancel").is_some();
-            // Shortcuts and commands wait for the file.
-            assert!(w.app.run("solid.box", json!({"length": 5, "width": 5, "height": 5})).is_err());
-            continue;
-        }
-        let (_, took) = w.frame(vec![]);
-        slowest = slowest.max(took);
+    let cmds = w.gesture(&[bar, bar + vec2(12.0, 4.0), bar + vec2(40.0, 10.0)]);
+    assert!(cmds.iter().any(|c| matches!(c, ViewportCommand::StartDrag)), "the title bar drag was handled during the open");
+    let cam = serde_json::to_value(w.app.cam).unwrap();
+    w.gesture(&[viewport, viewport + vec2(30.0, 0.0), viewport + vec2(80.0, 20.0)]);
+    assert_eq!(serde_json::to_value(w.app.cam).unwrap(), cam, "the design underneath took no camera input");
+    assert!(w.app.tool.is_none());
+    assert!(crate::scenario::handle_at("file_loading:cancel").is_some(), "the Opening overlay with Cancel was shown");
+    assert!(w.app.run("solid.box", json!({"length": 5, "width": 5, "height": 5})).is_err());
+    assert!(w.app.file_load.busy(), "all window interactions completed before releasing the worker");
+    assert!(std::sync::Arc::ptr_eq(&w.app.session.doc, &blank));
+    release_tx.send(()).expect("release the file worker after window interactions");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while w.app.file_load.busy() && std::time::Instant::now() < deadline {
+        w.frame(vec![]);
+        std::thread::yield_now();
     }
-    assert!(!w.app.file_load.busy(), "the open finished");
-    assert!(busy_frames >= 3, "frames kept coming during the {sync_ms:.0} ms open: {busy_frames}");
-    assert!(moved, "the title bar drag was handled during the open");
-    assert!(overlay, "the Opening overlay with Cancel was shown");
-    assert!(viewport_ignored, "the design underneath took no input");
-    assert!(slowest.as_secs_f64() * 1000.0 < (sync_ms * 0.5).max(250.0), "no frame waited for the open: slowest {slowest:?}, open {sync_ms:.0} ms");
+    assert!(!w.app.file_load.busy(), "the released open finished");
     for _ in 0..3 {
         w.frame(vec![]);
     }

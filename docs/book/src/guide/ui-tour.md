@@ -66,6 +66,44 @@ Tritan. In a mode, the faces Draft and Accessibility Analysis mark as failing ar
 Help › Keyboard Shortcuts lists every key, and File › Keyboard
 Shortcuts changes them.
 
+### Colour themes
+
+General › **Theme** lists Dark, Light and System (follows the operating system), the built-in
+Gruvbox themes (dark and light, each in hard, normal and soft contrast) and any themes you have
+imported. A choice applies at once.
+
+A theme is a small JSON file that starts from the Dark or Light palette and changes any of its
+colours by name:
+
+```json
+{
+  "format": "solidcraft-theme/1",
+  "name": "My Theme",
+  "base": "dark",
+  "colors": {
+    "panel": "#282828",
+    "text": "#ebdbb2",
+    "accent": "#83a598",
+    "viewport_top": "#32302f",
+    "viewport_bottom": "#32302f",
+    "triad": ["#fb4934", "#b8bb26", "#83a598"]
+  }
+}
+```
+
+Colours are `#rrggbb`, or `#rrggbbaa` for translucent ones. A few colours, such as the view
+triad's X, Y and Z, take a list. Any colour the file leaves out keeps the base palette's value.
+
+- **Import…** adds a theme file and turns it on. Importing a file with the same name again updates
+  that theme. A file with an unknown colour name or a malformed colour is refused, and the message
+  names every problem.
+- **Export…** saves the theme on now as a complete file listing every colour. It is a good starting
+  point for your own theme.
+- **Remove** deletes the selected imported theme.
+
+Imported themes are kept with your preferences, so they work in the browser app too. Colour
+vision modes still apply on top of any theme.
+
 Navigation › **Smooth wheel zoom** is on by default. Turn it off to apply each wheel or
 trackpad event immediately, with no smoothing tail. It is independent of **Animate view
 changes**, which controls axis views, Look At, Home and Fit. Re-enabling smoothing during

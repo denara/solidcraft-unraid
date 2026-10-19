@@ -15,8 +15,8 @@ The fork is hosted at [denara/solidcraft-unraid](https://github.com/denara/solid
 The public Unraid template names a new container `SolidCraft`; the existing local Compose service,
 image tags, command names, data format and environment variables retain compatibility.
 The first prototype used upstream commit `af536a7`. The current validated snapshot is
-`8f768b65c801b255e48fd5892b3c50c136fa0992`, packaged as
-`solvecraft-unraid:upstream-8f768b65`. See [update records](unraid-updates.md) for checks,
+`5122b98af3fc5fe287c2e6d4beee8587a503244b`, packaged as
+`solvecraft-unraid:upstream-5122b98a`. See [update records](unraid-updates.md) for checks,
 the transferable image archive and installation instructions for this update.
 
 For future requested updates, use the repository skill
@@ -81,7 +81,7 @@ restart an Unraid installation automatically.
 | `/files/NAME` | Authenticated GET download / PUT upload of persistent server files |
 | `/health` | Container health check; no authentication required |
 
-The web app does **not** display or edit MCP models. Browser storage is browser-specific
+Browser CAD remains independent of active MCP sessions. The workspace can open a saved native design as an independent browser copy; browser edits are not automatically saved back to the server. Browser storage is browser-specific
 (OPFS, with local-storage fallback); it is not the Unraid data volume. Download browser
 designs to back them up. HTTPS is recommended for browser storage and WebGPU support.
 MCP previews work headlessly on the CPU; no GPU passthrough or remote desktop is needed.
@@ -272,13 +272,13 @@ path remains available. These restrictions concern the gateway, not desktop CAD.
 Build on the development computer, not on Unraid:
 
 ```sh
-docker save -o solidcraft-unraid-upstream-8f768b65.tar solvecraft-unraid:upstream-8f768b65
+docker save -o solidcraft-unraid-upstream-5122b98a.tar solvecraft-unraid:upstream-5122b98a
 ```
 
 Transfer that archive to Unraid and load it from the Unraid terminal:
 
 ```sh
-docker load -i /path/to/solidcraft-unraid-upstream-8f768b65.tar
+docker load -i /path/to/solidcraft-unraid-upstream-5122b98a.tar
 mkdir -p /mnt/user/appdata/your-cad-service
 chown 99:100 /mnt/user/appdata/your-cad-service
 ```
@@ -293,7 +293,7 @@ docker run -d --name solidcraft --init --restart unless-stopped \
   --read-only --tmpfs /tmp:rw,nosuid,nodev,size=256m,mode=1777 \
   --cap-drop ALL --security-opt no-new-privileges:true \
   --memory 4g --cpus 4 --pids-limit 128 \
-  solvecraft-unraid:upstream-8f768b65
+  solvecraft-unraid:upstream-5122b98a
 ```
 
 This installs the already built image; it does not compile anything on Unraid. For a
@@ -303,7 +303,7 @@ fixed IP on an existing custom network, replace `-p 8781:8080` with
 Install the supplied `packaging/unraid/solvecraft.xml` as a user template (under
 `/boot/config/plugins/dockerMan/templates-user/`), then select it in **Docker → Add
 Container**. For this offline archive path, change the template's Repository field from
-the registry reference to `solvecraft-unraid:upstream-8f768b65`, the locally loaded image.
+the registry reference to `solvecraft-unraid:upstream-5122b98a`, the locally loaded image.
 Offline installations need a new image archive for subsequent updates. For direct registry
 installation, keep `ghcr.io/denara/solidcraft-unraid:latest` instead.
 

@@ -47,9 +47,10 @@ pub enum Target {
     Occurrence {
         path: Vec<u64>,
     },
-    /// A browser group of items.
+    /// A browser group of items, under the design (`scope` `c0`) or a placement (`o:<path>`).
     Group {
         id: u64,
+        scope: String,
     },
     /// The Origin folder.
     Origin,
@@ -78,10 +79,12 @@ pub enum Target {
     },
     /// The Section Analysis in the browser's Analysis folder.
     Section,
-    /// A component's Bodies, Sketches or Construction folder.
+    /// A component's Bodies, Sketches or Construction folder, under the design (`scope` `c0`)
+    /// or a placement (`o:<path>`).
     Folder {
         component: u64,
         folder: String,
+        scope: String,
     },
 }
 
@@ -265,7 +268,7 @@ pub fn target_bodies(app: &SolveApp, target: &Target) -> Vec<String> {
         Target::Body { name } => vec![name.clone()],
         Target::Component { id } => component_bodies(app, *id),
         Target::Occurrence { path } => app.session.occurrence_bodies(path, true).unwrap_or_default(),
-        Target::Group { id } => crate::browser::group_bodies(app, *id),
+        Target::Group { id, .. } => crate::browser::group_bodies(app, *id),
         Target::Sketch { .. }
         | Target::Plane { .. }
         | Target::OriginPlane { .. }
@@ -330,8 +333,8 @@ pub fn items(app: &SolveApp, target: &Target) -> Vec<Item> {
         Target::OriginPlane { name } => origin_plane_items(app, name),
         Target::Component { id } => component_items(app, *id),
         Target::Occurrence { path } => occurrence_items(app, path),
-        Target::Group { id } => crate::browser::group_items(app, *id),
-        Target::Folder { component, folder } => crate::browser::folder_items(app, *component, folder),
+        Target::Group { id, scope } => crate::browser::group_items(app, *id, scope),
+        Target::Folder { component, folder, scope } => crate::browser::folder_items(app, *component, folder, scope),
         Target::Canvas { id } => crate::browser::canvas_items(app, *id),
         Target::Origin => crate::browser::origin_items(app),
         Target::NamedViews => vec![act("ui.newView", "New Named View", "perspective")],
@@ -380,7 +383,7 @@ fn body_feature_and_sketch(app: &SolveApp, body: &str) -> (Option<u64>, Option<u
     (f, sketch)
 }
 
-/// The canvas menus follow Fusion's (`plan/fusion/ui/NOTES.md`, feature names only): Repeat on
+/// The canvas menus put Repeat on
 /// top, then what fits the selection, our extras after a separator.
 fn viewport_items(app: &SolveApp) -> Vec<Item> {
     let sel = &app.session.selection;
@@ -470,7 +473,9 @@ fn viewport_items(app: &SolveApp) -> Vec<Item> {
         v.push(act("ui.fit", "Fit", "fit"));
         v.push(act("ui.home", "Home View", "home"));
         v.push(Item::sep());
-        let anything_hidden = !app.session.visibility.hidden_bodies.is_empty() || !app.session.visibility.hidden_sketches.is_empty();
+        let anything_hidden = !app.session.visibility.hidden_bodies.is_empty()
+            || !app.session.visibility.hidden_sketches.is_empty()
+            || !app.session.visibility.hidden_folders.is_empty();
         v.push(act("ui.showAll", "Show All", "eye").on(anything_hidden));
         v.push(act("ui.showAll", "Unisolate", "").on(!app.session.visibility.hidden_bodies.is_empty()));
         v.push(Item::sep());
@@ -902,6 +907,9 @@ pub fn run_item(app: &mut SolveApp, item: &Item, at: Pos2) {
         "ui.showAll" => {
             let _ = app.run("browser.visibility", json!({"folder":"bodies", "visible":true}));
             app.session.visibility.hidden_sketches.clear();
+            // Hidden folders and groups too, so everything really shows.
+            app.session.visibility.hidden_folders.clear();
+            app.ui.show_sketches = true;
         }
         "ui.isolate" => {
             app.session.visibility.hidden_bodies =
@@ -987,7 +995,7 @@ pub fn run_item(app: &mut SolveApp, item: &Item, at: Pos2) {
             drop(app.run("inspect.section", json!({"clear": true})));
         }
         "ui.editSection" => app.start("inspect.section"),
-        "ui.sectionVisible" => crate::browser::set_section_visible(app, p.get("visible").and_then(Value::as_bool).unwrap_or(true)),
+        "ui.sectionVisible" => crate::browser::set_section_shown(app, p.get("visible").and_then(Value::as_bool).unwrap_or(true)),
         "ui.fit" => app.animate_view("fit"),
         "ui.home" => app.animate_view("home"),
         // One command for the whole selection: all fixed unless all already are.
@@ -1088,8 +1096,8 @@ pub fn run_item(app: &mut SolveApp, item: &Item, at: Pos2) {
             }
         }
         "ui.folderVisible" => {
-            if let Some(f) = p.get("folder").and_then(Value::as_str) {
-                crate::browser::toggle_folder(app, id_of(&p, "component").unwrap_or(0), f);
+            if let Some(key) = p.get("key").and_then(Value::as_str) {
+                crate::browser::toggle_folder(app, key);
             }
         }
         "ui.originAll" => {

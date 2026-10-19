@@ -325,6 +325,7 @@ fn frame(scene: &Scene, cam: &Camera, [width, height]: [u32; 2], key: u64, acces
         access,
         outline: true,
         eye: [eye[0], eye[1], eye[2], if cam.fov > 0.0 { 1.0 } else { 0.0 }],
+        ao_radius: 0.0,
         ssaa: 1.0,
     }
 }

@@ -83,6 +83,7 @@ const ALLOWED_LITERALS: &[(&str, usize, &str)] = &[
     ("ref_images.rs", 1, "a reference image's opacity tint"),
     ("sketch_palette.rs", 1, "white text on the accent button"),
     ("sketch_text.rs", 1, "white text on the selection chip"),
+    ("theme_files.rs", 1, "a colour read from a theme file, which sets tokens"),
     ("titlebar.rs", 4, "the window close button's red hover (the system's convention), white hovers and ink"),
     ("toolbar.rs", 3, "white hover overlays and the version text"),
 ];
