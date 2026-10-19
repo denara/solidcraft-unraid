@@ -1310,3 +1310,45 @@ installation, nginx/DNS change, application release or file migration is perform
 by this update task. Publication, archive checksum and local replacement are recorded
 after the exact-source container workflow and anonymous download checks pass. The
 canonical Unraid product Overview is unchanged, so no catalog commit is needed.
+Publication passed [container workflow 39218638514](https://github.com/denara/solidcraft-unraid/actions/runs/39218638514)
+from validated merge/source `36447e46d0be72c955783400f7758b59d9cb2f67`.
+The fresh CI image passed real MCP modelling/PNG/STEP, independent sessions,
+authentication/origin/path guards, restart persistence, browser assets, operational
+logging/privacy, shared revisions, live workspace/preview/browser-copy checks and
+remembered-login restart/revocation before registry push. Public Linux amd64 tags:
+`ghcr.io/denara/solidcraft-unraid:latest` and immutable
+`sha-36447e46d0be72c955783400f7758b59d9cb2f67`.
+Digest: `sha256:083abb7e0aa0dcb1b1a81ccfca7556398316dee9f53b7722832aabad89506787`.
+Both tags pulled anonymously using an empty Docker configuration; the anonymous
+registry manifest matched source, architecture and digest.
+
+Archive: `target/solidcraft-unraid-upstream-5122b98a.tar` (151,325,184 bytes),
+tagged `solvecraft-unraid:upstream-5122b98a`.
+SHA256: `060307a605d33d01929146ad1e9700d60d4dc79e0dfd1a22a677bc1e47755c3a`.
+
+The sole remaining local test runtime `solvecraft-solvecraft-1` is healthy at 0.16.2
+on the immutable public image. Fresh private data/config backups and
+`solvecraft-unraid:rollback-before-5122b98a` retain its former passing image/state.
+Its data volume, MCP token, complete environment, user, port/origin settings and
+resource/security limits were verified unchanged. Authenticated SDK modelling/PNG,
+read-only reopening of the known public 24000 mm3 fixture, workspace browser-cookie
+login/logout, saved properties, SSE, Rust client assets and independent browser
+startup passed after replacement. No real saved file was overwritten. The owned
+idle candidate and its unused prototype image were removed after label, image,
+volume and activity checks, with diagnostics retained in the ignored task directory.
+Build and browser-test containers removed themselves. No volumes or unrelated
+resources were removed; toolchains, build caches, private backups and rollback
+images remain. No global prune was used.
+
+After publication, the canonical XML/icon still exactly matched the public catalog
+at `denara/unraid-templates` main `4cac0942acd84241bc659c2b8eecac7f85f6eec1`.
+The profile and license are unchanged; no new catalog commit or submission was
+needed. The final fetch observed one later upstream commit,
+`5997d28de73eb7bfc746652dcd4af90f7a5805a7` (STEP instances reuse orientation,
+PR2875). It remains for the next fixed-snapshot update. The selected and validated
+baseline stays `5122b98af3fc5fe287c2e6d4beee8587a503244b`.
+To install on Unraid, save active work, back up server files and independent browser
+designs, update the existing container while preserving its data/token/settings,
+and reload the browser. Keep pre-update designs for rollback: new format28 files
+cannot be read by the previous build. No Unraid deployment or nginx/DNS change was
+performed; browser-copy edits still do not write back to server files automatically.
