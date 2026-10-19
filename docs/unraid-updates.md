@@ -33,6 +33,30 @@ Proofs/screenshots remain under ignored `target/workspace-projects-20261019/`.
 The original CAD engine/browser sources and native design format are unchanged;
 their full test suite was not repeated.
 
+Published source: `f629a6b913396141368638b67fe330c0b660dcff` on
+`codex/unraid-mcp-web`. [Container workflow](https://github.com/denara/solidcraft-unraid/actions/runs/39269471101)
+passed its fresh image build and modelling, file/project, authentication, logging,
+workspace, restart, browser-asset and remembered-login checks before publication.
+Both the immutable tag `ghcr.io/denara/solidcraft-unraid:sha-f629a6b913396141368638b67fe330c0b660dcff`
+and `latest` were pulled anonymously and have the verified source/amd64 labels.
+Digest: `sha256:6f8e3f0c41d47d52ff7aff940143e5537c5edcfd664f9700c2705cbdc3e7e0fb`.
+
+Transfer archive: `target/solidcraft-unraid-projects-f629a6b9.tar` (151432704 bytes),
+containing tag `solvecraft-unraid:projects-f629a6b9`.
+SHA256: `d43bf7bac6a748fa67adf935cdf1e74c3a9d65025b89ad8c77a273a702bf17f4`.
+
+The local test runtime was backed up privately and refreshed to the immutable public
+image, preserving its data volume, token, origins and resource/security settings.
+Health, authenticated SDK calls, the known public model's 24000 mm3 measurement,
+unchanged saved fixture bytes, RAM-only modelling/PNG, browser login, SSE and web
+assets passed after replacement. The completed candidate container and its temporary
+image were removed after ownership/activity checks; volumes, build caches/toolchains,
+private backups and a previous-image rollback tag remain. The canonical Overview was
+synchronized to `denara/unraid-templates` commit `e51d81f`, retaining profile, license
+and icon. No Unraid installation, DNS/nginx change or application release was made.
+Install through Unraid's normal image-update action, retaining the existing data and
+authentication settings, then reconnect MCP clients to discover project selection.
+
 ## 2026-10-11: upstream 4af2d06
 
 Advanced the deployment fork from `af536a7907dd4961bb8e01a3208863c013392c58` to the
