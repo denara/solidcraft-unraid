@@ -1,5 +1,38 @@
 # Validated container updates
 
+## 2026-10-19: explicit MCP project folders and workspace organization
+
+This integration update keeps the validated upstream snapshot `5122b98a` (0.16.2)
+and changes the HTTP gateway/dashboard only. The separate latest upstream head is
+checked but is not merged into this feature change.
+
+New HTTP sessions must call `project_select(name)` before CAD tools. The project
+directory is real and immutable for that session; all CAD output paths stay inside
+it. Shared HTTP downloads, file listings and revision keys retain their workspace
+prefix. Existing files stay in place; explicitly opened workspace sources cannot be
+implicitly overwritten outside the selected project. The desktop stdio interface
+is unchanged. Clients should reconnect/discover the new gateway tools after updating.
+
+Workspace groups start collapsed, preserve user choices during server-push updates,
+and group nested files under their real top-level project folder. Legacy root image
+variants follow the longest unambiguous native-model stem. Details distinguish our
+derived group from the design's optional stored project property. Session cards show
+the selected project. Live viewing of unsaved CAD sessions is researched in
+`workspace-live-view-research.md`; no viewer is included.
+
+Local validation: 94 gateway tests; formatting, Clippy with warnings denied, original
+asset checks, dependency layers and shipped-license checks. Isolated fresh-volume
+container proofs cover sketch/extrusion (24000 mm3), PNG/STEP, project selection,
+immutable bindings, paths and nested writes, legacy source preservation, shared-file
+revisions, authentication/origins, logging, restart persistence, SSE, remembered login,
+protected thumbnails and one-use browser copies. The official MCP client SDK models
+36000 mm3 in separate projects. Actual browser checks confirm collapsed initial and
+new groups, retained open/closed choices after server pushes, correctly grouped root
+PNG variants and a rendered independent CAD copy opened from a real project folder.
+Proofs/screenshots remain under ignored `target/workspace-projects-20261019/`.
+The original CAD engine/browser sources and native design format are unchanged;
+their full test suite was not repeated.
+
 ## 2026-10-11: upstream 4af2d06
 
 Advanced the deployment fork from `af536a7907dd4961bb8e01a3208863c013392c58` to the

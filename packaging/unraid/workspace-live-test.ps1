@@ -8,9 +8,10 @@ param(
 $ErrorActionPreference = 'Stop'
 $BaseUrl = $BaseUrl.TrimEnd('/')
 $taskStem = 'workspace-live-proof-' + [guid]::NewGuid().ToString('N')
-$taskModel = "$taskStem.solidcraft"
-$taskExport = "$taskStem.step"
-$taskPng = "$taskStem.png"
+$taskProject = $taskStem
+$taskModel = "$taskProject/example.solidcraft"
+$taskExport = "$taskProject/example.step"
+$taskPng = "$taskProject/example.png"
 $taskHeaders = @{Authorization = "Bearer $Token"; Accept = 'application/json, text/event-stream'; 'MCP-Protocol-Version' = '2025-06-18'}
 $taskRequestId = 0
 $taskEventCount = 0
@@ -24,10 +25,15 @@ function Rpc([string]$Method, [hashtable]$Parameters = @{}) {
     $reply = Invoke-WebRequest "$BaseUrl/mcp" -Method Post -ContentType application/json -Headers $taskHeaders -Body $body
     if ($Method -eq 'initialize') { $taskHeaders['Mcp-Session-Id'] = [string]($reply.Headers['Mcp-Session-Id'] | Select-Object -First 1) }
     $result = $reply.Content | ConvertFrom-Json -Depth 50
-    if ($result.error -or $result.result.isError) { throw 'MCP request failed during live workspace proof' }
+    if ($result.error -or $result.result.isError) { throw "MCP request failed during live workspace proof: $Method $($Parameters.name); $($result.result.content.text -join ' ')" }
     $result.result
 }
-function Tool([string]$Name, [hashtable]$Arguments = @{}) { Rpc 'tools/call' @{name = $Name; arguments = $Arguments} }
+function Tool([string]$Name, [hashtable]$Arguments = @{}) {
+    if ($Name -ne 'workspace_list_files' -and $Arguments.path -and $Arguments.path.StartsWith("$taskProject/")) {
+        $Arguments.path = $Arguments.path.Substring($taskProject.Length + 1)
+    }
+    Rpc 'tools/call' @{name = $Name; arguments = $Arguments}
+}
 function Tool-Json($Result) {
     if ($Result.structuredContent) { return $Result.structuredContent }
     ($Result.content | Where-Object type -EQ text | Select-Object -First 1).text | ConvertFrom-Json -Depth 50
@@ -67,6 +73,7 @@ function Wait-Workspace([scriptblock]$Predicate) {
 New-Item -ItemType Directory -Force $OutputDirectory | Out-Null
 try {
     $null = Rpc initialize @{protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{name = 'public-workspace-live-proof'; version = '1'}}
+    $null = Tool project_select @{name = $taskProject}
     $null = Tool execute @{command = 'solid.box'; params = @{length = 10; width = 20; height = 30}}
     $login = Invoke-WebRequest "$BaseUrl/workspace/login" -SessionVariable browser
     if ($login.Content -notmatch 'name="csrf" value="([^"]+)"') { throw 'Browser login challenge missing' }
@@ -89,7 +96,7 @@ try {
     $taskReader = [IO.StreamReader]::new($stream)
     $null = Wait-Workspace { param($html) -not $html.Contains($taskModel) }
 
-    $null = Tool execute @{command = 'file.save'; params = @{path = $taskModel; format = 'json'}}
+    $null = Tool execute @{command = 'file.save'; params = @{path = (Split-Path $taskModel -Leaf); format = 'json'}}
     $created = Wait-Workspace { param($html) $html.Contains($taskModel) }
     $listed = Tool-Json (Tool workspace_list_files @{path = $taskModel})
     $revision = $listed.files[0].revision
@@ -107,7 +114,7 @@ try {
     $snapshot = Invoke-RestMethod "$BaseUrl/workspace/api" -WebSession $browser
     $model = @($snapshot.files | Where-Object name -EQ $taskModel)[0]
     $export = @($snapshot.files | Where-Object name -EQ $taskExport)[0]
-    if (-not $model.project.id -or $model.project.id -ne $export.project.id -or $model.project.basis -ne 'design_stem') { throw 'Model/export project grouping incorrect' }
+    if (-not $model.project.id -or $model.project.id -ne $export.project.id -or $model.project.basis -ne 'directory' -or $model.project.name -ne $taskProject) { throw 'Model/export project grouping incorrect' }
     $details = Invoke-WebRequest "$BaseUrl/workspace/details/$taskModel" -WebSession $browser
     if ($details.Content -notmatch 'Live workspace proof updated' -or $details.Content -notmatch '<dt>Features</dt><dd>1</dd>') { throw 'Saved model properties missing or stale' }
     if ($details.Content.Contains($Token) -or $details.Content.Contains('/data/files')) { throw 'Model details exposed private transport metadata' }
@@ -134,7 +141,7 @@ try {
     } finally { $handoff.Dispose() }
     $copy = $taskClient.GetAsync($importUrl).GetAwaiter().GetResult()
     try {
-        if ([int]$copy.StatusCode -ne 200 -or $copy.Content.Headers.ContentType.MediaType -ne 'application/octet-stream' -or ($copy.Headers.GetValues('X-SolidCraft-Filename') | Select-Object -First 1) -ne $taskModel) { throw 'Native browser-copy bytes or filename missing' }
+        if ([int]$copy.StatusCode -ne 200 -or $copy.Content.Headers.ContentType.MediaType -ne 'application/octet-stream' -or ($copy.Headers.GetValues('X-SolidCraft-Filename') | Select-Object -First 1) -ne (Split-Path $taskModel -Leaf)) { throw 'Native browser-copy bytes or filename missing' }
         [byte[]]$copyBytes = $copy.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
         if ([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($copyBytes)) -ne [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($updatedBytes))) { throw 'Browser handoff returned a different saved native design' }
     } finally { $copy.Dispose() }

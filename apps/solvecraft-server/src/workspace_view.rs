@@ -309,6 +309,11 @@ fn session_row(html: &mut String, session: &Value) {
         Some(false) => "Noch nie gespeichert",
     };
     html.push_str(change_label);
+    if let Some(project) = session.get("project").and_then(Value::as_str).filter(|project| !project.is_empty()) {
+        let _ = write!(html, "<br>Projekt: {}", escape(project));
+    } else {
+        html.push_str("<br>Projekt noch nicht gewählt");
+    }
     if let Some(seconds) = session.get("last_model_change_seconds").and_then(Value::as_u64) {
         let _ = write!(html, "<br>Letzte Modelländerung: {}", event_date(seconds));
     }
@@ -342,14 +347,14 @@ fn project_files(html: &mut String, files: &[Value]) {
             name
         };
         let basis = match text(project, "basis") {
-            "directory" => "Dateiordner",
-            "design_stem" | "file_stem" => "Zusammengehörige Dateinamen",
+            "directory" => "Projektordner im Serverspeicher",
+            "design_stem" | "file_stem" => "Virtuelle Gruppe aus Dateinamen",
             "ungrouped" => "Ohne eindeutige Projektzuordnung",
             _ => "Einzeldatei",
         };
         let _ = write!(
             html,
-            "<details class=\"project\" open data-project=\"{}\"><summary>{}<div><div class=\"projectname\">{}</div><div class=\"projectmeta\">{basis}</div></div><span class=\"projectcount\">{} Datei{}</span></summary><div class=\"tablewrap\"><table><thead><tr><th scope=\"col\">Name</th><th scope=\"col\">Bearbeitung</th><th scope=\"col\">Zuletzt gespeichert</th><th scope=\"col\">Größe</th><th scope=\"col\">Aktionen</th></tr></thead><tbody>",
+            "<details class=\"project\" data-project=\"{}\"><summary>{}<div><div class=\"projectname\">{}</div><div class=\"projectmeta\">{basis}</div></div><span class=\"projectcount\">{} Datei{}</span></summary><div class=\"tablewrap\"><table><thead><tr><th scope=\"col\">Name</th><th scope=\"col\">Bearbeitung</th><th scope=\"col\">Zuletzt gespeichert</th><th scope=\"col\">Größe</th><th scope=\"col\">Aktionen</th></tr></thead><tbody>",
             escape(&id),
             icon(ICON_FOLDER),
             escape(name),
@@ -417,9 +422,22 @@ pub fn details(file: &Value) -> String {
     detail_value(&mut html, "Erstellt", &date(text(file, "created_at")));
     detail_value(&mut html, "Zuletzt gespeichert", &date(text(file, "modified_at")));
     if let Some(project) = file.get("project") {
-        detail_value(&mut html, "Projektgruppe", text(project, "name"));
+        detail_value(&mut html, "Projektgruppe", if text(project, "basis") == "ungrouped" { "Weitere Dateien" } else { text(project, "name") });
+        detail_value(
+            &mut html,
+            "Zuordnung",
+            match text(project, "basis") {
+                "directory" => "Projektordner im Serverspeicher",
+                "design_stem" | "file_stem" => "Virtuelle Gruppe aus Dateinamen",
+                _ => "Ohne eindeutige Projektzuordnung",
+            },
+        );
     }
-    html.push_str("</dl><h2 class=\"detailheading\">Modelleigenschaften</h2>");
+    html.push_str("</dl>");
+    if file.get("project").is_some() {
+        html.push_str("<p class=\"detailnote\">Die Projektgruppe wird aus dem Speicherpfad oder Dateinamen ermittelt. Sie ist keine Modelleigenschaft und verändert die Datei nicht.</p>");
+    }
+    html.push_str("<h2 class=\"detailheading\">Modelleigenschaften</h2>");
     let metadata = file.get("metadata").unwrap_or(&Value::Null);
     match text(metadata, "status") {
         "available" => {
@@ -475,7 +493,7 @@ pub fn fragment(snapshot: &Value, query: &str, kind: &str) -> String {
     );
     let _ = write!(
         html,
-        "<div class=\"work\"><section class=\"panel file-explorer\" aria-labelledby=\"files-heading\"><div class=\"panelhead\"><div><h2 id=\"files-heading\">Projekte &amp; Dateien <span class=\"counter\">{}</span></h2><div class=\"sub\">Im gemeinsamen Serverspeicher</div></div></div><p class=\"filesintro\">Ordner und passende Modell-/Exportnamen bündeln die Dateien automatisch.</p>",
+        "<div class=\"work\"><section class=\"panel file-explorer\" aria-labelledby=\"files-heading\"><div class=\"panelhead\"><div><h2 id=\"files-heading\">Projekte &amp; Dateien <span class=\"counter\">{}</span></h2><div class=\"sub\">Im gemeinsamen Serverspeicher</div></div></div><p class=\"filesintro\">Projektordner bündeln ihre Dateien und Unterordner. Dateien im Hauptordner werden nach passenden Modell-/Exportnamen virtuell gruppiert.</p>",
         files.len()
     );
     project_files(&mut html, files);
@@ -628,6 +646,8 @@ mod tests {
         ]});
         let fragment = fragment(&snapshot, "part", "all");
         assert_eq!(fragment.matches("data-project=\"stem:part\"").count(), 1);
+        assert!(fragment.contains("<details class=\"project\" data-project="));
+        assert!(!fragment.contains("<details class=\"project\" open"));
         assert!(fragment.contains("2 Dateien"));
         assert!(fragment.contains("<title>Folder</title>"));
         assert!(fragment.contains("<title>Box</title>"));
@@ -639,6 +659,31 @@ mod tests {
         assert!(page.contains("id=\"file-dialog\""));
         assert!(page.contains("id=\"workspace-status\""));
         assert!(page.contains("data-file-details=\"/workspace/details/part.solidcraft\""));
+    }
+
+    #[test]
+    fn derived_group_and_saved_project_are_distinct_in_file_details() {
+        let html = details(&json!({
+            "name":"fixture/part.solidcraft",
+            "project":{"id":"directory:fixture","name":"fixture","basis":"directory"},
+            "metadata":{"status":"available","project":"Saved model property"}
+        }));
+        assert!(html.contains("<dt>Projektgruppe</dt><dd>fixture</dd>"));
+        assert!(html.contains("<dt>Zuordnung</dt><dd>Projektordner im Serverspeicher</dd>"));
+        assert!(html.contains("<dt>Projekt</dt><dd>Saved model property</dd>"));
+        assert!(html.contains("Sie ist keine Modelleigenschaft"));
+    }
+
+    #[test]
+    fn sessions_show_the_server_selected_project_without_using_model_metadata() {
+        let mut html = String::new();
+        session_row(&mut html, &json!({"project":"Fixture & Tools","metadata":{"project":"Unrelated saved property"}}));
+        assert!(html.contains("Projekt: Fixture &amp; Tools"));
+        assert!(!html.contains("Unrelated saved property"));
+        assert!(!html.contains("Projekt noch nicht gewählt"));
+        let mut unselected = String::new();
+        session_row(&mut unselected, &json!({"project":null}));
+        assert!(unselected.contains("Projekt noch nicht gewählt"));
     }
 
     #[test]

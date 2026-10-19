@@ -105,7 +105,7 @@ async fn mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, bytes: Byte
     if !accepts("application/json") || !accepts("text/event-stream") {
         return failure(StatusCode::NOT_ACCEPTABLE, Value::Null, "Accept must include application/json and text/event-stream");
     }
-    let mut message: Value = match serde_json::from_slice(&bytes) {
+    let message: Value = match serde_json::from_slice(&bytes) {
         Ok(m) => m,
         Err(_) => return failure(StatusCode::BAD_REQUEST, Value::Null, "invalid JSON"),
     };
@@ -182,16 +182,6 @@ async fn mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, bytes: Byte
             Err(error) => Json(json!({"jsonrpc":"2.0","id":id,"result":{"isError":true,"content":[{"type":"text","text":error}]}})).into_response(),
         };
     }
-    if message.get("method").and_then(Value::as_str) == Some("tools/call")
-        && let Some(args) = message.get_mut("params").and_then(Value::as_object_mut).map(|p| p.entry("arguments").or_insert_with(|| json!({})))
-        && let Err(e) = paths::prepare_tool(&state.config.files, &tool, args)
-    {
-        state.audit.emit(Event::ToolFailed, json!({"session":log_id,"reason":"file_access_rejected"}));
-        if message.get("id").is_none() {
-            return StatusCode::ACCEPTED.into_response();
-        }
-        return Json(json!({"jsonrpc":"2.0","id":id,"result":{"isError":true,"content":[{"type":"text","text":e}]}})).into_response();
-    }
     let result = state.exchange(worker, message, log_id.clone()).await;
     let mut response = match result {
         Ok(Some(mut reply)) => {
@@ -200,11 +190,15 @@ async fn mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, bytes: Byte
             {
                 tools.retain(|tool| tool.get("name").and_then(Value::as_str) != Some("crash_reports"));
                 for definition in tools.iter_mut() {
+                    if definition.get("name").and_then(Value::as_str) == Some("open") {
+                        definition["inputSchema"]["properties"]["from_workspace"] = json!({"type":"boolean","description":"Explicitly read an existing source by workspace-relative path, including legacy root files. Save it under a project-relative path before saving implicitly; the source is never overwritten outside the selected project."});
+                    }
                     if matches!(definition.get("name").and_then(Value::as_str), Some("save" | "export" | "screenshot" | "execute" | "batch")) {
                         definition["inputSchema"]["properties"]["expected_revisions"] = json!({"type":"object","additionalProperties":{"type":"string"},"description":"Optional map of relative output file names to revisions from workspace_list_files. Existing files require a matching revision or the session's loaded revision; conflicts retain the in-memory model."});
                     }
                 }
                 tools.extend(crate::workspace::tools());
+                tools.extend(crate::projects::tools());
             }
             if reply.get("error").is_some() || reply.pointer("/result/isError").and_then(Value::as_bool) == Some(true) {
                 state.audit.emit(Event::ToolFailed, json!({"session":log_id,"reason":"cad_request_rejected"}));
@@ -212,7 +206,7 @@ async fn mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, bytes: Byte
             if initialize && let Some(instructions) = reply.pointer_mut("/result/instructions") {
                 let text = instructions.as_str().unwrap_or_default();
                 *instructions = Value::String(format!(
-                    "{text} Deployment: this is a separate headless model, independent of the browser app. File paths are relative to the shared persistent files directory. Save explicitly before session expiry or restart, then open the saved file in a new session. Exported files can be downloaded with the same Bearer authentication from /files/<relative-path>. Use workspace_list_files for saved files and session_status for your model's file and unsaved changes. Existing output files require the loaded file revision or an expected_revisions map obtained with workspace_list_files(path). On conflict your model is retained: reopen deliberately or save under a new name. The read-only browser workspace is /workspace."
+                    "{text} Deployment: this is a separate headless model, independent of the browser app. REQUIRED: call project_select(name) before CAD tools, choosing one real project folder for this session; project_list lists existing folders. The project cannot change within a session. CAD file paths are relative to that project. workspace_list_files paths, expected_revisions keys and /files downloads remain relative to the shared workspace, including the project prefix. To read an old file elsewhere explicitly use open(path, from_workspace:true), then save with an explicit project-relative destination; writes outside the selected project are rejected. Existing files are never moved automatically. Save explicitly before session expiry or restart, then select the same project and reopen the saved file in a new session. Existing output files require the loaded file revision or an expected_revisions map obtained with workspace_list_files(path). On conflict your model is retained: reopen deliberately or save under a new name. The read-only browser workspace is /workspace."
                 ));
             }
             Json(reply).into_response()

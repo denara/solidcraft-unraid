@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 
 #[derive(Default, Clone)]
 pub struct ModelStatus {
+    pub project: Option<String>,
     pub current_file: Option<String>,
     pub dirty: Option<bool>,
     pub has_model: bool,
@@ -22,7 +23,7 @@ pub fn relative(root: &Path, value: &str) -> Option<String> {
 
 impl ModelStatus {
     pub fn snapshot(&self) -> Value {
-        json!({"current_file":self.current_file,"dirty":self.dirty,"has_model":self.has_model,"model_revision":self.revision,
+        json!({"project":self.project,"current_file":self.current_file,"dirty":self.dirty,"has_model":self.has_model,"model_revision":self.revision,
             "loaded_revision":self.loaded_revision,"last_model_change_seconds":self.last_change.map(|t|t.elapsed().as_secs())})
     }
 

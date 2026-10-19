@@ -6,6 +6,7 @@ mod audit;
 mod config;
 mod http;
 mod paths;
+mod projects;
 mod sessions;
 mod workspace;
 mod workspace_files;

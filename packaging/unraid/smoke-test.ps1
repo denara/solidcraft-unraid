@@ -12,6 +12,7 @@ $taskHeaders = @{
     'MCP-Protocol-Version' = '2025-06-18'
 }
 $taskRequestId = 0
+$taskProject = 'unraid-proof-project'
 function Invoke-Mcp([string]$Method, [hashtable]$Parameters = @{}) {
     $script:taskRequestId++
     $taskBody = @{jsonrpc = '2.0'; id = $script:taskRequestId; method = $Method; params = $Parameters} | ConvertTo-Json -Depth 50 -Compress
@@ -30,6 +31,7 @@ function Initialize-Session {
     $taskBody = @{jsonrpc = '2.0'; method = 'notifications/initialized'} | ConvertTo-Json -Compress
     $taskReply = Invoke-WebRequest "$BaseUrl/mcp" -Method Post -ContentType 'application/json' -Headers $taskHeaders -Body $taskBody
     if ($taskReply.StatusCode -ne 202) { throw 'Initialized notification was not accepted' }
+    $null = Invoke-Tool 'project_select' @{name = $taskProject}
 }
 function Read-ToolJson($Result) {
     ($Result.content | Where-Object type -EQ 'text' | Select-Object -First 1).text | ConvertFrom-Json -Depth 50
@@ -49,7 +51,7 @@ if ($Reopen) {
     )}
     $null = Invoke-Tool 'save' @{path = 'unraid-proof.solvecraft'}
     $null = Invoke-Tool 'export' @{path = 'unraid-proof.step'}
-    Invoke-WebRequest "$BaseUrl/files/unraid-proof.step" -Headers @{Authorization = "Bearer $Token"} -OutFile (Join-Path $OutputDirectory 'unraid-proof.step')
+    Invoke-WebRequest "$BaseUrl/files/$taskProject/unraid-proof.step" -Headers @{Authorization = "Bearer $Token"} -OutFile (Join-Path $OutputDirectory 'unraid-proof.step')
     $taskStep = Get-Content (Join-Path $OutputDirectory 'unraid-proof.step') -TotalCount 1
     if ($taskStep -notmatch 'ISO-10303-21') { throw 'STEP download is invalid' }
 }
@@ -57,8 +59,8 @@ $taskMeasured = Read-ToolJson (Invoke-Tool 'measure')
 if ([Math]::Abs($taskMeasured.total.volume_mm3 - 24000) -gt 0.01) { throw "Unexpected volume: $($taskMeasured.total.volume_mm3)" }
 $taskShotArgs = @{view = 'iso'; width = 800; height = 600; path = 'unraid-proof.png'}
 if ($Reopen) {
-    $taskExisting = Read-ToolJson (Invoke-Tool 'workspace_list_files' @{path = 'unraid-proof.png'})
-    $taskShotArgs.expected_revisions = @{'unraid-proof.png' = $taskExisting.files[0].revision}
+    $taskExisting = Read-ToolJson (Invoke-Tool 'workspace_list_files' @{path = "$taskProject/unraid-proof.png"})
+    $taskShotArgs.expected_revisions = @{"$taskProject/unraid-proof.png" = $taskExisting.files[0].revision}
 }
 $taskShot = Invoke-Tool 'screenshot' $taskShotArgs
 $taskImage = ($taskShot.content | Where-Object type -EQ 'image' | Select-Object -First 1).data
@@ -76,11 +78,11 @@ if (-not $Reopen) {
     if ([Math]::Abs($taskLinked.total.volume_mm3 - 24000) -gt 0.01) { throw 'Confined linked design was not inserted' }
     $null = Invoke-Tool 'save' @{path = 'linked-proof.json'; format = 'json'}
     $taskLinkedFile = Join-Path $OutputDirectory 'linked-proof.json'
-    Invoke-WebRequest "$BaseUrl/files/linked-proof.json" -Headers @{Authorization = "Bearer $Token"} -OutFile $taskLinkedFile
+    Invoke-WebRequest "$BaseUrl/files/$taskProject/linked-proof.json" -Headers @{Authorization = "Bearer $Token"} -OutFile $taskLinkedFile
     $taskLinkedJson = Get-Content $taskLinkedFile -Raw | ConvertFrom-Json -Depth 100
     foreach ($taskLink in $taskLinkedJson.links.PSObject.Properties) { $taskLink.Value.path = '/data/mcp-token' }
     $taskHostileJson = $taskLinkedJson | ConvertTo-Json -Depth 100 -Compress
-    $null = Invoke-WebRequest "$BaseUrl/files/hostile-linked-proof.json" -Method Put -Headers @{Authorization = "Bearer $Token"} -Body ([Text.Encoding]::UTF8.GetBytes($taskHostileJson))
+    $null = Invoke-WebRequest "$BaseUrl/files/$taskProject/hostile-linked-proof.json" -Method Put -Headers @{Authorization = "Bearer $Token"} -Body ([Text.Encoding]::UTF8.GetBytes($taskHostileJson))
     $null = Invoke-Tool 'open' @{path = 'hostile-linked-proof.json'}
     $taskLinkProbeBody = @{jsonrpc = '2.0'; id = 998; method = 'tools/call'; params = @{name = 'execute'; arguments = @{command = 'component.update_links'}}} | ConvertTo-Json -Depth 10 -Compress
     $taskLinkRejected = Invoke-RestMethod "$BaseUrl/mcp" -Method Post -ContentType 'application/json' -Headers $taskHeaders -Body $taskLinkProbeBody

@@ -8,7 +8,8 @@ $ErrorActionPreference = 'Stop'
 $BaseUrl = $BaseUrl.TrimEnd('/')
 $taskId = 0
 $taskSessions = [Collections.Generic.List[hashtable]]::new()
-$taskName = 'workspace-proof-' + [guid]::NewGuid().ToString('N') + '.solidcraft'
+$taskProject = 'workspace-proof-' + [guid]::NewGuid().ToString('N')
+$taskName = "$taskProject/example.solidcraft"
 function Rpc([hashtable]$Headers, [string]$Method, [hashtable]$Parameters = @{}) {
     $script:taskId++
     $body = @{jsonrpc = '2.0'; id = $script:taskId; method = $Method; params = $Parameters} | ConvertTo-Json -Depth 30 -Compress
@@ -22,9 +23,13 @@ function Client {
     $headers = @{Authorization = "Bearer $Token"; Accept = 'application/json, text/event-stream'; 'MCP-Protocol-Version' = '2025-06-18'}
     $null = Rpc $headers initialize @{protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{name = 'public-workspace-proof'; version = '1'}}
     $taskSessions.Add($headers)
+    $null = Tool $headers project_select @{name = $taskProject}
     $headers
 }
 function Tool([hashtable]$Headers, [string]$Name, [hashtable]$Arguments = @{}, [switch]$AllowError) {
+    if ($Name -ne 'workspace_list_files' -and $Arguments.path -and $Arguments.path.StartsWith("$taskProject/")) {
+        $Arguments.path = $Arguments.path.Substring($taskProject.Length + 1)
+    }
     $result = Rpc $Headers 'tools/call' @{name = $Name; arguments = $Arguments}
     if ($result.isError -and -not $AllowError) { throw "Workspace tool failed: $Name" }
     $result
@@ -38,7 +43,7 @@ try {
     $a = Client
     $b = Client
     $catalog = Rpc $a 'tools/list'
-    foreach ($name in @('session_status', 'workspace_list_files')) { if ($name -notin $catalog.tools.name) { throw 'Workspace tools missing' } }
+    foreach ($name in @('session_status', 'workspace_list_files', 'project_list', 'project_select')) { if ($name -notin $catalog.tools.name) { throw 'Workspace/project tools missing' } }
     $null = Tool $a execute @{command = 'solid.box'; params = @{length = 30; width = 30; height = 40}}
     if (-not (Read-WorkspaceJson (Tool $a session_status)).dirty) { throw 'New model dirty state missing' }
     $null = Tool $a save @{path = $taskName}

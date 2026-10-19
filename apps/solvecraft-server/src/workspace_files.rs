@@ -274,7 +274,7 @@ mod tests {
     }
 
     #[test]
-    fn file_details_are_read_only_and_never_guess_project_prefixes() {
+    fn file_details_are_read_only_and_include_legacy_root_export_variants() {
         let root = Fixture::new();
         let design = br#"{"format":"solidcraft/1","name":"House","units":"mm","features":[],"params":[],"metadata":{"author":"Example"}}"#;
         fs::write(root.0.join("house.solidcraft"), design).unwrap();
@@ -288,7 +288,7 @@ mod tests {
         assert_eq!(file["project"]["name"], "house");
         assert_eq!(details(&root.0, "house.step").unwrap()["project"], file["project"]);
         assert_eq!(details(&root.0, "house.step").unwrap()["metadata"]["status"], "not_applicable");
-        assert_eq!(details(&root.0, "house_render.png").unwrap()["project"]["basis"], "ungrouped");
+        assert_eq!(details(&root.0, "house_render.png").unwrap()["project"], file["project"]);
         assert_eq!(revision(&root.0, "house.solidcraft").unwrap(), before);
         assert_eq!(fs::metadata(root.0.join("house.solidcraft")).unwrap().modified().unwrap(), modified);
         assert_eq!(fs::read(root.0.join("house.solidcraft")).unwrap(), design);

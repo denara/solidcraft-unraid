@@ -180,6 +180,39 @@ mod tests {
         assert!(!worker.lock().await.failed);
         assert!(!fixture.rows().iter().any(|row| row.contains("cad.timed_out") || row.contains("cad.exchange_failed")));
     }
+
+    #[tokio::test]
+    async fn project_selection_is_required_immutable_and_does_not_reach_cad() {
+        let fixture = Fixture::new();
+        let (_id, worker, log_id) = fixture.state.create("2025-06-18".into()).await.unwrap();
+        let call = |tool: &str, args: Value| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":tool,"arguments":args}});
+        let denied = fixture.state.exchange(Arc::clone(&worker), call("new_design", json!({})), log_id.clone()).await.unwrap().unwrap();
+        assert_eq!(denied["result"]["isError"], true);
+        assert!(denied.to_string().contains("project required"));
+        assert!(!worker.lock().await.failed);
+        let selected =
+            fixture.state.exchange(Arc::clone(&worker), call("project_select", json!({"name":"Demo"})), log_id.clone()).await.unwrap().unwrap();
+        assert_eq!(selected["result"]["structuredContent"]["project"], "Demo");
+        assert!(fixture.directory.join("Demo").is_dir());
+        let repeated =
+            fixture.state.exchange(Arc::clone(&worker), call("project_select", json!({"name":"Demo"})), log_id.clone()).await.unwrap().unwrap();
+        assert_ne!(repeated["result"]["isError"], true);
+        let changed =
+            fixture.state.exchange(Arc::clone(&worker), call("project_select", json!({"name":"Other"})), log_id.clone()).await.unwrap().unwrap();
+        assert_eq!(changed["result"]["isError"], true);
+        assert!(!fixture.directory.join("Other").exists());
+        let invalid = fixture
+            .state
+            .exchange(Arc::clone(&worker), call("save", json!({"path":"../outside.solidcraft"})), log_id.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(invalid["result"]["isError"], true);
+        let list = fixture.state.exchange(Arc::clone(&worker), call("project_list", json!({})), log_id).await.unwrap().unwrap();
+        assert_eq!(list["result"]["structuredContent"]["projects"], json!(["Demo"]));
+        assert_eq!(worker.lock().await.model.lock().unwrap().snapshot()["project"], "Demo");
+        assert!(!fixture.rows().iter().any(|row| row.contains("cad.timed_out")));
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -381,6 +414,52 @@ impl State {
             if is_tool && message.get("id").is_none() {
                 return Ok(None);
             }
+            if is_tool {
+                let tool = message.pointer("/params/name").and_then(Value::as_str).unwrap_or_default();
+                if matches!(tool, "project_list" | "project_select") {
+                    let previous = worker.model.lock().map_err(|_| "model metadata unavailable")?.project.clone();
+                    let args = message.pointer("/params/arguments").cloned().unwrap_or_else(|| json!({}));
+                    if let Err(error) = crate::projects::arguments(tool, &args) {
+                        return Ok(Some(tool_error(&message, &error)));
+                    }
+                    let selected = if tool == "project_select" {
+                        match args.get("name").and_then(Value::as_str) {
+                            Some(name) if previous.as_deref().is_none_or(|current| current == name) => Some(name.to_owned()),
+                            Some(_) => return Ok(Some(tool_error(&message, "this session already has a project; initialize a new session to select another"))),
+                            None => return Ok(Some(tool_error(&message, "project_select requires a project name"))),
+                        }
+                    } else { None };
+                    let project_root = root.clone();
+                    let select_name = selected.clone();
+                    let _files = file_gate.lock().await;
+                    let result = tokio::task::spawn_blocking(move || {
+                        if let Some(name) = select_name {
+                            crate::projects::select(&project_root, &name)?;
+                            Ok(json!({"project":name,"directory":name,"paths":"CAD paths are relative to this project; workspace_list_files and expected_revisions keys are relative to the shared workspace"}))
+                        } else {
+                            crate::projects::list(&project_root)
+                        }
+                    }).await.map_err(|_| "project directory unavailable")?;
+                    return Ok(Some(match result {
+                        Ok(value) => {
+                            if let Some(name) = selected {
+                                worker.model.lock().map_err(|_| "model metadata unavailable")?.project = Some(name);
+                            }
+                            json!({"jsonrpc":"2.0","id":message.get("id"),"result":{"structuredContent":value,"content":[{"type":"text","text":value.to_string()}]}})
+                        }
+                        Err(error) => tool_error(&message, &error),
+                    }));
+                }
+                let project = worker.model.lock().map_err(|_| "model metadata unavailable")?.project.clone();
+                if tool != "list_commands" {
+                    let Some(project) = project else {
+                        return Ok(Some(tool_error(&message, "project required: call project_select with a project name before CAD tools")));
+                    };
+                    if let Err(error) = crate::projects::prepare(&root, &project, &mut message) {
+                        return Ok(Some(tool_error(&message, &error)));
+                    }
+                }
+            }
             let expected = message
                 .pointer_mut("/params/arguments")
                 .and_then(Value::as_object_mut)
@@ -392,6 +471,11 @@ impl State {
                 Ok(ops) => ops,
                 Err(error) => return Ok(Some(tool_error(&message, &error))),
             };
+            if let Some(project) = previous.project.as_deref()
+                && let Err(error) = crate::projects::check_writes(project, &operations)
+            {
+                return Ok(Some(tool_error(&message, &error)));
+            }
             let _files = if operations.is_empty() { None } else { Some(file_gate.lock().await) };
             let check_root = root.clone();
             let check_ops = operations.clone();

@@ -65,6 +65,15 @@ Preserve validated PNG thumbnails and cookie-bound, expiring one-use native-desi
 handoffs to independent browser copies. Never overwrite browser files, send the MCP
 token to browser storage, or silently write browser edits back into server files.
 
+HTTP MCP sessions must select one immutable real project folder with `project_select`
+before CAD tools. Preserve project-relative CAD paths, workspace-relative revision
+keys/downloads and explicit read-only source opening via `open(from_workspace:true)`.
+Never silently move legacy root files or permit an implicit save outside the selected
+project. Keep real project folders authoritative and use virtual grouping only for
+legacy root files. Run `packaging/unraid/project-test.ps1` on the isolated candidate
+when changing gateway path handling or project binding. Initial dashboard groups are
+collapsed; live updates retain the user's current folder choices.
+
 Requested upstream updates merge one selected upstream snapshot and retain all published
 integration features in the combined image. Preserve the canonical Unraid template's
 Overview as a product description, not a dated changelog: link to upstream for SolidCraft

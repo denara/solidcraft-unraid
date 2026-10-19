@@ -86,6 +86,43 @@ Browser CAD remains independent of active MCP sessions. The workspace can open a
 designs to back them up. HTTPS is recommended for browser storage and WebGPU support.
 MCP previews work headlessly on the CPU; no GPU passthrough or remote desktop is needed.
 
+## Project folders for MCP clients
+
+Every new HTTP MCP session must choose a project before using CAD tools. Discovery,
+`project_list`, `workspace_list_files` and `session_status` remain available first.
+Call `project_select` with `{"name":"Demo-Bracket"}` to select or create the real
+directory `/data/files/Demo-Bracket`. The exact name is fixed for that session;
+selecting another project requires a new session. Names are bounded to 96 UTF-8 bytes
+and must be one visible directory component, without separators, reserved names,
+surrounding spaces or a trailing dot. Existing folders retain their spelling.
+
+CAD paths are relative to the selected project: `save({"path":"part.solidcraft"})`
+writes `Demo-Bracket/part.solidcraft`. Downloads, `workspace_list_files` filters and
+`expected_revisions` keys remain relative to the shared workspace and include the
+project prefix. For example, use `/files/Demo-Bracket/part.solidcraft` for download
+and `{"Demo-Bracket/part.solidcraft":"<revision>"}` for a revision precondition.
+This distinction preserves the same file identity for HTTP and all MCP sessions.
+
+Existing files are not moved or rewritten. To use an older root file as a source,
+explicitly call `open({"path":"old-part.solidcraft","from_workspace":true})` after
+selecting a project. Then save to an explicit project-relative destination. An
+implicit save back to a source outside the selected project is rejected, including
+inside a batch. The same workspace token still grants shared workspace access:
+project folders organize work; they are not separate user permission boundaries.
+The original desktop/stdio MCP server retains its existing behaviour.
+
+The dashboard groups files by their first real directory component, including nested
+exports. Existing root files use virtual groups based on native model names; exports
+with additional hyphen/underscore suffixes use the longest unambiguous matching model
+stem. Files without a safe match remain in “Weitere Dateien”. Groups start collapsed
+on every page load; live updates preserve the user's current open/closed choices.
+The file-detail “Projektgruppe” is derived by this integration. The separate “Projekt”
+property comes from the design's optional `metadata.project`; it does not select or
+rename a server directory.
+
+A possible read-only live view of unsaved AI models is researched separately in
+[the viewer proposal](workspace-live-view-research.md); it is not implemented.
+
 ## Build and run locally
 
 Start Docker Desktop with Linux containers. From this repository:
