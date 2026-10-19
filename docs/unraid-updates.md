@@ -1,5 +1,88 @@
 # Validated container updates
 
+## 2026-10-19: read-only live observation of unsaved MCP models
+
+The first stage from `workspace-live-view-research.md` is implemented on the same
+validated upstream snapshot `5122b98a` (0.16.2). Upstream `3b4db52c` was checked and
+is reserved for a separate upstream update. Source `ac3689f8b74a4a7b2f3bd7ce378c63d03c655446`
+on `codex/unraid-mcp-web` adds **Live-Vorschau ansehen** to active workspace session
+cards. Cookie-protected SSE announces actual PNG snapshots of the worker's current
+unsaved sketches and solids. Changes appear after completed commands or batches;
+the previous picture is marked while a calculation is running. Browser CAD remains
+independent, and observation provides no model or camera controls.
+
+Snapshot preparation/rendering runs in a guarded background thread. The observer
+preserves the document, camera, undo history, dirty state and saved path; cold
+document and kernel instance display caches are isolated from editing. A visual
+revision also tracks camera-only changes. Viewers share the latest in-memory image,
+bounded to 800 x 500 pixels and 2 MiB, with a global render limit, a minimum two-second
+capture interval, a 32 MiB cache budget and four leased image responses. No observation
+image or design is written to shared files. Logout/expiry and session termination
+revoke image access and end subscriptions. Independent opaque handles do not expose
+usable MCP session credentials. Real MCP requests have priority over internal
+snapshot exchanges. Oversized or failed previews degrade independently of CAD work.
+
+Relevant validation includes gateway unit tests, five worker observer tests, four
+workspace telemetry tests, two kernel instance-cache tests and a document mesh-cache
+test; formatting, Clippy with warnings denied, Wasm compatibility, original asset,
+dependency-layer and license checks. Additional regressions cover logout-event
+delivery under a competing revocation watchdog and bounded backpressure. Isolated
+container proofs passed modelling/PNG/STEP (24000 mm3), restart reopening, project
+and path boundaries, file revisions, authentication/origins, logging, workspace SSE,
+thumbnails/native browser copies and remembered-login persistence. The new observer
+proof verifies a real unsaved 30 x 30 x 40 mm sketch/extrusion (36000 mm3), camera-only
+updates, shared frames, responsive MCP, preserved files/history and logout/session-end
+revocation. Its test harness explicitly clears a deliberate hostile Origin retained
+by PowerShell's browser session before subsequent legitimate image requests.
+
+Actual browser evidence shows an unsaved 40 x 30 mm sketch becoming a 20 mm-high body
+without reloading, a second body appearing, retained folder choices, successful
+close/reopen and an explicit ended state with the image removed. The independent
+browser CAD app loads its original sample plate. Public-safe screenshots and proofs
+remain under ignored `target/workspace-observer-20261019/`. The design format and
+upstream CAD behavior are unchanged; the full CAD test suite was not repeated.
+
+The local development runtime now uses `solvecraft-unraid:observer-local-ac3689f8`,
+with the verified source label and exactly the same filesystem layers as the passing
+candidate. This local assembly rebuilds the native binaries and workspace Wasm over
+the previous passing image, reusing its unchanged CAD-web assets; the publication
+workflow builds the complete image from source. Its previous data/configuration was
+backed up privately; data volume,
+MCP token, origins, identity, ports and security/resource limits were preserved.
+Health, authenticated MCP SDK calls, read-only reopening of the known public 24000 mm3
+fixture, unchanged fixture bytes, RAM-only modelling/PNG (4000 mm3), browser login,
+workspace SSE and browser assets passed after replacement. The completed candidate
+container and its temporary image were removed after ownership/activity checks;
+volumes, build caches/toolchains, private backups and
+`solvecraft-unraid:rollback-before-observer-20261019` remain.
+
+Local-image archive: `target/solidcraft-unraid-observer-local-ac3689f8.tar`
+(249916416 bytes), containing `solvecraft-unraid:observer-local-ac3689f8`.
+SHA256: `c91d6ffe2505e3e1b6fca200418105d8c7c5767a3758c7a924a924e9a4f86d15`.
+This is the locally built and validated image; public registry distribution is
+verified separately below.
+
+The exact-source [container workflow](https://github.com/denara/solidcraft-unraid/actions/runs/39286338598)
+passed its complete image build and all modelling, persistence, browser-asset,
+logging, project/path/revision, workspace, live-observer and remembered-login gates
+before publication. GitHub's Actions incident delayed status reporting during the
+run; the final successful result and source revision were verified directly.
+The immutable tag
+`ghcr.io/denara/solidcraft-unraid:sha-ac3689f8b74a4a7b2f3bd7ce378c63d03c655446`
+and `latest` were pulled anonymously and verified against the source and Linux/amd64
+labels. Public digest:
+`sha256:bc5b925e6ec7de2e2ce9f6a8e59fe39709cc41a7dbfcead4aa5ca1150142382c`.
+
+Public-image archive: `target/solidcraft-unraid-observer-ac3689f8.tar` (151697408
+bytes), containing `solvecraft-unraid:observer-ac3689f8`.
+SHA256: `141ec2caa19a120b9658647438fa3975b70a50f6ae47e06208ac43a130f63ee5`.
+The canonical Overview's own-feature bullet was synchronized after verified image
+publication to `denara/unraid-templates` commit
+`2fad17ba3a09cb946c164a8ffe2692ad7c1b41c2`, preserving profile, license and original icon.
+No Unraid installation, nginx/DNS change or application release was made. Install
+through Unraid's usual container image-update action, retaining data and credentials,
+then reload `/workspace`; save active unsaved drafts before restarting the container.
+
 ## 2026-10-19: explicit MCP project folders and workspace organization
 
 This integration update keeps the validated upstream snapshot `5122b98a` (0.16.2)
