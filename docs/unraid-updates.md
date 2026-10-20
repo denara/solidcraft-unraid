@@ -68,10 +68,38 @@ exported STEP and verified BOM path/revision rejection. Original fixture bytes w
 unchanged. Only disposable candidate data was deleted; the existing development
 runtime was not used for destructive tests.
 
-Registry publication, final archive/digest and local runtime refresh are pending
-until the validated source commit's exact container workflow completes. The canonical
-Unraid Overview lists only the fork's additional features and keeps original authorship
-and unofficial status explicit; catalog synchronization follows image publication.
+Source `e75ca79677221d1a99e893f3005d39be4e57fcba` is published on `codex/unraid-mcp-web`.
+The exact [SolidCraft Unraid container workflow](https://github.com/denara/solidcraft-unraid/actions/runs/39403273835)
+passed its build and all integration gates before publishing both immutable source tag
+`sha-e75ca79677221d1a99e893f3005d39be4e57fcba` and `latest` to `ghcr.io/denara/solidcraft-unraid`.
+Both tags were pulled successfully with an empty Docker credential configuration;
+source labels, Linux/amd64 identity and equal image identities were verified.
+Anonymous registry access independently confirmed digest
+`sha256:e8eb620754192d001b4fe49638eaaed3e58fdcf13c2074af409222f779fc8af1`.
+
+Public-image archive: `target/solidcraft-unraid-workspace-actions-e75ca796.tar` (155814400 bytes),
+containing tag `solvecraft-unraid:workspace-actions-e75ca796`.
+SHA256: `80a10ebe449d8497e9ee542b721b3545486d7665847984a7508ddc51a66d5e6e`.
+A separate archive of the identical-filesystem locally validated image is retained in
+ignored target as an additional development artifact.
+
+The existing local development instance now runs the verified immutable registry
+image. Its data and configuration were backed up privately first; the same data
+volume, MCP token, identity, port, origins and security/resource limits were preserved.
+Docker and HTTP health, authenticated SDK calls, a read-only reopen of the known
+public 24000 mm3 fixture with unchanged bytes, RAM-only 4000 mm3 modelling/PNG,
+browser login/logout, Workspace metadata/SSE and browser assets passed after replacement.
+One completed owned candidate container was removed only after these checks and
+ownership/activity verification. No volumes were deleted. Toolchain/build caches,
+private backups and the previous image tagged
+`solvecraft-unraid:rollback-before-actions-20261020` remain available.
+
+The canonical Unraid Overview describes only the fork's additional features and
+retains original authorship and unofficial status. It was synchronized after public
+image verification to `denara/unraid-templates` main commit `72852d1109f091ff4e8979649ae62c277264d962`;
+profile, license and original icon were preserved. No new CA submission or acceptance
+claim was involved. Nothing was installed on Unraid and nginx/DNS were not changed.
+Existing Unraid users can now check for and install the container update themselves.
 
 
 ## 2026-10-19: read-only live observation of unsaved MCP models

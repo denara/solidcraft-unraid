@@ -18,10 +18,15 @@ groups, bounded saved-design metadata, original upstream icons and optional reme
 browser logins, plus validated PNG thumbnails and a protected shortcut to open native
 models as independent browser copies. Grouping preserves existing files and paths;
 no migration is required. Browser edits are not automatically saved back to the server.
+The integration also retains read-only live previews of unsaved MCP models. Its file
+management now supports explicitly confirmed deletion of files and real folders with
+active-project/revision protection, plus bounded server-streamed ZIP64 folder downloads.
+Empty folders are included; virtual legacy groups never receive bulk deletion actions.
+Fork deployment status updated 2026-10-20; upstream CAD milestones remain below.
 Requested upstream updates use the repository's
 [update skill](.agents/skills/update-solvecraft-unraid/SKILL.md), with a fixed target snapshot,
 isolated validation and local-only private deployment settings.
-The container's validated upstream baseline is `5122b98a` (SolidCraft 0.16.2, format 28 with three pending joint changes, previously `8f768b65`);
+The container's validated upstream baseline is `e9b1a077` (SolidCraft 0.16.2, format 28, previously `5122b98a`);
 the Linux image passes the changed CAD/UI tests and real web/MCP, restart and old-design
 compatibility checks. See [update records](docs/unraid-updates.md).
 
