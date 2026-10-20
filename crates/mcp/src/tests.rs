@@ -293,6 +293,33 @@ fn parameters_drive_the_design() {
     assert!(d["params"].as_array().unwrap().iter().any(|p| p["name"] == "len" && p["value"] == 50.0), "{d}");
 }
 
+/// `set_parameter` takes the new value as `value` or as `expression` (the name parameters.change
+/// uses), which it used to refuse instead of forwarding.
+#[test]
+fn set_parameter_takes_value_or_expression() {
+    let mut s = server();
+    let def = tool_definitions().into_iter().find(|d| d["name"] == "set_parameter").unwrap();
+    assert_eq!(def["inputSchema"]["required"], json!(["name"]), "{def}");
+    assert!(def["inputSchema"]["properties"]["expression"].is_object(), "{def}");
+    tool(&mut s, "set_parameter", json!({"name": "len", "expression": "40 mm"}));
+    tool(&mut s, "execute", json!({"command": "solid.box", "params": {"length": "len", "width": 10, "height": 10, "corner": [0, 0, 0]}}));
+    assert!(rel(volume(&mut s), 4000.0) < 1e-9);
+    let r = tool(&mut s, "set_parameter", json!({"name": "len", "expression": 50}));
+    assert_eq!(r["value"], 50.0, "{r}");
+    assert!(rel(volume(&mut s), 5000.0) < 1e-9);
+    // Both, when they agree.
+    let r = tool(&mut s, "set_parameter", json!({"name": "len", "value": 60, "expression": "60"}));
+    assert_eq!(r["value"], 60.0, "{r}");
+    // Both disagreeing, or neither, is an error that changes nothing.
+    for args in [json!({"name": "len", "value": 70, "expression": "80"}), json!({"name": "len"}), json!({"name": "len", "value": null})] {
+        let r = raw_tool(&mut s, "set_parameter", args.clone());
+        assert_eq!(r["result"]["isError"], json!(true), "{args}: {r}");
+        let text = r["result"]["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(text.contains("`value`") && text.contains("`expression`"), "{args}: {text}");
+    }
+    assert!(rel(volume(&mut s), 6000.0) < 1e-9);
+}
+
 /// Design properties (#1015) are set through `execute` and come back in `inspect_design`.
 #[test]
 fn design_properties_show_in_inspect_design() {

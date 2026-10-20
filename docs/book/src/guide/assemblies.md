@@ -46,6 +46,28 @@ expression stops working out (say a parameter becomes an angle), the joint is le
 solve and `joint.solve` gives the reason, instead of placing the part from old numbers. Typing a
 plain number, or driving the value, drops that expression.
 
+**Relations** are joints that tie only part of a placement, so a part is placed the way a
+designer describes it, one relation at a time: `parallel` (z along z, free to move and turn
+about it), `perpendicular` and `angle` (z square to z, or at the joint's `angle` from mated),
+`point_on_plane` (a point on a face's plane, `offset` off it), `point_on_line` (a point on an
+axis) and `line_on_plane` (an axis on a face's plane: a cylinder's radius as `offset` lays it
+tangent). A relation is made where the parts are: B moves no further than the relation needs.
+Several relations between the same two parts add up; the solver meets them together, each one's
+degrees of freedom come off what is left, and one that can't be met is reported, not forced:
+
+```json
+{"command": "joint.create", "params": {"type": "parallel", "a": "Panel top", "b": "Bracket bottom"}}
+{"command": "joint.create", "params": {"type": "point_on_plane", "a": "Panel top", "b": "Bracket corner"}}
+{"command": "joint.create", "params": {"type": "parallel", "a": "Panel front", "b": "Bracket face", "flip": true}}
+{"command": "joint.create", "params": {"type": "point_on_plane", "a": "Panel front", "b": "Bracket corner", "offset": -40}}
+{"command": "joint.create", "params": {"type": "point_on_plane", "a": "Panel end", "b": "Bracket corner", "offset": -40}}
+```
+
+leaves the bracket flat on the panel, square to its front, its corner 40 mm in from the front and
+the end, wherever the panel's size takes them. Coincident faces are a `planar` joint, a distance
+between faces is `planar` with an `offset`, concentric is `cylindrical` and two points that meet
+are `ball`.
+
 The check behind it, `inspect.clearance`, does all of that in one call for any number of bodies,
 which suits scripts and agents checking a whole assembly:
 
@@ -62,7 +84,10 @@ body in `bodies` and the other in `against`, and `skip_within` leaves out pairs 
 occurrence (`"occurrence"`) or one placed component, its subcomponents included
 (`"component"`): the parts of a bought component that touch by design. Distances are measured on
 the exact faces and edges; the meshes only rule out pairs that are too far apart, and the pairs
-left are checked in parallel. `inspect.interference` remains for the overlaps alone.
+left are checked in parallel. `inspect.interference` remains for the overlaps alone: it clears
+pairs whose meshes stay apart without intersecting them, intersects the rest in parallel, and
+returns after `budget_s` seconds (default 240) at most, listing the pairs it had no time for as
+not checked.
 
 **Gear**, **Rack and Pinion** and **Screw** (on the **ASSEMBLE** panel) are motion links whose
 ratio comes from the parts rather than a typed number:
@@ -83,7 +108,9 @@ ratio comes from the parts rather than a typed number:
 A radius or pitch may be an expression of the design's parameters, and a picked face is found
 again whenever the design changes. Change the parameter or the gear's diameter, and the ratio
 follows. The new link leaves the driven joint where it is, so teeth modelled in mesh stay in mesh.
-**Reverse** turns the driven joint the other way, for joints whose axes point opposite ways. These
+**Reverse** turns the driven joint the other way, for joints whose axes point opposite ways.
+Redefining a link (`link: i`, such as turning it the other way with **Reverse**) also leaves the
+driven joint where it is, so the gears stay in mesh at the pose they are in. These
 couplings are motion links, so they work in closed loops, with contact sets and in motion studies:
 a rack can push the piston of a slider-crank, or a pinion can steer through a rack and its tie
 rods. Drive the joint that drives the coupling (joint 1, the pinion, or the screw's turn), not the
@@ -133,7 +160,8 @@ example driving a rocker beyond its swing, the motion stops at the last position
 closes, and the drive reports `stopped_by_loop`. A loop that cannot close at all is listed
 under `conflicts` and nothing in it moves. `joint.list` reports how many degrees of freedom each
 part still has with its loops closed: the moving parts of a four-bar have one between them, and a
-loop locked by a rigid joint has none. The Drive Joints dialog says when a drive stops short and
+loop locked by a rigid joint has none. A joint a motion link drives adds no freedom of its own:
+two meshed gears on a fixed housing have one between them, each turning with the driving gear. The Drive Joints dialog says when a drive stops short and
 why. While it previews, a row under the values gives the value the joint reached and the reason
 (the loop that can't close further, or the two parts a contact set keeps apart), and after OK the
 status line repeats it. The value box keeps what you typed. The dialog opens on the joint
@@ -165,8 +193,11 @@ it where it is), and it moves.
 `joint.drive` answers the joint's values as `joint.list` gives them, in degrees and millimetres
 with their units and limits, and `moved` says whether any part moved. A joint's origins are mated
 by default: B's z axis is turned against A's, as two faces meet. `flip: true` lines them up
-instead, so two origins given at one point with the same z stay as they are. For scripts that
-drive many steps, `quiet: true` leaves the per-part degrees of freedom out of joint answers, and
+instead, so two origins given at one point with the same z stay as they are. Without an
+`angle`, a new joint (other than a relation, which starts where its parts are) takes no turn or a half turn about its axis, whichever turns B less: two
+faces that already meet, a plate under a panel, stay as they are instead of B spinning about
+their shared normal. For scripts that drive many steps, `quiet: true` leaves the per-part
+degrees of freedom out of joint answers, and
 `motion.play` with `quiet: true` gives the poses of only the parts that moved.
 
 **Motion Trace** (`motion.trace`, on the **ASSEMBLE** panel) draws the path a point of a part
@@ -234,6 +265,19 @@ sets tell them apart: an occurrence inside a sub-assembly placed twice is one pa
 copies are not checked against each other. A check takes at most 256 bodies; on a large design,
 list the `occurrences` to check (an arm, with `against` the parts it must miss). When the work
 runs out it says `truncated` and the step it `checked_to`.
+`joint.sweep {joint, from, to, index?, step?, refine?, occurrences?, against?, contact_sets?,
+report_gaps?, apply?}` drives one joint value from `from` toward `to` and answers how far it gets
+before parts touch: `stopped_at` (the last value clear of contact), `stopped_by` (the two parts
+and the point `at` which they touch, or `"loop"` where a closed loop can no longer close, or
+`"limit"`), and with `report_gaps` the nearest gap at every sample and the nearest each part came
+to another (`min_gap`). The samples are fine enough that no part passes through another between
+two (or `step` apart), and the first contact is bisected until no part moves more than `refine`
+(0.01 mm by default) across it. Gaps are distances between the parts' tessellations
+(`gap_method: "mesh"`): exact for flat faces, within `gap_tolerance_mm` for curved ones. Pairs
+already touching at `from`, such as parts joined face to face or a door resting on its frame, are
+listed in `touching_at_start` and stop the sweep only once they pass into each other, deeper than
+they start. The sweep runs on a copy (closed loops follow, contact sets don't stop it) and
+leaves the design as it was unless `apply` is true.
 
 **Insert Design** (`component.insert_design {path, translate?}`, on the **ASSEMBLE** panel and
 in the **File** menu) adds a component linked to another saved design, so each part can live in
@@ -247,6 +291,22 @@ After the part file changes, **Update Links** (`component.update_links`) reads i
 the part's bodies only: its timeline, parameters and sheet-metal data (flat pattern, bend
 table) stay in the part's own design.
 
+If a source file moves or is renamed, right-click its linked component or occurrence in the
+Browser and choose **Relink Source (All Instances)…**. Choose the saved `.solidcraft` design
+to use. Relinking updates that component's stored path and solid bodies for **all its
+instances**, keeping their identities and placements. Cancelling or choosing a missing,
+invalid, empty or self-referencing design leaves the assembly unchanged. The operation is
+one undo step and the new path is saved relative to the assembly when possible.
+
+Scripts use `component.relink {component, path}`. The reply includes `previous_path`, `path`,
+`warnings`, `joint_errors` and `joint_conflicts`. Changed geometry can invalidate a joint's
+face reference: relinking reports those joints in the reply and UI status/message history;
+repair the joint or undo the relink. Relink does not repair or verify the intended meaning of
+existing joints.
+When linked geometry changes and the component has joints, a reminder to check those joints
+is also shown even if the solver reports no error: a successful solve does not prove that a
+joint still describes the intended connection.
+
 STEP export writes the component tree as an assembly.
 
 Right-click a component in the Browser and choose **Properties** to inspect
@@ -257,3 +317,41 @@ measures the complete assembly. Volumes are summed, including overlapping bodies
 measuring their union. The same workflow is available through `component.properties` and
 `occurrence.properties`; see
 [placement and measurement details](https://github.com/bherbruck/solidcraft/blob/main/docs/assembly-properties.md).
+
+## Part properties and the bill of materials
+
+A component definition carries its own **part properties**: a part number, a description and a
+revision, other tools' data under a reverse-DNS key (the same rules as the design's own
+properties), and free text properties such as a material grade or a finish. Every occurrence of
+the component shares them, Paste New copies them, and they are saved with the component.
+`component.metadata {component}` reads them and
+`component.metadata.set {component, part_number?, description?, revision?, values?, properties?}`
+changes them in one undo step (an empty value removes a field). The root component is the
+design itself: its properties are `document.metadata`'s. Standard parts (`parts.insert`) get a
+part number from their standard and size (`ISO 4762 M6x20`, or a bearing's designation) and a
+description; **Change Part Size** renumbers them, keeping a field you changed yourself.
+
+**Bill of Materials** (`assembly.bom`, on the **INSPECT** panel) counts the placed components:
+
+- `levels: "flat"` (the default) lists the parts at any depth, each counted through its
+  subassemblies: a part placed once in a subassembly that is placed twice counts 2. A
+  subassembly is listed through its parts, unless it has bodies of its own.
+- `levels: "top"` lists the direct children, a subassembly as one row.
+- `group_by: ["part_number"]` (the default) puts definitions with the same part number in one
+  row; a definition without a part number gets a row of its own. `["definition"]` gives every
+  definition its own row.
+- `group_children: true` keeps what is placed inside a part with a part number in that part's
+  row: a bolt with a washer and a nut placed inside it is one row, the washer and the nut listed
+  under it as `children` (items 1.1, 1.2…, with `each` per bolt and `count` in all) instead of
+  rows of their own. Bolts with different contents (one with a nut, one without) are different
+  rows. `total_occurrences` counts the children too, so it is the same either way.
+- `component` lists one subassembly's parts instead of the design's.
+
+Rows are sorted by part number (rows without one come last) and hold `item`, `part_number`,
+`description`, `revision`, `count`, `definition` (the component names), `components` (their ids)
+and `properties`, with `total_occurrences` beside them. `path` writes them to a `.csv` file
+(the columns item, part_number, description, revision, count and definition, every field
+quoted; children follow their row) or a `.json` file. The window lists the same rows, switches
+between the levels and groupings and shows children under their part, edits a picked row's part
+number, description and revision, and exports them. Changing part properties changes no
+geometry, so it doesn't evaluate the model or re-seat joints again.

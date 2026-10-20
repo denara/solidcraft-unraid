@@ -5,7 +5,7 @@ use super::*;
 use crate::EmbossFace;
 use crate::apply_point;
 use crate::sheet;
-use solidcraft_geom::{Aabb3, Loop2, Seg2};
+use solidcraft_geom::{Aabb3, Loop2, Ring, Seg2};
 
 pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut ModelState) -> Result<()> {
     match &f.kind {
@@ -97,20 +97,22 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
             let tn = tp.normal();
             let i = body_at(st, body, &crate::plain(faces))?;
             let Some(mb) = st.bodies.get(i).cloned() else { return Err(DocError::Invalid("body".into())) };
-            let mut b = mb.body.clone();
+            // Each face moved is a step of the body's lineage, as Offset Face's is: without it no face of
+            // the result could take a sketch's attachment.
+            let mut b = mb.traced();
             for p in faces {
-                let n =
-                    planar_normal_at(&b, p.0).ok_or_else(|| DocError::Invalid("not supported yet: replacing a face that is not planar".into()))?;
+                let n = planar_normal_at(&b.body, p.0)
+                    .ok_or_else(|| DocError::Invalid("not supported yet: replacing a face that is not planar".into()))?;
                 if n.dot(tn).abs() < 1.0 - 1e-9 {
                     return Err(DocError::Invalid("not supported yet: a target that is not parallel to the face".into()));
                 }
                 let d = (tp.origin - p.0).dot(n);
                 if d.abs() > 1e-9 {
-                    b = kernel::offset_faces(&b, &[p.0], d)?;
+                    b = Traced::step(kernel::offset_faces(&b.body, &[p.0], d)?, &[&b]);
                 }
             }
             if let Some(slot) = st.bodies.get_mut(i) {
-                *slot = ModelBody::new(mb.name, b, mb.feature);
+                *slot = ModelBody::traced_new(mb.name, b, mb.feature);
             }
             Ok(())
         }
@@ -773,11 +775,6 @@ pub(super) fn sheet_eval(
     }
 }
 
-fn poly_area(p: &[Vec2]) -> f64 {
-    let m = p.len();
-    (0..m).filter_map(|i| Some(p.get(i)?.cross(*p.get((i + 1) % m)?))).sum::<f64>() / 2.0
-}
-
 /// Current unmodified extrusion caps, including placement, certify the tool's depth.
 /// Tessellation can drift in thickness at distant coordinates and cannot certify a slab.
 fn sheet_tool_span(body: &Body, source: &Plane) -> Option<(f64, f64, f64, Option<(Plane, Region2)>)> {
@@ -1361,9 +1358,7 @@ fn mesh_box(mb: &ModelBody) -> Option<Aabb3> {
 
 fn padded_box(mesh: &solidcraft_geom::Mesh, tol: f64) -> Option<Aabb3> {
     let b = mesh.bounds();
-    let pad = 2.0 * tol + 1e-6;
-    let pad = Vec3::new(pad, pad, pad);
-    (!b.is_empty() && b.min.is_finite() && b.max.is_finite()).then(|| Aabb3 { min: b.min - pad, max: b.max + pad })
+    (!b.is_empty() && b.min.is_finite() && b.max.is_finite()).then(|| b.inflated(2.0 * tol + 1e-6))
 }
 
 /// Whether two boxes are known to be apart (an unknown box is never apart).
@@ -1403,7 +1398,7 @@ fn parted_note(sh: &sheet::SheetBody, material: &[Region2], before: &sheet::Shee
 
 /// Outline loops (in `plane` coordinates) of the mesh triangles lying in the plane at distance
 /// `level` from `at` along `n`: the edges used by one of them only, chained.
-fn face_loops(mesh: &solidcraft_geom::Mesh, plane: &Plane, at: Vec3, n: Vec3, level: f64, tol: f64) -> Vec<Vec<Vec2>> {
+fn face_loops(mesh: &solidcraft_geom::Mesh, plane: &Plane, at: Vec3, n: Vec3, level: f64, tol: f64) -> Vec<Ring<Vec2>> {
     face_outline(mesh, plane, at, n, level, tol).into_iter().map(|l| l.into_iter().map(|(p, _)| p).collect()).collect()
 }
 
@@ -1441,7 +1436,7 @@ fn face_outline(mesh: &solidcraft_geom::Mesh, plane: &Plane, at: Vec3, n: Vec3, 
 }
 
 /// The loops (in `plane` coordinates) that bound the triangles `on` of the mesh.
-fn boundary_loops(mesh: &solidcraft_geom::Mesh, plane: &Plane, on: &[[u32; 3]]) -> Vec<Vec<Vec2>> {
+fn boundary_loops(mesh: &solidcraft_geom::Mesh, plane: &Plane, on: &[[u32; 3]]) -> Vec<Ring<Vec2>> {
     chain_loops(mesh, plane, on, |_, _| None).into_iter().map(|l| l.into_iter().map(|(p, _)| p).collect()).collect()
 }
 
@@ -1638,7 +1633,7 @@ fn plate_recesses(body: &Body, mesh: &Mesh, plane: &Plane, at: Vec3, n: Vec3, (l
     for (f, d, ..) in &floors {
         let on: Vec<[u32; 3]> = fine.triangles.iter().zip(&fine.tri_face).filter(|(_, g)| **g as usize == *f).map(|(tri, _)| *tri).collect();
         let mut loops = boundary_loops(&fine, plane, &on);
-        loops.sort_by(|a, b| poly_area(b).abs().total_cmp(&poly_area(a).abs()));
+        loops.sort_by(|a, b| b.signed_area().abs().total_cmp(&a.signed_area().abs()));
         let mut it = loops.into_iter();
         let Some(outline) = it.next() else { continue };
         let region = Region2 { outer: Loop2::polygon(&outline).ccw(), holes: it.map(|l| Loop2::polygon(&l).ccw().reversed()).collect() };
@@ -1835,24 +1830,24 @@ pub(super) fn plastic_eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &F
             let tol = (mb.body.size() * 1e-3).max(1e-3);
             let mesh = mb.body.tessellate(tol)?;
             let mut loops = face_loops(&mesh, &plane, face.0, n, 0.0, tol);
-            loops.sort_by(|a, b| poly_area(b).abs().total_cmp(&poly_area(a).abs()));
-            let ccw = |l: &[Vec2]| if poly_area(l) < 0.0 { l.iter().rev().copied().collect::<Vec<_>>() } else { l.to_vec() };
+            loops.sort_by(|a, b| b.signed_area().abs().total_cmp(&a.signed_area().abs()));
+            let ccw = |l: &Ring<Vec2>| if l.signed_area() < 0.0 { l.iter().rev().copied().collect::<Ring<_>>() } else { l.clone() };
             // The inner edge is an opening (the cavity under a rim): not the foot of a boss or a
             // wall standing on the face, whose side the band would run against.
-            let opening = |l: &[Vec2]| {
+            let opening = |l: &Ring<Vec2>| {
                 let eps = (tol * 4.0).max(1e-3);
-                l.iter().zip(l.iter().cycle().skip(1)).filter_map(|(a, b)| Some(((*a + *b) * 0.5, (*b - *a).normalized()?))).take(3).any(|(m, t)| {
+                l.edges().filter_map(|(a, b)| Some(((*a + *b) * 0.5, (*b - *a).normalized()?))).take(3).any(|(m, t)| {
                     // Just over the face, inside the loop (to the left of a ccw loop's edges).
                     let q = plane.to_world(m + Vec2::new(-t.y, t.x) * eps) + n * eps;
                     !mesh.contains(q)
                 })
             };
-            let outer = loops.first().map(|l| ccw(l));
-            let openings: Vec<Vec<Vec2>> = loops.iter().skip(1).map(|l| ccw(l)).filter(|l| opening(l)).collect();
+            let outer = loops.first().map(ccw);
+            let openings: Vec<Ring<Vec2>> = loops.iter().skip(1).map(ccw).filter(|l| opening(l)).collect();
             // A rim runs round one opening, the cavity; smaller ones (a screw hole) may sit in it.
             // Openings alike in size (a plate's holes) leave no edge that is the rim's.
             let alike = match openings.as_slice() {
-                [a, b, ..] => poly_area(b).abs() > 0.5 * poly_area(a).abs(),
+                [a, b, ..] => b.signed_area().abs() > 0.5 * a.signed_area().abs(),
                 _ => false,
             };
             let (Some(outer), Some(inner), false) = (outer, openings.first().cloned(), alike) else {
@@ -1877,16 +1872,24 @@ pub(super) fn plastic_eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &F
             // The band along the chosen edge, inside the rim face. A groove's cutter reaches past
             // the edge into the free side (the cavity, or outside), so no wall coincides.
             let free = if *groove { bw } else { 0.0 };
-            let band = if *outside {
-                Region2 {
-                    outer: Loop2::polygon(&offset_left(&outer, -free)).ccw(),
-                    holes: vec![Loop2::polygon(&offset_left(&outer, bw)).ccw().reversed()],
-                }
+            let (plane, band) = if let Ok(exact) = kernel::rim_band(&mb.body, face.0, bw, free, *outside) {
+                exact
+            } else if *outside {
+                (
+                    plane,
+                    Region2 {
+                        outer: Loop2::polygon(&offset_left(&outer, -free)).ccw(),
+                        holes: vec![Loop2::polygon(&offset_left(&outer, bw)).ccw().reversed()],
+                    },
+                )
             } else {
-                Region2 {
-                    outer: Loop2::polygon(&offset_left(&inner, -bw)).ccw(),
-                    holes: vec![Loop2::polygon(&offset_left(&inner, free)).ccw().reversed()],
-                }
+                (
+                    plane,
+                    Region2 {
+                        outer: Loop2::polygon(&offset_left(&inner, -bw)).ccw(),
+                        holes: vec![Loop2::polygon(&offset_left(&inner, free)).ccw().reversed()],
+                    },
+                )
             };
             let delta = (h * 0.05).clamp(1e-3, 0.5);
             if *groove {

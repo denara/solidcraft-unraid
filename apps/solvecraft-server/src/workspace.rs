@@ -1,10 +1,10 @@
-//! A read-only browser workspace. Cookies are never accepted by the MCP routes.
+//! A browser workspace with narrowly authorized, confirmed file deletion. Cookies are never accepted by the MCP routes.
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
@@ -38,11 +38,12 @@ pub struct BrowserAuth {
     inner: Mutex<AuthStore>,
     pub(crate) live: crate::workspace_live::Live,
     pub(crate) media: crate::workspace_media::Media,
+    pub(crate) actions: crate::workspace_actions::Actions,
 }
 
 impl BrowserAuth {
     pub fn new(config: &crate::config::Config) -> Self {
-        Self { inner: Mutex::new(remember::load(config)), live: Default::default(), media: Default::default() }
+        Self { inner: Mutex::new(remember::load(config)), live: Default::default(), media: Default::default(), actions: Default::default() }
     }
 }
 
@@ -53,6 +54,9 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/workspace/login", get(login_page).post(login))
         .route("/workspace/logout", post(logout))
         .route("/workspace/api", get(api))
+        .route("/workspace/delete/{*name}", get(crate::workspace_actions::preview))
+        .route("/workspace/delete", post(crate::workspace_actions::delete).layer(DefaultBodyLimit::max(4096)))
+        .route("/workspace/archive/{*name}", get(crate::workspace_actions::download))
         .route("/workspace/details/{*name}", get(details))
         .route("/workspace/boot.js", get(boot))
         .route("/workspace/assets/{*name}", get(client_asset))
@@ -330,7 +334,7 @@ pub async fn snapshot(state: &AppState) -> Result<Value, String> {
         };
     }
     Ok(
-        json!({"files":files,"sessions":sessions,"slots_total":state.config.max_sessions,"slots_used":state.slots_used(),"truncated":listing.truncated}),
+        json!({"directories":listing.directories,"files":files,"sessions":sessions,"slots_total":state.config.max_sessions,"slots_used":state.slots_used(),"truncated":listing.truncated}),
     )
 }
 
@@ -440,7 +444,7 @@ pub async fn file_tool(state: &AppState, args: &Value) -> Result<Value, String> 
         let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0).min(512) as usize;
         let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50).clamp(1,100) as usize;
         let total = listing.files.len();
-        Ok(json!({"files":listing.files.into_iter().skip(offset).take(limit).collect::<Vec<_>>(),"truncated":listing.truncated,"next_offset":(offset+limit < total).then_some(offset+limit)}))
+        Ok(json!({"directories":listing.directories,"files":listing.files.into_iter().skip(offset).take(limit).collect::<Vec<_>>(),"truncated":listing.truncated,"next_offset":(offset+limit < total).then_some(offset+limit)}))
     }).await.map_err(|_|"file listing unavailable".to_string())?
 }
 

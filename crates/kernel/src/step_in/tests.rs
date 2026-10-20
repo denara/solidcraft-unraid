@@ -240,20 +240,30 @@ fn parallel_import_retains_units_order_sources_and_partial_failure_across_batche
 #[test]
 fn parallel_body_preparation_reports_errors_in_place_and_preserves_placement() {
     let body = cylinder(Vec3::new(2.0, 2.0, 0.0), Vec3::Z, 2.0, 4.0).unwrap();
-    let solids = vec![body.solid.as_ref().clone(), mt::Solid::new(Vec::new()), body.solid.as_ref().clone(), body.solid.as_ref().clone()];
+    let ex = p21::parse(&step_export(&[&body], "test").unwrap()).unwrap();
+    let solid = *ex.entities.iter().find(|(_, e)| e.name() == "MANIFOLD_SOLID_BREP").map(|(id, _)| id).unwrap();
+    let units = DEFAULT_UNITS;
     let placement = mt::Matrix4::from_translation(mt::Vector3::new(10.0, 20.0, 30.0));
-    let jobs: Vec<_> = solids.into_iter().map(|solid| parallel::Job { solid, check_mesh: true }).collect();
-    let serial = parallel::bodies(&jobs, &placement, 1);
-    let threaded = parallel::bodies(&jobs, &placement, 4);
+    // The second item is not in the file.
+    let jobs: Vec<_> = [solid, 999_999_999, solid, solid]
+        .into_iter()
+        .map(|item| parallel::Job { source: parallel::Source::Item { item, units }, placement, check_mesh: true })
+        .collect();
+    let serial = parallel::bodies(&ex, &jobs, 1);
+    let threaded = parallel::bodies(&ex, &jobs, 4);
     assert_eq!(serial.len(), 4);
     assert_eq!(threaded.len(), 4);
     for (index, (a, b)) in serial.iter().zip(&threaded).enumerate() {
         if index == 1 {
-            assert_eq!(a.as_ref().unwrap_err(), b.as_ref().unwrap_err());
+            let (Err(a), Err(b)) = (a, b) else { panic!("job 1 has no item") };
+            assert!(a.read && b.read);
+            assert_eq!(a.msg, b.msg);
         } else {
-            assert_eq!(a.as_ref().unwrap().1, b.as_ref().unwrap().1);
-            let a = measure(&a.as_ref().unwrap().0).unwrap();
-            let b = measure(&b.as_ref().unwrap().0).unwrap();
+            let (Ok(a), Ok(b)) = (a, b) else { panic!("job {index} failed") };
+            assert_eq!(a.missing, b.missing);
+            assert!(a.read.is_some() && b.read.is_some(), "each job read its item");
+            let a = measure(&a.body).unwrap();
+            let b = measure(&b.body).unwrap();
             assert_same_measure(&a, &b);
             // Curved bounds come from the measurement tessellation, not analytic extrema.
             assert!(a.bbox.min.dist(Vec3::new(10.0, 20.0, 30.0)) < 1e-3);
@@ -296,14 +306,14 @@ fn parallel_import_does_not_prepare_past_body_budget_with_duplicates_or_mapped_i
         reader.node_items.insert(2000);
         let mut out = Vec::new();
         reader.rep_bodies(60, &mt::Matrix4::from_scale(1.0), &[], "Budget", None, &mut out, 0);
-        assert!(reader.solids.is_empty(), "the walk only plans the solids");
+        assert!(reader.oriented.is_empty() && reader.unreadable.is_empty(), "the walk only plans the solids");
         while reader.convert_next(workers == 1) {}
         let out = reader.remap(&out);
         assert_eq!(reader.bodies.len(), MAX_BODIES);
         assert_eq!(out, vec![MAX_BODIES - 2, MAX_BODIES - 1]);
         assert_eq!(reader.bodies.last().unwrap().name, "Second");
-        assert_eq!(reader.solids.len(), 2);
-        assert!(!reader.solids.contains_key(&2003));
+        assert_eq!(reader.oriented.len(), 2);
+        assert!(!reader.oriented.contains_key(&2003) && !reader.unreadable.contains_key(&2003));
         assert!(!reader.used_items.contains(&3000));
         assert_eq!(reader.warnings.len(), 1);
         assert!(reader.warnings.keys().next().unwrap().contains("more than"));
@@ -651,6 +661,103 @@ fn hand_written_assembly() {
     assert_eq!(imp.bodies[1].path, vec!["Assembly".to_string(), "Block".to_string()]);
     assert_eq!([imp.bodies[0].instance.as_deref(), imp.bodies[1].instance.as_deref()], [Some("Block:0"), Some("Block:1")]);
     assert!((root.children[1].transform[3][0] - 100.0).abs() < 1e-9);
+}
+
+/// The cube part (in cm) placed `n` times in a millimetre assembly, each instance moved along X
+/// and turned about Z.
+fn instanced_assembly(n: u64) -> String {
+    instanced_assembly_of(1, n)
+}
+
+/// [`instanced_assembly`] with `parts` distinct parts (the cube solid under different items and
+/// products), instance `k` placing part `k % parts`.
+fn instanced_assembly_of(parts: u64, n: u64) -> String {
+    let mut t = String::from(HEAD);
+    t += "#8=PRODUCT_DEFINITION_CONTEXT('part definition',#9,'design');\n#9=APPLICATION_CONTEXT('');\n";
+    t += &cube_entities();
+    t += &context(20, "(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.CENTI.,.METRE.))");
+    t += &context(30, "(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.MILLI.,.METRE.))");
+    t += &product(70, "Assembly");
+    for p in 0..parts {
+        let pd = 1000 + p * 100;
+        t += &product(pd, if p == 0 { "Block".to_string() } else { format!("Block{p}") }.as_str());
+        let item = if p == 0 { 101 } else { pd + 20 };
+        if p > 0 {
+            t += &format!("#{item}=MANIFOLD_SOLID_BREP('Cube{p}',#100);\n");
+        }
+        t += &format!("#{}=ADVANCED_BREP_SHAPE_REPRESENTATION('',(#{item},#{}),#20);\n", pd + 10, pd + 15);
+        t += &format!("#{}=SHAPE_DEFINITION_REPRESENTATION(#{},#{});\n", pd + 11, pd + 4, pd + 10);
+        t += &format!("#{}=AXIS2_PLACEMENT_3D('',#{},$,$);\n#{}=CARTESIAN_POINT('',(0.,0.,0.));\n", pd + 15, pd + 16, pd + 16);
+    }
+    let items: Vec<String> = (0..n).map(|k| format!("#{}", 3000 + k * 10)).collect();
+    t += &format!("#80=SHAPE_REPRESENTATION('',({}),#30);\n#88=SHAPE_DEFINITION_REPRESENTATION(#74,#80);\n", items.join(","));
+    for k in 0..n {
+        let (a, turn, pd) = (3000 + k * 10, k as f64 * 0.7, 1000 + (k % parts) * 100);
+        t += &format!("#{a}=AXIS2_PLACEMENT_3D('',#{},#{},#{});\n", a + 1, a + 2, a + 3);
+        t += &format!("#{}=CARTESIAN_POINT('',({}.,0.,0.));\n", a + 1, 50 * k);
+        t += &format!("#{}=DIRECTION('',(0.,0.,1.));\n#{}=DIRECTION('',({},{},0.));\n", a + 2, a + 3, turn.cos(), turn.sin());
+        let u = 6000 + k * 10;
+        t += &format!("#{u}=NEXT_ASSEMBLY_USAGE_OCCURRENCE('{k}','Block:{k}','',#70,#{pd},$);\n");
+        t += &format!("#{}=PRODUCT_DEFINITION_SHAPE('','',#{u});\n", u + 1);
+        t += &format!("#{}=ITEM_DEFINED_TRANSFORMATION('','',#{},#{a});\n", u + 2, pd + 15);
+        t += &format!(
+            "#{}=(REPRESENTATION_RELATIONSHIP('','',#{},#80)REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(#{})SHAPE_REPRESENTATION_RELATIONSHIP());\n",
+            u + 3,
+            pd + 10,
+            u + 2
+        );
+        t += &format!("#{}=CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#{},#{});\n", u + 4, u + 3, u + 1);
+    }
+    t += TAIL;
+    t
+}
+
+/// A part placed many times is oriented (meshed whole) once, not once per instance (#2814:
+/// an assembly with hundreds of instances spent most of an hour re-meshing the same parts),
+/// and every instance still comes out outward-facing at its own place.
+#[test]
+fn instanced_parts_are_oriented_once() {
+    let n = 24;
+    let t = instanced_assembly(n);
+    crate::body::ORIENTED.with(|c| c.set(0));
+    let imp = step_import_with_workers(&t, 1).unwrap();
+    assert_eq!(crate::body::ORIENTED.with(|c| c.get()), 1, "one distinct part");
+    assert_eq!(imp.bodies.len(), n as usize);
+    assert!(imp.warnings.is_empty(), "{:?}", imp.warnings);
+    for (k, b) in imp.bodies.iter().enumerate() {
+        let m = measure(&b.body).unwrap();
+        assert!(rel(m.volume, 1000.0) < 1e-9, "instance {k}: {}", m.volume);
+        let centre = (m.bbox.min + m.bbox.max) * 0.5;
+        let turn = k as f64 * 0.7;
+        let expected = Vec3::new(50.0 * k as f64 + 5.0 * (turn.cos() - turn.sin()), 5.0 * (turn.sin() + turn.cos()), 5.0);
+        assert!(centre.dist(expected) < 1e-6, "instance {k}: {centre:?} vs {expected:?}");
+    }
+    assert_same_import(&imp, &step_import_with_workers(&t, 8).unwrap());
+}
+
+/// Distinct parts are oriented together, not one occurrence at a time: an assembly placing
+/// two parts in turn converts in a few steps of many solids (the first finds both parts'
+/// orientations side by side on the workers, the next places every other instance), where
+/// converting instance by instance took one step each.
+#[test]
+fn distinct_parts_convert_together_across_instances() {
+    let n = 24;
+    let t = instanced_assembly_of(2, n);
+    let mut reading = StepReading::with_workers(&t, 8).unwrap();
+    let mut steps = 0;
+    while reading.step() {
+        steps += 1;
+    }
+    assert_eq!(steps, 2, "both parts in the first step, every other instance in the second");
+    let threaded = reading.finish().unwrap();
+    assert_eq!(threaded.bodies.len(), n as usize);
+    assert!(threaded.warnings.is_empty(), "{:?}", threaded.warnings);
+    crate::body::ORIENTED.with(|c| c.set(0));
+    let serial = step_import_with_workers(&t, 1).unwrap();
+    assert_eq!(crate::body::ORIENTED.with(|c| c.get()), 2, "two parts");
+    assert_same_import(&serial, &threaded);
+    assert_eq!(threaded.bodies[1].name, "Cube1");
+    assert_eq!(threaded.bodies[1].path, vec!["Assembly".to_string(), "Block1".to_string()]);
 }
 
 /// A part an assembly places twice is meshed once: the second instance shows the first one's

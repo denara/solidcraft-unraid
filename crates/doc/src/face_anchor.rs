@@ -1,4 +1,5 @@
-//! Exact ordinary face attachments. Missing identities never invoke a proximity fallback.
+//! Exact ordinary face attachments. Missing identities never invoke a proximity fallback; the one
+//! fallback is an extrude cap whose sketch loop changed (`Document::anchored_face_indices`).
 use crate::config::ConfigFaceTarget;
 use crate::{DocError, Document, EmbossFace, FeatureKind, Model, ModelBody, ModelState, PlaneRef, Result};
 use serde::{Deserialize, Serialize};
@@ -104,22 +105,38 @@ impl Document {
         state: &ModelState,
         framed: &ModelState,
     ) -> Result<Plane> {
-        fn replace(doc: &Document, plane: &mut PlaneRef, author: u64, state: &ModelState, depth: usize) -> Result<()> {
+        self.resolve_attached_plane_noted(vals, plane, author, state, framed).map(|(plane, _)| plane)
+    }
+
+    /// [`Document::resolve_attached_plane`] with the note of an attachment found by fallback
+    /// ([`Document::anchored_face_indices`]).
+    pub fn resolve_attached_plane_noted(
+        &self,
+        vals: &std::collections::BTreeMap<String, crate::expr::Value>,
+        plane: &PlaneRef,
+        author: u64,
+        state: &ModelState,
+        framed: &ModelState,
+    ) -> Result<(Plane, Option<String>)> {
+        fn replace(doc: &Document, plane: &mut PlaneRef, author: u64, state: &ModelState, depth: usize) -> Result<Option<String>> {
             if depth > 64 {
                 return Err(DocError::Invalid("attached plane nesting exceeds budget".into()));
             }
             match plane {
-                PlaneRef::Face { anchor: Some(anchor), .. } => *plane = PlaneRef::Custom { plane: doc.resolve_face_anchor(anchor, author, state)? },
-                PlaneRef::Offset { base, .. } | PlaneRef::AtAngle { base, .. } | PlaneRef::Flipped { base, .. } => {
-                    replace(doc, base, author, state, depth + 1)?
+                PlaneRef::Face { anchor: Some(anchor), .. } => {
+                    let (resolved, note) = doc.resolve_face_anchor_noted(anchor, author, state)?;
+                    *plane = PlaneRef::Custom { plane: resolved };
+                    Ok(note)
                 }
-                _ => {}
+                PlaneRef::Offset { base, .. } | PlaneRef::AtAngle { base, .. } | PlaneRef::Flipped { base, .. } => {
+                    replace(doc, base, author, state, depth + 1)
+                }
+                _ => Ok(None),
             }
-            Ok(())
         }
         let mut resolved = plane.clone();
-        replace(self, &mut resolved, author, state, 0)?;
-        self.resolve_plane_in(vals, &resolved, 0, Some(framed))
+        let note = replace(self, &mut resolved, author, state, 0)?;
+        Ok((self.resolve_plane_in(vals, &resolved, 0, Some(framed))?, note))
     }
 }
 
@@ -193,11 +210,92 @@ impl Document {
         Ok(anchor)
     }
 
+    /// The faces an attachment stands for, and a note when they were found by fallback.
+    ///
+    /// An extrude's cap is certified by the loop of sketch curves around it, so editing that
+    /// sketch's outline (a curve that now cuts the profile, a side deleted and drawn again, a
+    /// notch trimmed into it) leaves no face with the exact certificate. The attachment then
+    /// takes the cap of the same (solid) extrude, at the same end, from the same sketch, on the
+    /// same body, whose loop shares the most of the stored curves, at least half of them (a tie
+    /// is not guessed). It never does while the exact cap is still on another body (profiles
+    /// reordered: the bodies swapped names). The note names what changed. Every other identity
+    /// stays exact.
+    pub(crate) fn anchored_face_indices(
+        &self,
+        state: &ModelState,
+        body: &ModelBody,
+        target: &ConfigFaceTarget,
+    ) -> Result<(Vec<usize>, Option<String>)> {
+        let error = match self.configuration_face_indices(body, target) {
+            Ok(indices) => return Ok((indices, None)),
+            Err(error) => error,
+        };
+        let Some(crate::config::FaceCertificate::ExtrudeCap { sketch, high, outer, holes }) = &target.certificate else { return Err(error) };
+        let exact = |source: &Option<solidcraft_kernel::FaceSource>| {
+            matches!(source, Some(solidcraft_kernel::FaceSource::CertifiedExtrudeCap { producer, sketch: from, high: end, outer: around, holes: inside, .. })
+                if *producer == target.origin_feature && from == sketch && end == high && around == outer && inside == holes)
+        };
+        if state.bodies.iter().any(|other| other.body.face_sources().is_some_and(|sources| sources.iter().any(exact))) {
+            return Err(error);
+        }
+        // A thin wall's cap is signed by the curves the wall follows: a wall along other curves
+        // is another wall, whose cap never stands for this one.
+        let solid = self.feature(target.origin_feature).is_some_and(|feature| matches!(feature.kind, FeatureKind::Extrude { thin: None, .. }));
+        if !solid || self.certify_config_face(target).is_err() || body.body.is_mesh() || body.definition_name() != target.body {
+            return Err(error);
+        }
+        // The producer's caps at that end, grouped by the loop each was made from.
+        let mut caps: std::collections::BTreeMap<&Vec<String>, Vec<usize>> = std::collections::BTreeMap::new();
+        for (index, source) in body.body.face_sources().into_iter().flatten().enumerate() {
+            if let Some(solidcraft_kernel::FaceSource::CertifiedExtrudeCap { producer, sketch: from, high: end, outer: around, .. }) = source
+                && *producer == target.origin_feature
+                && from == sketch
+                && end == high
+            {
+                caps.entry(around).or_default().push(index);
+            }
+        }
+        let stored: std::collections::BTreeSet<&str> = outer.iter().map(String::as_str).collect();
+        let shared = |around: &[String]| around.iter().filter(|id| stored.contains(id.as_str())).count();
+        let best = caps.keys().map(|around| shared(around)).max().unwrap_or(0);
+        if best == 0 || best.saturating_mul(2) < stored.len() {
+            return Err(error);
+        }
+        let mut chosen = caps.iter().filter(|(around, _)| shared(around) == best);
+        let (Some((around, indices)), None) = (chosen.next(), chosen.next()) else { return Err(error) };
+        let indices = self.certified_pieces(body, indices.clone(), target.origin_feature).map_err(|_| error)?;
+        let now: std::collections::BTreeSet<&str> = around.iter().map(String::as_str).collect();
+        let list = |ids: Vec<&str>| ids.iter().map(|id| format!("`{id}`")).collect::<Vec<_>>().join(", ");
+        let mut changes = Vec::new();
+        let gone: Vec<&str> = stored.difference(&now).copied().collect();
+        if !gone.is_empty() {
+            changes.push(format!("{} no longer around it", list(gone)));
+        }
+        let new: Vec<&str> = now.difference(&stored).copied().collect();
+        if !new.is_empty() {
+            changes.push(format!("{} new", list(new)));
+        }
+        let feature = self.feature(target.origin_feature).map_or_else(|| format!("F{}", target.origin_feature), |f| f.name.clone());
+        let note = format!(
+            "the face this sketch sits on, {}, changed when its sketch was edited ({}); using the {} cap of {feature} as it is now",
+            self.describe_face_target(target),
+            changes.join(", "),
+            if *high { "top" } else { "bottom" },
+        );
+        Ok((indices, Some(note)))
+    }
+
     pub fn resolve_face_anchor(&self, anchor: &FaceAnchor, author: u64, state: &ModelState) -> Result<Plane> {
+        self.resolve_face_anchor_noted(anchor, author, state).map(|(plane, _)| plane)
+    }
+
+    /// [`Document::resolve_face_anchor`] with the note of an attachment found by fallback
+    /// ([`Document::anchored_face_indices`]).
+    pub fn resolve_face_anchor_noted(&self, anchor: &FaceAnchor, author: u64, state: &ModelState) -> Result<(Plane, Option<String>)> {
         anchor.validate()?;
         let body =
             state.body(&anchor.target.body).ok_or_else(|| DocError::Unknown(format!("attached body `{}` no longer exists", anchor.target.body)))?;
-        let indices = self.configuration_face_indices(body, &anchor.target)?;
+        let (indices, note) = self.anchored_face_indices(state, body, &anchor.target)?;
         let first = indices.first().copied().ok_or_else(|| DocError::Unknown("attached face no longer exists".into()))?;
         let certificate = anchor.target.certificate.as_ref();
         let plane = self
@@ -214,7 +312,9 @@ impl Document {
         let canonical = map_plane(&anchor.source_to_author(self, author, body)?, &plane)?;
         let origin = canonical.origin + canonical.x * anchor.coordinates[0] + canonical.y * anchor.coordinates[1];
         let x = canonical.x * anchor.x_axis[0] + canonical.y * anchor.x_axis[1];
-        Plane::new(origin, x, canonical.normal().cross(x)).ok_or_else(|| DocError::Invalid("attached sketch basis is degenerate".into()))
+        let plane =
+            Plane::new(origin, x, canonical.normal().cross(x)).ok_or_else(|| DocError::Invalid("attached sketch basis is degenerate".into()))?;
+        Ok((plane, note))
     }
 
     pub fn sketch_face_attachment(&self, feature: u64, model: &Model) -> FaceAttachmentStatus {

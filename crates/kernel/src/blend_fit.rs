@@ -365,13 +365,19 @@ enum Clash {
 /// `strict`, when it comes within the chord of one (the surface may then be inside it).
 fn first_clash(sel: &Selection, size: Size, strict: bool) -> Option<Clash> {
     let wedges: Vec<Option<Wedge>> = sel.frames.iter().map(|f| f.as_ref().and_then(|f| f.wedge(size))).collect();
+    // What each blend changes: for a round only the fan between its edge and its arc, a part of
+    // the wedge. A face inside the wedge but beyond the arc (the inside round of a wall, when the
+    // outside one is a concentric round) is on the ball's side, left as it is.
+    let changes: Vec<Option<Vec<Wedge>>> = sel.frames.iter().map(|f| f.as_ref().and_then(|f| f.pieces(size))).collect();
     // Planar faces are exact in the mesh; curved ones are within the chord.
     let flat = (sel.size * 1e-7).max(1e-9);
     let curved = if strict { -sel.chord } else { sel.chord * 2.0 };
     // Planar faces beside an edge lie in its wedge's side planes: outside it means further.
     let out = (sel.size * 1e-6).max(1e-8);
-    for (i, (f, w)) in sel.frames.iter().zip(&wedges).enumerate() {
+    for (i, ((f, w), changed)) in sel.frames.iter().zip(&wedges).zip(&changes).enumerate() {
         let (Some(f), Some(w)) = (f, w) else { continue };
+        // Without its pieces (or for a chamfer, whose one piece is the wedge) the wedge counts.
+        let changed = changed.as_deref().unwrap_or_default();
         let hit = sel.tris.iter().filter(|(_, face)| !f.allowed.contains(face)).any(|(t, face)| {
             let eps = if sel.planar.get(*face).copied().unwrap_or(false) { flat } else { curved };
             // The other blended edges this face runs along or ends them trim it back.
@@ -383,7 +389,11 @@ fn first_clash(sel: &Selection, size: Size, strict: bool) -> Option<Clash> {
                 .filter(|(j, (fj, _))| *j != i && fj.as_ref().is_some_and(|fj| fj.allowed.contains(face)))
                 .filter_map(|(_, (_, wj))| wj.as_ref())
                 .collect();
+            // The pieces near the arc's ends are thin: a curved face only goes clear of them
+            // when its mesh stays a chord outside, or a sliver into the round is missed (#324).
+            let fan = if sel.planar.get(*face).copied().unwrap_or(false) { flat } else { -sel.chord };
             reaches_inside_beyond(t, &w.planes, eps, &trimmed, out)
+                && (changed.len() <= 1 || changed.iter().any(|p| reaches_inside_beyond(t, &p.planes, fan, &trimmed, out)))
         });
         if hit {
             return Some(Clash::Face);

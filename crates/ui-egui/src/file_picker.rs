@@ -29,8 +29,9 @@ impl Wake for Repaint {
 
 impl SolveApp {
     /// Keep the target design and editors unchanged until the picker answers.
+    /// (A save being written keeps it unchanged too, see [`crate::save_job`].)
     pub fn file_picker_busy(&self) -> bool {
-        self.file_picker.is_some()
+        self.file_picker.is_some() || self.saving.is_some()
     }
 
     pub(crate) fn pick_open(&mut self, complete: impl FnOnce(&mut SolveApp, Option<String>) + 'static) {
@@ -175,6 +176,8 @@ mod tests {
             waker.wake();
         }
         tick(app, &egui::Context::default());
+        // A save the answer started is written on a worker: wait for it.
+        crate::save_job::tick(app, true);
         assert!(!app.file_picker_busy());
     }
 

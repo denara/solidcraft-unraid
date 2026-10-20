@@ -365,6 +365,65 @@ fn rules_dialog_picks_the_corner_relief_shape() {
     assert_eq!((rounds(&h.app), torn), (Some(0), Some(4)));
 }
 
+/// The rule manager's rectangular relief, on a base whose corners are not square: the shape and
+/// the size the dialog shows reach the part, the bends and the flat pattern.
+#[test]
+fn the_rule_manager_relieves_a_corner_that_is_not_square() {
+    let mut h = crate::scenario::Harness::new();
+    h.app
+        .run(
+            "sheet.manage_rules",
+            json!({"name": "AL2", "thickness": "2 mm", "k_factor": 0.5, "bend_radius": "1 mm", "gap": "0.5 mm", "corner_relief": "8 mm", "active": true}),
+        )
+        .unwrap();
+    // A rhombus whose corners are 60° and 120°, with a flange on each of its four edges.
+    h.app.run("sketch.create", json!({"plane": "XY", "name": "Base"})).unwrap();
+    h.app.run("sketch.line", json!({"points": [[0, 0], [120, 0], [165, 77.9422863406], [45, 77.9422863406]], "closed": true})).unwrap();
+    h.app.run("sketch.finish", json!({})).unwrap();
+    h.app.run("sheet.flange", json!({"sketch": "Base"})).unwrap();
+    h.app
+        .run(
+            "sheet.flange",
+            json!({"edges": [[60, 0, 2], [142.5, 38.9711431703, 2], [105, 77.9422863406, 2], [22.5, 38.9711431703, 2]], "height": 38.6, "angle": "90 deg"}),
+        )
+        .unwrap();
+    // The base of the notch has its four corners, and the bends run the whole length of the edges.
+    let base = |app: &SolveApp| {
+        let state = app.session.model.state();
+        state.sheets.last().map(|s| (s.base.outer.segs.len(), s.flanges.iter().map(|f| s.zone_span(f).1 - s.zone_span(f).0).collect::<Vec<_>>()))
+    };
+    let shown = |app: &SolveApp| match app.dialog.as_ref().map(|d| &d.kind) {
+        Some(Kind::Sheet(Sm::Rules { relief, .. })) => Some(*relief),
+        _ => None,
+    };
+    let (segs, notch_bends) = base(&h.app).expect("the sheet");
+    assert_eq!(segs, 4, "the notch cuts nothing out of the base");
+    h.step(&json!({"start": "sheet.manage_rules"})).unwrap();
+    h.frames(3);
+    assert_eq!(shown(&h.app), Some(0), "a rule starts with the notch");
+    // The rectangular relief: the shape the dialog offers, and the size the rule carries.
+    h.step(&json!({"click": {"handle": "dialog:Corner Relief Shape"}})).unwrap();
+    h.step(&json!({"click": {"handle": "dialog:Corner Relief Shape:Rectangular"}})).unwrap();
+    assert_eq!(shown(&h.app), Some(2));
+    h.frames(3);
+    assert!(h.app.preview.error.is_none(), "the preview: {:?}", h.app.preview.error);
+    h.step(&json!({"widget": "OK"})).unwrap();
+    assert!(h.app.dialog.is_none(), "{:?}", h.app.dialog);
+    assert_eq!(h.app.session.doc.sheet_rule(None).corner_relief_shape, "rectangular");
+    assert_eq!(h.app.session.doc.sheet_rule(None).corner_relief, "8 mm");
+    // A kite at each of the four corners: two more edges than the notch's four.
+    let (segs, relieved) = base(&h.app).expect("the sheet");
+    assert_eq!(segs, 12, "a kite at each corner of the base");
+    for (was, now) in notch_bends.iter().zip(&relieved) {
+        assert!((was - now - 8.0).abs() < 1e-6, "{notch_bends:?} and {relieved:?}: the bends are 8 mm shorter");
+    }
+    // The flat pattern is one loop, and the part folds.
+    let flat = h.app.session.execute("sheet.flat_pattern", &json!({})).expect("the flat pattern");
+    assert_eq!(flat["outline"].as_array().map(Vec::len), Some(1), "{flat}");
+    assert_eq!(flat["cutouts"], json!([]), "{flat}");
+    assert!(h.app.preview.error.is_none(), "{:?}", h.app.preview.error);
+}
+
 /// The Flange dialog's relief rows: Rule (the default) and an empty size leave the relief to the rule,
 /// a shape and a size reach the feature, Edit Feature shows them again, and Rule takes them back.
 #[test]

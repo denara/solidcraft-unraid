@@ -59,6 +59,21 @@ pub fn capture<T>(f: impl FnOnce() -> T) -> (T, KernelTimes) {
     (r, times)
 }
 
+/// Count kernel time spent on other threads for this thread's running capture (when one runs
+/// and no timed call does): work this thread handed out and waited for. The caller keeps the
+/// sum within the wall time it waited, so the totals still never pass what the command took.
+pub fn credit(times: KernelTimes) {
+    let ok = |x: f64| if x.is_finite() && x > 0.0 { x } else { 0.0 };
+    STATE.with(|s| {
+        let mut st = s.get();
+        if st.on && !st.busy {
+            st.times.boolean_ms += ok(times.boolean_ms);
+            st.times.tessellate_ms += ok(times.tessellate_ms);
+            s.set(st);
+        }
+    });
+}
+
 /// Time `f` as `kind` when a capture is running and no timed call is.
 pub(crate) fn timed<T>(kind: Kind, f: impl FnOnce() -> T) -> T {
     let st = STATE.with(Cell::get);
@@ -120,6 +135,19 @@ mod tests {
         assert!(t.boolean_ms >= 6.0 && t.tessellate_ms >= 2.0, "{t:?}");
         // The tessellation inside the boolean is not counted twice.
         assert!(t.boolean_ms + t.tessellate_ms <= elapsed + 1e-6, "{t:?} in {elapsed} ms");
+    }
+
+    #[test]
+    fn time_credited_from_other_threads_counts_only_inside_a_capture() {
+        let t = KernelTimes { boolean_ms: 4.0, tessellate_ms: 1.0 };
+        credit(t);
+        let ((), got) = capture(|| {
+            credit(t);
+            credit(KernelTimes { boolean_ms: f64::NAN, tessellate_ms: -3.0 });
+            // Inside a timed call it would count twice: it is the call's time already.
+            timed(Kind::Boolean, || credit(t));
+        });
+        assert_eq!((got.boolean_ms >= 4.0, got.boolean_ms < 8.0, got.tessellate_ms), (true, true, 1.0), "{got:?}");
     }
 
     #[test]

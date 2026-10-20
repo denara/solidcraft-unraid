@@ -1,6 +1,7 @@
 //! The Help menu (the ? button on the application bar): Documentation (the online book), About
 //! SolidCraft (version, commit, build date, licences, attributions, fonts), the keyboard shortcuts
-//! (read only), and Report an Issue, which opens a local editable report draft.
+//! (read only), Messages (every status message of the run, #2763), and Report an Issue, which
+//! opens a local editable report draft.
 
 use egui::{RichText, vec2};
 
@@ -43,7 +44,7 @@ pub fn diagnostics(app: &SolveApp) -> String {
     )
 }
 
-/// Run a Help menu item: `docs`, `about`, `shortcuts`, `report`, `crashes`.
+/// Run a Help menu item: `docs`, `about`, `shortcuts`, `messages`, `report`, `crashes`.
 pub fn run(app: &mut SolveApp, ctx: &egui::Context, item: &str) {
     app.help.menu = false;
     match item {
@@ -54,6 +55,7 @@ pub fn run(app: &mut SolveApp, ctx: &egui::Context, item: &str) {
             app.keymap.read_only = true;
         }
         "crashes" => crate::crash_ui::open(app),
+        "messages" => app.messages.open = true,
         "report" => {
             let dialog = app.dialog.clone();
             let error = dialog.as_ref().and_then(|d| d.error.clone()).or_else(|| app.preview.error.clone());
@@ -74,6 +76,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context, anchor: egui::Pos2) {
                         ("docs", "Documentation"),
                         ("about", "About SolidCraft"),
                         ("shortcuts", "Keyboard Shortcuts"),
+                        ("messages", "Messages…"),
                         ("report", "Report an Issue…"),
                         ("crashes", "Crash Reports…"),
                     ] {
@@ -95,6 +98,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context, anchor: egui::Pos2) {
     }
     about(app, ctx);
     crate::crash_ui::show(app, ctx);
+    crate::messages::show(app, ctx);
 }
 
 fn about(app: &mut SolveApp, ctx: &egui::Context) {

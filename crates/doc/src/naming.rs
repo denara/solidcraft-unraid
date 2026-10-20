@@ -17,7 +17,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use solidcraft_geom::{Mesh, Seg2, Vec2, Vec3};
+use solidcraft_geom::{Aabb3, Mesh, Seg2, Vec2, Vec3};
 
 use crate::history_names::Names;
 use crate::lineage::Lineage;
@@ -156,20 +156,16 @@ pub(crate) fn closest(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
 
 /// A body's faces as triangle lists with bounding boxes, for "does this point lie on face f".
 struct FaceIndex {
-    faces: Vec<(Vec3, Vec3, Vec<[Vec3; 3]>)>,
+    faces: Vec<(Aabb3, Vec<[Vec3; 3]>)>,
 }
 
 impl FaceIndex {
     fn new(m: &Mesh, nf: usize) -> FaceIndex {
-        let mut faces: Vec<(Vec3, Vec3, Vec<[Vec3; 3]>)> =
-            vec![(Vec3::new(f64::MAX, f64::MAX, f64::MAX), Vec3::new(f64::MIN, f64::MIN, f64::MIN), Vec::new()); nf];
+        let mut faces: Vec<(Aabb3, Vec<[Vec3; 3]>)> = vec![(Aabb3::EMPTY, Vec::new()); nf];
         for (t, f) in m.triangles.iter().zip(&m.tri_face) {
             if let (Some(slot), Some(tri)) = (faces.get_mut(*f as usize), m.tri(t)) {
-                for p in tri {
-                    slot.0 = Vec3::new(slot.0.x.min(p.x), slot.0.y.min(p.y), slot.0.z.min(p.z));
-                    slot.1 = Vec3::new(slot.1.x.max(p.x), slot.1.y.max(p.y), slot.1.z.max(p.z));
-                }
-                slot.2.push(tri);
+                slot.0.extend(tri);
+                slot.1.push(tri);
             }
         }
         FaceIndex { faces }
@@ -178,8 +174,8 @@ impl FaceIndex {
     /// The face a point lies on (within `tol`).
     fn face_at(&self, p: Vec3, tol: f64) -> Option<usize> {
         let mut best: Option<(f64, usize)> = None;
-        for (i, (lo, hi, tris)) in self.faces.iter().enumerate() {
-            if p.x < lo.x - tol || p.y < lo.y - tol || p.z < lo.z - tol || p.x > hi.x + tol || p.y > hi.y + tol || p.z > hi.z + tol {
+        for (i, (bounds, tris)) in self.faces.iter().enumerate() {
+            if !bounds.inflated(tol).contains(p) {
                 continue;
             }
             let d = tris.iter().map(|[a, b, c]| closest(p, *a, *b, *c).dist(p)).fold(f64::MAX, f64::min);
@@ -392,7 +388,7 @@ fn behind(ps: &[Vec3], ns: &[Vec3], inputs: &[(&ModelBody, FaceIndex, Arc<Vec<St
     for p in ps {
         let mut best: Option<(f64, String)> = None;
         for (_, idx, nm) in inputs {
-            for (fi, (_, _, tris)) in idx.faces.iter().enumerate() {
+            for (fi, (_, tris)) in idx.faces.iter().enumerate() {
                 for [a, b, c] in tris {
                     if let Some(t) = ray_hit(*p, d, *a, *b, *c)
                         && t > 1e-9
@@ -497,10 +493,7 @@ fn number_pieces(names: &mut [String], pts: &[Vec<Vec3>], mark: char) {
             ps.iter().fold(Vec3::ZERO, |a, p| a + *p) * (1.0 / ps.len().max(1) as f64)
         };
         let cs: Vec<(usize, Vec3)> = same.iter().map(|j| (*j, centre(*j))).collect();
-        let (lo, hi) = cs.iter().fold((Vec3::new(f64::MAX, f64::MAX, f64::MAX), Vec3::new(f64::MIN, f64::MIN, f64::MIN)), |(l, h), (_, c)| {
-            (Vec3::new(l.x.min(c.x), l.y.min(c.y), l.z.min(c.z)), Vec3::new(h.x.max(c.x), h.y.max(c.y), h.z.max(c.z)))
-        });
-        let ext = hi - lo;
+        let ext = cs.iter().map(|(_, c)| *c).collect::<Aabb3>().size();
         let key = |c: Vec3| {
             if ext.x >= ext.y && ext.x >= ext.z {
                 (c.x, c.y, c.z)

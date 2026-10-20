@@ -18,7 +18,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .at("SOLID", "CREATE")
         .icon("extrude")
         .key("E")
-        .params("distance: expr (or through_all: true); taper?: angle expr; sketch?: id|name (default: active or last sketch); profiles?: all | [index] | [{curves: [ids]}] (the profile whose outer loop is made of exactly these curves, or pieces of them; found again on every recompute, so it follows parameter changes; islands inside are its holes; an error when no profile or several match) | [{point:[x,y]}] (index and point picks are stored by their curves when that finds the same profile); face?: [x,y,z] (extrude a planar body face instead of a sketch profile); faces?: [[x,y,z],…] (coplanar faces of one body); face_body?: name (whose face, where faces of several bodies meet at the point); direction?: positive|negative|symmetric (distance is total thickness, split evenly around the start plane); convention?: total_distance|legacy_per_side (default total_distance; legacy preserves older symmetric extents); distance2?; start_offset?: expr (along the sketch normal, also with direction: negative); to?: [x,y,z] (To Object: a face, vertex or point; to_offset?: expr past it); from?: [x,y,z] (From Object: start at that face or point); operation?: new|join|cut|intersect|auto (cut into a body, otherwise join existing solids; new in an empty component); targets?: [body] (Join from a face, or from a sketch on a body's face, defaults to that face's body; explicit targets or participants override); name?; body_name?; thin?: true (Thin: a wall along sketch curves instead of the profiles) with curves?: [curve ids] (open chains and closed loops, joined where they meet end to end; default: every drawn curve of the sketch), thickness: expr, side?: center|inside|outside|two_sides (a closed loop's inside is the area it encloses, an open chain's the side it bends toward, a straight line's the left of its first curve as drawn; default center), thickness2?: expr (two_sides: the thickness outside); corners are mitred, crossing walls are one"),
+        .params("distance: expr (or through_all: true); taper?: angle expr; sketch?: id|name (default: active or last sketch); profiles?: all | [index] | [{curves: [ids]}] (the profile whose outer loop is made of exactly these curves, or pieces of them; found again on every recompute, so it follows parameter changes; islands inside are its holes; an error when no profile or several match) | [{point:[x,y]}] (index and point picks are stored by their curves when that finds the same profile); face?: [x,y,z] (extrude a planar body face instead of a sketch profile); faces?: [[x,y,z],…] (coplanar faces of one body); face_body?: name (whose face, where faces of several bodies meet at the point); direction?: positive|negative|symmetric (distance is total thickness, split evenly around the start plane); convention?: total_distance|legacy_per_side (default total_distance; legacy preserves older symmetric extents); distance2?: expr (Two Sides: a second distance the other way from the first side, which may be through_all or to; with direction: negative the first side goes against the normal and distance2 along it); start_offset?: expr (along the sketch normal, also with direction: negative); to?: [x,y,z] (To Object: a face, vertex or point; to_offset?: expr past it); from?: [x,y,z] (From Object: start at that face or point); operation?: new|join|cut|intersect|auto (cut into a body, otherwise join existing solids; new in an empty component); targets?: [body] (Join from a face, or from a sketch on a body's face, defaults to that face's body; explicit targets or participants override); name?; body_name?; thin?: true (Thin: a wall along sketch curves instead of the profiles) with curves?: [curve ids] (open chains and closed loops, joined where they meet end to end; default: every drawn curve of the sketch), thickness: expr, side?: center|inside|outside|two_sides (a closed loop's inside is the area it encloses, an open chain's the side it bends toward, a straight line's the left of its first curve as drawn; default center), thickness2?: expr (two_sides: the thickness outside); corners are mitred, crossing walls are one"),
     CommandSpec::new("solid.revolve", "Revolve", revolve)
         .at("SOLID", "CREATE")
         .icon("revolve")
@@ -27,7 +27,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .at("SOLID", "CREATE")
         .icon("sweep")
         .params("sketch: profile sketch; profiles?; path_sketch: sketch; path: [curve ids in order]; orientation?: perpendicular (default: square to the path, turning with it) | parallel (as drawn: the profile moves without turning; the path must keep crossing its plane) | [x,y,z] (square to the path, its turn about the path fixed by this direction); twist?: angle expr (the profile turns this much about the path over its length; within 4 turns); scale?: expr (the profile's scale at the end, linear along the path; 0.01…100); rails?: [{sketch?: sketch (default path_sketch), curves: [curve ids in order]}] (guide rails, one or two, each meeting every plane square to the path once along it, from the end nearest the path's start: one rail turns the profile so its point where the rail starts stays on the rail and scales it with the rail's distance from the path; two rails carry it between them, its points where they start staying on both; rails take the default orientation, no twist and no scale, and a path without sharp corners); rail_fit?: scale (default: the profile grows and shrinks evenly) | stretch (only across to the rail, between the rails); operation?, targets?, name?, body_name?"),
-    CommandSpec::new("solid.loft", "Loft", loft).at("SOLID", "CREATE").icon("loft").params("sections: [{sketch, profiles?} | {sketch, point: id} (an apex)] (2 or more, in order); operation?, targets?, name?, body_name?"),
+    CommandSpec::new("solid.loft", "Loft", loft).at("SOLID", "CREATE").icon("loft").params("sections: [{sketch, profiles?} | {sketch, point: id} (an apex)] (2…50, in order; matching hole counts, no holes at an apex); rails?: [{sketch, curves: [ids in order]}] (one or two guide rails from the first section to the last, through every section's outline: the loft follows them between the sections; not with sections that have holes); rail_fit?: scale|stretch (default scale: with one rail the sections grow evenly with the rail's distance from their middle, with two with the distance between the rails; stretch: only that way); operation?, targets?, name?, body_name?"),
     CommandSpec::new("solid.box", "Box", prim_box).at("SOLID", "CREATE").icon("box").params("length, width, height: expr; corner?: [x,y,z] | center?: [x,y,z] (numbers in mm or length expressions; default: the origin); operation?, targets?: [body], name?, body_name?"),
     CommandSpec::new("solid.cylinder", "Cylinder", prim_cylinder).at("SOLID", "CREATE").icon("cylinder").params("radius | diameter, height: expr; base?: [x,y,z] (centre of the bottom: numbers in mm or length expressions; default: the origin); axis?: X|Y|Z|[x,y,z] (default Z); operation?, targets?: [body], name?, body_name?"),
     CommandSpec::new("solid.sphere", "Sphere", prim_sphere).at("SOLID", "CREATE").icon("sphere").params("radius | diameter: expr; center?: [x,y,z] (numbers in mm or length expressions; default: the origin); operation?, targets?: [body], name?, body_name?"),
@@ -36,7 +36,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .at("SOLID", "MODIFY")
         .icon("fillet")
         .key("F")
-        .params("edges: [[x,y,z] point on edge | {body, index}]; radius: expr; body?; type?: constant|curvature (alias g2: curvature-continuous quintic between planar faces along straight edges, one perpendicular planar end face at each end; radius sets the equivalent circular setback, not constant curvature; exact fit only)|chord (radius is the width across)|variable (radius at the end nearest start, radius2 at the other; one end may be 0, where the round closes to the corner)|spline (the radius along the edge is a clamped B-spline from the end nearest start: radius is its first control radius, radii the rest, knots its knot vector from 0 to 1; one end may be 0); radius2?; start?: [x,y,z]; radii?: [expr, …]; knots?: [number, …]; mid?: [[position 0…1 from start, radius expr], …] (variable radii between the ends); smooth?: bool (smooth instead of straight between the radii); corner?: rolling|g2 (rolling, the default: the corners where three blended edges meet are pieces of the rolling ball's sphere, tangent to each blend; g2: a patch repeating each blend's surface up to the second order, constant-radius exact fillets only, refused where it cannot be built); fit?: exact|reduce|taper (exact, the default: a radius too large for the geometry around the edges is refused; reduce: where it doesn't fit it is reduced to the largest that does, one radius for edges sharing a face; the smallest used is returned as `radius_applied`, each edge's as `radii_applied: [{edge: [x,y,z], radius}]`, and noted in the feature's warning; taper: along each straight edge between planar faces where it doesn't fit, the radius follows the room there as a smooth spline, down to 0 where a face closes to a point, noted in the feature's warning)"),
+        .params("edges: [[x,y,z] point on edge | {body, index}]; radius: expr; body?; type?: constant|curvature (alias g2: curvature-continuous quintic between planar faces along straight edges, one planar end face at each end (including sloped ends); radius sets the equivalent circular setback, not constant curvature; exact fit only)|chord (radius is the width across)|variable (radius at the end nearest start, radius2 at the other; one end may be 0, where the round closes to the corner)|spline (the radius along the edge is a clamped B-spline from the end nearest start: radius is its first control radius, radii the rest, knots its knot vector from 0 to 1; one end may be 0); radius2?; start?: [x,y,z]; radii?: [expr, …]; knots?: [number, …]; mid?: [[position 0…1 from start, radius expr], …] (variable radii between the ends); smooth?: bool (smooth instead of straight between the radii); corner?: rolling|g2 (rolling, the default: the corners where three blended edges meet are pieces of the rolling ball's sphere, tangent to each blend; g2: a patch repeating each blend's surface up to the second order, constant-radius exact fillets only, refused where it cannot be built); fit?: exact|reduce|taper (exact, the default: a radius too large for the geometry around the edges is refused; reduce: where it doesn't fit it is reduced to the largest that does, one radius for edges sharing a face; the smallest used is returned as `radius_applied`, each edge's as `radii_applied: [{edge: [x,y,z], radius}]`, and noted in the feature's warning; taper: along each straight edge between planar faces where it doesn't fit, the radius follows the room there as a smooth spline, down to 0 where a face closes to a point, noted in the feature's warning)"),
     CommandSpec::new("solid.chamfer", "Chamfer", chamfer).at("SOLID", "MODIFY").icon("chamfer").params("edges: [[x,y,z] | {body, index}]; distance: expr; distance2?: expr (along the second face) | angle?: expr (from the first face); flip?: bool (which face is first: by default the one facing up most); body?"),
     CommandSpec::new("solid.combine", "Combine", combine).at("SOLID", "MODIFY").icon("combine").params("target: body; tools: [body]; operation?: join|cut|intersect; keep_tools?: bool; new_component?: bool (the result goes into a new component; component_name?)"),
     CommandSpec::new("solid.pattern.rectangular", "Rectangular Pattern", pattern_rect)
@@ -1985,6 +1985,20 @@ pub(super) fn sweep_options(s: &Session, p: &Value, cmd: &str) -> Result<(SweepO
 /// rails, each a sketch (default: the path's) and 1…1000 of its curves; a fit of scale or
 /// stretch; and no orientation, twist or scale besides, since the rails set those.
 pub(super) fn sweep_rails(s: &Session, p: &Value, cmd: &str, path_sketch: u64) -> Result<(Vec<SweepRail>, RailFit)> {
+    let (rails, rail_fit) = guide_rails(s, p, cmd, "sweep", Some(path_sketch))?;
+    if !rails.is_empty() {
+        for key in ["orientation", "twist", "scale"] {
+            if p.get(key).is_some_and(|v| !v.is_null()) {
+                return Err(bad(cmd, format!("guide rails set the profile's turn and size along the path: leave out `{key}`")));
+            }
+        }
+    }
+    Ok((rails, rail_fit))
+}
+
+/// A sweep's or a loft's (`what`) `rails` (one or two `{sketch?, curves}`, each rail's sketch
+/// `default_sketch` when it names none) and `rail_fit` (scale | stretch).
+pub(super) fn guide_rails(s: &Session, p: &Value, cmd: &str, what: &str, default_sketch: Option<u64>) -> Result<(Vec<SweepRail>, RailFit)> {
     let rail_fit = match p.get("rail_fit") {
         None | Some(Value::Null) => RailFit::Scale,
         Some(Value::String(f)) if f.eq_ignore_ascii_case("scale") => RailFit::Scale,
@@ -1994,21 +2008,17 @@ pub(super) fn sweep_rails(s: &Session, p: &Value, cmd: &str, path_sketch: u64) -
     let given = match p.get("rails") {
         None | Some(Value::Null) => return Ok((Vec::new(), rail_fit)),
         Some(Value::Array(a)) => a,
-        Some(_) => return Err(bad(cmd, "`rails` must list one or two rails: [{sketch?, curves: [ids]}]")),
+        Some(_) => return Err(bad(cmd, "`rails` must list one or two rails: [{sketch, curves: [ids]}]")),
     };
     if !(1..=2).contains(&given.len()) {
-        return Err(bad(cmd, "a sweep takes one or two guide rails"));
-    }
-    for key in ["orientation", "twist", "scale"] {
-        if p.get(key).is_some_and(|v| !v.is_null()) {
-            return Err(bad(cmd, format!("guide rails set the profile's turn and size along the path: leave out `{key}`")));
-        }
+        return Err(bad(cmd, format!("a {what} takes one or two guide rails")));
     }
     let mut rails = Vec::with_capacity(given.len());
     for rail in given {
-        let sketch = match rail.get("sketch") {
-            None | Some(Value::Null) => path_sketch,
-            Some(_) => sketch_id(s, rail.get("sketch"), cmd, "rails[].sketch")?,
+        let sketch = match (rail.get("sketch").filter(|v| !v.is_null()), default_sketch) {
+            (None, Some(sketch)) => sketch,
+            (None, None) => return Err(bad(cmd, "each rail needs the `sketch` its curves are in")),
+            (Some(_), _) => sketch_id(s, rail.get("sketch"), cmd, "rails[].sketch")?,
         };
         let curves = string_list(rail, "curves");
         if curves.is_empty() || curves.len() > 1000 {
@@ -2043,10 +2053,17 @@ fn loft(s: &mut Session, p: &Value) -> Result<Value> {
         }
         sections.push(solidcraft_doc::LoftSection { sketch: SketchId(sketch), profiles: profiles(sec, cmd)?, point: None });
     }
+    let (rails, rail_fit) = guide_rails(s, p, cmd, "loft", None)?;
     add_feature(
         s,
         p,
-        FeatureKind::Loft { sections, operation: operation(p, cmd)?, targets: string_list(p, "targets").into_iter().map(BodyName).collect() },
+        FeatureKind::Loft {
+            sections,
+            operation: operation(p, cmd)?,
+            targets: string_list(p, "targets").into_iter().map(BodyName).collect(),
+            rails,
+            rail_fit,
+        },
     )
 }
 
@@ -2159,6 +2176,10 @@ mod patterns_tests;
 #[cfg(test)]
 #[path = "prism_local_tests.rs"]
 mod prism_local_tests;
+
+#[cfg(test)]
+#[path = "loft_rails_tests.rs"]
+mod loft_rails_tests;
 
 #[cfg(test)]
 #[path = "revolve_convention_tests.rs"]

@@ -1,7 +1,9 @@
 param(
     [string]$BaseUrl = 'http://localhost:8781',
     [Parameter(Mandatory = $true)][string]$Token,
-    [Parameter(Mandatory = $true)][string]$ContainerName
+    [Parameter(Mandatory = $true)][string]$ContainerName,
+    [string]$CandidateTask = '',
+    [string]$CandidateImage = ''
 )
 # This restart proof is restricted to labelled, loopback-only disposable containers.
 # Cookies and credentials remain in memory; no proof file contains authentication data.
@@ -23,6 +25,15 @@ function Assert-DisposableCandidate {
     try { $inspection = @($inspectionText -join "`n" | ConvertFrom-Json -Depth 50)[0] } catch { throw 'Invalid Docker inspection response' }
     $taskLabel = $inspection.Config.Labels.'solidcraft.task' -eq 'workspace-live-20261018'
     $proofLabel = $inspection.Config.Labels.'solidcraft.proof' -eq 'true'
+    # Local builds must identify their exact task and image as well as all the
+    # existing disposable-volume, loopback, isolation and credential safeguards.
+    $explicitLocal = $proofLabel -and $CandidateTask -and $CandidateImage -and
+        $inspection.Config.Labels.'solidcraft.task' -ceq $CandidateTask -and
+        $inspection.Config.Image -ceq $CandidateImage -and
+        $inspection.Name -ceq "/$ContainerName" -and
+        $ContainerName -match '^(solidcraft|solvecraft)[a-z0-9._-]*(proof|test|candidate)[a-z0-9._-]*$'
+    $taskLabel = $taskLabel -or $explicitLocal
+
     if (-not ($taskLabel -or $proofLabel) -or -not $inspection.State.Running -or $inspection.Id -notmatch '^[a-f0-9]{64}$') {
         throw 'Restart proof requires a running container explicitly labelled as a disposable proof'
     }

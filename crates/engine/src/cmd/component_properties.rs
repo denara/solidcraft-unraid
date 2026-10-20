@@ -1,7 +1,7 @@
 //! Physical properties of an assembly placement, with original body material assignments.
 use serde_json::{Value, json};
 use solidcraft_doc::{Document, Mat};
-use solidcraft_geom::Vec3;
+use solidcraft_geom::{Aabb3, Vec3};
 
 use crate::params::bad;
 use crate::{Result, Session};
@@ -90,8 +90,7 @@ fn properties(s: &Session, doc: &Document, selected: &[u64], descendants: bool, 
     let mut bodies = Vec::new();
     let (mut volume, mut area, mut mass) = (0.0, 0.0, 0.0);
     let mut moment = Vec3::ZERO;
-    let (mut min, mut max) =
-        (Vec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY), Vec3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY));
+    let mut bounds = Aabb3::EMPTY;
     let (mut faces, mut edges, mut vertices) = (0, 0, 0);
     let mut placement_count = 0;
     let selected_placements = if selected.is_empty() {
@@ -126,8 +125,7 @@ fn properties(s: &Session, doc: &Document, selected: &[u64], descendants: bool, 
             area += measured.area;
             mass += body_mass;
             moment += measured.centroid * body_mass;
-            min = Vec3::new(min.x.min(measured.bbox.min.x), min.y.min(measured.bbox.min.y), min.z.min(measured.bbox.min.z));
-            max = Vec3::new(max.x.max(measured.bbox.max.x), max.y.max(measured.bbox.max.y), max.z.max(measured.bbox.max.z));
+            bounds = bounds.union(&measured.bbox);
             faces += measured.merged.faces;
             edges += measured.merged.edges;
             vertices += measured.merged.vertices;
@@ -145,7 +143,7 @@ fn properties(s: &Session, doc: &Document, selected: &[u64], descendants: bool, 
     if centroid.is_some_and(|point| !point.is_finite()) {
         return Err(bad(cmd, "center of mass exceeds supported numeric range"));
     }
-    let bbox = if bodies.is_empty() { Value::Null } else { json!({"min": min, "max": max}) };
+    let bbox = if bodies.is_empty() { Value::Null } else { json!({"min": bounds.min, "max": bounds.max}) };
     Ok(json!({"path": selected, "coordinate_frame": "world", "descendants": descendants,
         "placement_count": placement_count, "body_count": bodies.len(), "bodies": bodies,
         "total": {"volume_mm3": volume, "area_mm2": area, "mass_g": mass,

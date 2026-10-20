@@ -1,10 +1,10 @@
 //! Navigation drawing definitions. Camera projection and picking remain in the UI widgets.
 use crate::theme::Tokens;
 use egui::{Align2, Color32, FontId, Pos2, Rect, Shape, Stroke, pos2, vec2};
-use solidcraft_engine::geom::Vec3;
+use solidcraft_engine::geom::{Ring, Vec3};
 pub(crate) struct Facet {
     pub(crate) direction: Vec3,
-    pub(crate) points: Vec<Pos2>,
+    pub(crate) points: Ring<Pos2>,
     pub(crate) outer_edges: Vec<bool>,
     pub(crate) centre: Pos2,
     pub(crate) label: String,
@@ -89,7 +89,7 @@ pub(crate) fn paint_cube(painter: &egui::Painter, faces: &[Facet], hovered: Opti
         for &p in &face.points {
             fill_mesh.colored_vertex(p, fill);
         }
-        for (j, (&a, &b)) in face.points.iter().zip(face.points.iter().cycle().skip(1)).take(face.points.len()).enumerate() {
+        for (j, (&a, &b)) in face.points.edges().enumerate() {
             fill_mesh.add_triangle(centre, centre + 1 + j as u32, centre + 1 + ((j + 1) % face.points.len()) as u32);
             // Coplanar picking regions have no visible seams. Only actual cube
             // edges and the hovered target's boundary receive an outline.

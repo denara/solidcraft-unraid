@@ -3,7 +3,7 @@
 //! directly from the body's faces (the band's walls continue the walls below, which a boolean
 //! union can't join: their faces would coincide).
 
-use solidcraft_geom::Vec3;
+use solidcraft_geom::{Loop2, Plane, Region2, Ring, Seg2, Vec3};
 use truck_modeling::{self as mt, builder};
 
 use crate::body::{Body, Solid, from_p3, p3, v3};
@@ -43,10 +43,12 @@ fn face_at(body: &Body, at: Vec3) -> Result<(usize, Vec3)> {
     if d > size * 1e-3 {
         return Err(fail("no face there"));
     }
-    let face = body.solid.face_iter().nth(f).ok_or_else(|| fail("face"))?;
-    let mt::Surface::Plane(pl) = face.oriented_surface() else { return Err(fail("the face must be planar")) };
-    let n = pl.normal();
-    Ok((f, Vec3::new(n.x, n.y, n.z).normalized().ok_or_else(|| fail("normal"))?))
+    guard("rim face", || {
+        let face = body.solid.face_iter().nth(f).ok_or_else(|| fail("face"))?;
+        let mt::Surface::Plane(pl) = face.oriented_surface() else { return Err(fail("the face must be planar")) };
+        let n = pl.normal();
+        Ok((f, Vec3::new(n.x, n.y, n.z).normalized().ok_or_else(|| fail("normal"))?))
+    })
 }
 
 /// The face's loop moved `w` into the face (to the left of its edges, as a face's boundary has
@@ -62,15 +64,18 @@ fn offset_loop(pieces: &[Piece], n: Vec3, w: f64, tol: f64) -> Result<Vec<Piece>
             }
             Some(m) => {
                 // Each point moves square to the arc (along its radius), to the left.
-                let (la, lm, lb) =
-                    (left(p.a, m).ok_or_else(|| fail("arc"))?, left(p.a, p.b).ok_or_else(|| fail("arc"))?, left(m, p.b).ok_or_else(|| fail("arc"))?);
+                let lm = left(p.a, p.b).ok_or_else(|| fail("arc"))?;
                 let c = circle_centre(p.a, m, p.b).ok_or_else(|| fail("arc"))?;
-                let radial = |q: Vec3, hint: Vec3| {
-                    let r = (q - c).normalized().unwrap_or(hint);
-                    if r.dot(hint) >= 0.0 { r } else { -r }
-                };
-                let _ = (la, lb);
-                Piece { a: p.a + radial(p.a, lm) * w, b: p.b + radial(p.b, lm) * w, mid: Some(m + radial(m, lm) * w) }
+                let r = m.dist(c);
+                let shift = if (m - c).dot(lm) >= 0.0 { w } else { -w };
+                if r + shift <= tol {
+                    return Err(fail("the offset closes an arc"));
+                }
+                // Use one radial scale for the whole arc. At a semicircle's ends the
+                // radial is perpendicular to the chord's left, so its dot product cannot
+                // reliably choose the side independently at each end.
+                let moved = |q: Vec3| c + (q - c) * ((r + shift) / r);
+                Piece { a: moved(p.a), b: moved(p.b), mid: Some(moved(m)) }
             }
         });
     }
@@ -120,6 +125,85 @@ fn circle_centre(a: Vec3, m: Vec3, b: Vec3) -> Option<Vec3> {
     Some(a + (v.cross(w) * u.len2() + w.cross(u) * v.len2()) * (1.0 / d))
 }
 
+fn pieces(wire: &mt::Wire, size: f64) -> Result<Vec<Piece>> {
+    wire.edge_iter()
+        .map(|e| {
+            let (a, b) = (from_p3(e.front().point()), from_p3(e.back().point()));
+            match crate::offset::arc_mid(e, size * 1e-6) {
+                Some(mid) => Ok(Piece { a, b, mid }),
+                None => Err(fail("edges must be lines or arcs")),
+            }
+        })
+        .collect()
+}
+
+/// Signed area ordering including arc midpoints: two semicircles have only two
+/// vertices, whose polygon has zero area for both the inner and outer loops.
+fn turn(wire: &mt::Wire, n: Vec3) -> f64 {
+    use mt::{BoundedCurve, ParametricCurve};
+    let ring: Ring<Vec3> = wire
+        .edge_iter()
+        .flat_map(|e| {
+            let c = e.oriented_curve();
+            let (a, b) = c.range_tuple();
+            [from_p3(e.front().point()), from_p3(c.subs((a + b) * 0.5))]
+        })
+        .collect();
+    ring.area_vector().dot(n)
+}
+
+fn rim_loops(wires: &[mt::Wire], n: Vec3) -> Result<(&mt::Wire, &mt::Wire)> {
+    let [a, b] = wires else { return Err(fail("the face must have an outer and one inner loop (a rim)")) };
+    Ok(if turn(a, n) >= turn(b, n) { (a, b) } else { (b, a) })
+}
+
+fn profile(pieces: &[Piece], plane: &Plane) -> Result<Loop2> {
+    use std::f64::consts::TAU;
+    let segs = pieces
+        .iter()
+        .map(|p| {
+            let (a, b) = (plane.to_local(p.a), plane.to_local(p.b));
+            Ok(match p.mid {
+                None => Seg2::Line { a, b },
+                Some(m) => {
+                    let center = plane.to_local(circle_centre(p.a, m, p.b).ok_or_else(|| fail("arc"))?);
+                    let mid = plane.to_local(m);
+                    let start = (a - center).angle();
+                    let end = (b - center).angle();
+                    let sweep = (end - start).rem_euclid(TAU);
+                    let sweep = if ((mid - center).angle() - start).rem_euclid(TAU) <= sweep { sweep } else { sweep - TAU };
+                    Seg2::Arc { center, radius: a.dist(center), start, sweep }
+                }
+            })
+        })
+        .collect::<Result<_>>()?;
+    Ok(Loop2 { segs })
+}
+
+/// Exact profile of a band along a planar rim's chosen edge. `width` reaches into
+/// the rim; `free` reaches into its free side so a groove cutter crosses the wall.
+/// Lines and circular arcs stay analytic, independent of display tessellation.
+pub fn rim_band(body: &Body, at: Vec3, width: f64, free: f64, outside: bool) -> Result<(Plane, Region2)> {
+    body.require_brep("a rim band")?;
+    if !(width.is_finite() && width > 0.0 && free.is_finite() && free >= 0.0) {
+        return Err(KernelError::Invalid("invalid rim band width".into()));
+    }
+    let (fi, n) = face_at(body, at)?;
+    guard("rim band", || {
+        let face = body.solid.face_iter().nth(fi).ok_or_else(|| fail("face"))?;
+        let wires = face.boundaries();
+        let (outer, inner) = rim_loops(&wires, n)?;
+        let along = if outside { outer } else { inner };
+        let p = pieces(along, body.size())?;
+        let tol = (body.size() * 1e-5).max(1e-7);
+        let plane = Plane::from_normal(at, n).ok_or_else(|| fail("rim plane"))?;
+        let into = profile(&offset_loop(&p, n, width, tol)?, &plane)?;
+        let away = profile(&offset_loop(&p, n, -free, tol)?, &plane)?;
+        let (outer, inner) = if outside { (away, into) } else { (into, away) };
+        Ok((plane, Region2 { outer: outer.ccw(), holes: vec![inner.ccw().reversed()] }))
+    })
+}
+
 /// Raise the band of the planar face at `at` that runs `width` wide along its outer loop
 /// (`outside`) or its inner loop, by `height` along the face's normal.
 pub fn raise_band(body: &Body, at: Vec3, width: f64, height: f64, outside: bool) -> Result<Body> {
@@ -133,39 +217,14 @@ pub fn raise_band(body: &Body, at: Vec3, width: f64, height: f64, outside: bool)
     let size = body.size();
     let tol = (size * 1e-7).max(1e-9) * 100.0;
     let (fi, n) = face_at(body, at)?;
-    let faces: Vec<mt::Face> = body.solid.face_iter().cloned().collect();
-    let f = faces.get(fi).ok_or_else(|| fail("face"))?;
-    let wires = f.boundaries();
-    if wires.len() != 2 {
-        return Err(fail("the face must have an outer and one inner loop (a rim)"));
-    }
-    // Outer loop: turning positively about n.
-    let turn = |w: &mt::Wire| -> f64 {
-        let pts: Vec<Vec3> = w.vertex_iter().map(|v| from_p3(v.point())).collect();
-        let mut s = Vec3::ZERO;
-        for (k, p) in pts.iter().enumerate() {
-            if let Some(q) = pts.get((k + 1) % pts.len()) {
-                s += p.cross(*q);
-            }
-        }
-        s.dot(n)
-    };
-    let (w0, w1) = (wires.first().ok_or_else(|| fail("loop"))?, wires.get(1).ok_or_else(|| fail("loop"))?);
-    let (outer, inner) = if turn(w0) >= turn(w1) { (w0, w1) } else { (w1, w0) };
-    let (along, other) = if outside { (outer, inner) } else { (inner, outer) };
-    let pieces: Vec<Piece> = along
-        .edge_iter()
-        .map(|e| {
-            let (a, b) = (from_p3(e.front().point()), from_p3(e.back().point()));
-            match crate::offset::arc_mid(e, size * 1e-6) {
-                Some(None) => Ok(Piece { a, b, mid: None }),
-                Some(Some(m)) => Ok(Piece { a, b, mid: Some(m) }),
-                None => Err(fail("edges must be lines or arcs")),
-            }
-        })
-        .collect::<Result<_>>()?;
-    let moved = offset_loop(&pieces, n, width, tol)?;
     guard("lip", || {
+        let faces: Vec<mt::Face> = body.solid.face_iter().cloned().collect();
+        let f = faces.get(fi).ok_or_else(|| fail("face"))?;
+        let wires = f.boundaries();
+        let (outer, inner) = rim_loops(&wires, n)?;
+        let (along, other) = if outside { (outer, inner) } else { (inner, outer) };
+        let pieces = pieces(along, size)?;
+        let moved = offset_loop(&pieces, n, width, tol)?;
         // The band's other edge, on the face.
         let verts: Vec<mt::Vertex> = moved.iter().map(|p| builder::vertex(p3(p.a))).collect();
         let k = verts.len();

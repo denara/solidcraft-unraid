@@ -286,7 +286,7 @@ fn gap(c1: Vec3, r1: f64, c2: Vec3, r2: f64, corner: Vec3, r: f64) -> Gap {
             ring.push(c + Vec3::new(t.cos(), t.sin(), 0.0) * rr);
         }
     }
-    let area = ring.iter().zip(ring.iter().cycle().skip(1)).map(|(p, q)| p.x * q.y - q.x * p.y).sum::<f64>().abs() * 0.5;
+    let area = ring.iter().map(|p| solidcraft_geom::Vec2::new(p.x, p.y)).collect::<solidcraft_geom::Ring<_>>().signed_area().abs();
     let (p, q) = ((t1 - f).normalized().unwrap(), (t2 - f).normalized().unwrap());
     let arc = (0..=8).map(|i| angles[2] * i as f64 / 8.0).map(|t| f + (p * ((angles[2] - t).sin()) + q * t.sin()) * (r / angles[2].sin())).collect();
     Gap { arc, angles, area }

@@ -15,13 +15,22 @@ use super::CommandSpec;
 use crate::params::{bad, str_, vec3};
 use crate::{EngineError, Result, Session};
 
+#[cfg(test)]
+#[path = "component_relink_tests.rs"]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod relink_tests;
+
 pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("component.insert_design", "Insert Design", insert_design).at("SOLID", "ASSEMBLE").icon("component").params(
         "path: a .solidcraft design → a new component linked to it, holding its solid bodies as placed in that design; \
-         name? (default: the design's name); parent?: component id or name (default: the active one); translate?: [x,y,z]",
+         name? (default: the design's name); parent?: component id or name (default: the active one); translate?: [x,y,z]; \
+         reuse?: bool (default false): insert another occurrence of an existing link to the same file",
     ),
     CommandSpec::new("component.update_links", "Update Links", update_links).icon("update").params(
         "component?: id or name (default: every linked component) — reads the linked designs again and replaces their bodies where they changed",
+    ),
+    CommandSpec::new("component.relink", "Relink Source", relink).icon("update").params(
+        "component: id or name of a linked component; path: a saved .solidcraft design — replaces the source and linked bodies for all its occurrences, preserving identities and placements; returns path, previous_path, warnings, joint_errors and joint_conflicts",
     ),
     CommandSpec::new("component.break_link", "Break Link", break_link)
         .icon("break")
@@ -172,13 +181,23 @@ fn insert_design(s: &mut Session, p: &Value) -> Result<Value> {
         Some(v) => vec3(v).filter(|t| t.is_finite() && t.len() < 1e9).ok_or_else(|| bad(cmd, "`translate` must be [x, y, z] in mm"))?,
     };
     let file = absolute(Path::new(given));
+    if s.path.as_deref().is_some_and(|own| absolute(Path::new(own)) == file) {
+        return Err(bad(cmd, "a design can't be linked into itself"));
+    }
+    if p.get("reuse").and_then(Value::as_bool).unwrap_or(false) {
+        let existing = s.doc.links.iter().find(|(_, link)| absolute(&resolve(s.path.as_deref(), &link.path)) == file).map(|(id, _)| *id);
+        if let Some(component) = existing {
+            let parent = p.get("parent").cloned().unwrap_or_else(|| json!(s.active_component));
+            return super::component::copy_occurrence(s, &json!({"component": component, "parent": parent, "translate": translate}));
+        }
+    }
     let (design_name, sf) = linked_bodies(&file, s.path.as_deref())?;
     let name = str_(p, "name").filter(|n| !n.trim().is_empty()).map(str::to_string).unwrap_or(design_name);
     let mut create = json!({"name": name, "activate": false});
     if let Some(parent) = p.get("parent") {
         create["parent"] = parent.clone();
     }
-    let made = s.execute("component.create", &create)?;
+    let made = super::component::new_component(s, &create)?;
     let comp = made["component"].as_u64().ok_or_else(|| bad(cmd, "the component was not created"))?;
     let occ = made["occurrence"].as_u64();
     let id = s.doc_mut().add_feature(sf.kind, Some(&name))?;
@@ -247,6 +266,66 @@ fn update_links(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(EngineError::Other(e));
     }
     Ok(json!({"updated": updated, "unchanged": unchanged, "warnings": warnings}))
+}
+
+fn relink(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "component.relink";
+    let comp = component_key(s, p, "component", cmd)?;
+    let link = s.doc.links.get(&comp).cloned().ok_or_else(|| bad(cmd, "that component is not linked to a design"))?;
+    if !matches!(s.doc.feature(link.feature), Some(f) if f.component == comp && matches!(f.kind, FeatureKind::Import { .. })) {
+        return Err(bad(cmd, "the linked bodies are gone; break the link or insert the design again"));
+    }
+    let given = str_(p, "path").filter(|x| !x.trim().is_empty() && x.len() < 4096).ok_or_else(|| bad(cmd, "`path` is required"))?;
+    let file = absolute(Path::new(given));
+    if !file.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("solidcraft")) {
+        return Err(bad(cmd, "choose a saved .solidcraft design"));
+    }
+    // The ordinary lexical check in linked_bodies also works in the browser VFS. On native
+    // hosts, reject an alias of this assembly too (a symlink or a path with different case).
+    if let (Ok(candidate), Some(Ok(own))) = (file.canonicalize(), s.path.as_deref().map(std::fs::canonicalize))
+        && candidate == own
+    {
+        return Err(bad(cmd, "a design can't be linked into itself"));
+    }
+    // Read/evaluate the candidate before changing anything. Session::execute owns the single
+    // undo step and restores both the document and evaluated state on any later failure.
+    let (_, sf) = linked_bodies(&file, s.path.as_deref()).map_err(|e| bad(cmd, e.to_string()))?;
+    let geometry_changed = match (s.doc.feature(link.feature).map(|f| &f.kind), &sf.kind) {
+        (Some(FeatureKind::Import { step: old, .. }), FeatureKind::Import { step, .. }) => old != step,
+        _ => true,
+    };
+    let path = stored(s.path.as_deref(), &file);
+    let mut warnings = sf.warnings;
+    if geometry_changed
+        && s.doc
+            .assembly
+            .joints
+            .iter()
+            .any(|j| s.doc.occurrences.iter().any(|o| o.component == comp && (j.a.occurrence == o.id || j.b.occurrence == o.id)))
+    {
+        warnings.push("the linked geometry changed; check this component's joints, even when the solver reports no error".to_string());
+    }
+    if let Some(f) = s.doc_mut().feature_mut(link.feature) {
+        if f.body_names.len() != sf.body_names.len() {
+            f.body_names = sf.body_names;
+        }
+        f.kind = sf.kind;
+    }
+    s.doc_mut().links.insert(comp, DesignLink { path: path.clone(), feature: link.feature });
+    s.refresh();
+    if let Some(error) = s.model.result(link.feature).and_then(|r| r.error.clone()) {
+        return Err(bad(cmd, error));
+    }
+    // Report the solver's diagnostics. A resolved joint can still describe the wrong
+    // connection after a source edit; the reminder above does not depend on solve errors.
+    let sol = solidcraft_doc::joints::solve(&s.doc, &s.model.state());
+    let diagnostics =
+        |rows: &[(u64, String, String)]| rows.iter().map(|(id, name, why)| json!({"joint": id, "name": name, "why": why})).collect::<Vec<_>>();
+    for (_, name, why) in sol.errors.iter().chain(&sol.conflicts) {
+        warnings.push(format!("joint {name}: {why}"));
+    }
+    Ok(json!({"component": comp, "feature": link.feature, "path": path, "previous_path": link.path, "geometry_changed": geometry_changed,
+        "warnings": warnings, "joint_errors": diagnostics(&sol.errors), "joint_conflicts": diagnostics(&sol.conflicts)}))
 }
 
 fn break_link(s: &mut Session, p: &Value) -> Result<Value> {

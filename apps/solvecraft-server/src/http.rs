@@ -206,7 +206,7 @@ async fn mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, bytes: Byte
             if initialize && let Some(instructions) = reply.pointer_mut("/result/instructions") {
                 let text = instructions.as_str().unwrap_or_default();
                 *instructions = Value::String(format!(
-                    "{text} Deployment: this is a separate headless model, independent of the browser app. REQUIRED: call project_select(name) before CAD tools, choosing one real project folder for this session; project_list lists existing folders. The project cannot change within a session. CAD file paths are relative to that project. workspace_list_files paths, expected_revisions keys and /files downloads remain relative to the shared workspace, including the project prefix. To read an old file elsewhere explicitly use open(path, from_workspace:true), then save with an explicit project-relative destination; writes outside the selected project are rejected. Existing files are never moved automatically. Save explicitly before session expiry or restart, then select the same project and reopen the saved file in a new session. Existing output files require the loaded file revision or an expected_revisions map obtained with workspace_list_files(path). On conflict your model is retained: reopen deliberately or save under a new name. The read-only browser workspace is /workspace."
+                    "{text} Deployment: this is a separate headless model, independent of the browser app. REQUIRED: call project_select(name) before CAD tools, choosing one real project folder for this session; project_list lists existing folders. The project cannot change within a session. CAD file paths are relative to that project. workspace_list_files paths, expected_revisions keys and /files downloads remain relative to the shared workspace, including the project prefix. To read an old file elsewhere explicitly use open(path, from_workspace:true), then save with an explicit project-relative destination; writes outside the selected project are rejected. Existing files are never moved automatically. Save explicitly before session expiry or restart, then select the same project and reopen the saved file in a new session. Existing output files require the loaded file revision or an expected_revisions map obtained with workspace_list_files(path). On conflict your model is retained: reopen deliberately or save under a new name. The browser workspace is /workspace; file deletion there requires explicit confirmation."
                 ));
             }
             Json(reply).into_response()
@@ -274,7 +274,10 @@ async fn upload(State(state): State<Arc<AppState>>, Path(name): Path<String>, he
         Err(e) => return failure(StatusCode::BAD_REQUEST, Value::Null, &e),
     };
     let root = state.config.files.clone();
-    let check_name = name.clone();
+    let check_name = path.strip_prefix(&root).ok().and_then(|path| path.to_str()).unwrap_or_default().to_owned();
+    if let Err(error) = crate::workspace_actions::check_transfers(&state.browser.actions.transfers, &check_name) {
+        return failure(StatusCode::CONFLICT, Value::Null, error);
+    }
     let actual = match tokio::task::spawn_blocking(move || crate::workspace_files::revision(&root, &check_name)).await {
         Ok(Ok(actual)) => actual,
         _ => return failure(StatusCode::BAD_REQUEST, Value::Null, "cannot inspect upload target"),

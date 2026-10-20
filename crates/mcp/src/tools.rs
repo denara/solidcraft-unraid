@@ -164,16 +164,19 @@ pub fn tool_definitions() -> Vec<Value> {
             "set_parameter",
             "Set a parameter",
             "Create or change a user parameter and re-evaluate the timeline. `value` is a number (mm) or an expression \
-             (\"40 mm\", \"width * 2\", \"30 deg\"). Returns the new value, the features recomputed (`recomputed`), the features whose earlier \
-             result for the same inputs was reused instead (`restored`, e.g. after setting a value back) and any features that now fail.",
+             (\"40 mm\", \"width * 2\", \"30 deg\"); `expression` is the same thing under the name the parameters.change command \
+             uses. Give one of the two (both only when they agree). Returns the new value, the features recomputed (`recomputed`), the \
+             features whose earlier result for the same inputs was reused instead (`restored`, e.g. after setting a value back) and any \
+             features that now fail.",
             obj(
                 json!({
                     "name": string("Parameter name"),
-                    "value": {"type": ["number", "string"], "description": "Number or expression"},
+                    "value": {"type": ["number", "string"], "description": "Number or expression (or give it as `expression`)"},
+                    "expression": {"type": ["number", "string"], "description": "Same as `value` (the parameters.change name); give one of the two"},
                     "unit": string("mm, deg or \"\" (unitless); default from the expression"),
                     "comment": string("Comment shown in the parameters table"),
                 }),
-                &["name", "value"],
+                &["name"],
             ),
             Effect::Edits,
         ),
@@ -184,7 +187,9 @@ pub fn tool_definitions() -> Vec<Value> {
              Connected to the app: a screenshot of the window (source \"window\", the default) or a render of the model \
              with the app's camera (source \"model\"). Both show an active section (inspect.section) with its cut face \
              capped. `view` first turns the camera to a standard view or a saved named view (view.save), `camera` to              any camera (as view.apply). \
-             `grid: false` and `axes: false` leave the ground grid (on Z 0) and the origin's axes out of a model render.",
+             `grid: false` and `axes: false` leave the ground grid (on Z 0) and the origin's axes out of a model render. \
+             A body whose appearance is see-through (appearance.assign with an `opacity` below 1) is drawn see-through, \
+             so what is inside it shows: that is how to look at the body a cut would remove inside the material it meets.",
             obj(
                 json!({
                     "view": string(
@@ -419,7 +424,7 @@ fn dispatch(b: &mut dyn Backend, name: &str, a: &Map<String, Value>) -> Result<V
         }
         "set_parameter" => {
             let mut p = pick(a, &["name", "unit", "comment"]);
-            p["expression"] = a.get("value").cloned().unwrap_or(Value::Null);
+            p["expression"] = parameter_value(a)?;
             exec(b, "parameters.change", p)
         }
         "export" => exec(b, "file.export", pick(a, &["path", "format", "bodies", "mesh_prefix", "effort", "velocity"])),
@@ -433,6 +438,21 @@ fn dispatch(b: &mut dyn Backend, name: &str, a: &Map<String, Value>) -> Result<V
         "open" => exec(b, "doc.open", pick(a, &["path", "up", "names"])),
         "save" => exec(b, "file.save", pick(a, &["path", "format"])),
         other => Err(format!("unknown tool `{other}`")),
+    }
+}
+
+/// `set_parameter`'s new value: `value` or `expression` (the parameters.change name), one of
+/// them, or both when they agree (`50` and `"50"` do).
+fn parameter_value(a: &Map<String, Value>) -> Result<Value, String> {
+    let text = |v: &Value| match v {
+        Value::String(s) => s.trim().to_string(),
+        v => v.to_string(),
+    };
+    match (a.get("value").filter(|v| !v.is_null()), a.get("expression").filter(|v| !v.is_null())) {
+        (Some(v), None) | (None, Some(v)) => Ok(v.clone()),
+        (Some(v), Some(e)) if text(v) == text(e) => Ok(v.clone()),
+        (Some(_), Some(_)) => Err("set_parameter: `value` and `expression` disagree; give one of them".into()),
+        (None, None) => Err("set_parameter: give the new value as `value` (or `expression`): a number (mm) or an expression".into()),
     }
 }
 

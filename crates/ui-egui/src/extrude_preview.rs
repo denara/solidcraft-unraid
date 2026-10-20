@@ -79,7 +79,7 @@ impl StraightPreview {
         if direction == "negative" {
             distance = -distance;
         }
-        if !distance.is_finite() || distance.abs() < 1e-9 || distance.abs() > 1e6 {
+        if !distance.is_finite() || distance.abs() > 1e6 {
             return None;
         }
         let operation = params.get("operation").and_then(Value::as_str).unwrap_or("new");
@@ -89,6 +89,11 @@ impl StraightPreview {
         let inputs = &app.dialog.as_ref()?.inputs.first()?.items;
         if inputs.is_empty() || inputs.len() > 1024 {
             return None;
+        }
+        // Zero makes no extrusion. Say so now rather than building the scratch design only
+        // for the kernel to refuse it: that wait was a visible lag (#3254).
+        if distance.abs() < 1e-9 {
+            return Some(Err(solidcraft_engine::kernel::KernelError::Invalid("extrude distance is zero".into()).to_string()));
         }
         if self
             .cached
@@ -360,6 +365,27 @@ mod tests {
         h.app.run("occurrence.move", json!({"occurrence":made["occurrence"],"translate":[-20,0,0]})).unwrap();
         h.app.run("occurrence.copy", json!({"component":made["component"],"translate":[30,0,0]})).unwrap();
         assert!(preview.compute(&h.app, &commands, colors).is_none());
+    }
+
+    /// #3254: a zero distance is refused at once, with the error the extrusion itself gives,
+    /// instead of after a full scratch preview.
+    #[test]
+    fn zero_distance_is_refused_without_a_scratch_preview() {
+        let mut h = Harness::new();
+        h.app.run("solid.box", json!({"length":4,"width":3,"height":5,"body_name":"Stock"})).unwrap();
+        let world = h.app.session.world_state();
+        let face =
+            world.body("Stock").unwrap().body.faces(0.001).unwrap().into_iter().find(|face| face.plane_normal.is_some_and(|n| n.z > 0.99)).unwrap();
+        h.app.session.selection = vec![Sel::Face { body: "Stock".into(), index: face.index, point: face.centroid }];
+        h.app.start("solid.extrude");
+        if let Kind::Extrude { distance, .. } = &mut h.app.dialog.as_mut().unwrap().kind {
+            *distance = "0 mm".into();
+        }
+        let commands = crate::dialogs::apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap();
+        let colors = Colors::from_tokens(&crate::theme::Tokens::get());
+        let Some(Err(error)) = StraightPreview::default().compute(&h.app, &commands, colors) else { panic!("no immediate error") };
+        let engine = h.app.session.preview(&commands).unwrap_err().to_string();
+        assert_eq!(error, engine, "the same error as the extrusion's own");
     }
 
     #[test]

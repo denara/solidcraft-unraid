@@ -5,7 +5,7 @@
 //! imports sit loose in a component open and rebuild as they did.
 
 use serde_json::{Value, json};
-use solidcraft_geom::Vec3;
+use solidcraft_geom::{Aabb3, Vec3};
 use solidcraft_kernel::{ExportBody, ExportProduct, StepHeader, box_solid, step_export_products};
 
 use super::run;
@@ -113,12 +113,7 @@ fn corner_of(s: &Session, occurrence: &str) -> Vec3 {
     let names = s.occurrence_bodies(&path, true).unwrap();
     assert!(!names.is_empty());
     let world = s.world_state();
-    let mut lo = Vec3::new(f64::MAX, f64::MAX, f64::MAX);
-    for b in world.bodies.iter().filter(|b| names.contains(&b.name)) {
-        let bb = solidcraft_kernel::measure(&b.body).unwrap().bbox;
-        lo = Vec3::new(lo.x.min(bb.min.x), lo.y.min(bb.min.y), lo.z.min(bb.min.z));
-    }
-    lo
+    world.bodies.iter().filter(|b| names.contains(&b.name)).fold(Aabb3::EMPTY, |a, b| a.union(&solidcraft_kernel::measure(&b.body).unwrap().bbox)).min
 }
 
 fn close(a: Vec3, b: Vec3) -> bool {

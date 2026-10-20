@@ -9,7 +9,7 @@ use solidcraft_geom::{Plane, Vec3};
 use truck_modeling::{self as mt, builder};
 
 use crate::body::{Body, Solid, from_p3, p3, v3};
-use crate::history::{EdgeOrigin, FaceOrigin, FaceProv, History};
+use crate::history::{Change, EdgeOrigin, FaceOrigin, FaceProv, History};
 use crate::record;
 use crate::{KernelError, Result, guard};
 
@@ -490,6 +490,9 @@ fn shell_planar(b: &Body, open: &[Vec3], thickness: f64) -> Result<Body> {
             "the rim would have no thickness: an open face meets a round of radius {r:.4} mm tangentially, and the shell is {thickness:.4} mm thick (make the round smaller than the thickness)"
         )));
     }
+    if let Some(shell) = shell_barrel(&healed, &opened, thickness)? {
+        return Ok(record::after(shell, &healed, &record::counts(&[b])));
+    }
     let margin = thickness + size * 0.05;
     shell_opened(b, &healed, open, &opened, thickness, margin).map_err(|e| match rim_without_thickness(&healed, &opened, thickness, false) {
         Some(r) => unsupported_shell(&format!(
@@ -497,6 +500,83 @@ fn shell_planar(b: &Body, open: &[Vec3], thickness: f64) -> Result<Body> {
         )),
         None => e,
     })
+}
+
+/// A convex circular-meridian barrel between two axial caps. Sew its exact inset walls
+/// to the original walls at annular rims: a Boolean of the two spindle sheets cannot
+/// reliably find their cap intersections, and sweeping an inset cap makes a cylindrical
+/// lip that cuts away part of the curved wall.
+fn shell_barrel(b: &Body, opened: &[usize], thickness: f64) -> Result<Option<Body>> {
+    use crate::offset::Surf;
+    if b.solid.boundaries().len() != 1 || b.face_count() > 256 {
+        return Ok(None);
+    }
+    let faces: Vec<mt::Face> = b.solid.face_iter().cloned().collect();
+    let tol = (b.size() * 1e-7).max(1e-9) * 100.0;
+    let surfs: Option<Vec<Surf>> = faces.iter().map(|f| crate::offset::surf_of(f, tol)).collect();
+    let Some(surfs) = surfs else { return Ok(None) };
+    let Some((centre, axis, big, radius)) = surfs.iter().find_map(|s| match *s {
+        Surf::Torus { o, a, big, h, r, convex: true } if big < -tol => Some((o + a * h, a, big, r)),
+        _ => None,
+    }) else {
+        return Ok(None);
+    };
+    let mut caps = Vec::new();
+    for (i, s) in surfs.iter().enumerate() {
+        match *s {
+            Surf::Torus { o, a, big: ring, h, r, convex: true }
+                if (o + a * h).dist(centre) < tol && a.dot(axis).abs() > 1.0 - 1e-9 && (ring - big).abs() < tol && (r - radius).abs() < tol => {}
+            Surf::Plane { n, d } if n.dot(axis).abs() > 1.0 - 1e-9 && faces.get(i).is_some_and(|f| f.boundaries().len() == 1) => {
+                caps.push((i, (d - n.dot(centre)) / n.dot(axis), n.dot(axis)));
+            }
+            _ => return Ok(None),
+        }
+    }
+    if caps.len() != 2 || opened.iter().any(|i| !caps.iter().any(|c| c.0 == *i)) {
+        return Ok(None);
+    }
+    caps.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let (Some(&(lower, lo, down)), Some(&(upper, hi, up))) = (caps.first(), caps.get(1)) else { return Ok(None) };
+    if down >= 0.0 || up <= 0.0 {
+        return Ok(None);
+    }
+    let lo = lo + if opened.contains(&lower) { 0.0 } else { thickness };
+    let hi = hi - if opened.contains(&upper) { 0.0 } else { thickness };
+    let inner_radius = radius - thickness;
+    if lo >= hi || inner_radius <= 0.0 || [lo, hi].iter().any(|z| inner_radius * inner_radius - z * z <= big * big) {
+        return Err(KernelError::Invalid("shell thickness leaves no barrel cavity".into()));
+    }
+    let cavity = offset_planar(b, |i, _| if opened.contains(&i) { 0.0 } else { -thickness })?;
+    let history = cavity.history().ok_or_else(|| unsupported_shell("the barrel cavity has no face history"))?;
+    // Every wall must still be the one offset of its source, in source order. No collapsed
+    // faces or changed topology can be sewn by this construction.
+    if cavity.face_count() != faces.len()
+        || history.faces.iter().enumerate().any(|(i, f)| f.origins.as_slice() != [FaceOrigin::Face { operand: 0, face: i }])
+    {
+        return Err(unsupported_shell("the barrel cavity changed topology"));
+    }
+    let inner: Vec<mt::Face> = cavity.solid.face_iter().cloned().collect();
+    let mut out = Vec::new();
+    let mut provenance = Vec::new();
+    for (i, outer) in faces.iter().enumerate() {
+        let inset = inner.get(i).ok_or_else(|| unsupported_shell("the barrel cavity lost a face"))?;
+        if opened.contains(&i) {
+            let mut wires = outer.absolute_boundaries().to_vec();
+            wires.extend(inset.absolute_boundaries().iter().map(|w| w.inverse()));
+            let mut rim = mt::Face::try_new(wires, outer.surface()).map_err(|e| KernelError::Failed(format!("shell rim: {e}")))?;
+            if !outer.orientation() {
+                rim.invert();
+            }
+            out.push(rim);
+            provenance.push(record::from_face(0, i, Change::Modified));
+        } else {
+            out.extend([outer.clone(), inset.inverse()]);
+            provenance.extend([record::from_face(0, i, Change::Kept), record::generated(vec![FaceOrigin::Offset { operand: 0, face: i }])]);
+        }
+    }
+    let solid = Solid::try_new(vec![out.into()]).map_err(|e| KernelError::Failed(format!("shell barrel: {e}")))?;
+    let copies = record::edges_by_identity(&cavity, history).filter_map(|(id, origins)| origins.into_iter().next().map(|o| (id, o))).collect();
+    record::attach(Body::new(solid)?, &[record::Operand::new(b)], Some(provenance), copies).map(Some)
 }
 
 /// The radius of a convex round (cylinder or torus) that meets an open face tangentially and

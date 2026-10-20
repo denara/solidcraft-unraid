@@ -49,6 +49,8 @@ impl ModelStatus {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileOperation {
+    /// Linked-source reads share the file gate but never bless a save revision.
+    ReadSources,
     Open(String),
     Save(String),
     Write(String),
@@ -87,6 +89,7 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
     fn command(root: &Path, id: &str, args: &Value, current: &mut Option<String>, out: &mut Vec<FileOperation>) -> Result<(), String> {
         match id {
             "file.new" => *current = None,
+            "component.insert_design" | "component.relink" | "component.update_links" => out.push(FileOperation::ReadSources),
             "doc.open" => {
                 if let Some(path) = name(root, args)? {
                     *current = (!imports_as_new(&path)).then(|| path.clone());
@@ -138,7 +141,8 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
             | "sketch.export_dxf"
             | "sheet.export_bend_table"
             | "file.export_view_dxf"
-            | "library.export" => {
+            | "library.export"
+            | "assembly.bom" => {
                 if let Some(path) = name(root, args)? {
                     out.push(FileOperation::Write(path));
                 }
@@ -190,6 +194,7 @@ pub fn check_revisions(root: &Path, status: &ModelStatus, ops: &[FileOperation],
     let mut opened = std::collections::HashSet::new();
     for op in ops {
         match op {
+            FileOperation::ReadSources => {}
             FileOperation::Open(name) => {
                 opened.insert(name);
             }
@@ -325,5 +330,35 @@ mod tests {
         model.update(&root, &status, false);
         assert_eq!(model.current_file.as_deref(), Some("part.solidcraft"));
         assert_eq!(model.loaded_revision, None);
+    }
+    #[test]
+    fn optional_upstream_bom_output_is_preflighted_as_one_revision_checked_file() {
+        let root = std::env::temp_dir();
+        let call = |params| json!({"params":{"name":"execute","arguments":{"command":"assembly.bom","params":params}}});
+        assert!(operations(&root, &call(json!({})), None).unwrap().is_empty());
+        let expected = vec![FileOperation::Write("Public/bom.csv".into())];
+        assert_eq!(operations(&root, &call(json!({"path":root.join("Public/bom.csv")})), None).unwrap(), expected);
+        assert!(crate::projects::check_writes("Other", &expected).is_err());
+        crate::projects::check_writes("Public", &expected).unwrap();
+    }
+    #[test]
+    fn linked_source_reads_take_the_gate_without_blessing_existing_output_revisions() {
+        let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("source.solidcraft"), b"public fixture").unwrap();
+        for command in ["component.insert_design", "component.relink", "component.update_links"] {
+            let call = json!({"params":{"name":"execute","arguments":{"command":command,"params":{"path":root.join("source.solidcraft")}}}});
+            assert_eq!(operations(&root, &call, None).unwrap(), vec![FileOperation::ReadSources]);
+        }
+        assert!(
+            check_revisions(
+                &root,
+                &ModelStatus::default(),
+                &[FileOperation::ReadSources, FileOperation::Write("source.solidcraft".into())],
+                &Value::Null
+            )
+            .is_err()
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

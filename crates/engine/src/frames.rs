@@ -310,6 +310,20 @@ pub fn mapped() -> bool {
     MAPPED.with(std::cell::Cell::get)
 }
 
+/// Author generated geometry directly in the active component's local frame.
+/// Restores the enclosing command's mapping state, including on an error.
+pub(crate) fn local_geometry() -> LocalGeometry {
+    LocalGeometry(MAPPED.with(|m| m.replace(true)))
+}
+
+pub(crate) struct LocalGeometry(bool);
+
+impl Drop for LocalGeometry {
+    fn drop(&mut self) {
+        MAPPED.with(|m| m.set(self.0));
+    }
+}
+
 /// A command running inside another (its parameters are already in component frames).
 pub struct Nested;
 

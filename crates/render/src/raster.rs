@@ -35,6 +35,40 @@ impl Canvas {
     }
 }
 
+/// The order a scene's bodies are drawn in. Solid bodies come first and own the depth buffer;
+/// the see-through ones are then blended over them, far sides before near sides, so a
+/// translucent body reads like glass and whatever lies inside it shows through. This is the
+/// order the GPU viewport draws its own glass in.
+///
+/// Splitting each see-through body by facing orders its own two layers, which is what a single
+/// translucent body needs. Two see-through bodies that overlap on screen blend in the order the
+/// scene lists them, where the GPU sorts its glass triangles back to front: the difference shows
+/// only where translucent bodies lie in front of each other, which the CPU rasterizer (a
+/// fallback for machines without a GPU) does not try to match.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    Solid,
+    GlassFar,
+    GlassNear,
+}
+
+impl Pass {
+    /// Does this pass draw the see-through bodies ([`SceneMesh::glass`])?
+    fn glass(self) -> bool {
+        self != Pass::Solid
+    }
+
+    /// Does it draw a triangle whose facing is `inside` (away from the eye)? A solid body draws
+    /// both: its back faces show only where a section opens it.
+    fn takes(self, inside: bool) -> bool {
+        match self {
+            Pass::Solid => true,
+            Pass::GlassFar => inside,
+            Pass::GlassNear => !inside,
+        }
+    }
+}
+
 pub(crate) fn shade(n: Vec3, view_dir: Vec3, base: [f64; 3]) -> [f64; 3] {
     let n = if n.dot(view_dir) < 0.0 { -n } else { n };
     let key = (view_dir * 0.8 + Vec3::new(-0.3, 0.2, 0.6)).normalized().unwrap_or(view_dir);
@@ -79,91 +113,104 @@ pub fn render(scene: &Scene, cam: &Camera, w: usize, h: usize) -> Canvas {
     // depth test.
     let mut slope = vec![0f32; sw * sh];
     let cap_tint = scene.cap.unwrap_or(SECTION_CAP).f();
-    for sm in &scene.meshes {
-        let m = &sm.mesh;
-        let body = sm.color.f();
-        let pts: Vec<Option<[f64; 3]>> = m.positions.iter().map(|p| project(*p)).collect();
-        // 1 / clip w per vertex, for perspective-correct interpolation of world positions (so
-        // the section cuts along the plane, not a curve, in perspective views).
-        let inv_w: Vec<f64> = m.positions.iter().map(|p| 1.0 / vp.apply(*p)[3].max(1e-9)).collect();
-        for (ti, t) in m.triangles.iter().enumerate() {
-            let face = m.tri_face.get(ti).copied();
-            let base = sm.face_colors.iter().find(|(f, _)| Some(*f) == face).map_or(body, |(_, c)| c.f());
-            let wp = t.map(|k| m.positions.get(k as usize).copied().unwrap_or_default());
-            // Seen from inside (only where a section cuts the body open).
-            let to_eye = if cam.fov > 0.0 { cam.eye() - wp[0] } else { view_dir };
-            let inside = (wp[1] - wp[0]).cross(wp[2] - wp[0]).dot(to_eye) < 0.0;
-            let iw = t.map(|k| inv_w.get(k as usize).copied().unwrap_or(1.0));
-            let (Some(Some(a)), Some(Some(b)), Some(Some(cc))) = (pts.get(t[0] as usize), pts.get(t[1] as usize), pts.get(t[2] as usize)) else {
-                continue;
-            };
-            let ns: Vec<Vec3> = t.iter().map(|k| m.normals.get(*k as usize).copied().unwrap_or(Vec3::Z)).collect();
-            // A curved surface (its normals turn across the triangle) gets a silhouette line
-            // where it turns away from the eye.
-            let curved = ns.iter().any(|n| n.dist(ns[0]) > 1e-6);
-            let (x0, x1) = (a[0].min(b[0]).min(cc[0]).floor().max(0.0), a[0].max(b[0]).max(cc[0]).ceil().min(sw as f64 - 1.0));
-            let (y0, y1) = (a[1].min(b[1]).min(cc[1]).floor().max(0.0), a[1].max(b[1]).max(cc[1]).ceil().min(sh as f64 - 1.0));
-            if !(x0 <= x1 && y0 <= y1) {
-                continue;
-            }
-            let area = (b[0] - a[0]) * (cc[1] - a[1]) - (b[1] - a[1]) * (cc[0] - a[0]);
-            if area.abs() < 1e-12 {
-                continue;
-            }
-            let gx = ((b[2] - a[2]) * (cc[1] - a[1]) - (cc[2] - a[2]) * (b[1] - a[1])) / area;
-            let gy = ((cc[2] - a[2]) * (b[0] - a[0]) - (b[2] - a[2]) * (cc[0] - a[0])) / area;
-            let tri_slope = gx.hypot(gy) as f32;
-            for y in y0 as usize..=y1 as usize {
-                for x in x0 as usize..=x1 as usize {
-                    let (px, py) = (x as f64 + 0.5, y as f64 + 0.5);
-                    let w0 = ((b[0] - px) * (cc[1] - py) - (b[1] - py) * (cc[0] - px)) / area;
-                    let w1 = ((cc[0] - px) * (a[1] - py) - (cc[1] - py) * (a[0] - px)) / area;
-                    let w2 = 1.0 - w0 - w1;
-                    if w0 < -1e-9 || w1 < -1e-9 || w2 < -1e-9 {
-                        continue;
-                    }
-                    let (q0, q1, q2) = (w0 * iw[0], w1 * iw[1], w2 * iw[2]);
-                    let qs = q0 + q1 + q2;
-                    let (p0, p1, p2) = if qs > 1e-12 { (q0 / qs, q1 / qs, q2 / qs) } else { (w0, w1, w2) };
-                    if let Some((cn, cd)) = scene.clip
-                        && cn.dot(wp[0] * p0 + wp[1] * p1 + wp[2] * p2) > cd
-                    {
-                        continue;
-                    }
-                    let z = (w0 * a[2] + w1 * b[2] + w2 * cc[2]) as f32;
-                    let i = y * sw + x;
-                    if c.depth.get(i).is_some_and(|d| z < *d) {
-                        if let Some(d) = c.depth.get_mut(i) {
-                            *d = z;
-                        }
-                        if let Some(s) = slope.get_mut(i) {
-                            *s = tri_slope;
-                        }
-                        let n = (ns[0] * p0 + ns[1] * p1 + ns[2] * p2).normalized().unwrap_or(Vec3::Z);
-                        let cut = scene.clip.is_some() && inside;
-                        if let Some(d) = cap_depth.get_mut(i) {
-                            *d = match cap_z {
-                                Some([a, b, k]) if cut => ((a * px + b * py + k) as f32).min(z),
-                                _ => f32::INFINITY,
-                            };
-                        }
-                        if cut {
-                            // The cut: the body's colour tinted toward the cap colour, hatched
-                            // at 45 degrees (as the viewport draws it).
-                            let tinted: [f64; 3] = std::array::from_fn(|k| base[k] + (cap_tint[k] - base[k]) * 0.35);
-                            let k = if ((x + y) / SS) % 9 < 2 { 0.6 } else { 1.0 };
-                            c.put(x, y, tinted.map(|v| v * k), 1.0);
+    for pass in [Pass::Solid, Pass::GlassFar, Pass::GlassNear] {
+        for sm in scene.meshes.iter().filter(|m| m.glass() == pass.glass()) {
+            let alpha = sm.alpha();
+            let m = &sm.mesh;
+            let body = sm.color.f();
+            let pts: Vec<Option<[f64; 3]>> = m.positions.iter().map(|p| project(*p)).collect();
+            // 1 / clip w per vertex, for perspective-correct interpolation of world positions (so
+            // the section cuts along the plane, not a curve, in perspective views).
+            let inv_w: Vec<f64> = m.positions.iter().map(|p| 1.0 / vp.apply(*p)[3].max(1e-9)).collect();
+            for (ti, t) in m.triangles.iter().enumerate() {
+                let face = m.tri_face.get(ti).copied();
+                let base = sm.face_colors.iter().find(|(f, _)| Some(*f) == face).map_or(body, |(_, c)| c.f());
+                let wp = t.map(|k| m.positions.get(k as usize).copied().unwrap_or_default());
+                // Seen from inside: where a section cuts a solid body open, and the far side of
+                // a see-through one (drawn in the pass before its near side).
+                let to_eye = if cam.fov > 0.0 { cam.eye() - wp[0] } else { view_dir };
+                let inside = (wp[1] - wp[0]).cross(wp[2] - wp[0]).dot(to_eye) < 0.0;
+                if !pass.takes(inside) {
+                    continue;
+                }
+                let iw = t.map(|k| inv_w.get(k as usize).copied().unwrap_or(1.0));
+                let (Some(Some(a)), Some(Some(b)), Some(Some(cc))) = (pts.get(t[0] as usize), pts.get(t[1] as usize), pts.get(t[2] as usize)) else {
+                    continue;
+                };
+                let ns: Vec<Vec3> = t.iter().map(|k| m.normals.get(*k as usize).copied().unwrap_or(Vec3::Z)).collect();
+                // A curved surface (its normals turn across the triangle) gets a silhouette line
+                // where it turns away from the eye.
+                let curved = ns.iter().any(|n| n.dist(ns[0]) > 1e-6);
+                let (x0, x1) = (a[0].min(b[0]).min(cc[0]).floor().max(0.0), a[0].max(b[0]).max(cc[0]).ceil().min(sw as f64 - 1.0));
+                let (y0, y1) = (a[1].min(b[1]).min(cc[1]).floor().max(0.0), a[1].max(b[1]).max(cc[1]).ceil().min(sh as f64 - 1.0));
+                if !(x0 <= x1 && y0 <= y1) {
+                    continue;
+                }
+                let area = (b[0] - a[0]) * (cc[1] - a[1]) - (b[1] - a[1]) * (cc[0] - a[0]);
+                if area.abs() < 1e-12 {
+                    continue;
+                }
+                let gx = ((b[2] - a[2]) * (cc[1] - a[1]) - (cc[2] - a[2]) * (b[1] - a[1])) / area;
+                let gy = ((cc[2] - a[2]) * (b[0] - a[0]) - (b[2] - a[2]) * (cc[0] - a[0])) / area;
+                let tri_slope = gx.hypot(gy) as f32;
+                for y in y0 as usize..=y1 as usize {
+                    for x in x0 as usize..=x1 as usize {
+                        let (px, py) = (x as f64 + 0.5, y as f64 + 0.5);
+                        let w0 = ((b[0] - px) * (cc[1] - py) - (b[1] - py) * (cc[0] - px)) / area;
+                        let w1 = ((cc[0] - px) * (a[1] - py) - (cc[1] - py) * (a[0] - px)) / area;
+                        let w2 = 1.0 - w0 - w1;
+                        if w0 < -1e-9 || w1 < -1e-9 || w2 < -1e-9 {
                             continue;
                         }
-                        let mut col = shade(n, view_dir, base);
-                        let ndv = n.dot(view_dir).abs();
-                        if curved && ndv < 0.14 {
-                            let a = 1.0 - ndv / 0.14;
-                            for (k, e) in col.iter_mut().zip([0.07, 0.08, 0.10]) {
-                                *k = *k * (1.0 - a) + e * a;
-                            }
+                        let (q0, q1, q2) = (w0 * iw[0], w1 * iw[1], w2 * iw[2]);
+                        let qs = q0 + q1 + q2;
+                        let (p0, p1, p2) = if qs > 1e-12 { (q0 / qs, q1 / qs, q2 / qs) } else { (w0, w1, w2) };
+                        if let Some((cn, cd)) = scene.clip
+                            && cn.dot(wp[0] * p0 + wp[1] * p1 + wp[2] * p2) > cd
+                        {
+                            continue;
                         }
-                        c.put(x, y, col, 1.0);
+                        let z = (w0 * a[2] + w1 * b[2] + w2 * cc[2]) as f32;
+                        let i = y * sw + x;
+                        if c.depth.get(i).is_some_and(|d| z < *d) {
+                            // A see-through body is blended over what is already drawn and
+                            // leaves the depth buffer alone, so bodies inside it stay visible
+                            // and the lines' depth test still answers for the solids.
+                            if !pass.glass() {
+                                if let Some(d) = c.depth.get_mut(i) {
+                                    *d = z;
+                                }
+                                if let Some(s) = slope.get_mut(i) {
+                                    *s = tri_slope;
+                                }
+                            }
+                            let n = (ns[0] * p0 + ns[1] * p1 + ns[2] * p2).normalized().unwrap_or(Vec3::Z);
+                            // A see-through body has no cut face: the interior already shows.
+                            let cut = !pass.glass() && scene.clip.is_some() && inside;
+                            if let Some(d) = cap_depth.get_mut(i).filter(|_| !pass.glass()) {
+                                *d = match cap_z {
+                                    Some([a, b, k]) if cut => ((a * px + b * py + k) as f32).min(z),
+                                    _ => f32::INFINITY,
+                                };
+                            }
+                            if cut {
+                                // The cut: the body's colour tinted toward the cap colour, hatched
+                                // at 45 degrees (as the viewport draws it).
+                                let tinted: [f64; 3] = std::array::from_fn(|k| base[k] + (cap_tint[k] - base[k]) * 0.35);
+                                let k = if ((x + y) / SS) % 9 < 2 { 0.6 } else { 1.0 };
+                                c.put(x, y, tinted.map(|v| v * k), 1.0);
+                                continue;
+                            }
+                            let mut col = shade(n, view_dir, base);
+                            let ndv = n.dot(view_dir).abs();
+                            if curved && ndv < 0.14 {
+                                let a = 1.0 - ndv / 0.14;
+                                for (k, e) in col.iter_mut().zip([0.07, 0.08, 0.10]) {
+                                    *k = *k * (1.0 - a) + e * a;
+                                }
+                            }
+                            c.put(x, y, col, alpha);
+                        }
                     }
                 }
             }
@@ -336,7 +383,7 @@ mod tests {
             edge_faces: vec![],
         };
         let scene = Scene {
-            meshes: vec![SceneMesh { mesh: Arc::new(mesh), color: Rgb(200, 30, 30), face_colors: Vec::new() }],
+            meshes: vec![SceneMesh::solid(Arc::new(mesh), Rgb(200, 30, 30))],
             lines: vec![],
             background: None,
             radius: 20.0,
@@ -352,6 +399,71 @@ mod tests {
         assert!(render_png(&scene, &cam, 16, 16).unwrap().starts_with(&[0x89, b'P', b'N', b'G']));
         // Hostile sizes are clamped.
         assert_eq!(render(&scene, &cam, 0, usize::MAX).w, 1);
+    }
+
+    /// A square panel facing the front camera (which looks along +Y), 20 × 20 about the origin
+    /// at `y`: nearer the eye the smaller `y` is.
+    fn panel(y: f64) -> Mesh {
+        let c = [(-10.0, -10.0), (10.0, -10.0), (10.0, 10.0), (-10.0, 10.0)].map(|(x, z)| Vec3::new(x, y, z));
+        Mesh {
+            positions: c.to_vec(),
+            normals: vec![Vec3::new(0.0, -1.0, 0.0); 4],
+            triangles: vec![[0, 1, 2], [0, 2, 3]],
+            tri_face: vec![0, 0],
+            ..Default::default()
+        }
+    }
+
+    /// A front panel over a back one, with a line between them, seen from the front.
+    fn two_panels(front_opacity: f32) -> (Scene, Camera) {
+        let glass = SceneMesh { mesh: Arc::new(panel(-5.0)), color: Rgb(255, 0, 0), face_colors: Vec::new(), opacity: front_opacity };
+        let scene = Scene {
+            meshes: vec![SceneMesh::solid(Arc::new(panel(5.0)), Rgb(0, 255, 0)), glass],
+            lines: vec![SceneLine {
+                points: vec![Vec3::new(-8.0, 2.0, 0.0), Vec3::new(8.0, 2.0, 0.0)],
+                color: Rgb(0, 0, 255),
+                width: 1.4,
+                on_top: false,
+            }],
+            radius: 40.0,
+            ..Default::default()
+        };
+        let mut cam = Camera { distance: 60.0, ..Default::default() };
+        cam.set_view(StandardView::Front);
+        (scene, cam)
+    }
+
+    /// A body the design draws see-through lets what is behind it show: the colour of the body
+    /// behind it comes through, and so does a line between the two, which a solid body in front
+    /// hides. This is what makes a picture of a cut's tool inside a translucent target readable.
+    #[test]
+    fn a_see_through_body_shows_what_is_inside_it() {
+        let middle = |opacity: f32| {
+            let (scene, cam) = two_panels(opacity);
+            let c = render(&scene, &cam, 64, 64);
+            // Inside both panels and clear of the line across the middle, so this pixel is
+            // the two panels alone.
+            let i = (24 * 64 + 24) * 4;
+            [c.rgba[i], c.rgba[i + 1], c.rgba[i + 2]]
+        };
+        let behind = |opacity: f32| {
+            let (scene, cam) = two_panels(opacity);
+            render(&scene, &cam, 64, 64).rgba.chunks(4).filter(|p| p[2] > 150 && p[0] < 120 && p[1] < 120).count()
+        };
+
+        let solid = middle(1.0);
+        assert!(solid[0] > 150 && solid[1] < 60, "a solid panel hides the one behind it: {solid:?}");
+        assert_eq!(behind(1.0), 0, "a solid panel hides the line behind it");
+
+        let glass = middle(0.35);
+        assert!(glass[1] > solid[1] + 60, "the panel behind shows through: {glass:?} vs {solid:?}");
+        assert!(glass[0] < solid[0], "the see-through panel itself is dimmer: {glass:?} vs {solid:?}");
+        assert!(behind(0.35) > 20, "the line between the panels shows through the see-through one");
+
+        // Opacity 0 still leaves a trace of the body rather than an invisible one, and the
+        // picture changes all the way down.
+        let faint = middle(0.0);
+        assert!(faint[0] > 0 && faint[0] < glass[0], "opacity 0 is a trace, not nothing and not glass: {faint:?} vs {glass:?}");
     }
 
     /// A sheet facing the front camera, turned back by `tilt` about X: the plane y = z·tan(tilt)
@@ -371,12 +483,7 @@ mod tests {
     /// A close front view: 40 mm high on 64 px (128 canvas px, 0.3125 mm each), of a design of
     /// radius `radius`.
     fn close_view(mesh: Mesh, lines: Vec<SceneLine>, radius: f64, fov: f64) -> (Scene, Camera) {
-        let scene = Scene {
-            meshes: vec![SceneMesh { mesh: Arc::new(mesh), color: Rgb(160, 165, 175), face_colors: Vec::new() }],
-            lines,
-            radius,
-            ..Default::default()
-        };
+        let scene = Scene { meshes: vec![SceneMesh::solid(Arc::new(mesh), Rgb(160, 165, 175))], lines, radius, ..Default::default() };
         let mut cam = Camera { distance: if fov > 0.0 { 20.0 / (fov * 0.5).tan() } else { 50.0 }, fov, ..Default::default() };
         cam.set_view(StandardView::Front);
         (scene, cam)

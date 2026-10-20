@@ -282,8 +282,7 @@ pub(crate) fn handle(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, resp: &e
     // with no window or menu above it.
     let inside = resp.contains_pointer() && ui.rect_contains_pointer(rect) && hover.is_some_and(|p| !axes.contains(p));
     app.viewport.mouse = hover.filter(|_| inside);
-    // Ctrl or Alt held: drawing and dragging don't snap.
-    crate::drag_snap::set_suppressed(mods.ctrl || mods.alt || mods.command);
+    // Sketch snap suppression is set once in `viewport::show` from preferences.
     middle_double_click(app, ui, inside);
     // The 3D mouse's motion this frame, with what this page's camera may do.
     device(app, rect, caps);

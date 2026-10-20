@@ -81,6 +81,8 @@ impl eframe::App for App {
     fn on_exit(&mut self) {
         // The agent chat's agent and everything it started end with the app.
         solidcraft_ui_egui::agent_chat::shutdown(&mut self.solve);
+        // A save still being written ends before the app does.
+        solidcraft_ui_egui::save_job::tick(&mut self.solve, true);
         solidcraft_ui_egui::recovery_ui::close(&mut self.solve);
         solidcraft_engine::crash::end_session();
         // An update asked to restart into the new version or to run its installer.

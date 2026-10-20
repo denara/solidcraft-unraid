@@ -34,8 +34,8 @@ mod healing;
 pub use healing::{RobustSplitClosedEdgesAndFaces, SplitClosedEdgesAndFaces};
 mod transversal;
 pub use transversal::{
-    and, and_with_history, or, or_with_history, EdgeOrigin, FaceIndex, FaceOrigin, History, ShapeOpsCurve,
-    ShapeOpsSurface,
+    and, and_with_history, and_with_history_meshed, meshes, or, or_with_history, EdgeOrigin, FaceIndex, FaceOrigin,
+    History, MeshedShell, ShapeOpsCurve, ShapeOpsSurface,
 };
 // SolidCraft: exercised by kernel regressions in the workspace CI.
 #[doc(hidden)]

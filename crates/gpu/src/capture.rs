@@ -62,8 +62,15 @@ impl Capturer {
     /// As [`Capturer::new`], drawing with the depth format `depth` (with a stencil): the fallback
     /// `Depth24PlusStencil8` on a device that has a float one too, to compare the two.
     pub fn with_depth(adapter: &wgpu::Adapter, device: wgpu::Device, queue: wgpu::Queue, depth: wgpu::TextureFormat) -> Result<Self> {
+        Self::with_samples(adapter, device, queue, depth, SAMPLES)
+    }
+
+    /// As [`Capturer::with_depth`], with `samples` per pixel (1: no multisampling, as a device or
+    /// browser without 4× draws); 1 where the device lacks that many.
+    fn with_samples(adapter: &wgpu::Adapter, device: wgpu::Device, queue: wgpu::Queue, depth: wgpu::TextureFormat, samples: u32) -> Result<Self> {
         let flags = |f: wgpu::TextureFormat| adapter.get_texture_format_features(f).flags;
-        let samples = if flags(FORMAT).sample_count_supported(SAMPLES) && flags(depth).sample_count_supported(SAMPLES) { SAMPLES } else { 1 };
+        let samples =
+            if samples > 1 && flags(FORMAT).sample_count_supported(samples) && flags(depth).sample_count_supported(samples) { samples } else { 1 };
         let scopes = error_scopes(&device);
         let renderer = Renderer::new(&device, GpuTarget { format: FORMAT, depth: Some(depth), samples, tess: false }, None);
         let background = background_pipeline(&device, samples, depth);
@@ -97,6 +104,16 @@ impl Capturer {
         let (adapter, device, queue) = crate::open_headless()?;
         device.on_uncaptured_error(Arc::new(|e: wgpu::Error| log::error!("GPU: {e}")));
         Self::with_depth(&adapter, device, queue, depth)
+    }
+
+    /// As [`Capturer::headless`], without multisampling: one sample per pixel, as the viewport
+    /// draws where 4× isn't available (some browsers and devices, or MSAA turned off).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn headless_single_sample() -> Result<Self> {
+        let (adapter, device, queue) = crate::open_headless()?;
+        device.on_uncaptured_error(Arc::new(|e: wgpu::Error| log::error!("GPU: {e}")));
+        let depth = crate::depth_format(&device, true);
+        Self::with_samples(&adapter, device, queue, depth, 1)
     }
 
     /// The depth format pictures are drawn with; float formats are drawn with reversed depth.
@@ -314,6 +331,7 @@ fn frame(scene: &Scene, cam: &Camera, [width, height]: [u32; 2], key: u64, acces
         hl_slot: empty(),
         pv_key: 0,
         pv_slot: empty(),
+        pv_hide: false,
         view_proj: cam.view_proj(f64::from(width) / f64::from(height.max(1)), scene.radius.max(1.0)).to_f32(),
         back: cam.back().to_f32(),
         size_px: [width as f32, height as f32],
@@ -332,11 +350,14 @@ fn frame(scene: &Scene, cam: &Camera, [width, height]: [u32; 2], key: u64, acces
 
 /// A scene's meshes and lines as the viewport's model scene: faces in their colours (smooth
 /// normals; a face normal where a vertex has none), lines as wide lines (over everything when
-/// `on_top`), the grid under everything.
+/// `on_top`), the grid under everything. A body whose appearance is see-through
+/// ([`solidcraft_render::SceneMesh::glass`]) goes into the scene's glass, drawn as the viewport
+/// draws glass: far sides first, then near sides, so what lies inside it shows through.
 pub fn scene_geometry(scene: &Scene) -> GpuScene {
     let mut sc = GpuScene::default();
-    let c4 = |c: Rgb| [c.0, c.1, c.2, 255];
     for m in &scene.meshes {
+        let alpha = (m.alpha() * 255.0).round().clamp(0.0, 255.0) as u8;
+        let c4 = |c: Rgb| [c.0, c.1, c.2, alpha];
         let faces: HashMap<u32, Rgb> = m.face_colors.iter().copied().collect();
         let mesh = &m.mesh;
         for (ti, t) in mesh.triangles.iter().enumerate() {
@@ -345,10 +366,15 @@ pub fn scene_geometry(scene: &Scene) -> GpuScene {
             let flat = (b - a).cross(c - a).normalized().unwrap_or(Vec3::Z);
             for (k, p) in t.iter().zip([a, b, c]) {
                 let n = mesh.normals.get(*k as usize).copied().filter(|n| n.is_finite() && n.len() > 0.5).unwrap_or(flat);
-                sc.tri(p.to_f32(), n.to_f32(), col);
+                if m.glass() {
+                    sc.glass_tri(p.to_f32(), n.to_f32(), col);
+                } else {
+                    sc.tri(p.to_f32(), n.to_f32(), col);
+                }
             }
         }
     }
+    let c4 = |c: Rgb| [c.0, c.1, c.2, 255];
     for l in &scene.grid {
         for w in l.points.windows(2) {
             sc.under_line(w[0].to_f32(), w[1].to_f32(), c4(l.color), l.width as f32);
@@ -451,4 +477,63 @@ fn background_pipeline(device: &wgpu::Device, samples: u32, depth: wgpu::Texture
         multiview_mask: None,
         cache: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::view::TRI_SIZE;
+    use solidcraft_geom::Mesh;
+    use solidcraft_render::SceneMesh;
+    use std::sync::Arc;
+
+    /// One triangle facing the camera.
+    fn sheet() -> Arc<Mesh> {
+        Arc::new(Mesh {
+            positions: vec![Vec3::new(-1.0, 0.0, -1.0), Vec3::new(1.0, 0.0, -1.0), Vec3::new(0.0, 0.0, 1.0)],
+            normals: vec![Vec3::new(0.0, -1.0, 0.0); 3],
+            triangles: vec![[0, 1, 2]],
+            tri_face: vec![0],
+            ..Default::default()
+        })
+    }
+
+    /// The alpha of a triangle `scene_geometry` wrote (the last byte of its first vertex).
+    fn alpha(bytes: &[u8]) -> Option<u8> {
+        bytes.get(TRI_SIZE - 1).copied()
+    }
+
+    /// A body the design draws see-through goes into the scene's glass, at its own alpha, and
+    /// not among the solid triangles: that is how the viewport draws glass, and it is why a
+    /// headless picture of a translucent target shows the tool inside it.
+    #[test]
+    fn a_see_through_body_is_glass_at_its_own_alpha_and_a_solid_one_is_not() {
+        let mesh = |opacity: f32| SceneMesh { mesh: sheet(), color: Rgb(200, 30, 30), face_colors: Vec::new(), opacity };
+        let geometry = |opacity: f32| scene_geometry(&Scene { meshes: vec![mesh(opacity)], ..Default::default() });
+
+        let solid = geometry(1.0);
+        assert_eq!((solid.tris.len(), solid.glass.len()), (3 * TRI_SIZE, 0));
+        assert_eq!(alpha(&solid.tris), Some(255), "a solid body is drawn opaque");
+
+        let glass = geometry(0.3);
+        assert_eq!((glass.tris.len(), glass.glass.len()), (0, 3 * TRI_SIZE), "a see-through body is glass, not a solid triangle");
+        assert_eq!(alpha(&glass.glass), Some(77), "0.3 of 255");
+
+        // The threshold and the floor are the viewport's: an appearance a hair under 1 stays
+        // solid, and opacity 0 still leaves a trace rather than vanishing.
+        let almost = geometry(0.9995);
+        assert_eq!((almost.tris.len(), almost.glass.len()), (3 * TRI_SIZE, 0), "an appearance a hair under 1 is still solid");
+        assert_eq!(alpha(&geometry(0.0).glass), Some(13), "0.05 of 255");
+    }
+
+    /// A face with a colour of its own is drawn in that colour, and takes its body's opacity:
+    /// painting one face does not make the body solid again.
+    #[test]
+    fn a_painted_face_keeps_its_bodys_opacity() {
+        let mesh = SceneMesh { mesh: sheet(), color: Rgb(200, 30, 30), face_colors: vec![(0, Rgb(0, 255, 0))], opacity: 0.5 };
+        let sc = scene_geometry(&Scene { meshes: vec![mesh], ..Default::default() });
+        assert_eq!(sc.tris.len(), 0);
+        let first = sc.glass.get(TRI_SIZE - 4..TRI_SIZE);
+        assert_eq!(first, Some(&[0, 255, 0, 128][..]), "the face's own colour at the body's alpha");
+    }
 }

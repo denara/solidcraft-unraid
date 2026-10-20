@@ -33,6 +33,8 @@ pub enum FaceSurface {
         radius: f64,
     },
     /// Centre of the ring, its axis, the ring (major) and tube (minor) radii.
+    /// `major` is signed: negative on a spindle torus's inner sheet, whose tube centre
+    /// lies across the axis from the face (a revolved barrel).
     Torus {
         center: Vec3,
         axis: UnitVec3,

@@ -72,7 +72,7 @@ desktop integration and how to distinguish an old executable on `PATH`.
 
 ## How the code is laid out
 
-The [README](README.md#architecture) has the layer table. The short version:
+The [architecture page](docs/architecture.md) has the layer table. The short version:
 
 - `crates/geom`: vectors, planes, meshes, measures.
 - `crates/sketch`: our own constraint solver, plus profile finding.
@@ -183,10 +183,12 @@ depend on wall-clock timing.
 **Ready pull requests test what they touch.** CI maps changed files to workspace packages and
 runs Clippy, the test build and tests for those and their dependents. The
 [package selector](scripts/ci/affected.py) and [CI workflow](.github/workflows/ci.yml) define
-which changes require native checks; documentation, packaging and bot-script-only PRs can run
-repository checks only. Workspace-wide changes, merge-queue groups, nightly runs and Run
-workflow select the full workspace. A push to `main` reuses a successful merge-queue run for
-the same commit; otherwise it runs the full suite.
+which changes require native checks; documentation, packaging, other-workflow and bot-script-only
+changes run the repository checks only, on pull requests and on `main`. Workspace-wide changes,
+merge-queue groups, nightly runs and Run workflow select the full workspace. A push to `main`
+reuses a successful merge-queue run for the same commit, and runs only the repository checks
+when no code changed since the last push to `main` that passed; otherwise it runs the full
+suite. Doc tests, reference tests and the Windows jobs run on `main` and nightly only.
 
 **CI shards the tests.** One job builds them into a cargo-nextest archive; two shards run on
 pull requests and four during full validation. Every test runs in its own process: don't rely
@@ -287,8 +289,9 @@ and a fresh CI run:
    clippy (`-D warnings`), then the tests with the wasm build check alongside. A PR has to pass it.
    Heavy CI runs after review: a pull request gets the formatting and repository checks and a
    quick compile (`cargo check`) when you push. Once a maintainer has reviewed it they add the
-   `approved-for-ci` label, which runs the full CI (build, tests, goldens, Clippy); every push
-   after that runs the full set again.
+   `approved-for-ci` label when the PR is ready to merge, which runs the full CI (build, tests,
+   goldens, Clippy); every push after that runs the full set again. Maintainers merge approved
+   PRs in groups by area, so PRs that touch the same code meet a conflict at most once.
 4. Reference the issue (`Fixes #12`). In the PR, say what you tested and how. For geometry work, include the measured numbers (and
    the expected ones).
 
@@ -384,4 +387,4 @@ unchanged. The initial switch to sorted rows is a one-time larger diff.
 ## Licence
 
 By contributing you agree that your contribution is licensed as MIT OR Apache-2.0, like the rest
-of SolidCraft. SolidCraft isn't affiliated with Autodesk. Fusion is a trademark of Autodesk, Inc.
+of SolidCraft. SolidCraft isn't affiliated with any CAD vendor; product names are trademarks of their owners (see NOTICE).

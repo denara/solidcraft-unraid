@@ -5,6 +5,8 @@
 //! added. The boundary stays exactly the shared edge nodes, so the face meets its neighbours
 //! exactly, and only the band next to the boundary is irregular (cut-cell meshing).
 
+use solidcraft_geom::Ring;
+
 use super::cdt;
 use super::motorcycle::Trace;
 
@@ -196,6 +198,7 @@ pub(crate) fn cut_grid(
                 across.push(c);
             }
         }
+        let poly = Ring::new(poly);
         if poly.len() == 4 {
             let [a, b, c, d] = [*poly.first()?, *poly.get(1)?, *poly.get(2)?, *poly.get(3)?];
             tris.push([a, b, c]);
@@ -205,14 +208,13 @@ pub(crate) fn cut_grid(
             let centre = [0.5 * (lu.at.get(i0)? + lu.at.get(i1)?), 0.5 * (lv.at.get(j0)? + lv.at.get(j1)?)];
             let m = u32::try_from(n + extra.len()).ok()?;
             extra.push(centre);
-            for k in 0..poly.len() {
-                tris.push([m, *poly.get(k)?, *poly.get((k + 1) % poly.len())?]);
+            for (&a, &b) in poly.edges() {
+                tris.push([m, a, b]);
             }
         }
-        for k in 0..poly.len() {
-            let (ci, cj) = *across.get(k)?;
+        for ((&a, &b), &(ci, cj)) in poly.edges().zip(&across) {
             if !kept(ci, cj) {
-                stairs.push((*poly.get(k)?, *poly.get((k + 1) % poly.len())?));
+                stairs.push((a, b));
             }
         }
     }

@@ -118,49 +118,51 @@ pub(crate) fn one_letter() -> bool {
     ONE_LETTER.with(std::cell::Cell::get)
 }
 
-/// A text is picked whole: the profiles of its letters when profile `index` of `sketch` is
-/// bounded by one text alone (none when other geometry shares it). The letters' counters (the
-/// inside of an O) are left out; inside one, a letter is a letter again. The picked profile
-/// comes first when it is a letter.
+/// A text is picked whole: the profiles of its letters when profile `index` of `sketch` is a
+/// letter of one text, or the counter of one (none when it is bounded by other geometry alone,
+/// or by two texts). A letter that other geometry crosses (a face's projected edge the text runs
+/// over) is cut into pieces bounded by both: each piece inside the letter is picked, so the
+/// letter is picked whole. The letters' counters (the inside of an O) are left out; inside one,
+/// a letter is a letter again. The picked profile comes first when it is a letter.
 pub(crate) fn text_profiles(s: &solidcraft_engine::Session, sketch: u64, index: usize) -> Option<Vec<usize>> {
     let state = s.world_state();
     let ss = state.sketch(sketch)?;
-    let text_of = |profile: &solidcraft_engine::sketch::Profile| -> Option<String> {
-        let mut link: Option<&str> = None;
+    // The text bounding a profile, with or without other curves; whether only it bounds it.
+    let text_of = |profile: &solidcraft_engine::sketch::Profile| -> Option<(String, bool)> {
+        let (mut link, mut alone): (Option<&str>, bool) = (None, true);
         for id in profile.curve_ids() {
             let curve = ss.sketch.curves.iter().find(|curve| curve.id == id)?;
-            let source = ss.sketch.link(curve.link.as_deref()?)?;
-            if source.kind != LinkKind::Text || link.is_some_and(|old| old != source.id.as_str()) {
-                return None;
-            }
-            link = Some(source.id.as_str());
-        }
-        link.map(str::to_owned)
-    };
-    let link = text_of(ss.profiles.get(index)?)?;
-    let sorted = |ids: &[String]| {
-        let mut ids = ids.to_vec();
-        ids.sort();
-        ids
-    };
-    let mine: Vec<usize> = (0..ss.profiles.len()).filter(|&i| ss.profiles.get(i).and_then(text_of).as_deref() == Some(link.as_str())).collect();
-    // A profile whose outer loop is a hole of another one lies inside it.
-    let parent = |i: usize| -> Option<usize> {
-        let outer = sorted(&ss.profiles.get(i)?.outer_curves);
-        mine.iter().copied().find(|&j| j != i && ss.profiles.get(j).is_some_and(|p| p.hole_curves.iter().any(|hole| sorted(hole) == outer)))
-    };
-    let depth = |i: usize| {
-        let (mut at, mut depth) = (i, 0usize);
-        while let Some(up) = parent(at) {
-            at = up;
-            depth += 1;
-            if depth > mine.len() {
-                break;
+            match curve.link.as_deref().and_then(|l| ss.sketch.link(l)).filter(|source| source.kind == LinkKind::Text) {
+                Some(source) if link.is_some_and(|old| old != source.id.as_str()) => return None,
+                Some(source) => link = Some(source.id.as_str()),
+                None => alone = false,
             }
         }
-        depth
+        link.map(|l| (l.to_owned(), alone))
     };
-    let mut letters: Vec<usize> = mine.iter().copied().filter(|&i| depth(i) % 2 == 0).collect();
+    let (link, alone) = text_of(ss.profiles.get(index)?)?;
+    // The text's own outlines, the other curves left out: a point is in a letter when an odd
+    // number of them surround it (an O's ring is in one, its counter in two).
+    let mut own = ss.sketch.clone();
+    for curve in &mut own.curves {
+        if curve.link.as_deref() != Some(link.as_str()) {
+            curve.construction = true;
+        }
+    }
+    let outlines = solidcraft_engine::sketch::find_profiles(&own);
+    let in_letter = |i: usize| {
+        ss.profiles.get(i).is_some_and(|p| {
+            let at = p.region.interior_point();
+            outlines.iter().filter(|o| o.region.outer.contains(at)).count() % 2 == 1
+        })
+    };
+    // A piece the text shares with other geometry is the text's only inside a letter: the region
+    // round the letters (a face's, bounded by its edges and the letters crossing them) is not.
+    if !alone && !in_letter(index) {
+        return None;
+    }
+    let mut letters: Vec<usize> =
+        (0..ss.profiles.len()).filter(|&i| ss.profiles.get(i).and_then(text_of).is_some_and(|(l, _)| l == link) && in_letter(i)).collect();
     letters.sort_by_key(|&i| i != index);
     (!letters.is_empty()).then_some(letters)
 }
@@ -1357,6 +1359,33 @@ mod tests {
         // Inside the O's counter, the text is picked too (its letters).
         assert_eq!(text_profiles(&h.app.session, sid, counter).map(|v| v.len()), Some(2));
         assert!(text_profiles(&h.app.session, sid, 99).is_none());
+    }
+
+    /// The text runs over the edge of what it is drawn on (a face's projected edge, here a drawn
+    /// rectangle whose top crosses both letters): each letter is cut into pieces bounded by the
+    /// text and the edge. A click on a piece still picks the whole text, every piece of both
+    /// letters and nothing else; a click round the letters picks no text.
+    #[test]
+    fn a_text_crossed_by_an_edge_is_picked_whole() {
+        let (mut h, sid, i, _, _) = letters();
+        let area = |h: &Harness, picked: &[usize]| {
+            let state = h.app.session.world_state();
+            let profiles = &state.sketch(sid).unwrap().profiles;
+            picked.iter().map(|&k| profiles[k].region.area()).sum::<f64>()
+        };
+        let whole = area(&h, &text_profiles(&h.app.session, sid, i).unwrap());
+        // The I's stem, below where the rectangle's top will cross it.
+        let stem = solidcraft_engine::geom::Vec2::new(h.app.session.world_state().sketch(sid).unwrap().profiles[i].centroid.x, 2.0);
+        h.app.run("sketch.rectangle.two_point", json!({"p0":[-5,-5],"p1":[40,8]})).unwrap();
+        let state = h.app.session.world_state();
+        let profiles = &state.sketch(sid).unwrap().profiles;
+        let below = solidcraft_engine::sketch::profile_at_point(profiles, stem).unwrap();
+        let picked = text_profiles(&h.app.session, sid, below).unwrap();
+        assert_eq!(picked[0], below);
+        assert!(picked.len() > 2, "the letters are cut in pieces: {picked:?}");
+        assert!((area(&h, &picked) - whole).abs() < 1e-5 * whole, "{} {whole}", area(&h, &picked));
+        let round = solidcraft_engine::sketch::profile_at_point(profiles, solidcraft_engine::geom::Vec2::new(-3.0, -3.0)).unwrap();
+        assert!(text_profiles(&h.app.session, sid, round).is_none());
     }
 
     #[test]

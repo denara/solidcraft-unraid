@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use solidcraft_geom::{Mesh, Vec3};
+use solidcraft_geom::{Aabb3, Mesh, Vec3};
 use truck_modeling::{self as mt, builder};
 
 use crate::body::{Body, Solid, edge_order, from_p3, p3};
@@ -365,11 +365,7 @@ fn faceted_boolean_untimed(a: &Body, b: &Mesh, op: BoolOp, tol: f64) -> Result<O
     if pa.len() + pb.len() > MAX_POLYS {
         return Err(KernelError::Failed("the bodies are too detailed to facet".into()));
     }
-    let (lo, hi) = b
-        .positions
-        .iter()
-        .fold((Vec3::new(f64::MAX, f64::MAX, f64::MAX), Vec3::new(f64::MIN, f64::MIN, f64::MIN)), |(l, h), p| (l.min(*p), h.max(*p)));
-    let size = if b.positions.is_empty() { a.size() } else { a.size().max((hi - lo).len()) };
+    let size = if b.positions.is_empty() { a.size() } else { a.size().max(b.positions.iter().copied().collect::<Aabb3>().diagonal()) };
     // Fine facets of curved faces meet at shallow angles, where the coplanar test decides
     // whether the pieces' boundaries come out consistent: try a few tolerances, and take the
     // first whose result is watertight and agrees with the complementary boolean (A − B and
@@ -398,9 +394,24 @@ fn faceted_boolean_untimed(a: &Body, b: &Mesh, op: BoolOp, tol: f64) -> Result<O
         if out.is_empty() {
             return Ok(None);
         }
-        match rebuild(out, size, &sources) {
+        let weld = size * 1e-7;
+        match rebuild(&out, size, weld, &sources) {
             Ok(b) => return Ok(Some(b)),
             Err(e) => last = e,
+        }
+        // Thin facets at a thread crest can be narrower than the usual reconstruction
+        // tolerance. Welding/splitting at that coarser tolerance collapses their boundaries
+        // into a non-manifold edge. Retry the same volume-checked polygons at the BSP's
+        // finer precision. Allow a small margin for points classified on either side of
+        // a splitter, then try the exact BSP tolerance if that still collapses a facet.
+        // Never return a shell that fails the closed-solid check.
+        for precision in [3.0 * eps, eps] {
+            if precision < weld {
+                match rebuild(&out, size, precision, &sources) {
+                    Ok(b) => return Ok(Some(b)),
+                    Err(e) => last = e,
+                }
+            }
         }
     }
     Err(last)
@@ -685,7 +696,7 @@ fn polys_boolean(pa: Vec<Poly>, pb: Vec<Poly>, size: f64, op: BoolOp, eps: f64, 
     if polys.is_empty() {
         return Ok(None);
     }
-    rebuild(polys, size, sources).map(Some)
+    rebuild(&polys, size, size * 1e-7, sources).map(Some)
 }
 
 /// What a rebuilt body's history is over: each operand's face and edge counts and, where it is
@@ -837,8 +848,7 @@ fn key(p: Vec3, q: f64) -> (i64, i64, i64) {
 /// Its history over the operands the polygons are pieces of (`sources`): each face the
 /// operand faces whose pieces it joins (pieces joined across the edges between them), each edge
 /// what the pieces either side of it say (see [`Sources::edge`]).
-fn rebuild(polys: Vec<Poly>, size: f64, sources: &Sources) -> Result<Body> {
-    let q = size * 1e-7;
+fn rebuild(polys: &[Poly], size: f64, q: f64, sources: &Sources) -> Result<Body> {
     // Global vertex table.
     let mut index: BTreeMap<(i64, i64, i64), usize> = BTreeMap::new();
     let mut verts: Vec<Vec3> = Vec::new();
@@ -862,7 +872,7 @@ fn rebuild(polys: Vec<Poly>, size: f64, sources: &Sources) -> Result<Body> {
     };
     let mut loops: Vec<(PlaneEq, Vec<usize>)> = Vec::new();
     let mut srcs: Vec<FaceOrigin> = Vec::new();
-    for p in &polys {
+    for p in polys {
         let mut l: Vec<usize> = p.v.iter().map(|v| id(*v, &mut verts)).collect();
         l.dedup();
         if l.first() == l.last() && l.len() > 1 {
@@ -905,7 +915,7 @@ fn rebuild(polys: Vec<Poly>, size: f64, sources: &Sources) -> Result<Body> {
             let (Some(&pa), Some(&pb)) = (verts.get(a), verts.get(b)) else { continue };
             let d = pb - pa;
             let len2 = d.len2();
-            let (lo, hi) = (ckey(pa.min(pb) - Vec3::new(tol, tol, tol)), ckey(pa.max(pb) + Vec3::new(tol, tol, tol)));
+            let (lo, hi) = (ckey(pa.min(pb) - Vec3::new(q, q, q)), ckey(pa.max(pb) + Vec3::new(q, q, q)));
             let cells = (hi.0 - lo.0 + 1) * (hi.1 - lo.1 + 1) * (hi.2 - lo.2 + 1);
             let candidates: Vec<usize> = if cells > 4096 {
                 (0..verts.len()).collect()
@@ -928,7 +938,7 @@ fn rebuild(polys: Vec<Poly>, size: f64, sources: &Sources) -> Result<Body> {
                 .filter_map(|k| {
                     let v = verts.get(k)?;
                     let t = (*v - pa).dot(d) / len2.max(1e-300);
-                    (t > 1e-9 && t < 1.0 - 1e-9 && v.dist_to_segment(pa, pb) < tol).then_some((t, k))
+                    (t > 1e-9 && t < 1.0 - 1e-9 && v.dist_to_segment(pa, pb) < q).then_some((t, k))
                 })
                 .collect();
             on.sort_by(|x, y| x.0.total_cmp(&y.0));

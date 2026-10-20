@@ -95,21 +95,27 @@ fn a_result_that_removes_more_than_the_blend_is_refused() {
     assert!(m.contains("more than the chamfer can"), "{m}");
 }
 
-/// #1668: a box shelled outward 2 mm, open at the bottom. R5 on its top outer edge alone would
-/// reach past the sharp inside corner 2 mm away; with the inside edge rounded in the same
-/// fillet, that corner is filled, and the two build as one feature as they do one after the
-/// other: the outer round takes (1 - π/4) · 25 mm² along 104 mm, the inner one adds it along
-/// 100 mm.
+/// #1668: a box shelled outward 2 mm, open at the bottom. R5 on its top outer edge alone leaves
+/// the sharp inside corner 2 mm away on its ball's side, 0.76 mm inside the round; it reaches
+/// the corner only past 2√2 / (√2 - 1) ≈ 6.83 mm. With the inside edge rounded in the same
+/// fillet, the two build as one feature as they do one after the other: the outer round takes
+/// (1 - π/4) · 25 mm² along 104 mm, the inner one adds it along 100 mm.
 #[test]
 fn rounds_on_both_sides_of_a_wall_build_as_one_fillet() {
     let outer = box_solid(Vec3::new(-52.0, -32.0, 0.0), Vec3::new(52.0, 32.0, 42.0)).unwrap();
     let shelled = cut(&outer, [-50.0, -30.0, -1.0], [50.0, 30.0, 40.0]);
     let (out_edge, in_edge) = (Vec3::new(0.0, 32.0, 42.0), Vec3::new(0.0, 30.0, 40.0));
-    let m = too_large(crate::fillet(&shelled, &[out_edge], 5.0));
-    assert!(m.contains("runs past the faces beside the edge"), "{m}");
+    let section = (1.0 - std::f64::consts::FRAC_PI_4) * 25.0;
+    let alone = crate::fillet(&shelled, &[out_edge], 5.0).unwrap();
+    assert!(alone.validity().is_empty(), "{:?}", alone.validity());
+    let want = shelled.volume_at(0.01).unwrap() - section * 104.0;
+    assert!((crate::measure(&alone).unwrap().volume - want).abs() < 1e-4 * want);
+    let m = too_large(crate::fillet(&shelled, &[out_edge], 7.0));
+    let largest: f64 = m.rsplit("that fits is ").next().and_then(|t| t.trim_end_matches(" mm").parse().ok()).unwrap_or(0.0);
+    let limit = 2.0 * 2f64.sqrt() / (2f64.sqrt() - 1.0);
+    assert!(largest <= limit && largest > limit - 0.5, "{m}");
     let both = crate::fillet(&shelled, &[out_edge, in_edge], 5.0).unwrap();
     assert!(both.validity().is_empty(), "{:?}", both.validity());
-    let section = (1.0 - std::f64::consts::FRAC_PI_4) * 25.0;
     let want = shelled.volume_at(0.01).unwrap() - section * 104.0 + section * 100.0;
     let v = crate::measure(&both).unwrap().volume;
     assert!((v - want).abs() < 1e-4 * want, "{v} vs {want}");
@@ -118,4 +124,39 @@ fn rounds_on_both_sides_of_a_wall_build_as_one_fillet() {
     // Past the wall's own room they still cross: R7's outer round reaches the inner one's arc.
     let m = too_large(crate::fillet(&shelled, &[out_edge, in_edge], 7.0));
     assert!(m.contains("the largest radius that fits"), "{m}");
+}
+
+/// A shell 3 mm thick bent over like an upside-down U: 60 wide, 20 long, 50 high, its top
+/// plate from z = 47 to 50 and its walls from x = 0 to 3 and 57 to 60.
+fn bent_shell() -> Body {
+    let b = box_solid(Vec3::new(0.0, 0.0, 0.0), Vec3::new(60.0, 20.0, 50.0)).unwrap();
+    cut(&b, [3.0, -1.0, -1.0], [57.0, 21.0, 47.0])
+}
+
+/// The corner left by a round of radius `r` on a 90° edge, per unit length.
+fn corner(r: f64) -> f64 {
+    r * r * (1.0 - std::f64::consts::FRAC_PI_4)
+}
+
+/// An outside round concentric with the inside one keeps the wall 3 mm thick: the inside round
+/// lies inside the outside one's wedge, but on its ball's side of the arc, which the round
+/// leaves as it is. It used to be refused as running into other geometry.
+#[test]
+fn outside_round_concentric_with_the_inside_round_of_a_wall_fits() {
+    let s = bent_shell();
+    let inside = [Vec3::new(3.0, 10.0, 47.0), Vec3::new(57.0, 10.0, 47.0)];
+    let outside = [Vec3::new(0.0, 10.0, 50.0), Vec3::new(60.0, 10.0, 50.0)];
+    let a = crate::fillet(&s, &inside, 15.0).unwrap();
+    let b = crate::fillet(&a, &outside, 18.0).unwrap();
+    assert!(b.validity().is_empty(), "{:?}", b.validity());
+    // The inside rounds fill their corners, the outside ones take theirs away.
+    let want = s.volume_at(0.01).unwrap() + 2.0 * 20.0 * (corner(15.0) - corner(18.0));
+    let got = b.volume_at(0.01).unwrap();
+    assert!((got - want).abs() < 1e-3 * want, "{got} for {want}");
+    // Larger, the outside round's centre moves off the inside one's: it runs into the hollow
+    // where its arc crosses the inside round's, at r = (18√2 - 15) / (√2 - 1) ≈ 25.24 mm.
+    let m = too_large(crate::fillet(&a, &outside, 30.0));
+    let largest: f64 = m.rsplit("that fits is ").next().and_then(|t| t.trim_end_matches(" mm").parse().ok()).unwrap_or(0.0);
+    let limit = (18.0 * 2f64.sqrt() - 15.0) / (2f64.sqrt() - 1.0);
+    assert!(largest <= limit && largest > limit - 0.5, "{m}");
 }

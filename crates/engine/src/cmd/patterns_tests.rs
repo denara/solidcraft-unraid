@@ -521,3 +521,31 @@ fn pattern_of_cuts_beside_a_round_needs_no_retries() {
     let v = volume(&mut s);
     assert!(rel(v, expected) < 1e-5, "{v} vs {expected}");
 }
+
+/// #2755: a cut cylinder with `targets` cuts only those bodies, and so do its pattern and mirror
+/// copies: a body over the plate that the cylinder was told to leave alone keeps its volume.
+#[test]
+fn copies_of_a_primitive_cut_only_its_targets() {
+    let body_volume = |s: &mut Session, name: &str| {
+        let m = run(s, "inspect.measure", json!({"bodies": [name]}));
+        m["bodies"][0]["volume_mm3"].as_f64().unwrap_or(f64::NAN)
+    };
+    // The command, and the holes in the plate after it (the cylinder's and its copies).
+    for (copy, holes) in [
+        (json!(["solid.pattern.rectangular", {"features": ["Trou"], "dir1": [1, 0, 0], "count1": 3, "spacing1": 30}]), 3.0),
+        (json!(["solid.mirror", {"features": ["Trou"], "plane": {"origin": [50, 0, 0], "normal": [1, 0, 0]}}]), 2.0),
+    ] {
+        let mut s = Session::default();
+        run(&mut s, "solid.box", json!({"length": 100, "width": 60, "height": 10, "body_name": "Plaque"}));
+        run(&mut s, "solid.box", json!({"length": 100, "width": 60, "height": 10, "corner": [0, 0, 5], "operation": "new", "body_name": "Voisin"}));
+        let cyl = json!({"radius": 3, "height": 30, "base": [10, 10, -5], "operation": "cut", "targets": ["Plaque"], "name": "Trou"});
+        run(&mut s, "solid.cylinder", cyl);
+        assert!(rel(body_volume(&mut s, "Voisin"), 60000.0) < 1e-9);
+        let (id, p) = (copy[0].as_str().unwrap_or_default(), copy[1].clone());
+        let r = run(&mut s, id, p);
+        assert_eq!(r["changed_bodies"], json!(["Plaque"]), "{id}");
+        assert!(rel(body_volume(&mut s, "Voisin"), 60000.0) < 1e-9, "{id} cut Voisin");
+        let removed = 60000.0 - body_volume(&mut s, "Plaque");
+        assert!(rel(removed, holes * PI * 9.0 * 10.0) < 1e-3, "{id}: {removed} mm³ cut from Plaque");
+    }
+}

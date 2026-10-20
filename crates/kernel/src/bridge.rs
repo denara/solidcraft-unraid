@@ -137,49 +137,161 @@ pub fn chain_closes(chain: &[mt::Edge]) -> bool {
     first.front().id() == last.back().id()
 }
 
-/// The stations of a chain of edges, `count` of them evenly along its length, and the length
-/// itself. A chain that closes is sampled with its last station back on its first.
-fn chain_samples(edges: &[mt::Edge], count: usize) -> Result<(Vec<Vec3>, f64)> {
-    /// Samples per edge used for the length table.
-    const PER_EDGE: usize = 64;
-    let mut poly: Vec<Vec3> = Vec::with_capacity(edges.len() * (PER_EDGE + 1));
-    for e in edges {
-        let c = e.curve();
-        let (t0, t1) = c.range_tuple();
-        if !(t1 > t0) || ![t0, t1].into_iter().all(f64::is_finite) {
-            return Err(KernelError::Invalid("an edge has no parameter range".into()));
+/// A point of a [`ChainLine`]'s polyline: where it is, its arclength along the chain, the chain
+/// edge (its index) the segment from it runs along, and that edge's curve parameter there.
+#[derive(Clone, Copy)]
+struct Sample {
+    p: Vec3,
+    s: f64,
+    edge: usize,
+    t: f64,
+}
+
+/// A chain of edges measured by arclength through a fine polyline on it, so that a station is read
+/// on the edge's own curve, not on a chord. A chain that closes ends back on its first point.
+struct ChainLine {
+    curves: Vec<mt::Curve>,
+    samples: Vec<Sample>,
+    closed: bool,
+}
+
+impl ChainLine {
+    fn of(edges: &[mt::Edge]) -> Result<ChainLine> {
+        /// Samples per edge used for the length table.
+        const PER_EDGE: usize = 64;
+        let mut samples: Vec<Sample> = Vec::with_capacity(edges.len() * (PER_EDGE + 1) + 1);
+        let mut curves = Vec::with_capacity(edges.len());
+        let push = |samples: &mut Vec<Sample>, p: Vec3, edge: usize, t: f64| {
+            let s = samples.last().map_or(0.0, |last| last.s + last.p.dist(p));
+            samples.push(Sample { p, s, edge, t });
+        };
+        for (i, e) in edges.iter().enumerate() {
+            let c = e.curve();
+            let (t0, t1) = c.range_tuple();
+            if !(t1 > t0) || ![t0, t1].into_iter().all(f64::is_finite) {
+                return Err(KernelError::Invalid("an edge has no parameter range".into()));
+            }
+            for k in 0..=PER_EDGE {
+                // The segment that starts at this point: along this edge, or the zero-length join
+                // to the next edge.
+                let t = t0 + (t1 - t0) * k as f64 / PER_EDGE as f64;
+                push(&mut samples, from_p3(c.subs(t)), i, t);
+            }
+            curves.push(c);
         }
-        for k in 0..=PER_EDGE {
-            poly.push(from_p3(c.subs(t0 + (t1 - t0) * k as f64 / PER_EDGE as f64)));
+        let closed = chain_closes(edges);
+        if closed && let Some(first) = samples.first().copied() {
+            push(&mut samples, first.p, edges.len().saturating_sub(1), first.t);
         }
+        let line = ChainLine { curves, samples, closed };
+        let total = line.length();
+        if !(total > 1e-9) || !total.is_finite() {
+            return Err(KernelError::Invalid("the edge chain has no length".into()));
+        }
+        Ok(line)
     }
-    if chain_closes(edges)
-        && let Some(first) = poly.first().copied()
-    {
-        poly.push(first);
+
+    fn length(&self) -> f64 {
+        self.samples.last().map_or(0.0, |x| x.s)
     }
-    let mut cum = Vec::with_capacity(poly.len());
-    cum.push(0.0);
-    for w in poly.windows(2) {
-        let (Some(a), Some(b)) = (w.first(), w.get(1)) else { continue };
-        let Some(last) = cum.last().copied() else { break };
-        cum.push(last + a.dist(*b));
+
+    /// The point at arclength `s` (wrapped round a closed chain, clamped on an open one), on its
+    /// edge's own curve, and the chain edge it is on.
+    fn at(&self, s: f64) -> Result<(Vec3, usize)> {
+        let total = self.length();
+        let s = if self.closed { s.rem_euclid(total) } else { s.clamp(0.0, total) };
+        let hi = self.samples.partition_point(|x| x.s < s).clamp(1, self.samples.len().saturating_sub(1));
+        let fail = || KernelError::Failed("bridge: sample".into());
+        let (lo, hi) = (self.samples.get(hi - 1).ok_or_else(fail)?, self.samples.get(hi).ok_or_else(fail)?);
+        let curve = self.curves.get(lo.edge).ok_or_else(fail)?;
+        let span = hi.s - lo.s;
+        if !(span > 1e-12) {
+            // The zero-length join between two edges: the end of the edge it belongs to.
+            return Ok((from_p3(curve.subs(lo.t)), lo.edge));
+        }
+        let f = ((s - lo.s) / span).clamp(0.0, 1.0);
+        Ok((from_p3(curve.subs(lo.t + (hi.t - lo.t) * f)), lo.edge))
     }
-    let total = cum.last().copied().unwrap_or(0.0);
-    if !(total > 1e-9) || !total.is_finite() {
-        return Err(KernelError::Invalid("the edge chain has no length".into()));
+
+    /// `count` stations evenly along the chain, from arclength `start` (a closed chain's seam; an
+    /// open chain always runs end to end), forwards or backwards. A closed chain's last station is
+    /// back on its first.
+    fn stations(&self, count: usize, start: f64, backwards: bool) -> Result<Vec<(Vec3, usize)>> {
+        let total = self.length();
+        let start = if self.closed {
+            start
+        } else if backwards {
+            total
+        } else {
+            0.0
+        };
+        let sign = if backwards { -1.0 } else { 1.0 };
+        (0..count).map(|i| self.at(start + sign * total * i as f64 / (count.max(2) - 1) as f64)).collect()
     }
-    let mut out = Vec::with_capacity(count);
-    for i in 0..count {
-        let s = total * i as f64 / (count.max(2) - 1) as f64;
-        let hi = cum.partition_point(|x| *x < s).clamp(1, poly.len().saturating_sub(1));
-        let (Some(a), Some(b)) = (poly.get(hi - 1), poly.get(hi)) else { return Err(KernelError::Failed("bridge: sample".into())) };
-        let (Some(&lo), Some(&hi_s)) = (cum.get(hi - 1), cum.get(hi)) else { return Err(KernelError::Failed("bridge: sample".into())) };
-        let span = hi_s - lo;
-        let t = if span > 1e-12 { (s - lo) / span } else { 0.0 };
-        out.push(*a + (*b - *a) * t);
+
+    /// The chain edges `p` (a station on chain edge `edge`) lies on: that edge, and the edge before
+    /// or after it when `p` is on the vertex they share.
+    fn edges_at(&self, p: Vec3, edge: usize) -> [Option<usize>; 3] {
+        let count = self.curves.len();
+        let tol = self.length() * 1e-9 + 1e-12;
+        let Some(curve) = self.curves.get(edge) else { return [Some(edge), None, None] };
+        let (t0, t1) = curve.range_tuple();
+        let at = |t: f64| from_p3(curve.subs(t)).dist(p) <= tol;
+        let before = at(t0).then(|| edge.checked_sub(1).or(self.closed.then(|| count.saturating_sub(1)))).flatten();
+        let after = at(t1).then(|| Some(edge + 1).filter(|e| *e < count).or(self.closed.then_some(0))).flatten();
+        [Some(edge), before, after]
     }
-    Ok((out, total))
+
+    /// Where stations start from `seam` (a point on the chain), and whether they run backwards: a
+    /// closed chain starts at it, an open one runs from the end it is nearer.
+    fn start_at_seam(&self, seam: Vec3) -> (f64, bool) {
+        let s = self.nearest(seam);
+        if self.closed { (s, false) } else { (0.0, s > self.length() / 2.0) }
+    }
+
+    /// The arclength of the chain's point nearest `p`, and how far `p` is from the chain: the
+    /// nearest point of the fine polyline, then refined on that edge's own curve.
+    fn nearest_with_distance(&self, p: Vec3) -> (f64, f64) {
+        let mut best = (f64::INFINITY, 0.0, 0usize, 0.0);
+        for w in self.samples.windows(2) {
+            let (Some(a), Some(b)) = (w.first(), w.get(1)) else { continue };
+            let len = a.p.dist(b.p);
+            let f = if len > 1e-12 { ((p - a.p).dot(b.p - a.p) / (len * len)).clamp(0.0, 1.0) } else { 0.0 };
+            let d = p.dist(a.p + (b.p - a.p) * f);
+            if d < best.0 {
+                best = (d, a.s + len * f, a.edge, a.t + (b.t - a.t) * f);
+            }
+        }
+        let (chord, s, edge, hint) = best;
+        let on_curve = self.curves.get(edge).and_then(|c| {
+            let (t0, t1) = c.range_tuple();
+            let t = c.search_nearest_parameter(p3(p), Some(hint), 100)?;
+            (t0..=t1).contains(&t).then(|| from_p3(c.subs(t)).dist(p))
+        });
+        (s, on_curve.map_or(chord, |d| d.min(chord)))
+    }
+
+    /// The arclength of the chain's point nearest `p`.
+    fn nearest(&self, p: Vec3) -> f64 {
+        self.nearest_with_distance(p).0
+    }
+
+    /// The middle of the chain: a closed chain's centroid (what it surrounds), an open chain's
+    /// point halfway along.
+    fn middle(&self) -> Result<Vec3> {
+        if !self.closed {
+            return Ok(self.at(self.length() / 2.0)?.0);
+        }
+        let mut sum = Vec3::ZERO;
+        let mut weight = 0.0;
+        for w in self.samples.windows(2) {
+            let (Some(a), Some(b)) = (w.first(), w.get(1)) else { continue };
+            let len = a.p.dist(b.p);
+            sum += (a.p + b.p) * (0.5 * len);
+            weight += len;
+        }
+        Ok(sum * (1.0 / weight.max(1e-300)))
+    }
 }
 
 /// The support surface's frames along `edges` (a chain of its own edges), for a bridge that
@@ -188,19 +300,61 @@ pub fn frames(face: &mt::Face, edges: &[mt::Edge], leave: Vec3, count: usize) ->
     if !(2..=4097).contains(&count) {
         return Err(KernelError::Invalid("a bridge needs 2 to 4097 stations".into()));
     }
+    let line = ChainLine::of(edges)?;
+    let stations = line.stations(count, 0.0, false)?;
+    frames_on(&vec![face.clone(); edges.len()], &stations, &line, leave)
+}
+
+/// The frames at `stations` (points on `line`, each with the index of the chain edge it is on),
+/// each read on the support face of its own edge (`faces`, one per chain edge): a chain may run
+/// along the boundaries of several faces, a tube's rim along the halves of its wall. A station on
+/// the vertex where two of those faces meet sits at a corner of one face's parameters, where the
+/// shape may not be readable along the leave direction; it is then read on the other face, which
+/// holds the same point.
+fn frames_on(faces: &[mt::Face], stations: &[(Vec3, usize)], line: &ChainLine, leave: Vec3) -> Result<Vec<Frame>> {
     let leave =
         leave.normalized().filter(|l| l.is_finite()).ok_or_else(|| KernelError::Invalid("the leave direction must be a finite vector".into()))?;
-    let (pts, length) = chain_samples(edges, count)?;
-    let support = Support::of(face, length)?;
-    let mut walk = Walk::new(length);
     let along = |n: Vec3| -> Result<Vec3> {
         (leave - n * leave.dot(n))
             .normalized()
             .ok_or_else(|| KernelError::Invalid("the leave direction is normal to the support surface: it has no tangent plane there".to_string()))
     };
-    let mut out = Vec::with_capacity(pts.len());
-    for p in &pts {
-        out.push(support.station(*p, &along, &mut walk, true)?.0);
+    let length = line.length();
+    // One support per distinct face, each with its own walk (a parameter hint means nothing on
+    // another surface).
+    let mut supports: Vec<(mt::FaceID, Support, Walk)> = Vec::new();
+    let mut out = Vec::with_capacity(stations.len());
+    'stations: for (p, edge) in stations {
+        let mut tried: Vec<mt::FaceID> = Vec::with_capacity(2);
+        let mut refusal: Option<KernelError> = None;
+        for e in line.edges_at(*p, *edge).into_iter().flatten() {
+            let Some(face) = faces.get(e) else { continue };
+            let id = face.id();
+            if tried.contains(&id) {
+                continue;
+            }
+            tried.push(id);
+            let k = match supports.iter().position(|(f, _, _)| *f == id) {
+                Some(k) => k,
+                None => {
+                    supports.push((id, Support::of(face, length)?, Walk::new(length)));
+                    supports.len() - 1
+                }
+            };
+            let Some((_, support, walk)) = supports.get_mut(k) else { continue };
+            match support.station(*p, &along, walk, true) {
+                Ok((frame, _)) => {
+                    out.push(frame);
+                    continue 'stations;
+                }
+                // The station's own face's refusal is the one reported when the other cannot read
+                // it either.
+                Err(err) => {
+                    refusal.get_or_insert(err);
+                }
+            }
+        }
+        return Err(refusal.unwrap_or_else(|| KernelError::Failed("bridge: a station's edge has no support face".into())));
     }
     Ok(out)
 }
@@ -595,72 +749,133 @@ pub fn sample_grid(body: &Body, along: usize, across: usize) -> Result<Vec<Vec<V
 
 /// The most any point of a bridge's boundary row is from the chain it was built on — the row at
 /// `v0` for the first boundary, at `v1` for the second: what a stitch would have to close up.
-fn boundary_gap(made: &Body, chain: &[mt::Edge], at_end: bool) -> Result<f64> {
+fn boundary_gap(made: &Body, line: &ChainLine, at_end: bool) -> Result<f64> {
     let face = made.solid.face_iter().next().ok_or_else(|| KernelError::Failed("bridge: no face".into()))?;
     let surf = face.surface();
     let (Some((u0, u1)), Some((v0, v1))) = surf.try_range_tuple() else {
         return Err(KernelError::Failed("bridge: the surface is unbounded".into()));
     };
     let v = if at_end { v1 } else { v0 };
-    let (poly, _) = chain_samples(chain, 257)?;
     let mut worst: f64 = 0.0;
     for i in 0..=256 {
         let u = u0 + (u1 - u0) * i as f64 / 256.0;
-        let p = from_p3(surf.subs(u, v));
-        let mut best = f64::INFINITY;
-        for w in poly.windows(2) {
-            let (Some(a), Some(b)) = (w.first(), w.get(1)) else { continue };
-            let t = if b.dist(*a) > 1e-12 { ((p - *a).dot(*b - *a) / b.dist(*a).powi(2)).clamp(0.0, 1.0) } else { 0.0 };
-            best = best.min(p.dist(*a + (*b - *a) * t));
-        }
-        worst = worst.max(best);
+        worst = worst.max(line.nearest_with_distance(from_p3(surf.subs(u, v))).1);
     }
     Ok(worst)
 }
 
-/// The midpoint of a chain of edges.
-fn chain_mid(edges: &[mt::Edge]) -> Result<Vec3> {
-    let (pts, _) = chain_samples(edges, 3)?;
-    pts.get(1).copied().ok_or_else(|| KernelError::Failed("bridge: no chain".into()))
+/// Which face of `body` the blend continues from along each edge of a chain (one per edge, in
+/// chain order): of the faces each edge bounds, the one whose tangent plane holds as much of
+/// `leave` as possible there. A chain may run along several faces (a tube's rim along the halves
+/// of its wall).
+fn support_faces(body: &Body, chain: &[mt::Edge], leave: Vec3) -> Result<Vec<mt::Face>> {
+    let mut out = Vec::with_capacity(chain.len());
+    for edge in chain {
+        let curve = edge.curve();
+        let (t0, t1) = curve.range_tuple();
+        let mid = from_p3(curve.subs(0.5 * (t0 + t1)));
+        let mut best: Option<(f64, mt::Face)> = None;
+        for face in body.solid.face_iter() {
+            if !face.edge_iter().any(|f| f.id() == edge.id()) {
+                continue;
+            }
+            let Some((q, n, _)) = crate::curveblend::project(face, mid, None) else { continue };
+            if q.dist(mid) > body.size() * 1e-6 + 1e-9 {
+                continue;
+            }
+            let score = (leave - n * leave.dot(n)).len();
+            if best.as_ref().is_none_or(|(b, _)| score > *b) {
+                best = Some((score, face.clone()));
+            }
+        }
+        let (score, face) = best.ok_or_else(|| KernelError::Invalid("no face of the body holds a picked edge".into()))?;
+        if score < 0.2 {
+            return Err(KernelError::Invalid(
+                "the direction towards the other boundary lies in no face at the picked edges: give `align` points to leave by".into(),
+            ));
+        }
+        out.push(face);
+    }
+    Ok(out)
 }
 
-/// Which face of `body` the blend should continue from a chain, and the direction it leaves in:
-/// the face whose tangent plane holds as much of `leave` as possible.
-fn support_face(body: &Body, chain: &[mt::Edge], leave: Vec3) -> Result<(mt::Face, Vec3)> {
-    let mut best: Option<(f64, mt::Face)> = None;
-    for face in body.solid.face_iter() {
-        if !chain.iter().all(|e| face.edge_iter().any(|f| f.id() == e.id())) {
-            continue;
+/// Where the second chain's stations start, and which way they run, so that they pair with the
+/// first chain's `a` station by station. An open chain runs from the end `seam` (a point on it)
+/// is nearer, or else the way that puts its ends nearer their partners. A closed chain runs round
+/// the same way as the first (by their area vectors; the nearer pairing when they stand almost
+/// at right angles), from `seam` when given, or else from the start that puts each station
+/// closest to its partner: two rims whose seams sit apart would otherwise give a twisted blend.
+fn pair_with(a: &[(Vec3, usize)], line: &ChainLine, seam: Option<Vec3>) -> Result<Vec<(Vec3, usize)>> {
+    let count = a.len();
+    let cost = |start: f64, backwards: bool| -> Result<f64> {
+        Ok(line.stations(count, start, backwards)?.iter().zip(a).map(|((q, _), (p, _))| p.dist(*q)).sum())
+    };
+    // The least-cost start and way round among `starts` × `directions`.
+    let best_of = |starts: &[f64], directions: &[bool]| -> Result<(f64, bool)> {
+        let mut best = (0.0, false, f64::INFINITY);
+        for &start in starts {
+            for &backwards in directions {
+                let c = cost(start, backwards)?;
+                if c < best.2 {
+                    best = (start, backwards, c);
+                }
+            }
         }
-        let mid = chain_mid(chain)?;
-        let surf = face.surface();
-        let Some((u, v)) = surf.search_nearest_parameter(p3(mid), None, 100) else { continue };
-        if from_p3(surf.subs(u, v)).dist(mid) > body.size() * 1e-6 + 1e-9 {
-            continue;
-        }
-        let normal = surf.normal(u, v);
-        let n = Vec3::new(normal.x, normal.y, normal.z).normalized().unwrap_or(Vec3::ZERO);
-        let in_plane = leave - n * leave.dot(n);
-        let score = in_plane.len();
-        if best.as_ref().is_none_or(|(b, _)| score > *b) {
-            best = Some((score, face.clone()));
-        }
+        Ok((best.0, best.1))
+    };
+    if !line.closed {
+        let backwards = match seam {
+            Some(p) => line.start_at_seam(p).1,
+            None => cost(0.0, true)? < cost(0.0, false)?,
+        };
+        return line.stations(count, 0.0, backwards);
     }
-    let (score, face) = best.ok_or_else(|| KernelError::Invalid("no face of the body holds the picked edges".into()))?;
-    if score < 0.2 {
-        return Err(KernelError::Invalid(
-            "the direction towards the other boundary lies in no face at the picked edges: give `align` points to leave by".into(),
-        ));
+    let total = line.length();
+    let spacing = total / (count.max(2) - 1) as f64;
+    let coarse: Vec<f64> = (0..4 * (count.max(2) - 1)).map(|k| k as f64 * spacing / 4.0).collect();
+    // The way round: the same sense as the first loop, unless the two loops stand almost at right
+    // angles (then the area vectors cannot say, and the nearer pairing does, with its start).
+    let ring =
+        |pts: &[(Vec3, usize)]| crate::plane_fit::loop_area(&pts.iter().take(pts.len().saturating_sub(1)).map(|(p, _)| *p).collect::<Vec<_>>());
+    let (area_a, area_b) = (ring(a), ring(&line.stations(count, 0.0, false)?));
+    let agree = area_a.dot(area_b);
+    let (backwards, nearest_start) = if agree.abs() > 0.2 * area_a.len() * area_b.len() {
+        (agree < 0.0, None)
+    } else {
+        let (start, backwards) = best_of(&coarse, &[false, true])?;
+        (backwards, Some(start))
+    };
+    if let Some(p) = seam {
+        return line.stations(count, line.start_at_seam(p).0, backwards);
     }
-    Ok((face, leave))
+    // The best of starts four to a station spacing, narrowed down to a thousandth of a spacing
+    // (the cost is smooth near its least).
+    let mut start = match nearest_start {
+        Some(start) => start,
+        None => best_of(&coarse, &[backwards])?.0,
+    };
+    let (mut lo, mut hi) = (start - spacing / 4.0, start + spacing / 4.0);
+    while hi - lo > spacing * 1e-3 {
+        let (m1, m2) = (lo + (hi - lo) / 3.0, hi - (hi - lo) / 3.0);
+        if cost(m1, backwards)? <= cost(m2, backwards)? {
+            hi = m2;
+        } else {
+            lo = m1;
+        }
+        start = 0.5 * (lo + hi);
+    }
+    line.stations(count, start, backwards)
 }
 
 /// A blend surface between two picked edge chains of two bodies: the surfaces the blend leaves
-/// and arrives at are the faces the chains bound (the best-facing one at each side), and each
-/// side repeats that surface up to its requested continuity. `align` overrides the direction
-/// each side leaves in (points in world space); `crown` how full each side is; `stitch` sews the
-/// blend to its two bodies where their boundaries meet. The reply's `gap`, if any, is how far the
-/// blend's own boundary lay from the chains it was built on.
+/// and arrives at are the faces the chains bound (along each edge, the best-facing one), and each
+/// side repeats that surface up to its requested continuity. Two closed chains blend station to
+/// station from their seams — `seam` (a point on each chain) when given, otherwise the pairing
+/// that keeps the blend from twisting; a closed chain does not blend to an open one. `align`
+/// overrides the direction each side leaves in (points in world space); `crown` how full each side
+/// is; `stitch` sews the blend to its two bodies where their boundaries meet. The reply's `gap`, if
+/// any, is how far the blend's own boundary lay from the chains it was built on.
+#[allow(clippy::too_many_arguments)]
 pub fn blend_between(
     a: &Body,
     picks_a: &[Vec3],
@@ -669,6 +884,7 @@ pub fn blend_between(
     orders: [Continuity; 2],
     crown: [f64; 2],
     align: Option<[Vec3; 2]>,
+    seam: Option<[Vec3; 2]>,
     samples: usize,
     stitch: bool,
 ) -> Result<(Body, f64)> {
@@ -677,9 +893,16 @@ pub fn blend_between(
     if !(5..=401).contains(&samples) {
         return Err(KernelError::Invalid("a blend needs 5 to 401 stations".into()));
     }
+    if align.iter().chain(&seam).flatten().any(|p| !p.is_finite()) {
+        return Err(KernelError::Invalid("`align` and `seam` points must be finite".into()));
+    }
     let chain_a = chain(a, picks_a)?;
     let chain_b = chain(b, picks_b)?;
-    let (mid_a, mid_b) = (chain_mid(&chain_a)?, chain_mid(&chain_b)?);
+    let (line_a, line_b) = (ChainLine::of(&chain_a)?, ChainLine::of(&chain_b)?);
+    if line_a.closed != line_b.closed {
+        return Err(KernelError::Invalid("a closed chain blends only to a closed chain, and an open one only to an open one".into()));
+    }
+    let (mid_a, mid_b) = (line_a.middle()?, line_b.middle()?);
     let (leave_a, leave_b) = match align {
         Some([p, q]) => (
             (p - mid_a).normalized().ok_or_else(|| KernelError::Invalid("`align` must not sit on the boundary".into()))?,
@@ -690,19 +913,15 @@ pub fn blend_between(
             (mid_a - mid_b).normalized().ok_or_else(|| KernelError::Invalid("the two boundaries coincide: there is nothing to blend".into()))?,
         ),
     };
-    let (face_a, leave_a) = support_face(a, &chain_a, leave_a)?;
-    let (face_b, leave_b) = support_face(b, &chain_b, leave_b)?;
-    let frames_a = frames(&face_a, &chain_a, leave_a, samples)?;
-    let mut frames_b = frames(&face_b, &chain_b, leave_b, samples)?;
-    // The two chains are sampled from their own starts: turn one round when that pairs the
-    // stations better (the blend is built station to station).
-    let direct: f64 = frames_a.iter().zip(&frames_b).map(|(x, y)| x.p.dist(y.p)).sum();
-    let reversed: f64 = frames_a.iter().zip(frames_b.iter().rev()).map(|(x, y)| x.p.dist(y.p)).sum();
-    if reversed < direct {
-        frames_b.reverse();
-    }
+    let faces_a = support_faces(a, &chain_a, leave_a)?;
+    let faces_b = support_faces(b, &chain_b, leave_b)?;
+    let (start_a, backwards_a) = seam.map_or((0.0, false), |[p, _]| line_a.start_at_seam(p));
+    let stations_a = line_a.stations(samples, start_a, backwards_a)?;
+    let stations_b = pair_with(&stations_a, &line_b, seam.map(|[_, q]| q))?;
+    let frames_a = frames_on(&faces_a, &stations_a, &line_a, leave_a)?;
+    let frames_b = frames_on(&faces_b, &stations_b, &line_b, leave_b)?;
     let made = bridge(&frames_a, &frames_b, orders, crown)?;
-    let gap = boundary_gap(&made, &chain_a, false)?.max(boundary_gap(&made, &chain_b, true)?);
+    let gap = boundary_gap(&made, &line_a, false)?.max(boundary_gap(&made, &line_b, true)?);
     let faces: Vec<mt::Face> = made.solid.face_iter().cloned().collect();
     let mut rec = crate::record::Rebuild::default();
     for f in &faces {

@@ -862,6 +862,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "chardetng"
+version = "0.1.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "14b8f0b65b7b08ae3c8187e8d77174de20cb6777864c6b832d8ad365999cf1ea"
+dependencies = [
+ "cfg-if",
+ "encoding_rs",
+ "memchr",
+]
+
+[[package]]
 name = "chrono"
 version = "0.4.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4369,7 +4380,10 @@ dependencies = [
  "cadmpeg-core",
  "cadmpeg-ir",
  "cadmpeg-registry",
+ "chardetng",
+ "encoding_rs",
  "gltf",
+ "log",
  "quick-xml",
  "rustix 1.1.5",
  "serde",
@@ -4439,6 +4453,9 @@ dependencies = [
 [[package]]
 name = "solidcraft-space-mouse"
 version = "0.16.2"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "solidcraft-ui-egui"
@@ -4457,6 +4474,7 @@ dependencies = [
  "sha2 0.10.9",
  "solidcraft-engine",
  "solidcraft-gpu",
+ "solidcraft-space-mouse",
  "tiny-skia",
  "toml",
  "ttf-parser",

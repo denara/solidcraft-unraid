@@ -98,8 +98,9 @@ ball). See the roadmap's known limitations for the rest.
 **Curvature (G2)** in the Fillet dialog's **Radius Type** blends straight edges between two
 planar faces with an exact quintic section. The tangent plane and curvature match each side
 face: curvature goes to zero at both contact rails, unlike a circular G1 fillet. Each end
-must meet one planar face perpendicular to the edge. Curved edges/faces, sloped or multi-face
-ends, and intersecting corner blends are not supported; they return an error, not a G1 fallback.
+must meet one planar face; perpendicular and sloped planar ends are supported. Curved
+edges/faces, multi-face ends, and intersecting corner blends are not supported; they return
+an error, not a G1 fallback.
 **Equivalent Radius** sets the same contact setback as a circular fillet (for a right angle,
 setback equals the entered value); it is not a constant curvature radius. Reduce/Taper to Fit
 are unavailable for this type.

@@ -75,8 +75,16 @@ the point is in world coordinates. A point-only face request must find a unique 
 source. An unsupported or ambiguous request fails with an explanation instead of creating
 an attachment with weaker identity.
 
-When a source is suppressed, deleted, replaced, or loses its certificate, the sketch reports
-a lost attachment. Its saved plane is only a visible repair guide: it does not produce a
+A solid extrude's cap is identified by the curves around its profile, so editing that sketch's
+outline (a line that now splits the profile, a side deleted and drawn again, a notch trimmed into
+it) leaves no cap with the exact identity. The sketch then sits on the cap of the same extrude, at
+the same end, made from the same sketch, on the same body, whose outline shares the most of the
+stored curves, at least half of them (a tie is not guessed; a cap whose exact identity is still
+on another body is never replaced). It warns, naming the face and the curves
+that went or came, until the sketch is placed again with **Redefine Sketch Plane**.
+
+When a source is suppressed, deleted, replaced, or loses its certificate otherwise, the sketch
+reports a lost attachment, naming the face it was on (`the top cap of Extrude1 on `Body1``). Its saved plane is only a visible repair guide: it does not produce a
 healthy solved sketch or let downstream features build at a substitute face.
 
 Use **Redefine Sketch Plane** to select a new supported face explicitly. The draft can be

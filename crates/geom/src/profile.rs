@@ -6,7 +6,7 @@ use std::f64::consts::TAU;
 
 use serde::{Deserialize, Serialize};
 
-use crate::Vec2;
+use crate::{Aabb2, Ring, Vec2};
 
 /// One boundary segment in sketch coordinates.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -530,29 +530,26 @@ impl Loop2 {
     pub fn ccw(&self) -> Loop2 {
         if self.is_ccw() { self.clone() } else { self.reversed() }
     }
-    pub fn polyline(&self, tol: f64) -> Vec<Vec2> {
-        let mut out = Vec::new();
-        for s in &self.segs {
-            let p = s.polyline(tol);
-            out.extend(p.iter().take(p.len().saturating_sub(1)));
-        }
-        out
+    /// Each segment with the next and the last with the first: the loop's joints, where one
+    /// segment should end on the start of the next.
+    pub fn joints(&self) -> impl Iterator<Item = (&Seg2, &Seg2)> + Clone {
+        crate::chain::around(&self.segs)
+    }
+    /// The loop as a polyline within `tol`: each segment's points but its last, which the next
+    /// segment starts on.
+    pub fn polyline(&self, tol: f64) -> Ring<Vec2> {
+        self.segs
+            .iter()
+            .flat_map(|s| {
+                let p = s.polyline(tol);
+                let n = p.len().saturating_sub(1);
+                p.into_iter().take(n)
+            })
+            .collect()
     }
     /// Even-odd point containment against the polyline approximation.
     pub fn contains(&self, p: Vec2) -> bool {
-        let poly = self.polyline(1e-3);
-        let n = poly.len();
-        let mut inside = false;
-        for i in 0..n {
-            let (Some(a), Some(b)) = (poly.get(i), poly.get((i + 1) % n)) else { continue };
-            if (a.y > p.y) != (b.y > p.y) {
-                let x = a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x);
-                if p.x < x {
-                    inside = !inside;
-                }
-            }
-        }
-        inside
+        self.polyline(1e-3).contains(p)
     }
     /// Area-weighted centroid (of the polyline approximation).
     pub fn centroid(&self) -> Vec2 {
@@ -634,25 +631,20 @@ impl Region2 {
     /// before they meet (a taper going in closes it there). Found by a grid search refined
     /// around the best point, to about `tol`.
     pub fn inradius(&self, tol: f64) -> f64 {
-        let loops: Vec<Vec<Vec2>> = std::iter::once(&self.outer).chain(&self.holes).map(|l| l.polyline(tol)).collect();
+        let loops: Vec<Ring<Vec2>> = std::iter::once(&self.outer).chain(&self.holes).map(|l| l.polyline(tol)).collect();
         max_clearance(&loops)
     }
 }
 
 /// The largest distance from a point inside `loops` (even-odd) to their sides, by a grid search
 /// over their box refined around the best point. Zero for an empty or degenerate outline.
-fn max_clearance(loops: &[Vec<Vec2>]) -> f64 {
-    let sides: Vec<(Vec2, Vec2)> = loops
-        .iter()
-        .flat_map(|pl| (0..pl.len()).filter_map(move |i| Some((*pl.get(i)?, *pl.get((i + 1) % pl.len())?))))
-        .filter(|(a, b)| a.dist(*b) > 0.0)
-        .collect();
-    let (Some(lo), Some(hi)) = (
-        sides.iter().map(|s| s.0).reduce(|a, b| Vec2::new(a.x.min(b.x), a.y.min(b.y))),
-        sides.iter().map(|s| s.0).reduce(|a, b| Vec2::new(a.x.max(b.x), a.y.max(b.y))),
-    ) else {
+fn max_clearance(loops: &[Ring<Vec2>]) -> f64 {
+    let sides: Vec<(Vec2, Vec2)> = loops.iter().flat_map(|pl| pl.edges().map(|(a, b)| (*a, *b))).filter(|(a, b)| a.dist(*b) > 0.0).collect();
+    let corners: Aabb2 = sides.iter().map(|s| s.0).collect();
+    if corners.is_empty() {
         return 0.0;
-    };
+    }
+    let Aabb2 { min: lo, max: hi } = corners;
     let inside = |p: Vec2| {
         let mut odd = false;
         for (a, b) in &sides {
@@ -782,26 +774,24 @@ pub fn regions_apart(regions: &[Region2], gap: f64) -> bool {
     let tol = gap / 4.0;
     let reach = gap + 2.0 * tol;
     struct Outline {
-        loops: Vec<Vec<Vec2>>,
-        lo: Vec2,
-        hi: Vec2,
+        loops: Vec<Ring<Vec2>>,
+        bounds: Aabb2,
         inside: Vec2,
     }
     let mut outlines = Vec::with_capacity(regions.len());
     for r in regions {
-        let loops: Vec<Vec<Vec2>> = std::iter::once(&r.outer).chain(&r.holes).map(|l| l.polyline(tol)).collect();
+        let loops: Vec<Ring<Vec2>> = std::iter::once(&r.outer).chain(&r.holes).map(|l| l.polyline(tol)).collect();
         let Some(outer) = loops.first().filter(|l| l.len() >= 2) else { return false };
         if outer.iter().any(|p| !p.is_finite()) {
             return false;
         }
-        let lo = outer.iter().fold(Vec2::new(f64::MAX, f64::MAX), |m, p| Vec2::new(m.x.min(p.x), m.y.min(p.y)));
-        let hi = outer.iter().fold(Vec2::new(f64::MIN, f64::MIN), |m, p| Vec2::new(m.x.max(p.x), m.y.max(p.y)));
+        let bounds = outer.bounds();
         let Some(inside) = outer.first().copied() else { return false };
-        outlines.push(Outline { loops, lo, hi, inside });
+        outlines.push(Outline { loops, bounds, inside });
     }
     let mut order: Vec<usize> = (0..outlines.len()).collect();
     order.sort_by(|&i, &j| {
-        let x = |k: usize| outlines.get(k).map(|o| o.lo.x).unwrap_or(0.0);
+        let x = |k: usize| outlines.get(k).map(|o| o.bounds.min.x).unwrap_or(0.0);
         x(i).total_cmp(&x(j))
     });
     let mut work = 0usize;
@@ -809,10 +799,11 @@ pub fn regions_apart(regions: &[Region2], gap: f64) -> bool {
         let Some(a) = outlines.get(i) else { return false };
         for &j in order.iter().skip(k + 1) {
             let Some(b) = outlines.get(j) else { return false };
-            if b.lo.x > a.hi.x + reach {
+            let (a_box, b_box) = (a.bounds, b.bounds);
+            if b_box.min.x > a_box.max.x + reach {
                 break;
             }
-            if b.lo.y > a.hi.y + reach || a.lo.y > b.hi.y + reach {
+            if b_box.min.y > a_box.max.y + reach || a_box.min.y > b_box.max.y + reach {
                 continue;
             }
             // A boundary point of one inside the other: one holds the other (boundaries that do

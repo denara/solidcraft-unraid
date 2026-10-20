@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use solidcraft_geom::{Mesh, Plane, Vec3};
+use solidcraft_geom::{Aabb3, Mesh, Plane, Vec3};
 
 use crate::{DocError, Result};
 
@@ -68,9 +68,8 @@ fn boundary_edges(mesh: &Mesh, mut edges: Vec<usize>, faces: &BTreeSet<usize>, p
     }
     let geometry_key = |e: usize| {
         let pts = mesh.edges.get(e).map(Vec::as_slice).unwrap_or_default();
-        let lo = pts.iter().copied().fold(Vec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY), Vec3::min);
-        let hi = pts.iter().copied().fold(Vec3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY), Vec3::max);
-        (key(lo), key(hi))
+        let b: Aabb3 = pts.iter().copied().collect();
+        (key(b.min), key(b.max))
     };
     edges.sort_by_key(|e| geometry_key(*e));
     let mut at: BTreeMap<Key, Vec<usize>> = BTreeMap::new();

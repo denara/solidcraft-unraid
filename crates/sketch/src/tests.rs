@@ -840,10 +840,7 @@ fn long_connected_chain_solves() {
 fn exact_profiles_for_high_degree_and_cut_free_form_curves() {
     use solidcraft_geom::Seg2;
     let exact_loop = |p: &Profile| p.region.outer.segs.iter().all(|s| !matches!(s, Seg2::Line { .. }) || s.length() > 1.0);
-    let closed = |p: &Profile| {
-        let s = &p.region.outer.segs;
-        s.iter().zip(s.iter().cycle().skip(1)).all(|(a, b)| a.end().dist(b.start()) < 1e-9)
-    };
+    let closed = |p: &Profile| p.region.outer.joints().all(|(a, b)| a.end().dist(b.start()) < 1e-9);
     // Degree 5 over six points, closed by a line.
     let mut sk = Sketch::default();
     let ids: Vec<usize> = [v(0.0, 0.0), v(4.0, 10.0), v(10.0, 12.0), v(16.0, 12.0), v(22.0, 10.0), v(26.0, 0.0)]

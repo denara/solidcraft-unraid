@@ -16,7 +16,7 @@ new uses of it anywhere else. Public docs/web/Flatpak deployments use project Pa
 
 ## Container prototype baseline
 The first Unraid prototype used upstream commit `af536a7`. The current validated
-container baseline is `5122b98af3fc5fe287c2e6d4beee8587a503244b`.
+container baseline is `e9b1a077d7e33420791791c651f2e293962a2da1`.
 Keep later upstream CAD/UI feature updates separate from this deployment addition;
 advance the baseline only as a separate, validated update. See [update records](docs/unraid-updates.md).
 
@@ -46,7 +46,15 @@ file/origin, persistence and web checks pass. Keep `latest` on a passing build a
 commit-specific tags. Verify anonymous pulls before claiming public availability.
 This is container packaging, not an upstream application release or an Unraid deployment.
 
-The container's `/workspace` dashboard is read-only and independent of browser CAD.
+The container's `/workspace` dashboard is independent of browser CAD. Its only write
+action is explicitly confirmed deletion of individual files or real folders. Preserve
+cookie/CSRF/Origin checks, owner-bound expiring confirmations, strong revision checks,
+active-project protection and the shared HTTP/MCP file gate. Never delete by virtual
+group or delete test data outside an isolated disposable volume. Folder ZIPs stream
+server-side with bounded buffers, ZIP64, capped manifests and path leases that reject
+conflicting writes without holding the global gate for the download. Aborted, changed
+or unauthorized streams must fail and release all resources. Run
+`packaging/unraid/workspace-actions-test.ps1` when changing these paths.
 Preserve its cookie-only browser authentication, Bearer-only MCP/files authentication,
 authoritative per-session metadata and shared HTTP/MCP file-revision checks. When an
 upstream update adds file-writing commands, review their entire output set against
@@ -118,6 +126,8 @@ People trust SolidCraft with their designs; a crash loses their work. **This out
   `crashes replay <id>` (or the `diagnostics.crash_reports` command / MCP `crash_reports` tool).
 - **Prove it:** every crash fix lands with a regression test (see `hostile_params_never_panic`); a
   crash report's `design.solidcraft` + `replay.json` is the test's starting point.
+- **Where tests go:** a regression test goes into the existing test file for its area (booleans, blends,
+  shell, sweep, STEP, naming…), never a new file named after the bug (#3226).
 - Every production crate root carries
   `#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]`.
 
@@ -206,10 +216,10 @@ People trust SolidCraft with their designs; a crash loses their work. **This out
 - Before working on issue #N, check nobody has it: `gh pr list -R bherbruck/solidcraft --state open --search "#N"`.
 - If none, branch from the latest `origin/main`, `git commit --allow-empty -m "claim: #N"`, push,
   and open a **draft** PR titled `<summary> (#N)` right away. **The lowest-numbered open PR for an
-  issue wins**; if yours lost, close it. A comment or file edit alone does not replace the draft PR.
-- After opening the draft PR, comment `/claim` on the issue so the bot records the claimant and
-  adds the `in progress` label. **Do both:** the draft PR establishes ownership and `/claim` marks
-  the issue as taken. Reference `#N` in the PR so the bot can find it.
+  issue wins**; if yours lost, close it. Opening the PR is the claim: the bot assigns you and
+  labels the issue `in progress` (or says on your PR who holds it). Reference `#N` in the PR title
+  so the bot can find it. Don't claim by editing files; comment `/claim` on the issue only to stake
+  a claim before you have a branch.
 - Push work in progress at least daily. A draft with no pushes for 72 hours may be taken over:
   comment on it first, then open your own claim (you may start from its branch).
   This takeover policy is separate from the bot's automatic cleanup deadlines in CONTRIBUTING.md.

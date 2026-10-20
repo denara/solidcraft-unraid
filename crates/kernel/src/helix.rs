@@ -1,11 +1,11 @@
 //! Helical sweeps (coils, springs) and lofts to a point (pyramids, cones).
 
 use mt::builder;
-use solidcraft_geom::{Loop2, Mesh, Plane, Region2, Seg2, Vec2, Vec3};
+use solidcraft_geom::{Grid, Loop2, Mesh, Plane, Region2, Seg2, Vec2, Vec3};
 use truck_modeling as mt;
 
 use crate::body::{Body, Solid, p3};
-use crate::build::{cap_and_close, uniform_wire};
+use crate::build::{NetFit, cap_and_close, interpolate_net, uniform_wire};
 use crate::numbered::NumberedLoop;
 use crate::record::{self, Side};
 use crate::{KernelError, Result, guard};
@@ -124,33 +124,13 @@ fn smooth_helix(plane: &Plane, profile: &NumberedLoop, o: Vec3, k: Vec3, pitch: 
         o + rot(w - o, k, a) + k * (pitch * a / std::f64::consts::TAU)
     };
     let fail = |w: &str| KernelError::Failed(format!("smooth helix: {w}"));
-    // Per segment: the station curves (control points along v) and the surface net.
+    // Per segment: the wall surface through its samples at every station.
     let mut faces_data = Vec::with_capacity(nseg);
     for s in &lp.segs {
-        let mut station_curves = Vec::with_capacity(n + 1);
-        for i in 0..=n {
-            let pts: Vec<Vec3> = (0..SEG_SAMPLES).map(|j| at(i, s.point_at(j as f64 / (SEG_SAMPLES - 1) as f64))).collect();
-            station_curves.push(crate::build::interpolate_cubic(&pts).ok_or_else(|| fail("profile curve"))?);
-        }
-        let kv = station_curves.first().map(|c| c.knot_vec().clone()).ok_or_else(|| fail("no stations"))?;
-        // Along the helix: each control-point column interpolated across the stations.
-        let mut columns = Vec::with_capacity(SEG_SAMPLES);
-        for j in 0..SEG_SAMPLES {
-            let pts: Vec<Vec3> = station_curves
-                .iter()
-                .map(|c| {
-                    let p = c.control_point(j);
-                    Vec3::new(p.x, p.y, p.z)
-                })
-                .collect();
-            columns.push(crate::build::interpolate_cubic(&pts).ok_or_else(|| fail("helix curve"))?);
-        }
-        let ku = columns.first().map(|c| c.knot_vec().clone()).ok_or_else(|| fail("no columns"))?;
-        let net: Vec<Vec<mt::Point3>> = (0..=n).map(|m| columns.iter().map(|c| *c.control_point(m)).collect()).collect();
-        let surf = mt::BSplineSurface::try_new((ku, kv), net).map_err(|e| fail(&e.to_string()))?;
-        let (Some(first), Some(last)) = (station_curves.first().cloned(), station_curves.last().cloned()) else { return Err(fail("stations")) };
-        let seam = columns.first().cloned().ok_or_else(|| fail("seam"))?;
-        faces_data.push((first, last, seam, surf));
+        // u along the helix (the stations), v along the profile segment.
+        let samples =
+            Grid::from_fn([n + 1, SEG_SAMPLES], |i, j| at(i, s.point_at(j as f64 / (SEG_SAMPLES - 1) as f64))).ok_or_else(|| fail("samples"))?;
+        faces_data.push(interpolate_net(&samples).ok_or_else(|| fail("wall surface"))?);
     }
     guard("smooth helix", || {
         let start: Vec<mt::Vertex> = lp.segs.iter().map(|s| builder::vertex(p3(at(0, s.start())))).collect();
@@ -158,7 +138,7 @@ fn smooth_helix(plane: &Plane, profile: &NumberedLoop, o: Vec3, k: Vec3, pitch: 
         let mut e0 = Vec::with_capacity(nseg);
         let mut e1 = Vec::with_capacity(nseg);
         let mut seams = Vec::with_capacity(nseg);
-        for (j, (c0, c1, seam, _)) in faces_data.iter().enumerate() {
+        for (j, NetFit { u_ends: [c0, c1], v_ends: [seam, _], .. }) in faces_data.iter().enumerate() {
             let (Some(a0), Some(b0), Some(a1), Some(b1)) = (start.get(j), start.get((j + 1) % nseg), end.get(j), end.get((j + 1) % nseg)) else {
                 return Err(fail("vertices"));
             };
@@ -167,7 +147,7 @@ fn smooth_helix(plane: &Plane, profile: &NumberedLoop, o: Vec3, k: Vec3, pitch: 
             seams.push(mt::Edge::try_new(a0, a1, mt::Curve::BSplineCurve(seam.clone())).map_err(|e| fail(&e.to_string()))?);
         }
         let mut walls = Vec::with_capacity(nseg);
-        for (j, (_, _, _, surf)) in faces_data.iter().enumerate() {
+        for (j, NetFit { surface: surf, .. }) in faces_data.iter().enumerate() {
             let (Some(a), Some(b), Some(sa), Some(sb)) = (e0.get(j), e1.get(j), seams.get(j), seams.get((j + 1) % nseg)) else {
                 return Err(fail("edges"));
             };

@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use solidcraft_geom::Vec3;
+use solidcraft_geom::{Ring, Vec3};
 use truck_modeling::{self as mt, builder};
 
 use crate::body::{Solid, from_p3};
@@ -51,15 +51,7 @@ fn samples(e: &mt::Edge) -> Vec<Vec3> {
 }
 
 fn loop_area(edges: &[mt::Edge], n: Vec3) -> f64 {
-    let pts: Vec<Vec3> = edges.iter().flat_map(samples).collect();
-    let k = pts.len();
-    let mut s = Vec3::ZERO;
-    for i in 0..k {
-        if let (Some(a), Some(b)) = (pts.get(i), pts.get((i + 1) % k)) {
-            s += a.cross(*b);
-        }
-    }
-    s.dot(n) * 0.5
+    edges.iter().flat_map(samples).collect::<Ring<Vec3>>().area_vector().dot(n)
 }
 
 fn inside(p: Vec3, edges: &[mt::Edge], n: Vec3) -> bool {
@@ -680,7 +672,8 @@ mod tests {
             .map(|k| builder::vertex(mt::Point3::new(k as f64, 0.0, 0.0)))
             .chain([builder::vertex(mt::Point3::new(n as f64, 3.0, 0.0)), builder::vertex(mt::Point3::new(0.0, 3.0, 0.0))])
             .collect();
-        let edges: Vec<mt::Edge> = pts.iter().zip(pts.iter().cycle().skip(1)).map(|(a, b)| builder::line(a, b)).collect();
+        let pts: solidcraft_geom::Ring<mt::Vertex> = pts.into();
+        let edges: Vec<mt::Edge> = pts.edges().map(|(a, b)| builder::line(a, b)).collect();
         let face = builder::try_attach_plane(&[mt::Wire::from(edges)]).expect("a plane");
         builder::tsweep(&face, mt::Vector3::new(0.0, 0.0, 2.0))
     }

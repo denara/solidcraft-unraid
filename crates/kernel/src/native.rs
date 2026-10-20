@@ -1,5 +1,5 @@
 //! SolidCraft native, versioned binary geometry. No STEP conversion or display meshes.
-//! A cache remains provisional until the document is rebuilt; hashes are not trust.
+//! Exact: a decoded body is the encoded one, number for number, for the same producer.
 use crate::{Body, KernelError, Result, guard};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value};
@@ -11,23 +11,38 @@ mod metadata;
 mod preview;
 pub use preview::native_preview_mesh;
 
-// 01/02 were development-only prototypes; independent metadata records start at 03.
-const MAGIC: &[u8; 8] = b"SCBREP03";
-const MAX_BYTES: usize = 64 << 20;
-const MAX_ITEMS: usize = 100_000;
+// 01/02 were development-only prototypes; independent metadata records start at 03; 04 stores
+// procedural intersections and placed revolutions exactly, and the measured runtime values.
+const MAGIC: &[u8; 8] = b"SCBREP04";
+// A body's own limits. A design's cache holds many bodies within the container's budgets, and
+// decoding is linear in the bytes, so one large part (an imported casting) fits.
+const MAX_BYTES: usize = 256 << 20;
+const MAX_ITEMS: usize = 1_000_000;
+const MAX_VALUES: usize = 20_000_000;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SavedBody {
     solid: solidcraft_geom::brep::Brep,
     metadata: solidcraft_geom::brep::envelope::Metadata,
+    runtime: Runtime,
+}
+
+/// What a body measured about itself that later operations read: kept so a decoded body works
+/// to the same tolerances as the one encoded, without measuring again.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Runtime {
+    /// [`Body::size`] as stored (0: not measured).
+    size: f64,
+    /// The orientation mesh's missing-face count at its tolerance.
+    coarse_missing: Option<(f64, u64)>,
 }
 fn invalid(detail: impl std::fmt::Display) -> KernelError {
     KernelError::Invalid(format!("native B-rep: {detail}"))
 }
 
-/// Explicit topology, spatial geometry, construction certificates and history.
-/// Procedural intersections use bounded fitting for provisional cache display.
+/// Explicit topology, spatial geometry, construction certificates and history, exactly.
 /// Failure is a cache miss at the IO boundary, never a failed document save.
 pub fn encode_native_body(body: &Body) -> Result<Vec<u8>> {
     guard("encode native B-rep", || {
@@ -51,12 +66,13 @@ pub fn encode_native_body(body: &Body) -> Result<Vec<u8>> {
         if body.mesh.is_some() {
             return Err(invalid("mesh bodies are source blobs, not B-rep"));
         }
-        let saved = SavedBody { solid: adapter::encode(&body.solid)?, metadata: metadata::encode(body)? };
+        let runtime = Runtime { size: body.size, coarse_missing: body.coarse_missing.map(|(tol, n)| (tol, n as u64)) };
+        let saved = SavedBody { solid: adapter::encode(&body.solid)?, metadata: metadata::encode(body)?, runtime };
         // Structural validation does not invoke another geometric reconstruction.
         validate_topology(&saved)?;
         let value = serde_json::to_value(saved).map_err(invalid)?;
         validate_value(&value, 0)?;
-        if value_nodes(&value) > 2_000_000 {
+        if value_nodes(&value) > MAX_VALUES {
             return Err(invalid("value budget"));
         }
         let mut out = MAGIC.to_vec();
@@ -66,14 +82,14 @@ pub fn encode_native_body(body: &Body) -> Result<Vec<u8>> {
 }
 
 /// Decode bounded untrusted data. Validate indices before topology extraction.
-/// Callers must not treat the decoded body as authoritative editing geometry.
+/// Only a caller that has checked who produced the data may treat it as evaluated geometry.
 pub fn decode_native_body(bytes: &[u8]) -> Result<Body> {
     if bytes.len() > MAX_BYTES || bytes.get(..8) != Some(MAGIC.as_slice()) {
         return Err(invalid("version or size"));
     }
     guard("decode native B-rep", || {
         let mut input = bytes.get(8..).ok_or_else(|| invalid("header"))?;
-        let mut remaining = 2_000_000usize;
+        let mut remaining = MAX_VALUES;
         let value = binary::read(&mut input, 0, &mut remaining)?;
         if !input.is_empty() {
             return Err(invalid("trailing data"));
@@ -82,11 +98,15 @@ pub fn decode_native_body(bytes: &[u8]) -> Result<Body> {
         let saved: SavedBody = serde_json::from_value(value).map_err(invalid)?;
         validate_topology(&saved)?;
         let solid = adapter::decode(saved.solid)?;
+        let Runtime { size, coarse_missing } = saved.runtime;
+        if !(size.is_finite() && size >= 0.0) || coarse_missing.is_some_and(|(tol, n)| !tol.is_finite() || n > MAX_ITEMS as u64) {
+            return Err(invalid("runtime values"));
+        }
         let mut body = Body {
             solid: Arc::new(solid),
-            size: 0.0,
+            size,
             volume: Some(std::sync::Arc::new(std::sync::Mutex::new(None))),
-            coarse_missing: None,
+            coarse_missing: coarse_missing.map(|(tol, n)| (tol, n as usize)),
             mesh: None,
             color: None,
             paint: None,
@@ -94,6 +114,7 @@ pub fn decode_native_body(bytes: &[u8]) -> Result<Body> {
             face_sources: None,
             history: None,
             display_of: None,
+            meshes: None,
             regularization_protected: false,
         };
         metadata::apply(&mut body, saved.metadata)?;
@@ -232,7 +253,7 @@ mod tests {
             .iter()
             .map(|body| {
                 let bytes = encode_native_body(body).unwrap();
-                assert_eq!(&bytes[..8], b"SCBREP03");
+                assert_eq!(&bytes[..8], b"SCBREP04");
                 let mut raw = &bytes[8..];
                 let value = binary::read(&mut raw, 0, &mut 2_000_000).unwrap();
                 assert!(raw.is_empty());
@@ -240,7 +261,7 @@ mod tests {
             })
             .collect();
         let actual = serde_json::json!(records);
-        let expected: Value = serde_json::from_str(include_str!("native/fixtures/box-fillet-v3.json")).unwrap();
+        let expected: Value = serde_json::from_str(include_str!("native/fixtures/box-fillet-v4.json")).unwrap();
         compare_wire(&expected, &actual);
     }
 

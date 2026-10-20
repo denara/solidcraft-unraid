@@ -36,7 +36,8 @@ fn scene(s: &Session) -> Option<(Scene, Camera)> {
         let color = s.doc.body_color(body).map_or(crate::view::colors::BODY, |[r, g, b]| Rgb(channel(r), channel(g), channel(b)));
         let face_colors =
             s.doc.face_colors(body).into_iter().map(|(face, look)| (face as u32, Rgb(look.color[0], look.color[1], look.color[2]))).collect();
-        scene.meshes.push(SceneMesh { mesh, color, face_colors });
+        let opacity = s.doc.model_body_opacity(body) as f32;
+        scene.meshes.push(SceneMesh { mesh, color, face_colors, opacity });
     }
     if bounds.is_empty() {
         return None;

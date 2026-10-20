@@ -50,17 +50,23 @@ pub fn delete_selection(app: &mut SolveApp) {
 }
 
 /// Delete `params` (as `selection.delete` takes them): at once, or after a confirmation when
-/// other features go with it or would fail.
+/// other features go with it or would fail. The dry run that finds out evaluates the history
+/// after what is deleted, so it may compute off the window thread (#2678).
 pub fn request(app: &mut SolveApp, params: Value) {
     if is_empty(&params) {
         return;
     }
     let mut dry = params.clone();
     dry["dry_run"] = json!(true);
-    let report = match app.session.execute("selection.delete", &dry) {
+    app.check_delete(vec![("selection.delete".to_string(), dry)], crate::deferred::AfterCheck::Selection(params));
+}
+
+/// [`request`] once its dry run's report is in.
+pub(crate) fn checked(app: &mut SolveApp, params: Value, report: Result<Value, String>) {
+    let report = match report {
         Ok(r) => r,
         Err(e) => {
-            app.set_status(e.to_string().replace("selection.delete: ", ""), true);
+            app.set_status(e.replace("selection.delete: ", ""), true);
             return;
         }
     };

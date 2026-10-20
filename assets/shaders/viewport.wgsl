@@ -356,10 +356,14 @@ fn vs_line(@builtin(vertex_index) vi: u32, @location(0) a: vec3<f32>, @location(
     let t = ts[vi];
     let s = ss[vi];
     let base = select(ca, cb, t > 0.5);
-    let off = nrm * s * w * 0.5 + dir * (t * 2.0 - 1.0) * w * 0.5;
+    // A line thinner than a pixel is drawn a pixel wide, faded by the width it lacks: a narrower
+    // quad covers no pixel centre when it falls between two rows, so without multisampling thin
+    // lines (the grid's) came and went as the view zoomed (#2823).
+    let wd = max(w, 1.0);
+    let off = nrm * s * wd * 0.5 + dir * (t * 2.0 - 1.0) * wd * 0.5;
     var o: LOut;
     o.pos = vec4<f32>(base.xy + off / half * base.w, base.z, base.w);
-    o.c = c;
+    o.c = vec4<f32>(c.rgb, c.a * (w / wd));
     o.wp = select(pa, pb, t > 0.5);
     return o;
 }

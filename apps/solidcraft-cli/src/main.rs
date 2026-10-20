@@ -4,9 +4,10 @@
 //! solidcraft-cli run <script.json|design.solidcraft|part.step|mesh.3mf> [--in design|part.step|mesh.3mf] [--out FILE]... [--save FILE] [--quiet] [--results] [--timings] [--profile] [--json-out FILE] [--allow-errors]
 //! solidcraft-cli eval <script.json|design.solidcraft|part.step> [--json-out FILE] (alias: inspect) measurements as JSON
 //! solidcraft-cli script <design.solidcraft> [--out script.json]     the design's history as a command script
-//! solidcraft-cli bench-open <design.solidcraft | part.step> [--parse-only] [--display LEVEL [--edit NAME EXPR]] loading timings as JSON lines
+//! solidcraft-cli bench-open <design.solidcraft | part.step> [--parse-only] [--save OUT.solidcraft] [--display LEVEL [--edit NAME EXPR]] loading timings as JSON lines
 //! solidcraft-cli bench-agent [--scale F] [--save F] [--script-out F] a ~1,300-body design built command by command, timed
 //! solidcraft-cli snapshot <script|design> [--in design|part.step] --out shot.png [--width W] [--height H] [--view iso|front|top|…|NAME | --camera JSON] [--no-grid] [--no-axes]
+//!                                                             [--body NAME:opacity=0.3,color=#rrggbb]... [--tool NAME]... [--section z=27]
 //! solidcraft-cli exec <command> [json-params]                 run one command on an empty design
 //! solidcraft-cli commands                                     the command registry as JSON
 //! solidcraft-cli recipe <recipe.json>                         translate an oracle recipe to a script
@@ -23,6 +24,7 @@ mod bench_agent;
 mod crashes;
 mod fuzz;
 mod oracle;
+mod preview;
 mod recipe;
 mod render;
 mod spatial;
@@ -47,14 +49,21 @@ const USAGE: &str = "usage:
        as plain UTF-8: a shell's > can re-encode it, e.g. Windows PowerShell adds a byte-order mark)
   solidcraft-cli script <design.solidcraft|script.json> [--out script.json]
       (the design's history as a command script that eval and run replay)
-  solidcraft-cli bench-open <design.solidcraft | part.step> [--parse-only] [--display LEVEL [--edit NAME EXPR]]
+  solidcraft-cli bench-open <design.solidcraft | part.step> [--parse-only] [--save OUT.solidcraft] [--display LEVEL [--edit NAME EXPR]]
   solidcraft-cli bench-agent [--scale F] [--save design.solidcraft] [--script-out script.json]
   solidcraft-cli snapshot <script|design> [--in design.solidcraft|part.step] --out shot.png [--width W] [--height H] [--view NAME | --camera JSON] [--no-grid] [--no-axes]
+      [--body NAME:opacity=0.3,color=#rrggbb]... [--tool NAME]... [--section z=27]
   solidcraft-cli snapshot --in <design.solidcraft|part.step> --out shot.png ...
       (as with run, --in starts from a design and the script runs on top of it; an option snapshot doesn't take is an error;
        --view: iso, front, back, top, bottom, left, right, or the name of a view saved in the design with view.save;
        --camera: {target: [x,y,z], yaw, pitch, distance, fov?} in mm and radians, as the MCP screenshot takes it (docs/mcp.md);
-       --no-grid and --no-axes leave the ground grid (on Z 0) and the origin's axes out of the picture)
+       --no-grid and --no-axes leave the ground grid (on Z 0) and the origin's axes out of the picture;
+       --body: how one body is drawn, as appearance.assign takes it: opacity 0-1 (below 1 is see-through, so what is inside
+         it shows) and color #rrggbb, either or both, once per body;
+       --tool: draw this body solid in the tool colour and every other body see-through, so a cut's or a join's tool body
+         is visible inside the material it meets; a later --body overrides it;
+       --section: cut the model as inspect.section does, so the inside shows: z=27 (the plane through that world
+         coordinate, keeping the smaller side), add ,flip to keep the other side, or XY, XZ, YZ, or its own JSON)
   solidcraft-cli render <script|design> --out image.png [--setup NAME] [--width W] [--height H] [--transparent] [--overwrite] [--timeout SECONDS]
   solidcraft-cli exec <command> [json-params]
   solidcraft-cli commands
@@ -405,7 +414,12 @@ fn install_renderer() {
 
 fn cmd_snapshot(args: &[String]) -> Result<(), String> {
     install_renderer();
-    known_flags("snapshot", args, &["--in", "--out", "--width", "--height", "--view", "--camera"], &["--no-grid", "--no-axes"])?;
+    known_flags(
+        "snapshot",
+        args,
+        &["--in", "--out", "--width", "--height", "--view", "--camera", "--body", "--tool", "--section"],
+        &["--no-grid", "--no-axes"],
+    )?;
     if positional(args).is_none() && flag(args, "--in").is_none() {
         return Err(USAGE.to_string());
     }
@@ -416,6 +430,9 @@ fn cmd_snapshot(args: &[String]) -> Result<(), String> {
     };
     let (w, h) = (size("--width", 1280)?, size("--height", 800)?);
     let mut s = open(flag(args, "--in"), positional(args))?;
+    // How the bodies are drawn and where the model is cut, through the commands the app's
+    // Appearance dialog and Section Analysis run (`preview`).
+    preview::apply(&mut s, &flags(args, "--body"), &flags(args, "--tool"), flag(args, "--section"))?;
     // The camera choices of the MCP `screenshot`, through the same command (`view.apply`): a
     // standard view, a view saved in the design, or an explicit camera. A script that applies a
     // view itself sets the camera too; without any, the iso view framing the model.
@@ -632,14 +649,53 @@ pub(crate) fn cmd_bench_open(args: &[String]) -> Result<(), String> {
     }
     let t = std::time::Instant::now();
     let st = s.world_state();
+    let place_ms = t.elapsed().as_secs_f64() * 1000.0;
     // As the desktop app prepares a design it opened.
     st.warm_meshes(|| true);
     let triangles: usize = st.bodies.iter().map(|b| b.mesh().triangles.len()).sum();
-    println!("{}", json!({"step": "mesh", "ms": t.elapsed().as_secs_f64() * 1000.0, "bodies": st.bodies.len(), "triangles": triangles}));
+    println!(
+        "{}",
+        json!({"step": "mesh", "ms": t.elapsed().as_secs_f64() * 1000.0, "place_ms": place_ms, "bodies": st.bodies.len(), "triangles": triangles})
+    );
+    let flag = |name: &str| args.iter().position(|a| a == name);
+    // `--save PATH`: save the opened design without its model cache (to PATH.plain.solidcraft) and
+    // as the app does, with it, then read the cache back.
+    let s = match flag("--save").and_then(|i| args.get(i + 1)) {
+        Some(out) => {
+            let mut s = s;
+            // Without the cache first, for comparison.
+            let plain = format!("{out}.plain.solidcraft");
+            let t = std::time::Instant::now();
+            s.execute("file.save_as", &json!({"path": plain, "cache": false})).map_err(|e| e.to_string())?;
+            let plain_ms = t.elapsed().as_secs_f64() * 1000.0;
+            let plain_bytes = std::fs::metadata(&plain).map(|m| m.len()).unwrap_or(0);
+            let t = std::time::Instant::now();
+            s.execute("file.save_as", &json!({"path": out})).map_err(|e| e.to_string())?;
+            let save_ms = t.elapsed().as_secs_f64() * 1000.0;
+            let bytes = std::fs::read(out).map_err(|e| format!("{out}: {e}"))?;
+            let t = std::time::Instant::now();
+            let cached = solidcraft_engine::io::read_design_geometry(&bytes).map(|m| m.bodies.len());
+            let read_ms = t.elapsed().as_secs_f64() * 1000.0;
+            // Why bodies could not be kept exactly, when the cache was left out.
+            let mut refused = std::collections::BTreeMap::<String, usize>::new();
+            if cached.is_none() {
+                for b in &s.model.state().bodies {
+                    if let Err(e) = solidcraft_engine::kernel::encode_native_body(&b.body) {
+                        *refused.entry(e.to_string()).or_default() += 1;
+                    }
+                }
+            }
+            println!(
+                "{}",
+                json!({"step": "save", "ms": save_ms, "bytes": bytes.len(), "plain_ms": plain_ms, "plain_bytes": plain_bytes, "cached_bodies": cached, "cache_read_ms": read_ms, "refused": refused})
+            );
+            s
+        }
+        None => s,
+    };
     // `--display LEVEL`: the display plans the viewport draws at that display quality, made as
     // the GPU viewport makes them; `--edit NAME EXPR` then changes a parameter and times the
     // evaluation and the plans of the bodies it changed.
-    let flag = |name: &str| args.iter().position(|a| a == name);
     let Some(level) = flag("--display").and_then(|i| args.get(i + 1)) else { return Ok(()) };
     let q = solidcraft_engine::doc::display_quality::DisplayQuality::parse(level).ok_or("--display: coarse, normal, fine or ultra")?;
     let plans = |st: &solidcraft_engine::doc::ModelState| {

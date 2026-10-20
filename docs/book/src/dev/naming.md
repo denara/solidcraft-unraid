@@ -98,6 +98,29 @@ surface of a plane, cylinder, cone, sphere or torus), which the feature stores l
 with the name it then gets as before. Nothing new is stored in the design. `model.faces` lists
 that point for every face.
 
+### Profiles picked by their curves
+
+A profile picked by a point or an index is stored by the curve ids of its outer loop
+(`ProfileSel::Curves`), so it follows dimension and parameter edits exactly. Editing the outline
+itself can leave no profile bounded by exactly those curves; the feature then falls back to the
+best match and warns, instead of failing and taking its body and everything after it along
+(`profile_refs::fallback_loop`):
+
+1. all the stored curves are still there and still close a loop on their own, but another curve
+   now cuts the region: the pieces inside that loop that touch it, which together are the region
+   that was picked (islands inside stay holes);
+2. otherwise the profile whose outer loop shares the most of the stored curves, at least half of
+   them (a side deleted and drawn again, a notch trimmed in); a tie goes to the one with the
+   fewest curves the loop did not have, and a tie left after that is an error, as is a loop
+   that matches nothing.
+
+Loops of offset curves and legacy graph-span multisets keep their exact meaning. Commands still
+check a pick with the exact rule, so a curve list that names no profile is refused when given.
+A sketch on such an extrude's cap falls back the same way: its certificate names the loop, and
+the cap of the same solid extrude at the same end, from the same sketch and on the same body,
+that shares the most (at least half) of its curves stands for it, unless the exact cap is still
+on another body (`Document::anchored_face_indices`).
+
 A hole placed by a position on a face is the exception to "the point nearest the reference's
 point": its position is a place, not a pick. The hole follows its face along its own axis, so it
 moves with the face when the face moves, and when the face no longer reaches the position it stays

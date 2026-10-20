@@ -3,7 +3,15 @@
 //! use SolidCraft's own `.app` to see the cap move.
 
 fn main() {
-    if let Err(error) = solidcraft_3dx_client::start("SolidCraft dump", |event| println!("{event:?}")) {
+    if let Err(error) = solidcraft_3dx_client::start(
+        "SolidCraft dump",
+        |event| println!("{event:?}"),
+        |connected| {
+            if let Err(error) = connected {
+                eprintln!("{error}");
+            }
+        },
+    ) {
         eprintln!("{error}");
         return;
     }

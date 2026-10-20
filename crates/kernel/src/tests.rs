@@ -490,6 +490,43 @@ fn tapered_extrude_of_lines_and_arcs() {
     assert!(e.to_string().contains("arc meets another edge at a corner"), "{e}");
 }
 
+/// A circle with a lobe on each side (four arcs of three circles, meeting at corners: the outline of
+/// a scale pocket with finger notches) tapered inward: every circle shrinks by d = z · tan 45°,
+/// and the corners go to where the shrunk circles cross, so each section is the union of the
+/// shrunk circles. Before, the arcs kept their end angles and the sides missed the corners (#2810).
+#[test]
+fn tapered_extrude_of_arcs_meeting_at_corners() {
+    let (r0, w0, c, h, a) = (49.2, 16.2, 41.0, 2.5, 45f64.to_radians());
+    let corner = |r: f64, w: f64| {
+        let x = (r * r - w * w + c * c) / (2.0 * c);
+        (x, (r * r - x * x).sqrt())
+    };
+    let (x, y) = corner(r0, w0);
+    let at = |cx: f64, px: f64, py: f64| (py).atan2(px - cx);
+    let lobed = Loop2 {
+        segs: vec![
+            Seg2::Arc { center: Vec2::ZERO, radius: r0, start: at(0.0, x, y), sweep: at(0.0, -x, y) - at(0.0, x, y) },
+            Seg2::Arc { center: Vec2::new(-c, 0.0), radius: w0, start: at(-c, -x, y), sweep: 2.0 * PI - 2.0 * at(-c, -x, y) },
+            Seg2::Arc { center: Vec2::ZERO, radius: r0, start: at(0.0, -x, -y), sweep: at(0.0, x, -y) - at(0.0, -x, -y) },
+            Seg2::Arc { center: Vec2::new(c, 0.0), radius: w0, start: at(c, x, -y), sweep: 2.0 * at(c, x, y) },
+        ],
+    };
+    let b = extrude_tapered(&Plane::XY, &Region2 { outer: lobed, holes: vec![] }, h, -1.0, -a).unwrap();
+    // Union of the circle and two lobes: the circle plus each lobe less its lens with the circle.
+    let area = |d: f64| {
+        let (r, w) = (r0 - d, w0 - d);
+        let lens = r * r * ((c * c + r * r - w * w) / (2.0 * c * r)).acos() + w * w * ((c * c + w * w - r * r) / (2.0 * c * w)).acos()
+            - 0.5 * ((-c + r + w) * (c + r - w) * (c - r + w) * (c + r + w)).sqrt();
+        PI * r * r + 2.0 * (PI * w * w - lens)
+    };
+    let k = 200;
+    let v: f64 = (0..k).map(|j| area((j as f64 + 0.5) * h / k as f64 * a.tan())).sum::<f64>() * h / k as f64;
+    let m = measure(&b).unwrap();
+    assert!(rel(m.volume, v) < 2e-4, "{} vs {v}", m.volume);
+    assert_eq!(m.merged.faces, 6);
+    assert!(m.bbox.max.z < 1e-6 && m.bbox.min.z > -h - 1e-6, "{:?}", m.bbox);
+}
+
 /// A circle drawn as four conics (the way free curves come, as in text) tapered inward: each
 /// conic's control polygon moves in by d, which for a circle is the exact smaller circle, so
 /// the solid is a cone frustum.
@@ -584,7 +621,7 @@ fn tapered_extrude_swallows_a_short_tip() {
     let meet = |(p0, t0): (Vec2, Vec2), (p1, t1): (Vec2, Vec2)| p0 + t0 * ((p1 - p0).cross(t1) / t0.cross(t1));
     let (low, high, left) = (moved(pts[0], pts[1]), moved(pts[2], pts[3]), moved(pts[3], pts[0]));
     let top = [meet(left, low), meet(low, high), meet(high, left)];
-    let area = |q: &[Vec2]| 0.5 * q.iter().zip(q.iter().cycle().skip(1)).map(|(a, b)| a.cross(*b)).sum::<f64>();
+    let area = |q: &[Vec2]| solidcraft_geom::Ring::from(q.to_vec()).signed_area();
     // Halfway up, each side edge's midpoint (the two tip corners both run to the top's tip).
     let mid = [pts[0].lerp(top[0], 0.5), pts[1].lerp(top[1], 0.5), pts[2].lerp(top[1], 0.5), pts[3].lerp(top[2], 0.5)];
     let v = h / 6.0 * (area(&pts) + 4.0 * area(&mid) + area(&top));
@@ -1977,6 +2014,53 @@ fn fillet_smooth_arc_and_line_loop_keeps_exact_removal() {
 }
 
 #[test]
+fn fillet_rounded_rectangle_with_tiny_end_edges() {
+    // #2498: the 4.29 mm corners leave 0.02 mm straight edges on an 8.6 mm end.
+    let (w, h, r, height) = (26.4, 8.6, 4.29, 8.4);
+    let p = |x, y| Vec2::new(10.0 + x, 10.0 + y);
+    let outline = Loop2 {
+        segs: vec![
+            Seg2::Line { a: p(r, 0.0), b: p(w - r, 0.0) },
+            Seg2::Arc { center: p(w - r, r), radius: r, start: -PI / 2.0, sweep: PI / 2.0 },
+            Seg2::Line { a: p(w, r), b: p(w, h - r) },
+            Seg2::Arc { center: p(w - r, h - r), radius: r, start: 0.0, sweep: PI / 2.0 },
+            Seg2::Line { a: p(w - r, h), b: p(r, h) },
+            Seg2::Arc { center: p(r, h - r), radius: r, start: PI / 2.0, sweep: PI / 2.0 },
+            Seg2::Line { a: p(0.0, h - r), b: p(0.0, r) },
+            Seg2::Arc { center: p(r, r), radius: r, start: PI, sweep: PI / 2.0 },
+        ],
+    };
+    let body = extrude(&Plane::XY, &[Region2 { outer: outline, holes: vec![] }], 0.0, height).unwrap().pop().unwrap();
+    let picks = [
+        Vec3::new(23.2, 10.0, 8.4),
+        Vec3::new(35.14348809129028, 11.25651190870971, 8.4),
+        Vec3::new(11.256511908709715, 11.256511908709712, 8.4),
+        Vec3::new(10.0, 14.3, 8.4),
+        Vec3::new(11.256511908709713, 17.343488091290293, 8.4),
+        Vec3::new(23.2, 18.6, 8.4),
+        Vec3::new(35.14348809129028, 17.34348809129029, 8.4),
+        Vec3::new(36.4, 14.3, 8.4),
+    ];
+    let radius = 2.0;
+    // Pappus: the removed cross-section swept along the straight sides and four quarters.
+    let area = radius * radius * (1.0 - PI / 4.0);
+    let centroid = radius * (10.0 - 3.0 * PI) / (3.0 * (4.0 - PI));
+    let removed = area * (2.0 * (w + h - 4.0 * r) + 2.0 * PI * (r - centroid));
+    let fine = |b: &Body| b.tessellate_with(1e-4, true).unwrap().measure().volume;
+    let initial = fine(&body);
+    // Every rim edge, the tiny end alone (tangent chain), and the opposite selection order.
+    for selection in [picks.to_vec(), vec![picks[3]], picks.into_iter().rev().collect()] {
+        let blended = fillet(&body, &selection, radius).unwrap();
+        assert!(blended.validity().is_empty(), "{:?}", blended.validity());
+        assert_eq!(blended.crossed_face_loops().unwrap(), 0);
+        assert_eq!((blended.face_count(), blended.edge_count(), blended.vertex_count()), (18, 40, 24));
+        let actual = initial - fine(&blended);
+        assert!(rel(actual, removed) < 1e-3, "{actual} vs {removed}");
+    }
+    assert!(fillet(&body, &picks, 9.0).is_err());
+}
+
+#[test]
 fn fillet_sharp_arc_and_arc_loop() {
     use solidcraft_geom::Seg2;
     // The intersection of two radius-10 disks whose centres are 10 mm apart.
@@ -2878,4 +2962,21 @@ fn loft_pairs_the_vertices_of_matching_non_convex_sections() {
     // skewed quad, one twisted face, 0.3 % under), so the bounds leave room for that.
     assert!(rel(m.volume, want) < 5e-3, "{} vs {want}", m.volume);
     assert!(m.centroid.x.abs() < 0.05, "centre of mass x {}", m.centroid.x);
+}
+
+/// Two cylinders crossing at right angles need the kernel's own intersection: with no tries
+/// left the boolean fails at once, a budget inside another uses the outer one's up, and none
+/// lingers after.
+#[test]
+fn an_attempt_budget_stops_the_boolean_and_is_shared_by_nesting() {
+    let a = cylinder(Vec3::new(0.0, 0.0, -10.0), Vec3::Z, 3.0, 20.0).unwrap();
+    let b = cylinder(Vec3::new(-10.0, 0.0, 0.0), Vec3::X, 2.0, 20.0).unwrap();
+    assert!(with_attempt_budget(0, || boolean(&a, &b, BoolOp::Intersect)).is_err());
+    // The inner budget asks for more than the outer has left: it gets what is left.
+    let (inner, after) = with_attempt_budget(1, || {
+        let inner = with_attempt_budget(10, || boolean(&a, &b, BoolOp::Intersect).is_ok());
+        (inner, boolean(&a, &b, BoolOp::Intersect).is_ok())
+    });
+    assert!(inner && !after);
+    assert!(boolean(&a, &b, BoolOp::Intersect).unwrap().is_some());
 }

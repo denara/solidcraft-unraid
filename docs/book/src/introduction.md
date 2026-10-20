@@ -32,5 +32,6 @@ generated from the code on every build.
 
 SolidCraft is licensed MIT OR Apache-2.0. It is independent: behaviour is designed from public
 documentation, general CAD conventions and user feedback, and reference tests use analytic
-values and open-source tools. SolidCraft is not affiliated with Autodesk; Fusion is a trademark
-of Autodesk, Inc.
+values and open-source tools. SolidCraft is not affiliated with Autodesk, Dassault Systèmes,
+PTC or any other CAD vendor; product names such as Fusion, SolidWorks and Onshape are trademarks of
+their respective owners, named only to describe compatibility.

@@ -1,11 +1,11 @@
-# Portable native B-rep, schema 2
+# Native B-rep, schema 3
 
-This is SolidCraft's geometry interchange data model in `solidcraft_geom::brep`.
-It has no modelling-backend dependency. It is the basis for #303's disposable
-native cache; it is not an editable-session snapshot or a STEP replacement for
-external interchange. The container reader, binary codec and kernel adapters are
-separate layers. Warm application saves can emit it as the optional native cache
-described in [the container format](design-container.md#native-evaluated-cache).
+This is SolidCraft's geometry data model in `solidcraft_geom::brep`. It has no
+modelling-backend dependency. It is the body encoding of a design's model cache
+([the container format](design-container.md#model-cache)); it is not a STEP
+replacement for external interchange. The container reader, binary codec and
+kernel adapters are separate layers. The truck adapter writes it exactly: a body
+decoded by the producer that encoded it is that body, number for number.
 
 ## Geometry and topology
 
@@ -38,7 +38,12 @@ Curves are tagged mathematical records:
 - `intersection`: an explicit ordinary 3D polynomial spline (knots and Cartesian
   control points), positive fitting tolerance in millimetres, and optional two
   shell-local face references as hints. No supporting surfaces, leader, backend
-  solver or parameter-search convention is required to evaluate it.
+  solver or parameter-search convention is required to evaluate it. (Read only;
+  schema 3 writers store the intersection itself, below.)
+- `surface_intersection`: the intersection of two surface records, traced from a
+  `leader` (a polyline or spline near it, its knots as the producer holds them) to
+  within `tolerance` mm. The curve is the procedural one, not a fit: a different
+  kernel must trace it again.
 
 Surfaces include planes (origin and independent parameter axes), polynomial and
 rational tensor-product splines, and explicit analytic records. Analytic frames
@@ -51,7 +56,14 @@ store origin and orthonormal x/y axes; z is x cross y. Angular ranges are radian
 - torus: major/minor radii, longitude and meridian ranges;
 - revolution: profile, origin, unit axis and angular range. Rotate the profile
   around that axis using the right-hand rule. There is no persisted affine matrix
-  or backend orientation/parameter-swap flag.
+  or backend orientation/parameter-swap flag. (Read only in schema 3.)
+- placed revolution: a full revolution of a profile about an origin and unit axis,
+  then mapped by a column-major affine `matrix` (non-singular), with the normal
+  reversed unless `forward`. Nothing is baked into the profile.
+
+A `plane_through` record is a plane given by three points: parameter (0, 0) at
+`origin`, (1, 0) at `u_point` and (0, 1) at `v_point`. Writers use it rather than
+the axis form, whose axes would be rounded differences of the points.
 
 Cylinder/cone positions are origin + h*z + r(h)*(cos(u)*x + sin(u)*y).
 Sphere positions are origin + r*(cos(v)*(cos(u)*x + sin(u)*y) + sin(v)*z).
@@ -62,7 +74,7 @@ when its runtime uses a different parameterization.
 
 ## Validation and trust
 
-Schema 2 caps 1,024 shells, 100,000 combined topology/geometry items, geometry
+Schema 3 caps 1,024 shells, 1,000,000 combined topology/geometry items, geometry
 nesting at 16, spline degree at 16 and control points per spline dimension at
 4,096. Numbers must be finite and bounded in magnitude by 1e12. Knot order, active
 spline domain, multiplicities, rectangular grids, positive rational weights,
@@ -84,14 +96,17 @@ floating-point comparisons. A decoded cache remains provisional until authoritat
 re-evaluation finishes. The document and original blobs remain sufficient to reopen
 when a cache, representation, producer or adapter is unsupported.
 
-## Body binary envelope, version 3
+## Body binary envelope, version 4
 
-`SCBREP03` is the eight-byte envelope signature. Geometry schema 2 is nested in
-`solid`; metadata schema 1 is nested in `metadata`. These are separate version
-numbers because each contract can evolve independently. Signatures 01 and 02
-were development prototypes; 02 introduced the explicit geometry schema while
-03 also separates metadata from runtime Rust types. Unsupported versions are
-cache misses, not design-file migration failures.
+`SCBREP04` is the eight-byte envelope signature. Geometry schema 3 is nested in
+`solid`; metadata schema 1 is nested in `metadata`; `runtime` holds what the body
+measured about itself that later operations read (its size, from which kernel
+tolerances follow, and the orientation mesh's missing-face count), so a decoded
+body works to the same tolerances. These are separate version numbers because
+each contract can evolve independently. Signatures 01 and 02 were development
+prototypes; 02 introduced the explicit geometry schema while 03 also separated
+metadata from runtime Rust types and 04 made the encoding exact. Unsupported
+versions are cache misses, not design-file migration failures.
 
 The envelope uses its own explicitly versioned records for color, paint, authored
 boundaries, face-source certificates, operation history and boundary protection.
@@ -99,41 +114,36 @@ Plane, region and segment records are also owned by the wire schema. Exhaustive
 manual adapter conversions separate these from runtime FaceSource, History,
 FaceProv, EdgeProv, Paint, Seg2, Region2 and Plane types. Their serde derives or
 internal refactors cannot silently redefine the saved fields. No truck serde
-record, pointer, tessellation or STEP string is written. Changing field semantics
+struct, pointer, tessellation or STEP string is written. Changing field semantics
 requires a format version change, even if a Rust type keeps its name.
 
 Values use tags: null=0, false=1, true=2, signed integer=3, unsigned integer=4,
 binary64=5, UTF-8 string=6, array=7, object=8. Numbers use eight little-endian
 bytes. Strings and collections use unsigned 32-bit little-endian lengths; object
 keys are length-prefixed UTF-8, emitted lexicographically. Readers reject duplicate
-keys, unknown tags, non-finite numbers and trailing bytes. Limits are 64 MiB,
-2,000,000 values, depth 48, 100,000 entries per collection and 1 MiB per string.
+keys, unknown tags, non-finite numbers and trailing bytes. Limits per body are
+256 MiB, 20,000,000 values, depth 48, 1,000,000 entries per collection and 1 MiB per
+string; a design's cache bounds the total (see the container format).
 
-The truck adapter converts these records into runtime topology only after
-validation. It refuses single-vertex closed edges, standalone polylines,
-unclamped spline domains, non-full angular carrier surfaces and conversions that
-would change plane axes. Circle/ellipse arcs use exact rational quadratic loci;
-the adapter may reparameterize them. Similarity transforms on revolutions are
-baked into their profile, origin and axis (including reflections). Non-similarity
-transforms are refused until an exact independent spline conversion exists.
-Normal flips and backend boundary orientation are converted separately.
+The truck adapter writes every curve and surface as truck holds it: lines,
+B-spline and NURBS coefficients, the three points of a plane, a revolution's
+profile, axis, matrix and orientation, and an intersection's two surfaces, leader
+and tolerance. Decoding builds the same structures without the constructors that
+would round them (normalizing an axis, composing a matrix with the identity), and
+rebuilds each shell's topology as recorded, including closed edges on one vertex
+and seam edges a wire uses twice. On reading it refuses standalone polylines,
+unclamped spline domains and non-full angular carrier surfaces in the portable
+records it does not write. Circle/ellipse arcs use exact rational quadratic loci;
+the adapter may reparameterize them. Normal flips and backend boundary orientation
+are converted separately.
 
-Procedural intersections are exported with a bounded spatial cubic fit: 1e-4 mm
-fitting target, 4,096 evaluations shared across the body, at most 1,023 pieces and
-12 subdivisions per source interval. The target is checked at sampled positions;
-it is not a certified maximum error between samples. Failure to fit within these
-limits refuses the cache. A decoded fitted curve is an ordinary spatial spline;
-re-export may therefore use the `spline` record rather than retain its optional
-intersection annotation. This approximation is suitable only for the provisional
-cache, never authoritative modelling state.
+Hashes prove which document and payload a cache belongs to, not who wrote it: the
+container's key ties a cache to the producer, application build and platform that
+computed it, and the decoder applies the structural and resource checks above to
+every body. A second backend needs its own tested adapter before cross-kernel
+interoperability can be claimed.
 
-Decoded bodies remain provisional; the application must never use an untrusted
-cache as its editable model. Application integration keeps it provisional while
-rebuilding the document and original sources. A second
-backend needs its own tested adapter before cross-kernel interoperability can be
-claimed.
-
-The box-and-fillet golden JSON fixture pins the decoded version-3 envelope,
+The box-and-fillet golden JSON fixture pins the decoded version-4 envelope,
 field names, tags, topology, geometry and metadata. Integer and structural values
 are exact; floating coefficients allow 1e-10 relative/absolute platform rounding.
 The signature is asserted separately. This protects the wire contract against

@@ -185,6 +185,24 @@ impl Document {
         }
         Ok(())
     }
+    /// A face target for messages: its role on its feature where the certificate tells it, else
+    /// its name, and its body (`the top cap of E1 on `Body1``).
+    pub(crate) fn describe_face_target(&self, target: &ConfigFaceTarget) -> String {
+        let feature = self.feature(target.origin_feature).map_or_else(|| format!("F{}", target.origin_feature), |f| f.name.clone());
+        let end = |high: bool| if high { "top" } else { "bottom" };
+        let role = match &target.certificate {
+            Some(super::FaceCertificate::ExtrudeCap { high, .. }) | Some(super::FaceCertificate::CylinderCap { high }) => {
+                format!("the {} cap", end(*high))
+            }
+            Some(super::FaceCertificate::Box { axis, high }) => {
+                format!("the {}{} side", if *high { "+" } else { "-" }, ["x", "y", "z"].get(usize::from(*axis)).copied().unwrap_or("?"))
+            }
+            Some(super::FaceCertificate::ExtrudeSide { curve, .. }) => format!("the side along `{curve}`"),
+            _ => format!("face `{}`", target.name),
+        };
+        format!("{role} of {feature} on `{}`", target.body)
+    }
+
     /// Verify the current named pieces describe one surface, not ambiguous generated roles.
     pub fn configuration_face_indices(&self, body: &crate::ModelBody, target: &ConfigFaceTarget) -> Result<Vec<usize>> {
         self.certify_config_face(target)?;
@@ -248,7 +266,7 @@ impl Document {
                 })
                 .collect();
             if indices.is_empty() {
-                return Err(DocError::Unknown("attached planar face certificate is missing or ambiguous".into()));
+                return Err(DocError::Invalid(format!("{} no longer exists", self.describe_face_target(target))));
             }
             return self.certified_pieces(body, indices, target.origin_feature);
         }

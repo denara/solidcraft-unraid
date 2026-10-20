@@ -288,3 +288,37 @@ fn letting_go_on_a_snap_or_undoing_evaluates_once() {
     assert!(r["constraint"]["error"].is_string(), "{r}");
     assert!(!s.model.is_stale());
 }
+
+#[test]
+fn a_drag_with_the_rest_of_a_selection_moves_it_as_one() {
+    // A vertical line and a 5 mm tail hanging off its top that keeps only its length (#2621).
+    let start = || {
+        let mut s = Session::default();
+        run(&mut s, "sketch.create", json!({"plane": "XY"}));
+        run(&mut s, "sketch.line", json!({"points": [[10, 10], [10, 50], [14, 47]]}));
+        run(&mut s, "sketch.constraint.horizontal_vertical", json!({"line": "l1"}));
+        run(&mut s, "sketch.dimension", json!({"entities": ["l2"], "value": 5}));
+        run(&mut s, "sketch.circle.center", json!({"center": [40, 10], "radius": 3, "id": "c1"}));
+        s
+    };
+    let v = solidcraft_geom::Vec2::new;
+    for live in [false, true] {
+        // Dragged alone, the line leaves the tail's free end where it was as far as it can.
+        let mut s = start();
+        run(&mut s, "sketch.drag", json!({"entity": "l1", "from": [10, 30], "to": [20, 20], "live": live}));
+        assert!(pt(&s, "l2.end").dist(v(24.0, 37.0)) > 1.0, "{:?}", pt(&s, "l2.end"));
+        // Dragged with the tail and the circle, all of it slides by the cursor's move.
+        let mut s = start();
+        let r = run(&mut s, "sketch.drag", json!({"entity": "l1", "with": ["l2", "c1"], "from": [10, 30], "to": [20, 20], "live": live}));
+        assert_eq!((&r["reached"], &r["at"]), (&json!(1.0), &json!([20.0, 20.0])), "{r}");
+        for (p, at) in [("l1.start", v(20.0, 0.0)), ("l1.end", v(20.0, 40.0)), ("l2.end", v(24.0, 37.0)), ("c1.center", v(50.0, 0.0))] {
+            assert!(pt(&s, p).dist(at) < 1e-6, "{p}: {:?}", pt(&s, p));
+        }
+        let sk = s.doc.sketch(s.active_sketch.expect("sketch mode")).expect("the sketch");
+        assert_eq!(sk.radius(sk.curve_index("c1").expect("the circle")), Some(3.0));
+    }
+    let mut s = start();
+    for with in [json!("l2"), json!([7]), json!(["nope"])] {
+        assert!(s.execute("sketch.drag", &json!({"entity": "l1", "with": with, "from": [10, 30], "to": [20, 20]})).is_err(), "{with}");
+    }
+}

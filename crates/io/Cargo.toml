@@ -13,12 +13,15 @@ solidcraft-geom = { workspace = true }
 solidcraft-kernel = { workspace = true }
 solidcraft-doc = { workspace = true }
 thiserror = { workspace = true }
+log = { workspace = true }
 zip = { workspace = true }
 quick-xml = { workspace = true }
 gltf = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+chardetng = { workspace = true }
+encoding_rs = { workspace = true }
 
 # A plain fsync where a network share refuses Apple's full flush (src/safe_write.rs); already in
 # the tree through tempfile.

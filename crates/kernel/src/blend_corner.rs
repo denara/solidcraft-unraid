@@ -791,7 +791,22 @@ fn crease(a: &Sel, b: &Sel, q: Vec3, end: Vec3, size: f64) -> Result<mt::Curve> 
         pts.push(p3(p));
     }
     pts.push(p3(end));
-    crate::splitface::fit(&pts, size)
+    let mut curve = crate::splitface::fit(&pts, size)?;
+    // The last chord tilts away from the cylinders' intersection tangent. At an equal-radius
+    // mitre that tangent continues the sharp third edge; losing it breaks the smooth chain
+    // used to map picks when a later fillet rebuilds these rounds (#2422).
+    let radial = |c: Vec3, d: Vec3| (end - c) - d * (end - c).dot(d);
+    if (a.r - b.r).abs() <= size * 1e-9
+        && let Some(tangent) = radial(ca, da).cross(radial(cb, db)).normalized()
+        && let mt::Curve::BSplineCurve(ref mut spline) = curve
+        && let Some(index) = spline.control_points().len().checked_sub(2)
+        && let Some(control) = spline.control_points_mut().nth(index)
+    {
+        let toward_end = end - crate::body::from_p3(*control);
+        let tangent = if tangent.dot(toward_end) < 0.0 { -tangent } else { tangent };
+        *control = p3(end - tangent * toward_end.len());
+    }
+    Ok(curve)
 }
 
 /// Keep selected sharp edges while consuming a selected mitre that is on the same smooth
@@ -1374,6 +1389,32 @@ mod tests {
         // or turn a mitre-only selection into a different sharp edge.
         assert!(fillet_radii(&rounded, &[(vertical, 1.0), (seam, 2.0)]).is_err());
         assert!(fillet_radii(&rounded, &[(seam, 2.0)]).is_err());
+    }
+
+    #[test]
+    fn issue2422_vertical_after_separate_bottom_rounds() {
+        let origin = Vec3::new(-5.0, 7.2, -2.0);
+        let b = box_solid(origin, origin + Vec3::new(40.0, 80.0, 27.0)).unwrap();
+        let bottom = [Vec3::new(15.0, 7.2, -2.0), Vec3::new(35.0, 47.2, -2.0), Vec3::new(15.0, 87.2, -2.0), Vec3::new(-5.0, 47.2, -2.0)];
+        // The issue has no design attached. Reconstruct its outside corner and bottom mitre,
+        // using the reported picks, with and without the open cavity visible in the screenshot.
+        let picks = [Vec3::new(-5.0, 87.2, 12.5), Vec3::new(-4.283446394180081, 86.48344639418008, -1.5001085324947512)];
+        for base in [b.clone(), crate::shell(&b, &[Vec3::new(15.0, 47.2, 25.0)], 1.0).unwrap()] {
+            let mut rounded = base;
+            for edge in bottom {
+                rounded = fillet(&rounded, &[edge], 2.0).unwrap();
+            }
+            let reference = fillet(&rounded, &picks[..1], 2.0).unwrap();
+            for selection in [picks, [picks[1], picks[0]]] {
+                let result = fillet(&rounded, &selection, 2.0).unwrap();
+                assert_eq!(result.face_count(), reference.face_count());
+                assert_eq!(result.unmeshed_faces(), 0);
+                assert!(result.validity().is_empty(), "{:?}", result.validity());
+                assert!((vol(&result) - vol(&reference)).abs() < 0.05);
+                assert!(!result.contains(Vec3::new(-4.9, 87.1, 10.0)));
+                assert!(result.contains(Vec3::new(-4.1, 86.3, 10.0)));
+            }
+        }
     }
 
     #[test]

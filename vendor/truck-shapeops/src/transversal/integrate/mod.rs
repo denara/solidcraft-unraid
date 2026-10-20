@@ -50,16 +50,31 @@ impl<C, S: ShapeOpsSurface> ShapeOpsCurve<S> for C where C: ParametricCurve3D
 {
 }
 
+/// SolidCraft: the meshed form of a shell that a set operation works on (see [`meshes`]).
+pub type MeshedShell = Shell<Point3, PolylineCurve<Point3>, Option<PolygonMesh>>;
+
+/// SolidCraft: the meshes of `solid`'s shells at `tol`, as a set operation makes them: an
+/// operand used in many operations at one tolerance (a large body cut down to many small
+/// regions) is meshed once and handed to [`and_with_history_meshed`], which is most of what
+/// such an operation costs. They fit any copy of `solid` with its faces in the same order.
+pub fn meshes<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(solid: &Solid<Point3, C, S>, tol: f64) -> Vec<MeshedShell> {
+    solid.boundaries().iter().map(|shell| shell.robust_triangulation(tol)).collect()
+}
+
 fn process_one_pair_of_shells<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
     shell0: &Shell<Point3, C, S>,
+    meshed0: Option<&MeshedShell>,
     shell1: &Shell<Point3, C, S>,
     tol: f64,
     lineage: &mut Lineage<C, S>,
 ) -> Option<[Shell<Point3, C, S>; 2]> {
     nonpositive_tolerance!(tol);
     // SolidCraft: robust meshing (boundaries from earlier operations lie on surfaces only
-    // within tolerance).
-    let poly_shell0 = shell0.robust_triangulation(tol);
+    // within tolerance). A mesh made before is copied: the loops stores cut its edges.
+    let poly_shell0 = match meshed0 {
+        Some(m) if m.len() == shell0.len() => m.mapped(|p| *p, |c| c.clone(), |s| s.clone()),
+        _ => shell0.robust_triangulation(tol),
+    };
     let poly_shell1 = shell1.robust_triangulation(tol);
     let loops_store::LoopsStoreQuadruple {
         geom_loops_store0: loops_store0,
@@ -113,7 +128,7 @@ pub fn and<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
     solid1: &Solid<Point3, C, S>,
     tol: f64,
 ) -> Option<Solid<Point3, C, S>> {
-    boolean(solid0, solid1, tol, |[and, _]| and).map(|(solid, _)| solid)
+    boolean(solid0, None, solid1, tol, |[and, _]| and).map(|(solid, _)| solid)
 }
 
 /// OR operation between two solids.
@@ -122,7 +137,7 @@ pub fn or<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
     solid1: &Solid<Point3, C, S>,
     tol: f64,
 ) -> Option<Solid<Point3, C, S>> {
-    boolean(solid0, solid1, tol, |[_, or]| or).map(|(solid, _)| solid)
+    boolean(solid0, None, solid1, tol, |[_, or]| or).map(|(solid, _)| solid)
 }
 
 /// SolidCraft: AND operation between two solids, with where each face and edge of the result
@@ -134,7 +149,18 @@ pub fn and_with_history<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
     solid1: &Solid<Point3, C, S>,
     tol: f64,
 ) -> Option<(Solid<Point3, C, S>, Option<History>)> {
-    boolean(solid0, solid1, tol, |[and, _]| and)
+    boolean(solid0, None, solid1, tol, |[and, _]| and)
+}
+
+/// SolidCraft: [`and_with_history`] with `solid0` meshed already ([`meshes`] of it, or of a
+/// copy of it, at `tol`): the same result.
+pub fn and_with_history_meshed<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
+    solid0: &Solid<Point3, C, S>,
+    meshed0: &[MeshedShell],
+    solid1: &Solid<Point3, C, S>,
+    tol: f64,
+) -> Option<(Solid<Point3, C, S>, Option<History>)> {
+    boolean(solid0, Some(meshed0), solid1, tol, |[and, _]| and)
 }
 
 /// SolidCraft: OR operation between two solids, with where each face and edge of the result
@@ -146,7 +172,7 @@ pub fn or_with_history<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
     solid1: &Solid<Point3, C, S>,
     tol: f64,
 ) -> Option<(Solid<Point3, C, S>, Option<History>)> {
-    boolean(solid0, solid1, tol, |[_, or]| or)
+    boolean(solid0, None, solid1, tol, |[_, or]| or)
 }
 
 /// Combines the operands' first shells, then folds in their other shells one at a time
@@ -154,6 +180,7 @@ pub fn or_with_history<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
 /// edge of the result was not recorded; the result stands without it.
 fn boolean<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
     solid0: &Solid<Point3, C, S>,
+    meshed0: Option<&[MeshedShell]>,
     solid1: &Solid<Point3, C, S>,
     tol: f64,
     pick: fn([Shell<Point3, C, S>; 2]) -> Shell<Point3, C, S>,
@@ -163,9 +190,10 @@ fn boolean<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
     let mut iter1 = solid1.boundaries().iter();
     let shell0 = iter0.next()?;
     let shell1 = iter1.next()?;
-    let mut shell = pick(crate::tr!(process_one_pair_of_shells(shell0, shell1, tol, &mut lineage), "first shells"));
+    let meshed0 = meshed0.filter(|m| m.len() == solid0.boundaries().len()).and_then(|m| m.first());
+    let mut shell = pick(crate::tr!(process_one_pair_of_shells(shell0, meshed0, shell1, tol, &mut lineage), "first shells"));
     for other in iter0.chain(iter1) {
-        shell = pick(crate::tr!(process_one_pair_of_shells(&shell, other, tol, &mut lineage), "another shell"));
+        shell = pick(crate::tr!(process_one_pair_of_shells(&shell, None, other, tol, &mut lineage), "another shell"));
     }
     let solid = crate::tr!(Solid::try_new(components_in_order(&shell)).ok(), "result solid");
     let history = lineage.history(&solid);

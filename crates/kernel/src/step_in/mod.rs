@@ -32,6 +32,8 @@ const MAX_BODIES: usize = 10_000;
 /// Most product occurrences and mapped representations visited (a shared sub-assembly used
 /// twice at every level would otherwise grow exponentially).
 const MAX_VISITS: usize = 100_000;
+/// Most planned solids converted in one go (bounds the geometry held at once).
+const MAX_WINDOW: usize = 64;
 /// Most representation entries walked while deciding which items are converted exactly once. A
 /// larger file keeps every conversion instead of paying for the walk.
 const MAX_CLOSURE_WORK: usize = 1 << 16;
@@ -239,10 +241,6 @@ fn rigid_inverse(m: &mt::Matrix4) -> mt::Matrix4 {
     m.invert().unwrap_or_else(mt::Matrix4::identity)
 }
 
-/// One converted representation item: the truck solid, whether its shells are closed, the
-/// faces the file had, and the file face of each kernel face (band faces split into two).
-type SolidEntry = (mt::Solid, bool, usize, Vec<u64>);
-
 struct Reader {
     ex: Arc<Exchange>,
     units: HashMap<u64, Units>,
@@ -261,15 +259,18 @@ struct Reader {
     colors: HashMap<u64, [f32; 3]>,
     /// Opacity of styled items with a transparency (1 = opaque).
     opacity: HashMap<u64, f32>,
-    /// Converted items (brep id → entry, or the error). Held behind `Arc` so the conversion is
-    /// handed on without copying wherever the file cannot ask for the item a second time.
-    solids: HashMap<u64, std::result::Result<Arc<SolidEntry>, String>>,
-    /// Items the file converts exactly once (see `index`): keeping their solids would hold a
+    /// Items that gave no part: reported once when the file could not be read, else (the
+    /// body could not be made) at every instance, as the message says.
+    unreadable: HashMap<u64, Option<String>>,
+    /// Items the file converts exactly once (see `index`): keeping their parts would hold a
     /// second copy of the whole import for nothing.
     once: HashSet<u64>,
     /// An item placed more than once: its first instance's display, shared by the later ones
     /// (with the placement that first instance had), so the part is meshed once.
     shown: HashMap<u64, (Arc<crate::body::SharedDisplay>, mt::Matrix4)>,
+    /// An item placed more than once: read and oriented where the file defines it, so each
+    /// later instance is only placed (orienting meshes the whole part).
+    oriented: HashMap<u64, Arc<parallel::Part>>,
     used_items: HashSet<u64>,
     /// Items already instanced for the product being read.
     node_items: HashSet<u64>,
@@ -309,9 +310,10 @@ impl Reader {
             placements: HashMap::new(),
             colors: HashMap::new(),
             opacity: HashMap::new(),
-            solids: HashMap::new(),
+            unreadable: HashMap::new(),
             once: HashSet::new(),
             shown: HashMap::new(),
+            oriented: HashMap::new(),
             used_items: HashSet::new(),
             node_items: HashSet::new(),
             visits: 0,
@@ -594,38 +596,6 @@ impl Reader {
         mapped.map(|rep| self.rep_closure(&[rep])).unwrap_or_default()
     }
 
-    fn item_solid(&mut self, item: u64, u: Units) -> Option<Arc<SolidEntry>> {
-        if let Some(r) = self.solids.get(&item) {
-            return r.as_ref().ok().cloned();
-        }
-        let cx = Ctx { ex: &self.ex, len: u.len, ang: u.ang, tol: u.tol };
-        let r = match guard("step brep", || brep::read_item(&cx, item).map_err(KernelError::Failed)) {
-            Ok(out) => {
-                let label = self.label(item);
-                for f in &out.failed {
-                    self.warn(format!("{label}: {f}"));
-                }
-                if !out.closed {
-                    self.warn(format!("{label}: imported as an open body (the shell is not closed)"));
-                }
-                Ok((out.solid, out.closed, out.file_faces, out.face_origin))
-            }
-            Err(e) => {
-                let label = self.label(item);
-                let msg = e.to_string().trim_start_matches("the operation failed: ").to_string();
-                self.warn(format!("{label}: not imported: {msg}"));
-                Err(msg)
-            }
-        };
-        let entry = r.map(Arc::new);
-        // An item the file converts exactly once hands its only reference on and keeps no copy;
-        // anything it may ask for again keeps its conversion.
-        if !self.once.contains(&item) {
-            self.solids.insert(item, entry.clone());
-        }
-        entry.ok()
-    }
-
     fn label(&self, item: u64) -> String {
         let name = self.ex.get(item).and_then(|e| e.params().first()).and_then(Param::as_str).unwrap_or("").trim().to_string();
         if name.is_empty() { format!("solid #{item}") } else { format!("solid '{name}'") }
@@ -722,36 +692,66 @@ impl Reader {
             return false;
         }
         let first = self.converted;
-        let id = self.plan[first].batch;
+        // The next solids, across instances and parts, converted together: parts still to
+        // orient are shared out between the workers. A part that comes back within the window
+        // waits for the next one, which places the orientation its first instance found.
         let mut last = first + 1;
-        while !single && last < self.plan.len() && self.plan[last].batch == id {
-            last += 1;
+        if !single {
+            let mut fresh: HashSet<u64> = self.plan.get(first).map(|p| p.item).into_iter().collect();
+            while let Some(p) = self.plan.get(last)
+                && last - first < MAX_WINDOW
+            {
+                if !self.oriented.contains_key(&p.item) && !fresh.insert(p.item) {
+                    break;
+                }
+                last += 1;
+            }
         }
         self.converted = last;
         let ex = self.ex.clone();
         let mut sources = Vec::new();
-        let mut solids = Vec::new();
+        let mut jobs = Vec::new();
         for i in first..last {
-            let (item, u) = (self.plan[i].item, self.plan[i].units);
             self.made.push(None);
-            let Some(entry) = self.item_solid(item, u) else { continue };
-            // A one-use item is the only reference to its entry, so the solid moves
-            // out; an item whose conversion is cached for a later instance needs its
-            // own copy.
-            let (solid, closed, file_faces, face_origin) = match Arc::try_unwrap(entry) {
-                Ok(entry) => entry,
-                Err(shared) => (*shared).clone(),
+            let Some(p) = self.plan.get(i) else { continue };
+            let (item, units) = (p.item, p.units);
+            if let Some(again) = self.unreadable.get(&item) {
+                if let Some(msg) = again.clone() {
+                    let label = self.label(item);
+                    self.warn(format!("{label}: not imported: {msg}"));
+                }
+                continue;
+            }
+            let source = match self.oriented.get(&item) {
+                Some(part) => parallel::Source::Oriented(part.clone()),
+                None => parallel::Source::Item { item, units },
             };
-            sources.push((i, item, closed, file_faces, face_origin));
-            solids.push(parallel::Job { solid, check_mesh: !self.unmeshed_checked.contains(&item) });
+            let placement = self.batches.get(p.batch).map_or(mt::Matrix4::from_scale(1.0), |b| b.m);
+            sources.push((i, item));
+            jobs.push(parallel::Job { source, placement, check_mesh: !self.unmeshed_checked.contains(&item) });
         }
-        let Some(batch) = self.batches.get(id) else { return true };
-        let (m, path, product, instance) = (batch.m, batch.path.clone(), batch.product.clone(), batch.instance.clone());
-        let prepared = parallel::bodies(&solids, &m, self.workers);
-        for ((i, item, closed, file_faces, face_origin), body) in sources.into_iter().zip(prepared) {
+        // Reading and orienting new parts is shared out between the workers.
+        let prepared = parallel::bodies(&ex, &jobs, self.workers);
+        for ((i, item), made) in sources.into_iter().zip(prepared) {
             let Some(e) = ex.get(item) else { continue };
-            match body {
-                Ok((body, missing)) => {
+            let Some(batch) = self.plan.get(i).and_then(|p| self.batches.get(p.batch)) else { continue };
+            let (m, path, product, instance) = (batch.m, batch.path.clone(), batch.product.clone(), batch.instance.clone());
+            match made {
+                Ok(parallel::Made { body, missing, part, read }) => {
+                    // What the read of the item found, reported once.
+                    if let Some(failed) = read {
+                        let label = self.label(item);
+                        for f in &failed {
+                            self.warn(format!("{label}: {f}"));
+                        }
+                        if !part.closed {
+                            self.warn(format!("{label}: imported as an open body (the shell is not closed)"));
+                        }
+                    }
+                    if !self.once.contains(&item) {
+                        self.oriented.entry(item).or_insert_with(|| part.clone());
+                    }
+                    let (closed, file_faces, face_origin) = (part.closed, part.file_faces, part.face_origin.clone());
                     let own = e.params().first().and_then(Param::as_str).unwrap_or("").trim().to_string();
                     let name = if own.is_empty() { product.clone() } else { own };
                     // Faces the mesher gives up on (or that the budget cut short) are reported.
@@ -800,9 +800,13 @@ impl Reader {
                         face_origin,
                     });
                 }
-                Err(err) => {
+                Err(parallel::Failure { read, msg }) => {
                     let label = self.label(item);
-                    self.warn(format!("{label}: not imported: {err}"));
+                    self.warn(format!("{label}: not imported: {msg}"));
+                    // Later instances don't read the item again.
+                    if !self.oriented.contains_key(&item) {
+                        self.unreadable.insert(item, (!read).then_some(msg));
+                    }
                 }
             }
         }

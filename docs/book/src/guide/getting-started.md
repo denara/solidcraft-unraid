@@ -226,6 +226,35 @@ solidcraft-cli snapshot part.solidcraft --out photo.png --view Photo
 solidcraft-cli snapshot part.solidcraft --out close-up.png --no-grid --no-axes --camera '{"target": [30, -20, 0], "yaw": 0.6, "pitch": 0.25, "distance": 60}'
 ```
 
+### Seeing what a cut or a join is about to do
+
+A picture answers in a glance what a volume cannot: does the tool body reach through the
+material, and is it where you meant it to be? `--body NAME:opacity=0.3` draws that body
+see-through, so whatever is inside it shows; `--body NAME:color=#cc3333` gives it a colour.
+Either key on its own keeps what the design says about the other, and the option is a shortcut
+for `appearance.assign`, the command the Appearance dialog runs — the picture is the one the
+window would show with the same appearance assigned.
+
+`--tool NAME` is the common case in one option: that body solid in the tool colour, every
+other body see-through around it. `--section z=27` cuts the model at a plane so the inside
+shows, as `inspect.section` does: an axis and the world coordinate to cut at, `,flip` to keep
+the other side, `XY`, `XZ` or `YZ` for a plane through the origin, or the command's own JSON.
+
+![A pin inside a translucent plate, cut by a section plane](../generated/tool-preview.png)
+
+```sh
+# The pin the cut would remove, inside the plate it stops 6 mm short of.
+solidcraft-cli snapshot plate.solidcraft --out preview.png --tool Pin
+solidcraft-cli snapshot plate.solidcraft --out cut.png --tool Pin --section z=12
+solidcraft-cli snapshot plate.solidcraft --out glass.png --body "Plate:opacity=0.25" --body "Pin:color=#1a7f4b"
+```
+
+A body drawn see-through is drawn see-through everywhere a picture is drawn, not only here:
+an appearance with an opacity below 1 (`Glass - Clear` in the library, or any `opacity` you
+assign) now reads as glass in `snapshot`, in MCP screenshots and in a design's thumbnail, as it
+always has in the window. A face painted with a see-through look of its own still draws at its
+body's opacity.
+
 Windows PowerShell 5.1 drops the double quotes inside an argument it passes to a program: write them as `\"` there.
 
 A command that fails stops the script. A feature can also fail later, when a parameter change

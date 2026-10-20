@@ -17,8 +17,11 @@ pub(super) struct Model {
     pub bodies: HashMap<u64, Vec<usize>>,
     pub sketches: HashMap<u64, Vec<usize>>,
     pub planes: HashMap<u64, Vec<usize>>,
+    pub features: HashMap<u64, Vec<usize>>,
     pub children: HashMap<u64, Vec<u64>>,
     placements: HashMap<Vec<u64>, Option<Arc<OccurrencePlacement>>>,
+    /// Each placed body's placement path, by the body's world name (built on first use).
+    body_paths: Option<HashMap<String, Vec<u64>>>,
 }
 
 impl Model {
@@ -30,7 +33,9 @@ impl Model {
         }
         let mut sketches: HashMap<u64, Vec<usize>> = HashMap::new();
         let mut planes: HashMap<u64, Vec<usize>> = HashMap::new();
+        let mut features: HashMap<u64, Vec<usize>> = HashMap::new();
         for (i, feature) in session.doc.features.iter().enumerate() {
+            features.entry(feature.component).or_default().push(i);
             let index = match feature.kind {
                 FeatureKind::Sketch { .. } => &mut sketches,
                 FeatureKind::ConstructionPlane { .. } => &mut planes,
@@ -49,8 +54,10 @@ impl Model {
             bodies,
             sketches,
             planes,
+            features,
             children,
             placements: HashMap::new(),
+            body_paths: None,
         }
     }
 
@@ -60,5 +67,35 @@ impl Model {
 
     pub fn placement(&mut self, session: &Session, path: &[u64]) -> Option<Arc<OccurrencePlacement>> {
         self.placements.entry(path.to_vec()).or_insert_with(|| session.occurrence_placement(path).ok().map(Arc::new)).clone()
+    }
+
+    /// The placement a placed body (by its world name) belongs to, as the browser's occurrence
+    /// rows nest; `None` for a body of the top-level design. Every placement is walked once per
+    /// model, as deep and as far as the browser draws them.
+    pub fn body_path(&mut self, session: &Session, body: &str) -> Option<Vec<u64>> {
+        if self.body_paths.is_none() {
+            let mut paths: HashMap<String, Vec<u64>> = HashMap::new();
+            let mut stack: Vec<Vec<u64>> = self.children.get(&0).into_iter().flatten().map(|o| vec![*o]).collect();
+            let mut walked = 0;
+            while let Some(path) = stack.pop() {
+                walked += 1;
+                if walked > 100_000 {
+                    break;
+                }
+                let Some(placement) = self.placement(session, &path) else { continue };
+                for b in &placement.bodies {
+                    paths.entry(b.world.clone()).or_insert_with(|| path.clone());
+                }
+                if path.len() < 64 {
+                    for child in self.children.get(&placement.component).into_iter().flatten() {
+                        let mut next = path.clone();
+                        next.push(*child);
+                        stack.push(next);
+                    }
+                }
+            }
+            self.body_paths = Some(paths);
+        }
+        self.body_paths.as_ref()?.get(body).cloned()
     }
 }

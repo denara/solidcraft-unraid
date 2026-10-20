@@ -44,6 +44,11 @@ pub fn initialize_params(version: &str) -> Value {
     })
 }
 
+/// The name the chat gives its MCP server (#2592): not `solidcraft`, the name docs/mcp.md suggests
+/// for a user's own setup, so an agent that merges its own MCP servers with the session's (Codex
+/// keeps its own entry on a clash) can't shadow the bridge with a headless session.
+pub const BRIDGE_NAME: &str = "solidcraft-app";
+
 /// The MCP server the agent starts to reach the design: `solidcraft-cli mcp --connect` bridged to
 /// this app's control port. The server finds the port's token in the token file the app wrote
 /// (docs/control-protocol.md), so the token never travels through the agent, and it keeps its
@@ -57,7 +62,7 @@ pub struct McpBridge {
 impl McpBridge {
     pub fn to_json(&self) -> Value {
         json!({
-            "name": "solidcraft",
+            "name": BRIDGE_NAME,
             "command": self.cli.to_string_lossy(),
             "args": ["mcp", "--connect", format!("127.0.0.1:{}", self.port)],
             "env": [],
@@ -67,7 +72,7 @@ impl McpBridge {
 
 /// What every session is told about where it is. Agents that don't read `_meta` ignore it.
 pub const SYSTEM_NOTE: &str = "You are running inside SolidCraft, a parametric 3D CAD application, as the user's assistant. \
-The open design is reachable through the `solidcraft` MCP server: use its tools (list_commands, batch, execute, inspect_design, \
+The open design is reachable through the `solidcraft-app` MCP server: use its tools (list_commands, batch, execute, inspect_design, \
 measure, screenshot, set_parameter, undo) to read and change the design the user is looking at, and verify with measure or \
 inspect_design. Prefer one `batch` over many small calls. Saving, opening or exporting files waits for the user's approval in \
 the chat, and each message allows a limited number of changes. Don't use shell or file tools: work through the SolidCraft tools. \
@@ -483,12 +488,24 @@ mod tests {
         assert!(split_command("   ").is_empty());
     }
 
+    /// #2592: the bridge is not called `solidcraft`, the name a user's own MCP entry takes from
+    /// docs/mcp.md, and the note tells the agent the name it really has.
+    #[test]
+    fn the_bridge_has_a_name_of_its_own_and_the_note_uses_it() {
+        assert_ne!(BRIDGE_NAME, "solidcraft");
+        assert!(SYSTEM_NOTE.contains(&format!("`{BRIDGE_NAME}` MCP server")), "{SYSTEM_NOTE}");
+        assert!(!SYSTEM_NOTE.contains("`solidcraft` MCP server"));
+        // The panel still recognises the bridge's tools as SolidCraft's (agents name them after
+        // their server, e.g. `mcp__solidcraft-app__batch`).
+        assert!(BRIDGE_NAME.contains("solidcraft"));
+    }
+
     #[test]
     fn the_session_gets_the_bridged_mcp_server_without_a_token_or_any_path() {
         let b = McpBridge { cli: "/opt/solidcraft/solidcraft-cli".into(), port: 41234 };
         let p = session_new_params(std::path::Path::new("/home/u/designs"), Some(&b));
         let s = &p["mcpServers"][0];
-        assert_eq!(s["name"], "solidcraft");
+        assert_eq!(s["name"], BRIDGE_NAME);
         assert_eq!(s["args"], json!(["mcp", "--connect", "127.0.0.1:41234"]));
         let text = p.to_string();
         assert!(!text.contains("allow-any-path") && !text.contains("TOKEN") && !text.contains("token"), "{text}");

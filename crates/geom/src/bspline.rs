@@ -532,6 +532,10 @@ impl NurbsSurface {
     pub fn homogeneous(&self) -> &[HPoint] {
         &self.ctrl
     }
+    /// The control net.
+    pub fn net(&self) -> crate::Grid<HPoint> {
+        crate::Grid::checked(self.count, self.ctrl.clone())
+    }
     /// Control point `(i, j)`.
     pub fn point(&self, i: usize, j: usize) -> HPoint {
         self.ctrl.get(j * self.count[0] + i).copied().unwrap_or(HPoint::ZERO)

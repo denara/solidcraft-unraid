@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use mt::builder;
-use solidcraft_geom::Vec3;
+use solidcraft_geom::{Ring, Vec3};
 use truck_modeling as mt;
 
 use crate::body::{Body, Solid, p3, v3};
@@ -428,7 +428,8 @@ fn edge_sheets(faces: &[FaceSpec], group: &[(EdgeUse, Vec3, Vec3)]) -> Result<[[
             j -= 1;
         }
     }
-    let wedges: Vec<_> = rays.iter().zip(rays.iter().cycle().skip(1)).collect();
+    let rays = Ring::new(rays);
+    let wedges: Vec<_> = rays.edges().collect();
     // Each wedge's faces must use the edge in opposite directions, and be told apart (faces
     // leaving the same way and turning alike lie on each other).
     let same_way = |p: f64, q: f64| {

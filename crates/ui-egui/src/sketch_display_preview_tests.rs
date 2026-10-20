@@ -86,7 +86,7 @@ fn pixel_preview_temporary_curves_match_committed_geometry_and_sampling() {
     ];
     for (command, points, hover, sweep, rho, params) in cases {
         let tool = tool(command, &points);
-        let preview = preview_curve(&tool, Vec2::new(hover[0], hover[1]), sweep, rho).unwrap();
+        let preview = preview_curve(&tool, Vec2::new(hover[0], hover[1]), sweep, rho, None).unwrap();
         let mut h = Harness::new();
         h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
         h.app.run(command, params).unwrap();
@@ -129,7 +129,7 @@ fn pixel_preview_temporary_curves_match_committed_geometry_and_sampling() {
 
 #[test]
 fn pixel_preview_fully_offscreen_circle_is_clipped_without_false_connections() {
-    let curve = preview_curve(&tool("sketch.circle.center", &[[0., 0.]]), Vec2::X, None, None).unwrap();
+    let curve = preview_curve(&tool("sketch.circle.center", &[[0., 0.]]), Vec2::X, None, None, None).unwrap();
     let proj = projection(1000.0);
     // The viewport half diagonal is about 832px: a 1000px circle never enters it.
     assert!((proj.rect.width() * 0.5).hypot(proj.rect.height() * 0.5) < 1000.0);
@@ -138,10 +138,10 @@ fn pixel_preview_fully_offscreen_circle_is_clipped_without_false_connections() {
 
 #[test]
 fn pixel_preview_rejects_degenerate_and_unbounded_input_without_changing_document() {
-    assert!(preview_curve(&tool("sketch.circle.center", &[[0., 0.]]), Vec2::new(f64::NAN, 0.), None, None).is_none());
-    assert!(preview_curve(&tool("sketch.arc.three_point", &[[0., 0.], [1., 0.]]), Vec2::new(2., 0.), None, None).is_none());
+    assert!(preview_curve(&tool("sketch.circle.center", &[[0., 0.]]), Vec2::new(f64::NAN, 0.), None, None, None).is_none());
+    assert!(preview_curve(&tool("sketch.arc.three_point", &[[0., 0.], [1., 0.]]), Vec2::new(2., 0.), None, None, None).is_none());
     let points = vec![[0., 0.]; 500];
-    assert!(preview_curve(&tool("sketch.spline.fit_point", &points), Vec2::X, None, None).is_none());
+    assert!(preview_curve(&tool("sketch.spline.fit_point", &points), Vec2::X, None, None, None).is_none());
 }
 
 #[test]
@@ -172,4 +172,137 @@ fn polygon_preview_rejects_invalid_or_unbounded_input() {
     assert_eq!(polygon_outline(&t, Vec2::X, 200.0).unwrap().len(), 201);
     let t = tool("sketch.polygon.inscribed", &[[f64::INFINITY, 0.0]]);
     assert!(polygon_outline(&t, Vec2::X, 6.0).is_none());
+}
+
+#[test]
+fn slot_preview_matches_every_committed_side_and_cap() {
+    let cases = [
+        ("sketch.slot.center_to_center", vec![[0., 0.], [40., 0.]], [20., 8.], json!({"p0":[0,0],"p1":[40,0],"width":16})),
+        // Free pointer input retains the final click's minimum width.
+        ("sketch.slot.center_to_center", vec![[0., 0.], [40., 0.]], [20., 0.], json!({"p0":[0,0],"p1":[40,0],"width":0.001})),
+        ("sketch.slot.overall", vec![[0., 0.], [40., 0.]], [20., -8.], json!({"p0":[0,0],"p1":[40,0],"width":16})),
+        ("sketch.slot.center_point", vec![[0., 0.], [20., 0.]], [10., 8.], json!({"center":[0,0],"end":[20,0],"width":16})),
+        ("sketch.slot.arc_center", vec![[0., 0.], [20., 0.], [0., 20.]], [0., 24.], json!({"center":[0,0],"start":[20,0],"end":[0,20],"width":8})),
+        (
+            "sketch.slot.arc_three_point",
+            vec![[20., 0.], [0., 20.], [-20., 0.]],
+            [-20., 4.],
+            json!({"start":[20,0],"through":[0,20],"end":[-20,0],"width":8}),
+        ),
+        // A sloping, reversed axis and the opposite side of a three-point centre arc.
+        ("sketch.slot.center_to_center", vec![[30., 40.], [0., 0.]], [8., -6.], json!({"p0":[30,40],"p1":[0,0],"width":20})),
+        (
+            "sketch.slot.arc_three_point",
+            vec![[-20., 0.], [0., 20.], [20., 0.]],
+            [20., -4.],
+            json!({"start":[-20,0],"through":[0,20],"end":[20,0],"width":8}),
+        ),
+    ];
+    for (command, points, hover, params) in cases {
+        let mut h = Harness::new();
+        h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+        let preview = preview_curve(&tool(command, &points), Vec2::new(hover[0], hover[1]), None, None, None)
+            .unwrap_or_else(|| panic!("{command}: no slot outline before the width click"));
+        let ctx = egui::Context::default();
+        let proj = projection(2.0);
+        let output = ctx.run_ui(egui::RawInput { screen_rect: Some(proj.rect), ..Default::default() }, |ui| {
+            super::paint_preview_curve(preview.clone(), &Plane::XY, ui.painter(), &proj, egui::Stroke::new(1.5, egui::Color32::WHITE), 0);
+        });
+        assert_eq!(
+            output.shapes.iter().filter(|shape| matches!(shape.shape, egui::Shape::Path(_))).count(),
+            4,
+            "{command}: paint all four outline curves"
+        );
+        h.app.run(command, params).unwrap();
+        let state = h.app.session.world_state();
+        let committed = &state.sketch(h.app.session.active_sketch.unwrap()).unwrap().sketch;
+        assert_eq!(preview.curves.len(), committed.curves.len(), "{command}");
+        for index in 0..committed.curves.len() {
+            let a = preview.exact_segs(index).unwrap_or_else(|| preview.segs(index));
+            let b = committed.exact_segs(index).unwrap_or_else(|| committed.segs(index));
+            assert_eq!(a.len(), b.len(), "{command}, curve {index}");
+            assert_eq!(preview.curves[index].construction, committed.curves[index].construction);
+            for (a, b) in a.iter().zip(&b) {
+                for i in 0..=20 {
+                    assert!(a.point_at(f64::from(i) / 20.0).dist(b.point_at(f64::from(i) / 20.0)) < 1e-7, "{command}, curve {index}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn typed_small_slot_width_preview_matches_the_final_click() {
+    for (command, length) in [("sketch.slot.center_to_center", 40.0), ("sketch.slot.overall", 40.0), ("sketch.slot.overall", 0.0002)] {
+        let mut h = Harness::new();
+        h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+        let mut t = tool(command, &[[0., 0.], [length, 0.]]);
+        t.dims = crate::sketch_dims::boxes_for(command, 2);
+        t.dims[0].value = "0.0002 / 2".into();
+        t.dims[0].locked = true;
+        t.hover = Some((Vec2::new(length * 0.5, 8.), None));
+        crate::sketch_dims::validate(&h.app, &t).unwrap();
+
+        // Zoom into the first cap: the accepted typed width is smaller than the pointer's
+        // minimum width, and must still produce the same visible outline as the final click.
+        let ctx = egui::Context::default();
+        let proj = projection(2_000_000.0);
+        let input = || egui::RawInput { screen_rect: Some(proj.rect), ..Default::default() };
+        let output = ctx.run_ui(input(), |ui| super::preview(&h.app, &t, ui.painter(), &proj));
+        let paths = |output: egui::FullOutput| {
+            output
+                .shapes
+                .into_iter()
+                .filter_map(|s| match s.shape {
+                    egui::Shape::Path(path) => Some(path.points),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let preview = paths(output);
+        assert!(h.app.session.world_state().sketch(h.app.session.active_sketch.unwrap()).unwrap().sketch.curves.is_empty());
+
+        let click = crate::sketch_dims::placed(&h.app, &t, t.hover.as_ref().unwrap());
+        h.app.tool = Some(t);
+        super::place(&mut h.app, click);
+        let state = h.app.session.world_state();
+        let committed = &state.sketch(h.app.session.active_sketch.unwrap()).unwrap().sketch;
+        assert_eq!(committed.curves.len(), 4, "{command}: final click commits the typed width");
+        let solidcraft_engine::geom::Seg2::Arc { radius, .. } = committed.segs(1)[0] else { panic!("missing slot cap") };
+        assert!((radius - 0.00005).abs() < 1e-10, "{command}: the typed width determines the cap radius");
+        let output = ctx.run_ui(input(), |ui| {
+            super::paint_preview_curve(committed.clone(), &Plane::XY, ui.painter(), &proj, egui::Stroke::new(1.5, egui::Color32::WHITE), 0);
+        });
+        let expected = paths(output);
+        assert!(!expected.is_empty(), "{command}: the zoomed cap must be visible");
+        assert_eq!(preview.len(), expected.len(), "{command}: preview and committed paths");
+        for (preview, expected) in preview.iter().zip(&expected) {
+            assert_eq!(preview.len(), expected.len(), "{command}: sampled path vertices");
+            for (preview, expected) in preview.iter().zip(expected) {
+                assert!(preview.distance(*expected) < 0.1, "{command}: preview {preview:?}, committed {expected:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn slot_preview_rejects_invalid_extents() {
+    let cases = [
+        ("sketch.slot.center_to_center", vec![[0., 0.], [0., 0.]], [0., 8.]),
+        ("sketch.slot.overall", vec![[0., 0.], [10., 0.]], [5., 5.]),
+        ("sketch.slot.overall", vec![[0., 0.], [10., 0.]], [5., 8.]),
+        ("sketch.slot.arc_center", vec![[0., 0.], [20., 0.], [0., 20.]], [0., 40.]),
+        ("sketch.slot.arc_center", vec![[0., 0.], [0., 20.], [0., 0.]], [0., 24.]),
+        ("sketch.slot.arc_three_point", vec![[0., 0.], [10., 0.], [20., 0.]], [20., 4.]),
+    ];
+    for (command, points, hover) in cases {
+        assert!(preview_curve(&tool(command, &points), Vec2::new(hover[0], hover[1]), None, None, None).is_none(), "{command}");
+    }
+    let t = tool("sketch.slot.center_to_center", &[[0., 0.], [40., 0.]]);
+    for hover in [Vec2::new(f64::NAN, 0.), Vec2::new(0., f64::INFINITY), Vec2::new(f64::MAX, f64::MAX)] {
+        assert!(preview_curve(&t, hover, None, None, None).is_none());
+    }
+    for width in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::MAX] {
+        assert!(preview_curve(&t, Vec2::new(20., 8.), None, None, Some(width)).is_none());
+    }
 }

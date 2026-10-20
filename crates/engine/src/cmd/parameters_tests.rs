@@ -593,3 +593,65 @@ fn moving_a_parameter_refuses_bad_targets() {
     }
     assert_eq!(s.doc.to_json(), before);
 }
+
+#[test]
+fn a_large_import_is_checked_once_and_keeps_each_rows_unit() {
+    // 3000 parameters, each the one before plus a millimetre, then an angle, a unit-less
+    // ratio and a row that names a parameter defined further down: all new, in one import.
+    let mut csv = String::from("name,expression\n");
+    csv.push_str("a,later * 2\np0,1 mm\n");
+    for i in 1..3000 {
+        csv.push_str(&format!("p{i},p{} + 1 mm\n", i - 1));
+    }
+    csv.push_str("turn,30 deg\nratio,p10 / p4\nlater,5\n");
+    let mut s = Session::default();
+    let t = std::time::Instant::now();
+    run(&mut s, "parameters.import", json!({"text": csv}));
+    println!("import of {} rows: {:.2} s", 3005, t.elapsed().as_secs_f64());
+    let (vals, errors) = s.doc.param_values();
+    assert!(errors.is_empty(), "{errors:?}");
+    let unit = |n: &str| s.doc.param(n).map(|p| p.unit.clone()).unwrap_or_default();
+    assert_eq!((unit("p2999"), unit("turn"), unit("ratio"), unit("later")), ("mm".into(), "deg".into(), String::new(), "mm".into()));
+    assert!(
+        vals.get("p2999").is_some_and(|v| (v.to_kind(solidcraft_doc::expr::Kind::Length).unwrap_or(f64::NAN) - 3000.0).abs() < 1e-9),
+        "{:?}",
+        vals.get("p2999")
+    );
+    assert!(
+        vals.get("a").is_some_and(|v| (v.to_kind(solidcraft_doc::expr::Kind::Length).unwrap_or(f64::NAN) - 10.0).abs() < 1e-9),
+        "{:?}",
+        vals.get("a")
+    );
+    // Changing the first moves the whole chain; a row that breaks changes nothing.
+    run(&mut s, "parameters.import", json!({"text": "name,expression\np0,101 mm\n"}));
+    assert!(
+        s.doc
+            .param_values()
+            .0
+            .get("p2999")
+            .is_some_and(|v| (v.to_kind(solidcraft_doc::expr::Kind::Length).unwrap_or(f64::NAN) - 3100.0).abs() < 1e-9)
+    );
+    assert!(s.execute("parameters.import", &json!({"text": "name,expression\np0,2 mm\np5,p0 + 1 deg\n"})).is_err());
+    assert_eq!(s.doc.param("p0").map(|p| p.expr.as_str()), Some("101 mm"));
+}
+
+#[test]
+fn several_parameters_change_in_one_rebuild_and_one_undo() {
+    let mut s = Session::default();
+    run(&mut s, "parameters.add", json!({"name": "h", "expression": "10 mm"}));
+    block(&mut s);
+    let d = run(&mut s, "parameters.list", json!({"filter": "feature"}))["parameters"][0]["name"].as_str().unwrap_or_default().to_string();
+    run(&mut s, "parameters.change", json!({"name": d, "expression": "h"}));
+    let r = run(&mut s, "parameters.change", json!({"changes": {"len": "100 mm", "h": 20}}));
+    assert_eq!(r["errors"].as_array().map(Vec::len), Some(0), "{r}");
+    assert_eq!(r["changed"]["len"], 100.0, "{r}");
+    assert!(rel(volume(&mut s), 40.0 * 50.0 * 20.0) < 1e-9);
+    // All or nothing: an unknown name or a broken expression changes nothing.
+    assert!(err(&mut s, "parameters.change", json!({"changes": {"len": "60 mm", "nope": "1 mm"}})).contains("nope"));
+    assert!(s.execute("parameters.change", &json!({"changes": {"len": "60 mm", "h": "1 / 0"}})).is_err());
+    assert!(s.execute("parameters.change", &json!({"changes": {}})).is_err());
+    assert_eq!(expr_of(&mut s, "len"), "100 mm");
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!((expr_of(&mut s, "len"), expr_of(&mut s, "h")), ("60 mm".to_string(), "10 mm".to_string()));
+    assert!(rel(volume(&mut s), 40.0 * 30.0 * 10.0) < 1e-9);
+}

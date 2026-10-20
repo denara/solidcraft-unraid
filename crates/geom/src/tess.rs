@@ -109,6 +109,70 @@ impl TessPlan {
     pub fn vertex_count(&self) -> usize {
         self.faces.iter().map(|f| f.uv.len()).sum()
     }
+
+    /// This plan for the body moved by the rotation and translation `m` (by columns, the
+    /// translation in `m[3]`): the same parameters and triangles on the moved surfaces, so a
+    /// part placed many times is planned once. Only for proper rigid motions (a reflection
+    /// would turn the triangles inside out; the caller checks).
+    pub fn transformed(&self, m: &[[f64; 4]; 4]) -> TessPlan {
+        let vector = |v: Vec3| {
+            Vec3::new(
+                m[0][0] * v.x + m[1][0] * v.y + m[2][0] * v.z,
+                m[0][1] * v.x + m[1][1] * v.y + m[2][1] * v.z,
+                m[0][2] * v.x + m[1][2] * v.y + m[2][2] * v.z,
+            )
+        };
+        let point = |p: Vec3| vector(p) + Vec3::new(m[3][0], m[3][1], m[3][2]);
+        let surfaces = self
+            .surfaces
+            .iter()
+            .map(|s| match s {
+                EvalSurface::Plane { origin, du, dv } => EvalSurface::Plane { origin: point(*origin), du: vector(*du), dv: vector(*dv) },
+                EvalSurface::Nurbs { degree, knots, count, ctrl } => EvalSurface::Nurbs {
+                    degree: *degree,
+                    knots: knots.clone(),
+                    count: *count,
+                    // Homogeneous: the translation scales with the weight.
+                    ctrl: ctrl
+                        .iter()
+                        .map(|c| {
+                            let q = vector(Vec3::new(c[0], c[1], c[2])) + Vec3::new(m[3][0], m[3][1], m[3][2]) * c[3];
+                            [q.x, q.y, q.z, c[3]]
+                        })
+                        .collect(),
+                },
+                EvalSurface::Revolved { profile, origin, axis, transform, swap } => {
+                    // `m` (as rows) after the surface's own affine map.
+                    let r = |i: usize| [m[0][i], m[1][i], m[2][i], m[3][i]];
+                    let rows = [r(0), r(1), r(2)];
+                    let t = transform;
+                    let composed = rows.map(|row| {
+                        let mut out = [0.0; 4];
+                        for (j, slot) in out.iter_mut().enumerate() {
+                            *slot = (0..3).map(|k| row[k] * t[k][j]).sum::<f64>() + if j == 3 { row[3] } else { 0.0 };
+                        }
+                        out
+                    });
+                    EvalSurface::Revolved { profile: profile.clone(), origin: *origin, axis: *axis, transform: composed, swap: *swap }
+                }
+            })
+            .collect();
+        let faces = self
+            .faces
+            .iter()
+            .map(|f| FacePlan {
+                fixed: f.fixed.iter().map(|p| point(*p)).collect(),
+                normals: f.normals.iter().map(|n| vector(*n)).collect(),
+                ..f.clone()
+            })
+            .collect();
+        TessPlan {
+            surfaces,
+            faces,
+            edges: self.edges.iter().map(|e| e.iter().map(|p| point(*p)).collect()).collect(),
+            edge_faces: self.edge_faces.clone(),
+        }
+    }
 }
 
 impl EvalCurve {
@@ -310,6 +374,53 @@ mod tests {
 
     fn close(a: Vec3, b: Vec3, tol: f64) -> bool {
         a.dist(b) <= tol
+    }
+
+    /// A moved plan evaluates to the plan's points moved, on a rational spline surface (the
+    /// translation scales with each weight) and a revolved one (composed with its own map).
+    #[test]
+    fn a_transformed_plan_evaluates_to_the_moved_points() {
+        let (c, s) = (0.6f64.cos(), 0.6f64.sin());
+        // Turned about z by 0.6 rad, then moved: by columns.
+        let m = [[c, s, 0.0, 0.0], [-s, c, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [5.0, -2.0, 7.0, 1.0]];
+        let apply = |p: Vec3| Vec3::new(c * p.x - s * p.y + 5.0, s * p.x + c * p.y - 2.0, p.z + 7.0);
+        let w = std::f64::consts::FRAC_1_SQRT_2;
+        let nurbs = EvalSurface::Nurbs {
+            degree: [2, 1],
+            knots: [vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0], vec![0.0, 0.0, 1.0, 1.0]],
+            count: [3, 2],
+            ctrl: vec![[1.0, 0.0, 0.0, 1.0], [w, w, 0.0, w], [0.0, 1.0, 0.0, 1.0], [1.0, 0.0, 2.0, 1.0], [w, w, 2.0 * w, w], [0.0, 1.0, 2.0, 1.0]],
+        };
+        let revolved = EvalSurface::Revolved {
+            profile: line(Vec3::new(2.0, 0.0, 0.0), Vec3::new(3.0, 0.0, 1.0)),
+            origin: Vec3::ZERO,
+            axis: Vec3::Z,
+            transform: [[1.0, 0.0, 0.0, 1.0], [0.0, 0.0, -1.0, 2.0], [0.0, 1.0, 0.0, 3.0]],
+            swap: false,
+        };
+        let face = |i: u32| FacePlan {
+            face: i,
+            surface: Some(i),
+            uv: vec![[0.1, 0.2], [0.7, 0.4], [0.3, 0.9]],
+            fixed: vec![Vec3::new(1.0, 2.0, 3.0)],
+            triangles: vec![[0, 1, 2]],
+            ..Default::default()
+        };
+        let plan = TessPlan {
+            surfaces: vec![nurbs, revolved],
+            faces: vec![face(0), face(1)],
+            edges: vec![vec![Vec3::new(1.0, 1.0, 1.0)]],
+            edge_faces: vec![vec![0, 1]],
+        };
+        let (a, b) = (plan.evaluate(), plan.transformed(&m).evaluate());
+        assert_eq!(a.triangles, b.triangles);
+        for (p, q) in a.positions.iter().zip(&b.positions) {
+            assert!(close(apply(*p), *q, 1e-12), "{p:?} -> {q:?}");
+        }
+        for (n, k) in a.normals.iter().zip(&b.normals) {
+            assert!(close(apply(*n) - apply(Vec3::ZERO), *k, 1e-12));
+        }
+        assert!(close(apply(a.edges[0][0]), b.edges[0][0], 1e-12));
     }
 
     fn line(a: Vec3, b: Vec3) -> EvalCurve {

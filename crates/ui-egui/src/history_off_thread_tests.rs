@@ -27,7 +27,7 @@ fn block_boss_hole() -> Harness {
 /// Frames until nothing computes or waits (a few seconds at most).
 fn until_settled(h: &mut Harness) {
     for _ in 0..500 {
-        if h.app.deferred.is_none() && h.app.deferred_queue.is_empty() {
+        if h.app.deferred.is_none() && h.app.deferred_queue.is_empty() && h.app.delete_check.is_none() {
             break;
         }
         h.frames(1);
@@ -97,4 +97,74 @@ fn a_design_changed_while_a_move_computes_is_computed_again() {
     until_settled(&mut h);
     assert!(h.app.session.revision > revision, "the move ran after the change");
     assert_eq!(marker(&h), Some(2));
+}
+
+fn feature_ids(h: &Harness) -> Vec<u64> {
+    h.app.session.doc.features.iter().map(|f| f.id).collect()
+}
+
+/// Volume of the block with the hole through it, once the boss is deleted.
+fn block_with_hole() -> f64 {
+    12000.0 - std::f64::consts::PI * 4.0 * 10.0
+}
+
+fn volume(h: &mut Harness) -> f64 {
+    h.app.run("inspect.measure", json!({})).unwrap()["total"]["volume_mm3"].as_f64().unwrap()
+}
+
+/// The timeline's Delete checks what the delete breaks off the window thread (#2678): the design
+/// is as it was while it checks, and the feature goes once the check is in.
+#[test]
+fn the_timelines_delete_checks_off_the_window_thread() {
+    let mut h = block_boss_hole();
+    let boss = feature_ids(&h)[1];
+    crate::timeline::delete_features(&mut h.app, vec![boss]);
+    assert!(h.app.computing_since().is_some(), "checking");
+    assert!(h.app.session.doc.feature(boss).is_some(), "the design is as it was while it checks");
+    until_settled(&mut h);
+    assert!(h.app.session.doc.feature(boss).is_none(), "deleted once the check is in");
+    assert!(h.app.dialog.is_none(), "nothing breaks, so nothing to confirm");
+    assert!((volume(&mut h) - block_with_hole()).abs() < 1.0);
+}
+
+/// Delete on the selection (the Delete key) runs its dry run off the window thread too.
+#[test]
+fn delete_on_the_selection_checks_off_the_window_thread() {
+    let mut h = block_boss_hole();
+    let boss = feature_ids(&h)[1];
+    h.app.session.selection = vec![solidcraft_engine::Sel::Feature { id: boss }];
+    let params = crate::delete::selection_params(&h.app);
+    crate::delete::request(&mut h.app, params);
+    assert!(h.app.computing_since().is_some(), "checking");
+    assert!(h.app.session.doc.feature(boss).is_some());
+    until_settled(&mut h);
+    assert!(h.app.session.doc.feature(boss).is_none());
+    assert!(h.app.menu.confirm.is_none());
+    assert!((volume(&mut h) - block_with_hole()).abs() < 1.0);
+}
+
+/// A design changed while its delete is checked is checked again before anything is deleted, and
+/// a second Delete meanwhile is left out.
+#[test]
+fn a_design_changed_while_a_delete_is_checked_is_checked_again() {
+    let mut h = block_boss_hole();
+    let ids = feature_ids(&h);
+    crate::timeline::delete_features(&mut h.app, vec![ids[1]]);
+    crate::timeline::delete_features(&mut h.app, vec![ids[2]]);
+    h.app.run("solid.box", json!({"corner": [100, 0, 0], "length": 10, "width": 10, "height": 10})).unwrap();
+    until_settled(&mut h);
+    assert!(h.app.session.doc.feature(ids[1]).is_none(), "the boss is deleted");
+    assert!(h.app.session.doc.feature(ids[2]).is_some(), "the second Delete was left out");
+    assert!((volume(&mut h) - (block_with_hole() + 1000.0)).abs() < 1.0, "the box added meanwhile stays");
+}
+
+/// Without a wait (headless use, tests) the check runs in place, as before.
+#[test]
+fn without_a_wait_the_delete_checks_in_place() {
+    let mut h = block_boss_hole();
+    h.app.apply_off_thread = None;
+    let boss = feature_ids(&h)[1];
+    crate::timeline::delete_features(&mut h.app, vec![boss]);
+    assert!(h.app.delete_check.is_none());
+    assert!(h.app.session.doc.feature(boss).is_none());
 }

@@ -7,7 +7,7 @@ use solidcraft_doc::sheet::{self, SheetBody, SheetRule};
 use solidcraft_doc::{BodyName, SketchId};
 use solidcraft_doc::{FacePick, Position};
 use solidcraft_doc::{FeatureKind, FlangeEdge};
-use solidcraft_geom::{Vec2, Vec3};
+use solidcraft_geom::{Aabb2, Ring, Vec2, Vec3};
 
 use super::CommandSpec;
 use super::features::{add_feature, check_expr, feature_sketch, profiles, sketch_id};
@@ -494,13 +494,9 @@ fn loop_shape(lp: &solidcraft_geom::Loop2) -> Value {
 
 fn flat_json(sh: &SheetBody) -> Result<Value> {
     let regions = sh.flat_regions()?;
-    let loops: Vec<Vec<Vec2>> = regions.iter().map(|r| r.outer.polyline(1e-3)).collect();
-    let (mut lo, mut hi) = (Vec2::new(f64::MAX, f64::MAX), Vec2::new(f64::MIN, f64::MIN));
-    for p in loops.iter().flatten() {
-        lo = Vec2::new(lo.x.min(p.x), lo.y.min(p.y));
-        hi = Vec2::new(hi.x.max(p.x), hi.y.max(p.y));
-    }
-    let (w, h) = (hi.x - lo.x, hi.y - lo.y);
+    let loops: Vec<Ring<Vec2>> = regions.iter().map(|r| r.outer.polyline(1e-3)).collect();
+    let size = loops.iter().fold(Aabb2::EMPTY, |b, l| b.union(&l.bounds())).size();
+    let (w, h) = (size.x, size.y);
     let pt = |v: &Vec2| json!([v.x, v.y]);
     let outline: Vec<Value> = loops.iter().map(|l| Value::Array(l.iter().map(pt).collect())).collect();
     let holes: Vec<Value> = regions.iter().flat_map(|r| &r.holes).map(|h| Value::Array(h.polyline(1e-3).iter().map(pt).collect())).collect();
@@ -904,3 +900,7 @@ mod convert_tests;
 #[cfg(test)]
 #[path = "sheet_dxf_tests.rs"]
 mod dxf_tests;
+
+#[cfg(test)]
+#[path = "sheet_face_names_tests.rs"]
+mod face_names_tests;

@@ -13,6 +13,9 @@ mod details_tests;
 #[path = "workspace_media_tests.rs"]
 mod media_tests;
 
+#[path = "workspace_actions_tests.rs"]
+mod actions_tests;
+
 use super::*;
 use axum::body::{Body, to_bytes};
 use axum::http::Request;

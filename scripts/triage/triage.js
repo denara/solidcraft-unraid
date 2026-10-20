@@ -91,7 +91,7 @@ function classifyIssue(title, body) {
   const labels = new Set();
   if (CRASH.test(t)) {
     labels.add('bug');
-    labels.add('priority:P1'); // a crash loses work (CLAUDE.md, "Never crash")
+    labels.add('priority:P1'); // a crash loses work (AGENTS.md, "Never crash")
   } else if (IN_APP_FAILURE.test(t) || /^##\s*(behavior|actual behavior)\b/im.test(b)) {
     labels.add('bug');
   } else if (FEATURE.test(t)) {

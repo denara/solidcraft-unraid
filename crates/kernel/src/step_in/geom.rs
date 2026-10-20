@@ -10,6 +10,7 @@
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use mt::{BoundedCurve, Cut, InnerSpace, Invertible, MetricSpace, ParametricCurve, ParametricSurface3D, SearchNearestParameter};
+use solidcraft_geom::Ring;
 use truck_modeling as mt;
 
 use super::Ctx;
@@ -711,8 +712,8 @@ fn largest_gap(angles: &[f64]) -> Option<(f64, f64)> {
     }
     a.sort_by(f64::total_cmp);
     let (mut best, mut mid) = (0.0, 0.0);
-    for i in 0..a.len() {
-        let (Some(&x), Some(&y)) = (a.get(i), a.get((i + 1) % a.len())) else { continue };
+    let a = Ring::new(a);
+    for (i, (&x, &y)) in a.edges().enumerate() {
         let gap = if i + 1 == a.len() { y + TAU - x } else { y - x };
         if gap > best {
             best = gap;

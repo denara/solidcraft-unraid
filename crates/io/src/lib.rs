@@ -12,10 +12,9 @@ mod design_metadata;
 mod dxf;
 mod dxf_out;
 pub use design::{
-    DesignCompression, DesignContainerReader, DesignGeometry, DesignPreview, THUMBNAIL_SIZE, is_design_container, read_design_file,
-    read_design_geometry, read_design_preview, read_design_thumbnail, read_design_thumbnail_file, write_design_container,
-    write_design_container_with_cache, write_design_container_with_compression, write_design_container_with_preview,
-    write_design_container_with_thumbnail,
+    DesignCompression, DesignContainerReader, DesignPreview, THUMBNAIL_SIZE, is_design_container, read_design_file, read_design_geometry,
+    read_design_preview, read_design_thumbnail, read_design_thumbnail_file, write_design_container, write_design_container_with_cache,
+    write_design_container_with_compression, write_design_container_with_preview, write_design_container_with_thumbnail,
 };
 mod legacy_dir;
 #[cfg(test)]
@@ -156,6 +155,35 @@ pub struct StepFeature {
     pub import: std::sync::Arc<solidcraft_kernel::StepImport>,
 }
 
+/// Bytes the encoding detector sees at most: the lines with 8-bit bytes, which in a STEP or IGES
+/// file are the names and descriptions.
+const ENCODING_SAMPLE_BYTES: usize = 64 << 10;
+
+/// STEP or IGES bytes as text. UTF-8 stays as it is. Some exporters write names in the system's
+/// legacy encoding instead of Part 21 escapes (GBK from Chinese vendors, Shift_JIS from Japanese
+/// ones): that encoding is detected from the lines holding 8-bit bytes and the file decoded with
+/// it, so a name reads `圆角` rather than U+FFFD noise (#2344). The syntax itself is ASCII in every
+/// such encoding.
+fn step_text(bytes: &[u8]) -> String {
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_owned();
+    }
+    let mut detector = chardetng::EncodingDetector::new();
+    let mut fed = 0;
+    for line in bytes.split(|b| *b == b'\n').filter(|line| !line.is_ascii()) {
+        if fed >= ENCODING_SAMPLE_BYTES {
+            break;
+        }
+        let line = line.get(..line.len().min(ENCODING_SAMPLE_BYTES - fed)).unwrap_or_default();
+        detector.feed(line, false);
+        detector.feed(b"\n", false);
+        fed += line.len() + 1;
+    }
+    detector.feed(&[], true);
+    let encoding = detector.guess(None, false);
+    encoding.decode_without_bom_handling(bytes).0.into_owned()
+}
+
 /// Read STEP bytes (`file` is the source file name) into an Import base feature. The file is
 /// read once here to fail early and collect names; the feature holds the STEP text.
 pub fn step_import_feature(bytes: &[u8], file: &str) -> Result<StepFeature> {
@@ -172,7 +200,7 @@ pub fn step_import_feature_named(bytes: &[u8], file: &str, names: StepNames) -> 
     let (text, iges_warnings) = if is_native_cad_path(file) {
         native_cad_to_step(bytes, file).map_err(IoError::Invalid)?
     } else {
-        let text = String::from_utf8_lossy(bytes).into_owned();
+        let text = step_text(bytes);
         if is_iges_path(file) { solidcraft_kernel::iges_to_step(&text).map_err(IoError::Invalid)? } else { (text, Vec::new()) }
     };
     let imp = solidcraft_kernel::step_import_shared(&text)?;
@@ -747,6 +775,27 @@ mod tests {
         let plain = String::from_utf8(export(&m.state(), &[], Format::Step, "t").unwrap()).unwrap();
         assert!(plain.contains("FILE_DESCRIPTION(('SolidCraft model'),'2;1');\nFILE_NAME('t.step','',(''),(''),"));
         assert!(!model_xml(export(&m.state(), &[], Format::ThreeMf, "t").unwrap()).contains("Title"));
+    }
+
+    #[test]
+    fn step_names_in_a_legacy_encoding() {
+        // Exporters that write names in the system encoding instead of Part 21 escapes (#2344).
+        let (_, m) = model();
+        let step = export(&m.state(), &[], Format::Step, "t").unwrap();
+        let at = step.windows(7).position(|w| w == b"'Body1'").unwrap();
+        for (encoding, name) in [(encoding_rs::GBK, "圆角20"), (encoding_rs::SHIFT_JIS, "ネジ穴の面取り"), (encoding_rs::WINDOWS_1252, "Gehäuse")]
+        {
+            let mut bytes = step[..at + 1].to_vec();
+            bytes.extend_from_slice(&encoding.encode(name).0);
+            bytes.extend_from_slice(&step[at + 6..]);
+            assert!(std::str::from_utf8(&bytes).is_err(), "{name}: the test file is not UTF-8");
+            assert_eq!(step_import_feature(&bytes, "t.step").unwrap().body_names, [name], "{}", encoding.name());
+        }
+        // UTF-8 names are read as they are.
+        let mut bytes = step[..at + 1].to_vec();
+        bytes.extend_from_slice("圆角".as_bytes());
+        bytes.extend_from_slice(&step[at + 6..]);
+        assert_eq!(step_import_feature(&bytes, "t.step").unwrap().body_names, ["圆角"]);
     }
 
     #[test]

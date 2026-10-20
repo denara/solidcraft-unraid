@@ -644,7 +644,6 @@ fn clusters(pts: &[Pt], cell: f64) -> Vec<Vec<usize>> {
         }
     }
     let groups_of = |parent: &mut [usize]| -> Vec<usize> { of_point.iter().map(|&c| find(parent, c)).collect() };
-    let grow = Vec3::new(cell, cell, cell);
     // Join groups of one side whose grown boxes overlap, until none do (sort and sweep along X).
     for _ in 0..16 {
         let groups = groups_of(&mut parent);
@@ -652,8 +651,7 @@ fn clusters(pts: &[Pt], cell: f64) -> Vec<Vec<usize>> {
         for (pt, g) in pts.iter().zip(&groups) {
             boxes.entry(*g).or_insert((pt.side, Aabb3::EMPTY)).1.add(pt.off.p);
         }
-        let mut list: Vec<(usize, Side, Aabb3)> =
-            boxes.into_iter().map(|(g, (s, b))| (g, s, Aabb3 { min: b.min - grow, max: b.max + grow })).collect();
+        let mut list: Vec<(usize, Side, Aabb3)> = boxes.into_iter().map(|(g, (s, b))| (g, s, b.inflated(cell))).collect();
         list.sort_by(|a, b| a.2.min.x.total_cmp(&b.2.min.x).then(a.0.cmp(&b.0)));
         let mut joined = false;
         for (k, (ga, sa, ba)) in list.iter().enumerate() {
@@ -887,10 +885,9 @@ pub fn compare(a: &Mesh, b: &Mesh, o: &CompareOptions, each: Each) -> Comparison
     found.sort_by(|x, y| y.weight.total_cmp(&x.weight).then(y.max.total_cmp(&x.max)));
     let unlisted = found.len().saturating_sub(o.max_regions);
     found.truncate(o.max_regions);
-    let grow = Vec3::new(cell, cell, cell);
     let measured = gather(found.len(), each, |i| {
         let f = found.get(i)?;
-        region_volume([&ta, &tb], &Aabb3 { min: f.bbox.min - grow, max: f.bbox.max + grow }, f.side, o.max_lines)
+        region_volume([&ta, &tb], &f.bbox.inflated(cell), f.side, o.max_lines)
     });
     let mut regions: Vec<Region> = found
         .into_iter()

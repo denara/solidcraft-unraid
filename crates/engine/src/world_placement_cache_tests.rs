@@ -197,7 +197,7 @@ fn moved_component_bodies_are_not_placed_again_when_something_else_changes() {
     let again = after.body(&rim.name).unwrap();
     assert!(Arc::ptr_eq(&mesh, &again.mesh()), "an unchanged placed body keeps its mesh");
     assert!(again.body.same(&rim.body));
-    // The placement moves: placed and meshed again where it now is.
+    // The placement moves: new world coordinates, reusing the definition's triangulation.
     run(&mut session, "occurrence.move", json!({"occurrence":occurrence,"translate":[0,50,0]}));
     let moved = session.world_state();
     let moved_rim = moved.bodies.iter().find(|b| b.source_name.as_deref() == Some("Rim")).unwrap();
@@ -212,4 +212,53 @@ fn moved_component_bodies_are_not_placed_again_when_something_else_changes() {
     assert_eq!(kept.source_transform, moved_rim.source_transform);
     assert!(source.mesh().bounds().min.dist(Vec3::ZERO) < 1e-6);
     assert!(mesh.bounds().min.dist(Vec3::new(100., 0., 0.)) < 1e-6);
+}
+
+/// Driving an unchanged definition must map its warm reference triangles, not re-tessellate
+/// the placed B-rep on the first mesh read of every new pose (viewport bounds does that read).
+#[test]
+fn joint_drive_reuses_reference_tessellation_across_rigid_poses() {
+    let mut session = Session::default();
+    run(&mut session, "solid.cylinder", json!({"radius":3,"height":8,"base":[4,0,0],"body_name":"Crank"}));
+    run(&mut session, "component.create", json!({"name":"Crank","parent":"root","activate":false}));
+    run(&mut session, "component.move_bodies", json!({"bodies":["Crank"],"component":"Crank"}));
+    run(
+        &mut session,
+        "joint.as_built",
+        json!({"type":"revolute","name":"Crank","a":0,"b":"Crank","at":{"occurrence":0,"point":[0,0,0],"z":[0,0,1]}}),
+    );
+    let definitions = session.model.state();
+    let original = session.world_state();
+    let local = original.body("Crank").unwrap().mesh();
+    let bounds = local.bounds();
+    for angle in [37., 91., 37., 0.] {
+        let driven = run(&mut session, "joint.drive", json!({"joint":"Crank","value":angle}));
+        assert_eq!(driven["moved"], true);
+        assert!(Arc::ptr_eq(&definitions, &session.model.state()));
+        let world = session.world_state();
+        let body = world.body("Crank").unwrap();
+        let (mesh, work) = crate::kernel::profile::capture(|| body.mesh());
+        assert_eq!(work.tessellate_ms, 0., "a warm definition must not enter the kernel mesher at a new pose: {work:?}");
+        assert_eq!(mesh.positions.len(), local.positions.len());
+        assert_eq!(mesh.normals.len(), local.normals.len());
+        assert_eq!(mesh.edges.iter().map(Vec::len).collect::<Vec<_>>(), local.edges.iter().map(Vec::len).collect::<Vec<_>>());
+        assert_eq!(mesh.triangles, local.triangles);
+        assert_eq!(mesh.tri_face, local.tri_face);
+        assert_eq!(mesh.edge_faces, local.edge_faces);
+        assert_eq!(mesh.seams, local.seams);
+        assert_eq!(mesh.smooth_edges, local.smooth_edges);
+        assert_eq!(mesh.sharp_edges, local.sharp_edges);
+        for (p, q) in local.positions.iter().zip(&mesh.positions) {
+            assert!(crate::doc::apply_point(&body.source_transform, *p).dist(*q) < 1e-8);
+        }
+        for (n, q) in local.normals.iter().zip(&mesh.normals) {
+            assert!(crate::doc::apply_vector(&body.source_transform, *n).dist(*q) < 1e-8);
+        }
+        for (edge, placed) in local.edges.iter().zip(&mesh.edges) {
+            for (p, q) in edge.iter().zip(placed) {
+                assert!(crate::doc::apply_point(&body.source_transform, *p).dist(*q) < 1e-8);
+            }
+        }
+    }
+    assert_eq!(local.bounds(), bounds, "old snapshots stay immutable");
 }

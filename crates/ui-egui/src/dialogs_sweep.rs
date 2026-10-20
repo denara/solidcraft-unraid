@@ -1,6 +1,6 @@
 //! The options Sweep and Surface Sweep share (#771): how the profile turns along the path, a
 //! twist over the path's length, the profile's scale at the end, and guide rails with how they
-//! reshape the profile.
+//! reshape the profile. Loft and Surface Loft take the same guide rails (#201).
 
 use serde_json::{Value, json};
 use solidcraft_engine::Sel;
@@ -55,7 +55,7 @@ impl SweepOpts {
         let mut o = SweepOpts {
             twist: twist.as_ref().map_or_else(|| NO_TWIST.into(), |t| t.to_string()),
             scale: scale.as_ref().map_or_else(|| NO_SCALE.into(), |k| k.to_string()),
-            rail_fit: usize::from(rail_fit == RailFit::Stretch),
+            rail_fit: rail_fit_index(rail_fit),
             ..SweepOpts::default()
         };
         let mut pick = None;
@@ -110,17 +110,25 @@ pub fn rows(ui: &mut egui::Ui, o: &mut SweepOpts, id: &str) -> bool {
     row_label(ui, "End Scale");
     enter |= field(ui, &mut o.scale);
     ui.end_row();
-    row_label(ui, "Rail Fit");
-    combo(ui, &format!("{id}_rail_fit"), &RAIL_FITS, &mut o.rail_fit);
-    ui.end_row();
+    rail_fit_row(ui, id, &mut o.rail_fit);
     enter
 }
 
-/// The options as command parameters, added to `p`: the orientation, and the twist and end
-/// scale when they change anything; with rails picked, the rails (each in the sketch its curves
-/// are in) and the fit instead. `picked` is the direction input's selection, `rails` the rail
-/// inputs'.
-pub fn params(app: &SolveApp, o: &SweepOpts, picked: Option<&Sel>, rails: [&[Sel]; 2], p: &mut Value) -> Result<(), String> {
+/// The Rail Fit row: `fit` an index into [`RAIL_FITS`].
+pub fn rail_fit_row(ui: &mut egui::Ui, id: &str, fit: &mut usize) {
+    row_label(ui, "Rail Fit");
+    combo(ui, &format!("{id}_rail_fit"), &RAIL_FITS, fit);
+    ui.end_row();
+}
+
+/// A stored rail fit as an index into [`RAIL_FITS`].
+pub fn rail_fit_index(fit: RailFit) -> usize {
+    usize::from(fit == RailFit::Stretch)
+}
+
+/// The picked rails (each in the sketch its curves are in) and the fit (`fit`, an index into
+/// [`RAIL_FITS`]), added to `p`; whether any rail was picked.
+pub fn rail_params(app: &SolveApp, fit: usize, rails: [&[Sel]; 2], p: &mut Value) -> Result<bool, String> {
     let mut given = Vec::new();
     for sels in rails {
         let curves: Vec<String> = sels.iter().filter_map(|x| if let Sel::SketchCurve { id } = x { Some(id.clone()) } else { None }).collect();
@@ -130,12 +138,23 @@ pub fn params(app: &SolveApp, o: &SweepOpts, picked: Option<&Sel>, rails: [&[Sel
         let sketch = crate::dialogs::curves_sketch(app, &curves, None).ok_or("each rail's curves must be in one sketch")?;
         given.push(json!({"sketch": sketch, "curves": curves}));
     }
-    if !given.is_empty() {
-        // Rails set the profile's turn and size: the other options don't apply.
-        p["rails"] = json!(given);
-        if o.rail_fit == 1 {
-            p["rail_fit"] = json!("stretch");
-        }
+    if given.is_empty() {
+        return Ok(false);
+    }
+    p["rails"] = json!(given);
+    if fit == 1 {
+        p["rail_fit"] = json!("stretch");
+    }
+    Ok(true)
+}
+
+/// The options as command parameters, added to `p`: the orientation, and the twist and end
+/// scale when they change anything; with rails picked, the rails (each in the sketch its curves
+/// are in) and the fit instead. `picked` is the direction input's selection, `rails` the rail
+/// inputs'.
+pub fn params(app: &SolveApp, o: &SweepOpts, picked: Option<&Sel>, rails: [&[Sel]; 2], p: &mut Value) -> Result<(), String> {
+    // Rails set the profile's turn and size: the other options don't apply.
+    if rail_params(app, o.rail_fit, rails, p)? {
         return Ok(());
     }
     match o.orientation {

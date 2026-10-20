@@ -242,3 +242,141 @@ fn continuity_parses_its_words() {
     assert_eq!(Continuity::parse(""), None);
     assert_eq!([Continuity::G0, Continuity::G1, Continuity::G2, Continuity::G3].map(Continuity::conditions), [1, 2, 3, 4]);
 }
+
+/// A radius-10 tube along z from `z0` to `z0 + 30`, turned `turn` radians about its axis (which
+/// moves where its rim's seam sits), with the end face at `open_at` taken off: a surface body
+/// whose rim there is a closed chain.
+fn open_tube(z0: f64, turn: f64, open_at: f64) -> Body {
+    let c = cylinder(Vec3::new(0.0, 0.0, z0), Vec3::Z, 10.0, 30.0).unwrap();
+    let c = crate::transform(&c, Vec3::ZERO, Vec3::ZERO, Vec3::Z, turn).unwrap();
+    let (_, rest) = crate::surfaces::unstitch(&c, &[Vec3::new(0.0, 0.0, open_at)]).unwrap();
+    rest.unwrap()
+}
+
+/// Points round a radius-10 rim at height `z`.
+fn rim_at(z: f64) -> Vec<Vec3> {
+    (0..8).map(|k| f64::from(k) * std::f64::consts::FRAC_PI_4 + 0.1).map(|a| Vec3::new(10.0 * a.cos(), 10.0 * a.sin(), z)).collect()
+}
+
+/// How far a blend between two coaxial rims turns round the axis: the most, over its stations,
+/// of the angle between where a cross-section starts and where it ends (zero for straight
+/// rulings parallel to the axis).
+fn worst_turn(body: &Body) -> f64 {
+    let grid = sample_grid(body, 33, 9).unwrap();
+    grid.iter()
+        .map(|row| {
+            let (a, b) = (row[0], row[row.len() - 1]);
+            angle_deg(Vec3::new(a.x, a.y, 0.0), Vec3::new(b.x, b.y, 0.0))
+        })
+        .fold(0.0, f64::max)
+}
+
+#[test]
+fn a_blend_between_closed_rims_lines_their_seams_up() {
+    // Two coaxial tubes 10 apart, the upper one turned a quarter round: its rim's seam is 90°
+    // from the lower rim's. The blend between them is the cylinder wall between: every ruling
+    // straight up the axis, none turning round it.
+    let low = open_tube(0.0, 0.0, 30.0);
+    let high = open_tube(40.0, std::f64::consts::FRAC_PI_2, 40.0);
+    for orders in [[Continuity::G0, Continuity::G0], [Continuity::G1, Continuity::G1], [Continuity::G2, Continuity::G2]] {
+        let (made, gap) = blend_between(&low, &rim_at(30.0), &high, &rim_at(40.0), orders, [0.0, 0.0], None, None, 65, false).unwrap();
+        let turn = worst_turn(&made);
+        // The boundary is a cubic through the stations on the rim: between them it strays by the
+        // interpolation error of a circle at 65 stations (about 2e-5 mm here).
+        assert!(gap < 1e-4, "{orders:?}: the boundary stays on the rims: {gap}");
+        assert!(turn < 0.1, "{orders:?}: the blend turns {turn}° round the axis");
+        // The wall between: radius 10 everywhere (G1 and G2 repeat a straight wall).
+        for row in sample_grid(&made, 17, 9).unwrap() {
+            for p in row {
+                assert!((Vec3::new(p.x, p.y, 0.0).len() - 10.0).abs() < 1e-5, "{orders:?}: off the wall at {p:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_closed_chain_blends_only_to_a_closed_chain() {
+    // The tube's closed rim against one open edge of a box's top.
+    let tube = open_tube(0.0, 0.0, 30.0);
+    let b = box_solid(Vec3::new(-20.0, 30.0, 30.0), Vec3::new(20.0, 40.0, 40.0)).unwrap();
+    let err = blend_between(&tube, &rim_at(30.0), &b, &[Vec3::new(0.0, 30.0, 40.0)], [Continuity::G1; 2], [0.0, 0.0], None, None, 33, false);
+    assert!(matches!(&err, Err(KernelError::Invalid(m)) if m.contains("closed chain")), "{err:?}");
+    let err = blend_between(&b, &[Vec3::new(0.0, 30.0, 40.0)], &tube, &rim_at(30.0), [Continuity::G1; 2], [0.0, 0.0], None, None, 33, false);
+    assert!(matches!(&err, Err(KernelError::Invalid(m)) if m.contains("closed chain")), "{err:?}");
+}
+
+#[test]
+fn a_blend_between_offset_strips_is_the_cubic_hermite_strip() {
+    // Two 40-long boxes 10 apart in y, the second standing 5 higher: the blend from the first's
+    // top rim (y = 10, z = 10) to the second's (y = 20, z = 15), G1 at both ends. Every
+    // cross-section is the cubic Bézier that leaves each top face along it, at the speed chord/3
+    // (chord = |(10, 5)|): control points (10, 10), (10 + chord/9, 10), (20 - chord/9, 15),
+    // (20, 15) in (y, z), the same at every x.
+    let a = box_solid(Vec3::new(0.0, 0.0, 0.0), Vec3::new(40.0, 10.0, 10.0)).unwrap();
+    let b = box_solid(Vec3::new(0.0, 20.0, 5.0), Vec3::new(40.0, 30.0, 15.0)).unwrap();
+    let (made, gap) =
+        blend_between(&a, &[Vec3::new(20.0, 10.0, 10.0)], &b, &[Vec3::new(20.0, 20.0, 15.0)], [Continuity::G1; 2], [0.0, 0.0], None, None, 9, false)
+            .unwrap();
+    assert!(gap < 1e-9, "straight rims: the boundary is on them exactly: {gap}");
+    let chord = 125f64.sqrt();
+    let control = [(10.0, 10.0), (10.0 + chord / 9.0, 10.0), (20.0 - chord / 9.0, 15.0), (20.0, 15.0)];
+    let bezier = |t: f64| {
+        let w = [(1.0 - t).powi(3), 3.0 * t * (1.0 - t).powi(2), 3.0 * t * t * (1.0 - t), t.powi(3)];
+        control.iter().zip(w).fold((0.0, 0.0), |(y, z), ((cy, cz), w)| (y + cy * w, z + cz * w))
+    };
+    let across = 11;
+    for row in sample_grid(&made, 9, across).unwrap() {
+        for (j, p) in row.iter().enumerate() {
+            let (y, z) = bezier(j as f64 / (across - 1) as f64);
+            assert!((p.y - y).abs() < 1e-9 && (p.z - z).abs() < 1e-9, "at v = {j}/{}: {p:?} vs the Hermite strip ({y}, {z})", across - 1);
+        }
+    }
+    // G1 at both seams: the blend's normal is the top faces' (±z) all along each rim.
+    let face = made.solid.face_iter().next().unwrap();
+    let surf = face.surface();
+    let (Some((u0, u1)), Some((v0, v1))) = surf.try_range_tuple() else { panic!("unbounded") };
+    for i in 0..=16 {
+        let u = u0 + (u1 - u0) * i as f64 / 16.0;
+        for v in [v0, v1] {
+            let n = surf.normal(u, v);
+            let worst = angle_deg(Vec3::new(n.x, n.y, n.z), Vec3::Z).min(angle_deg(Vec3::new(n.x, n.y, n.z), Vec3::Z * -1.0));
+            assert!(worst < 0.01, "at u = {u}, v = {v}: the normal is {worst}° off the top faces'");
+        }
+    }
+}
+
+#[test]
+fn a_picked_seam_sets_where_a_closed_blend_starts() {
+    // The same coaxial rims as above, but the upper chain told to start a quarter round from where
+    // the lower one starts: the blend then turns a quarter round the axis, as asked.
+    let low = open_tube(0.0, 0.0, 30.0);
+    let high = open_tube(40.0, 0.0, 40.0);
+    let free = blend_between(&low, &rim_at(30.0), &high, &rim_at(40.0), [Continuity::G1; 2], [0.0, 0.0], None, None, 65, false).unwrap().0;
+    assert!(worst_turn(&free) < 0.1, "unpicked: no turn ({}°)", worst_turn(&free));
+    let first = sample_grid(&free, 2, 2).unwrap()[0][0];
+    let quarter = Vec3::new(-first.y, first.x, 40.0);
+    let seams = Some([Vec3::new(first.x, first.y, 30.0), quarter]);
+    let turned = blend_between(&low, &rim_at(30.0), &high, &rim_at(40.0), [Continuity::G1; 2], [0.0, 0.0], None, seams, 65, false).unwrap().0;
+    let turn = worst_turn(&turned);
+    assert!((turn - 90.0).abs() < 0.1, "the picked seams turn the blend a quarter round: {turn}°");
+    // Seam points that are not numbers are refused.
+    let bad = Some([Vec3::new(f64::NAN, 0.0, 30.0), quarter]);
+    assert!(blend_between(&low, &rim_at(30.0), &high, &rim_at(40.0), [Continuity::G1; 2], [0.0, 0.0], None, bad, 65, false).is_err());
+}
+
+#[test]
+fn a_blend_between_offset_tubes_reads_stations_on_the_walls_seams() {
+    // A radius-10 tube and a radius-6 one standing 8 off its axis: the blend leaves each rim at an
+    // angle, so a station on the vertex where a wall's two halves meet is at a corner of one
+    // half's parameters. It is read on the other half, and the blend builds at every order.
+    let low = open_tube(0.0, 0.0, 30.0);
+    let high = cylinder(Vec3::new(8.0, 0.0, 50.0), Vec3::Z, 6.0, 25.0).unwrap();
+    let (_, high) = crate::surfaces::unstitch(&high, &[Vec3::new(8.0, 0.0, 50.0)]).unwrap();
+    let high = high.unwrap();
+    let rim6: Vec<Vec3> = rim_at(50.0).into_iter().map(|p| Vec3::new(8.0 + p.x * 0.6, p.y * 0.6, 50.0)).collect();
+    for orders in [[Continuity::G1; 2], [Continuity::G2; 2], [Continuity::G3; 2]] {
+        let made = blend_between(&low, &rim_at(30.0), &high, &rim6, orders, [0.0, 0.0], None, None, 41, false);
+        let (_, gap) = made.unwrap_or_else(|e| panic!("{orders:?}: {e:?}"));
+        assert!(gap < 1e-3, "{orders:?}: {gap}");
+    }
+}

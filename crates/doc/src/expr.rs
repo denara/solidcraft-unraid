@@ -897,10 +897,6 @@ pub fn eval_params(params: &[ParamDef], doc_len: f64) -> (BTreeMap<String, Value
         if cx.stack.len() > 512 {
             return Err(DocError::Expr("parameters nested too deeply".into()));
         }
-        let Some((kind, _)) = unit_info(&p.unit).or(Some((Kind::Length, 1.0))) else {
-            return Err(DocError::Expr(format!("unknown unit `{}`", p.unit)));
-        };
-        let defaults = Defaults::for_unit(&p.unit, cx.doc_len);
         cx.stack.push(name.to_string());
         let mut vals: BTreeMap<String, Value> = BTreeMap::new();
         let mut err = None;
@@ -918,17 +914,7 @@ pub fn eval_params(params: &[ParamDef], doc_len: f64) -> (BTreeMap<String, Value
         cx.stack.pop();
         let r = match err {
             Some(e) => Err(e),
-            None => {
-                eval_with_defaults(&p.expr, &|n| vals.get(n).copied().ok_or_else(|| DocError::Expr(format!("unknown parameter `{n}`"))), defaults)
-                    .and_then(|v| {
-                        let x = v.to_kind_in(kind, defaults)?;
-                        Ok(match kind {
-                            Kind::Length => Value::length(x),
-                            Kind::Angle => Value::angle(x),
-                            Kind::Unitless => Value::num(x),
-                        })
-                    })
-            }
+            None => eval_def(p, &|n| vals.get(n).copied().ok_or_else(|| DocError::Expr(format!("unknown parameter `{n}`"))), cx.doc_len),
         };
         match &r {
             Ok(v) => {
@@ -947,6 +933,19 @@ pub fn eval_params(params: &[ParamDef], doc_len: f64) -> (BTreeMap<String, Value
         let _ = visit(&p.name, &mut cx);
     }
     (cx.done, cx.errors)
+}
+
+/// One parameter's value: its expression in its unit, with the values of the parameters it
+/// refers to from `lookup`.
+pub fn eval_def(p: &ParamDef, lookup: &dyn Fn(&str) -> Result<Value, DocError>, doc_len: f64) -> Result<Value, DocError> {
+    let (kind, _) = unit_info(&p.unit).unwrap_or((Kind::Length, 1.0));
+    let defaults = Defaults::for_unit(&p.unit, doc_len);
+    let x = eval_with_defaults(&p.expr, lookup, defaults)?.to_kind_in(kind, defaults)?;
+    Ok(match kind {
+        Kind::Length => Value::length(x),
+        Kind::Angle => Value::angle(x),
+        Kind::Unitless => Value::num(x),
+    })
 }
 
 /// Dependency edges between parameters: (parameter, parameter it references).

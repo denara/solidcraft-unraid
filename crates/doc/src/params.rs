@@ -463,14 +463,92 @@ impl Document {
         if rows.len() > 10_000 {
             return Err(DocError::Invalid("too many parameters".into()));
         }
+        // Each row is checked and applied as `change_param` would, but the parameters are
+        // evaluated once for all of them, not once per row (thousands of rows took minutes).
         let mut next = self.clone();
-        let mut names = Vec::new();
-        for (n, e, u, c) in rows {
-            next.change_param(&n, &e, u.as_deref(), c.as_deref())?;
-            names.push(n);
+        let (mut vals, _) = next.param_values();
+        for (n, e, u, c) in &rows {
+            next.import_row(n, e, u.as_deref(), c.as_deref(), &mut vals)?;
+        }
+        let (_, errors) = next.param_values();
+        if let Some(e) = rows.iter().find_map(|(n, ..)| errors.get(n)) {
+            return Err(DocError::Expr(e.clone()));
         }
         *self = next;
-        Ok(names)
+        Ok(rows.into_iter().map(|(n, ..)| n).collect())
+    }
+
+    /// One imported row: the checks and change of `change_param` (a feature's parameter) or
+    /// `set_param` (a user parameter, a new one taking the unit of its value) without evaluating
+    /// every parameter. `vals` are the values so far, for the units of the rows after it.
+    fn import_row(&mut self, name: &str, expr_s: &str, unit: Option<&str>, comment: Option<&str>, vals: &mut BTreeMap<String, Value>) -> Result<()> {
+        if expr_s.len() > 4096 {
+            return Err(DocError::Expr("expression too long".into()));
+        }
+        let hit = self.features.iter().enumerate().find_map(|(i, f)| f.param_names.iter().position(|n| n == name).map(|k| (i, k)));
+        if let Some((i, k)) = hit {
+            let kind = self.features.get(i).and_then(|f| f.kind.inputs().get(k).map(|x| x.2)).unwrap_or(Kind::Unitless);
+            let expr_s = self.with_design_unit(expr_s, kind);
+            if let Some(f) = self.features.get_mut(i)
+                && let Some((_, e, _)) = f.kind.inputs_mut().into_iter().nth(k)
+            {
+                *e = expr_s.into();
+            }
+            if let Some(c) = comment {
+                self.param_comments.insert(name.to_string(), c.to_string());
+            }
+            return Ok(());
+        }
+        if let Some(p) = Self::param_name_problem(name) {
+            return Err(DocError::Invalid(p));
+        }
+        if expr_s.trim().is_empty() {
+            return Err(DocError::Expr("empty expression".into()));
+        }
+        if let Some(u) = unit
+            && expr::unit_info(u).is_none()
+        {
+            return Err(DocError::Expr(format!("unknown unit `{u}` (mm, cm, m, in, ft, deg, rad or none)")));
+        }
+        if comment.is_some_and(|c| c.len() > 4096) {
+            return Err(DocError::Invalid("comment too long".into()));
+        }
+        match self.params.iter_mut().find(|p| p.name == name) {
+            Some(p) => {
+                p.expr = expr_s.trim().to_string();
+                if let Some(u) = unit {
+                    p.unit = u.trim().to_string();
+                }
+                if let Some(c) = comment {
+                    p.comment = c.to_string();
+                }
+            }
+            None => {
+                if self.params.len() >= MAX_PARAMS {
+                    return Err(DocError::Invalid("too many parameters".into()));
+                }
+                let unit = match unit {
+                    Some(u) => u.trim().to_string(),
+                    None => Self::infer_unit_in(vals, expr_s),
+                };
+                self.params.push(crate::Param {
+                    name: name.into(),
+                    expr: expr_s.trim().into(),
+                    unit,
+                    comment: comment.unwrap_or_default().into(),
+                    model: false,
+                });
+            }
+        }
+        let def = self.params.iter().find(|p| p.name == name).map(|p| ParamDef { name: p.name.clone(), expr: p.expr.clone(), unit: p.unit.clone() });
+        let value = def.and_then(|d| {
+            expr::eval_def(&d, &|n| vals.get(n).copied().ok_or_else(|| DocError::Expr(format!("unknown parameter `{n}`"))), doc_len(&self.units)).ok()
+        });
+        match value {
+            Some(v) => vals.insert(name.to_string(), v),
+            None => vals.remove(name),
+        };
+        Ok(())
     }
 }
 
@@ -558,7 +636,11 @@ impl Document {
     /// The unit for a new parameter with this expression: that of its value; a bare number is
     /// a length (mm).
     pub(crate) fn infer_unit(&self, e: &str) -> String {
-        let (vals, _) = self.param_values();
+        Self::infer_unit_in(&self.param_values().0, e)
+    }
+
+    /// [`Document::infer_unit`] against parameter values already worked out.
+    fn infer_unit_in(vals: &BTreeMap<String, Value>, e: &str) -> String {
         let v = expr::eval_with(e, &|n| vals.get(n).copied().ok_or_else(|| DocError::Expr(format!("unknown parameter `{n}`"))));
         match v.ok().and_then(|v| v.kind()) {
             Some(Kind::Unitless) if !expr::references(e).is_empty() => String::new(),

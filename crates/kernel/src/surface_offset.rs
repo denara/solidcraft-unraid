@@ -10,10 +10,11 @@
 use std::collections::HashMap;
 
 use mt::{BoundedCurve, InnerSpace, ParametricCurve, ParametricSurface, ParametricSurface3D, SearchNearestParameter};
-use solidcraft_geom::Vec3;
+use solidcraft_geom::{Grid, Vec3};
 use truck_modeling as mt;
 
 use crate::body::{Body, from_p3, p3};
+use crate::build::interpolate_net;
 use crate::history::FaceOrigin;
 use crate::surfaces::{Offset, map_curve, map_surface, surface_body};
 use crate::{KernelError, Result, guard};
@@ -270,9 +271,10 @@ fn fit(f: &mt::Face, distance: f64, tolerance: f64) -> Result<mt::BSplineSurface
     }
     let mut n = START_GRID;
     loop {
-        let grid: Vec<Vec<Vec3>> =
-            (0..=n).map(|i| (0..=n).map(|j| at(i as f64 / n as f64, j as f64 / n as f64)).collect::<Result<Vec<_>>>()).collect::<Result<_>>()?;
-        let surface = interpolate_surface(&grid).ok_or_else(|| KernelError::Failed("offset: fitting the surface".into()))?;
+        let grid = Grid::from_fn([n + 1, n + 1], |i, j| at(i as f64 / n as f64, j as f64 / n as f64))
+            .ok_or_else(|| KernelError::TooLarge("offset: the sample grid".into()))?
+            .try_map(|p| p)?;
+        let surface = interpolate_net(&grid).map(|fit| fit.surface).ok_or_else(|| KernelError::Failed("offset: fitting the surface".into()))?;
         // Checked between the samples, where a fit strays most.
         let mut worst = 0.0f64;
         for i in 0..n {
@@ -313,22 +315,6 @@ fn principal_curvatures(s: &mt::Surface, u: f64, v: f64) -> Option<(f64, f64)> {
     let h = (e * nn - 2.0 * f * m + g * l) / (2.0 * det);
     let disc = (h * h - k).max(0.0).sqrt();
     Some((h + disc, h - disc))
-}
-
-/// A cubic B-spline surface through a grid of points at uniform parameters on [0, 1]².
-fn interpolate_surface(grid: &[Vec<Vec3>]) -> Option<mt::BSplineSurface<mt::Point3>> {
-    let rows: Vec<mt::BSplineCurve<mt::Point3>> = grid.iter().map(|r| crate::build::interpolate_cubic(r)).collect::<Option<_>>()?;
-    let kv = rows.first()?.knot_vec().clone();
-    let m = rows.first()?.control_points().len();
-    let mut cols = Vec::with_capacity(m);
-    for j in 0..m {
-        let pts: Vec<Vec3> = rows.iter().filter_map(|r| r.control_points().get(j).map(|p| from_p3(*p))).collect();
-        cols.push(crate::build::interpolate_cubic(&pts)?);
-    }
-    let ku = cols.first()?.knot_vec().clone();
-    let n = cols.first()?.control_points().len();
-    let net: Vec<Vec<mt::Point3>> = (0..n).map(|i| cols.iter().filter_map(|c| c.control_points().get(i).copied()).collect()).collect();
-    mt::BSplineSurface::try_new((ku, kv), net).ok()
 }
 
 /// `s` (on [0, 1]²) with its knots stretched onto `u` × `v`.

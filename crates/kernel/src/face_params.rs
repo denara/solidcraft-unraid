@@ -7,8 +7,8 @@
 //! its holes first.
 
 use mt::{BoundedCurve, Cut, InnerSpace, Invertible, MetricSpace, ParametricCurve, ParametricSurface, SearchNearestParameter, Transformed};
-use solidcraft_geom::Vec3;
 use solidcraft_geom::tess::EvalSurface;
+use solidcraft_geom::{Ring, Vec3};
 use truck_modeling as mt;
 
 use crate::body::from_p3;
@@ -30,20 +30,13 @@ pub(crate) struct LoopSamples {
 impl LoopSamples {
     /// The loop as a polygon in parameters (each edge's samples but its last, which the next
     /// edge starts on).
-    pub(crate) fn polygon(&self) -> Vec<[f64; 2]> {
+    pub(crate) fn polygon(&self) -> Ring<[f64; 2]> {
         self.edges.iter().flat_map(|(_, s)| s.iter().take(s.len().saturating_sub(1)).map(|x| x.2)).collect()
     }
 
     /// Signed area of the loop in parameters (positive: counter-clockwise).
     pub(crate) fn area(&self) -> f64 {
-        let poly = self.polygon();
-        let n = poly.len();
-        (0..n)
-            .filter_map(|i| {
-                let (a, b) = (poly.get(i)?, poly.get((i + 1) % n)?);
-                Some(0.5 * (a[0] * b[1] - b[0] * a[1]))
-            })
-            .sum()
+        self.polygon().signed_area()
     }
 
     /// How far `p` is from the loop (from its samples).

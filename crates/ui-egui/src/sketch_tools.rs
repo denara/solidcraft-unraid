@@ -12,8 +12,60 @@ use serde_json::{Value, json};
 use solidcraft_engine::geom::{Vec2, Vec3};
 
 use crate::SolveApp;
+use crate::tool_modifiers::{Audit, Binding, Match, ModAction, ModifierCombo, Scope, ToolModifiers, Trigger};
 use crate::tools::{Kind, Tool};
 use crate::viewport::{Hit, Proj, pick, sketch_point_at};
+
+const DRAW_SCOPES: &[Scope] = &[Scope::SketchDraw, Scope::SketchDrag];
+const NONE: &[Scope] = &[];
+
+const ISOCURVE_ALT: &[Binding] = &[Binding {
+    action: ModAction::IsoCurveAlternate,
+    defaults: &[ModifierCombo::SHIFT],
+    matching: Match::AtLeast,
+    trigger: Trigger::Press,
+    rebindable: true,
+}];
+
+/// Per-tool modifier descriptors owned by this host file.
+pub const MODIFIERS: &[ToolModifiers] = &[
+    ToolModifiers { tool: "sketch.project", scopes: NONE, bindings: &[], audit: Audit::VerifiedNoOp },
+    ToolModifiers { tool: "sketch.intersect", scopes: NONE, bindings: &[], audit: Audit::VerifiedNoOp },
+    ToolModifiers { tool: "sketch.include_3d", scopes: NONE, bindings: &[], audit: Audit::VerifiedNoOp },
+    ToolModifiers { tool: "sketch.fit_curves_to_section", scopes: NONE, bindings: &[], audit: Audit::VerifiedNoOp },
+    ToolModifiers { tool: "sketch.isoparametric_curve", scopes: NONE, bindings: ISOCURVE_ALT, audit: Audit::Implemented },
+    ToolModifiers { tool: "inspect.curvature_comb", scopes: NONE, bindings: &[], audit: Audit::VerifiedNoOp },
+    ToolModifiers { tool: "inspect.minimum_radius", scopes: NONE, bindings: &[], audit: Audit::VerifiedNoOp },
+    ToolModifiers { tool: "inspect.center_of_mass", scopes: NONE, bindings: &[], audit: Audit::VerifiedNoOp },
+    ToolModifiers { tool: "inspect.isocurve", scopes: NONE, bindings: &[], audit: Audit::VerifiedNoOp },
+    ToolModifiers { tool: "canvas.insert", scopes: NONE, bindings: &[], audit: Audit::VerifiedNoOp },
+    ToolModifiers { tool: "canvas.decal", scopes: NONE, bindings: &[], audit: Audit::VerifiedNoOp },
+    ToolModifiers { tool: "sketch.trim", scopes: NONE, bindings: &[], audit: Audit::VerifiedNoOp },
+    ToolModifiers { tool: "sketch.extend", scopes: NONE, bindings: &[], audit: Audit::VerifiedNoOp },
+    ToolModifiers { tool: "sketch.break", scopes: NONE, bindings: &[], audit: Audit::VerifiedNoOp },
+    ToolModifiers { tool: "sketch.line.midpoint", scopes: DRAW_SCOPES, bindings: &[], audit: Audit::Implemented },
+    ToolModifiers { tool: "sketch.arc.tangent", scopes: DRAW_SCOPES, bindings: &[], audit: Audit::Implemented },
+    ToolModifiers { tool: "sketch.ellipse", scopes: DRAW_SCOPES, bindings: &[], audit: Audit::Implemented },
+    ToolModifiers { tool: "sketch.conic", scopes: DRAW_SCOPES, bindings: &[], audit: Audit::Implemented },
+    ToolModifiers { tool: "sketch.slot.center_point", scopes: DRAW_SCOPES, bindings: &[], audit: Audit::Implemented },
+    ToolModifiers { tool: "sketch.slot.arc_three_point", scopes: DRAW_SCOPES, bindings: &[], audit: Audit::Implemented },
+    ToolModifiers { tool: "sketch.slot.arc_center", scopes: DRAW_SCOPES, bindings: &[], audit: Audit::Implemented },
+    ToolModifiers { tool: "sketch.spline.fit_point", scopes: DRAW_SCOPES, bindings: &[], audit: Audit::Implemented },
+    ToolModifiers { tool: "sketch.spline.control_point", scopes: DRAW_SCOPES, bindings: &[], audit: Audit::Implemented },
+    ToolModifiers { tool: "sketch.spline.control_point_5", scopes: DRAW_SCOPES, bindings: &[], audit: Audit::Implemented },
+    ToolModifiers { tool: "sketch.text", scopes: DRAW_SCOPES, bindings: &[], audit: Audit::Implemented },
+    ToolModifiers { tool: "sketch.edit_text", scopes: NONE, bindings: &[], audit: Audit::VerifiedNoOp },
+    ToolModifiers { tool: "sketch.blend_curve", scopes: DRAW_SCOPES, bindings: &[], audit: Audit::Implemented },
+    ToolModifiers { tool: "sketch.constraint.curvature", scopes: NONE, bindings: &[], audit: Audit::VerifiedNoOp },
+    ToolModifiers { tool: "sketch.circle.two_tangent", scopes: NONE, bindings: &[], audit: Audit::VerifiedNoOp },
+    ToolModifiers { tool: "sketch.circle.three_tangent", scopes: NONE, bindings: &[], audit: Audit::VerifiedNoOp },
+    ToolModifiers { tool: "sketch.constrainer", scopes: NONE, bindings: &[], audit: Audit::VerifiedNoOp },
+    ToolModifiers { tool: "sketch.constraint.polygon", scopes: NONE, bindings: &[], audit: Audit::VerifiedNoOp },
+    ToolModifiers { tool: "sketch.centerline", scopes: NONE, bindings: &[], audit: Audit::VerifiedNoOp },
+    ToolModifiers { tool: "sketch.project_to_surface", scopes: NONE, bindings: &[], audit: Audit::VerifiedNoOp },
+    ToolModifiers { tool: "sketch.intersection_curve", scopes: NONE, bindings: &[], audit: Audit::VerifiedNoOp },
+    ToolModifiers { tool: "sketch.spun_profile", scopes: NONE, bindings: &[], audit: Audit::VerifiedNoOp },
+];
 
 thread_local! {
     /// Shift held this frame.
@@ -280,6 +332,9 @@ pub fn refine_snap(
             return Some((plane.to_local(point), Some(format!("vertex:{},{},{}", point.x, point.y, point.z))));
         }
     }
+    let mid_only = crate::tool_modifiers::target_midpoint();
+    // Shift midpoint mode: widen the midpoint capture a little and skip other inferences.
+    let mid_tol = if mid_only { tol * 1.5 } else { tol };
     let mut best: Option<(f64, &'static str, Vec2)> = None;
     let mut mid_of: Option<String> = None;
     for (i, c) in sk.curves.iter().enumerate() {
@@ -288,7 +343,7 @@ pub fn refine_snap(
         {
             let m = (a + b) * 0.5;
             let d = m.dist(lp);
-            if d < tol && best.is_none_or(|x| d < x.0) {
+            if d < mid_tol && best.is_none_or(|x| d < x.0) {
                 best = Some((d, "Mid", m));
                 mid_of = Some(c.id.clone());
             }
@@ -306,7 +361,8 @@ pub fn refine_snap(
     };
     // Line tool: the tangent point of a circle or arc (before plain "on the curve").
     let line_tool = app.tool.as_ref().is_none_or(|t| t.cmd == "sketch.line");
-    if best.is_none()
+    if !mid_only
+        && best.is_none()
         && line_tool
         && let Some(prev) = prev
         && let Some(i) = crate::inference::tangent(sk, prev, lp, tol)
@@ -314,7 +370,7 @@ pub fn refine_snap(
         best = Some((i.dist, i.label(), i.at));
     }
     // On a curve (coincident with it).
-    if best.is_none() {
+    if !mid_only && best.is_none() {
         for (i, c) in sk.curves.iter().enumerate() {
             let Some(sh) = sk.shape(i) else { continue };
             let d = sh.dist(lp);
@@ -325,7 +381,8 @@ pub fn refine_snap(
             }
         }
     }
-    if best.is_none()
+    if !mid_only
+        && best.is_none()
         && let Some(prev) = prev
     {
         let (dx, dy) = ((lp.x - prev.x).abs(), (lp.y - prev.y).abs());
@@ -339,7 +396,8 @@ pub fn refine_snap(
         }
     }
     // Line tool: parallel or perpendicular to a line, or on a line's extension.
-    if best.is_none()
+    if !mid_only
+        && best.is_none()
         && line_tool
         && let Some(prev) = prev
         && let Some(i) = crate::inference::lines(sk, prev, lp, tol)
@@ -941,6 +999,33 @@ pub fn finish(app: &mut SolveApp, tool: &mut Tool) -> bool {
     }
 }
 
+/// The cursor's Trim piece, keyed by design revision, sketch, curve and cursor: the viewport's
+/// hover and the preview both ask for it each frame, and it intersects the curve with every other.
+type TrimPieceKey = (u64, u64, String, [u64; 2]);
+
+thread_local! {
+    static TRIM_PIECE: std::cell::RefCell<Option<(TrimPieceKey, Option<Vec<Vec2>>)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// With Trim active and the cursor over curve `id` of `sketch` (the active sketch): the piece a
+/// click takes away (#3052), which the hover shows in place of the whole curve. `None` with
+/// another tool, or for a curve trim cuts otherwise (`solidcraft_engine::cmd::trim_piece`).
+pub(crate) fn trim_hover_piece(app: &SolveApp, sketch: u64, id: &str) -> Option<Vec<Vec2>> {
+    let tool = app.tool.as_ref().filter(|t| t.cmd == "sketch.trim")?;
+    let (at, _) = tool.hover.as_ref()?;
+    if active_sketch(app) != Some(sketch) {
+        return None;
+    }
+    let key = (app.session.revision, sketch, id.to_string(), [at.x.to_bits(), at.y.to_bits()]);
+    if let Some(piece) = TRIM_PIECE.with(|c| c.borrow().as_ref().filter(|(k, _)| *k == key).map(|(_, p)| p.clone())) {
+        return piece;
+    }
+    let st = app.session.world_state();
+    let piece = solidcraft_engine::cmd::trim_piece(&st.sketch(sketch)?.sketch, id, *at);
+    TRIM_PIECE.with(|c| *c.borrow_mut() = Some((key, piece.clone())));
+    piece
+}
+
 /// Rubber band for point tools and pick markers.
 pub fn preview(app: &SolveApp, t: &Tool, painter: &egui::Painter, proj: &Proj) {
     let Some(sid) = active_sketch(app) else { return };
@@ -948,6 +1033,13 @@ pub fn preview(app: &SolveApp, t: &Tool, painter: &egui::Painter, proj: &Proj) {
     let Some(ss) = st.sketch(sid) else { return };
     let to = |p: Vec2| proj.to_screen(ss.plane.to_world(p));
     let tk = crate::theme::Tokens::get();
+    if let Some(crate::viewport::Hit::SketchCurve { sketch, id, .. }) = &app.viewport.hover
+        && let Some(piece) = trim_hover_piece(app, *sketch, id)
+    {
+        let world: Vec<_> = piece.iter().map(|p| ss.plane.to_world(*p)).collect();
+        // In the error colour, thicker than a hover: it is what the click deletes.
+        crate::tools::paint_sketch_path(&world, 0, painter, proj, Stroke::new(4.5, tk.error));
+    }
     let stroke = Stroke::new(1.5, tk.rubber_band);
     if let Some((hp, snap)) = &t.hover
         && let Some(sp) = to(*hp)
@@ -975,7 +1067,7 @@ pub fn preview(app: &SolveApp, t: &Tool, painter: &egui::Painter, proj: &Proj) {
         }
     }
     if let Some((h, _)) = t.hover.as_ref()
-        && let Some(curve) = crate::tools::preview_curve(t, *h, None, crate::sketch_dims::locked_value(app, t, "Rho"))
+        && let Some(curve) = crate::tools::preview_curve(t, *h, None, crate::sketch_dims::locked_value(app, t, "Rho"), None)
     {
         crate::tools::paint_preview_curve(curve, &ss.plane, painter, proj, stroke, crate::sketch_palette::mode(app));
     }
@@ -1205,7 +1297,10 @@ fn snap_hint(app: &SolveApp, painter: &egui::Painter, proj: &Proj) {
 
 /// Per frame, after the viewport is drawn: constraint glyphs, snap hints and analysis marks.
 pub fn show(app: &mut SolveApp, ui: &egui::Ui, painter: &egui::Painter, proj: &Proj) {
-    SHIFT.with(|c| c.set(ui.input(|i| i.modifiers.shift)));
+    // IsoCurveAlternate (Shift default) for sketch.isoparametric_curve - via resolve, not raw shift.
+    let held = crate::tool_modifiers::Held::from_modifiers(ui.input(|i| i.modifiers));
+    let iso = crate::tool_modifiers::resolve(&[], crate::tool_modifiers::descriptor("sketch.isoparametric_curve"), held, Trigger::Press);
+    SHIFT.with(|c| c.set(iso.contains(ModAction::IsoCurveAlternate)));
     glyphs(app, painter, proj, ui.input(|i| i.pointer.hover_pos()).filter(|_| ui.rect_contains_pointer(proj.rect)));
     snap_hint(app, painter, proj);
     combs(app, painter, proj);

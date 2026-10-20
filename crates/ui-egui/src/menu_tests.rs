@@ -805,3 +805,56 @@ fn menus_near_the_window_corner_open_inward() {
         }
     }
 }
+
+#[test]
+fn contribution_picked_faces_open_their_own_feature_after_later_modifiers() {
+    use solidcraft_engine::{Sel, geom::Vec3};
+    for expected in [1, 2, 3] {
+        let mut app = SolveApp::new(Session::default(), Services::default());
+        app.run("solid.box", json!({"length":40,"width":30,"height":20,"body_name":"Plate"})).unwrap();
+        app.run("solid.hole", json!({"position":[20,15,20],"diameter":8})).unwrap();
+        app.run("solid.fillet", json!({"edges":[[0,0,10]],"radius":2})).unwrap();
+        app.run("solid.hole", json!({"position":[32,20,20],"diameter":4})).unwrap();
+        let state = app.session.world_state();
+        let b = state.body("Plate").unwrap();
+        let names = solidcraft_engine::doc::naming::face_names(b);
+        let index = names.iter().position(|n| n.starts_with(&format!("F{expected}:"))).unwrap();
+        let mesh = b.mesh();
+        let point = mesh
+            .triangles
+            .iter()
+            .enumerate()
+            .find_map(|(i, t)| (mesh.tri_face.get(i).copied() == Some(index as u32)).then(|| mesh.tri(t)).flatten())
+            .map(|t| (t[0] + t[1] + t[2]) / 3.0)
+            .unwrap_or(Vec3::ZERO);
+        let pick = Sel::Face { body: "Plate".into(), index, point };
+        app.session.selection = vec![pick.clone()];
+        let items = context_menu::items(&app, &Target::Viewport);
+        for label in ["Edit Feature", "Find in Timeline", "Find in Browser"] {
+            let item = find(&items, label);
+            assert!(item.enabled, "{label}, {expected}: {names:?}");
+            assert_eq!(item.params.as_ref().unwrap()["feature"], json!(expected));
+        }
+        act(&mut app, &Target::Viewport, "Find in Timeline");
+        assert_eq!(app.session.selection, vec![Sel::Feature { id: expected }]);
+        app.session.selection = vec![pick.clone()];
+        act(&mut app, &Target::Viewport, "Find in Browser");
+        assert_eq!(app.session.selection, vec![Sel::Feature { id: expected }]);
+        assert_eq!(app.tree.reveal_feature.as_ref().unwrap().id, expected);
+        app.session.selection = vec![pick];
+        act(&mut app, &Target::Viewport, "Edit Feature");
+        assert_eq!(app.dialog.as_ref().unwrap().editing.unwrap().0, expected);
+    }
+}
+
+#[test]
+fn contribution_unresolvable_face_does_not_edit_the_body_creator() {
+    let mut app = SolveApp::new(Session::default(), Services::default());
+    app.run("solid.box", json!({"length":10,"width":10,"height":10,"body_name":"Plate"})).unwrap();
+    app.session.selection =
+        vec![solidcraft_engine::Sel::Face { body: "Plate".into(), index: usize::MAX, point: solidcraft_engine::geom::Vec3::ZERO }];
+    let items = context_menu::items(&app, &Target::Viewport);
+    assert!(!find(&items, "Edit Feature").enabled);
+    assert!(!find(&items, "Find in Timeline").enabled);
+    assert!(!find(&items, "Find in Browser").enabled);
+}

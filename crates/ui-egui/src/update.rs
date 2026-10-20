@@ -991,8 +991,17 @@ pub enum Span {
     Text(String),
     Strong(String),
     Code(String),
-    /// A link's text (the target is dropped: the release page has them).
-    Link(String),
+    /// A link's text and, for a web address (`https://`, `http://`), where it goes (#2943).
+    Link {
+        text: String,
+        url: Option<String>,
+    },
+}
+
+/// A link target the notes may open: web addresses only.
+fn web_url(url: &str) -> Option<String> {
+    let url = url.trim();
+    (url.starts_with("https://") || url.starts_with("http://")).then(|| url.to_string())
 }
 
 /// A block of the release notes.
@@ -1006,7 +1015,7 @@ pub enum Block {
 
 /// The Markdown GitHub release notes use, enough to read them: headings, paragraphs (soft line
 /// breaks joined), `-`/`*` lists, `**strong**`, `` `code` ``, `[links](…)` and bare pull-request
-/// URLs (shown as `#123`). Anything else shows as written.
+/// URLs (shown as `#123`, linking to them). Anything else shows as written.
 pub fn parse_markdown(src: &str) -> Vec<Block> {
     let mut blocks = Vec::new();
     let mut para = String::new();
@@ -1075,7 +1084,8 @@ pub fn inline(text: &str) -> Vec<Span> {
             && let Some(end) = after.get(close + 2..).and_then(|s| s.find(')'))
         {
             push_plain(&mut out, &mut plain);
-            out.push(Span::Link(strip_links(after.get(..close).unwrap_or_default())));
+            let url = after.get(close + 2..close + 2 + end).and_then(web_url);
+            out.push(Span::Link { text: strip_links(after.get(..close).unwrap_or_default()), url });
             rest = after.get(close + 2 + end + 1..).unwrap_or_default();
         } else if rest.starts_with("https://github.com/") {
             let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
@@ -1086,7 +1096,7 @@ pub fn inline(text: &str) -> Vec<Span> {
             match (number, kind) {
                 (Some(n), Some("pull" | "issues")) => {
                     push_plain(&mut out, &mut plain);
-                    out.push(Span::Link(format!("#{n}")));
+                    out.push(Span::Link { text: format!("#{n}"), url: web_url(tail) });
                     rest = rest.get(tail.len()..).unwrap_or_default();
                 }
                 _ => {
@@ -1108,7 +1118,7 @@ fn strip_links(s: &str) -> String {
     inline(s)
         .into_iter()
         .map(|span| match span {
-            Span::Text(t) | Span::Strong(t) | Span::Code(t) | Span::Link(t) => t,
+            Span::Text(t) | Span::Strong(t) | Span::Code(t) | Span::Link { text: t, .. } => t,
         })
         .collect()
 }
@@ -1123,11 +1133,31 @@ fn markdown(ui: &mut egui::Ui, src: &str, t: &Tokens) {
                 Span::Text(s) => (s.as_str(), FontId::proportional(size), if strong { t.text } else { body }),
                 Span::Strong(s) => (s.as_str(), FontId::proportional(size), t.text),
                 Span::Code(s) => (s.as_str(), FontId::monospace(size - 1.0), body),
-                Span::Link(s) => (s.as_str(), FontId::proportional(size), t.accent),
+                Span::Link { text, .. } => (text.as_str(), FontId::proportional(size), t.accent),
             };
             job.append(text, 0.0, egui::TextFormat { font_id: font, color, ..Default::default() });
         }
         job
+    };
+    // A laid-out text can't be clicked in parts: a block's web links follow it as buttons that
+    // open them in the browser (#2943), as the agent chat shows its links.
+    let links = |ui: &mut egui::Ui, spans: &[Span], indent: f32| {
+        let targets: Vec<(&str, &str)> = spans
+            .iter()
+            .filter_map(|s| match s {
+                Span::Link { text, url: Some(url) } => Some((text.as_str(), url.as_str())),
+                _ => None,
+            })
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.add_space(indent);
+            for (text, url) in targets {
+                ui.hyperlink_to(RichText::new(text).size(11.5), url).on_hover_text(url);
+            }
+        });
     };
     // Fixed widths: the notes never widen the window, whatever their lines.
     let width = NOTES_W;
@@ -1139,6 +1169,7 @@ fn markdown(ui: &mut egui::Ui, src: &str, t: &Tokens) {
             }
             Block::Paragraph(spans) => {
                 ui.add(egui::Label::new(job(&spans, 12.5, false, width)).wrap());
+                links(ui, &spans, 0.0);
                 ui.add_space(3.0);
             }
             Block::Item(depth, spans) => {
@@ -1148,6 +1179,7 @@ fn markdown(ui: &mut egui::Ui, src: &str, t: &Tokens) {
                     ui.label(RichText::new("•").size(12.5));
                     ui.add(egui::Label::new(job(&spans, 12.5, false, width - indent - 14.0)).wrap());
                 });
+                links(ui, &spans, indent + 14.0);
             }
         }
     }

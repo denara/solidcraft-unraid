@@ -302,8 +302,7 @@ fn crosses(uv: &[[f64; 2]], x0: f64, x1: f64) -> bool {
 fn clip(path: &[[f64; 2]], pts: &[Vec3], x0: f64, x1: f64, out: &mut Vec<Piece>) {
     let inside = |q: &[f64; 2]| q[0] > x0 && q[0] < x1;
     let mut cur: Option<Piece> = None;
-    for k in 0..path.len().saturating_sub(1) {
-        let (Some(a), Some(b), Some(pa), Some(pb)) = (path.get(k), path.get(k + 1), pts.get(k), pts.get(k + 1)) else { break };
+    for ((a, b), (pa, pb)) in path.iter().zip(path.iter().skip(1)).zip(pts.iter().zip(pts.iter().skip(1))) {
         let at = |x: f64| {
             let t = ((x - a[0]) / (b[0] - a[0])).clamp(0.0, 1.0);
             ([x, a[1] + (b[1] - a[1]) * t], *pa + (*pb - *pa) * t)

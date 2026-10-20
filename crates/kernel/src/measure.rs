@@ -55,6 +55,16 @@ fn min_edge_radius(m: &Mesh) -> Option<f64> {
     best
 }
 
+/// Volume, area, centre and box of a body, as [`measure`] works them out, without the topology
+/// counts (and the tessellation they take).
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct MassMeasure {
+    pub volume: f64,
+    pub area: f64,
+    pub centroid: Vec3,
+    pub bbox: Aabb3,
+}
+
 /// Measure a body from a fine tessellation (chord tolerance 5e-5 of the body size, finer for
 /// small radii down to 5e-6). Faces whose fine tessellation disagrees with a coarse one (a
 /// meshing failure) use the coarse result.
@@ -78,14 +88,69 @@ pub fn measure(b: &Body) -> Result<BodyMeasure> {
             merged,
         });
     }
+    let (m, topo) = mass(b, true)?;
+    let topo = match topo {
+        Some(t) => t,
+        None => b.tessellate((b.size() * 1e-3).max(1e-3))?,
+    };
+    Ok(BodyMeasure {
+        volume: m.volume,
+        area: m.area,
+        centroid: m.centroid,
+        bbox: m.bbox,
+        faces: b.face_count(),
+        edges: b.edge_count(),
+        vertices: b.vertex_count(),
+        shells: b.shell_count(),
+        merged: merged_topology(b, &topo)?,
+    })
+}
+
+/// [`measure`]'s volume, area, centre and box alone: the same numbers, a tessellation fewer
+/// (for callers that need no topology counts, such as an interference check).
+pub fn measure_mass(b: &Body) -> Result<MassMeasure> {
+    if b.triangle_mesh().is_some() {
+        let m = measure(b)?;
+        return Ok(MassMeasure { volume: m.volume, area: m.area, centroid: m.centroid, bbox: m.bbox });
+    }
+    Ok(mass(b, false)?.0)
+}
+
+/// The mass properties of a B-rep body from three tessellations: a coarse one (which sets how
+/// fine the others go), then a fine and a medium one at once on desktop (one after the other
+/// in the browser). With `topology`, also the coarse unrefined mesh the topology counts take,
+/// made alongside them.
+fn mass(b: &Body, topology: bool) -> Result<(MassMeasure, Option<Mesh>)> {
     let size = b.size();
-    let coarse = b.tessellate_with((size * 1e-3).max(1e-3), true)?;
+    let coarse_tol = (size * 1e-3).max(1e-3);
+    let coarse = b.tessellate_with(coarse_tol, true)?;
     // Chord error relative to a radius sets the volume error: keep it near 3e-4 of the
     // smallest radius (thin tubes, small fillets).
     let tight = min_edge_radius(&coarse).map(|r| r * 3e-4).unwrap_or(f64::INFINITY);
     let fine_tol = (size * 5e-5).min(tight).max(size * 5e-6).max(1e-4);
-    let fine = b.tessellate_with(fine_tol, true)?;
-    let medium = b.tessellate_with((fine_tol * 5.0).max(2e-4), true)?;
+    let mut jobs = vec![(fine_tol, true), ((fine_tol * 5.0).max(2e-4), true)];
+    if topology {
+        jobs.push((coarse_tol, false));
+    }
+    // Independent tessellations of one body: each on its own thread, the calling thread's
+    // profile counting their wall time once as tessellation. Not from inside a worker pool: a
+    // pool thread blocked on threads of its own could leave their meshing (which runs on the
+    // shared pool) without a worker.
+    #[cfg(not(target_arch = "wasm32"))]
+    let threads = if rayon::current_thread_index().is_none() { jobs.len() } else { 1 };
+    #[cfg(target_arch = "wasm32")]
+    let threads = 1;
+    let made = crate::profile::timed(crate::profile::Kind::Tessellate, || {
+        crate::par::map_on_threads(&jobs, threads, |&(tol, refine)| b.tessellate_with(tol, refine))
+    });
+    let mut made = made.into_iter().map(|m| m.unwrap_or_else(|| Err(crate::KernelError::Internal("tessellation failed".into()))));
+    let missing = || crate::KernelError::Internal("tessellation missing".into());
+    let fine = made.next().ok_or_else(missing)??;
+    let medium = made.next().ok_or_else(missing)??;
+    let topo = match made.next() {
+        Some(m) => Some(m?),
+        None => None,
+    };
     let nf = b.face_count();
     let (sf, sm, sc) = (face_sums(&fine, nf), face_sums(&medium, nf), face_sums(&coarse, nf));
     let close = |x: f64, y: f64| (x - y).abs() <= 0.01 * x.abs().max(y.abs()) + 1e-9;
@@ -105,15 +170,31 @@ pub fn measure(b: &Body) -> Result<BodyMeasure> {
     }
     let volume = v6 / 6.0;
     let centroid = if v6.abs() > 1e-12 { mom / (4.0 * v6) } else { fine.bounds().center() };
-    Ok(BodyMeasure {
-        volume,
-        area,
-        centroid,
-        bbox: coarse.bounds().union(&fine.bounds()),
-        faces: b.face_count(),
-        edges: b.edge_count(),
-        vertices: b.vertex_count(),
-        shells: b.shell_count(),
-        merged: merged_topology(b, &b.tessellate((size * 1e-3).max(1e-3))?)?,
-    })
+    Ok((MassMeasure { volume, area, centroid, bbox: coarse.bounds().union(&fine.bounds()) }, topo))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{BoolOp, boolean, cylinder, torus};
+
+    /// The mass properties alone are [`measure`]'s, to the bit, with the tessellations made at
+    /// once; and on a curved intersection they are the textbook ones.
+    #[test]
+    fn mass_alone_is_the_full_measure() {
+        let ring = torus(Vec3::ZERO, 10.0, 2.0).unwrap();
+        let post = cylinder(Vec3::new(10.0, 0.0, -5.0), Vec3::Z, 1.5, 10.0).unwrap();
+        let shared = boolean(&ring, &post, BoolOp::Intersect).unwrap().unwrap();
+        for b in [&ring, &shared] {
+            let (full, mass) = (measure(b).unwrap(), measure_mass(b).unwrap());
+            assert_eq!(full.volume.to_bits(), mass.volume.to_bits());
+            assert_eq!(full.area.to_bits(), mass.area.to_bits());
+            assert_eq!(full.centroid, mass.centroid);
+            assert_eq!((full.bbox.min, full.bbox.max), (mass.bbox.min, mass.bbox.max));
+        }
+        let want = 2.0 * std::f64::consts::PI.powi(2) * 10.0 * 4.0;
+        let got = measure_mass(&ring).unwrap().volume;
+        assert!((got - want).abs() < 1e-3 * want, "{got} against {want}");
+        assert!(measure(&ring).unwrap().merged.faces > 0);
+    }
 }

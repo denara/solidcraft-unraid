@@ -191,7 +191,6 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                 section(ui, &t, "User Parameters");
                 let users: Vec<&Row> = visible.iter().copied().filter(|r| r.source == "user").collect();
                 table(app, ui, &mut d, &users, "user");
-                add_row(app, ui, &mut d);
                 section(ui, &t, "Model Parameters");
                 let mut groups: Vec<String> = Vec::new();
                 for r in visible.iter().filter(|r| r.source != "user") {
@@ -258,7 +257,8 @@ fn table(app: &mut SolveApp, ui: &mut egui::Ui, d: &mut ParamsDialog, rows: &[&R
     let t = Tokens::get();
     egui::Grid::new(("ptable", salt)).num_columns(7).striped(true).spacing([10.0, 4.0]).show(ui, |ui| {
         for h in ["", "Name", "Unit", "Expression", "Value", "Comment", ""] {
-            ui.label(RichText::new(h).color(t.text_dim).small());
+            let resp = ui.label(RichText::new(h).color(t.text_dim).small());
+            crate::scenario::publish_rect(&format!("param:heading:{salt}:{h}"), resp.rect);
         }
         ui.end_row();
         // Only the rows in view are laid out (#2723); the others take their height, so the
@@ -407,6 +407,11 @@ fn table(app: &mut SolveApp, ui: &mut egui::Ui, d: &mut ParamsDialog, rows: &[&R
             }
             ui.end_row();
         }
+        // The add row is the user table's last row, so its fields sit under the headings,
+        // with or without user parameters (#2920).
+        if salt == "user" {
+            add_row(app, ui, d);
+        }
     });
 }
 
@@ -429,69 +434,79 @@ fn enter_for(ui: &mut egui::Ui, focused: bool) -> bool {
         })
 }
 
+/// The add row, one cell per column of the user table it ends.
 fn add_row(app: &mut SolveApp, ui: &mut egui::Ui, d: &mut ParamsDialog) {
     let t = Tokens::get();
-    ui.horizontal(|ui| {
-        let name_id = ui.make_persistent_id("pnew_name");
-        let expr_id = ui.make_persistent_id("pnew_expr");
-        let comment_id = ui.make_persistent_id("pnew_comment");
-        let focused_id = ui.memory(|m| [name_id, expr_id, comment_id].into_iter().find(|id| m.has_focus(*id)));
-        let name =
-            ui.add(egui::TextEdit::singleline(&mut d.new_name).id(name_id).hint_text(crate::i18n::tr_label("new parameter")).desired_width(120.0));
-        crate::scenario::publish_handle("param:new:name", name.rect.center());
-        let unit_response = egui::ComboBox::from_id_salt("pnew_unit")
-            .width(56.0)
-            .selected_text(unit_label(UNITS.get(d.new_unit).copied().unwrap_or("mm")))
-            .show_ui(ui, |ui| {
-                for (i, u) in UNITS.iter().enumerate() {
-                    ui.selectable_value(&mut d.new_unit, i, unit_label(u));
-                }
-            });
-        crate::scenario::publish_handle("param:new:unit", unit_response.response.rect.center());
-        let unit = UNITS.get(d.new_unit).copied().unwrap_or("mm");
-        let bad = new_check(app, d, unit).is_err();
-        let mut te = egui::TextEdit::singleline(&mut d.new_expr).id(expr_id).desired_width(170.0);
-        if bad {
-            te = te.text_color(t.error);
+    let name_id = ui.make_persistent_id("pnew_name");
+    let expr_id = ui.make_persistent_id("pnew_expr");
+    let comment_id = ui.make_persistent_id("pnew_comment");
+    let focused_id = ui.memory(|m| [name_id, expr_id, comment_id].into_iter().find(|id| m.has_focus(*id)));
+    // The column of the favourite and move buttons.
+    ui.label("");
+    // Sized like the rows' boxes: in a grid cell a text box only gets the column's width so far.
+    let name = ui.add_sized(
+        [120.0, 20.0],
+        egui::TextEdit::singleline(&mut d.new_name).id(name_id).hint_text(crate::i18n::tr_label("new parameter")).desired_width(120.0),
+    );
+    crate::scenario::publish_handle("param:new:name", name.rect.center());
+    crate::scenario::publish_rect("param:new:name", name.rect);
+    let unit_response = egui::ComboBox::from_id_salt("pnew_unit")
+        .width(56.0)
+        .selected_text(unit_label(UNITS.get(d.new_unit).copied().unwrap_or("mm")))
+        .show_ui(ui, |ui| {
+            for (i, u) in UNITS.iter().enumerate() {
+                ui.selectable_value(&mut d.new_unit, i, unit_label(u));
+            }
+        });
+    crate::scenario::publish_handle("param:new:unit", unit_response.response.rect.center());
+    crate::scenario::publish_rect("param:new:unit", unit_response.response.rect);
+    let unit = UNITS.get(d.new_unit).copied().unwrap_or("mm");
+    let bad = new_check(app, d, unit).is_err();
+    let mut te = egui::TextEdit::singleline(&mut d.new_expr).id(expr_id).desired_width(170.0);
+    if bad {
+        te = te.text_color(t.error);
+    }
+    let resp = ui.add_sized([170.0, 20.0], te);
+    crate::scenario::publish_handle("param:new:expression", resp.rect.center());
+    crate::scenario::publish_rect("param:new:expression", resp.rect);
+    let completed = complete(ui, &resp, &mut d.new_expr);
+    let live = new_check(app, d, unit);
+    let value = match &live {
+        Ok(v) => ui.label(RichText::new(v).color(t.text_dim)),
+        Err(m) => ui.label(RichText::new(m).color(t.error)),
+    };
+    crate::scenario::publish_rect("param:new:value", value.rect);
+    let comment =
+        ui.add_sized([150.0, 20.0], egui::TextEdit::singleline(&mut d.new_comment).id(comment_id).hint_text("comment").desired_width(150.0));
+    crate::scenario::publish_handle("param:new:comment", comment.rect.center());
+    crate::scenario::publish_rect("param:new:comment", comment.rect);
+    let submit = !completed && enter_for(ui, focused_id.is_some());
+    let ok = !d.new_name.trim().is_empty() && live.is_ok();
+    if ui.add_enabled(ok, egui::Button::new(crate::i18n::tr_label("Add"))).clicked() || submit {
+        if let Err(error) = &live {
+            d.error = Some(error.clone());
+            if let Some(id) = focused_id {
+                ui.memory_mut(|m| m.request_focus(id));
+            }
+            return;
         }
-        let resp = ui.add(te);
-        crate::scenario::publish_handle("param:new:expression", resp.rect.center());
-        let completed = complete(ui, &resp, &mut d.new_expr);
-        let live = new_check(app, d, unit);
-        match &live {
-            Ok(v) => ui.label(RichText::new(v).color(t.text_dim)),
-            Err(m) => ui.label(RichText::new(m).color(t.error)),
-        };
-        let comment = ui.add(egui::TextEdit::singleline(&mut d.new_comment).id(comment_id).hint_text("comment").desired_width(120.0));
-        crate::scenario::publish_handle("param:new:comment", comment.rect.center());
-        let submit = !completed && enter_for(ui, focused_id.is_some());
-        let ok = !d.new_name.trim().is_empty() && live.is_ok();
-        if ui.add_enabled(ok, egui::Button::new(crate::i18n::tr_label("Add"))).clicked() || submit {
-            if let Err(error) = &live {
-                d.error = Some(error.clone());
+        let p = json!({"name": d.new_name.trim(), "expression": d.new_expr, "unit": unit, "comment": d.new_comment});
+        match app.run("parameters.add", p) {
+            Ok(_) => {
+                d.new_name.clear();
+                d.new_expr = NEW_EXPR.into();
+                d.new_comment.clear();
+                d.error = None;
+                name.request_focus();
+            }
+            Err(e) => {
+                d.error = Some(e);
                 if let Some(id) = focused_id {
                     ui.memory_mut(|m| m.request_focus(id));
                 }
-                return;
-            }
-            let p = json!({"name": d.new_name.trim(), "expression": d.new_expr, "unit": unit, "comment": d.new_comment});
-            match app.run("parameters.add", p) {
-                Ok(_) => {
-                    d.new_name.clear();
-                    d.new_expr = NEW_EXPR.into();
-                    d.new_comment.clear();
-                    d.error = None;
-                    name.request_focus();
-                }
-                Err(e) => {
-                    d.error = Some(e);
-                    if let Some(id) = focused_id {
-                        ui.memory_mut(|m| m.request_focus(id));
-                    }
-                }
             }
         }
-    });
+    }
 }
 
 /// A completion offered under an expression box.
@@ -678,5 +693,31 @@ mod tests {
         h.frames(2);
         let d = h.app.params.as_ref().unwrap();
         assert!(d.listed.as_ref().unwrap().1.iter().any(|r| r.name == "p1" && r.comment == "hello"));
+    }
+
+    /// The add row's fields start where their headings do (#2920): before the first user
+    /// parameter, when the headings stood over nothing, and with one. Its text boxes keep
+    /// the rows' widths, so "new parameter" is not cut short.
+    #[test]
+    fn the_add_row_lines_up_with_the_headings() {
+        let mut h = crate::scenario::Harness::new();
+        h.app.home.open = false;
+        h.step(&json!({"start": "parameters.change"})).unwrap();
+        let aligned = |case: &str| {
+            for (heading, field) in [("Name", "name"), ("Unit", "unit"), ("Expression", "expression"), ("Value", "value"), ("Comment", "comment")] {
+                let head = crate::scenario::rect_of(&format!("param:heading:user:{heading}")).unwrap();
+                let cell = crate::scenario::rect_of(&format!("param:new:{field}")).unwrap();
+                assert!((head.left() - cell.left()).abs() < 0.5, "{case}: {heading} heading at x {}, its field at x {}", head.left(), cell.left());
+            }
+            for (field, width) in [("name", 120.0), ("expression", 170.0), ("comment", 150.0)] {
+                let cell = crate::scenario::rect_of(&format!("param:new:{field}")).unwrap();
+                assert!(cell.width() >= width - 0.5, "{case}: the {field} box is {} wide", cell.width());
+            }
+        };
+        h.frames(3);
+        aligned("no user parameter");
+        h.app.run("parameters.add", json!({"name": "width", "expression": "40 mm", "unit": "mm"})).unwrap();
+        h.frames(3);
+        aligned("one user parameter");
     }
 }

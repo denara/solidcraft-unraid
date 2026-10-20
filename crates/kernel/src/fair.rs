@@ -43,8 +43,8 @@
 //! control point that does not change the geometry at all — is reported as an error and the
 //! geometry is left alone.
 
-use solidcraft_geom::Vec3;
 use solidcraft_geom::bspline::{HPoint, MAX_SPLINE_DEGREE, NurbsSurface, Side, SplineError, check_knots, local_basis};
+use solidcraft_geom::{Grid, Vec3};
 use truck_modeling as mt;
 
 use crate::body::Body;
@@ -167,16 +167,15 @@ pub struct FairCurve<const N: usize> {
     pub report: FairReport,
 }
 
-/// A faired B-spline control net: the input's degrees, knots and counts, the moved control points
-/// (u fastest) and the run's report.
+/// A faired B-spline control net: the input's degrees and knots, the moved control points and the
+/// run's report.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FairNet<const N: usize> {
     pub degree: [usize; 2],
     pub knots: [Vec<f64>; 2],
-    pub count: [usize; 2],
-    /// The faired control points, u fastest; the held boundary layers are bit-identical to the
-    /// input.
-    pub ctrl: Vec<[f64; N]>,
+    /// The faired control points, as many as the input's; the held boundary layers are
+    /// bit-identical to the input.
+    pub ctrl: Grid<[f64; N]>,
     pub report: FairReport,
 }
 
@@ -274,23 +273,23 @@ impl Gram {
 /// A control net to fair: a tensor-product B-spline with the terms of its fairness energy. A
 /// direction of one control point (degree 0, knots `[0, 1]`) makes the net a curve, whose energy
 /// is the one-direction [`CURVE_ENERGY`].
-struct Net {
+struct Net<'a, const N: usize> {
     degree: [usize; 2],
-    count: [usize; 2],
-    /// The number of control points, `count[0] · count[1]`.
-    total: usize,
+    /// The control points as the design has them; the run moves copies.
+    ctrl: &'a Grid<[f64; N]>,
     gram: [Gram; 2],
     terms: &'static [(usize, usize, f64)],
 }
 
-impl Net {
+impl<'a, const N: usize> Net<'a, N> {
     /// Check the degrees, knots and counts and build the Gram matrices: an error, never a panic,
     /// for a degree above [`MAX_SPLINE_DEGREE`], too few control points for the degree, a knot
     /// vector of the wrong length, unusable knots or an empty parameter range.
-    fn new(degree: [usize; 2], knots: [Vec<f64>; 2], count: [usize; 2], terms: &'static [(usize, usize, f64)]) -> Result<Net> {
-        let Some(total) = count[0].checked_mul(count[1]).filter(|&n| n <= MAX_FAIR_POINTS) else {
+    fn new(degree: [usize; 2], knots: [Vec<f64>; 2], ctrl: &'a Grid<[f64; N]>, terms: &'static [(usize, usize, f64)]) -> Result<Net<'a, N>> {
+        let count = ctrl.count();
+        if ctrl.cells().len() > MAX_FAIR_POINTS {
             return Err(KernelError::TooLarge(format!("fairing {} × {} control points (at most {MAX_FAIR_POINTS} in all)", count[0], count[1])));
-        };
+        }
         for d in 0..2 {
             let (p, c, kn) = (degree[d], count[d], &knots[d]);
             if p > MAX_SPLINE_DEGREE {
@@ -316,18 +315,28 @@ impl Net {
             return Err(KernelError::Invalid("a fairness term does not fit the net's degrees".into()));
         }
         let gram = [Gram::new(degree[0], &knots[0], count[0])?, Gram::new(degree[1], &knots[1], count[1])?];
-        Ok(Net { degree, count, total, gram, terms })
+        Ok(Net { degree, ctrl, gram, terms })
+    }
+
+    /// Control points along u and along v.
+    fn count(&self) -> [usize; 2] {
+        self.ctrl.count()
+    }
+
+    /// The number of control points, `count[0] · count[1]`.
+    fn total(&self) -> usize {
+        self.ctrl.cells().len()
     }
 
     /// The index of control point `(i, j)` in the flattened net (u fastest).
     fn index(&self, i: usize, j: usize) -> usize {
-        j * self.count[0] + i
+        j * self.count()[0] + i
     }
 
     /// The fairness energy `Pᵀ·G·P` of the net `ctrl` (u fastest) and, in `grad`, `G·P`. One
     /// banded sweep gives both, since `E = Σ Pₚ·(G·P)ₚ`.
-    fn energy_gradient<const N: usize>(&self, ctrl: &[[f64; N]], grad: &mut [[f64; N]]) -> f64 {
-        let [cu, cv] = self.count;
+    fn energy_gradient(&self, ctrl: &[[f64; N]], grad: &mut [[f64; N]]) -> f64 {
+        let [cu, cv] = self.count();
         let (pu, pv) = (self.degree[0], self.degree[1]);
         let mut energy = 0.0;
         for j in 0..cv {
@@ -365,7 +374,7 @@ impl Net {
     /// step). In the u-fastest order two unknowns couple within `degree_u + degree_v · cols`:
     /// `degree_u` along a row, `degree_v` rows apart.
     fn system(&self, interior: &Interior) -> Result<Band> {
-        let [cu, cv] = self.count;
+        let [cu, cv] = self.count();
         let (pu, pv) = (self.degree[0], self.degree[1]);
         let rows = if cv > 1 { interior.rows.saturating_sub(1).min(pv) } else { 0 };
         let mut band = Band::new(interior.points.len(), pu + rows * interior.cols)?;
@@ -383,20 +392,18 @@ impl Net {
         band.factorised()
     }
 
-    /// Fair `ctrl` (u fastest) with checked `opts`: see the module docs. The result is the input
-    /// with the interior control points moved; the held ones are bit-identical.
-    fn fair<const N: usize>(&self, ctrl: &[[f64; N]], opts: &FairOptions) -> Result<(Vec<[f64; N]>, FairReport)> {
-        if ctrl.len() != self.total {
-            return Err(KernelError::Invalid(format!("{} control points, expected {}", ctrl.len(), self.total)));
-        }
+    /// Fair the net with checked `opts`: see the module docs. The result is the input with the
+    /// interior control points moved; the held ones are bit-identical.
+    fn fair(&self, opts: &FairOptions) -> Result<(Grid<[f64; N]>, FairReport)> {
+        let ctrl = self.ctrl.cells();
         if ctrl.iter().flatten().any(|x| !x.is_finite()) {
             return Err(KernelError::Invalid("a control point is not a finite number".into()));
         }
         let interior = Interior::new(self, if opts.keep_edges { 2 } else { 1 })?;
         let system = self.system(&interior)?;
-        let mut current: Vec<[f64; N]> = ctrl.to_vec();
-        let mut grad = vec![[0.0; N]; self.total];
-        let energy_before = self.energy_gradient(&current, &mut grad);
+        let mut current = self.ctrl.clone();
+        let mut grad = vec![[0.0; N]; self.total()];
+        let energy_before = self.energy_gradient(ctrl, &mut grad);
         if !energy_before.is_finite() {
             return Err(KernelError::Invalid("the fairness energy of this net is not a finite number".into()));
         }
@@ -409,7 +416,7 @@ impl Net {
         let mut b = vec![0.0; interior.points.len()];
         let mut report = FairReport { energy_before, energy_after: energy_before, steps: 0, movement: 0.0, energy_trace: Vec::new() };
         for _ in 0..opts.iterations {
-            let e_now = self.energy_gradient(&current, &mut grad);
+            let e_now = self.energy_gradient(current.cells(), &mut grad);
             if !e_now.is_finite() {
                 break;
             }
@@ -431,7 +438,7 @@ impl Net {
             }
             // The largest fraction of the step that keeps every control point within the
             // tolerance of where the design put it, and never more than the whole step.
-            let mut s = opts.strength.min(interior.limit(ctrl, &current, &step, opts.tolerance));
+            let mut s = opts.strength.min(interior.limit(ctrl, current.cells(), &step, opts.tolerance));
             if !(s > 0.0) {
                 break;
             }
@@ -444,7 +451,7 @@ impl Net {
             let mut taken = false;
             for _ in 0..MAX_HALVINGS {
                 let candidate = interior.apply(&current, &step, s);
-                let e = self.energy_gradient(&candidate, &mut grad);
+                let e = self.energy_gradient(candidate.cells(), &mut grad);
                 if e < e_now {
                     current = candidate;
                     report.steps += 1;
@@ -464,7 +471,7 @@ impl Net {
             }
         }
         report.energy_after = report.energy_trace.last().copied().unwrap_or(energy_before);
-        report.movement = interior.movement(ctrl, &current);
+        report.movement = interior.movement(ctrl, current.cells());
         Ok((current, report))
     }
 }
@@ -483,13 +490,13 @@ struct Interior {
 impl Interior {
     /// The interior of `net` with `keep` layers held at each end of each direction (1 without
     /// [`FairOptions::keep_edges`], 2 with it).
-    fn new(net: &Net, keep: usize) -> Result<Interior> {
-        let [cu, cv] = net.count;
+    fn new<const N: usize>(net: &Net<N>, keep: usize) -> Result<Interior> {
+        let [cu, cv] = net.count();
         let (i0, i1) = free_span(cu, keep)?;
         let (j0, j1) = free_span(cv, keep)?;
         let (cols, rows) = (i1 - i0, j1 - j0);
         let mut points = Vec::with_capacity(cols * rows);
-        let mut slot = vec![None; net.total];
+        let mut slot = vec![None; net.total()];
         for j in j0..j1 {
             for i in i0..i1 {
                 if let Some(s) = slot.get_mut(net.index(i, j)) {
@@ -509,10 +516,10 @@ impl Interior {
 
     /// `current` with `s` times the step `d` added to the interior control points; the held ones
     /// are copied as they are, bit for bit.
-    fn apply<const N: usize>(&self, current: &[[f64; N]], d: &[[f64; N]], s: f64) -> Vec<[f64; N]> {
-        let mut out = current.to_vec();
+    fn apply<const N: usize>(&self, current: &Grid<[f64; N]>, d: &[[f64; N]], s: f64) -> Grid<[f64; N]> {
+        let mut out = current.clone();
         for (slot, &at) in self.points.iter().enumerate() {
-            let (Some(p), Some(v)) = (out.get_mut(at), d.get(slot)) else { continue };
+            let (Some(p), Some(v)) = (out.cells_mut().get_mut(at), d.get(slot)) else { continue };
             for (x, dx) in p.iter_mut().zip(v) {
                 *x += s * dx;
             }
@@ -697,28 +704,20 @@ impl Band {
 /// wire in space, 2 for a sketch curve.
 pub fn fair_curve<const N: usize>(degree: usize, knots: &[f64], ctrl: &[[f64; N]], opts: &FairOptions) -> Result<FairCurve<N>> {
     let opts = opts.checked()?;
-    let net = Net::new([degree, 0], [knots.to_vec(), TRIVIAL_KNOTS.to_vec()], [ctrl.len(), 1], &CURVE_ENERGY)?;
-    let (faired, report) = net.fair(ctrl, &opts)?;
-    Ok(FairCurve { degree, knots: knots.to_vec(), ctrl: faired, report })
+    let row = Grid::row(ctrl.to_vec());
+    let (faired, report) = Net::new([degree, 0], [knots.to_vec(), TRIVIAL_KNOTS.to_vec()], &row, &CURVE_ENERGY)?.fair(&opts)?;
+    Ok(FairCurve { degree, knots: knots.to_vec(), ctrl: faired.into_cells(), report })
 }
 
 /// Fair the interior of a B-spline control net with the thin-plate energy
 /// `∫∫ ‖S_uu‖² + 2‖S_uv‖² + ‖S_vv‖² du dv` in the net's own parameters (see the module docs).
-/// `count[0]` control points lie along u and `count[1]` along v, `ctrl` is u fastest, and the
-/// boundary layers (see [`FairOptions::keep_edges`]) are held. The generic core behind
+/// The boundary layers (see [`FairOptions::keep_edges`]) are held. The generic core behind
 /// [`fair_surface`], [`fair_bspline_surface`] and their rational counterparts, for a caller with
 /// its own control net.
-pub fn fair_net<const N: usize>(
-    degree: [usize; 2],
-    knots: [&[f64]; 2],
-    count: [usize; 2],
-    ctrl: &[[f64; N]],
-    opts: &FairOptions,
-) -> Result<FairNet<N>> {
+pub fn fair_net<const N: usize>(degree: [usize; 2], knots: [&[f64]; 2], ctrl: &Grid<[f64; N]>, opts: &FairOptions) -> Result<FairNet<N>> {
     let opts = opts.checked()?;
-    let net = Net::new(degree, [knots[0].to_vec(), knots[1].to_vec()], count, &SURFACE_ENERGY)?;
-    let (faired, report) = net.fair(ctrl, &opts)?;
-    Ok(FairNet { degree, knots: [knots[0].to_vec(), knots[1].to_vec()], count, ctrl: faired, report })
+    let (faired, report) = Net::new(degree, [knots[0].to_vec(), knots[1].to_vec()], ctrl, &SURFACE_ENERGY)?.fair(&opts)?;
+    Ok(FairNet { degree, knots: [knots[0].to_vec(), knots[1].to_vec()], ctrl: faired, report })
 }
 
 /// Fair a truck B-spline curve's control points: [`fair_curve`] on its three-dimensional points,
@@ -762,39 +761,41 @@ pub fn fair_nurbs_curve(curve: &mt::NurbsCurve<mt::Vector4>, opts: &FairOptions)
 /// of the same knots, with the boundary rows held. Guarded like [`fair_bspline_curve`].
 pub fn fair_bspline_surface(surface: &mt::BSplineSurface<mt::Point3>, opts: &FairOptions) -> Result<(mt::BSplineSurface<mt::Point3>, FairReport)> {
     guard("fair a B-spline surface", || {
-        let rows = surface.control_points();
-        let count = [rows.len(), rows.first().map_or(0, Vec::len)];
-        if count[0] == 0 || count[1] == 0 {
-            return Err(KernelError::Invalid("the surface has no control points".into()));
-        }
-        if rows.iter().any(|r| r.len() != count[1]) {
-            return Err(KernelError::Invalid("the surface's control net is not rectangular".into()));
-        }
-        // truck keeps the net as control_points()[i][j] with i along u; fair_net wants u fastest.
-        let mut ctrl = Vec::with_capacity(count[0] * count[1]);
-        for j in 0..count[1] {
-            for i in 0..count[0] {
-                let Some(p) = rows.get(i).and_then(|r| r.get(j)) else { continue };
-                ctrl.push([p.x, p.y, p.z]);
-            }
-        }
+        let net = truck_net(surface.control_points())?;
         let (ku, kv) = surface.knot_vecs();
         let (pu, pv) = surface.degrees();
-        let faired = fair_net([pu, pv], [ku, kv], count, &ctrl, opts)?;
-        let mut net: Vec<Vec<mt::Point3>> = Vec::with_capacity(count[0]);
-        for i in 0..count[0] {
-            let mut row = Vec::with_capacity(count[1]);
-            for j in 0..count[1] {
-                let Some(c) = faired.ctrl.get(j * count[0] + i) else {
-                    return Err(KernelError::Failed("fairing lost a control point".into()));
-                };
-                row.push(mt::Point3::new(c[0], c[1], c[2]));
-            }
-            net.push(row);
-        }
+        let faired = fair_net([pu, pv], [ku, kv], &net.map(|p| [p.x, p.y, p.z]), opts)?;
+        let net = faired.ctrl.map(|[x, y, z]| mt::Point3::new(x, y, z)).into_u_rows();
         let surface = mt::BSplineSurface::try_new((ku.clone(), kv.clone()), net).map_err(|e| KernelError::Failed(format!("fair: {e}")))?;
         Ok((surface, faired.report))
     })
+}
+
+/// A truck surface's control net (`rows[i][j]`, i along u) as a grid: refused when it is empty
+/// or not rectangular.
+fn truck_net<P: Clone>(rows: &[Vec<P>]) -> Result<Grid<P>> {
+    let net = Grid::from_u_rows(rows).ok_or_else(|| KernelError::Invalid("the surface's control net is not rectangular".into()))?;
+    if net.is_empty() {
+        return Err(KernelError::Invalid("the surface has no control points".into()));
+    }
+    Ok(net)
+}
+
+/// A homogeneous control net's Cartesian points; refused when a weight is zero (the point has no
+/// position).
+fn positions(net: &Grid<HPoint>) -> Result<Grid<[f64; 3]>> {
+    net.clone().try_map(|h| {
+        let p = h.project().ok_or_else(|| KernelError::Invalid("a control point has no position: its weight is zero".into()))?;
+        Ok([p.x, p.y, p.z])
+    })
+}
+
+/// `net` moved to the faired `points`, each keeping its weight.
+fn reweighted(mut net: Grid<HPoint>, points: &Grid<[f64; 3]>) -> Grid<HPoint> {
+    for (h, &[x, y, z]) in net.cells_mut().iter_mut().zip(points.cells()) {
+        *h = HPoint::weighted(Vec3::new(x, y, z), h.w);
+    }
+    net
 }
 
 /// Fair a geom NURBS surface's control net: [`fair_net`] on its Cartesian control points, with
@@ -802,24 +803,13 @@ pub fn fair_bspline_surface(surface: &mt::BSplineSurface<mt::Point3>, opts: &Fai
 /// A rational surface's geometry then stays within the tolerance too, by the same convex-hull
 /// bound as the non-rational case.
 pub fn fair_surface(surface: &NurbsSurface, opts: &FairOptions) -> Result<(NurbsSurface, FairReport)> {
-    let [cu, cv] = surface.count();
-    let mut ctrl = Vec::with_capacity(cu * cv);
-    let mut weights = Vec::with_capacity(cu * cv);
-    for j in 0..cv {
-        for i in 0..cu {
-            let h = surface.point(i, j);
-            let Some(p) = h.project() else {
-                return Err(KernelError::Invalid("a control point has no position: its weight is zero".into()));
-            };
-            ctrl.push([p.x, p.y, p.z]);
-            weights.push(h.w);
-        }
-    }
+    let net = surface.net();
     let [ku, kv] = surface.knots();
     let degree = surface.degree();
-    let faired = fair_net(degree, [ku, kv], [cu, cv], &ctrl, opts)?;
-    let points: Vec<HPoint> = faired.ctrl.iter().zip(&weights).map(|(p, w)| HPoint::weighted(Vec3::new(p[0], p[1], p[2]), *w)).collect();
-    let out = NurbsSurface::from_homogeneous(degree, surface.knots().clone(), points).map_err(|e| spline_error("fairing the surface", e))?;
+    let faired = fair_net(degree, [ku, kv], &positions(&net)?, opts)?;
+    let net = reweighted(net, &faired.ctrl);
+    let out =
+        NurbsSurface::from_homogeneous(degree, surface.knots().clone(), net.into_cells()).map_err(|e| spline_error("fairing the surface", e))?;
     Ok((out, faired.report))
 }
 
@@ -829,40 +819,11 @@ pub fn fair_surface(surface: &NurbsSurface, opts: &FairOptions) -> Result<(Nurbs
 pub fn fair_nurbs_surface(surface: &mt::NurbsSurface<mt::Vector4>, opts: &FairOptions) -> Result<(mt::NurbsSurface<mt::Vector4>, FairReport)> {
     guard("fair a NURBS surface", || {
         let bsp = surface.non_rationalized();
-        let rows = bsp.control_points();
-        let count = [rows.len(), rows.first().map_or(0, Vec::len)];
-        if count[0] == 0 || count[1] == 0 {
-            return Err(KernelError::Invalid("the surface has no control points".into()));
-        }
-        if rows.iter().any(|r| r.len() != count[1]) {
-            return Err(KernelError::Invalid("the surface's control net is not rectangular".into()));
-        }
-        let mut ctrl = Vec::with_capacity(count[0] * count[1]);
-        let mut weights = Vec::with_capacity(count[0] * count[1]);
-        for j in 0..count[1] {
-            for i in 0..count[0] {
-                let Some(h) = rows.get(i).and_then(|r| r.get(j)) else { continue };
-                let Some(p) = (HPoint { x: h.x, y: h.y, z: h.z, w: h.w }).project() else {
-                    return Err(KernelError::Invalid("a control point has no position: its weight is zero".into()));
-                };
-                ctrl.push([p.x, p.y, p.z]);
-                weights.push(h.w);
-            }
-        }
+        let net = truck_net(bsp.control_points())?.map(|h| HPoint { x: h.x, y: h.y, z: h.z, w: h.w });
         let (ku, kv) = bsp.knot_vecs();
         let (pu, pv) = bsp.degrees();
-        let faired = fair_net([pu, pv], [ku, kv], count, &ctrl, opts)?;
-        let mut net: Vec<Vec<mt::Vector4>> = Vec::with_capacity(count[0]);
-        for i in 0..count[0] {
-            let mut row = Vec::with_capacity(count[1]);
-            for j in 0..count[1] {
-                let (Some(c), Some(w)) = (faired.ctrl.get(j * count[0] + i), weights.get(j * count[0] + i)) else {
-                    return Err(KernelError::Failed("fairing lost a control point".into()));
-                };
-                row.push(mt::Vector4::new(c[0] * w, c[1] * w, c[2] * w, *w));
-            }
-            net.push(row);
-        }
+        let faired = fair_net([pu, pv], [ku, kv], &positions(&net)?, opts)?;
+        let net = reweighted(net, &faired.ctrl).map(|h| mt::Vector4::new(h.x, h.y, h.z, h.w)).into_u_rows();
         let bsp = mt::BSplineSurface::try_new((ku.clone(), kv.clone()), net).map_err(|e| KernelError::Failed(format!("fair: {e}")))?;
         Ok((mt::NurbsSurface::new(bsp), faired.report))
     })
@@ -1167,18 +1128,18 @@ mod tests {
             rough[j * cu + i][2] += d;
         }
         let opts = FairOptions::new(1.0, 6, false, 100.0).unwrap();
-        let faired = fair_net(degree, [&ku, &kv], [cu, cv], &rough, &opts).unwrap();
+        let faired = fair_net(degree, [&ku, &kv], &Grid::from_fn([cu, cv], |i, j| rough[j * cu + i]).unwrap(), &opts).unwrap();
         for j in 0..cv {
             for i in [0, cu - 1] {
-                assert_eq!(faired.ctrl[j * cu + i], rough[j * cu + i], "column {i}, row {j} moved");
+                assert_eq!(faired.ctrl.get(i, j), Some(&rough[j * cu + i]), "column {i}, row {j} moved");
             }
         }
         for i in 0..cu {
             for j in [0, cv - 1] {
-                assert_eq!(faired.ctrl[j * cu + i], rough[j * cu + i], "row {j}, column {i} moved");
+                assert_eq!(faired.ctrl.get(i, j), Some(&rough[j * cu + i]), "row {j}, column {i} moved");
             }
         }
-        let near = (0..cu * cv).map(|k| dist(&faired.ctrl[k], &smooth[k])).fold(0.0, f64::max);
+        let near = faired.ctrl.cells().iter().zip(&smooth).map(|(a, b)| dist(a, b)).fold(0.0, f64::max);
         let far = (0..cu * cv).map(|k| dist(&rough[k], &smooth[k])).fold(0.0, f64::max);
         eprintln!("net: perturbation {far} mm, faired to {near:e} mm, energy {:e} → {:e}", faired.report.energy_before, faired.report.energy_after);
         assert!(near < 1e-6, "{near:e}");
@@ -1191,16 +1152,16 @@ mod tests {
             inner[j * cu + i][2] += d;
         }
         let kept = FairOptions::new(1.0, 6, true, 100.0).unwrap();
-        let faired = fair_net(degree, [&ku, &kv], [cu, cv], &inner, &kept).unwrap();
+        let faired = fair_net(degree, [&ku, &kv], &Grid::from_fn([cu, cv], |i, j| inner[j * cu + i]).unwrap(), &kept).unwrap();
         let shell = |i: usize, j: usize| i < 2 || i + 2 >= cu || j < 2 || j + 2 >= cv;
         for j in 0..cv {
             for i in 0..cu {
                 if shell(i, j) {
-                    assert_eq!(faired.ctrl[j * cu + i], inner[j * cu + i], "({i}, {j}) is a boundary layer and moved");
+                    assert_eq!(faired.ctrl.get(i, j), Some(&inner[j * cu + i]), "({i}, {j}) is a boundary layer and moved");
                 }
             }
         }
-        let near = (0..cu * cv).filter(|&k| !shell(k % cu, k / cu)).map(|k| dist(&faired.ctrl[k], &smooth[k])).fold(0.0, f64::max);
+        let near = (0..cu * cv).filter(|&k| !shell(k % cu, k / cu)).map(|k| dist(&faired.ctrl.cells()[k], &smooth[k])).fold(0.0, f64::max);
         eprintln!("net with keep_edges: interior faired to {near:e} mm, energy {:e} → {:e}", faired.report.energy_before, faired.report.energy_after);
         assert!(near < 1e-6 && faired.report.energy_after < faired.report.energy_before);
     }
@@ -1376,10 +1337,13 @@ mod tests {
         let flat = [0.0, 0.0, 1.0, 2.0, 2.0];
         let grid = [[0.0, 0.0, 0.0]; 9];
         let kept = FairOptions::new(1.0, 4, true, 1.0).unwrap();
-        assert!(fair_net([1, 1], [&flat, &flat], [3, 3], &grid, &kept).is_err(), "keep_edges on a 3 × 3 net");
+        assert!(
+            fair_net([1, 1], [&flat, &flat], &Grid::from_fn([3, 3], |i, j| grid[j * 3 + i]).unwrap(), &kept).is_err(),
+            "keep_edges on a 3 × 3 net"
+        );
         // A net too large to fair, refused before anything is allocated for it.
         let line = [0.0, 0.0, 1.0, 1.0];
-        assert!(fair_net([1, 1], [&line, &line], [65, 65], &vec![[0.0; 3]; 65 * 65], &ok).is_err(), "4225 control points");
+        assert!(fair_net([1, 1], [&line, &line], &Grid::from_fn([65, 65], |_, _| [0.0; 3]).unwrap(), &ok).is_err(), "4225 control points");
         // A singular system: a cubic whose last control points lie past the end of its domain
         // (0.5), where they do not move the curve at all, so the interior equations have no
         // unique solution and the run must refuse rather than move anything.
@@ -1405,14 +1369,20 @@ mod tests {
         for &(i, j, d) in &[(1usize, 2usize, 2.5), (2, 2, -1.5), (3, 3, 3.0), (2, 1, -2.0)] {
             rough[j * cu + i][2] += d;
         }
-        let faired = fair_net(degree, [&ku, &kv], [cu, cv], &rough, &FairOptions::new(1.0, 8, false, 100.0).unwrap()).unwrap();
-        let near = (0..cu * cv).map(|k| dist(&faired.ctrl[k], &smooth[k])).fold(0.0, f64::max);
+        let faired = fair_net(
+            degree,
+            [&ku, &kv],
+            &Grid::from_fn([cu, cv], |i, j| rough[j * cu + i]).unwrap(),
+            &FairOptions::new(1.0, 8, false, 100.0).unwrap(),
+        )
+        .unwrap();
+        let near = faired.ctrl.cells().iter().zip(&smooth).map(|(a, b)| dist(a, b)).fold(0.0, f64::max);
         eprintln!("5 × 5 quadratic net: faired to {near:e} mm, energy {:e} → {:e}", faired.report.energy_before, faired.report.energy_after);
         assert!(near < 1e-6 && faired.report.energy_after < 1e-9 * faired.report.energy_before);
         for j in 0..cv {
             for i in 0..cu {
                 if i == 0 || i + 1 == cu || j == 0 || j + 1 == cv {
-                    assert_eq!(faired.ctrl[j * cu + i], rough[j * cu + i], "({i}, {j}) is on the boundary and moved");
+                    assert_eq!(faired.ctrl.get(i, j), Some(&rough[j * cu + i]), "({i}, {j}) is on the boundary and moved");
                 }
             }
         }

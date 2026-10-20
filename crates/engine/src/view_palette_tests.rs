@@ -191,3 +191,31 @@ fn every_scene_colour_comes_from_its_palette_and_appearances_stay() {
     assert_eq!(mesh(&default, "Plain").0, colors::BODY);
     assert_eq!(mesh(&default, "Picked").0, colors::BODY_SELECTED);
 }
+
+/// A see-through appearance reaches the picture: the scene carries the body's opacity, so the
+/// renderers draw it as glass and what is inside it shows. A selected body stays solid, as in
+/// the viewport, so the selection colour reads.
+#[test]
+fn a_see_through_appearance_reaches_the_scene() {
+    let mut s = Session::default();
+    for (name, x) in [("Target", 0.), ("Tool", 20.), ("Picked", 40.)] {
+        s.execute("solid.box", &json!({"length": 10, "width": 10, "height": 10, "corner": [x, 0, 0], "operation": "new_body", "body_name": name}))
+            .unwrap();
+    }
+    s.execute("appearance.assign", &json!({"bodies": ["Target"], "color": "#b0bac6", "opacity": 0.3})).unwrap();
+    s.execute("appearance.assign", &json!({"bodies": ["Picked"], "color": "#b0bac6", "opacity": 0.3})).unwrap();
+    s.selection = vec![Sel::Body { name: "Picked".into() }];
+    let cam = home_camera(&s);
+    let sc = scene(&s, &cam);
+    let names: Vec<String> = s.world_state().bodies.iter().filter(|b| s.body_visible(&b.name)).map(|b| b.name.clone()).collect();
+    let opacity = |name: &str| names.iter().position(|n| n == name).and_then(|i| sc.meshes.get(i)).map(|m| (m.opacity, m.glass())).unwrap();
+
+    assert_eq!(opacity("Target"), (0.3, true), "the design's opacity is the one the renderers draw");
+    assert_eq!(opacity("Tool"), (1.0, false), "a body with no appearance of its own is solid");
+    assert_eq!(opacity("Picked"), (1.0, false), "a selected body is drawn solid, so the selection colour reads");
+
+    // Clearing the appearance makes it solid again.
+    s.execute("appearance.assign", &json!({"bodies": ["Target"], "color": null})).unwrap();
+    let sc = scene(&s, &cam);
+    assert_eq!(sc.meshes.first().map(|m| m.opacity), Some(1.0));
+}

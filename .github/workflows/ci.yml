@@ -2,41 +2,40 @@
 # PRs test what they touch; main and nightly test everything. On a pull request the "Select
 # checks" job maps the changed files to workspace packages (scripts/ci/affected.py), adds the
 # packages that depend on them, and Clippy, the test archive and the test shards cover only
-# those. Changes to the lockfile, root manifest, toolchain/cargo/nextest config, .github/,
-# vendor/, tests/, scripts/ or any file no package owns select the whole workspace, as do
-# pushes to main, the nightly run and Run workflow.
+# those. Test data under tests/, vendored crates under vendor/ and root files a crate embeds
+# select the packages that read them. Changes to the lockfile, root manifest,
+# toolchain/cargo/nextest config, this workflow, scripts/ or any file no package owns select the
+# whole workspace, as do pushes to main that change code, the nightly run and Run workflow.
+# Documentation, packaging, the other workflows and the GitHub bots' scripts select nothing:
+# no native job runs for them, on pull requests or on main.
 # Tests are built once and run in shards. A few heavy tests (see .config/nextest.toml) are
 # skipped on pull requests and run on pushes to main and nightly. The Windows jobs (D3D12 shaders
-# and app startup) run on pull requests only when what they test changes (the GPU crate, the app,
-# the viewport's GPU glue, the graphics dependencies, their scripts or this file); main and
-# nightly always run them. Only main saves the build caches; pull requests restore them.
-# The merge queue runs the full suite on exactly the commit it then puts on main, so a push to
-# main that a passing merge-queue run already tested runs only the repository checks; a push
-# that skipped the queue still runs everything. Pull requests run the reference tests when the
-# command line (or anything it depends on) changes, and doc tests for the affected packages.
+# and app startup), the reference tests and the doc tests run on main and nightly only, not on
+# pull requests (the fast lane, in Select checks); a break there is fixed forward on main. Only
+# main saves the build caches; pull requests restore them. On pull requests the test build and the
+# shards start only after the format and repository checks pass.
+# A push to main runs only the repository checks when a passing merge-queue run tested that very
+# commit, or when nothing a build reads changed since the last push to main whose run passed.
+# Otherwise it runs everything.
 # Heavy checks wait for review: a pull request without the `approved-for-ci` label runs only
 # Select checks, the format and repository checks and a quick compile. Adding the label (after
-# review) runs everything above, and every later push to the PR does too. Pushes to main, merge
-# groups, the nightly run and Run workflow are not pull requests and always run the full suite.
+# review) runs everything above, and every later push to the PR does too, except a push that only
+# merges main into a change that already passed (scripts/ci/main_merge.py): it carries that
+# result and runs the repository checks. Merge groups, the nightly run and Run workflow are not
+# pull requests and always run the full suite.
 # GitHub cannot filter `labeled` events by label name, so any other label starts a run whose jobs
 # are all skipped; it gets its own concurrency group (below) so it never cancels the real run.
 # Cross-compilation is opt-in through Run workflow; release builds remain in release.yml.
-# Trusted runs use both pools: pushes to main, merge-queue groups and pull requests from a branch
-# of this repository (people with write access; fork pull requests never run on this machine).
-# There, Select checks and ci run on the self-hosted light runner (`self-hosted-light`, quick
-# jobs, so they never wait behind a build). For pushes to main and the merge queue only, the
-# repository checks, Clippy, the doc tests, the reference tests and all four test shards run on the
-# self-hosted runners (`self-hosted-fast`, warm build directories via scripts/ci/warm-target.sh);
-# a pull request runs them on GitHub's runners, so it never holds up the queue. Fork PRs' Linux
-# jobs run on the isolated, ephemeral `self-hosted-untrusted` runners (no warm caches) when the
-# PR number ends in 7, 8 or 9 (the rest of the fork PRs, and everything else, run on GitHub's
-# runners, which have far more free slots).
-# Where the test shards run on GitHub's runners, the test archive is built there too: the
-# self-hosted machine has a newer glibc, so its binaries wouldn't start on ubuntu-24.04, while the
-# archive runs there unchanged (same /home/runner/work checkout path). The self-hosted shards
-# (main and the merge queue) skip the archive and build the tests in their warm build directories.
-# Fork pull requests, the nightly run and Run workflow use GitHub's runners only; the self-hosted
-# runners refuse any other job.
+# Every Linux job runs on Blacksmith's Ubuntu 24.04 runners (blacksmith-<N>vcpu-ubuntu-2404), sized
+# per job: 16 vCPU for Build tests, Clippy and the merge queue's test shards, 8 for compiles, the
+# other test shards, doc and reference tests, 4 for the light checks, 2 for Select checks and ci.
+# The Windows shader job runs on Blacksmith's Windows Server 2025 runners (blacksmith-8vcpu-windows-2025);
+# the Windows app startup smoke stays on windows-latest, which has a desktop session that presents frames.
+# Pull requests, forks included, the merge queue, pushes to main and the nightly run all use them:
+# the runners are ephemeral, fork runs get no secrets, and main saves the build caches that every
+# other run restores read-only. The tests are built once (Build tests) into an archive the shards
+# run; Blacksmith's image matches ubuntu-24.04, so the archive and the recorded goldens behave the
+# same.
 name: CI
 
 on:
@@ -77,7 +76,7 @@ jobs:
   dependency-advisories:
     name: Dependency advisories
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -92,8 +91,7 @@ jobs:
     # Not on a draft: every other check needs this one, so they skip too. Not on a label other than
     # approved-for-ci either (the same skip, for the same reason).
     if: (github.event_name != 'pull_request' || !github.event.pull_request.draft) && (github.event.action != 'labeled' || github.event.label.name == 'approved-for-ci')
-    # Trusted runs (see the top of this file) use the self-hosted runners.
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'self-hosted-light' || 'ubuntu-24.04' }}
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     permissions:
       contents: read
       # To ask whether the merge queue already tested a commit pushed to main.
@@ -108,9 +106,9 @@ jobs:
       quick: ${{ steps.paths.outputs.quick }}
       packages: ${{ steps.paths.outputs.packages }}
       oracle: ${{ steps.paths.outputs.oracle }}
-      # The fast self-hosted runners are kept for main and the merge queue (the pre-merge gate);
-      # pull requests, same-repo ones included, take the GitHub-hosted or untrusted paths.
-      local: ${{ runner.environment == 'self-hosted' && github.event_name != 'pull_request' }}
+      doctests: ${{ steps.paths.outputs.doctests }}
+      # The passing run a merge of main carries forward (its URL), when this push is only that.
+      carried: ${{ steps.paths.outputs.carried }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -122,6 +120,9 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PUSH_SHA: ${{ github.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
           REPO: ${{ github.repository }}
           APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'approved-for-ci') }}
           GH_TOKEN: ${{ github.token }}
@@ -132,17 +133,38 @@ jobs:
           windows=false
           full=true
           packages=
+          # Whether the NUL-separated paths in $1 reach any code: scripts/ci/affected.py selects
+          # something or the whole workspace. Documentation, packaging, other workflows and the bots'
+          # scripts select nothing. Pull requests and pushes to main share it.
+          select_packages() {
+            python3 -I scripts/ci/affected.py --paths "$1" > "$RUNNER_TEMP/ci-affected"
+            cat "$RUNNER_TEMP/ci-affected"
+            full=$(sed -n 's/^full=//p' "$RUNNER_TEMP/ci-affected")
+            packages=$(sed -n 's/^packages=//p' "$RUNNER_TEMP/ci-affected")
+          }
           if [ "$EVENT_NAME" = push ]; then
             # The queue lands the very commit its merge_group run tested. If that run passed,
             # testing the push again proves nothing new; otherwise (a merge that skipped the
             # queue, or the API cannot answer) test everything.
-            # curl and grep only: Select checks of a push runs on the self-hosted runner.
+            # The API through curl and grep, which every runner image has.
             tested=$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
               "https://api.github.com/repos/$REPO/actions/workflows/ci.yml/runs?event=merge_group&head_sha=$PUSH_SHA&status=success&per_page=1" \
               | grep -o '"total_count": *[0-9]*' | grep -o '[0-9]*$' || echo 0)
             if [ "${tested:-0}" -gt 0 ]; then
               echo "The merge queue already tested $PUSH_SHA: repository checks only."
+            elif tested=$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/$REPO/actions/workflows/ci.yml/runs?event=push&branch=main&status=success&per_page=1" \
+                | grep -o '"head_sha": *"[0-9a-f]*"' | head -n 1 | grep -o '[0-9a-f]\{40\}') \
+              && [ -n "$tested" ] && git merge-base --is-ancestor "$tested" "$PUSH_SHA" \
+              && git diff --no-renames --name-only -z "$tested" "$PUSH_SHA" > "$RUNNER_TEMP/ci-paths" \
+              && select_packages "$RUNNER_TEMP/ci-paths" && [ "$full" != true ] && [ -z "$packages" ]; then
+              # Nothing a build reads changed since the last push to main whose run passed (the
+              # push before may never have run: a newer push cancels a waiting one).
+              echo "$tested..$PUSH_SHA changes no code: repository checks only."
             else
+              # Code changed (or the push can't be compared): main runs everything.
+              full=true
+              packages=
               native=true
               windows=true
             fi
@@ -156,21 +178,13 @@ jobs:
               case "$path" in crates/kernel/*|vendor/truck-*) kernel=true ;; esac
               # What can change a robustness golden: the kernel and the crates a design is built with.
               case "$path" in
-                crates/kernel/*|crates/engine/*|crates/doc/*|crates/sketch/*|crates/geom/*|vendor/truck-*) goldens=true ;;
+                crates/kernel/*|crates/engine/*|crates/doc/*|crates/sketch/*|crates/geom/*|vendor/truck-*|tests/robustness/*) goldens=true ;;
               esac
               # What the Windows D3D12 jobs exercise: the GPU crate and its shaders, the app and
               # its startup, the viewport's wgpu glue, the vendored egui-wgpu, their scripts.
               case "$path" in
                 crates/gpu/*|apps/solidcraft/*|crates/ui-egui/src/gpu.rs|vendor/egui-wgpu/*) windows=true ;;
                 tools/windows-*.ps1|.github/workflows/ci.yml|rust-toolchain*|.cargo/*) windows=true ;;
-              esac
-              case "$path" in
-                .github/workflows/ci.yml) native=true ;;
-                *.rs|Cargo.toml|Cargo.lock|*/Cargo.toml|.cargo/*|rust-toolchain*) native=true ;;
-                docs/*|*.md|.github/*|packaging/*|LICENSE*|NOTICE|THIRD-PARTY-LICENSES.txt) ;;
-                # The GitHub bots' scripts: no Rust, tested in this job (Claim and triage bot tests).
-                scripts/claim/*|scripts/triage/*) ;;
-                *) native=true ;;
               esac
             done < "$RUNNER_TEMP/ci-paths"
             # A lockfile change that moves the graphics stack (wgpu, naga, egui, winit, windows).
@@ -179,13 +193,10 @@ jobs:
                 | grep -Eq '^[ +-]name = "(wgpu[a-z_-]*|naga|egui[a-z_-]*|eframe|winit|windows[a-z_-]*|d3d12)"'; then
               windows=true
             fi
-            # Pull requests build and test the touched packages and their dependents.
-            python3 -I scripts/ci/affected.py --paths "$RUNNER_TEMP/ci-paths" > "$RUNNER_TEMP/ci-affected"
-            cat "$RUNNER_TEMP/ci-affected"
-            full=$(sed -n 's/^full=//p' "$RUNNER_TEMP/ci-affected")
-            packages=$(sed -n 's/^packages=//p' "$RUNNER_TEMP/ci-affected")
-            # Code changed but nothing was selected: be safe and test everything.
-            if [ "$native" = true ] && [ "$full" != true ] && [ -z "$packages" ]; then full=true; fi
+            # Pull requests build and test the touched packages and their dependents; nothing
+            # selected means no code changed.
+            select_packages "$RUNNER_TEMP/ci-paths"
+            if [ "$full" = true ] || [ -n "$packages" ]; then native=true; fi
             # The goldens are solidcraft-engine tests: its tests must be in the archive.
             if [ "$goldens" = true ] && [ "$full" != true ]; then
               case " $packages " in *" solidcraft-engine "*) ;; *) packages="$packages solidcraft-engine" ;; esac
@@ -197,9 +208,12 @@ jobs:
           if [ "$EVENT_NAME" = pull_request ] && [ "$full" != true ]; then
             case " $packages " in *" solidcraft-cli "*) ;; *) oracle=false ;; esac
           fi
-          # The pull request fast lane: Windows and the reference tests run on main (and the nightly),
-          # not on every pull request push; a break there is fixed forward on main.
-          if [ "$EVENT_NAME" = pull_request ]; then windows=false; oracle=false; fi
+          # The pull request fast lane: Windows, the reference tests and the doc tests run on main
+          # (and the nightly), not on every pull request push; a break there is fixed forward on
+          # main. Over three days of pull requests the doc tests were the only failing job 3 times
+          # in about 7,900 runner-minutes, and the reference tests never were.
+          doctests=$native
+          if [ "$EVENT_NAME" = pull_request ]; then windows=false; oracle=false; doctests=false; fi
           # Until a maintainer adds approved-for-ci, a pull request gets a quick compile instead of
           # Clippy, the tests, the doc tests and the goldens.
           quick=false
@@ -209,12 +223,28 @@ jobs:
             oracle=false
             goldens=false
           fi
+          # A push that only merges main into the change (Merge branch 'main', Update branch) when
+          # the change itself already passed: nothing new to test here, and main tests the merged
+          # result after it lands. Over three days, 872 of 1,241 such merges brought in nothing that
+          # touched the pull request's files, and each restarted the whole run.
+          carried=
+          if [ "$EVENT_NAME" = pull_request ] && [ "$native" = true ]; then
+            carried=$(python3 -I scripts/ci/main_merge.py --base "$BASE_SHA" --head "$HEAD_SHA" --repo "$REPO" \
+              --pr "$PR_NUMBER" --head-repo "$HEAD_REPO" --head-ref "$HEAD_REF" | sed -n 's/^carried=//p')
+            if [ -n "$carried" ]; then
+              echo "Only a merge of main into a change that passed in $carried: repository checks only."
+              native=false
+              goldens=false
+            fi
+          fi
           {
             echo "native=$native"
             echo "kernel=$kernel"
             echo "goldens=$goldens"
             echo "windows=$windows"
             echo "oracle=$oracle"
+            echo "doctests=$doctests"
+            echo "carried=$carried"
             echo "full=$full"
             echo "quick=$quick"
             echo "packages=$packages"
@@ -223,20 +253,15 @@ jobs:
   checks:
     name: Format and repository checks
     if: (github.event_name != 'pull_request' || !github.event.pull_request.draft) && (github.event.action != 'labeled' || github.event.label.name == 'approved-for-ci')
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'self-hosted-fast' || 'ubuntu-24.04' }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Warm build directory (self-hosted runner)
-        if: runner.environment == 'self-hosted' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)
-        run: scripts/ci/warm-target.sh checks
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      # The trusted self-hosted runners keep their build directory and Cargo home instead; the
-      # untrusted ones (fork pull requests) start empty and restore main's cache, read-only.
-      - if: runner.environment == 'github-hosted' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # Main saves the cache; every other run restores it, read-only.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: repo-checks
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -258,6 +283,8 @@ jobs:
         run: cargo xtask web-offline-test
       - name: Affected-package selection self-test
         run: python3 -I scripts/ci/test_affected.py
+      - name: Merge-of-main detection self-test
+        run: python3 -I scripts/ci/test_main_merge.py
       - name: Claim and triage bot tests
         run: node --test scripts/claim/*.test.js scripts/triage/*.test.js
 
@@ -266,15 +293,14 @@ jobs:
     name: Quick compile
     needs: changes
     if: needs.changes.outputs.quick == 'true'
-    runs-on: ${{ needs.changes.outputs.local == 'true' && 'self-hosted-light' || 'ubuntu-24.04' }}
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Size parallel compiles to the job's memory
         run: scripts/ci/build-jobs.sh
       - uses: dtolnay/rust-toolchain@stable
-      - if: runner.environment == 'github-hosted'
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: quick-compile
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -285,20 +311,15 @@ jobs:
     name: Native Linux Clippy
     needs: changes
     if: needs.changes.outputs.native == 'true'
-    runs-on: ${{ needs.changes.outputs.local == 'true' && 'self-hosted-fast' || 'ubuntu-24.04' }}
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Warm build directory (self-hosted runner)
-        if: runner.environment == 'self-hosted' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)
-        run: scripts/ci/warm-target.sh clippy
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      # The trusted self-hosted runners keep their build directory and Cargo home instead; the
-      # untrusted ones (fork pull requests) start empty and restore main's cache, read-only.
-      - if: runner.environment == 'github-hosted' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # Main saves the cache; every other run restores it, read-only.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: native-clippy
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -314,13 +335,15 @@ jobs:
 
   build-tests:
     name: Build tests
-    needs: changes
-    # The self-hosted shards (main and the merge queue) build from their warm build directories
-    # instead: downloading the 3 GB archive took them longer than building.
-    if: needs.changes.outputs.native == 'true' && needs.changes.outputs.local != 'true'
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && (endsWith(format('{0}', github.event.pull_request.number), '7') || endsWith(format('{0}', github.event.pull_request.number), '8') || endsWith(format('{0}', github.event.pull_request.number), '9'))) && 'self-hosted-untrusted' || 'ubuntu-24.04' }}
-    # Fork builds compile inside gVisor on shared boxes; give them room to finish and upload.
-    timeout-minutes: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && (endsWith(format('{0}', github.event.pull_request.number), '7') || endsWith(format('{0}', github.event.pull_request.number), '8') || endsWith(format('{0}', github.event.pull_request.number), '9'))) && 90 || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 60 || 45 }}
+    # Fail fast on pull requests: the test archive (and so the shards) waits for the repository
+    # checks, the most common cheap failure; heavy jobs used to run on to the end beside a failed
+    # format check. Main, nightly and Run workflow build regardless, so the action matrix and the
+    # property tests that hang off this job keep their signal.
+    needs: [changes, checks]
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.native == 'true' && (github.event_name != 'pull_request' || needs.checks.result == 'success') }}
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    # Fork builds start from main's cache, read-only; give them room to finish and upload.
+    timeout-minutes: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 60 || 45 }}
     env:
       CARGO_INCREMENTAL: "0"
       RUSTC_WRAPPER: sccache
@@ -363,9 +386,9 @@ jobs:
 
   tests:
     name: Native Linux tests (${{ matrix.shard }}/4)
-    needs: [changes, build-tests]
-    if: ${{ !cancelled() && needs.changes.outputs.native == 'true' && (needs.changes.outputs.local == 'true' || needs.build-tests.result == 'success') }}
-    runs-on: ${{ needs.changes.outputs.local == 'true' && 'self-hosted-fast' || ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && (endsWith(format('{0}', github.event.pull_request.number), '7') || endsWith(format('{0}', github.event.pull_request.number), '8') || endsWith(format('{0}', github.event.pull_request.number), '9'))) && 'self-hosted-untrusted' || 'ubuntu-24.04') }}
+    needs: [changes, checks, build-tests]
+    if: ${{ !cancelled() && needs.changes.outputs.native == 'true' && (github.event_name != 'pull_request' || needs.checks.result == 'success') && needs.build-tests.result == 'success' }}
+    runs-on: ${{ github.event_name == 'merge_group' && 'blacksmith-16vcpu-ubuntu-2404' || 'blacksmith-8vcpu-ubuntu-2404' }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -381,35 +404,20 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install a software Vulkan driver (lavapipe)
-        # Preinstalled on the self-hosted runner, which has no sudo.
-        if: runner.environment == 'github-hosted'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers libvulkan1
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: cargo-nextest
-      # On the self-hosted runners each shard builds the tests in its warm build directory (a few
-      # minutes for what changed); elsewhere it runs the archive the Build tests job made.
-      - name: Size parallel compiles to the job's memory
-        if: needs.changes.outputs.local == 'true'
-        run: scripts/ci/build-jobs.sh
-      - name: Warm build directory (self-hosted runner)
-        if: needs.changes.outputs.local == 'true'
-        run: scripts/ci/warm-target.sh build-tests
-      - if: needs.changes.outputs.local == 'true'
-        uses: dtolnay/rust-toolchain@stable
-      - if: needs.changes.outputs.local != 'true'
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      # Each shard runs the archive the Build tests job made.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: nextest-archive
       - name: Run tests
         env:
           EVENT_NAME: ${{ github.event_name }}
           GOLDENS: ${{ needs.changes.outputs.goldens }}
-          LOCAL: ${{ needs.changes.outputs.local }}
-          FULL: ${{ needs.changes.outputs.full }}
-          PACKAGES: ${{ needs.changes.outputs.packages }}
           SHARD: ${{ matrix.shard }}
           SHARDS: ${{ github.event_name == 'pull_request' && 2 || 4 }}
           # The robustness golden seeds a pull request skips: each takes one to twenty minutes under
@@ -429,17 +437,10 @@ jobs:
             filter=(--ignore-default-filter -E "default() | (package(solidcraft-engine) & test(/^tests::robustness_goldens::/) & not test(/^tests::robustness_goldens::seed_($SLOW_SEEDS)\$/))")
           fi
           junit=${CARGO_TARGET_DIR:-target}/nextest/ci/junit.xml
-          # The warm build directory keeps the last run's junit.xml: never upload that one.
           rm -f "$junit"
-          if [ "$LOCAL" = true ]; then
-            scope=(--workspace)
-            if [ "$FULL" != true ]; then scope=(); for p in $PACKAGES; do scope+=(-p "$p"); done; fi
-            run=(cargo nextest run "${scope[@]}" --cargo-profile ci --locked)
-          else
-            # Extract into ./target: tests that run a built binary (env!("CARGO_BIN_EXE_*")) have
-            # the build job's path, which is the same checkout path here.
-            run=(cargo nextest run --archive-file tests.tar.zst --workspace-remap . --extract-to . --extract-overwrite)
-          fi
+          # Extract into ./target: tests that run a built binary (env!("CARGO_BIN_EXE_*")) have
+          # the build job's path, which is the same checkout path here.
+          run=(cargo nextest run --archive-file tests.tar.zst --workspace-remap . --extract-to . --extract-overwrite)
           if ! "${run[@]}" --profile ci --partition "slice:$SHARD/$SHARDS" --no-tests=pass "${filter[@]}"; then
             # A failed golden gets the hint to re-record it (junit.xml lists the failures).
             if [ -f "$junit" ] && tr '\n' ' ' < "$junit" | grep -q '<testcase name="tests::robustness_goldens::[^"]*"[^>]*>[[:space:]]*<failure'; then
@@ -464,7 +465,7 @@ jobs:
     name: Action matrix (${{ matrix.shard }}/16)
     needs: build-tests
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 55
     strategy:
       fail-fast: false
@@ -506,7 +507,7 @@ jobs:
     name: Action matrix determinism
     needs: build-tests
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -528,7 +529,7 @@ jobs:
     name: Property tests (many cases)
     needs: build-tests
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -551,8 +552,8 @@ jobs:
   doc-tests:
     name: Doc tests
     needs: changes
-    if: needs.changes.outputs.native == 'true'
-    runs-on: ${{ needs.changes.outputs.local == 'true' && 'self-hosted-fast' || 'ubuntu-24.04' }}
+    if: needs.changes.outputs.doctests == 'true'
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 45
     env:
       CARGO_INCREMENTAL: "0"
@@ -563,14 +564,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Size parallel compiles to the job's memory
         run: scripts/ci/build-jobs.sh
-      - name: Warm build directory (self-hosted runner)
-        if: runner.environment == 'self-hosted' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)
-        run: scripts/ci/warm-target.sh doc-tests
       - uses: dtolnay/rust-toolchain@stable
-      # The trusted self-hosted runners keep their build directory and Cargo home instead; the
-      # untrusted ones (fork pull requests) start empty and restore main's cache, read-only.
-      - if: runner.environment == 'github-hosted' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # Main saves the cache; every other run restores it, read-only.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: doc-tests
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -605,7 +601,7 @@ jobs:
     name: Reference tests
     needs: changes
     if: needs.changes.outputs.oracle == 'true'
-    runs-on: ${{ needs.changes.outputs.local == 'true' && 'self-hosted-fast' || ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && (endsWith(format('{0}', github.event.pull_request.number), '7') || endsWith(format('{0}', github.event.pull_request.number), '8') || endsWith(format('{0}', github.event.pull_request.number), '9'))) && 'self-hosted-untrusted' || 'ubuntu-24.04') }}
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 60
     env:
       CARGO_INCREMENTAL: "0"
@@ -616,14 +612,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Size parallel compiles to the job's memory
         run: scripts/ci/build-jobs.sh
-      - name: Warm build directory (self-hosted runner)
-        if: runner.environment == 'self-hosted' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)
-        run: scripts/ci/warm-target.sh oracle
       - uses: dtolnay/rust-toolchain@stable
-      # The trusted self-hosted runners keep their build directory and Cargo home instead; the
-      # untrusted ones (fork pull requests) start empty and restore main's cache, read-only.
-      - if: runner.environment == 'github-hosted' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # Main saves the cache; every other run restores it, read-only.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: oracle
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -651,7 +642,7 @@ jobs:
     name: Windows D3D12 FXC shaders
     needs: changes
     if: needs.changes.outputs.windows == 'true'
-    runs-on: windows-latest
+    runs-on: blacksmith-8vcpu-windows-2025
     timeout-minutes: 45
     env:
       WGPU_BACKEND: dx12
@@ -679,6 +670,8 @@ jobs:
     name: Windows app startup
     needs: changes
     if: needs.changes.outputs.windows == 'true'
+    # GitHub-hosted: the startup smoke needs an interactive desktop that presents frames; on
+    # Blacksmith's Windows runners the window never presents ("no frame was presented").
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
@@ -706,7 +699,7 @@ jobs:
     name: ${{ github.event.action == 'labeled' && github.event.label.name != 'approved-for-ci' && 'ci (ignored label)' || 'ci' }}
     needs: [changes, checks, quick-compile, clippy, build-tests, tests, doc-tests, oracle, windows-fxc, windows-startup]
     if: always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) && (github.event.action != 'labeled' || github.event.label.name == 'approved-for-ci')
-    runs-on: ${{ needs.changes.outputs.local == 'true' && 'self-hosted-light' || 'ubuntu-24.04' }}
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - name: Verify required checks
         env:
@@ -715,9 +708,9 @@ jobs:
           NATIVE: ${{ needs.changes.outputs.native }}
           QUICK: ${{ needs.changes.outputs.quick }}
           QUICK_COMPILE: ${{ needs.quick-compile.result }}
-          LOCAL: ${{ needs.changes.outputs.local }}
           WINDOWS: ${{ needs.changes.outputs.windows }}
           ORACLE_RUN: ${{ needs.changes.outputs.oracle }}
+          DOCTESTS: ${{ needs.changes.outputs.doctests }}
           CLIPPY: ${{ needs.clippy.result }}
           BUILD: ${{ needs.build-tests.result }}
           TESTS: ${{ needs.tests.result }}
@@ -734,9 +727,10 @@ jobs:
           fi
           if [ "$NATIVE" = true ]; then
             test "$CLIPPY" = success
-            # The self-hosted test shards build their own tests (no Build tests job there).
-            [ "$BUILD" = success ] || { [ "$LOCAL" = true ] && [ "$BUILD" = skipped ]; }
+            test "$BUILD" = success
             test "$TESTS" = success
+          fi
+          if [ "$DOCTESTS" = true ]; then
             test "$DOCS" = success
           fi
           if [ "$ORACLE_RUN" = true ]; then
@@ -746,11 +740,17 @@ jobs:
             test "$WINDOWS_FXC" = success
             test "$WINDOWS_STARTUP" = success
           fi
+      - name: Note a carried result
+        if: needs.changes.outputs.carried != ''
+        env:
+          CARRIED: ${{ needs.changes.outputs.carried }}
+        run: |
+          echo "This push only merges main into a change that already passed; the heavy checks were not repeated. Passing run: $CARRIED" >> "$GITHUB_STEP_SUMMARY"
 
   wasm:
     name: Compile WebAssembly (manual)
     if: github.event_name == 'workflow_dispatch' && inputs.cross_compile
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -766,7 +766,7 @@ jobs:
   riscv64-gates:
     name: Compile RISC-V (manual)
     if: github.event_name == 'workflow_dispatch' && inputs.cross_compile
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

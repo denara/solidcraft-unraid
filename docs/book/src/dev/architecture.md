@@ -3,7 +3,7 @@
 SolidCraft is a Cargo workspace in layers. A crate only depends on crates in lower layers, and
 `cargo xtask layers` fails the build otherwise.
 
-{{#include ../../../../README.md:architecture}}
+{{#include ../../../architecture.md:architecture}}
 
 The web app, `apps/solidcraft-web`, is the desktop front end compiled to wasm with
 [trunk](https://trunkrs.dev). `xtask` holds the repository's own tooling: `cargo xtask ci`,

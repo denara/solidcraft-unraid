@@ -450,6 +450,7 @@ impl State {
         let timeout = self.config.timeout;
         let audit = Arc::clone(&self.audit);
         let file_gate = Arc::clone(&self.file_gate);
+        let transfers = Arc::clone(&self.browser.actions.transfers);
         let root = self.config.files.clone();
         // A disconnected HTTP client must not abandon a read and leave a late reply in
         // the pipe. The spawned task finishes the transaction even if its caller leaves.
@@ -530,6 +531,12 @@ impl State {
                 return Ok(Some(tool_error(&message, &error)));
             }
             let _files = if operations.is_empty() { None } else { Some(file_gate.lock().await) };
+            for operation in &operations {
+                if let crate::workspace_model::FileOperation::Write(name) | crate::workspace_model::FileOperation::Save(name) = operation
+                    && let Err(error) = crate::workspace_actions::check_transfers(&transfers, name) {
+                    return Ok(Some(tool_error(&message, error)));
+                }
+            }
             let check_root = root.clone();
             let check_ops = operations.clone();
             if let Err(error) =

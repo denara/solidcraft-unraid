@@ -45,6 +45,73 @@ fn volume(s: &Session, body: &str) -> f64 {
     s.model.state().body(body).map(|b| solidcraft_kernel::measure(&b.body).unwrap().volume).unwrap_or(0.0)
 }
 
+/// #1985: the STEP export of a small enclosure never finished. The export reads its own file
+/// back, and meshing the screw hole's seam cylinder never ended: the boundary walk took
+/// projected angles millions of turns apart. The file is written, reads back cleanly, and holds
+/// the same solid.
+#[test]
+fn step_export_of_an_enclosure_with_a_screw_hole_finishes_and_reads_back() {
+    let s = replay(include_str!("../../../examples/regressions/step_export_screw_hole_enclosure.json"));
+    let state = s.model.state();
+    let body = &state.body("Unterteil").unwrap().body;
+    // 27 faces; the kernel splits each of the three whole turns (the hole, two standoffs) in two.
+    assert_eq!(body.face_count(), 30);
+    let (text, file_faces) = read_back(&s, body);
+    assert_eq!(text.matches("CYLINDRICAL_SURFACE(").count(), 7, "the seven round faces stay cylinders");
+    assert_eq!(file_faces, 27);
+}
+
+/// #1985, the reporter's second reproduction: the same walk on a standoff of a flanged
+/// enclosure without a screw hole.
+#[test]
+fn step_export_of_a_flanged_enclosure_finishes_and_reads_back() {
+    let s = replay(include_str!("../../../examples/regressions/step_export_flanged_enclosure.json"));
+    let state = s.model.state();
+    let (_, file_faces) = read_back(&s, &state.body("Unterteil").unwrap().body);
+    assert_eq!(file_faces, 29);
+}
+
+/// The body's STEP text, which reads back without warnings as one closed solid of the same
+/// volume and area, and the number of faces the file holds.
+fn read_back(s: &Session, body: &solidcraft_kernel::Body) -> (String, usize) {
+    assert!(s.model.results.iter().all(|r| r.error.is_none()), "{:?}", s.model.results);
+    let text = solidcraft_kernel::step_export(&[body], "SolidCraft").unwrap();
+    let imp = solidcraft_kernel::step_import(&text).unwrap();
+    assert!(imp.warnings.is_empty(), "{:?}", imp.warnings);
+    assert_eq!(imp.bodies.len(), 1);
+    let back = &imp.bodies[0];
+    assert!(back.closed);
+    let (a, b) = (solidcraft_kernel::measure(body).unwrap(), solidcraft_kernel::measure(&back.body).unwrap());
+    assert!((a.volume - b.volume).abs() < 1e-3 * a.volume, "volume {} read back as {}", a.volume, b.volume);
+    assert!((a.area - b.area).abs() < 1e-3 * a.area, "area {} read back as {}", a.area, b.area);
+    println!("#1985 volume {:.3} / {:.3} mm³; area {:.3} / {:.3} mm²", a.volume, b.volume, a.area, b.area);
+    (text, back.file_faces)
+}
+
+/// The timeline insertion from #1765 on a small part with analytic material. The kernel test
+/// separately forces the empty numerical attempts, without needing the reporter's design.
+#[test]
+fn shallow_cuts_rebuild_after_inserting_an_earlier_pocket() {
+    let s = replay(include_str!("../../../examples/regressions/shallow_cuts_after_earlier_pocket.json"));
+    let rounded_plate = 40.0 * 30.0 * 10.0 - (4.0 - std::f64::consts::PI) * 40.0;
+    // Half of each circle overlaps the existing 0.75 mm pocket.
+    let expected = rounded_plate - 30.0 * 10.0 * 0.75 - 2.0 * std::f64::consts::PI * 25.0 * (1.5 - 0.75 / 2.0);
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    for session in [s, reopened] {
+        assert!(session.model.results.iter().all(|r| r.error.is_none()));
+        assert_eq!(session.model.state().bodies.len(), 1);
+        let body = &session.model.state().bodies[0].body;
+        assert!(body.validity().is_empty(), "{:?}", body.validity());
+        let actual = volume(&session, "Plate");
+        assert!((actual - expected).abs() < 0.02, "{actual} vs {expected}");
+        let mesh = body.tessellate(0.001).unwrap();
+        assert!(!mesh.contains(solidcraft_geom::Vec3::new(12.0, 14.0, 9.0)));
+        assert!(mesh.contains(solidcraft_geom::Vec3::new(12.0, 14.0, 8.0)));
+        assert!(!mesh.contains(solidcraft_geom::Vec3::new(20.0, 20.0, 9.5)));
+        assert!(mesh.contains(solidcraft_geom::Vec3::new(20.0, 20.0, 9.0)));
+    }
+}
+
 /// #2059: tabs exactly as wide as their supporting ribs share the ribs' side
 /// planes. The base's remote conical chamfer must not prevent their join.
 #[test]
@@ -901,4 +968,67 @@ fn combine_of_a_piece_a_cut_used_to_split_off_takes_the_body_it_is_part_of() {
         let r = posts_cut().execute("solid.combine", &json!({"target": target, "tools": tools, "operation": operation}));
         assert!(r.is_err(), "{target} {operation} {tools}: {r:?}");
     }
+}
+
+/// A triangular prism and a thin slab sharing their bottom plane, the prism's edge in that plane
+/// lying in the slab's end face, the slab's corners rounded nearly to half its width (so its flat
+/// end is narrower than the prism).
+#[test]
+fn prism_edge_in_a_round_cornered_slab_end_face_joins() {
+    for r in [4.5, 4.9] {
+        let mut s = Session::default();
+        let mut run = |c: &str, p: Value| s.execute(c, &p).unwrap();
+        run("sketch.create", json!({"plane": {"origin": [-45.6, 0, 0], "x_dir": [0, 1, 0], "y_dir": [0, 0, 1]}}));
+        run("sketch.line", json!({"points": [[-63, 0], [-3, 0], [-63, 60]], "closed": true}));
+        run("sketch.finish", json!({}));
+        run("solid.extrude", json!({"distance": 1.2, "operation": "new", "body_name": "Prism"}));
+        run("sketch.create", json!({"plane": "XY"}));
+        run("sketch.rectangle.rounded", json!({"p0": [-50, -67], "p1": [-40, -3], "radius": r}));
+        run("sketch.finish", json!({}));
+        run("solid.extrude", json!({"distance": 0.4, "operation": "new", "body_name": "Slab"}));
+        let (prism, slab) = (volume(&s, "Prism"), volume(&s, "Slab"));
+        s.execute("solid.combine", &json!({"target": "Prism", "tools": ["Slab"], "operation": "join"})).unwrap();
+        let join = s.model.results.last().unwrap();
+        assert_eq!(join.error.as_deref(), None, "r {r}");
+        // The prism inside the slab: 1.2 wide, 0.4 high and 60 long, less the 0.4 x 0.4 triangle the
+        // sloped face leaves empty at the slab's end.
+        let shared = 1.2 * 0.4 * 60.0 - 1.2 * 0.4 * 0.4 / 2.0;
+        let got = volume(&s, "Prism");
+        assert!((got - (prism + slab - shared)).abs() < 1e-3 * got, "r {r}: {got} vs {}", prism + slab - shared);
+    }
+}
+
+/// A cut from a face up to the plate's top face, its tool's end lying in that face: the boolean
+/// of the bodies as they lie left the hole closed by a skin of no thickness (the plate's top face
+/// whole over the hole, the tool's end face under it), which no volume shows and which was kept.
+/// The hole is open, and the cut takes the whole tool: the circle of radius 3.04 the two
+/// profiles make, from the barrel cut's floor at z 1.6 up to the plate's top at z 2.8.
+#[test]
+fn cut_up_to_the_plate_top_face_opens_the_hole() {
+    let mut script: Value = serde_json::from_str(include_str!("../../../examples/regressions/cut_up_to_face_leaves_skin.json")).unwrap();
+    let s = replay_value(&script);
+    assert!(s.model.results.iter().all(|r| r.error.is_none()), "{:?}", s.model.results);
+    let state = s.model.state();
+    let body = &state.body("Body7").unwrap().body;
+    assert!(body.validity().is_empty(), "{:?}", body.validity());
+    let skin: Vec<f64> = body
+        .faces(1e-4)
+        .unwrap()
+        .into_iter()
+        .filter(|f| f.plane_normal.is_some_and(|n| n.z < -0.999) && (f.centroid.z - 2.8).abs() < 1e-6)
+        .map(|f| f.area)
+        .collect();
+    assert!(skin.is_empty(), "faces at z 2.8 facing down, areas {skin:?} mm²");
+    // The same design without the cut.
+    script["commands"].as_array_mut().unwrap().pop();
+    let before = replay_value(&script);
+    let fine = |s: &Session| s.model.state().body("Body7").unwrap().body.tessellate(1e-5).unwrap().measure().volume;
+    let (removed, want) = (fine(&before) - fine(&s), std::f64::consts::PI * 3.04 * 3.04 * 1.2);
+    assert!((removed - want).abs() < 0.01, "removed {removed} mm³, want {want}");
+}
+
+fn replay_value(script: &Value) -> Session {
+    let mut s = Session::default();
+    s.run_script(script).unwrap();
+    s
 }

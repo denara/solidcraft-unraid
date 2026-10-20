@@ -10,6 +10,10 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
+mod calibration;
 mod descriptor;
 
+pub use calibration::{
+    AxisCalibration, Calibration, HOLD_SECONDS, MAX_DEAD_ZONE_SHARE, MIN_SHARE, Problem, REST_SECONDS, Recording, STEPS, Stage, Step, Wizard,
+};
 pub use descriptor::{Descriptor, FULL_SCALE, Field, Layout, MAX_BUTTONS, Report};

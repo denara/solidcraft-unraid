@@ -50,7 +50,8 @@ pub use fonts::{DEFAULT_FONT_FAMILY, FontData, families_in, find_style_in, font_
 pub use freeform_offset::{FreeformOffset, OFFSET_TOLERANCE};
 pub use link::{Link, LinkGeom, LinkKind, LinkSource, MAX_LINK_ENTITIES, SKETCH_AXIS_HALF, TextExprs, sketch_axis_geom};
 pub use model::{
-    Constraint, ConstraintKind, Curve, CurveKind, MAX_CONSTRAINTS, MAX_COORD, MAX_CURVES, MAX_POINTS, SPoint, Sketch, SketchError, SketchView,
+    Constraint, ConstraintKind, Curve, CurveKind, MAX_CONSTRAINTS, MAX_COORD, MAX_CURVES, MAX_POINTS, PointExprs, SPoint, Sketch, SketchError,
+    SketchView,
 };
 pub use offset::OffsetChain;
 pub use offset_topology::{OffsetCreated, OffsetRole, OffsetRoleFlags, OffsetRoleKind, OffsetTopology};
@@ -62,8 +63,8 @@ pub use profiles::{
 };
 pub use shape::{Shape, intersections};
 pub use solver::{
-    Analysis, CONSISTENT, DrivingValues, Hold, SolveReport, SolveStatus, constraint_residual, determined_by, measure_dimension, solve,
-    solve_after_edit, solve_after_value_edit, solve_holding, solve_with,
+    Analysis, CONSISTENT, DrivingValues, Hold, SolveReport, SolveStatus, constraint_residual, determined_by, measure_dimension, move_point_towards,
+    solve, solve_after_edit, solve_after_value_edit, solve_holding, solve_with,
 };
 pub use text::{MAX_TEXT_CHARS, TextAlign, TextStyle, text_geometry, text_geometry_in, text_geometry_styled};
 pub use thin::{MAX_THIN_SEGMENTS, thin_wall_regions};
@@ -81,6 +82,8 @@ mod ends_tests;
 mod font_tests;
 #[cfg(test)]
 mod least_motion_tests;
+#[cfg(test)]
+mod line_circle_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

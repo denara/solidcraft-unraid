@@ -1665,7 +1665,6 @@ fn a_tangent_plane_on_a_drill_tip() {
 }
 
 #[test]
-#[ignore = "fails until #568 is fixed"]
 fn a_plane_on_a_patterned_counterbore_after_a_thickness_change() {
     let mut c = vec![json!({"command": "parameters.change", "params": {"name": "thick", "expression": "10 mm"}})];
     c.extend(rectangle(json!("XY"), [0., 0.], [80., 30.]));

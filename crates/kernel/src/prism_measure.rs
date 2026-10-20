@@ -1,7 +1,7 @@
 //! Independent current-geometry intervals for uniform prisms.
 //! These are not mesh measurements or certificates of construction history.
 use crate::body::from_p3;
-use solidcraft_geom::{Plane, Seg2, Vec2, Vec3};
+use solidcraft_geom::{Plane, Ring, Seg2, Vec2, Vec3};
 use truck_modeling as mt;
 
 #[derive(Clone, Copy, Debug)]
@@ -46,7 +46,7 @@ fn green_interval(segment: &Seg2, tolerance: f64) -> Option<Interval> {
 }
 
 struct CapLoop {
-    segments: Vec<Seg2>,
+    segments: Ring<Seg2>,
     area: Interval,
 }
 
@@ -331,15 +331,15 @@ fn wall_supports_cap(surface: &mt::Surface, edge: &mt::Edge, plane: &Plane, leve
         let Some(fit) = crate::prism_curve::segment(&support, plane, tol, work) else {
             continue;
         };
-        let fit_loop = CapLoop { segments: fit.clone(), area: Interval::enclosing(0., 0.)? };
+        let fit_loop = CapLoop { segments: Ring::from(fit.clone()), area: Interval::enclosing(0., 0.)? };
         if let Some((center, radius)) = circle(&fit_loop, tol * 8.)
             && cap.iter().all(|s| matches!(*s,Seg2::Arc {center:c,radius:r,..} if c.dist(center)+(r-radius).abs()<=tol*8.))
         {
             return Some(true);
         }
         let same = loops_same(
-            &CapLoop { segments: cap.clone(), area: Interval::enclosing(0., 0.)? },
-            &CapLoop { segments: fit, area: Interval::enclosing(0., 0.)? },
+            &CapLoop { segments: Ring::from(cap.clone()), area: Interval::enclosing(0., 0.)? },
+            &CapLoop { segments: Ring::from(fit), area: Interval::enclosing(0., 0.)? },
             tol * 8.,
             work,
         )?;
@@ -442,11 +442,10 @@ fn separated_material(loops: &[CapLoop], clearance: f64, work: &mut usize) -> Op
         }
         let mut turn = 0.;
         let mut angular_error = 0.;
-        for (i, s) in outer.segments.iter().enumerate() {
+        for (i, (s, next)) in outer.segments.edges().enumerate() {
             let Seg2::Line { a, b } = *s else {
                 return None;
             };
-            let next = outer.segments.get((i + 1) % outer.segments.len())?;
             let x = b - a;
             let y = next.end() - next.start();
             turn += x.cross(y).atan2(x.dot(y));
@@ -735,8 +734,9 @@ fn cap_loop(wire: &mt::Wire, plane: &Plane, tolerance: f64, work: &mut usize) ->
     }
     // Curve endpoints already agree with actual shared vertices in the
     // whole-span proof. Check the fitted representation's continuity too.
-    for i in 0..segments.len() {
-        if segments.get(i)?.end().dist(segments.get((i + 1) % segments.len())?.start()) > 2. * tolerance {
+    let segments = Ring::new(segments);
+    for (a, b) in segments.edges() {
+        if a.end().dist(b.start()) > 2. * tolerance {
             return None;
         }
     }
@@ -872,7 +872,8 @@ mod tests {
     #[test]
     fn winding_retracing_and_uncertain_material_do_not_get_certificates() {
         let arc = Seg2::Arc { center: Vec2::ZERO, radius: 6., start: 0., sweep: std::f64::consts::TAU };
-        let retraced = CapLoop { segments: vec![arc, arc.reversed(), arc], area: Interval::enclosing(36. * std::f64::consts::PI, 1e-8).unwrap() };
+        let retraced =
+            CapLoop { segments: Ring::from([arc, arc.reversed(), arc]), area: Interval::enclosing(36. * std::f64::consts::PI, 1e-8).unwrap() };
         assert!(circle(&retraced, 1e-6).is_none());
         let region = solidcraft_geom::Loop2::polygon(&[Vec2::ZERO, Vec2::new(20., 0.), Vec2::new(20., 20.), Vec2::new(0., 20.)]);
         let doubled = CapLoop { segments: region.segs.iter().chain(&region.segs).copied().collect(), area: Interval::enclosing(800., 1e-8).unwrap() };

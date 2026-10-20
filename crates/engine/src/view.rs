@@ -501,7 +501,10 @@ fn build_scene(
         } else {
             s.doc.face_colors(body).into_iter().map(|(f, l)| (f as u32, Rgb(l.color[0], l.color[1], l.color[2]))).collect()
         };
-        sc.meshes.push(SceneMesh { mesh: Arc::clone(&mesh), color, face_colors });
+        // A see-through appearance is drawn see-through, as the viewport draws it; a selected
+        // body is drawn solid, so the selection colour reads.
+        let opacity = if selected { 1.0 } else { s.doc.model_body_opacity(body) as f32 };
+        sc.meshes.push(SceneMesh { mesh: Arc::clone(&mesh), color, face_colors, opacity });
         for (i, e) in mesh.edges.iter().enumerate() {
             if !mesh.shaded_edge_visible(i) {
                 continue;

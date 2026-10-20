@@ -42,6 +42,7 @@ fn surface_of(shell: mt::Shell) -> Body {
         face_sources: None,
         history: None,
         display_of: None,
+        meshes: None,
         regularization_protected: false,
     }
 }
@@ -323,6 +324,13 @@ fn far_wire(swept: &mt::Shell, start: &mt::Wire, map: &dyn Fn(Vec3) -> Vec3) -> 
 /// split to the same number of segments (longest first) and each turned to run the way the one
 /// before it does. Walls only, no caps; the history has no operands: every face is new.
 pub fn loft_sheet(sections: &[(Plane, Vec<Seg2>)]) -> Result<Body> {
+    loft_sheet_with_rails(sections, &[], crate::RailFit::Scale)
+}
+
+/// [`loft_sheet`] following one or two guide rails (polylines from the first section to the last,
+/// through every section's curve; see [`crate::loft_rails`]), `fit` saying how they reshape the
+/// sections between. Without rails, the plain sheet loft.
+pub fn loft_sheet_with_rails(sections: &[(Plane, Vec<Seg2>)], rails: &[Vec<Vec3>], fit: crate::RailFit) -> Result<Body> {
     if sections.len() < 2 || sections.len() > 50 {
         return Err(KernelError::Invalid("a loft needs 2…50 sections".into()));
     }
@@ -344,10 +352,9 @@ pub fn loft_sheet(sections: &[(Plane, Vec<Seg2>)]) -> Result<Body> {
         }
         crate::build::chain_wire(plane, chain)?;
     }
-    let (wires, sources) = if all_closed {
+    let (wires, sources, reversed) = if all_closed {
         let loops: Vec<(Plane, solidcraft_geom::Loop2)> = sections.iter().map(|(p, c)| (*p, solidcraft_geom::Loop2 { segs: c.clone() })).collect();
-        let (wires, sources, _) = crate::build::loft_wires(&loops)?;
-        (wires, sources)
+        crate::build::loft_wires(&loops)?
     } else {
         let n = sections.iter().map(|(_, c)| c.len()).max().unwrap_or(0);
         let mut wires = Vec::with_capacity(sections.len());
@@ -377,13 +384,21 @@ pub fn loft_sheet(sections: &[(Plane, Vec<Seg2>)]) -> Result<Body> {
             wires.push(crate::build::uniform_chain_wire(plane, &pieces, false)?);
             sources.push(segs.iter().map(|(_, k)| vec![*k]).collect::<Vec<_>>());
         }
-        (wires, sources)
+        (wires, sources, false)
     };
+    let mut planes: Vec<Plane> = sections.iter().map(|(p, _)| *p).collect();
+    if reversed {
+        planes.reverse();
+    }
     let faces = guard("surface loft", || {
-        let smooth = if wires.len() >= 3 { crate::build::smooth_loft_faces(&wires, &sources, all_closed).ok() } else { None };
+        let all = crate::loft_rails::railed_wires(&planes, &wires, all_closed, rails, fit)?;
+        // A plain loft falls back to ruled faces where the smooth one fails; a railed one has to
+        // follow its rails.
+        let smooth = if all.len() >= 3 { Some(crate::build::smooth_loft_faces(&all, &sources, all_closed)) } else { None };
         match smooth {
-            Some(f) => Ok(f),
-            None => crate::build::ruled_loft_faces(&wires, &sources),
+            Some(Ok(f)) => Ok(f),
+            Some(Err(e)) if !rails.is_empty() => Err(e),
+            _ => crate::build::ruled_loft_faces(&wires, &sources),
         }
     })?;
     sheet_body(faces)
@@ -1098,31 +1113,6 @@ pub fn thicken(body: &Body, thickness: f64, symmetric: bool) -> Result<Body> {
     })
 }
 
-/// A surface body trimmed by a tool: its faces are cut where the tool meets them and the
-/// pieces on the side of `keep` are kept. The result's history is over `[body]`.
-pub fn trim(body: &Body, tool: &crate::SplitTool, keep: Vec3) -> Result<Body> {
-    body.require_brep("trim")?;
-    let total = body.solid.face_iter().count();
-    let all: Vec<usize> = (0..total).collect();
-    let (split, _) = crate::splitface::split_any(body, &all, tool)?;
-    let side = crate::splitface::side_of_point(tool, keep)?;
-    guard("trim", || {
-        let mut kept = Vec::new();
-        for f in split.solid.face_iter() {
-            let x = crate::splitface::face_side(f, tool, split.size())?;
-            if (x >= 0.0) == (side >= 0.0) {
-                kept.push(f.clone());
-            }
-        }
-        if kept.is_empty() {
-            return Err(KernelError::Invalid("nothing is left on that side of the tool".into()));
-        }
-        // The kept pieces are the split's own; its history carries them back to `body`.
-        let trimmed = rebuilt_body(surface_body(kept), &[&split.solid], &Rebuild::default());
-        Ok(crate::record::after(trimmed, &split, &crate::record::counts(&[body])))
-    })
-}
-
 /// A planar surface extended: the chosen straight edges (picked by points on them) move
 /// outward in the face's plane by `distance`, their neighbours lengthened to meet them. The
 /// result's history is over `[body]`: the face and each edge the one it was moved from.
@@ -1196,7 +1186,7 @@ pub fn extend(body: &Body, at: &[Vec3], distance: f64) -> Result<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{box_solid, cylinder, measure};
+    use crate::{box_solid, cylinder, measure, trim};
     use solidcraft_geom::{Loop2, Vec2};
 
     fn rel(a: f64, b: f64) -> f64 {

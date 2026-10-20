@@ -1,5 +1,79 @@
 # Validated container updates
 
+## 2026-10-20: upstream integration and confirmed Workspace file management
+
+Selected exactly one upstream snapshot, `e9b1a077d7e33420791791c651f2e293962a2da1`,
+and merged it into `codex/unraid-mcp-web`, preserving all published integration
+history and the HTTP gateway, browser CAD, project binding, remembered logins and
+live model observer. `origin/main` was fetched and is already an ancestor. The
+starting integration/source branch was `59856f90`; the previous upstream baseline
+was `5122b98a`. SolidCraft remains version 0.16.2; this is container integration,
+not an upstream application release.
+Later upstream movement to `8a562f27` was observed after validation began; it is
+reserved for a subsequent update and was not mixed into this fixed snapshot.
+
+Workspace now offers explicit file/real-folder deletion with a five-minute,
+cookie-bound confirmation, exact path, file/subfolder counts and total bytes.
+CSRF, exact Origin/Host checks, strong content revisions and the shared HTTP/MCP
+file gate reject stale or conflicting deletion. Active MCP projects/current files
+and ongoing file operations are protected. Virtual root groups have no bulk action.
+Real nested and empty folders appear in the bounded, live inventory. The read-only
+model observer and independent browser CAD retain their existing behavior.
+
+Real folders download as Rust-generated ZIP64 streams with safe Unicode relative
+names, nested/empty directories and empty files. Stored entries avoid compression
+work on already compressed CAD/images. A two-chunk bounded channel provides actual
+backpressure; no full archive buffer or server-side ZIP spool exists. Path leases
+reject matching HTTP/MCP writes while unrelated projects continue working. Limits
+are two downloads, 2048 entries, 1 MiB of names and 16 GiB uncompressed data; body
+authorization, stall/disconnect handling and final source checks reject incomplete
+or changed archives. Reserved/hidden paths, symlinks and special files are rejected.
+The explicit deletion exception and new proof command are recorded in AGENTS.md.
+
+Integration review added the new `assembly.bom` CSV/JSON destination to revision
+preflight, confined `component.relink` paths and serialized linked-source reads
+without granting save revisions. New upstream placed-mesh/plan caches and clearance
+caches remain isolated in observer snapshots. The omitted driver bridge accepts its
+new callback signature while continuing to return Unsupported without callbacks or
+threads. A Rust1.95 Clippy boolean simplification is equivalent for all 16 truth
+combinations. Generated shipped licenses cover the merged dependency graph.
+
+Relevant checks passed: 120 gateway tests; two document observer-cache tests; two
+kernel observer-cache tests; five worker observer tests; four workspace telemetry
+tests; nine BOM tests; the omitted-driver regression; native/Wasm Clippy, 13-crate
+Wasm compatibility, formatting, assets, icon standards and 15 icon-tool tests,
+layers, sorted catalogs and licenses. The entire CAD test suite was not repeated.
+The isolated container passed modelling/PNG/STEP at 24000 mm3, restart persistence,
+MCP/session/project/path/origin safety, logging, file revisions, Workspace push,
+metadata/thumbnails/native handoff, observer isolation/revocation and remembered
+login/logout across two restarts. The local login test now accepts an explicitly
+identified candidate task/image while retaining its volume, loopback, isolation,
+credential and identity safeguards.
+
+The new isolated file-action proof validates deletion, stale confirmations,
+CSRF/Origin protection, active sessions, parallel writes, independent MCP saves,
+ZIP integrity, Unicode/empty/nested/large content and abort cleanup. First ZIP bytes
+arrived in 7 ms during a 256 MiB transfer; measured server RSS grew by 128 KiB
+(from 9715712 to 9846784 bytes). Python's independent ZIP decoder verified CRCs for
+all six entries (268435469 uncompressed bytes). The real browser confirmed initial
+collapsed folders, the exact folder confirmation/cancel flow, individual file
+deletion and automatic removal in another tab while retaining its open folder.
+The actual browser CAD app opened the saved public model as an independent copy;
+the server design hash remained unchanged. Public-safe screenshots and proofs stay in ignored
+`target/upstream-e9b1a077-workspace-20261020/`.
+
+The real MCP SDK reopened public legacy format13 and previous-container format28,
+saved/reopened the migrated design, retained parameters and 24000 mm3 volume,
+exported STEP and verified BOM path/revision rejection. Original fixture bytes were
+unchanged. Only disposable candidate data was deleted; the existing development
+runtime was not used for destructive tests.
+
+Registry publication, final archive/digest and local runtime refresh are pending
+until the validated source commit's exact container workflow completes. The canonical
+Unraid Overview lists only the fork's additional features and keeps original authorship
+and unofficial status explicit; catalog synchronization follows image publication.
+
+
 ## 2026-10-19: read-only live observation of unsaved MCP models
 
 The first stage from `workspace-live-view-research.md` is implemented on the same

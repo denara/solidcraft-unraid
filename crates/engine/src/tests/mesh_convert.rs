@@ -71,6 +71,34 @@ fn failed_mesh_conversions_leave_the_design_unchanged() {
 }
 
 #[test]
+fn convert_uses_the_selected_mesh_body_when_body_is_omitted() {
+    let mut s = imported_box();
+    s.selection = vec![crate::Sel::Body { name: "Mesh".into() }];
+    run(&mut s, "mesh.convert", json!({"tolerance":"0.01 mm"}));
+    let state = s.model.state();
+    let body = &state.body("Mesh").unwrap().body;
+    assert!(!body.is_mesh());
+    assert_eq!(body.faces(0.01).unwrap().len(), 6);
+}
+
+#[test]
+fn convert_without_body_or_selection_is_refused() {
+    let mut s = imported_box();
+    let before = s.doc.to_json();
+    assert!(s.execute("mesh.convert", &json!({"tolerance":"0.01 mm"})).is_err());
+    assert_eq!(s.doc.to_json(), before);
+    assert!(s.model.state().body("Mesh").unwrap().body.is_mesh());
+}
+
+#[test]
+fn an_explicit_body_wins_over_the_selection() {
+    let mut s = imported_box();
+    s.selection = vec![crate::Sel::Body { name: "Missing".into() }];
+    run(&mut s, "mesh.convert", json!({"body":"Mesh","tolerance":"0.01 mm"}));
+    assert!(!s.model.state().body("Mesh").unwrap().body.is_mesh());
+}
+
+#[test]
 fn exported_binary_stl_with_a_bore_reconstructs_analytic_faces() {
     let mut s = Session::default();
     run(&mut s, "sketch.create", json!({"plane":"XY","name":"Section"}));

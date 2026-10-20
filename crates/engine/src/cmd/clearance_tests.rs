@@ -252,6 +252,157 @@ fn a_small_gap_past_a_corner_is_not_contact() {
     }
 }
 
+/// #2283: a knuckle (Ø6, z 3.7 to 8.3, with a 150 mm arm) turning between two frame bands (Ø6,
+/// z -1.5 to 3.5 and 8.5 to 13.5) on a shared axis is 0.2 mm from them at every angle. Its axis
+/// tilted 1.5e-6 rad (as a STEP round trip leaves it), the band's rim lies on the knuckle's
+/// cylinder extended past its end, and a point there was taken for a point of the knuckle at
+/// some angles: contact (0) at a point off the body.
+#[test]
+fn a_hinge_gap_is_measured_on_the_trimmed_faces_at_every_angle() {
+    let mut s = Session::default();
+    let part = |s: &mut Session, cmd: &str, mut p: Value, name: &str, join: bool| {
+        p["body_name"] = json!(name);
+        p["operation"] = json!(if join { "join" } else { "new" });
+        if join {
+            p["targets"] = json!([name]);
+        }
+        run(s, cmd, p);
+    };
+    part(&mut s, "solid.cylinder", json!({"radius": 3, "height": 5, "base": [0, 0, -1.5]}), "Frame", false);
+    part(&mut s, "solid.cylinder", json!({"radius": 3, "height": 5, "base": [0, 0, 8.5]}), "Frame", true);
+    for z in [-1.5, 8.5] {
+        part(&mut s, "solid.box", json!({"length": 137.5, "width": 4, "height": 5, "corner": [-140, -2, z]}), "Frame", true);
+    }
+    part(&mut s, "solid.box", json!({"length": 5, "width": 4, "height": 15, "corner": [-145, -2, -1.5]}), "Frame", true);
+    part(&mut s, "solid.cylinder", json!({"radius": 3, "height": 4.6, "base": [0, 0, 3.7]}), "Temple", false);
+    part(&mut s, "solid.box", json!({"length": 150, "width": 2, "height": 4.6, "corner": [0, -1, 3.7]}), "Temple", true);
+    run(&mut s, "solid.move", json!({"bodies": ["Temple"], "axis": [1, 0, 0], "angle": "1.5e-6 rad"}));
+    run(&mut s, "solid.move", json!({"bodies": ["Temple"], "axis": [0, 0, 1], "angle": "29 deg"}));
+    for deg in 30..=80 {
+        run(&mut s, "solid.move", json!({"bodies": ["Temple"], "axis": [0, 0, 1], "angle": "1 deg"}));
+        let r = run(&mut s, "inspect.clearance", json!({"bodies": ["Temple"], "against": ["Frame"], "clearance": 0.5, "nearest": 1}));
+        let near = &r["near"][0];
+        assert!((f(&near["distance_mm"]) - 0.2).abs() < 1e-4, "{deg}°: {r}");
+        assert!((f(&r["nearest"]["Temple"][0]["distance_mm"]) - 0.2).abs() < 1e-4, "{deg}°: {r}");
+        // The witness points lie on the bodies: the frame's at a band end, the knuckle's at one
+        // of its ends.
+        let (from, to) = (f(&near["from"][2]), f(&near["to"][2]));
+        assert!([3.5, 8.5].iter().any(|z| (from - z).abs() < 1e-4), "{deg}°: the frame's point {from} is at a band end: {r}");
+        assert!([3.7, 8.3].iter().any(|z| (to - z).abs() < 1e-4), "{deg}°: the knuckle's point {to} is at a knuckle end: {r}");
+    }
+}
+
+/// A second call measures only the pairs with a body that changed or moved since the first.
+#[test]
+fn pairs_whose_bodies_did_not_change_or_move_are_not_measured_again() {
+    let mut s = Session::default();
+    run(&mut s, "component.create", json!({"name": "Bought"}));
+    cube(&mut s, "Housing", 10.0, [0.0, 0.0, 0.0]);
+    cube(&mut s, "Insert", 4.0, [8.0, 3.0, 3.0]);
+    run(&mut s, "component.activate", json!({"component": "root"}));
+    let bracket = run(&mut s, "component.create", json!({"name": "Bracket"}))["component"].as_u64().unwrap();
+    cube(&mut s, "Plate", 10.0, [-9.5, 0.0, 0.0]);
+    let settings = json!({"clearance": 1});
+    let first = run(&mut s, "inspect.clearance", settings.clone());
+    assert_eq!((first["pairs_checked"].as_u64(), first["pairs_reused"].as_u64()), (Some(2), Some(0)), "{first}");
+    let again = run(&mut s, "inspect.clearance", settings.clone());
+    assert_eq!(again["pairs_reused"], 2, "{again}");
+    for k in ["overlaps", "near", "unchecked"] {
+        assert_eq!(again[k], first[k], "{k}");
+    }
+    // Other settings are measured afresh.
+    assert_eq!(run(&mut s, "inspect.clearance", json!({"clearance": 2}))["pairs_reused"], 0);
+    // The bracket moves 1 mm away: only its pair is measured again, and it is now near, not over.
+    let o = s.doc.occurrence_of(bracket).unwrap().id;
+    run(&mut s, "occurrence.move", json!({"occurrence": o, "translate": [-1, 0, 0], "capture": true}));
+    let moved = run(&mut s, "inspect.clearance", settings.clone());
+    assert_eq!((moved["pairs_checked"].as_u64(), moved["pairs_reused"].as_u64()), (Some(2), Some(1)), "{moved}");
+    let overlaps: Vec<[String; 2]> = moved["overlaps"].as_array().into_iter().flatten().map(pair).collect();
+    assert_eq!(overlaps, vec![["Housing".to_string(), "Insert".to_string()]], "{moved}");
+    assert!((f(&moved["near"][0]["distance_mm"]) - 0.5).abs() < 1e-6, "{moved}");
+    let still = run(&mut s, "inspect.clearance", settings);
+    assert_eq!(still["pairs_reused"], 2, "nothing changed since: {still}");
+    assert_eq!(still["near"], moved["near"]);
+}
+
+/// A body rebuilt with other geometry is measured again, not taken from an earlier call.
+#[test]
+fn a_body_that_changed_shape_is_measured_again() {
+    let mut s = Session::default();
+    cube(&mut s, "A", 10.0, [0.0, 0.0, 0.0]);
+    cube(&mut s, "B", 10.0, [10.5, 0.0, 0.0]);
+    let r = run(&mut s, "inspect.clearance", json!({"clearance": 1}));
+    assert!((f(&r["near"][0]["distance_mm"]) - 0.5).abs() < 1e-6, "{r}");
+    let list = run(&mut s, "parameters.list", json!({"filter": "feature"}));
+    let length = list["parameters"][0]["name"].as_str().unwrap().to_string();
+    run(&mut s, "parameters.change", json!({"name": length, "expression": "10.2 mm"}));
+    let r = run(&mut s, "inspect.clearance", json!({"clearance": 1}));
+    assert_eq!(r["pairs_reused"], 0, "{r}");
+    assert!((f(&r["near"][0]["distance_mm"]) - 0.3).abs() < 1e-6, "{r}");
+    // Set back, the first shape's result is the right one again.
+    run(&mut s, "parameters.change", json!({"name": length, "expression": "10 mm"}));
+    let r = run(&mut s, "inspect.clearance", json!({"clearance": 1}));
+    assert!((f(&r["near"][0]["distance_mm"]) - 0.5).abs() < 1e-6, "{r}");
+}
+
+/// A flanged bushing and a headed pin seated in it line to line, on its very axis, the head on
+/// the flange. Plain, they touch and share nothing; sunk 0.2 into the flange, the head shares the
+/// ring under it. With a fillet under the head against the bore's sharp edge, the fillet's ring
+/// is in the flange (about 0.49 mm³), next to walls that lie on one another: the boolean tried
+/// for minutes there and gave up; now it is reported as such within seconds.
+#[test]
+fn a_pin_seated_line_to_line_in_its_bushing_is_measured() {
+    let ring = std::f64::consts::PI * (7.0f64.powi(2) - 4.0f64.powi(2)) * 0.2;
+    for (sunk, fillet) in [(0.0, false), (0.2, false), (0.0, true)] {
+        let mut s = Session::default();
+        run(&mut s, "solid.cylinder", json!({"radius": 5, "height": 12, "base": [100, 0, 0], "operation": "new", "body_name": "Bush"}));
+        run(&mut s, "solid.cylinder", json!({"radius": 7.5, "height": 1, "base": [100, 0, 12], "operation": "join", "targets": ["Bush"]}));
+        run(&mut s, "solid.cylinder", json!({"radius": 4, "height": 20, "base": [100, 0, -3], "operation": "cut", "targets": ["Bush"]}));
+        let z = 13.0 - sunk;
+        run(&mut s, "solid.cylinder", json!({"radius": 4, "height": z + 2.0, "base": [100, 0, -2], "operation": "new", "body_name": "Pin"}));
+        run(&mut s, "solid.cylinder", json!({"radius": 7, "height": 1.5, "base": [100, 0, z], "operation": "join", "targets": ["Pin"]}));
+        if fillet {
+            run(&mut s, "solid.fillet", json!({"edges": [[104, 0, z]], "radius": 0.3, "body": "Pin"}));
+            run(&mut s, "solid.fillet", json!({"edges": [[107, 0, z + 1.5]], "radius": 0.5, "body": "Pin"}));
+        }
+        let started = std::time::Instant::now();
+        let r = run(&mut s, "inspect.clearance", json!({"bodies": ["Pin"], "against": ["Bush"], "min_volume": 0.01, "clearance": 1e-6}));
+        assert!(started.elapsed().as_secs_f64() < 30.0, "sunk {sunk}: {:?}", started.elapsed());
+        if fillet {
+            assert!(r["unchecked"][0]["reason"].as_str().is_some_and(|w| w.contains("pin on one cylinder")), "{r}");
+            continue;
+        }
+        assert_eq!(r["unchecked"], json!([]), "sunk {sunk}: {r}");
+        if sunk == 0.0 {
+            assert_eq!(r["overlaps"].as_array().map(Vec::len), Some(0), "{r}");
+            assert_eq!(f(&r["near"][0]["distance_mm"]), 0.0, "{r}");
+        } else {
+            let v = f(&r["overlaps"][0]["volume_mm3"]);
+            assert!((v - ring).abs() <= 1e-3 * ring, "{v} {ring}: {r}");
+        }
+    }
+}
+
+/// A chamfered pin through a hole of its own radius, its axis a hair off the hole's: the boolean
+/// cannot intersect walls all but tangent along two lines and once passed the pair as clear.
+/// The crescent the pin shares with the plate is reported, against the lens of two circles.
+#[test]
+fn a_pin_a_hair_off_its_hole_shares_its_crescent() {
+    let crescent = |r: f64, e: f64| std::f64::consts::PI * r * r - (2.0 * r * r * (e / (2.0 * r)).acos() - e / 2.0 * (4.0 * r * r - e * e).sqrt());
+    for offset in [5.9e-4, 1e-2] {
+        let mut s = Session::default();
+        run(&mut s, "solid.box", json!({"length": 20, "width": 20, "height": 5, "corner": [-10, -10, 0], "body_name": "Plate"}));
+        run(&mut s, "solid.cylinder", json!({"radius": 3, "height": 9, "base": [0, 0, -2], "operation": "cut", "targets": ["Plate"]}));
+        run(&mut s, "solid.cylinder", json!({"radius": 3, "height": 9, "base": [offset, 0, -2], "operation": "new", "body_name": "Pin"}));
+        run(&mut s, "solid.chamfer", json!({"edges": [[offset + 3.0, 0, 7]], "distance": 0.5, "body": "Pin"}));
+        let r = run(&mut s, "inspect.clearance", json!({"min_volume": 1e-9}));
+        assert_eq!(r["unchecked"], json!([]), "{offset}: {r}");
+        let want = 5.0 * crescent(3.0, offset);
+        let got = f(&r["overlaps"][0]["volume_mm3"]);
+        assert!((got - want).abs() < 1e-6 * want, "{offset}: {got} against {want}: {r}");
+    }
+}
+
 /// The shared volume is checked against the bodies and their union: two 10 mm cubes sharing a
 /// 3 mm corner cube agree at 27 mm³, and a shared part read as three times that (as a mirrored
 /// pair once was) does not.
@@ -321,4 +472,54 @@ fn a_roller_pressed_into_a_large_plate_is_reported() {
     assert_eq!(pair(&overlaps[0]), ["Plate", "Roller"]);
     let want = (r * r * ((r - depth) / r).acos() - (r - depth) * (r * r - (r - depth) * (r - depth)).sqrt()) * length;
     assert!((f(&overlaps[0]["volume_mm3"]) - want).abs() < 0.01 * want, "{want} {res}");
+}
+
+/// A pin turned from a profile (its wall in three faces) in the bore of a tube of its own size
+/// (in two faces), its end inside the bore, a hair off the axis, and a slit tube with the pin
+/// through it: touching, not overlapping. Their facets cross where one body's faces end on the
+/// shared cylinder, and the pairs were left unchecked ("could not be intersected there").
+#[test]
+fn a_turned_pin_in_a_bore_of_its_size_is_contact() {
+    let mut s = Session::default();
+    let pin = |s: &mut Session, name: &str, off: [f64; 3], z0: f64, z1: f64| {
+        run(s, "sketch.create", json!({"plane": {"origin": off, "x_dir": [1, 0, 0], "y_dir": [0, 0, 1]}}));
+        run(s, "sketch.rectangle.two_point", json!({"p0": [0, z0], "p1": [3, z1]}));
+        run(s, "solid.revolve", json!({"axis": "y", "body_name": name}));
+    };
+    let tube = |s: &mut Session, name: &str, x: f64| {
+        run(s, "solid.cylinder", json!({"radius": 5.25, "height": 19.55, "base": [x, 0, 0], "body_name": name}));
+        run(s, "solid.cylinder", json!({"radius": 3, "height": 19.55, "base": [x, 0, 0], "operation": "cut", "targets": [name]}));
+    };
+    pin(&mut s, "Pin", [2.2e-8, 4.7e-7, 0.0], -2.35, 9.65);
+    tube(&mut s, "Tube", 0.0);
+    pin(&mut s, "Through", [30.0, 0.0, 0.0], -3.0, 22.0);
+    tube(&mut s, "Slit", 30.0);
+    run(&mut s, "solid.box", json!({"length": 8, "width": 0.1, "height": 21, "corner": [22, -0.05, -1], "operation": "cut", "targets": ["Slit"]}));
+    let r = run(&mut s, "inspect.clearance", json!({"bodies": ["Pin", "Through"], "against": ["Tube", "Slit"], "clearance": 1e-6}));
+    assert_eq!(r["unchecked"].as_array().map(Vec::len), Some(0), "{r}");
+    assert_eq!(r["overlaps"].as_array().map(Vec::len), Some(0), "{r}");
+    let near = r["near"].as_array().cloned().unwrap_or_default();
+    assert_eq!(near.iter().map(pair).collect::<Vec<_>>(), [["Pin", "Tube"], ["Slit", "Through"]], "{r}");
+    assert!(near.iter().all(|n| f(&n["distance_mm"]) == 0.0 && n.get("overlap_mm3").is_none()), "{r}");
+}
+
+/// A pin of a bore's size through a D-bore whose flat is 0.022 mm inside the pin shares a
+/// sliver with the tube along the whole bore (the circular segment beyond the flat, 0.21 mm³):
+/// an overlap, not contact. Only the facetings of the shared cylinder may cross unseen; the flat
+/// reaches into it.
+#[test]
+fn a_pin_through_a_d_bore_of_its_size_overlaps_the_flat() {
+    let (r, flat, length) = (3.0_f64, 2.978_f64, 19.55);
+    let mut s = Session::default();
+    run(&mut s, "solid.cylinder", json!({"radius": 5.25, "height": length, "base": [0, 0, 0], "body_name": "Tube"}));
+    run(&mut s, "solid.cylinder", json!({"radius": r, "height": length, "base": [0, 0, 0], "operation": "cut", "targets": ["Tube"]}));
+    run(&mut s, "solid.box", json!({"length": 1, "width": 2, "height": length, "corner": [flat, -1, 0], "operation": "join", "targets": ["Tube"]}));
+    run(&mut s, "solid.cylinder", json!({"radius": r, "height": length + 6.0, "base": [0, 0, -3], "operation": "new", "body_name": "Pin"}));
+    let res = run(&mut s, "inspect.clearance", json!({"bodies": ["Pin"], "against": ["Tube"], "clearance": 1e-6}));
+    let want = (r * r * (flat / r).acos() - flat * (r * r - flat * flat).sqrt()) * length;
+    let overlaps = res["overlaps"].as_array().cloned().unwrap_or_default();
+    assert!(res["near"].as_array().is_none_or(|n| n.is_empty()), "{res}");
+    assert_eq!(res["unchecked"].as_array().map(Vec::len), Some(0), "{res}");
+    assert_eq!(overlaps.len(), 1, "{res}");
+    assert!((f(&overlaps[0]["volume_mm3"]) - want).abs() < 0.05 * want, "{want} {res}");
 }

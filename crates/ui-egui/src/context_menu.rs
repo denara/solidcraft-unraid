@@ -37,6 +37,10 @@ pub enum Target {
     Plane {
         id: u64,
     },
+    /// A native feature row in a component's Features folder.
+    Feature {
+        id: u64,
+    },
     /// An origin plane (XY, XZ or YZ).
     OriginPlane {
         name: String,
@@ -270,6 +274,7 @@ pub fn target_bodies(app: &SolveApp, target: &Target) -> Vec<String> {
         Target::Occurrence { path } => app.session.occurrence_bodies(path, true).unwrap_or_default(),
         Target::Group { id, .. } => crate::browser::group_bodies(app, *id),
         Target::Sketch { .. }
+        | Target::Feature { .. }
         | Target::Plane { .. }
         | Target::OriginPlane { .. }
         | Target::Folder { .. }
@@ -329,6 +334,10 @@ pub fn items(app: &SolveApp, target: &Target) -> Vec<Item> {
         Target::Viewport => viewport_items(app),
         Target::Body { name } => body_items(app, std::slice::from_ref(name), true),
         Target::Sketch { id } => sketch_items(app, *id),
+        Target::Feature { id } => vec![
+            act("ui.editFeature", "Edit Feature", "").with(json!({"feature":id})).on(app.session.doc.feature(*id).is_some()),
+            act("ui.findTimeline", "Find in Timeline", "").with(json!({"feature":id})).on(app.session.doc.feature(*id).is_some()),
+        ],
         Target::Plane { id } => plane_items(app, *id),
         Target::OriginPlane { name } => origin_plane_items(app, name),
         Target::Component { id } => component_items(app, *id),
@@ -373,9 +382,30 @@ pub fn items(app: &SolveApp, target: &Target) -> Vec<Item> {
     v
 }
 
-/// The feature a body was made by, and that feature's sketch if it has one.
-fn body_feature_and_sketch(app: &SolveApp, body: &str) -> (Option<u64>, Option<u64>) {
-    let f = body_feature(app, body);
+/// Resolve the picked face's creator, rather than the feature that first made its body.
+/// Persistent face names retain their creator through later trims and placements.
+fn picked_face_feature(app: &SolveApp) -> Option<u64> {
+    let (body, index) = app.session.selection.iter().find_map(|s| match s {
+        Sel::Face { body, index, .. } => Some((body, *index)),
+        _ => None,
+    })?;
+    let state = app.session.world_state();
+    let body = state.body(body)?;
+    let names = solidcraft_engine::doc::naming::face_names(body);
+    let name = names.get(index)?;
+    let (creator, _) = name.strip_prefix('F')?.split_once(':')?;
+    let id = creator.parse::<u64>().ok()?;
+    let owner = app.session.doc.feature(body.feature)?;
+    if matches!(owner.kind, solidcraft_engine::doc::FeatureKind::Import { .. } | solidcraft_engine::doc::FeatureKind::MeshImport { .. })
+        && id != owner.id
+    {
+        return None;
+    }
+    app.session.doc.feature(id).filter(|f| f.component == app.session.doc.model_body_component(body)).map(|f| f.id)
+}
+
+/// A feature and its profile sketch, if it has one.
+fn feature_and_sketch(app: &SolveApp, f: Option<u64>) -> (Option<u64>, Option<u64>) {
     let sketch = f
         .and_then(|f| app.session.doc.feature(f))
         .and_then(|f| serde_json::to_value(&f.kind).ok())
@@ -421,7 +451,7 @@ fn viewport_items(app: &SolveApp) -> Vec<Item> {
         v.extend(sketch_items(app, sketch));
     } else if has(|s| matches!(s, Sel::Face { .. })) {
         let face = sel.iter().find_map(|s| if let Sel::Face { body, .. } = s { Some(body.clone()) } else { None }).unwrap_or_default();
-        let (feature, sketch) = body_feature_and_sketch(app, &face);
+        let (feature, sketch) = feature_and_sketch(app, picked_face_feature(app));
         let hidden = app.session.visibility.hidden_bodies.contains(&face);
         v.push(cmd(app, "sketch.create", "Create Sketch"));
         v.push(cmd(app, "solid.extrude", "Extrude"));
@@ -437,8 +467,8 @@ fn viewport_items(app: &SolveApp) -> Vec<Item> {
         v.push(act("ui.delete", "Delete", "delete").key("Del"));
         v.push(act(if hidden { "ui.show" } else { "ui.hide" }, "Show/Hide", "eye").key("V").with(json!({ "bodies": [face] })));
         v.push(Item::sep());
-        v.push(act("ui.findBrowser", "Find in Browser", "").with(json!({ "body": face })));
-        v.push(act("ui.findTimeline", "Find in Timeline", "").with(json!({ "body": face })));
+        v.push(act("ui.findBrowser", "Find in Browser", "").with(json!({ "body": face, "feature": feature })).on(feature.is_some()));
+        v.push(act("ui.findTimeline", "Find in Timeline", "").with(json!({ "feature": feature })).on(feature.is_some()));
         v.push(Item::sep());
         v.push(cmd(app, "solid.press_pull", "Press Pull"));
         v.push(cmd(app, "inspect.measure", "Measure"));
@@ -492,6 +522,11 @@ fn viewport_items(app: &SolveApp) -> Vec<Item> {
         return v;
     }
     if !sel.is_empty() {
+        if !v.iter().any(|item| item.id == "parts.resize")
+            && let Some(component) = crate::dialogs_part_size::selected_component(app)
+        {
+            v.push(cmd(app, "parts.resize", "Change Part Size").with(json!({"component":component})));
+        }
         v.push(Item::sep());
         v.push(act("ui.clear", "Clear Selection", "").key("Esc"));
     }
@@ -525,6 +560,9 @@ fn body_items(app: &SolveApp, bodies: &[String], browser: bool) -> Vec<Item> {
     ];
     if one {
         let b = bodies.first().cloned().unwrap_or_default();
+        if let Some(component) = crate::dialogs_part_size::component_for_bodies(app, bodies) {
+            v.push(cmd(app, "parts.resize", "Change Part Size").with(json!({"component":component})));
+        }
         v.push(Item::sep());
         if !browser {
             v.push(act("ui.findBrowser", "Find in Browser", "").with(json!({ "body": b })));
@@ -669,6 +707,9 @@ fn component_items(app: &SolveApp, id: u64) -> Vec<Item> {
     let hidden = !bodies.is_empty() && bodies.iter().all(|b| app.session.visibility.hidden_bodies.contains(b));
     let names = json!(bodies);
     let mut v = Vec::new();
+    if doc.parts.contains_key(&id) {
+        v.push(cmd(app, "parts.resize", "Edit").with(json!({"component":id})));
+    }
     if id != 0 {
         let grounded = occ.is_some_and(|o| o.grounded);
         let oid = occ.map(|o| o.id).unwrap_or(0);
@@ -692,6 +733,8 @@ fn component_items(app: &SolveApp, id: u64) -> Vec<Item> {
     }
     v.push(cmd(app, "component.create", "New Component").with(json!({ "parent": id })));
     if id == 0 {
+        v.push(act("ui.copyDesign", "Copy", "").key("Ctrl+C"));
+        v.push(act("ui.paste", "Paste", "").key("Ctrl+V").on(crate::edit_clipboard::can_paste(app)));
         v.push(cmd(app, "component.from_bodies", "Create Components from Bodies").with(json!({ "bodies": names })).on(!bodies.is_empty()));
     }
     v.push(Item::sep());
@@ -703,6 +746,9 @@ fn component_items(app: &SolveApp, id: u64) -> Vec<Item> {
             .on(id != 0 || !bodies.is_empty()),
     );
     v.push(act("ui.properties", "Properties", "measure").with(json!({ "component": id })));
+    if doc.links.contains_key(&id) {
+        v.push(act("ui.relinkSource", "Relink Source (All Instances)…", "update").with(json!({"component": id})));
+    }
     if id == 0 {
         v.push(act("ui.designProperties", "Design Properties", "settings"));
     }
@@ -877,6 +923,13 @@ pub fn run_item(app: &mut SolveApp, item: &Item, at: Pos2) {
     let p = item.params.clone().unwrap_or(Value::Null);
     let bodies = strs(&p, "bodies");
     match item.id.as_str() {
+        "parts.resize" => {
+            if let Some(component) = id_of(&p, "component") {
+                crate::dialogs_part_size::open(app, component);
+            } else {
+                app.start("parts.resize");
+            }
+        }
         "ui.repeat" => {
             if let Some((id, _)) = app.last_command.clone() {
                 app.start(&id);
@@ -888,7 +941,13 @@ pub fn run_item(app: &mut SolveApp, item: &Item, at: Pos2) {
         "ui.delete" if item.params.is_some() => crate::delete::request(app, p),
         "ui.delete" => delete(app),
         "ui.finishSketch" => app.finish_sketch(),
+        "ui.relinkSource" => {
+            if let Some(component) = id_of(&p, "component") {
+                crate::linked_source::start(app, component);
+            }
+        }
         "ui.copy" => drop(crate::edit_clipboard::copy(app)),
+        "ui.copyDesign" => drop(crate::edit_clipboard::copy_design(app)),
         "ui.cut" => drop(crate::edit_clipboard::cut(app)),
         "ui.paste" => drop(crate::edit_clipboard::paste(app, Some(at))),
         "ui.editSketchPattern" => {
@@ -974,8 +1033,16 @@ pub fn run_item(app: &mut SolveApp, item: &Item, at: Pos2) {
             app.pick_save_command(&format!("{name}.step"), &["step", "stp", "igs", "stl", "3mf", "obj"], "file.export", json!({"bodies": bodies}));
         }
         "ui.findBrowser" => {
+            if let Some(feature) = id_of(&p, "feature") {
+                if let Some(body) = p.get("body").and_then(Value::as_str) {
+                    crate::browser::reveal_feature(app, feature, body);
+                }
+                return;
+            }
             if let Some(b) = p.get("body").and_then(Value::as_str) {
                 app.ui.show_browser = true;
+                app.preferences.timeline_left_browser_collapsed = false;
+                app.tree.reveal_feature = None;
                 app.tree.reveal = Some(b.to_string());
                 let _ = app.run("select.set", json!({"items": [{"type": "body", "name": b}]}));
             }

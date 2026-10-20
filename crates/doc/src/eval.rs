@@ -1,5 +1,8 @@
 //! Timeline evaluation.
 
+#[path = "placed_mesh.rs"]
+mod placed_mesh;
+
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock};
@@ -28,6 +31,8 @@ pub struct ModelBody {
     // Timeline snapshots are cloned before meshes are requested. Share the cell itself so
     // meshing any snapshot also warms every unchanged copy of this body.
     mesh: Arc<OnceLock<Arc<Mesh>>>,
+    /// Lazy canonical reference triangles for a proper rigid occurrence placement.
+    mesh_placement: Option<Arc<placed_mesh::PlacedMesh>>,
     /// The display plan (none when the body has no plan: a mesh body, or one the planner
     /// refuses), shared like the mesh. A GPU viewport draws it.
     plan: Arc<[OnceLock<Option<Arc<TessPlan>>>; 4]>,
@@ -50,6 +55,8 @@ pub struct ModelBody {
     /// [`Body::retained_bytes`] of `body`, measured when a feature made or changed it (0: not
     /// measured), so the evaluation cache's budget does not walk every body after every feature.
     bytes: usize,
+    /// In a world state: the [`ModelBody::geometry_key`] of the model body this one places (0: none).
+    source_key: u64,
 }
 
 impl ModelBody {
@@ -64,6 +71,11 @@ impl ModelBody {
             let _ = mesh.set(Arc::clone(ready));
         }
         copy.mesh = Arc::new(mesh);
+        // Placed meshes and display plans now carry their own shared lazy cells.
+        // The observer uses the exact placed B-rep with isolated cold caches.
+        copy.mesh_placement = None;
+        copy.plan = Arc::new(Default::default());
+        copy.plan_mesh = Arc::new(Default::default());
         copy
     }
 
@@ -75,6 +87,7 @@ impl ModelBody {
             body,
             feature,
             mesh: Arc::new(OnceLock::new()),
+            mesh_placement: None,
             plan: Arc::new(Default::default()),
             plan_mesh: Arc::new(Default::default()),
             key: 0,
@@ -84,7 +97,23 @@ impl ModelBody {
             transferred: false,
             imported: None,
             bytes: 0,
+            source_key: 0,
         }
+    }
+
+    /// Identity of this body's geometry where it stands: the same for a body evaluated or
+    /// placed again from the same inputs at the same place, so work measured on it can be
+    /// reused (none for a body the evaluation cache does not key).
+    pub fn geometry_key(&self) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+        let key = if self.key != 0 { self.key } else { self.source_key };
+        if key == 0 {
+            return None;
+        }
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut h);
+        self.source_transform.iter().flatten().for_each(|v| v.to_bits().hash(&mut h));
+        Some(h.finish())
     }
     pub fn definition_name(&self) -> &str {
         self.source_name.as_deref().unwrap_or(&self.name)
@@ -97,9 +126,10 @@ impl ModelBody {
         // finding their surface, picks naming their face, sketch planes), and a different
         // triangulation moved those and changed what designs build. A GPU viewport draws the
         // plan ([`ModelBody::display_plan`]).
-        self.mesh
-            .get_or_init(|| Arc::new(self.body.reference_display_mesh_angular(self.display_tol(), kernel::DISPLAY_ANGLE).unwrap_or_default()))
-            .clone()
+        match self.mesh_placement.as_deref() {
+            Some(placed) => self.mesh.get_or_init(|| placed.mesh()).clone(),
+            None => placed_mesh::reference_mesh(&self.body, &self.mesh, self.display_tol()),
+        }
     }
 
     /// The display plan of this body at the viewport's display quality
@@ -112,16 +142,12 @@ impl ModelBody {
 
     /// The display plan at a given display quality, made once per level.
     pub fn display_plan_at(&self, q: crate::display_quality::DisplayQuality) -> Option<Arc<TessPlan>> {
-        self.plan
-            .get(q.index())?
-            .get_or_init(|| match self.body.display_plan_angular(q.chord(self.body.size()), q.angle()) {
-                Ok(plan) => Some(Arc::new(plan)),
-                Err(e) => {
-                    log::debug!("{}: no display plan ({e})", self.name);
-                    None
-                }
-            })
-            .clone()
+        let cell = self.plan.get(q.index())?;
+        match self.mesh_placement.as_deref() {
+            // A placed part shows its definition's plan, moved (planned once for every placement).
+            Some(placed) => cell.get_or_init(|| placed.plan(q, &self.name)).clone(),
+            None => placed_mesh::definition_plan(&self.body, cell, q, &self.name),
+        }
     }
 
     /// The display plan's mesh, evaluated on the CPU once per level: the same triangles a GPU
@@ -136,7 +162,10 @@ impl ModelBody {
     pub fn plan_mesh_at(&self, q: crate::display_quality::DisplayQuality) -> Option<Arc<Mesh>> {
         self.plan_mesh
             .get(q.index())?
-            .get_or_init(|| self.display_plan_at(q).and_then(|plan| self.body.display_mesh_of(&plan).ok()).map(Arc::new))
+            .get_or_init(|| match self.mesh_placement.as_deref() {
+                Some(placed) => placed.plan_mesh(q, &self.name),
+                None => self.display_plan_at(q).and_then(|plan| self.body.display_mesh_of(&plan).ok()).map(Arc::new),
+            })
             .clone()
     }
 
@@ -159,9 +188,10 @@ impl ModelBody {
         Some((Arc::new(plan), Arc::new(mesh)))
     }
 
-    /// The chord tolerance of [`ModelBody::mesh`] (mm): 1/1000 of the body's size, at least 1 µm.
+    /// The chord tolerance of [`ModelBody::mesh`] (mm): 1/1000 of the definition's size, at least
+    /// 1 µm. Proper rigid placements retain that tolerance along with the reference triangles.
     pub fn display_tol(&self) -> f64 {
-        (self.body.size() * 1e-3).max(1e-3)
+        self.mesh_placement.as_ref().map(|placed| placed.tolerance).unwrap_or_else(|| (self.body.size() * 1e-3).max(1e-3))
     }
 
     /// Already computed display geometry; saving must not trigger cold tessellation.
@@ -370,7 +400,21 @@ fn thread_groove(t: &ThreadInfo, radius: f64, open: (bool, bool)) -> Result<soli
         (r_root, p / 8.0, r_out, (p / 4.0 + 2.0 * (r_out - r_root) * slope) / 2.0)
     };
     if w0.max(w1) * 2.0 >= p * 0.98 {
-        return Err(DocError::Invalid("the face is too far from the thread's diameter".into()));
+        // The groove would be wider than a pitch: the face is far inside the thread (a hole
+        // narrower than its minor diameter, a shaft thicker than its major one, #2688).
+        let (m, dia) = (&t.designation, 2.0 * radius);
+        let alt = thread_for(dia, t.internal).map(|(n, q)| format_thread(n, q)).filter(|a| a != m);
+        let shown = show_mm(dia);
+        return Err(DocError::Invalid(if t.internal {
+            let alt = alt.map(|a| format!(", or thread this hole {a}")).unwrap_or_default();
+            format!(
+                "this {shown} mm hole is too narrow for a modelled {m} thread (its teeth would fill the hole); drill {} mm for {m}{alt}",
+                show_mm(d - p)
+            )
+        } else {
+            let alt = alt.map(|a| format!(", or thread this shaft {a}")).unwrap_or_default();
+            format!("this {shown} mm shaft is too thick for a modelled {m} thread; make the shaft {} mm for {m}{alt}", show_mm(d))
+        }));
     }
     let k = t.axis;
     let u = k.cross(if k.x.abs() < 0.9 { Vec3::new(1.0, 0.0, 0.0) } else { Vec3::new(0.0, 1.0, 0.0) });
@@ -381,8 +425,19 @@ fn thread_groove(t: &ThreadInfo, radius: f64, open: (bool, bool)) -> Result<soli
     let base = t.axis_point + k * s0;
     let plane = Plane { origin: base, x: u, y: *k };
     let section = [Vec2::new(r0, -w0), Vec2::new(r1, -w1), Vec2::new(r1, w1), Vec2::new(r0, w0)];
-    // Sections 7.5° apart: the chords sag 0.2% of the radius.
-    Ok(kernel::sweep_helix_mesh(&plane, &section, base, *k, p, (s1 - s0) / p, 48)?)
+    // Keep radial chord error below 1% of the pitch, rather than a fixed fraction of the
+    // diameter. At 48 stations a large fine thread cuts too deeply; its outer tool facets
+    // can even dip under the shaft surface. The existing coarse sizes still use 48.
+    let outer = r0.abs().max(r1.abs());
+    if !outer.is_finite() {
+        return Err(DocError::Invalid("thread dimensions are too large".into()));
+    }
+    let angle = (1.0 - (p * 0.01 / outer).min(1.0)).acos();
+    let stations = (std::f64::consts::PI / angle).ceil().max(48.0);
+    if !stations.is_finite() || stations > 720.0 {
+        return Err(DocError::Invalid("the modelled thread is too fine for this diameter; use a cosmetic thread".into()));
+    }
+    Ok(kernel::sweep_helix_mesh(&plane, &section, base, *k, p, (s1 - s0) / p, stations as usize)?)
 }
 
 /// A constant fillet of `edges`; with [`FilletFit::Reduce`](crate::FilletFit::Reduce), a radius too
@@ -1035,23 +1090,26 @@ fn placement_digest(doc: &Document, f: &Feature) -> u64 {
     };
     let wired = |id: &crate::SketchId| doc.sketch(id.0).is_ok_and(|sketch| !sketch.wires.is_empty());
     let rails: &[crate::SweepRail] = match &f.kind {
-        FeatureKind::Sweep { rails, .. } | FeatureKind::SurfaceSweep { rails, .. } => rails,
+        FeatureKind::Sweep { rails, .. }
+        | FeatureKind::SurfaceSweep { rails, .. }
+        | FeatureKind::Loft { rails, .. }
+        | FeatureKind::SurfaceLoft { rails, .. } => rails,
         _ => &[],
     };
-    if let Some(path) = path
-        && (wired(&path) || rails.iter().any(|r| wired(&r.sketch)))
-    {
+    if path.as_ref().is_some_and(wired) || rails.iter().any(|r| wired(&r.sketch)) {
         let mut hash = std::collections::hash_map::DefaultHasher::new();
-        let owner = doc.feature(path.0).map(|feature| feature.component).unwrap_or(0);
+        let owner = path.and_then(|path| doc.feature(path.0)).map(|feature| feature.component).unwrap_or(0);
         for frame in [doc.component_transform(f.component), doc.component_transform(owner)] {
             frame.iter().flatten().for_each(|value| value.to_bits().hash(&mut hash));
         }
-        if let FeatureKind::Sweep { sketch, rails, .. } | FeatureKind::SurfaceSweep { sketch, rails, .. } = &f.kind {
-            // The profile's and the rails' components place them too.
-            for sketch in std::iter::once(sketch).chain(rails.iter().map(|r| &r.sketch)) {
-                let owner = doc.feature(sketch.0).map(|feature| feature.component).unwrap_or(0);
-                doc.component_transform(owner).iter().flatten().for_each(|value| value.to_bits().hash(&mut hash));
-            }
+        // A sweep's profile and the rails' components place them too.
+        let profile = match &f.kind {
+            FeatureKind::Sweep { sketch, .. } | FeatureKind::SurfaceSweep { sketch, .. } => Some(sketch),
+            _ => None,
+        };
+        for sketch in profile.into_iter().chain(rails.iter().map(|r| &r.sketch)) {
+            let owner = doc.feature(sketch.0).map(|feature| feature.component).unwrap_or(0);
+            doc.component_transform(owner).iter().flatten().for_each(|value| value.to_bits().hash(&mut hash));
         }
         return hash.finish();
     }
@@ -1204,6 +1262,23 @@ impl Model {
         })
     }
 
+    /// Whether the results are `doc`'s evaluation: one per feature, each on the inputs `doc`
+    /// gives it, none stale, so [`Model::evaluate`] would keep every one of them. A document
+    /// changed without an evaluation since is not.
+    pub fn is_current(&self, doc: &Document) -> bool {
+        if self.results.len() != doc.features.len() || self.is_stale() {
+            return false;
+        }
+        let vals = evaluation_values(doc).0;
+        let steps = StepDigests::of(doc, &self.step_digests);
+        let marker = doc.marker.unwrap_or(usize::MAX);
+        let mut prev = 0;
+        doc.features.iter().zip(&self.results).enumerate().all(|(i, (f, r))| {
+            prev = chain_fingerprint(doc, &vals, f, prev, i >= marker, &steps);
+            r.id == f.id && r.fingerprint == prev
+        })
+    }
+
     /// Re-evaluate the document, reusing results up to the first changed feature.
     pub fn evaluate(&mut self, doc: &Document) {
         let (vals, perr) = evaluation_values(doc);
@@ -1347,6 +1422,16 @@ impl Model {
                 }),
             });
             if r.is_ok() {
+                // Profiles picked by curves that no longer bound a profile exactly were found
+                // by their best match: say which.
+                let thin = matches!(&f.kind, FeatureKind::Extrude { thin: Some(_), .. });
+                for (sketch, sel) in f.kind.profile_sels() {
+                    if let (false, Some(ss)) = (thin, state.sketch(sketch)) {
+                        for note in crate::profile_fallback_notes(ss, sel) {
+                            append_warning(&mut warning, note);
+                        }
+                    }
+                }
                 if let Some(note) = boolean_diagnostics.warning() {
                     append_warning(&mut warning, note);
                 }
@@ -1436,15 +1521,12 @@ pub(crate) fn val(vals: &BTreeMap<String, Value>, e: &str, k: Kind) -> Result<f6
     Document::eval_in(vals, e, k)
 }
 
-/// A loft builds each section from its outline alone, so a section with a hole (a ring) is
-/// refused rather than lofted as if it were filled.
+/// Collapsing the outline and its holes onto one apex cannot make a manifold solid.
 fn refuse_loft_holes(r: &Region2) -> Result<()> {
     if r.holes.is_empty() {
         return Ok(());
     }
-    Err(DocError::Invalid(
-        "not supported yet: a loft section with a hole; loft the outline and the hole as two bodies and cut one from the other".into(),
-    ))
+    Err(DocError::Invalid("not supported yet: lofting a section with holes to a point".into()))
 }
 
 pub fn select_profiles(ss: &SolvedSketch, sel: &ProfileSel) -> Result<Vec<Region2>> {
@@ -1468,8 +1550,11 @@ pub fn select_profiles(ss: &SolvedSketch, sel: &ProfileSel) -> Result<Vec<Region
             }
             v
         }
+        // A curve loop that no longer bounds a profile exactly falls back to the best match; the
+        // feature's warning says so (`profile_fallback_notes`).
         ProfileSel::Curves { .. } | ProfileSel::OffsetBoundaries { .. } | ProfileSel::WholeBoundaries { .. } => {
-            crate::profile_selection_indices(ss, sel)?
+            crate::profile_selection_indices_lenient(ss, sel)?
+                .0
                 .into_iter()
                 .map(|index| {
                     ps.get(index)
@@ -1878,12 +1963,7 @@ pub fn through_all_distance(st: &ModelState, plane: &Plane, targets: &[String]) 
 /// Sample points inside a region (sketch coordinates).
 fn region_samples(r: &Region2) -> Vec<Vec2> {
     let mut out = vec![r.interior_point()];
-    let pts = r.outer.polyline(1e-2);
-    let (mut lo, mut hi) = (Vec2::new(f64::INFINITY, f64::INFINITY), Vec2::new(f64::NEG_INFINITY, f64::NEG_INFINITY));
-    for p in &pts {
-        lo = Vec2::new(lo.x.min(p.x), lo.y.min(p.y));
-        hi = Vec2::new(hi.x.max(p.x), hi.y.max(p.y));
-    }
+    let solidcraft_geom::Aabb2 { min: lo, max: hi } = r.outer.polyline(1e-2).bounds();
     for i in 0..5 {
         for j in 0..5 {
             let p = Vec2::new(lo.x + (hi.x - lo.x) * (0.1 + 0.2 * i as f64), lo.y + (hi.y - lo.y) * (0.1 + 0.2 * j as f64));
@@ -2898,6 +2978,38 @@ fn hole_tools(
     Ok(hole_tools_and_prisms(vals, st, position, dir, diameter, depth, hole)?.into_iter().map(|(tool, _)| tool).collect())
 }
 
+/// The scale a hole's tools are sized by: the largest body the hole's axis meets (#2904), so a
+/// large body elsewhere in the model changes neither the tool's reach above the face (and so
+/// the countersink's outline) nor its depth. A hole whose axis meets no body is sized by the
+/// largest body of the model, as before.
+fn hole_axis_size(st: &ModelState, position: &Vec3, dir: Vec3) -> f64 {
+    let along = |b: &ModelBody| {
+        // The axis (an unbounded line) against the body's box, grown by the display tolerance.
+        let bb = b.mesh().bounds();
+        if bb.is_empty() {
+            return false;
+        }
+        let pad = 2.0 * b.display_tol();
+        let (mut lo, mut hi) = (f64::NEG_INFINITY, f64::INFINITY);
+        for (o, d, min, max) in
+            [(position.x, dir.x, bb.min.x, bb.max.x), (position.y, dir.y, bb.min.y, bb.max.y), (position.z, dir.z, bb.min.z, bb.max.z)]
+        {
+            if d.abs() < 1e-12 {
+                if o < min - pad || o > max + pad {
+                    return false;
+                }
+            } else {
+                let (a, c) = ((min - pad - o) / d, (max + pad - o) / d);
+                lo = lo.max(a.min(c));
+                hi = hi.min(a.max(c));
+            }
+        }
+        lo <= hi
+    };
+    let met = st.bodies.iter().filter(|b| along(b)).map(|b| b.body.size()).fold(0.0, f64::max);
+    if met > 0.0 { met } else { st.bodies.iter().map(|b| b.body.size()).fold(1.0, f64::max) }
+}
+
 /// [`hole_tools`], each with its exact geometry when it is a straight cylinder along the axis
 /// (a plain hole, a counterbore, a drill point left in the air past a through hole), so sheet
 /// metal can keep it as a flat cut-out or pocket. Each tool's faces are named by the part of the
@@ -2916,7 +3028,7 @@ fn hole_tools_and_prisms(
     if !(r > 1e-6) {
         return Err(DocError::Invalid("hole diameter must be positive".into()));
     }
-    let size = st.bodies.iter().map(|b| b.body.size()).fold(1.0, f64::max);
+    let size = hole_axis_size(st, position, dir);
     let top = (size * 0.01).max(0.1);
     let bottom = match depth {
         Some(d) => -val(vals, d, Kind::Length)?,
@@ -3674,8 +3786,11 @@ fn feature_tools_with_constructor(
             let m = crate::rigid(Vec3::ZERO, origin_w, axis_w, -start);
             regions.iter().zip(bodies).map(|(r, body)| Ok(tool(r, kernel::transform_matrix(&body, m)?, Some(&body)))).collect()
         }
-        FeatureKind::Loft { sections, .. } if sections.iter().any(|s| s.point.is_some()) => {
+        FeatureKind::Loft { sections, rails, .. } if sections.iter().any(|s| s.point.is_some()) => {
             // A profile lofted to a sketch point (an apex).
+            if !rails.is_empty() {
+                return Err(DocError::Invalid("not supported yet: guide rails on a loft to a point".into()));
+            }
             let [a, b] = &sections[..] else { return Err(DocError::Invalid("not supported yet: a point section in a loft of more than two".into())) };
             let (prof, pt) = if a.point.is_some() { (b, a) } else { (a, b) };
             let ss = st.sketch(prof.sketch.0).ok_or_else(|| DocError::Unknown(format!("sketch {}", prof.sketch)))?;
@@ -3728,7 +3843,7 @@ fn feature_tools_with_constructor(
             let pitch = if *clockwise { -p } else { p };
             Ok(unnamed(vec![kernel::sweep_helix(&plane, &region, *base, axis, pitch, n)?]))
         }
-        FeatureKind::Loft { sections, .. } => {
+        FeatureKind::Loft { sections, rails, rail_fit, .. } => {
             let mut secs = Vec::new();
             let mut sketches = Vec::new();
             for sec in sections {
@@ -3737,14 +3852,27 @@ fn feature_tools_with_constructor(
                     .ok_or_else(|| DocError::Unknown(format!("sketch {} (it must come earlier in the timeline)", sec.sketch)))?;
                 let regions = solidcraft_sketch::merge_regions(&select_profiles(ss, &sec.profiles)?);
                 let [r] = &regions[..] else { return Err(DocError::Invalid("each loft section must be one profile".into())) };
-                refuse_loft_holes(r)?;
-                secs.push((ss.plane, r.outer.clone()));
+                secs.push((ss.plane, r.clone()));
                 sketches.push(ss);
             }
             // Its caps are the first and last sections, its sides named by the curves they run
             // between.
-            let body = kernel::loft(&secs)?;
-            let roles = crate::lineage::SectionRoles { sections: sketches.into_iter().zip(secs.iter().map(|(_, lp)| lp)).collect() };
+            let body = if rails.is_empty() {
+                kernel::loft_regions(&secs)?
+            } else {
+                // Rails shape the sections' outlines; sections with holes wait for rails that
+                // carry the holes too.
+                if secs.iter().any(|(_, r)| !r.holes.is_empty()) {
+                    return Err(DocError::Invalid("not supported yet: guide rails on a loft whose sections have holes".into()));
+                }
+                let outlines: Vec<_> = secs.iter().map(|(p, r)| (*p, r.outer.clone())).collect();
+                // The rails run from the end at the first section.
+                let start = outlines.first().and_then(|(p, lp)| lp.segs.first().map(|seg| p.to_world(seg.start()))).unwrap_or_default();
+                kernel::loft_with_rails(&outlines, &rail_polylines(doc, st, rails, f.component, start)?, kernel_rail_fit(*rail_fit))?
+            };
+            let roles = crate::lineage::SectionRoles {
+                sections: sketches.into_iter().zip(secs.iter().map(|(_, r)| std::iter::once(&r.outer).chain(&r.holes).collect())).collect(),
+            };
             Ok(vec![roles.tool(body)])
         }
         FeatureKind::Sweep { sketch, profiles, path_sketch, path, orientation, twist, scale, rails, rail_fit, .. } => {
@@ -3854,20 +3982,24 @@ pub(crate) fn sweep_control(
         Some(k) => val(vals, k, Kind::Unitless)?,
         None => 1.0,
     };
-    let rail_fit = match rail_fit {
-        crate::RailFit::Scale => kernel::RailFit::Scale,
-        crate::RailFit::Stretch => kernel::RailFit::Stretch,
-    };
-    let ctl = kernel::SweepControl { orientation, twist, scale, rails, rail_fit };
+    let ctl = kernel::SweepControl { orientation, twist, scale, rails, rail_fit: kernel_rail_fit(rail_fit) };
     ctl.check()?;
     Ok(ctl)
 }
 
-/// A sweep's guide rails as polylines in the feature's frame, each a chain of its sketch's curves
-/// (planar or 3D) from the end nearest `start`, the start of the path.
+/// How guide rails reshape a sweep's profile or a loft's sections, for the kernel.
+pub(crate) fn kernel_rail_fit(fit: crate::RailFit) -> kernel::RailFit {
+    match fit {
+        crate::RailFit::Scale => kernel::RailFit::Scale,
+        crate::RailFit::Stretch => kernel::RailFit::Stretch,
+    }
+}
+
+/// A sweep's or a loft's guide rails as polylines in the feature's frame, each a chain of its sketch's curves
+/// (planar or 3D) from the end nearest `start` (the start of the path, the loft's first section).
 pub(crate) fn rail_polylines(doc: &Document, st: &ModelState, rails: &[crate::SweepRail], consumer: u64, start: Vec3) -> Result<Vec<Vec<Vec3>>> {
     if rails.len() > 2 {
-        return Err(DocError::Invalid("a sweep takes one or two guide rails".into()));
+        return Err(DocError::Invalid("a sweep or a loft takes one or two guide rails".into()));
     }
     rails
         .iter()
@@ -4078,9 +4210,17 @@ fn path_segments(ps: &SolvedSketch, ids: &[String], start: Vec3) -> Result<Vec<k
 
 /// Where an extrude of distance `d` starts and ends along the sketch normal, before any start
 /// offset: one side, the other, both (symmetric), or a second distance on the other side.
+///
+/// A second distance (`distance2`) goes the other way from the first side, wherever that went:
+/// against the normal for `direction: negative` (#2700), and back along it when a negative
+/// distance or a To Object below the sketch sends the first side down.
 pub(crate) fn extent_sides(vals: &BTreeMap<String, Value>, extent: &crate::Extent, d: f64, direction: crate::Direction) -> Result<(f64, f64)> {
     Ok(match (&extent.distance2, direction) {
-        (Some(d2), _) => (-val(vals, d2, Kind::Length)?, d),
+        (Some(d2), _) => {
+            let first = if direction == crate::Direction::Negative { -d } else { d };
+            let d2 = val(vals, d2, Kind::Length)?;
+            (if first < 0.0 { d2 } else { -d2 }, first)
+        }
         (None, crate::Direction::Positive) => (0.0, d),
         (None, crate::Direction::Negative) => (-d, 0.0),
         (None, crate::Direction::Symmetric) => {
@@ -4370,6 +4510,9 @@ fn replay(
             continue;
         }
         let (op, targets) = feature_op(src);
+        // A primitive's or a hole's targets are its participants (#1108): the copies change
+        // those bodies only, like the feature itself (#2755).
+        let targets = if targets.is_empty() { src.participants.clone() } else { targets };
         let mut copies = Vec::new();
         if let FeatureKind::Hole { diameter, depth, hole, to, .. } = &src.kind {
             // A hole is drilled again at each copy of its spot (found on the surface there), so
@@ -4777,7 +4920,7 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
                 None => state_in_frame(doc, st, f.component),
             };
             let (plane, face_warning) = match (anchor, plane) {
-                (Some(_), plane) => (doc.resolve_attached_plane(vals, plane, f.component, st, &fst)?, None),
+                (Some(_), plane) => doc.resolve_attached_plane_noted(vals, plane, f.component, st, &fst)?,
                 // A flat face of a sheet: the panel's exact plane, from its flat region and fold.
                 (None, plane) if crate::sheet::plane_sheet_face(plane).is_some() => {
                     (doc.resolve_plane_in(vals, &sheet_face_plane_in_frame(doc, st, f.component, plane)?, 0, Some(&fst))?, None)
@@ -4936,7 +5079,11 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
             let pl = match crate::face_anchor::plane_face_anchor(plane) {
                 Some(anchor) => {
                     let fst = crate::state_in_face_anchor_frame(doc, st, anchor, f.component)?;
-                    doc.resolve_attached_plane(vals, plane, f.component, st, &fst)?
+                    let (pl, note) = doc.resolve_attached_plane_noted(vals, plane, f.component, st, &fst)?;
+                    if let Some(note) = note {
+                        append_warning(warning, note);
+                    }
+                    pl
                 }
                 // A plane of numbers alone reads no body: placing them all is the design's size.
                 None if plane_is_fixed(plane) => doc.resolve_plane_in(vals, plane, 0, Some(st))?,
@@ -5022,7 +5169,7 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
                     if curves.is_empty() {
                         return Err(DocError::Invalid(format!("sketch `{}` has no curves to split with", ss.name)));
                     }
-                    kernel::split_faces(&mb.body, &picked, &kernel::SplitTool::Curves { plane: ss.plane, curves })?
+                    kernel::split_faces(&mb.body, &picked, &kernel::SplitTool::Curves { plane: ss.plane, curves, along: None })?
                 }
                 (None, None) => {
                     let pl = doc.resolve_plane_in(vals, plane, 0, Some(st))?;
@@ -5721,11 +5868,19 @@ impl PlacedBodies {
             Some((_, placed)) => {
                 let mut fresh = ModelBody::new(name, placed.body.clone(), b.feature);
                 fresh.mesh = placed.mesh.clone();
+                fresh.mesh_placement = placed.mesh_placement.clone();
                 fresh.plan = placed.plan.clone();
                 fresh.plan_mesh = placed.plan_mesh.clone();
                 fresh
             }
-            None => ModelBody::new(name, kernel::transform_matrix(&b.body, *m).unwrap_or_else(|_| b.body.clone()), b.feature),
+            None => match kernel::transform_matrix(&b.body, *m) {
+                Ok(body) => {
+                    let mut fresh = ModelBody::new(name, body, b.feature);
+                    fresh.mesh_placement = placed_mesh::PlacedMesh::new(b, m).map(Arc::new);
+                    fresh
+                }
+                Err(_) => ModelBody::new(name, b.body.clone(), b.feature),
+            },
         }
     }
 }
@@ -5760,26 +5915,46 @@ pub fn world_state_reusing(doc: &Document, st: &ModelState, placed_before: &mut 
         path
     };
     let mut out = ModelState { body_counter: st.body_counter, ..Default::default() };
-    for (comp, path, m) in doc.placements() {
+    let placements = doc.placements();
+    // A body moved in from another component keeps its place (its offset).
+    let body_matrix = |b: &ModelBody, m: &crate::Mat| doc.model_body_offset(b).map(|o| crate::mat_mul(m, o)).unwrap_or(*m);
+    // Every body placed elsewhere than its definition, placed on all cores: a large assembly
+    // places hundreds of parts, each a B-rep transform.
+    let mut jobs = Vec::new();
+    for (comp, path, m) in &placements {
+        for b in st.bodies.iter().filter(|b| doc.model_body_component(b) == *comp) {
+            let bm = body_matrix(b, m);
+            if !crate::is_identity(&bm) {
+                jobs.push((b, bm, doc.world_body_name(st, &b.name, *comp, path)));
+            }
+        }
+    }
+    let mut moved = kernel::map_on_threads(&jobs, 16, |(b, bm, name)| placed_before.placed(b, bm, name.clone())).into_iter().zip(&jobs);
+    for (comp, path, m) in placements {
         let primary = path == first_path(comp);
         let ident = crate::is_identity(&m);
         for b in st.bodies.iter().filter(|b| doc.model_body_component(b) == comp) {
-            let name = doc.world_body_name(st, &b.name, comp, &path);
-            // A body moved in from another component keeps its place (its offset).
-            let bm = doc.model_body_offset(b).map(|o| crate::mat_mul(&m, o)).unwrap_or(m);
+            let bm = body_matrix(b, &m);
             // Identical geometry also shares its display mesh cell with the definition.
             // A changed placement keeps a distinct mesh, at that placement's coordinates.
             let mut placed = if crate::is_identity(&bm) {
                 let mut placed = b.clone();
-                placed.name = name;
+                placed.name = doc.world_body_name(st, &b.name, comp, &path);
                 placed
             } else {
-                let placed = placed_before.placed(b, &bm, name);
+                // The same order as the jobs: this body's, made above (again here if it failed).
+                let placed = match moved.next() {
+                    Some((Some(placed), _)) => placed,
+                    Some((None, (_, _, name))) => placed_before.placed(b, &bm, name.clone()),
+                    None => placed_before.placed(b, &bm, doc.world_body_name(st, &b.name, comp, &path)),
+                };
                 placed_now.by_source.insert(placed_key(b, &bm), (b.clone(), placed.clone()));
                 placed
             };
             // World states keep their previous display-only evaluation-key semantics.
             placed.key = 0;
+            // With the model body's own frame, so its place is told apart from the placement's.
+            placed.source_key = b.geometry_key().unwrap_or(0);
             placed.source_name = Some(b.definition_name().to_string());
             placed.source_transform = crate::mat_mul(&bm, &b.source_transform);
             placed.component = comp;
@@ -5831,6 +6006,22 @@ pub fn world_state_reusing(doc: &Document, st: &ModelState, placed_before: &mut 
 #[cfg(test)]
 mod observer_display_cache_tests {
     use super::*;
+
+    #[test]
+    fn observer_isolates_new_placement_and_plan_caches() {
+        let original = ModelBody::new("Public source".into(), kernel::box_solid(Vec3::ZERO, Vec3::new(2., 3., 4.)).unwrap(), 7);
+        let mut placed = original.clone();
+        placed.mesh_placement = placed_mesh::PlacedMesh::new(&original, &crate::IDENTITY).map(Arc::new);
+        let copy = placed.isolated_display_copy();
+        assert!(copy.mesh_placement.is_none());
+        assert!(!Arc::ptr_eq(&original.plan, &copy.plan));
+        assert!(!Arc::ptr_eq(&original.plan_mesh, &copy.plan_mesh));
+        assert!(!copy.mesh().triangles.is_empty());
+        let _ = copy.display_plan();
+        assert!(original.mesh.get().is_none());
+        assert!(original.plan.iter().all(|cell| cell.get().is_none()));
+        assert!(original.plan_mesh.iter().all(|cell| cell.get().is_none()));
+    }
 
     #[test]
     fn observer_tessellation_leaves_original_cache_cold_and_reuses_completed_meshes() {
@@ -5908,6 +6099,8 @@ mod world_placement_cache_tests {
         assert!(Arc::ptr_eq(&source.mesh, &first.mesh), "unchanged geometry must retain the shared display mesh cell");
         assert_eq!(first.key, 0);
         assert_eq!(placed.key, 0);
+        // Each placement has its own geometry identity, for work measured on it.
+        assert!(first.geometry_key().is_some() && first.geometry_key() != placed.geometry_key());
         assert!(!Arc::ptr_eq(&source.mesh, &placed.mesh), "a transformed mesh cannot be reused without mapping coordinates");
         assert_eq!(first.source_name.as_deref(), Some("Block"));
         assert_eq!(placed.source_name.as_deref(), Some("Block"));

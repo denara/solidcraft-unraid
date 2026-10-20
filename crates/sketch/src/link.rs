@@ -7,7 +7,7 @@
 //! constants; they still bound profiles and take constraints and dimensions like any curve.
 
 use serde::{Deserialize, Serialize};
-use solidcraft_geom::{Vec2, Vec3};
+use solidcraft_geom::{Aabb2, Vec2, Vec3};
 
 use crate::model::{Curve, CurveKind, Result, Sketch, SketchError, in_range, radius_in_range};
 
@@ -520,7 +520,8 @@ impl Sketch {
         self.links.iter().find(|l| l.id == id)
     }
 
-    /// The expressions of the sketch's texts, each with what it sets (`Text height`…).
+    /// The expressions of the sketch's texts and of its points placed by parameters, each with
+    /// what it sets (`Text height`, `Point X`…).
     pub fn text_exprs(&self) -> Vec<(&'static str, &String)> {
         self.links
             .iter()
@@ -529,6 +530,7 @@ impl Sketch {
                 _ => None,
             })
             .flatten()
+            .chain(self.points.iter().filter_map(|p| p.exprs.as_deref()).flat_map(crate::PointExprs::list))
             .collect()
     }
 
@@ -541,6 +543,7 @@ impl Sketch {
                 _ => None,
             })
             .flatten()
+            .chain(self.points.iter_mut().filter_map(|p| p.exprs.as_deref_mut()).flat_map(crate::PointExprs::list_mut))
             .collect()
     }
 
@@ -819,9 +822,8 @@ impl Sketch {
         {
             let old: Vec<Vec2> = points.iter().filter_map(|i| self.point(*i)).collect();
             let normalized = |ps: &[Vec2]| -> Vec<Vec2> {
-                let lo = ps.iter().fold(Vec2::new(f64::INFINITY, f64::INFINITY), |a, p| Vec2::new(a.x.min(p.x), a.y.min(p.y)));
-                let hi = ps.iter().fold(Vec2::new(f64::NEG_INFINITY, f64::NEG_INFINITY), |a, p| Vec2::new(a.x.max(p.x), a.y.max(p.y)));
-                ps.iter().map(|p| Vec2::new((p.x - lo.x) / (hi.x - lo.x).max(1e-9), (p.y - lo.y) / (hi.y - lo.y).max(1e-9))).collect()
+                let b: Aabb2 = ps.iter().copied().collect();
+                ps.iter().map(|p| b.relative(*p)).collect()
             };
             let loop_roles_required = self.link(id).is_some_and(|l| matches!(l.source, LinkSource::Face { .. }))
                 && cur.iter().chain(&lay.curves).all(|c| matches!(c, LCurve::Line(..) | LCurve::Arc(..) | LCurve::Circle(..)))

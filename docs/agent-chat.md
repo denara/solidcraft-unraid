@@ -185,7 +185,9 @@ Whatever you typed before signing in is sent once the agent is ready.
 ## What the agent can do
 
 The agent reaches the open design only through SolidCraft's own tools (the
-[MCP server](mcp.md)), which SolidCraft hands it when the chat starts:
+[MCP server](mcp.md)), which SolidCraft hands it when the chat starts. That server is named
+`solidcraft-app`, so an MCP server you set up yourself under the name `solidcraft` (as in
+[client configuration](mcp.md#client-configuration)) doesn't take its place:
 
 - **Read the design:** list commands, inspect features, sketches and parameters, measure,
   take pictures of the view.

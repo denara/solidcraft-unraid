@@ -33,6 +33,7 @@ impl Catalog {
 
 static ENGLISH: Catalog = Catalog::new("en", "English", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/en.json")));
 static CZECH: Catalog = Catalog::new("cs", "Čeština", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/cs.json")));
+static DANISH: Catalog = Catalog::new("da", "Dansk", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/da.json")));
 static GERMAN: Catalog = Catalog::new("de", "Deutsch", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/de.json")));
 static SPANISH: Catalog = Catalog::new("es", "Español (España)", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/es.json")));
 static FRENCH: Catalog = Catalog::new("fr", "Français", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/fr.json")));
@@ -47,6 +48,7 @@ static PORTUGUESE_BR: Catalog =
 static RUSSIAN: Catalog = Catalog::new("ru", "Русский", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/ru.json")));
 static TURKISH: Catalog = Catalog::new("tr", "Türkçe", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/tr.json")));
 static UKRAINIAN: Catalog = Catalog::new("uk", "Українська", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/uk.json")));
+static VIETNAMESE: Catalog = Catalog::new("vi", "Tiếng Việt", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/vi.json")));
 static CHINESE: Catalog = Catalog::new("zh", "中文", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/zh.json")));
 /// English first (the fallback), then by language id, one per line so that adding a language
 /// doesn't edit a line another addition edits.
@@ -54,6 +56,7 @@ static CHINESE: Catalog = Catalog::new("zh", "中文", include_str!(concat!(env!
 pub const LOCALES: &[&Catalog] = &[
     &ENGLISH,
     &CZECH,
+    &DANISH,
     &GERMAN,
     &SPANISH,
     &FRENCH,
@@ -67,6 +70,7 @@ pub const LOCALES: &[&Catalog] = &[
     &RUSSIAN,
     &TURKISH,
     &UKRAINIAN,
+    &VIETNAMESE,
     &CHINESE,
 ];
 
@@ -346,6 +350,7 @@ mod tests {
     fn newly_catalogued_command_labels_translate() {
         let cases = [
             ("cs", "Příruba", "Zebra analýza", "Studie pohybu"),
+            ("da", "Flange", "Zebraanalyse", "Bevægelsesanalyse"),
             ("zh", "法兰", "斑马纹分析", "运动研究"),
             ("ja", "フランジ", "ゼブラ解析", "モーション スタディ"),
             ("de", "Flansch", "Zebra-Analyse", "Bewegungsuntersuchung"),
@@ -689,6 +694,27 @@ mod tests {
         assert_eq!(uk.dynamic("Parameters (5)"), "Параметри (5)");
         assert_eq!(uk.dynamic("4 degrees of freedom"), "4 ступенів вільності");
         assert_eq!(uk.dynamic("Sketch of bracket"), "Sketch of bracket");
+    }
+
+    #[test]
+    fn vietnamese_catalog_translates_keys_labels_and_browser_patterns() {
+        let vi = Locale::for_language("vi");
+        assert_eq!(vi.name(), "Tiếng Việt");
+        assert!(is_supported("vi"));
+        assert_eq!(vi.text("ui.preferences"), "Tùy chọn cài đặt");
+        assert_eq!(vi.label("Extrude"), "Đùn khối");
+        assert_eq!(vi.label("CREATE SKETCH"), "TẠO PHÁC THẢO");
+        assert_eq!(vi.label("NonExistentKey"), "NonExistentKey");
+        assert_eq!(vi.format("document.save_changes", &[("name", "My {design}")]), "Lưu các thay đổi đối với My {design}?");
+        assert_eq!(vi.format("dialog.selected_count", &[("count", "2")]), "↖ 2 đã chọn");
+        assert_eq!(vi.dynamic("Sketch1"), "Phác thảo1");
+        assert_eq!(vi.dynamic("Body2"), "Thân khối2");
+        assert_eq!(vi.dynamic("Component12"), "Cụm chi tiết12");
+        assert_eq!(vi.dynamic("Units: mm"), "Đơn vị: mm");
+        assert_eq!(vi.dynamic("Precision: 3"), "Độ chính xác: 3");
+        assert_eq!(vi.dynamic("Parameters (5)"), "Bảng tham số (5)");
+        assert_eq!(vi.dynamic("4 degrees of freedom"), "4 bậc tự do");
+        assert_eq!(vi.dynamic("Sketch of bracket"), "Sketch of bracket");
     }
 
     #[test]

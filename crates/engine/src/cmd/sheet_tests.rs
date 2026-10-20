@@ -38,6 +38,58 @@ fn rectangle_tool(s: &mut Session, name: &str, p0: [f64; 2], p1: [f64; 2]) {
 }
 
 #[test]
+fn side_edge_flanges_across_a_bend_keep_their_relief_through_rebuild_and_reopen() {
+    use solidcraft_geom::Vec3;
+
+    for shape in ["round", "rectangular"] {
+        for reverse in [false, true] {
+            let mut s = Session::default();
+            run(
+                &mut s,
+                "sheet.manage_rules",
+                json!({"name":"AL2","thickness":"2 mm","k_factor":0.5,"bend_radius":"1 mm","gap":"0.5 mm","active":true}),
+            );
+            base(&mut s, 120.0, 90.0);
+            run(&mut s, "sheet.flange", json!({"edges":[[60,0,2]],"height":"30 mm","angle":"90 deg"}));
+            let sheet = &s.model.state().sheets[0];
+            let parent = &sheet.flanges[0];
+            let point = parent.p + parent.d * parent.len + parent.n * (sheet.allowance(parent) + parent.leg * 0.5);
+            let side = solidcraft_doc::apply_point(&sheet.world(Some(0)), Vec3::new(point.x, point.y, sheet.t));
+            let mut edges = vec![json!([120, 45, 2]), json!([side.x, side.y, side.z])];
+            if reverse {
+                edges.reverse();
+            }
+            let before = s.doc.to_json();
+            run(
+                &mut s,
+                "sheet.flange",
+                json!({"edges":edges,"height":"20 mm","angle":"90 deg","position":"inside","corner_relief_shape":shape,"corner_relief":"4 mm"}),
+            );
+            assert!(no_errors_or_warnings(&s), "{shape}, reverse={reverse}: {:?}", s.model.results);
+            let formed = volume(&mut s);
+            let pattern = flat(&mut s);
+            assert_eq!(s.model.state().sheets[0].holes.len(), 1);
+            let body = &s.model.state().bodies[0].body;
+            assert!(body.validity().is_empty() && body.shell_count() == 1);
+            run(&mut s, "edit.undo", json!({}));
+            assert_eq!(s.doc.to_json(), before);
+            run(&mut s, "edit.redo", json!({}));
+            assert!((volume(&mut s) - formed).abs() < 1e-6);
+            for command in ["sheet.unfold", "sheet.refold"] {
+                run(&mut s, command, json!({}));
+                assert!((volume(&mut s) - formed).abs() < formed * 1e-3);
+            }
+            let mut reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+            assert!(no_errors_or_warnings(&reopened), "{:?}", reopened.model.results);
+            assert!((volume(&mut reopened) - formed).abs() < 1e-6);
+            assert_eq!(flat(&mut reopened), pattern);
+            let dxf = run(&mut reopened, "sheet.export_dxf", json!({}))["dxf"].as_str().unwrap().to_owned();
+            assert!(!solidcraft_io::read_dxf(&dxf).unwrap().is_empty());
+        }
+    }
+}
+
+#[test]
 fn shallow_sheet_pocket_preserves_material_depth_export_undo_and_reopen() {
     let mut s = Session::default();
     base(&mut s, 100.0, 60.0);
@@ -3031,6 +3083,138 @@ fn corner_reliefs_of_the_rule_reach_the_part_the_flat_pattern_and_the_dxf() {
         assert!((v - volume(&mut s) - PI * 100.0 * 2.0).abs() < 0.5, "{shape}: {v} - {}", volume(&mut s));
         let mut reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
         assert!((volume(&mut reopened) - volume(&mut s)).abs() < 1e-6, "{shape}");
+    }
+}
+
+/// The height of the rhombus of [`rhombus_sheet`]: 90 · sin 60°.
+const RHOMBUS_Y: f64 = 77.9422863406;
+/// Half of it, where the picks on the slanted sides lie.
+const RHOMBUS_Y_HALF: f64 = 38.9711431703;
+
+/// A base flange on a rhombus whose corners are 60° and 120°, with a flange on each of its
+/// four edges: the two flanges of a corner meet there, and their bends stop short of it.
+fn rhombus_sheet(s: &mut Session, rule: Value) {
+    let mut r = json!({"name": "AL2", "thickness": "2 mm", "k_factor": 0.5, "bend_radius": "1 mm", "gap": "0.5 mm", "active": true});
+    if let (Some(r), Some(extra)) = (r.as_object_mut(), rule.as_object()) {
+        r.extend(extra.clone());
+    }
+    run(s, "sheet.manage_rules", r);
+    run(s, "sketch.create", json!({"plane": "XY", "name": "Base"}));
+    run(s, "sketch.line", json!({"points": [[0, 0], [120, 0], [165, RHOMBUS_Y], [45, RHOMBUS_Y]], "closed": true}));
+    run(s, "sketch.finish", json!({}));
+    run(s, "sheet.flange", json!({"sketch": "Base"}));
+    run(
+        s,
+        "sheet.flange",
+        json!({"edges": [[60, 0, 2], [142.5, RHOMBUS_Y_HALF, 2], [105, RHOMBUS_Y, 2], [22.5, RHOMBUS_Y_HALF, 2]], "height": 38.6, "angle": "90 deg"}),
+    );
+}
+
+/// The corner of the trimmed base at the corner `c` of the base, whose edges leave it in the
+/// directions `dirs`: the two bend lines, each `s0` in from its edge, meet there.
+fn trimmed_corner(c: (f64, f64), dirs: [(f64, f64); 2], s0: f64) -> (f64, f64) {
+    let (d0, d1) = (dirs[0], dirs[1]);
+    let alpha = (d0.0 * d1.1 - d0.1 * d1.0).atan2(d0.0 * d1.0 + d0.1 * d1.1).abs();
+    let (bx, by) = (d0.0 + d1.0, d0.1 + d1.1);
+    let k = s0 / (alpha / 2.0).sin() / (bx * bx + by * by).sqrt();
+    (c.0 + bx * k, c.1 + by * k)
+}
+
+/// The far corner of the square relief at a corner of the base: `4 / (1 + cos α)` from the
+/// corner, on the bisector of its two edges.
+fn kite_vertex(c: (f64, f64), d1: (f64, f64), d2: (f64, f64)) -> (f64, f64) {
+    let k = 4.0 / (1.0 + d1.0 * d2.0 + d1.1 * d2.1);
+    (c.0 + (d1.0 + d2.0) * k, c.1 + (d1.1 + d2.1) * k)
+}
+
+/// The corner reliefs at corners that are not square: a 60° and a 120° one, each of the four
+/// shapes. The relief is cut `size / 2` from the corner along both edges, the bends stop there,
+/// and the flat pattern and the DXF keep one clean loop.
+#[test]
+fn corner_reliefs_at_non_orthogonal_corners_reach_the_flat_pattern_and_the_dxf() {
+    // The corners of the trimmed base: the two at 60° (6 mm from their corner, on the bisector)
+    // and the two at 120° (3.464 mm from theirs), with the directions their edges leave in.
+    let u = (0.5, RHOMBUS_Y / 90.0);
+    let corners = [
+        (trimmed_corner((0.0, 0.0), [(1.0, 0.0), u], 3.0), [(1.0, 0.0), u]),
+        (trimmed_corner((120.0, 0.0), [(-1.0, 0.0), u], 3.0), [(-1.0, 0.0), u]),
+        (trimmed_corner((165.0, RHOMBUS_Y), [(-u.0, -u.1), (-1.0, 0.0)], 3.0), [(-u.0, -u.1), (-1.0, 0.0)]),
+        (trimmed_corner((45.0, RHOMBUS_Y), [(1.0, 0.0), (-u.0, -u.1)], 3.0), [(1.0, 0.0), (-u.0, -u.1)]),
+    ];
+    let mut notch = Session::default();
+    rhombus_sheet(&mut notch, json!({}));
+    assert!(no_errors_or_warnings(&notch), "{:?}", notch.model.results);
+    let area0 = flat_area(&flat(&mut notch));
+    for shape in ["notch", "round", "rectangular", "tear"] {
+        let mut s = Session::default();
+        rhombus_sheet(&mut s, json!({"corner_relief_shape": shape, "corner_relief": "8 mm"}));
+        assert!(no_errors_or_warnings(&s), "{shape}: {:?}", s.model.results);
+        // The flat pattern is one loop with no cut-outs.
+        let f = flat(&mut s);
+        assert_eq!(f["outline"].as_array().map(Vec::len), Some(1), "{shape}: {f}");
+        assert_eq!(f["cutouts"], json!([]), "{shape}: {f}");
+        // No hairline edges in it: no degenerate face.
+        let shortest = f["outline"][0].as_array().map(|l| {
+            l.windows(2)
+                .map(|w| {
+                    let (x, y) = (
+                        w[1][0].as_f64().unwrap_or(f64::NAN) - w[0][0].as_f64().unwrap_or(f64::NAN),
+                        w[1][1].as_f64().unwrap_or(f64::NAN) - w[0][1].as_f64().unwrap_or(f64::NAN),
+                    );
+                    (x * x + y * y).sqrt()
+                })
+                .fold(f64::MAX, f64::min)
+        });
+        assert!(shortest.is_some_and(|d| d > 1e-3), "{shape}: the shortest edge of the flat pattern is {shortest:?}");
+        // The folded part holds the flat pattern's material (K = 0.5 keeps the volume).
+        let (v, area) = (volume(&mut s), flat_area(&f));
+        assert!((v - area * 2.0).abs() < 1e-3 * v, "{shape}: {v} vs {}", area * 2.0);
+        // The DXF: the relief at each of the four corners.
+        let (arcs, ends) = relief_drawing(&mut s);
+        match shape {
+            "round" => {
+                // A round about each corner, of radius 4.
+                assert_eq!(arcs.len(), 4, "{shape}: {arcs:?}");
+                for (c, _) in corners {
+                    assert!(
+                        arcs.iter().any(|(a, r)| (a.x - c.0).abs() < 1e-6 && (a.y - c.1).abs() < 1e-6 && (r - 4.0).abs() < 1e-6),
+                        "{shape}: {arcs:?}"
+                    );
+                }
+                // The base loses a sector of radius 4 at each corner and 4 mm of each of the two
+                // bends there: 2 corners at 60° and 2 at 120°.
+                let ba = std::f64::consts::PI;
+                let want = 2.0 * (16.0 * (PI / 3.0) / 2.0) + 2.0 * (16.0 * (2.0 * PI / 3.0) / 2.0) + 4.0 * 2.0 * 4.0 * ba;
+                assert!((area0 - area - want).abs() < 0.1, "{shape}: {} vs {want}", area0 - area);
+            }
+            "rectangular" => {
+                // A kite at each corner, meeting 4 / cos(α / 2) from it on the bisector.
+                assert!(arcs.is_empty(), "{shape}: {arcs:?}");
+                for (c, [d1, d2]) in corners {
+                    let x = kite_vertex(c, d1, d2);
+                    assert!(ends.iter().any(|p| (p.x - x.0).abs() < 1e-6 && (p.y - x.1).abs() < 1e-6), "{shape}: no kite at {c:?}: {ends:?}");
+                }
+                let ba = std::f64::consts::PI;
+                let want = 2.0 * (16.0 * (PI / 6.0).tan()) + 2.0 * (16.0 * (PI / 3.0).tan()) + 4.0 * 2.0 * 4.0 * ba;
+                assert!((area0 - area - want).abs() < 0.1, "{shape}: {} vs {want}", area0 - area);
+            }
+            "tear" => {
+                // The tear cuts the bend ends, not the base: no arc, and the base keeps its corners.
+                assert!(arcs.is_empty(), "{shape}: {arcs:?}");
+                assert!(area > area0, "{shape}: the tear takes nothing out of the base");
+            }
+            _ => {
+                // The notch cuts nothing.
+                assert!(arcs.is_empty(), "{shape}: {arcs:?}");
+                assert!((area - area0).abs() < 1e-6, "{shape}: {area} vs {area0}");
+            }
+        }
+        // Unfolding and refolding keep it.
+        run(&mut s, "sheet.unfold", json!({}));
+        run(&mut s, "sheet.refold", json!({}));
+        assert!((volume(&mut s) - v).abs() < 1e-6 * v, "{shape}");
+        let mut reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+        assert!((volume(&mut reopened) - v).abs() < 1e-6 * v, "{shape}");
     }
 }
 

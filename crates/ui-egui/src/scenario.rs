@@ -254,9 +254,9 @@ impl Harness {
             }
             self.frame();
         }
-        // A file opening or recovering in the background: wait for it (as a person would).
+        // A file opening, recovering or saving in the background: wait for it (as a person would).
         let began = std::time::Instant::now();
-        while !self.app.file_load.idle() && began.elapsed() < std::time::Duration::from_secs(120) {
+        while (!self.app.file_load.idle() || self.app.saving.is_some()) && began.elapsed() < std::time::Duration::from_secs(120) {
             self.frame();
             std::thread::sleep(std::time::Duration::from_millis(1));
         }

@@ -302,8 +302,8 @@ impl ChainRoles<'_> {
 /// the section with the most segments (the one each side spans exactly one segment of) and
 /// answering to the others; its caps `start` and `end`.
 pub(crate) struct SectionRoles<'a> {
-    /// Each section's sketch and the loop lofted through it, in the order given.
-    pub sections: Vec<(&'a SolvedSketch, &'a solidcraft_geom::Loop2)>,
+    /// Each section's sketch and loops (outer, then holes), in the order given.
+    pub sections: Vec<(&'a SolvedSketch, Vec<&'a solidcraft_geom::Loop2>)>,
 }
 
 impl SectionRoles<'_> {
@@ -316,14 +316,19 @@ impl SectionRoles<'_> {
     fn of(&self, history: &History) -> Vec<Vec<String>> {
         // Each profile segment (numbered through the sections in order): its section and role.
         let mut segments: Vec<(usize, Option<String>)> = Vec::new();
-        for (k, (sketch, lp)) in self.sections.iter().enumerate() {
+        for (k, (sketch, loops)) in self.sections.iter().enumerate() {
             let curves = crate::config::ExactSketchCurves::new(sketch);
-            for seg in &lp.segs {
+            for seg in loops.iter().flat_map(|lp| &lp.segs) {
                 let role = curves.find_along(seg).map(|id| if k == 0 { format!("side:{id}") } else { format!("side:s{k}.{id}") });
                 segments.push((k, role));
             }
         }
-        let lead = self.sections.iter().enumerate().max_by_key(|(k, (_, lp))| (lp.segs.len(), std::cmp::Reverse(*k))).map_or(0, |(k, _)| k);
+        let lead = self
+            .sections
+            .iter()
+            .enumerate()
+            .max_by_key(|(k, (_, loops))| (loops.iter().map(|lp| lp.segs.len()).sum::<usize>(), std::cmp::Reverse(*k)))
+            .map_or(0, |(k, _)| k);
         history
             .faces
             .iter()

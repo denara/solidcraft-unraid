@@ -41,6 +41,10 @@ Changes:
   a moved vertex), across the passes that fold in the operands' extra shells. `and` / `or` are
   wrappers that drop the history; the `*_with_history` forms return the same solid with the
   history as an `Option` (`None` where a face or edge went unrecorded).
+- `transversal/integrate/mod.rs`: `meshes` and `and_with_history_meshed` take the first
+  operand's shell meshes made beforehand (copied for each use, since the loops stores cut their
+  edges): a large body cut down to the regions of many small ones is meshed once, which was most
+  of each operation's time.
 
 ## truck-geometry 0.5.0 (Apache-2.0, © RICOS Co. Ltd., https://github.com/ricosjp/truck)
 
@@ -127,6 +131,12 @@ Changes:
 - `tessellation/triangulation.rs`: meshed faces and edges are built unchecked: faces whose loop
   runs along a seam edge both ways and closed edges (a full circle on one vertex) are valid,
   but the debug-build checks rejected them (debug builds could not mesh them).
+- `tessellation/triangulation.rs`: on a periodic surface, a boundary point's projected parameter
+  is moved by whole periods to within half a period of the point before it, however many periods
+  away the search put it (it was moved by two periods at most). A hinted search on a revolved
+  surface can return an angle millions of turns from its hint; the loop then spanned those turns,
+  the polyline closing it across the seam had millions of points, and meshing never finished,
+  which hung the STEP export that reads its own file back (#1985).
 - `tessellation/triangulation.rs`: parameter searches that land outside a surface's bounded,
   non-periodic domain are rejected (a hinted B-spline search can run off and extrapolate to
   thousands of parameter units, and meshing that grid never finishes); the last-resort nearest

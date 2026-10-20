@@ -281,6 +281,8 @@ fn overlap(
 
 /// Whether some facet of `m` has material just under it (`depth` in from its middle) that is
 /// inside the other body (`inside`) or outside it. With `within`, only facets in that box.
+/// Points for which `ignored` holds, asked with the point and the facet's face (`u32::MAX`
+/// where the mesh has none), are no evidence either.
 fn under_surface(
     m: &solidcraft_geom::Mesh,
     own: &solidcraft_geom::InsideIndex,
@@ -288,41 +290,212 @@ fn under_surface(
     depth: f64,
     inside: bool,
     within: Option<&solidcraft_geom::Aabb3>,
+    ignored: &dyn Fn(Vec3, u32) -> bool,
 ) -> bool {
-    m.triangles.iter().filter_map(|t| m.tri(t)).any(|[p, q, r]| {
+    m.triangles.iter().enumerate().filter_map(|(i, t)| Some((m.tri(t)?, m.tri_face.get(i).copied().unwrap_or(u32::MAX)))).any(|([p, q, r], face)| {
         let Some(n) = (q - p).cross(r - p).normalized() else { return false };
         let c = (p + q + r) * (1.0 / 3.0) - n * depth;
         let near = within.is_none_or(|b| c.x >= b.min.x && c.x <= b.max.x && c.y >= b.min.y && c.y <= b.max.y && c.z >= b.min.z && c.z <= b.max.z);
         // A wall thinner than `depth` puts the point outside its own body: no evidence.
-        near && other.contains(c) == inside && own.contains(c)
+        near && other.contains(c) == inside && own.contains(c) && !ignored(c, face)
     })
 }
 
 /// Whether the bodies' facetings show that the samples' answer (see [`trivial`]) is wrong:
 /// their surfaces pass through each other, or a facet of one has material under it on the
-/// wrong side of the other. Overlaps and gaps shallower than `tol` are not seen.
+/// wrong side of the other. Overlaps and gaps shallower than `tol` are not seen, nor surfaces
+/// that pass through each other only on a cylinder both bodies have faces on, there between
+/// those faces or one of them and an end face across its axis, nor material under such an end
+/// face's facets at the cylinder (`shared`, asked only when the facetings disagree).
 fn contradicted(
     (ma, ia): (&solidcraft_geom::Mesh, &solidcraft_geom::InsideIndex),
     (mb, ib): (&solidcraft_geom::Mesh, &solidcraft_geom::InsideIndex),
     (disjoint, b_in_a, a_in_b): (bool, bool, bool),
     tol: f64,
+    shared: &dyn Fn() -> SharedCylinders,
 ) -> bool {
     if !(disjoint || b_in_a || a_in_b) {
         return false;
     }
+    let cylinders = std::cell::OnceCell::new();
+    let shared = || cylinders.get_or_init(shared);
     if ma.crosses(mb, tol) {
-        return true;
+        let shared = shared();
+        if shared.cylinders.is_empty() || ma.crosses_except(mb, tol, |p, fa, fb| shared.ignores(p, fa, fb, tol)) {
+            return true;
+        }
     }
+    // The end faces of a shared cylinder end on it at their own faceting: a facet of a pin's end
+    // inside the hole, or of the hole part's end face round the pin, has its middle within the
+    // facetings' error of the cylinder, where the other body's facets can reach over it.
+    let (under_a, under_b) = (|p: Vec3, f: u32| shared().under_cap(p, f, true, tol), |p: Vec3, f: u32| shared().under_cap(p, f, false, tol));
     if disjoint {
         let (ba, bb) = (ma.bounds(), mb.bounds());
-        let shared = solidcraft_geom::Aabb3 { min: ba.min.max(bb.min), max: ba.max.min(bb.max) };
-        return !shared.is_empty() && (under_surface(ma, ia, ib, tol, true, Some(&shared)) || under_surface(mb, ib, ia, tol, true, Some(&shared)));
+        let meet = ba.intersection(&bb);
+        return !meet.is_empty()
+            && (under_surface(ma, ia, ib, tol, true, Some(&meet), &under_a) || under_surface(mb, ib, ia, tol, true, Some(&meet), &under_b));
     }
-    (a_in_b && under_surface(ma, ia, ib, tol, false, None)) || (b_in_a && !a_in_b && under_surface(mb, ib, ia, tol, false, None))
+    (a_in_b && under_surface(ma, ia, ib, tol, false, None, &under_a)) || (b_in_a && !a_in_b && under_surface(mb, ib, ia, tol, false, None, &under_b))
 }
 
 /// Sampled overlap fraction below which two bodies share no material.
 const NONE: f64 = 0.003;
+
+/// A cylinder both bodies have faces on (a pin in a hole of its own size, a bore drilled again),
+/// and where along its axis both do. The two facetings of it are chords of one circle at
+/// different angles: where one body's facets end on it (a pin's wall through the end face of the
+/// hole's part, the pin's end inside the hole) they cross the other's by up to the facetings'
+/// error, though the surfaces only touch.
+struct SharedCylinder {
+    origin: Vec3,
+    axis: Vec3,
+    radius: f64,
+    span: (f64, f64),
+    /// The faces on it: of the first body, of the second.
+    faces: (usize, usize),
+    /// The end faces across its axis that keep to their body's side of it (a hole part's end
+    /// face round the hole, a pin's end inside it), within the facetings' error: of the first
+    /// body, of the second. A D-bore's end face, which reaches into the cylinder to the flat,
+    /// is not one.
+    caps: (Vec<usize>, Vec<usize>),
+}
+
+impl SharedCylinder {
+    /// Whether `p` lies on the cylinder, within `tol`, where both bodies have faces on it.
+    fn holds(&self, p: Vec3, tol: f64) -> bool {
+        let v = p - self.origin;
+        let along = v.dot(self.axis);
+        ((v - self.axis * along).len() - self.radius).abs() <= tol && along >= self.span.0 - tol && along <= self.span.1 + tol
+    }
+}
+
+/// The cylinders both bodies have faces on (see [`shared_cylinders`]).
+#[derive(Default)]
+struct SharedCylinders {
+    cylinders: Vec<SharedCylinder>,
+}
+
+impl SharedCylinders {
+    /// Whether a crossing at `p` of the first body's face `fa` with the second's `fb` is only
+    /// the facetings of a shared cylinder: on it, between the two faces on it, or between one of
+    /// them and one of its end faces (a pin's wall through the hole part's end face, the pin's
+    /// end inside the hole). A flat, key or rib along the axis still counts.
+    fn ignores(&self, p: Vec3, fa: u32, fb: u32, tol: f64) -> bool {
+        let (fa, fb) = (fa as usize, fb as usize);
+        self.cylinders.iter().any(|c| {
+            let (on_a, on_b) = (fa == c.faces.0, fb == c.faces.1);
+            ((on_a && (on_b || c.caps.1.contains(&fb))) || (c.caps.0.contains(&fa) && on_b)) && c.holds(p, tol)
+        })
+    }
+
+    /// Whether `p`, just under a facet of the first body's face `face` (`first`) or the second's,
+    /// lies within `tol` of a shared cylinder with that face one of its end faces: material the
+    /// other body's facets of the cylinder can cover there, though the surfaces only touch.
+    fn under_cap(&self, p: Vec3, face: u32, first: bool, tol: f64) -> bool {
+        let face = face as usize;
+        self.cylinders.iter().any(|c| (if first { &c.caps.0 } else { &c.caps.1 }).contains(&face) && c.holds(p, tol))
+    }
+}
+
+/// The cylinders on which both `a` and `b` have faces: axes parallel and within `same` of each
+/// other, radii within `same` (a pin a hair off its hole's axis shares a crescent, which this
+/// tolerance leaves far below any volume worth reporting). Spans from the meshes `ma`, `mb`.
+fn shared_cylinders(a: &Body, b: &Body, ma: &solidcraft_geom::Mesh, mb: &solidcraft_geom::Mesh, same: f64) -> SharedCylinders {
+    let cylinders = |body: &Body| -> Vec<(usize, Vec3, Vec3, f64)> {
+        (0..body.face_count())
+            .filter_map(|i| match crate::face_surface(body, i)? {
+                crate::FaceSurface::Cylinder { origin, axis, radius } if origin.is_finite() && radius.is_finite() && radius > 0.0 => {
+                    Some((i, origin, axis.normalized()?, radius))
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let (ca, cb) = (cylinders(a), cylinders(b));
+    if ca.is_empty() || cb.is_empty() {
+        return SharedCylinders::default();
+    }
+    // Where a face's facets reach along an axis.
+    let span = |m: &solidcraft_geom::Mesh, face: usize, origin: Vec3, axis: Vec3| -> Option<(f64, f64)> {
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        for (t, f) in m.triangles.iter().zip(&m.tri_face) {
+            if *f as usize != face {
+                continue;
+            }
+            for p in m.tri(t)? {
+                let s = (p - origin).dot(axis);
+                lo = lo.min(s);
+                hi = hi.max(s);
+            }
+        }
+        (lo <= hi).then_some((lo, hi))
+    };
+    // A face's facets.
+    fn facets(m: &solidcraft_geom::Mesh, face: usize) -> impl Iterator<Item = [Vec3; 3]> + '_ {
+        m.triangles.iter().zip(&m.tri_face).filter(move |(_, f)| **f as usize == face).filter_map(|(t, _)| m.tri(t))
+    }
+    // How near to and far from an axis a face's facets reach (nearest on their edges), and
+    // whether its material is inside the cylinder there (its normals point away from the axis).
+    let reach = |m: &solidcraft_geom::Mesh, face: usize, origin: Vec3, axis: Vec3| -> (f64, f64, bool) {
+        let radial = |p: Vec3| {
+            let v = p - origin;
+            v - axis * v.dot(axis)
+        };
+        let (mut near, mut far, mut out) = (f64::INFINITY, 0.0f64, 0.0);
+        for t in facets(m, face) {
+            for (p, q) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                let (p, q) = (radial(p), radial(q));
+                let d = q - p;
+                let s = if d.dot(d) > 0.0 { (-p.dot(d) / d.dot(d)).clamp(0.0, 1.0) } else { 0.0 };
+                near = near.min((p + d * s).len());
+                far = far.max(p.len());
+            }
+            out += (t[1] - t[0]).cross(t[2] - t[0]).dot(radial((t[0] + t[1] + t[2]) * (1.0 / 3.0)));
+        }
+        (near, far, out > 0.0)
+    };
+    let planes = |body: &Body| -> Vec<(usize, Vec3)> {
+        (0..body.face_count())
+            .filter_map(|i| match crate::face_surface(body, i)? {
+                crate::FaceSurface::Plane { normal, .. } => Some((i, normal.normalized()?)),
+                _ => None,
+            })
+            .collect()
+    };
+    let (pa, pb) = (planes(a), planes(b));
+    let mut out = Vec::new();
+    for &(fa, oa, xa, ra) in &ca {
+        for &(fb, ob, xb, rb) in &cb {
+            let d = ob - oa;
+            if xa.dot(xb).abs() <= 1.0 - 1e-9 || (ra - rb).abs() > same || (d - xa * d.dot(xa)).len() > same {
+                continue;
+            }
+            let (Some(sa), Some(sb)) = (span(ma, fa, oa, xa), span(mb, fb, oa, xa)) else { continue };
+            let (lo, hi) = (sa.0.max(sb.0), sa.1.min(sb.1));
+            if lo > hi {
+                continue;
+            }
+            // The facetings' error on the cylinder: how far inside it their chords pass.
+            let ((na, _, boss_a), (nb, _, boss_b)) = (reach(ma, fa, oa, xa), reach(mb, fb, oa, xa));
+            let error = 2.0 * (ra - na).max(ra - nb).max(0.0) + same;
+            // End faces across the axis that keep to their body's side of the cylinder.
+            let caps = |m: &solidcraft_geom::Mesh, planes: &[(usize, Vec3)], boss: bool| -> Vec<usize> {
+                planes
+                    .iter()
+                    .filter(|(_, n)| n.dot(xa).abs() >= 1.0 - 1e-6)
+                    .filter(|(i, _)| {
+                        let (near, far, _) = reach(m, *i, oa, xa);
+                        near <= far && if boss { far <= ra + error } else { near >= ra - error }
+                    })
+                    .map(|(i, _)| *i)
+                    .collect()
+            };
+            let caps = (caps(ma, &pa, boss_a), caps(mb, &pb, boss_b));
+            out.push(SharedCylinder { origin: oa, axis: xa, radius: ra, span: (lo, hi), faces: (fa, fb), caps });
+        }
+    }
+    SharedCylinders { cylinders: out }
+}
 
 /// Booleans that need no intersection: one body clear of the other, or inside it. These are
 /// common with coincident curved faces (a hole drilled where one already is, a body joined
@@ -351,7 +524,10 @@ fn trivial(
     // The samples only say that nearly all of one body is clear of, or inside, the other. A
     // small part can still be on the wrong side (a peg overlapping a rib, a chamfer taken off
     // one edge), and then the bodies have to be intersected.
-    let sure = !contradicted((ma, &ia), (mb, &ib), (disjoint, b_in_a > ALL, a_in_b > ALL), tol);
+    // The same surface as the kernel takes it elsewhere (see `coaxial_overlap`).
+    let same = (a.size().max(b.size()) * 1e-7).max(1e-9) * 10.0;
+    let shared = || shared_cylinders(a, b, ma, mb, same);
+    let sure = !contradicted((ma, &ia), (mb, &ib), (disjoint, b_in_a > ALL, a_in_b > ALL), tol, &shared);
     let answer = match op {
         // Sampling only selects this candidate. Validate every shell boundary and the
         // complete material/void nesting before preserving a disconnected union.
@@ -505,6 +681,151 @@ mod shortcut_tests {
         assert!(trivial(&outer, &protruding, BoolOp::Cut, &mesh, &protruding_mesh, &counts, 0.09).is_none());
     }
 
+    /// A pin turned from a profile (its wall in three faces) in the bore of a tube (its wall in
+    /// two): one cylinder, faceted at different angles, so the pin's facets cross the tube's end
+    /// face and the bore's facets cross the pin's end by the facetings' error. The pin is still
+    /// clear of the tube, exactly on its axis or a hair off it (parts placed from rounded
+    /// coordinates), with the pin's end inside the bore or through it, and with a slit along
+    /// the tube: answered at once, without the boolean's retries.
+    #[test]
+    fn a_pin_in_a_bore_of_its_size_is_clear_of_it_whatever_the_facets() {
+        use solidcraft_geom::{Loop2, Plane, Region2, Vec2};
+        let rect = |x1: f64, y0: f64, y1: f64| Region2 {
+            outer: Loop2::polygon(&[Vec2::new(0.0, y0), Vec2::new(x1, y0), Vec2::new(x1, y1), Vec2::new(0.0, y1)]),
+            holes: vec![],
+        };
+        let pin = |off: Vec3, z0: f64, z1: f64| {
+            let plane = Plane { origin: off, x: Vec3::X, y: Vec3::Z };
+            crate::revolve(&plane, &[rect(3.0, z0, z1)], Vec2::ZERO, Vec2::new(0.0, 1.0), std::f64::consts::TAU).unwrap().pop().unwrap()
+        };
+        let outer = crate::cylinder(Vec3::ZERO, Vec3::Z, 5.25, 19.55).unwrap();
+        let bore = crate::cylinder(Vec3::new(0.0, 0.0, -1.0), Vec3::Z, 3.0, 21.55).unwrap();
+        let tube = boolean(&outer, &bore, BoolOp::Cut).unwrap().unwrap();
+        let slit = crate::box_solid(Vec3::new(-6.0, -0.05, -1.0), Vec3::new(0.0, 0.05, 21.0)).unwrap();
+        let slit_tube = boolean(&tube, &slit, BoolOp::Cut).unwrap().unwrap();
+        let tube_volume = crate::measure(&tube).unwrap().volume;
+        for off in [Vec3::ZERO, Vec3::new(2.2e-8, 4.7e-7, 0.0)] {
+            for (p, t) in [(pin(off, -2.35, 9.65), &tube), (pin(off, -3.0, 22.0), &tube), (pin(off, -2.35, 9.65), &slit_tube)] {
+                assert_eq!(p.face_count(), 5);
+                for (x, y) in [(&p, t), (t, &p)] {
+                    let (r, report) = crate::capture_boolean_diagnostics(|| boolean(x, y, BoolOp::Intersect));
+                    assert!(r.unwrap().is_none() && report.events.is_empty(), "{off:?} {report:?}");
+                }
+                let cut = boolean(&tube, &p, BoolOp::Cut).unwrap().unwrap();
+                assert!((crate::measure(&cut).unwrap().volume - tube_volume).abs() < 1e-6 * tube_volume);
+            }
+        }
+        // Off the axis by 0.01 mm the pin shares a crescent with the tube: not taken for apart.
+        let (ma, mb) = (pin(Vec3::new(0.01, 0.0, 0.0), -2.35, 9.65), tube.clone());
+        let counts = record::counts(&[&ma, &mb]);
+        let (sa, sb) = (ma.tessellate_with(0.009, true).unwrap(), mb.tessellate_with(0.009, true).unwrap());
+        assert!(trivial(&ma, &mb, BoolOp::Intersect, &sa, &sb, &counts, 0.027).is_none_or(|(_, sure)| !sure));
+    }
+
+    /// A pin turned from a profile (its wall in three faces) and a plate with a bore of the pin's
+    /// size (its wall in two), the pin's end inside the bore: turned about the pin's axis and
+    /// the pair placed and tilted.
+    fn pin_in_plate_bore(radius: f64, turn: f64, (to, axis, angle): (Vec3, Vec3, f64)) -> (Body, Body) {
+        use solidcraft_geom::{Loop2, Plane, Region2, Vec2};
+        let profile = Region2 {
+            outer: Loop2::polygon(&[Vec2::new(0.0, -2.35), Vec2::new(radius, -2.35), Vec2::new(radius, 9.65), Vec2::new(0.0, 9.65)]),
+            holes: vec![],
+        };
+        let plane = Plane { origin: Vec3::ZERO, x: Vec3::X, y: Vec3::Z };
+        let pin = crate::revolve(&plane, &[profile], Vec2::ZERO, Vec2::new(0.0, 1.0), std::f64::consts::TAU).unwrap().pop().unwrap();
+        let pin = crate::transform(&pin, Vec3::ZERO, Vec3::ZERO, Vec3::Z, turn).unwrap();
+        let block = crate::box_solid(Vec3::new(-8.0, -8.0, 0.0), Vec3::new(8.0, 8.0, 19.5)).unwrap();
+        let bore = crate::cylinder(Vec3::new(0.0, 0.0, -1.0), Vec3::Z, 3.0, 21.5).unwrap();
+        let plate = boolean(&block, &bore, BoolOp::Cut).unwrap().unwrap();
+        let place = |b: &Body| crate::transform(b, to, Vec3::ZERO, axis, angle).unwrap();
+        (place(&pin), place(&plate))
+    }
+
+    /// Placements of the pair: as built, far off the origin on its side, and tilted two ways.
+    const PLACEMENTS: [(Vec3, Vec3, f64); 4] = [
+        (Vec3::ZERO, Vec3::Z, 0.0),
+        (Vec3::new(-270.0, 267.1, 546.7), Vec3::Y, -std::f64::consts::FRAC_PI_2),
+        (Vec3::new(120.0, -40.0, 15.0), Vec3::new(1.0, 1.0, 0.0), 0.7),
+        (Vec3::new(-35.0, 80.0, -60.0), Vec3::new(0.3, -0.5, 1.0), 2.1),
+    ];
+
+    /// The pin's end lies on the bore's rim at its own faceting, the plate's end face round the
+    /// pin at the bore's: the middle of a facet there can be just under the other body's facets
+    /// of the cylinder, so the material under it looked inside the other body though the two
+    /// only touch (the pin turned 9 steps and the pair tilted about x = y did, the boolean then
+    /// fell back on its retries and called its answer unverified). At every turn and placement
+    /// the pin is clear of the plate, answered at once.
+    #[test]
+    fn a_pin_in_a_plate_bore_of_its_size_is_clear_of_it_at_any_placement() {
+        for k in 0..12 {
+            for placement in PLACEMENTS {
+                let (pin, plate) = pin_in_plate_bore(3.0, k as f64 * 0.13, placement);
+                for (x, y) in [(&pin, &plate), (&plate, &pin)] {
+                    let (r, report) = crate::capture_boolean_diagnostics(|| boolean(x, y, BoolOp::Intersect));
+                    assert!(matches!(r, Ok(None)) && report.events.is_empty(), "{k} {placement:?} {r:?} {report:?}");
+                }
+            }
+        }
+    }
+
+    /// The same pin 0.02 mm larger than the bore shares a ring with the plate along the length
+    /// it is in it: an overlap, at the placements above too.
+    #[test]
+    fn a_pin_slightly_larger_than_its_plate_bore_still_overlaps_it() {
+        let want = std::f64::consts::PI * (3.02f64.powi(2) - 9.0) * 9.65;
+        for k in [0, 3, 6, 9] {
+            for placement in PLACEMENTS {
+                let (pin, plate) = pin_in_plate_bore(3.02, k as f64 * 0.13, placement);
+                let (r, report) = crate::capture_boolean_diagnostics(|| boolean(&pin, &plate, BoolOp::Intersect));
+                let shared = r.unwrap().map(|b| crate::measure(&b).unwrap().volume);
+                assert!(shared.is_some_and(|v| (v - want).abs() < 0.05 * want), "{k} {placement:?} {shared:?} {want} {report:?}");
+            }
+        }
+    }
+
+    /// A pin of the bore's size pushed 0.05 mm on past the bore, into a narrower one, shares a
+    /// ring with the tube there (0.2 % of the pin, under what the samples see): the crossings on
+    /// the shared cylinder are left out, those of the pin's end with the narrow bore are not.
+    #[test]
+    fn a_pin_pushed_into_a_narrower_bore_is_not_taken_for_clear() {
+        let outer = crate::cylinder(Vec3::ZERO, Vec3::Z, 5.25, 19.55).unwrap();
+        let wide = crate::cylinder(Vec3::new(0.0, 0.0, -1.0), Vec3::Z, 3.0, 10.0).unwrap();
+        let narrow = crate::cylinder(Vec3::new(0.0, 0.0, -1.0), Vec3::Z, 2.0, 21.55).unwrap();
+        let tube = boolean(&boolean(&outer, &wide, BoolOp::Cut).unwrap().unwrap(), &narrow, BoolOp::Cut).unwrap().unwrap();
+        let pin = crate::cylinder(Vec3::new(0.0, 0.0, -2.0), Vec3::Z, 3.0, 11.05).unwrap();
+        let counts = record::counts(&[&pin, &tube]);
+        let (ma, mb) = (pin.tessellate_with(0.009, true).unwrap(), tube.tessellate_with(0.009, true).unwrap());
+        for op in [BoolOp::Intersect, BoolOp::Cut] {
+            assert!(trivial(&pin, &tube, op, &ma, &mb, &counts, 0.027).is_none_or(|(_, sure)| !sure), "{op:?}");
+        }
+    }
+
+    /// A pin of the bore's size through a D-bore whose flat is 0.022 mm inside the pin (a sliver
+    /// of 0.21 mm³ along the bore): the pin's wall passes through the tube's end faces where the
+    /// flat reaches into the cylinder, near the shared cylinder but deeper than its facetings'
+    /// error. That is real overlap, and must not be taken for the facetings of the cylinder.
+    #[test]
+    fn a_pin_through_a_d_bore_of_its_size_still_overlaps_the_flat() {
+        let (r, flat, length) = (3.0, 2.978, 19.55);
+        let outer = crate::cylinder(Vec3::ZERO, Vec3::Z, 5.25, length).unwrap();
+        let bore = crate::cylinder(Vec3::new(0.0, 0.0, -1.0), Vec3::Z, r, length + 2.0).unwrap();
+        let keep = crate::box_solid(Vec3::new(-4.0, -4.0, -2.0), Vec3::new(flat, 4.0, length + 2.0)).unwrap();
+        let d_bore = boolean(&bore, &keep, BoolOp::Intersect).unwrap().unwrap();
+        let tube = boolean(&outer, &d_bore, BoolOp::Cut).unwrap().unwrap();
+        let pin = crate::cylinder(Vec3::new(0.0, 0.0, -3.0), Vec3::Z, r, length + 6.0).unwrap();
+        // Faceted as the boolean does for bodies of this size (0.015 mm deep crossings seen).
+        let counts = record::counts(&[&pin, &tube]);
+        let (ma, mb) = (pin.tessellate_with(0.005, true).unwrap(), tube.tessellate_with(0.005, true).unwrap());
+        for op in [BoolOp::Intersect, BoolOp::Cut] {
+            assert!(trivial(&pin, &tube, op, &ma, &mb, &counts, 0.015).is_none_or(|(_, sure)| !sure), "{op:?}");
+        }
+        // Nor does the boolean pass them as clear without saying so: the shortcut it falls back
+        // on is reported unverified (the bodies can't be intersected along the shared walls),
+        // and the caller measures the overlap another way.
+        let (shared, report) = crate::capture_boolean_diagnostics(|| boolean(&pin, &tube, BoolOp::Intersect));
+        assert!(shared.unwrap().is_some() || report.unverified().is_some(), "{report:?}");
+    }
+
     /// Bodies sharing less than the samples can see still meet: no shortcut, and the boolean
     /// gives the shared part.
     #[test]
@@ -553,6 +874,40 @@ thread_local! {
     static APART: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Set while a union runs with a bore narrowed off a common cylinder (no second round).
     static BORES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The intersections left to the booleans running under [`with_attempt_budget`], if any.
+    static ATTEMPTS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// `f`, with the booleans it runs on this thread allowed `attempts` of the kernel's own
+/// intersections between them (each try of a boolean takes one): past those, a boolean fails at
+/// once instead of trying on. For a caller that would rather report a pair it could not answer
+/// than wait on bodies the boolean cannot take, and the same on every machine. A budget inside
+/// another takes the smaller and uses up the outer one's too.
+pub fn with_attempt_budget<T>(attempts: usize, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<usize>, usize);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let left = ATTEMPTS.with(|c| c.get()).unwrap_or(0);
+            ATTEMPTS.with(|c| c.set(self.0.map(|outer| outer.saturating_sub(self.1.saturating_sub(left)))));
+        }
+    }
+    let outer = ATTEMPTS.with(|c| c.get());
+    let mine = outer.map_or(attempts, |o| o.min(attempts));
+    ATTEMPTS.with(|c| c.set(Some(mine)));
+    let _restore = Restore(outer, mine);
+    f()
+}
+
+/// Takes one of the attempts left under [`with_attempt_budget`]; false when none is left.
+fn take_attempt() -> bool {
+    ATTEMPTS.with(|c| match c.get() {
+        None => true,
+        Some(0) => false,
+        Some(n) => {
+            c.set(Some(n - 1));
+            true
+        }
+    })
 }
 
 /// Boolean of two bodies. The result may be empty (`Ok(None)`) for a cut that removes
@@ -781,7 +1136,7 @@ fn meeting_size(a: &Body, b: &Body) -> f64 {
         bb
     };
     let (ba, bb) = (bbox(a), bbox(b));
-    let s = solidcraft_geom::Aabb3 { min: ba.min.max(bb.min), max: ba.max.min(bb.max) }.size();
+    let s = ba.intersection(&bb).size();
     // A closed sweep's section seams need not span its geometry. Roundoff in a flat
     // vertex box is not a thin meeting region: refining for it
     // makes millions of triangles and skips the bounded containment shortcut (#2005).
@@ -794,7 +1149,7 @@ fn meeting_size(a: &Body, b: &Body) -> f64 {
 /// on its seam, so its vertex box says nothing about where its side reaches.
 fn mesh_meeting_size(a: &solidcraft_geom::Mesh, b: &solidcraft_geom::Mesh) -> f64 {
     let (ba, bb) = (a.bounds(), b.bounds());
-    let s = solidcraft_geom::Aabb3 { min: ba.min.max(bb.min), max: ba.max.min(bb.max) }.size();
+    let s = ba.intersection(&bb).size();
     if s.x > 0.0 && s.y > 0.0 && s.z > 0.0 { s.x.min(s.y).min(s.z) } else { f64::INFINITY }
 }
 
@@ -859,6 +1214,15 @@ fn boolean_whole(a: &Body, b: &Body, op: BoolOp) -> Result<Option<Body>> {
 }
 
 fn boolean_whole_with_refinement(a: &Body, b: &Body, op: BoolOp, refine: bool) -> Result<Option<Body>> {
+    boolean_whole_with(a, b, op, refine, &truck_boolean)
+}
+
+/// The whole-body strategies with the numerical intersection supplied separately, so tests
+/// can reproduce an empty numerical attempt without depending on a particular ray seed.
+fn boolean_whole_with<F>(a: &Body, b: &Body, op: BoolOp, refine: bool, intersect: &F) -> Result<Option<Body>>
+where
+    F: Fn(&Body, &Body, BoolOp, Option<mt::Vector3>, f64) -> Result<(Solid, Option<recorded::Shapeops>)>,
+{
     if let Some(body) = swept_prism(a, b, op) {
         return Ok(Some(body));
     }
@@ -931,7 +1295,8 @@ fn boolean_whole_with_refinement(a: &Body, b: &Body, op: BoolOp, refine: bool) -
     // nothing to cut, so it returns both operands side by side (#396). Volume and point
     // sampling cannot see that; the shell grouping can. Only contact over an area counts
     // (bodies tangent along a line stay two lumps), and operands already like that, saved
-    // before this was caught, stay joinable.
+    // before this was caught, stay joinable. Nor can they see a skin of no thickness left over
+    // a hole by a tool ending in a face of the target ([`crate::coplanar::has_skin`]).
     let unfused = |r: &Body| {
         op == BoolOp::Union
             && r.shell_count() > 1
@@ -947,7 +1312,7 @@ fn boolean_whole_with_refinement(a: &Body, b: &Body, op: BoolOp, refine: bool) -
         if !bounds {
             return (false, v);
         }
-        if unfused(r) {
+        if unfused(r) || crate::coplanar::has_skin(r, &mr) {
             return (false, v);
         }
         let consistent = match &meshes {
@@ -961,7 +1326,7 @@ fn boolean_whole_with_refinement(a: &Body, b: &Body, op: BoolOp, refine: bool) -
         // Bounded to two finer meshes; no tool displacement or relaxed acceptance tests.
         for k in [1e-5, 1e-6] {
             let tol = (size * k).max(1e-6);
-            if let Ok((solid, history)) = truck_boolean(a, b, op, None, tol)
+            if let Ok((solid, history)) = intersect(a, b, op, None, tol)
                 && !solid.boundaries().is_empty()
                 && let Ok(body) = guard("refined boolean result", || recorded::truck_result(solid, history, size, &keep, &counts))
                 && check(&body).0
@@ -1113,7 +1478,7 @@ fn boolean_whole_with_refinement(a: &Body, b: &Body, op: BoolOp, refine: bool) -
     let fine_tols: Vec<f64> = match &meshes {
         (Some(ma), Some(mb)) if a.solid.boundaries().len() == 1 && b.solid.boundaries().len() == 1 => {
             let (ba, bb) = (ma.bounds(), mb.bounds());
-            let s = solidcraft_geom::Aabb3 { min: ba.min.max(bb.min), max: ba.max.min(bb.max) }.size();
+            let s = ba.intersection(&bb).size();
             // The thinner operand's thickness (twice its volume over its area: a plate's
             // thickness, a rod's radius) bounds what the tolerance must resolve as well.
             let thickness = |m: &solidcraft_geom::Mesh| {
@@ -1131,7 +1496,7 @@ fn boolean_whole_with_refinement(a: &Body, b: &Body, op: BoolOp, refine: bool) -
         for (attempt, j) in JITTER.iter().enumerate().take(2) {
             let shift = mt::Vector3::new(j[0], j[1], j[2]) * (feature * 0.01);
             for &tol in &fine_tols {
-                match truck_boolean(a, b, op, if attempt > 0 { Some(shift) } else { None }, tol) {
+                match intersect(a, b, op, if attempt > 0 { Some(shift) } else { None }, tol) {
                     Ok((s, _)) if s.boundaries().is_empty() || s.face_iter().next().is_none() => *last = "empty result".into(),
                     Ok((s, h)) => match guard("boolean result", || recorded::truck_result(s, h, size, &keep, &counts)) {
                         Ok(body) => {
@@ -1196,6 +1561,18 @@ fn boolean_whole_with_refinement(a: &Body, b: &Body, op: BoolOp, refine: bool) -
                 return Ok(Some(body));
             }
         }
+        // A lens cut from a sphere's projected outline carries a redundant cylinder
+        // tangent to the sphere (#2750). Remove it only after proving that it
+        // encloses the entire target, keeping the other wall and both caps exact.
+        if attempt == 1 && op == BoolOp::Cut {
+            let (lens, diagnostics) = capture_boolean_diagnostics(|| crate::sphere_lens::cut(a, b, &boolean_whole));
+            if let Some(Ok(result)) = lens
+                && result.as_ref().is_none_or(|body| check(body).0)
+            {
+                merge(diagnostics);
+                return Ok(result);
+            }
+        }
         // A whole turn of a cylinder or cone bounded by one wire along its seam (as STEP files
         // write them) can't be divided by a loop lying inside it, and the tries below end in a
         // nudged tool, or fail: the same boolean with such faces in two halves, which is exact.
@@ -1208,10 +1585,17 @@ fn boolean_whole_with_refinement(a: &Body, b: &Body, op: BoolOp, refine: bool) -
                 return Ok(r);
             }
         }
+        // An implausible empty result from the unshifted numerical tries must still give
+        // the exact strategies above a chance (#1765), including seam-face recovery. If none
+        // recovers it, keep the original candidate for the outer guard, before displaced retries.
+        if empty_votes >= 2 && op != BoolOp::Union {
+            merge(empty_diagnostics);
+            return Ok(None);
+        }
         let shift = mt::Vector3::new(j[0], j[1], j[2]) * (size * 0.01);
         for k in [2e-3, 5e-4] {
             let tol = (size * k).max(1e-5);
-            let r = truck_boolean(a, b, op, if attempt > 0 { Some(shift) } else { None }, tol);
+            let r = intersect(a, b, op, if attempt > 0 { Some(shift) } else { None }, tol);
             match r {
                 Ok((s, _)) if s.boundaries().is_empty() || s.face_iter().next().is_none() => {
                     empty_votes += 1;
@@ -1254,6 +1638,9 @@ fn boolean_whole_with_refinement(a: &Body, b: &Body, op: BoolOp, refine: bool) -
         if empty_votes >= 2 && op != BoolOp::Union {
             if let Some(body) = fine(&mut last) {
                 return Ok(Some(body));
+            }
+            if attempt == 0 && crate::boolean_guard::check_retry(a, b, op, None).is_err() {
+                continue;
             }
             merge(empty_diagnostics);
             return Ok(None);
@@ -1496,6 +1883,9 @@ pub(crate) fn nudged(r: Body, nb: &Body, counts: &[(usize, usize)]) -> Body {
 /// copies) keep the operands' face and edge order, and so does moving the result back, so the
 /// history truck records holds for the operands themselves.
 pub(crate) fn truck_boolean(a: &Body, b: &Body, op: BoolOp, shift: Option<mt::Vector3>, tol: f64) -> Result<(Solid, Option<recorded::Shapeops>)> {
+    if !take_attempt() {
+        return Err(KernelError::Failed("no result in the tries it was given".into()));
+    }
     guard("boolean", || {
         let (mut sa, mut sb) = (a.deep_copy(), b.deep_copy());
         if let Some(shift) = shift {
@@ -1503,13 +1893,19 @@ pub(crate) fn truck_boolean(a: &Body, b: &Body, op: BoolOp, shift: Option<mt::Ve
             sb = mt::builder::translated(&sb, shift);
         }
         let tool_edges = (op == BoolOp::Cut).then(|| record::edge_origins(&sb, 1));
+        // A body that keeps its meshes is meshed once for all its booleans at this tolerance.
+        let meshed = shift.is_none().then(|| a.boolean_meshes(tol)).flatten();
+        let and = |sa: &Solid, sb: &Solid| match &meshed {
+            Some(m) => truck_shapeops::and_with_history_meshed(sa, m, sb, tol),
+            None => truck_shapeops::and_with_history(sa, sb, tol),
+        };
         let res = match op {
             BoolOp::Union => truck_shapeops::or_with_history(&sa, &sb, tol),
             BoolOp::Cut => {
                 sb.not();
-                truck_shapeops::and_with_history(&sa, &sb, tol)
+                and(&sa, &sb)
             }
-            BoolOp::Intersect => truck_shapeops::and_with_history(&sa, &sb, tol),
+            BoolOp::Intersect => and(&sa, &sb),
         };
         let (s, h) = res.ok_or_else(|| KernelError::Failed("no result".into()))?;
         let h = h.and_then(|h| recorded::shapeops(&h, &sb, tool_edges.as_ref()));
@@ -1610,8 +2006,7 @@ fn union_apart_untimed(bodies: &[Body]) -> Result<Option<Body>> {
         if bb.is_empty() {
             return Ok(None);
         }
-        let pad = Vec3::new(1.0, 1.0, 1.0) * (2.0 * tol);
-        boxes.push(solidcraft_geom::Aabb3 { min: bb.min - pad, max: bb.max + pad });
+        boxes.push(bb.inflated(2.0 * tol));
     }
     // Sweep along x: only boxes whose x ranges overlap are compared.
     let mut order: Vec<usize> = (0..boxes.len()).collect();
@@ -1686,7 +2081,7 @@ fn det3(m: &[[f64; 4]; 4]) -> f64 {
 }
 
 /// Whether the linear part is a rigid motion (rotation or reflection: no scale or shear).
-fn rigid_placement(m: &[[f64; 4]; 4]) -> bool {
+pub(crate) fn rigid_placement(m: &[[f64; 4]; 4]) -> bool {
     let r = [Vec3::new(m[0][0], m[0][1], m[0][2]), Vec3::new(m[1][0], m[1][1], m[1][2]), Vec3::new(m[2][0], m[2][1], m[2][2])];
     (0..3).all(|i| (r[i].dot(r[i]) - 1.0).abs() < 1e-9) && r[0].dot(r[1]).abs() < 1e-9 && r[0].dot(r[2]).abs() < 1e-9 && r[1].dot(r[2]).abs() < 1e-9
 }
@@ -1962,6 +2357,10 @@ pub(crate) fn half_box(body: &Body, plane: &solidcraft_geom::Plane, positive: bo
     let (lo, hi) = if positive { (0.0, reach) } else { (-reach, 0.0) };
     crate::build::extrude(plane, std::slice::from_ref(&sq), lo, hi)?.pop().ok_or_else(|| KernelError::Failed("half space".into()))
 }
+
+#[cfg(test)]
+#[path = "empty_retry_tests.rs"]
+mod empty_retry_tests;
 
 #[cfg(test)]
 #[path = "prism_fast_path_tests.rs"]

@@ -878,17 +878,8 @@ mod tests {
 
     /// The farthest the surface is from `z` over the polygon's inside (sampled on a grid).
     fn off_inside(f: &LoopFill, corners: &[[f64; 2]], z: &dyn Fn(f64, f64) -> f64) -> f64 {
-        let inside = |x: f64, y: f64| {
-            let n = corners.len();
-            let mut w = false;
-            for k in 0..n {
-                let (a, b) = (corners[k], corners[(k + 1) % n]);
-                if (a[1] > y) != (b[1] > y) && x < a[0] + (y - a[1]) / (b[1] - a[1]) * (b[0] - a[0]) {
-                    w = !w;
-                }
-            }
-            w
-        };
+        let polygon = crate::Ring::from(corners.to_vec());
+        let inside = |x: f64, y: f64| polygon.contains([x, y]);
         let s = &f.surface;
         let [du, dv] = s.domain();
         let mut worst = 0.0f64;

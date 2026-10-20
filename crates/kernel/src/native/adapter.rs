@@ -1,17 +1,12 @@
 //! The truck adapter. Persisted data belongs to solidcraft_geom::brep, never truck.
 use super::{Result, invalid};
-use mt::{BoundedCurve, EuclideanSpace, InnerSpace, Invertible, ParametricCurve, Transform, Transformed};
+use mt::Invertible;
 use solidcraft_geom::brep as b;
 use truck_modeling as mt;
-use truck_topology::compress as t;
 
-type Packed = t::CompressedSolid<mt::Point3, mt::Curve, mt::Surface>;
 #[path = "analytic.rs"]
 mod analytic;
-#[path = "fit.rs"]
-mod fit;
 use analytic::{arc, full_turn, load_analytic, revolved};
-use fit::fit_intersection;
 fn point(p: mt::Point3) -> [f64; 3] {
     [p.x, p.y, p.z]
 }
@@ -51,6 +46,8 @@ fn compatible_curve(c: &b::Curve) -> Result<()> {
         b::Curve::Spline { knots, points } => clamped(knots, points.len()),
         b::Curve::RationalSpline { knots, homogeneous } => clamped(knots, homogeneous.len()),
         b::Curve::Intersection { knots, points, .. } => clamped(knots, points.len()),
+        // The producer's own trace: its surfaces must load; its leader is kept as it was.
+        b::Curve::SurfaceIntersection { surfaces, .. } => surfaces.iter().try_for_each(|s| compatible_surface(s)),
         _ => Ok(()),
     }
 }
@@ -75,6 +72,8 @@ fn compatible_surface(s: &b::Surface) -> Result<()> {
             full_turn(angle)?;
             compatible_curve(profile)
         }
+        b::Surface::PlaneThrough { .. } => Ok(()),
+        b::Surface::PlacedRevolution { profile, .. } => compatible_curve(profile),
         b::Surface::Cylinder { angle, .. } | b::Surface::Cone { angle, .. } => full_turn(angle),
         b::Surface::Sphere { longitude, .. } | b::Surface::Torus { longitude, .. } => full_turn(longitude),
     }
@@ -93,19 +92,18 @@ fn compatible(body: &b::Brep) -> Result<()> {
 
 pub(super) fn encode(solid: &mt::Solid) -> Result<b::Brep> {
     let mut shells = Vec::new();
-    let mut fitting_budget = 4096usize;
     for shell in solid.compress().boundaries {
         let vertices = shell.vertices.into_iter().map(point).collect();
         let edges = shell
             .edges
             .into_iter()
-            .map(|e| Ok(b::Edge { vertices: [index(e.vertices.0)?, index(e.vertices.1)?], curve: save_curve(&e.curve, 0, &mut fitting_budget)? }))
+            .map(|e| Ok(b::Edge { vertices: [index(e.vertices.0)?, index(e.vertices.1)?], curve: save_curve(&e.curve, 0)? }))
             .collect::<Result<_>>()?;
         let faces = shell
             .faces
             .into_iter()
             .map(|f| {
-                let (surface, normal_flip) = save_surface(&f.surface, 0, &mut fitting_budget)?;
+                let surface = save_surface(&f.surface, 0)?;
                 Ok(b::Face {
                     loops: f
                         .boundaries
@@ -123,7 +121,7 @@ pub(super) fn encode(solid: &mt::Solid) -> Result<b::Brep> {
                         })
                         .collect::<Result<_>>()?,
                     surface,
-                    forward: f.orientation != normal_flip,
+                    forward: f.orientation,
                 })
             })
             .collect::<Result<_>>()?;
@@ -137,52 +135,50 @@ pub(super) fn encode(solid: &mt::Solid) -> Result<b::Brep> {
 pub(super) fn decode(body: b::Brep) -> Result<mt::Solid> {
     body.validate().map_err(invalid)?;
     compatible(&body)?;
-    if body.shells.iter().flat_map(|s| &s.edges).any(|e| e.vertices[0] == e.vertices[1]) {
-        return Err(invalid("closed single-vertex edges are unsupported by this adapter"));
-    }
-    let packed = Packed {
-        boundaries: body
-            .shells
-            .into_iter()
-            .map(|s| {
-                Ok(t::CompressedShell {
-                    vertices: s.vertices.into_iter().map(p).collect(),
-                    edges: s
-                        .edges
-                        .into_iter()
-                        .map(|e| Ok(t::CompressedEdge { vertices: (e.vertices[0] as usize, e.vertices[1] as usize), curve: load_curve(e.curve)? }))
-                        .collect::<Result<_>>()?,
-                    faces: s
-                        .faces
-                        .into_iter()
-                        .map(|f| {
-                            let mut loops = f.loops;
-                            if !f.forward {
-                                for wire in &mut loops {
-                                    reverse_wire(wire);
-                                }
-                            }
-                            Ok(t::CompressedFace {
-                                boundaries: loops
-                                    .into_iter()
-                                    .map(|w| {
-                                        w.into_iter().map(|e| t::CompressedEdgeIndex { index: e.edge as usize, orientation: e.forward }).collect()
-                                    })
-                                    .collect(),
-                                orientation: f.forward,
-                                surface: load_surface(f.surface)?,
-                            })
-                        })
-                        .collect::<Result<_>>()?,
-                })
-            })
-            .collect::<Result<_>>()?,
-    };
-    let shells = packed.boundaries.into_iter().map(mt::Shell::extract).collect::<std::result::Result<Vec<_>, _>>().map_err(invalid)?;
+    let shells = body.shells.into_iter().map(shell).collect::<Result<Vec<_>>>()?;
     if shells.iter().any(|s| s.shell_condition() == mt::ShellCondition::Irregular) {
         return Err(invalid("non-manifold shell"));
     }
     Ok(mt::Solid::new_unchecked(shells))
+}
+/// A shell's topology as recorded, references already checked: built as the kernel built it,
+/// without truck's checks for wires that touch themselves (a seam edge used twice, a closed edge
+/// on one vertex), which imported and modelled faces have.
+fn shell(s: b::Shell) -> Result<mt::Shell> {
+    let vertices: Vec<mt::Vertex> = s.vertices.into_iter().map(|v| mt::Vertex::new(p(v))).collect();
+    let vertex = |i: u32| vertices.get(i as usize).ok_or_else(|| invalid("edge vertices"));
+    let edges = s
+        .edges
+        .into_iter()
+        .map(|e| Ok(mt::Edge::new_unchecked(vertex(e.vertices[0])?, vertex(e.vertices[1])?, load_curve(e.curve)?)))
+        .collect::<Result<Vec<_>>>()?;
+    s.faces
+        .into_iter()
+        .map(|f| {
+            let mut loops = f.loops;
+            if !f.forward {
+                for wire in &mut loops {
+                    reverse_wire(wire);
+                }
+            }
+            let wires = loops
+                .into_iter()
+                .map(|w| {
+                    w.into_iter()
+                        .map(|u| {
+                            let e = edges.get(u.edge as usize).ok_or_else(|| invalid("edge reference"))?;
+                            Ok(if u.forward { e.clone() } else { e.inverse() })
+                        })
+                        .collect::<Result<mt::Wire>>()
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let mut face = mt::Face::new_unchecked(wires, load_surface(f.surface)?);
+            if !f.forward {
+                face.invert();
+            }
+            Ok(face)
+        })
+        .collect()
 }
 fn reverse_wire(wire: &mut [b::EdgeUse]) {
     wire.reverse();
@@ -190,7 +186,9 @@ fn reverse_wire(wire: &mut [b::EdgeUse]) {
         edge.forward = !edge.forward;
     }
 }
-fn save_curve(c: &mt::Curve, d: usize, fitting_budget: &mut usize) -> Result<b::Curve> {
+/// Exact: every record holds the producer's own numbers, so loading it gives back the same
+/// curve, never a refit.
+fn save_curve(c: &mt::Curve, d: usize) -> Result<b::Curve> {
     depth(d)?;
     Ok(match c {
         mt::Curve::Line(c) => b::Curve::Line { start: point(c.0), end: point(c.1) },
@@ -201,14 +199,56 @@ fn save_curve(c: &mt::Curve, d: usize, fitting_budget: &mut usize) -> Result<b::
             knots: c.knot_vec().iter().copied().collect(),
             homogeneous: c.control_points().iter().copied().map(vector4).collect(),
         },
-        mt::Curve::IntersectionCurve(_) => fit_intersection(c, fitting_budget)?,
+        mt::Curve::IntersectionCurve(c) => {
+            let leader = match c.leader() {
+                mt::Leader::Polyline(p) => b::Curve::Polyline { points: p.0.iter().copied().map(point).collect() },
+                mt::Leader::BSpline(c) => b::Curve::Spline {
+                    knots: c.knot_vec().iter().copied().collect(),
+                    points: c.control_points().iter().copied().map(point).collect(),
+                },
+            };
+            b::Curve::SurfaceIntersection {
+                surfaces: [Box::new(save_surface(c.surface0(), d + 1)?), Box::new(save_surface(c.surface1(), d + 1)?)],
+                leader: Box::new(leader),
+                tolerance: c.tolerance(),
+            }
+        }
     })
 }
-fn save_surface(s: &mt::Surface, d: usize, fitting_budget: &mut usize) -> Result<(b::Surface, bool)> {
+/// A plane as truck holds it: three points.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PlanePoints {
+    o: mt::Point3,
+    p: mt::Point3,
+    q: mt::Point3,
+}
+
+/// A revolution as truck holds it, built from its parts as they are (its constructors normalize
+/// the axis and compose the placement with the identity, either of which can round).
+#[derive(serde::Serialize)]
+struct PlacedRevolution {
+    entity: Revolved,
+    transform: mt::Matrix4,
+    orientation: bool,
+}
+#[derive(serde::Serialize)]
+struct Revolved {
+    curve: mt::Curve,
+    revolution: Axis,
+}
+#[derive(serde::Serialize)]
+struct Axis {
+    origin: mt::Point3,
+    axis: mt::Vector3,
+}
+
+fn save_surface(s: &mt::Surface, d: usize) -> Result<b::Surface> {
     depth(d)?;
-    let mut normal_flip = false;
-    let saved = match s {
-        mt::Surface::Plane(s) => b::Surface::Plane { origin: point(s.origin()), u_axis: vector(s.u_axis()), v_axis: vector(s.v_axis()) },
+    Ok(match s {
+        mt::Surface::Plane(s) => {
+            let PlanePoints { o, p, q } = serde_json::from_value(serde_json::to_value(s).map_err(invalid)?).map_err(invalid)?;
+            b::Surface::PlaneThrough { origin: point(o), u_point: point(p), v_point: point(q) }
+        }
         mt::Surface::BSplineSurface(s) => b::Surface::Spline {
             u_knots: s.uknot_vec().iter().copied().collect(),
             v_knots: s.vknot_vec().iter().copied().collect(),
@@ -220,39 +260,16 @@ fn save_surface(s: &mt::Surface, d: usize, fitting_budget: &mut usize) -> Result
             homogeneous: s.control_points().iter().map(|r| r.iter().copied().map(vector4).collect()).collect(),
         },
         mt::Surface::RevolutedCurve(s) => {
-            let m = s.transform();
-            let (x, y, z) = (m.x.truncate(), m.y.truncate(), m.z.truncate());
-            let scale = x.magnitude();
-            let tolerance = scale * 1e-10;
-            if !scale.is_finite()
-                || scale <= 1e-12
-                || (y.magnitude() - scale).abs() > tolerance
-                || (z.magnitude() - scale).abs() > tolerance
-                || x.dot(y).abs() > scale * tolerance
-                || x.dot(z).abs() > scale * tolerance
-                || y.dot(z).abs() > scale * tolerance
-                || m.x.w != 0.
-                || m.y.w != 0.
-                || m.z.w != 0.
-                || m.w.w != 1.
-            {
-                return Err(invalid("non-similarity revolution transform needs an exact spline conversion"));
-            }
-            // Bake a similarity into the geometry, never into persisted processor data.
-            // An improper rotation reverses the oriented axis in the rotation identity.
-            let sign = if x.dot(y.cross(z)) < 0. { -1. } else { 1. };
-            let axis = m.transform_vector(s.entity().axis()).normalize() * sign;
-            let profile = s.entity().entity_curve().transformed(*m);
-            normal_flip = !s.orientation();
-            b::Surface::Revolution {
-                profile: Box::new(save_curve(&profile, d + 1, fitting_budget)?),
-                origin: point(m.transform_point(s.entity().origin())),
-                axis: vector(axis),
-                angle: [0., std::f64::consts::TAU],
+            let m = *s.transform();
+            b::Surface::PlacedRevolution {
+                profile: Box::new(save_curve(s.entity().entity_curve(), d + 1)?),
+                origin: point(s.entity().origin()),
+                axis: vector(s.entity().axis()),
+                matrix: [m.x, m.y, m.z, m.w].map(vector4),
+                forward: s.orientation(),
             }
         }
-    };
-    Ok((saved, normal_flip))
+    })
 }
 fn load_curve(c: b::Curve) -> Result<mt::Curve> {
     Ok(match c {
@@ -268,6 +285,17 @@ fn load_curve(c: b::Curve) -> Result<mt::Curve> {
         b::Curve::Polyline { .. } => return Err(invalid("standalone polyline unsupported by this adapter")),
         b::Curve::Intersection { knots, points, .. } => {
             mt::Curve::BSplineCurve(mt::BSplineCurve::try_new(knots.into(), points.into_iter().map(p).collect()).map_err(invalid)?)
+        }
+        b::Curve::SurfaceIntersection { surfaces: [s0, s1], leader, tolerance } => {
+            let leader = match *leader {
+                b::Curve::Polyline { points } => mt::Leader::Polyline(mt::PolylineCurve(points.into_iter().map(p).collect())),
+                b::Curve::Spline { knots, points } => {
+                    mt::Leader::BSpline(mt::BSplineCurve::try_new(knots.into(), points.into_iter().map(p).collect()).map_err(invalid)?)
+                }
+                _ => return Err(invalid("intersection leader")),
+            };
+            let (s0, s1) = (load_surface(*s0)?, load_surface(*s1)?);
+            mt::Curve::IntersectionCurve(mt::IntersectionCurve::new_unchecked(Box::new(s0), Box::new(s1), leader, tolerance))
         }
     })
 }
@@ -286,6 +314,15 @@ fn load_surface(s: b::Surface) -> Result<mt::Surface> {
             full_turn(&angle)?;
             revolved(load_curve(*profile)?, p(origin), v(axis), false)
         }
+        b::Surface::PlaneThrough { origin, u_point, v_point } => mt::Surface::Plane(mt::Plane::new(p(origin), p(u_point), p(v_point))),
+        b::Surface::PlacedRevolution { profile, origin, axis, matrix: [x, y, z, w], forward } => {
+            let placed = PlacedRevolution {
+                entity: Revolved { curve: load_curve(*profile)?, revolution: Axis { origin: p(origin), axis: v(axis) } },
+                transform: mt::Matrix4::from_cols(v4(x), v4(y), v4(z), v4(w)),
+                orientation: forward,
+            };
+            mt::Surface::RevolutedCurve(serde_json::from_value(serde_json::to_value(placed).map_err(invalid)?).map_err(invalid)?)
+        }
         analytic => load_analytic(analytic)?,
     })
 }
@@ -293,6 +330,7 @@ fn load_surface(s: b::Surface) -> Result<mt::Surface> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mt::{BoundedCurve, InnerSpace, ParametricCurve, Transformed};
 
     #[test]
     fn refuses_domain_or_axis_changes_instead_of_approximating() {
@@ -342,28 +380,42 @@ mod tests {
     }
 
     #[test]
-    fn intersection_fit_is_spatial_bounded_and_independent_of_surface_solvers() {
-        use mt::MetricSpace;
+    fn intersections_and_revolutions_reload_exactly() {
         use solidcraft_geom::Vec3;
         let cyl = crate::cylinder(Vec3::ZERO, Vec3::Z, 5., 40.).unwrap();
         let block = crate::box_solid(Vec3::new(-20., -20., 20.), Vec3::new(20., 20., 60.)).unwrap();
         let block = crate::transform(&block, Vec3::ZERO, Vec3::new(0., 0., 20.), Vec3::X, 0.4).unwrap();
         let cut = crate::boolean(&cyl, &block, crate::BoolOp::Cut).unwrap().unwrap();
         let curve = cut.solid.edge_iter().map(|e| e.curve()).find(|c| matches!(c, mt::Curve::IntersectionCurve(_))).unwrap();
-        assert!(save_curve(&curve, 0, &mut 0).is_err());
-        let record = save_curve(&curve, 0, &mut 4096).unwrap();
-        let encoded = serde_json::to_string(&record).unwrap();
-        assert!(!encoded.contains("leader") && !encoded.contains("surfaces"));
-        let b::Curve::Intersection { fitting_tolerance, .. } = &record else { panic!("explicit fitted record required") };
-        let tolerance = *fitting_tolerance;
-        let restored = load_curve(record).unwrap();
+        let record = save_curve(&curve, 0).unwrap();
+        assert!(matches!(record, b::Curve::SurfaceIntersection { .. }), "the procedural curve itself, not a fit");
+        let restored = load_curve(record.clone()).unwrap();
         let (a, b) = curve.range_tuple();
-        for i in 0..=512 {
-            let t = a + (b - a) * i as f64 / 512.;
-            assert!(curve.subs(t).distance(restored.subs(t)) <= tolerance * 1.1, "sample {i}: error {}", curve.subs(t).distance(restored.subs(t)));
+        for i in 0..=64 {
+            let t = a + (b - a) * i as f64 / 64.;
+            assert_eq!(curve.subs(t), restored.subs(t), "sample {i}");
         }
-        let decoded = crate::decode_native_body(&crate::encode_native_body(&cut).unwrap()).unwrap();
-        let original = crate::measure(&cut).unwrap().volume;
-        assert!((crate::measure(&decoded).unwrap().volume - original).abs() < original * 1e-5);
+        assert_eq!(save_curve(&restored, 0).unwrap(), record);
+        // The whole body: the same records again, and the same volume to the last bit.
+        let bytes = crate::encode_native_body(&cut).unwrap();
+        let decoded = crate::decode_native_body(&bytes).unwrap();
+        assert_eq!(crate::encode_native_body(&decoded).unwrap(), bytes);
+        assert_eq!(crate::measure(&decoded).unwrap().volume, crate::measure(&cut).unwrap().volume);
+        // A revolution keeps its own placement, reversed normal included.
+        let line = mt::Curve::Line(mt::Line(mt::Point3::new(2., 0., 0.), mt::Point3::new(2.5, 0., 3.)));
+        let mt::Surface::RevolutedCurve(mut placed) = revolved(line, mt::Point3::new(0., 1., 0.), mt::Vector3::new(0., 0., 1.), true) else {
+            panic!("a revolution")
+        };
+        placed.transform_by(mt::Matrix4::from_translation(mt::Vector3::new(1., 2., 3.)) * mt::Matrix4::from_angle_x(mt::Rad(0.3)));
+        let placed = mt::Surface::RevolutedCurve(placed);
+        let record = save_surface(&placed, 0).unwrap();
+        assert!(matches!(record, b::Surface::PlacedRevolution { forward: false, .. }));
+        let restored = load_surface(record.clone()).unwrap();
+        assert_eq!(save_surface(&restored, 0).unwrap(), record);
+        use mt::{ParametricSurface, ParametricSurface3D};
+        for (u, v) in [(0., 0.), (1.3, 0.4), (4., 1.)] {
+            assert_eq!(placed.subs(u, v), restored.subs(u, v));
+            assert_eq!(placed.normal(u, v), restored.normal(u, v));
+        }
     }
 }

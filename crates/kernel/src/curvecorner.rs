@@ -214,7 +214,9 @@ fn radius_along(e: &mt::Edge, axis: Vec3, tol: f64) -> Option<f64> {
     (0..=16).map(|i| at(i as f64 / 16.0)).all(|p| (p.dist(o) - rho).abs() <= tol).then_some(rho)
 }
 
-fn param_on(c: &mt::Curve, x: Vec3) -> Option<f64> {
+/// The parameter of `c`'s point nearest `x`: the nearest of 65 samples, refined where that
+/// comes nearer.
+pub(crate) fn param_on(c: &mt::Curve, x: Vec3) -> Option<f64> {
     use mt::{BoundedCurve, ParametricCurve, SearchNearestParameter};
     let (lo, hi) = c.range_tuple();
     let d = |t: f64| from_p3(c.subs(t)).dist(x);

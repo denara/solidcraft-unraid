@@ -7,7 +7,7 @@
 //! ATTRIBUTION.md); [`crate::fonts`] finds others by file path or installed family name.
 
 use serde::{Deserialize, Serialize};
-use solidcraft_geom::Vec2;
+use solidcraft_geom::{Ring, Vec2};
 
 use crate::fonts::font_data_styled;
 use crate::link::{LinkGeom, LinkKind, LinkSource, MAX_LINK_ENTITIES};
@@ -303,8 +303,7 @@ impl Path {
         let closed = first.dist(last) <= 1e-9 * length.max(1.0);
         let readable = if closed {
             // Clockwise: the text stands on the outside.
-            let area: f64 = pts.iter().zip(pts.iter().skip(1)).map(|(a, b)| a.cross(*b)).sum::<f64>() + last.cross(first);
-            area <= 0.0
+            Ring::from(pts.clone()).signed_area() <= 0.0
         } else {
             last.x >= first.x - 1e-9 * length
         };

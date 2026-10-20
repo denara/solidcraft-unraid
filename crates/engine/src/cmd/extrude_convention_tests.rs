@@ -141,3 +141,60 @@ fn surface_extrude_shared_extent_retains_its_existing_per_side_semantics() {
     check_sheet(&s);
     check_sheet(&Session::new(Document::from_json(&s.doc.to_json()).unwrap()));
 }
+
+/// A second distance goes the other way from the first side (#2700): along the normal when the
+/// first side goes against it, whether by `direction: negative` or by a negative distance.
+#[test]
+fn a_second_distance_goes_the_other_way_from_the_first_side() {
+    for (settings, lo, hi) in [
+        (json!({"direction":"positive","distance":"10 mm","distance2":"4 mm"}), -4.0, 10.0),
+        (json!({"direction":"negative","distance":"10 mm","distance2":"4 mm"}), -10.0, 4.0),
+        (json!({"direction":"positive","distance":"-10 mm","distance2":"4 mm"}), -10.0, 4.0),
+    ] {
+        let s = fixture(settings.clone());
+        check(&s, lo, hi);
+        // Saved and opened again, it keeps its sides.
+        check(&Session::new(Document::from_json(&s.doc.to_json()).unwrap()), lo, hi);
+    }
+}
+
+/// Through all on one side and a distance on the other, either way round (#2700). A 40 mm cube
+/// round the origin, and an r5 hole sketched 10 mm above its middle: through all goes 10 mm up
+/// or 30 mm down to the cube's faces, and the 5 mm goes the other way.
+#[test]
+fn through_all_on_either_side_with_a_distance_on_the_other() {
+    let hole = std::f64::consts::PI * 25.0;
+    for (direction, depth) in [("positive", 15.0), ("negative", 35.0)] {
+        let mut s = Session::default();
+        run(&mut s, "solid.box", json!({"length":40,"width":40,"height":40,"corner":[-20,-20,-20],"body_name":"Box"}));
+        run(&mut s, "construct.plane.offset", json!({"base":"XY","offset":10,"name":"Above"}));
+        run(&mut s, "sketch.create", json!({"plane":"Above","name":"Hole"}));
+        run(&mut s, "sketch.circle.center", json!({"center":[0,0],"radius":5}));
+        run(&mut s, "sketch.finish", json!({}));
+        run(
+            &mut s,
+            "solid.extrude",
+            json!({"sketch":"Hole","through_all":true,"distance2":"5 mm","direction":direction,"operation":"cut","targets":["Box"]}),
+        );
+        assert!(s.model.results.iter().all(|r| r.error.is_none()));
+        let st = s.model.state();
+        let m = solidcraft_kernel::measure(&st.body("Box").unwrap().body).unwrap();
+        // The hole's depth from the volume removed (within the circle's measuring precision).
+        let deep = (64000.0 - m.volume) / hole;
+        assert!((deep - depth).abs() < 0.05, "{direction}: {deep} deep, want {depth}");
+    }
+}
+
+/// Designs saved before #2700 ignored `direction` on a two-sided extrude; opening one keeps its
+/// shape: its first distance still goes along the normal.
+#[test]
+fn an_older_reversed_two_sided_extrude_keeps_its_shape() {
+    let s = fixture(json!({"direction":"negative","distance":"10 mm","distance2":"4 mm"}));
+    let mut saved: Value = serde_json::from_str(&s.doc.to_json()).unwrap();
+    saved["format"] = json!("solidcraft/27");
+    saved.as_object_mut().unwrap().remove("format_pending");
+    let s = Session::new(Document::from_json(&saved.to_string()).unwrap());
+    check(&s, -4.0, 10.0);
+    let FeatureKind::Extrude { extent, .. } = &s.doc.find_feature("Depth").unwrap().kind else { panic!("extrude") };
+    assert_eq!(extent.direction, solidcraft_doc::Direction::Positive);
+}

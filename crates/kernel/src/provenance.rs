@@ -10,7 +10,7 @@
 
 use std::collections::BTreeSet;
 
-use solidcraft_geom::{Mesh, Plane, Region2, Seg2, Vec2, Vec3};
+use solidcraft_geom::{Aabb3, Mesh, Plane, Region2, Seg2, Vec2, Vec3};
 
 use crate::Result;
 use crate::body::Body;
@@ -22,30 +22,19 @@ const SAMPLES: usize = 24;
 /// A face's triangles with their unit normals, and its box.
 struct FaceTris {
     tris: Vec<([Vec3; 3], Vec3)>,
-    lo: Vec3,
-    hi: Vec3,
+    bounds: Aabb3,
     area: f64,
 }
 
 fn face_tris(m: &Mesh) -> Vec<FaceTris> {
     let n = m.tri_face.iter().copied().max().map(|x| x as usize + 1).unwrap_or(0);
-    let mut out: Vec<FaceTris> = (0..n)
-        .map(|_| FaceTris {
-            tris: Vec::new(),
-            lo: Vec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY),
-            hi: Vec3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
-            area: 0.0,
-        })
-        .collect();
+    let mut out: Vec<FaceTris> = (0..n).map(|_| FaceTris { tris: Vec::new(), bounds: Aabb3::EMPTY, area: 0.0 }).collect();
     for (t, f) in m.triangles.iter().zip(&m.tri_face) {
         let (Some(slot), Some(p)) = (out.get_mut(*f as usize), m.tri(t)) else { continue };
         let c = (p[1] - p[0]).cross(p[2] - p[0]);
         let Some(nrm) = c.normalized() else { continue };
         slot.area += c.len() * 0.5;
-        for q in p {
-            slot.lo = slot.lo.min(q);
-            slot.hi = slot.hi.max(q);
-        }
+        slot.bounds.extend(p);
         slot.tris.push((p, nrm));
     }
     out
@@ -85,7 +74,7 @@ fn closest_on_tri(p: Vec3, [a, b, c]: [Vec3; 3]) -> Vec3 {
 
 /// Does point `p` with normal `n` lie on the face (within `tol`, normals along each other)?
 fn on_face(f: &FaceTris, p: Vec3, n: Vec3, tol: f64) -> bool {
-    if p.x < f.lo.x - tol || p.y < f.lo.y - tol || p.z < f.lo.z - tol || p.x > f.hi.x + tol || p.y > f.hi.y + tol || p.z > f.hi.z + tol {
+    if !f.bounds.inflated(tol).contains(p) {
         return false;
     }
     // Either side: a cut's tool faces come out turned inside out.

@@ -13,6 +13,7 @@ solidcraft-engine = { workspace = true }
 egui = { workspace = true }
 egui-wgpu = { workspace = true }
 solidcraft-gpu = { workspace = true }
+solidcraft-space-mouse = { workspace = true, features = ["serde"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }

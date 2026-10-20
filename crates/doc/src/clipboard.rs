@@ -95,6 +95,11 @@ fn remap_geo(
             }
         }
         GeoRef::Face { name: Some(n), .. } | GeoRef::Edge { name: Some(n), .. } => *n = remap_topology(n, ids, bodies),
+        GeoRef::Vertex { edges: Some(names), .. } => {
+            for n in names {
+                *n = remap_topology(n, ids, bodies);
+            }
+        }
         GeoRef::ConstructPoint { name } | GeoRef::Axis { name } => mapped_name(name, names),
         GeoRef::Plane { plane } => remap_plane(plane, ids, names, bodies, depth + 1)?,
         _ => {}

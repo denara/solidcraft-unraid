@@ -2,7 +2,8 @@
 //! scratch copy of the session ([`solidcraft_engine::Session::preview`]), off the UI thread
 //! where threads exist, and the result is drawn in place of the bodies it changes: new surface
 //! tinted, removed material as a translucent ghost. The last good preview stays up while the
-//! next one computes or when an input makes the feature fail (the error shows in the dialog).
+//! next one computes; once the current inputs make the feature fail, nothing is previewed and
+//! the error shows in the dialog (#3254).
 //! Nothing here touches the document or the undo history.
 //!
 //! A feature that adds or removes a tool body (join, cut, intersect) shows only its tool. That
@@ -15,7 +16,7 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use serde_json::Value;
 use solidcraft_engine::Session;
 use solidcraft_engine::doc::ModelState;
-use solidcraft_engine::geom::{Aabb3, Mesh, Vec3};
+use solidcraft_engine::geom::{Aabb3, Mesh, Ring, Vec3};
 
 use crate::SolveApp;
 use crate::gpu::{GpuScene, SceneSlot};
@@ -83,7 +84,7 @@ pub struct PreviewState {
     /// Is a preview scene up?
     pub active: bool,
     pub sketches: Vec<SketchPreview>,
-    /// Why the current inputs don't make a feature (the last good preview stays up).
+    /// Why the current inputs don't make a feature (nothing is previewed then).
     pub error: Option<String>,
     /// A preview is being computed.
     pub busy: bool,
@@ -99,9 +100,31 @@ pub struct PreviewState {
     /// The radius splines the previewed fillet tapered its edges with.
     pub tapered: Vec<(Vec3, solidcraft_engine::kernel::Taper)>,
     straight: crate::extrude_preview::StraightPreview,
+    /// PreviewReselect: Primary held - hide the preview and restore replaced bodies for picks.
+    pub rolled_back: bool,
 }
 
 impl PreviewState {
+    /// Bodies the model scene should hide for the preview (empty while rolled back).
+    pub fn effective_replaced(&self) -> &[String] {
+        if self.rolled_back { &[] } else { &self.replaced }
+    }
+
+    /// Whether the preview scene should be drawn.
+    pub fn draw_active(&self) -> bool {
+        self.active && !self.rolled_back
+    }
+
+    /// Stop drawing the preview scene and give the bodies it stood in for back to the model.
+    fn hide_scene(&mut self) {
+        if self.active || !self.replaced.is_empty() {
+            self.active = false;
+            self.bounds = Aabb3::EMPTY;
+            self.replaced.clear();
+            self.set_scene(GpuScene::default());
+        }
+    }
+
     fn clear(&mut self) {
         self.straight.clear();
         self.running = None;
@@ -114,12 +137,8 @@ impl PreviewState {
         self.tapered.clear();
         self.sketches.clear();
         self.busy = false;
-        if self.active || !self.replaced.is_empty() {
-            self.active = false;
-            self.bounds = Aabb3::EMPTY;
-            self.replaced.clear();
-            self.set_scene(GpuScene::default());
-        }
+        self.rolled_back = false;
+        self.hide_scene();
     }
 
     /// Drop the preview of a design that leaves the window. Its scene goes too: the viewport
@@ -153,7 +172,10 @@ impl PreviewState {
                 self.tapered = b.tapered;
                 self.set_scene(b.scene);
             }
+            // The current inputs make no feature: the last good geometry would contradict
+            // them (a 1 mm extrusion still drawn at 0 mm), so nothing is drawn.
             Err(e) => {
+                self.hide_scene();
                 self.sketches.clear();
                 self.error = Some(e);
                 self.applied = None;
@@ -547,7 +569,7 @@ pub fn build(before: &ModelState, after: &ModelState, c: Colors) -> Built {
                     sc.xray_tri(p.to_f32(), plane.normal().to_f32(), color);
                 }
             }
-            for (a, b) in quad.iter().zip(quad.iter().cycle().skip(1)).take(4) {
+            for (a, b) in Ring::from(quad).edges() {
                 sc.line(a.to_f32(), b.to_f32(), c.added, 1.3, true);
             }
         }
@@ -761,6 +783,9 @@ pub fn point_triangle_dist(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> f64 {
 
 /// The same computed sketch preview is drawn over both native GPU and CPU viewports.
 pub fn paint_sketches(app: &SolveApp, painter: &egui::Painter, proj: &crate::viewport::Proj) {
+    if app.preview.rolled_back {
+        return;
+    }
     if !app.dialog.as_ref().is_some_and(|d| matches!(d.kind, crate::dialogs::Kind::SketchModify(_)) && d.previews()) {
         return;
     }
@@ -822,6 +847,8 @@ mod tests {
         pv.poll(2, None);
         assert_eq!(pv.error.as_deref(), Some("current invalid expression"));
         assert_eq!(pv.shown_key, Some(2));
+        assert!(!pv.active && pv.replaced.is_empty(), "the current inputs failed: nothing is previewed (#3254)");
+        assert_ne!(pv.key, 9, "the viewport takes the empty scene");
         pv.poll(2, None);
         assert_eq!(pv.error.as_deref(), Some("current invalid expression"), "current errors still prevent invalid Apply");
     }

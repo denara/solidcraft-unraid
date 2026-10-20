@@ -505,21 +505,11 @@ mod tests {
     /// vanishes on the rim, so cells across it add little error).
     fn gained(fill: &Body, corners: &[Vec2]) -> f64 {
         let s = fill.solid.face_iter().next().unwrap().surface();
-        let (lo, hi) = corners.iter().fold((Vec2::new(f64::MAX, f64::MAX), Vec2::new(f64::MIN, f64::MIN)), |(lo, hi), p| {
-            (Vec2::new(lo.x.min(p.x), lo.y.min(p.y)), Vec2::new(hi.x.max(p.x), hi.y.max(p.y)))
-        });
+        let polygon = solidcraft_geom::Ring::from(corners.to_vec());
+        let solidcraft_geom::Aabb2 { min: lo, max: hi } = polygon.bounds();
         let n = 300;
         let (dx, dy) = ((hi.x - lo.x) / n as f64, (hi.y - lo.y) / n as f64);
-        let inside = |x: f64, y: f64| {
-            let mut w = false;
-            for k in 0..corners.len() {
-                let (a, b) = (corners[k], corners[(k + 1) % corners.len()]);
-                if (a.y > y) != (b.y > y) && x < a.x + (y - a.y) / (b.y - a.y) * (b.x - a.x) {
-                    w = !w;
-                }
-            }
-            w
-        };
+        let inside = |x: f64, y: f64| polygon.contains(Vec2::new(x, y));
         let mut sum = 0.0;
         let mut start = None;
         for i in 0..n {

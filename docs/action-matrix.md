@@ -283,10 +283,10 @@ make a legacy face sketch there).
 | 56 | #563 | Draft and tapered Extrude drop the faces' sources | `face.extrude` 14, `face.offset_plane` 14, `face.press_pull` 14, `face.sketch` 14 | 3 | oracle/05-taper-extrude `Frustum/F2:start` |
 | 48 | #564 | The rim a Shell leaves has no source | `face.extrude` 12, `face.offset_plane` 12, `face.press_pull` 12, `face.sketch` 12 | 8 | demo/pi-case `Body1/F2:top` |
 | 18 | #567 | Axis or tangent plane on a drill tip: no face at NaN | `curved.axis` 9, `curved.tangent_plane` 9 | 3 | oracle/18-hole-features `Plate/F5:face:15` |
-| 9 | #568 | Construction geometry on model edges, faces and vertices is lost when a parameter moves it | `vertex.plane_three_points+edit` 5, `edge.normal_plane+edit` 2, `face.midplane+edit` 1, `face.shell+edit` 1 | 4 | demo/enclosure_steps `Enclosure/v[F2:top & F4:inner:F2:side:l4 & F4:inner:F3:blend:F2:side:l` |
 | 9 |  | Axis through a face the kernel sees as a cylinder that the command doesn't (sensor enclosure slot ends; not filed yet) | `curved.axis` 9 | 1 | examples/sensor_enclosure `Lid/F15:blend:F14:side:l2\|F14:side:l3` |
 | 7 |  | Other failures in the edit round: the hole cut and blend sizes above, and an extrude from the M0 box's top face whose profile isn't found again (not filed yet) | `face.hole+edit` 3, `face.extrude+edit` 1, `face.press_pull+edit` 1, `edge.chamfer+edit` 1 | 4 | corpus/m0-box-fillet-hole `Body1/F2:top` |
 | 2 |  | A helix edge projected along its axis is a point (expected) | `edge.project` 2 | 1 | oracle/50-sweep-tight-bend `Bend/F3:side:c1#1\|F3:side:c1#2~2` |
+| 1 | #566 | Shell after the edit round: a corner whose faces don't meet the same way after the move | `face.shell+edit` 1 | 1 | demo/pi-case `Body1/F4:inner:F2:start#[…]#[F6:side:c2@F7.2]` |
 
 Where the face history stands (`crates/kernel/src/history.rs`, [face attachments](face-attachments.md)):
 a flat face takes an attached sketch when the body carries an exact source certificate for it

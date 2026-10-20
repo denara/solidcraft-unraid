@@ -27,6 +27,7 @@ pub fn stored(get: impl Fn(&str) -> Option<String>) -> Option<String> {
 
 use crate::SolveApp;
 use crate::theme::Tokens;
+use crate::tool_modifiers::ModifierCombo;
 use crate::viewport::NavMode;
 
 pub const UNITS: [&str; 5] = ["mm", "cm", "m", "in", "ft"];
@@ -207,8 +208,9 @@ pub fn nav_preset(id: &str) -> &'static NavPreset {
     NAV_PRESETS.iter().find(|p| p.id == id).unwrap_or(&NAV_PRESETS[0])
 }
 /// The dialog's pages, in order.
-pub const PAGES: [&str; 8] = ["General", "Navigation", "Keyboard Shortcuts", "Design", "Graphics", "Sketch", "Selection", "AI"];
+pub const PAGES: [&str; 9] = ["General", "Navigation", "Keyboard Shortcuts", "Design", "Graphics", "Sketch", "Selection", "AI", "Plugins"];
 pub const PAGE_AI: usize = 7;
+pub const PAGE_PLUGINS: usize = 8;
 pub const PAGE_SHORTCUTS: usize = 2;
 pub const PAGE_DESIGN: usize = 3;
 pub const PAGE_GRAPHICS: usize = 4;
@@ -283,6 +285,10 @@ pub struct Prefs {
     pub space_mouse_reverse: [bool; 6],
     /// Per physical axis of the cap, a multiplier on top of `space_mouse_speed`; 0 switches it off.
     pub space_mouse_axis_speed: [f32; 6],
+    /// Per 3D mouse (`space_mouse::Input::device`), the calibration that puts its axes on
+    /// 3Dconnexion's. A device without one is read as it reports.
+    #[serde(deserialize_with = "calibrations_that_read")]
+    pub space_mouse_calibrations: std::collections::BTreeMap<String, solidcraft_space_mouse::Calibration>,
     /// Anti-aliasing samples (applies on restart).
     pub msaa: u32,
     /// Soft contact shading in the GPU viewport; optional and applied immediately.
@@ -391,6 +397,18 @@ pub struct Prefs {
     pub agent_chat_window: Option<[f32; 4]>,
     /// Changes the agent may make for one message.
     pub agent_chat_turn_limit: u32,
+
+    // ---- Sketch / selection modifier bindings (classic defaults; alternate mapping is opt-in) ----
+    /// Modifier that suppresses sketch auto-snap while drawing or dragging a sketch point.
+    /// Default: Alt/Option. Set to Ctrl/Cmd for the alternate mapping.
+    pub suppress_sketch_snap: ModifierCombo,
+    /// Whether Alt/Option also frees gizmo / canvas manipulator arrows (Primary always does).
+    pub manipulator_free_alt: bool,
+    /// When true: Shift+click adds without removing; Primary toggles.
+    /// When false (default): Shift and Primary both toggle.
+    pub selection_shift_add_only: bool,
+    /// Plugin ids turned off (Preferences › Plugins). An installed plugin whose id is absent is on.
+    pub disabled_plugins: std::collections::BTreeSet<String>,
 }
 
 /// What a middle-button double-click in the view does.
@@ -435,6 +453,7 @@ impl Default for Prefs {
             space_mouse_speed: 1.0,
             space_mouse_reverse: [false; 6],
             space_mouse_axis_speed: [1.0; 6],
+            space_mouse_calibrations: Default::default(),
             msaa: 4,
             ambient_occlusion: false,
             grid_follows_view: false,
@@ -487,6 +506,10 @@ impl Default for Prefs {
             agent_chat_popped: false,
             agent_chat_window: None,
             agent_chat_turn_limit: crate::agent_chat::gate::DEFAULT_TURN_LIMIT,
+            suppress_sketch_snap: ModifierCombo::CTRL_ALT,
+            manipulator_free_alt: true,
+            selection_shift_add_only: false,
+            disabled_plugins: std::collections::BTreeSet::new(),
         }
     }
 }
@@ -721,6 +744,7 @@ fn defaults(app: &mut SolveApp, page: usize) {
             app.autosave_minutes = 5.0;
             set_autosave(app);
         }
+        PAGE_PLUGINS => p.disabled_plugins.clear(),
         PAGE_AI => {
             // The agents the user added and their "always allow" answers stay.
             p.ai_features = d.ai_features;
@@ -749,6 +773,7 @@ fn defaults(app: &mut SolveApp, page: usize) {
             p.space_mouse_speed = d.space_mouse_speed;
             p.space_mouse_reverse = d.space_mouse_reverse;
             p.space_mouse_axis_speed = d.space_mouse_axis_speed;
+            // The 3D mice the user calibrated stay: a calibration describes the device.
             p.look_at_anim = d.look_at_anim;
             p.look_at_speed = d.look_at_speed;
             p.middle_double_click = d.middle_double_click;
@@ -776,8 +801,15 @@ fn defaults(app: &mut SolveApp, page: usize) {
                 save_graphics(app);
             }
         }
-        5 => app.session.auto_project = true,
-        _ => app.ui.pick_bodies = false,
+        5 => {
+            app.session.auto_project = true;
+            p.suppress_sketch_snap = d.suppress_sketch_snap;
+            p.manipulator_free_alt = d.manipulator_free_alt;
+        }
+        _ => {
+            app.ui.pick_bodies = false;
+            p.selection_shift_add_only = d.selection_shift_add_only;
+        }
     }
 }
 
@@ -859,6 +891,25 @@ pub fn nav_mode(app: &SolveApp, button: NavButton, mods: Modifiers) -> Option<Na
 /// +1, or −1 when horizontal scrolling pans the other way (#2007).
 pub fn pan_sign_x(app: &SolveApp) -> f32 {
     if app.preferences.pan_reverse_x { -1.0 } else { 1.0 }
+}
+
+/// Whether the configured suppress-snap chord is held.
+pub fn suppress_sketch_snap_held(app: &SolveApp, m: Modifiers) -> bool {
+    let c = app.preferences.suppress_sketch_snap;
+    let held = crate::tool_modifiers::Held::from_modifiers(m);
+    // Classic default (`CTRL_ALT`): Ctrl/Cmd **or** Alt/Option each suppress snap.
+    // A single-key preference keeps the usual AtLeast match for that key only.
+    if c == ModifierCombo::CTRL_ALT {
+        return held.primary || held.alt;
+    }
+    c.held(m)
+}
+
+/// Primary always frees manipulator arrows; Alt/Option also frees when `manipulator_free_alt` is on.
+pub fn manipulator_free_held(app: &SolveApp, m: Modifiers) -> bool {
+    use crate::tool_modifiers::Held;
+    let held = Held::from_modifiers(m);
+    held.primary || (app.preferences.manipulator_free_alt && held.alt)
 }
 
 /// +1, or −1 when the wheel zooms the other way.
@@ -1039,6 +1090,8 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     }
     if !app.prefs_window.open {
         app.prefs_window.snapshot = None;
+        // Calibration opens from here and ends with it, so the cap moves the view again.
+        app.space_mouse.calibrating = None;
         return;
     }
     if app.prefs_window.snapshot.is_none() {
@@ -1107,6 +1160,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     if let Some(w) = &shown {
         crate::scenario::publish_rect("prefs:window", w.response.rect);
     }
+    crate::space_mouse_calibration::show(app, ctx);
     if app.preferences.msaa != before.msaa {
         save_graphics(app);
     }
@@ -1170,6 +1224,10 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
     }
     if app.prefs_window.section == PAGE_AI {
         crate::agent_chat::settings::page(app, ui);
+        return;
+    }
+    if app.prefs_window.section == PAGE_PLUGINS {
+        crate::plugins::page(app, ui);
         return;
     }
     egui::Grid::new(("sc_prefs_grid", app.prefs_window.section)).num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| match app.prefs_window.section {
@@ -1355,6 +1413,42 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
                 });
                 ui.end_row();
             }
+            ui.label(app.tr("ui.space_mouse_calibration"));
+            ui.horizontal(|ui| {
+                let device = app.space_mouse.device.clone();
+                let saved = device.as_ref().is_some_and(|device| app.preferences.space_mouse_calibrations.contains_key(device));
+                ui.add_enabled_ui(app.preferences.space_mouse_enabled && device.is_some(), |ui| {
+                    if ui.button(app.tr("ui.space_mouse_calibrate")).on_hover_text(app.tr("ui.space_mouse_calibrate_tip")).clicked() {
+                        crate::space_mouse_calibration::start(app);
+                    }
+                    if saved && ui.button(app.tr("ui.space_mouse_forget")).clicked()
+                        && let Some(device) = &device
+                    {
+                        app.preferences.space_mouse_calibrations.remove(device);
+                    }
+                });
+                // With the device it's about, so it's clear which calibration is in use.
+                ui.label(match (&device, saved) {
+                    (None, _) => app.tr("ui.space_mouse_none").to_owned(),
+                    (Some(device), true) => format!("{} ({device})", app.tr("ui.space_mouse_calibrated")),
+                    (Some(device), false) => format!("{} ({device})", app.tr("ui.space_mouse_not_calibrated")),
+                });
+            });
+            ui.end_row();
+            // The calibrated device's dead zone, adjustable after calibrating.
+            let enabled = app.preferences.space_mouse_enabled;
+            let (label, tip) = (app.tr("ui.space_mouse_dead_zone").to_owned(), app.tr("ui.space_mouse_dead_zone_tip").to_owned());
+            let (device, raw) = (app.space_mouse.device.clone(), app.space_mouse.raw.into());
+            if let Some(calibration) = device.and_then(|device| app.preferences.space_mouse_calibrations.get_mut(&device)) {
+                ui.label(label);
+                ui.add_enabled_ui(enabled, |ui| {
+                    crate::space_mouse_calibration::dead_zone_slider(ui, &mut calibration.dead_zone_share).on_hover_text(tip);
+                });
+                ui.end_row();
+                ui.label("");
+                crate::space_mouse_calibration::dead_zone_pads(ui, calibration, raw);
+                ui.end_row();
+            }
             note(ui, crate::i18n::tr_label("Move and rotate the view together; sketches use pan and zoom only."));
         }
         PAGE_DESIGN => {
@@ -1489,11 +1583,50 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
                 let _ = app.run("sketch.auto_project", json!({ "value": auto }));
             }
             ui.end_row();
+
+            ui.label("");
+            ui.end_row();
+            ui.label(RichText::new(crate::i18n::tr_label("Sketch modifiers")).strong());
+            ui.label("");
+            ui.end_row();
+
+            ui.label(crate::i18n::tr_label("Suppress auto-snap while drawing / dragging"));
+            snap_suppress_picker(ui, "pref_suppress_sketch_snap", &mut app.preferences.suppress_sketch_snap);
+            ui.end_row();
+            note(ui, crate::i18n::tr_label("ui.suppress_auto_snap_note"));
+
+            ui.label(crate::i18n::tr_label("Manipulator free drag also on Alt/Option"));
+            ui.checkbox(&mut app.preferences.manipulator_free_alt, "").on_hover_text(crate::i18n::tr_label(
+                "On: Alt/Option or Ctrl/Cmd on extrude / gizmo arrows disables value snapping. Off: Ctrl/Cmd only.",
+            ));
+            ui.end_row();
         }
         _ => {
             ui.label(crate::i18n::tr_label("Click selects whole bodies"));
             ui.checkbox(&mut app.ui.pick_bodies, "");
             ui.end_row();
+
+            ui.label("");
+            ui.end_row();
+            ui.label(RichText::new(crate::i18n::tr_label("Selection modifiers")).strong());
+            ui.label("");
+            ui.end_row();
+
+            ui.label(crate::i18n::tr_label("Shift+click adds without removing"));
+            ui.checkbox(&mut app.preferences.selection_shift_add_only, "").on_hover_text(crate::i18n::tr_label(
+                "On: Shift adds items, Ctrl/Cmd toggles. Off (default): Shift and Ctrl/Cmd both toggle.",
+            ));
+            ui.end_row();
+        }
+    });
+}
+
+/// Sketch snap-suppress picker: classic Ctrl/Cmd-or-Alt first, then single keys.
+fn snap_suppress_picker(ui: &mut egui::Ui, salt: &str, combo: &mut ModifierCombo) {
+    let label = combo.label();
+    egui::ComboBox::from_id_salt(salt).selected_text(label).show_ui(ui, |ui| {
+        for c in ModifierCombo::SNAP_SUPPRESS_CHOICES {
+            ui.selectable_value(combo, c, c.label());
         }
     });
 }
@@ -1625,6 +1758,24 @@ pub fn control(app: &mut SolveApp, p: &serde_json::Value) -> Result<serde_json::
     Ok(out)
 }
 
+/// The saved 3D mouse calibrations that still read. One this version can't read (a hand edit, a
+/// format from another release) is dropped on its own, with a log line, not with all the others.
+fn calibrations_that_read<'de, D: serde::Deserializer<'de>>(
+    saved: D,
+) -> Result<std::collections::BTreeMap<String, solidcraft_space_mouse::Calibration>, D::Error> {
+    let saved = std::collections::BTreeMap::<String, serde_json::Value>::deserialize(saved)?;
+    Ok(saved
+        .into_iter()
+        .filter_map(|(device, calibration)| match serde_json::from_value(calibration) {
+            Ok(calibration) => Some((device, calibration)),
+            Err(error) => {
+                log::warn!("preferences: the 3D mouse calibration for `{device}` can't be read ({error}); reading the device as it reports");
+                None
+            }
+        })
+        .collect())
+}
+
 /// Every theme the Theme list offers, as (id, name): the modes, the built-in theme files, then
 /// the imported ones.
 fn theme_choices(app: &SolveApp) -> Vec<(String, String)> {
@@ -1677,15 +1828,36 @@ fn current_theme_file(app: &SolveApp) -> serde_json::Value {
     }
 }
 
-/// Fold a setting an older release kept in its own field into the one this version reads.
-/// `orbit_cursor` (`true` = the point under the cursor) became `orbit_around`.
 /// The cap's physical axes, in the order of `Prefs::space_mouse_reverse`.
-const SPACE_MOUSE_AXES: [&str; 6] = ["Push left / right", "Push forward / back", "Lift / press", "Tilt forward / back", "Tilt left / right", "Twist"];
+pub(crate) const SPACE_MOUSE_AXES: [&str; 6] =
+    ["Push left / right", "Push forward / back", "Lift / press", "Tilt forward / back", "Tilt left / right", "Twist"];
 
+/// Fold a setting an older release kept in its own field into the one this version reads.
+/// `orbit_cursor` (`true` = the point under the cursor) became `orbit_around`. A 3D mouse
+/// calibration that can't be used as it is (a hand edit) is dropped, so the device is read as it
+/// reports rather than spinning the view.
 pub fn migrate(mut p: Prefs) -> Prefs {
     if p.orbit_cursor {
         p.orbit_around = OrbitAround::Cursor;
         p.orbit_cursor = false;
+    }
+    p.space_mouse_calibrations.retain(|device, calibration| {
+        let usable = calibration.is_usable();
+        if !usable {
+            log::warn!("preferences: the 3D mouse calibration for `{device}` can't be used as it is; reading the device as it reports");
+        }
+        usable
+    });
+    p
+}
+
+/// Drop plugin ids this page would not show, and keep at most [`crate::plugins::MAX_DISABLED`],
+/// so a hand-edited preferences file cannot carry a huge or nonsense list. `set` still refuses
+/// those instead of dropping them.
+fn limit_disabled_plugins(mut p: Prefs) -> Prefs {
+    p.disabled_plugins.retain(|id| crate::plugins::valid_id(id));
+    if p.disabled_plugins.len() > crate::plugins::MAX_DISABLED {
+        p.disabled_plugins = p.disabled_plugins.into_iter().take(crate::plugins::MAX_DISABLED).collect();
     }
     p
 }
@@ -1695,7 +1867,7 @@ pub fn migrate(mut p: Prefs) -> Prefs {
 /// its default on its own instead of discarding all of them.
 pub fn lenient(saved: &serde_json::Value) -> Prefs {
     if let Ok(p) = serde_json::from_value::<Prefs>(saved.clone()) {
-        return migrate(p);
+        return limit_disabled_plugins(migrate(p));
     }
     let Ok(mut cur) = serde_json::to_value(Prefs::default()) else { return Prefs::default() };
     if let (Some(o), Some(src)) = (cur.as_object_mut(), saved.as_object()) {
@@ -1709,7 +1881,7 @@ pub fn lenient(saved: &serde_json::Value) -> Prefs {
             }
         }
     }
-    serde_json::from_value(cur).map(migrate).unwrap_or_default()
+    serde_json::from_value(cur).map(migrate).map(limit_disabled_plugins).unwrap_or_default()
 }
 
 /// Set preferences from JSON (control channel); returns them all.
@@ -1751,6 +1923,9 @@ pub fn set(app: &mut SolveApp, p: &serde_json::Value) -> Result<serde_json::Valu
     }
     if new.ui_font != app.preferences.ui_font && !new.ui_font.trim().is_empty() && crate::fonts::ui_font(&new.ui_font).is_none() {
         return Err(format!("`ui_font`: `{}` is not an installed font family or a readable font file", new.ui_font.trim()));
+    }
+    if new.disabled_plugins.len() > crate::plugins::MAX_DISABLED || new.disabled_plugins.iter().any(|id| !crate::plugins::valid_id(id)) {
+        return Err(format!("`disabled_plugins` must be at most {} ids of lowercase letters, digits and hyphens", crate::plugins::MAX_DISABLED));
     }
     if !(0.5..=2.5).contains(&new.ui_scale) || !(0.25..=4.0).contains(&new.look_at_speed) {
         return Err("`ui_scale` must be 0.5…2.5 and `look_at_speed` 0.25…4".into());
@@ -2103,6 +2278,47 @@ mod tests {
     }
 
     #[test]
+    fn tool_modifier_prefs_default_classic_and_persist() {
+        let d = Prefs::default();
+        assert_eq!(d.suppress_sketch_snap, ModifierCombo::CTRL_ALT);
+        assert!(d.manipulator_free_alt);
+        assert!(!d.selection_shift_add_only);
+        let old: Prefs = serde_json::from_value(json!({"nav": "solidworks"})).unwrap();
+        assert_eq!(old.suppress_sketch_snap, ModifierCombo::CTRL_ALT);
+        assert!(!old.selection_shift_add_only);
+        // Classic default: Ctrl/Cmd or Alt each suppress (`command` is primary on all hosts).
+        let mut app = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
+        let ctrl = Modifiers { ctrl: true, command: true, ..Default::default() };
+        let alt = Modifiers { alt: true, ..Default::default() };
+        let shift = Modifiers { shift: true, ..Default::default() };
+        assert!(suppress_sketch_snap_held(&app, ctrl));
+        assert!(suppress_sketch_snap_held(&app, alt));
+        assert!(!suppress_sketch_snap_held(&app, shift));
+        control(
+            &mut app,
+            &json!({"open": "Sketch", "suppress_sketch_snap": {"shift": false, "ctrl": true, "alt": false}, "manipulator_free_alt": false}),
+        )
+        .unwrap();
+        control(&mut app, &json!({"button": "apply"})).unwrap();
+        control(&mut app, &json!({"open": "Selection", "selection_shift_add_only": true})).unwrap();
+        control(&mut app, &json!({"button": "apply"})).unwrap();
+        assert_eq!(app.preferences.suppress_sketch_snap, ModifierCombo::CTRL);
+        assert!(!app.preferences.manipulator_free_alt);
+        assert!(app.preferences.selection_shift_add_only);
+        let mut other = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
+        other.load_prefs(&app.prefs());
+        assert_eq!(other.preferences.suppress_sketch_snap, ModifierCombo::CTRL);
+        assert!(!other.preferences.manipulator_free_alt);
+        assert!(other.preferences.selection_shift_add_only);
+        control(&mut app, &json!({"open": "Sketch", "button": "defaults"})).unwrap();
+        assert_eq!(app.preferences.suppress_sketch_snap, ModifierCombo::CTRL_ALT);
+        assert!(app.preferences.manipulator_free_alt);
+        assert!(app.preferences.selection_shift_add_only, "Selection page setting stays until that page resets");
+        control(&mut app, &json!({"button": "cancel"})).unwrap();
+        assert_eq!(app.preferences.suppress_sketch_snap, ModifierCombo::CTRL);
+    }
+
+    #[test]
     fn wheel_smoothing_persists_and_follows_dialog_buttons() {
         assert!(serde_json::from_value::<Prefs>(json!({})).unwrap().smooth_wheel_zoom);
         let mut app = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
@@ -2285,7 +2501,7 @@ mod tests {
         let mut out = ctx.run_ui(Default::default(), |ui| show(&mut app, ui.ctx()));
         out.textures_delta.clear();
         assert!(app.prefs_window.open && app.prefs_window.section == PAGE_SHORTCUTS && !app.keymap.open);
-        assert!(control(&mut app, &json!({"open": "Plugins"})).is_err());
+        assert!(control(&mut app, &json!({"open": "NoSuch"})).is_err());
         assert!(set(&mut app, &json!({"up_axis": "x"})).is_err());
         assert!(set(&mut app, &json!({"theme": "sepia"})).is_err());
         assert!(set(&mut app, &json!({"language": "xx"})).is_err());

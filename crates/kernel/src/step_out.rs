@@ -1854,6 +1854,11 @@ mod tests {
         let p = ex.get(1).unwrap().params();
         assert_eq!(p[0].as_str(), Some("a'b\\é"));
         assert_eq!(p[1].as_f64(), Some(1e-6));
+        // Names of several non-ASCII characters in a row read back whole (#2344).
+        for name in ["圆角", "凸台-拉伸7", "ネジ穴", "Gehäuse 😀"] {
+            let ex = p21::parse(&format!("ISO-10303-21;DATA;#1=A({});ENDSEC;END-ISO-10303-21;", string(name))).unwrap();
+            assert_eq!(ex.get(1).unwrap().params()[0].as_str(), Some(name));
+        }
     }
 
     #[test]

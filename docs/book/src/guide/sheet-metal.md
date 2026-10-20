@@ -57,7 +57,9 @@ square the round follows the angle of the base and the square becomes a kite, it
 square to the edges. Changing the shape in a rule changes the parts made with that rule. A
 relief that doesn't fit (under 0.01 mm across, leaving nothing of a bend, or reaching as far
 from its corner as another edge of the base is) is left out, and the flange feature reports a
-warning saying where.
+warning saying where. The reliefs at the corners of one edge are cut together, so a corner's
+relief does not depend on the order the corners are cut in; two of them that would overlap
+leave the second one out, with a warning.
 
 ```json
 {"command":"sheet.manage_rules","params":{"name":"Sheet 2 mm","thickness":"2 mm","k_factor":0.5,
@@ -133,6 +135,17 @@ are, so the returns on them close over a relieved or torn corner as over a whole
 
 (The four returns of a 120 x 90 tray in 2 mm sheet with 90° walls 20 high: each point is the
 middle of a wall's far edge on its inner face, so the returns turn in over the base.)
+
+A flange can stand on a straight side edge of an existing flange as well. Select that edge
+and the adjoining edge of its supporting panel in one feature to close the new flanges across
+the existing bend. The panels are mitred with the rule's gap; `round` and `rectangular` corner
+reliefs cut a rounded or rectangular slot across the existing bend zone in the flat material.
+The slot's width is `corner_relief`, and it survives unfolding, refolding and DXF export.
+`notch` keeps the gap without another cut. A `tear` across an existing bend is not supported
+yet and leaves the notch with a warning. A mitre that would overlap the flat pattern stays
+open with a warning. Side-edge setbacks on curved panels or on only part of an edge left by
+a cut-out are not supported yet. The edge connecting a panel to its existing bend is not a
+free edge. See `examples/regressions/sheet-side-flange-corner.json` for a small reproduction.
 
 **Convert** also takes a solid or a shelled body: pick the face that stays fixed and the sharp
 edges that become bends (`bends`; Bend Edges in the dialog). The flat faces reached from the
@@ -312,3 +325,12 @@ flat pattern and its DXF have it, and on the bottom face y runs the other way, a
 below. When the face is gone (its flange is suppressed or deleted) the sketch reports a lost
 attachment instead of moving to another face; **Redefine Sketch Plane** attaches it to another
 face. `fixed: true` still freezes the picked plane in space.
+
+Every face of a folded sheet has a name of that kind, which `model.faces` lists as `sheet_face`:
+`<panel>:top` and `<panel>:bottom`, `<panel>:rim.<edge>` for a rim (a base sketch line's id, or a
+flange's `far`, `side0`, `side1`; `rim.bend0`/`rim.bend1` for a bend's flat ends and
+`rim.ext0`/`rim.ext1` where a flange runs on past its bend toward a neighbour), and
+`<flange>:bend.inner` / `<flange>:bend.outer` for a bend's curved faces. A command that takes a
+face name takes it too (`sheet:Body1:F3.1:top`), and finds the face from the sheet itself, so the
+name stays with that face while the sheet's sizes change and other flanges come and go. Faces the
+sheet does not describe (a hole's wall) have none.

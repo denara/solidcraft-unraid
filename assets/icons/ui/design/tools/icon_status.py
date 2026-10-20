@@ -37,8 +37,11 @@ def art_rev():
     paths += glob.glob(HERE + '/*.py')
     paths += [D + '/palette.toml', D + '/aliases.toml', __file__]
     for path in sorted(paths):
-        st = os.stat(path)
-        h.update(('%s %d %d;' % (os.path.relpath(path, ROOT), st.st_mtime_ns, st.st_size)).encode())
+        # Equal-length edits can share an mtime. Only the content identifies what
+        # the reviewer saw; file metadata must never authorize stale acceptance.
+        h.update(os.path.relpath(path, ROOT).replace(os.sep, '/').encode() + b'\0')
+        with open(path, 'rb') as source:
+            h.update(hashlib.sha256(review_state.lf(source.read())).digest())
     return h.hexdigest()[:16]
 
 
@@ -82,7 +85,7 @@ def scan():
     for f in glob.glob(ROOT + '/crates/ui-egui/src/**/*.rs', recursive=True):
         t = open(f, encoding='utf-8').read()
         for name in ui_icon_names(t):
-            uses[name].append('ui:' + os.path.relpath(f, ROOT + '/crates/ui-egui/src'))
+            uses[name].append('ui:' + os.path.relpath(f, ROOT + '/crates/ui-egui/src').replace(os.sep, '/'))
     mk = ROOT + '/assets/icons/ui/source/markers.rs'
     if os.path.exists(mk):
         for name in re.findall(r'=> "(c_[a-z_]+)"', open(mk, encoding='utf-8').read()): uses[name].append('ui:sketch constraint glyph')
@@ -284,7 +287,7 @@ if '--serve' in args:
                         request_id = uuid.uuid4().hex
                         path = os.path.join(REQUESTS, request_id + '.json')
                         # Publish a complete snapshot atomically so the chat never reads half a request.
-                        with open(path + '.tmp', 'w') as f:
+                        with open(path + '.tmp', 'w', encoding='utf-8') as f:
                             json.dump({'version': 1, 'id': request_id,
                                        'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
                                        'notes': {i: r['notes'][i] for i in todo}}, f, indent=1)

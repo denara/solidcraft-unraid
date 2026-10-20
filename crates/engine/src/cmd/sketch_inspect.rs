@@ -2,7 +2,7 @@
 //! centre of mass of bodies.
 
 use serde_json::{Value, json};
-use solidcraft_geom::{Seg2, Vec2, Vec3};
+use solidcraft_geom::{Aabb3, Seg2, Vec2, Vec3};
 
 use super::CommandSpec;
 use crate::params::{bad, num, string_list, vec3};
@@ -135,12 +135,10 @@ fn curvature_comb(s: &mut Session, p: &Value) -> Result<Value> {
     }
     // One scale for all combs: the longest tooth is a fifth of the largest curve's size.
     let kmax = combs.iter().flat_map(|c| c.1.iter().map(|t| t.1.abs())).fold(0.0_f64, f64::max);
-    let size = combs.iter().flat_map(|c| c.1.iter().map(|t| t.0)).fold(
-        (Vec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY), Vec3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY)),
-        |(lo, hi), q| (lo.min(q), hi.max(q)),
-    );
-    let diag = (size.1 - size.0).len();
-    let scale = num(p, "scale").filter(|x| *x > 0.0).unwrap_or(if kmax > 1e-12 && diag.is_finite() { 0.2 * diag / kmax } else { 1.0 });
+    let bounds: Aabb3 = combs.iter().flat_map(|c| c.1.iter().map(|t| t.0)).collect();
+    let diag = bounds.diagonal();
+    let scale =
+        num(p, "scale").filter(|x| *x > 0.0).unwrap_or(if kmax > 1e-12 && !bounds.is_empty() && diag.is_finite() { 0.2 * diag / kmax } else { 1.0 });
     let out: Vec<Value> = combs
         .iter()
         .map(|(id, teeth)| {

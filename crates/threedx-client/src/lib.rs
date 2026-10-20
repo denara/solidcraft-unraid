@@ -55,21 +55,32 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// The platform driver bridge is not included in this container fork.
-/// Returns Unsupported without starting a thread or invoking the callback.
-pub fn start(name: &str, sink: impl Fn(Event) + Send + Sync + 'static) -> Result<(), Error> {
-    let _ = (name, sink);
+/// Returns Unsupported without starting a thread or invoking either callback.
+pub fn start(
+    name: &str,
+    sink: impl Fn(Event) + Send + Sync + 'static,
+    connected: impl FnOnce(Result<(), Error>) + Send + 'static,
+) -> Result<(), Error> {
+    let _ = (name, sink, connected);
     Err(Error::Unsupported)
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn omitted_driver_bridge_reports_unsupported_without_invoking_the_sink() {
+    fn omitted_driver_bridge_reports_unsupported_without_invoking_callbacks() {
         let invoked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let sink_invoked = std::sync::Arc::clone(&invoked);
-        let result = super::start("public test", move |_| {
-            sink_invoked.store(true, std::sync::atomic::Ordering::Relaxed);
-        });
+        let connected_invoked = std::sync::Arc::clone(&invoked);
+        let result = super::start(
+            "public test",
+            move |_| {
+                sink_invoked.store(true, std::sync::atomic::Ordering::Relaxed);
+            },
+            move |_| {
+                connected_invoked.store(true, std::sync::atomic::Ordering::Relaxed);
+            },
+        );
         assert_eq!(result, Err(super::Error::Unsupported));
         assert!(!invoked.load(std::sync::atomic::Ordering::Relaxed));
     }

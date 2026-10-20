@@ -9,21 +9,34 @@ use super::{
     features::{add_feature, check_expr},
 };
 use crate::{
-    Result, Session,
+    Result, Sel, Session,
     params::{bad, expr, str_},
 };
 
 pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("mesh.convert", "Convert Mesh", convert)
         .icon("import")
-        .params("body: mesh body name; tolerance?: length expression (default 0.05 mm): reconstruct a closed constant-section mechanical mesh as editable planar and cylindrical faces, with a parametric timeline feature; name?"),
+        .params("body?: mesh body name (default: the selected mesh body); tolerance?: length expression (default 0.05 mm): reconstruct a closed constant-section mechanical mesh as editable planar and cylindrical faces, with a parametric timeline feature; name?"),
 ];
+
+/// The mesh body to convert: `body`, else the one selected body.
+fn target(s: &Session, p: &Value, cmd: &str) -> Result<String> {
+    if let Some(name) = str_(p, "body").filter(|b| !b.trim().is_empty()) {
+        return Ok(name.to_owned());
+    }
+    let selected: Vec<&str> = s.selection.iter().filter_map(|x| if let Sel::Body { name } = x { Some(name.as_str()) } else { None }).collect();
+    match selected.as_slice() {
+        [name] => Ok((*name).to_owned()),
+        [] => Err(bad(cmd, "select a mesh body")),
+        _ => Err(bad(cmd, "select one mesh body")),
+    }
+}
 
 fn convert(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "mesh.convert";
-    let body = str_(p, "body").filter(|b| !b.trim().is_empty()).ok_or_else(|| bad(cmd, "select a mesh body"))?;
     let state = s.model.state();
-    let source = state.body(body).ok_or_else(|| bad(cmd, format!("no body `{body}`")))?;
+    let body = target(s, p, cmd)?;
+    let source = state.body(&body).ok_or_else(|| bad(cmd, format!("no body `{body}`")))?;
     if !source.body.is_mesh() {
         return Err(bad(cmd, "select a mesh body"));
     }

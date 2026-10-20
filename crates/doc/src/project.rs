@@ -429,7 +429,8 @@ fn certified_planar_construction(body: &crate::ModelBody, index: usize) -> bool 
 
 pub fn resolve_anchored_face(doc: &Document, st: &ModelState, plane: &Plane, kind: LinkKind, anchor: &crate::FaceAnchor) -> Result<Resolved> {
     let body = st.body(&anchor.target.body).ok_or_else(|| lost("anchored projection body"))?;
-    let indices = doc.configuration_face_indices(body, &anchor.target)?;
+    // The sketch's plane says when the face was found by fallback; its projection follows it.
+    let (indices, _) = doc.anchored_face_indices(st, body, &anchor.target)?;
     resolve_face_indices(st, plane, kind, &body.name, &indices)
 }
 
@@ -766,14 +767,13 @@ fn merge_split_circles(geom: Vec<LinkGeom>) -> Vec<LinkGeom> {
     const TOL: f64 = 1e-6;
     let near = |p: Vec2, q: Vec2| p.dist(q) <= TOL * (1.0 + p.len().max(q.len()));
     let mut out = geom.clone();
-    for i in 0..geom.len() {
-        let Some(LinkGeom::Arc { c, a, b }) = geom.get(i).cloned() else { continue };
-        for j in i + 1..geom.len() {
-            if let Some(LinkGeom::Arc { c: c2, a: a2, b: b2 }) = geom.get(j).cloned()
+    for (i, first) in geom.iter().enumerate() {
+        let LinkGeom::Arc { c, a, b } = *first else { continue };
+        for (second, slot) in geom.iter().zip(out.iter_mut()).skip(i + 1) {
+            if let LinkGeom::Arc { c: c2, a: a2, b: b2 } = *second
                 && near(c, c2)
                 && near(a, a2)
                 && near(b, b2)
-                && let Some(slot) = out.get_mut(j)
             {
                 *slot = LinkGeom::Arc { c, a: b, b: a };
             }

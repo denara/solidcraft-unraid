@@ -123,7 +123,7 @@ mod browser {
             expired();
             return Ok(None);
         }
-        if !response.ok() {
+        if !response.ok() && !matches!(response.status(), 403 | 409 | 429) {
             return Err(JsValue::from_str("file unavailable"));
         }
         let html = JsFuture::from(response.text()?).await?.as_string().ok_or_else(|| JsValue::from_str("invalid response"))?;
@@ -143,8 +143,15 @@ mod browser {
             }
             let Some(element) = event.target().and_then(|target| target.dyn_into::<Element>().ok()) else { return };
             let Some(link) = element.closest("a[data-file-details]").ok().flatten() else { return };
-            let Some(url) = link.get_attribute("data-file-details").filter(|url| url.starts_with("/workspace/details/")) else { return };
+            let Some(url) =
+                link.get_attribute("data-file-details").filter(|url| url.starts_with("/workspace/details/") || url.starts_with("/workspace/delete/"))
+            else {
+                return;
+            };
             let Some(dialog) = dialog() else { return };
+            if let Some(title) = document().and_then(|doc| doc.get_element_by_id("file-dialog-title")) {
+                title.set_text_content(Some(if url.starts_with("/workspace/delete/") { "Löschen bestätigen" } else { "Dateidetails" }));
+            }
             // Preserve a normal accessible navigation when the browser cannot
             // display the native dialog, rather than swallowing the link.
             if dialog.show_modal().is_err() {

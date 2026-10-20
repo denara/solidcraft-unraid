@@ -58,10 +58,16 @@ pub fn vec2_list(cmd: &str, p: &Value, k: &str, max: usize) -> Result<Vec<Vec2>>
     a.iter().map(|v| vec2(v).ok_or_else(|| bad(cmd, format!("`{k}` must contain [x, y] points")))).collect()
 }
 
+/// A finite number given for an expression, as the expression's text (`8` → `"8"`, which reads
+/// as mm or degrees by context).
+pub fn number_text(n: &serde_json::Number) -> Option<String> {
+    n.as_f64().and_then(finite).map(|v| format!("{v}"))
+}
+
 /// An expression parameter: a number (mm or degrees by context) or an expression string.
 pub fn expr(p: &Value, k: &str) -> Option<Expr> {
     match p.get(k)? {
-        Value::Number(n) => n.as_f64().and_then(finite).map(|v| Expr::new(format!("{v}"))),
+        Value::Number(n) => number_text(n).map(Expr::new),
         Value::String(s) if !s.trim().is_empty() && s.len() <= 4096 => Some(Expr::new(s.trim())),
         _ => None,
     }

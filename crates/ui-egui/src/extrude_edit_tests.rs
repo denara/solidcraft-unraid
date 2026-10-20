@@ -48,6 +48,7 @@ fn unchanged_actual_editor_preserves_all_extents_and_parameter_identities() {
         json!({"direction":"symmetric","distance":"5 mm"}),
         json!({"direction":"symmetric","distance":"5 mm","convention":"legacy_per_side"}),
         json!({"distance":"10 mm","distance2":"3 mm"}),
+        json!({"direction":"negative","distance":"10 mm","distance2":"3 mm"}),
         json!({"from":[0,0,5],"start_offset":"0 mm"}),
         json!({"to":[0,0,10],"to_offset":"3 mm"}),
         json!({"to":[0,0,-10],"to_offset":"-2 mm"}),
@@ -452,4 +453,51 @@ fn a_click_on_the_extrude_arrow_stem_keeps_the_profile() {
     h.frames(2);
     assert_eq!(picked(&h), before);
     assert!((dialog_distance(&h) - distance).abs() < 1e-9, "{} for {distance}", dialog_distance(&h));
+}
+
+/// The volume of the body `name`.
+fn volume(h: &Harness, name: &str) -> f64 {
+    let state = h.app.session.world_state();
+    solidcraft_engine::doc::kernel::measure(&state.body(name).unwrap().body).unwrap().volume
+}
+
+/// Two Sides with All (#2700): the editor shows Distance 2 and Reverse for a through-all cut, and
+/// Reverse swaps the sides: through all down and 3 mm up instead of through all up and 3 mm down.
+#[test]
+fn two_sides_with_all_shows_distance_2_and_reverse_swaps_the_sides() {
+    let mut h = Harness::new();
+    h.app.home.open = false;
+    h.app.run("solid.box", json!({"length":20,"width":20,"height":40,"corner":[0,0,-30],"body_name":"Main"})).unwrap();
+    h.app.run("sketch.create", json!({"plane":"XY","name":"Hole"})).unwrap();
+    h.app.run("sketch.circle.center", json!({"center":[10,10],"radius":2})).unwrap();
+    h.app.run("sketch.finish", json!({})).unwrap();
+    let cut = json!({"sketch":"Hole","through_all":true,"distance2":"3 mm","operation":"cut","targets":["Main"],"name":"Depth"});
+    h.app.run("solid.extrude", cut).unwrap();
+    h.frames(4);
+    // The box runs 10 mm above the sketch and 30 mm below it.
+    let area = std::f64::consts::PI * 4.0;
+    let depth = |h: &Harness| (16000.0 - volume(h, "Main")) / area;
+    assert!((depth(&h) - 13.0).abs() < 0.05, "{}", depth(&h));
+    open(&mut h);
+    assert!(h.widget("Distance 2").is_some(), "Two Sides with All shows the second side's distance");
+    assert!(h.widget("Reverse Direction").is_some(), "Two Sides offers Reverse");
+    // The first side's arrow goes up (through all) and the second's down, either side of the
+    // hole's centre on screen; Reverse swaps them.
+    let centre = h.at(&json!({"world":[10,10,0]})).unwrap()[1] as f32;
+    let tips = || (crate::scenario::handle_at("arrow").unwrap().y - centre, crate::scenario::handle_at("arrow2").unwrap().y - centre);
+    let (first, second) = tips();
+    assert!(first < 0.0 && second > 0.0, "the first side's arrow is above the sketch, the second's below: {first} {second}");
+    h.step(&json!({"widget":"Reverse Direction"})).unwrap();
+    h.frames(2);
+    let (first, second) = tips();
+    assert!(first > 0.0 && second < 0.0, "reversed, the first side's arrow is below, the second's above: {first} {second}");
+    h.step(&json!({"widget":"OK"})).unwrap();
+    assert!(h.app.dialog.is_none(), "{:?}", h.app.session.log);
+    let e = extent(&h);
+    assert_eq!((e.direction, e.through_all, e.distance2.as_deref()), (solidcraft_engine::doc::Direction::Negative, true, Some("3 mm")));
+    assert!((depth(&h) - 33.0).abs() < 0.05, "{}", depth(&h));
+    // And it opens reversed again: OK without changes keeps it.
+    open(&mut h);
+    h.step(&json!({"widget":"OK"})).unwrap();
+    assert_eq!(extent(&h), e);
 }

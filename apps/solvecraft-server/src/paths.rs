@@ -100,7 +100,7 @@ fn commands(root: &Path, value: &mut Value, depth: usize) -> Result<(), String> 
             let geometry = object.get("command").and_then(Value::as_str).is_some_and(|c| {
                 (c.starts_with("solid.") && c != "solid.decal")
                     || c.starts_with("construct.")
-                    || (c.starts_with("component.") && c != "component.insert_design")
+                    || (c.starts_with("component.") && !matches!(c, "component.insert_design" | "component.relink"))
                     || c.starts_with("occurrence.")
             });
             if !geometry
@@ -201,5 +201,14 @@ mod tests {
         assert!(resolve(&root, "escape/file").is_err());
         std::fs::remove_file(root.join("escape")).unwrap();
         std::fs::remove_dir(root).unwrap();
+    }
+    #[test]
+    fn upstream_relink_uses_a_confined_file_path_instead_of_a_geometry_path() {
+        let root = std::env::temp_dir();
+        let mut call = json!({"command":"component.relink","params":{"component":"Part","path":"parts/source.solidcraft"}});
+        commands(&root, &mut call, 0).unwrap();
+        assert_eq!(call["params"]["path"], json!(root.join("parts/source.solidcraft")));
+        let mut escape = json!({"command":"component.relink","params":{"component":"Part","path":"../secret.solidcraft"}});
+        assert!(commands(&root, &mut escape, 0).is_err());
     }
 }

@@ -23,7 +23,37 @@ pub struct SceneMesh {
     pub color: Rgb,
     /// Faces in colours of their own: (B-rep face index, colour).
     pub face_colors: Vec<(u32, Rgb)>,
+    /// How opaque the body is (an appearance's opacity): 1 is solid, below [`SEE_THROUGH`] it is
+    /// drawn see-through, so what lies inside it shows, as the viewport draws glass. A body
+    /// without an appearance of its own is solid.
+    pub opacity: f32,
 }
+
+impl SceneMesh {
+    /// A solid body in `color`, with no face of its own look.
+    pub fn solid(mesh: Arc<Mesh>, color: Rgb) -> SceneMesh {
+        SceneMesh { mesh, color, face_colors: Vec::new(), opacity: 1.0 }
+    }
+
+    /// Is the body drawn see-through? (Its opacity is below [`SEE_THROUGH`].)
+    pub fn glass(&self) -> bool {
+        self.opacity < SEE_THROUGH
+    }
+
+    /// The alpha the body is blended with: its opacity, never so low that it vanishes
+    /// altogether, and 1 when it is solid.
+    pub fn alpha(&self) -> f64 {
+        if self.glass() { f64::from(self.opacity).clamp(MIN_ALPHA, 1.0) } else { 1.0 }
+    }
+}
+
+/// At or above this opacity a body is drawn solid: an appearance a hair under 1 is not worth a
+/// see-through pass, and the viewport draws the same bodies as glass.
+pub const SEE_THROUGH: f32 = 0.999;
+
+/// The lowest alpha a see-through body is drawn with, so opacity 0 still leaves a trace of the
+/// body rather than an invisible one (as the viewport clamps it).
+pub const MIN_ALPHA: f64 = 0.05;
 
 pub struct SceneLine {
     pub points: Vec<Vec3>,

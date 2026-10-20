@@ -26,8 +26,36 @@ mod trace;
 pub use trace::{TraceForm, picked_point};
 
 /// Joint types in the order the Type box lists them (command names).
-pub const TYPES: [&str; 7] = ["rigid", "revolute", "slider", "cylindrical", "pin_slot", "planar", "ball"];
-const TYPE_LABELS: [&str; 7] = ["Rigid", "Revolute", "Slider", "Cylindrical", "Pin-slot", "Planar", "Ball"];
+pub const TYPES: [&str; 13] = [
+    "rigid",
+    "revolute",
+    "slider",
+    "cylindrical",
+    "pin_slot",
+    "planar",
+    "ball",
+    "parallel",
+    "perpendicular",
+    "angle",
+    "point_on_plane",
+    "point_on_line",
+    "line_on_plane",
+];
+const TYPE_LABELS: [&str; 13] = [
+    "Rigid",
+    "Revolute",
+    "Slider",
+    "Cylindrical",
+    "Pin-slot",
+    "Planar",
+    "Ball",
+    "Parallel",
+    "Perpendicular",
+    "Angle",
+    "Point on plane",
+    "Point on line",
+    "Line on plane",
+];
 /// What a joint origin input accepts (snaps on faces, edges and vertices).
 pub const SNAPS: u16 = FACES | EDGES | VERTICES;
 /// Commands whose effect is where occurrences sit (previewed on the placed model).

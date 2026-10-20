@@ -1,12 +1,13 @@
-//! Versioned design packages. Geometry is rebuilt from authoritative inputs; no
-//! evaluated cache is trusted here. Entries are never extracted to filesystem paths.
+//! Versioned design packages. Entries are never extracted to filesystem paths. The optional
+//! model cache is only read back by the build that wrote it, for the exact document it was
+//! written with.
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
 mod native_cache;
 mod thumbnail;
-pub use native_cache::{DesignGeometry, read_design_geometry};
+pub use native_cache::read_design_geometry;
 pub use thumbnail::{THUMBNAIL_SIZE, read_design_thumbnail, read_design_thumbnail_file};
 
 use serde_json::{Map, Value, json};
@@ -105,13 +106,14 @@ pub fn write_design_container_with_preview(doc: &Document, compression: DesignCo
     write_design_container_with_cache(doc, compression, preview, None)
 }
 
-/// Save an optional warm native cache without making document saving depend on it.
-/// Display meshes remain separately opt-in; no evaluation or meshing happens here.
+/// Save an optional model cache (the evaluated timeline's bodies) without making document
+/// saving depend on it. Display meshes remain separately opt-in; no evaluation or meshing
+/// happens here.
 pub fn write_design_container_with_cache(
     doc: &Document,
     compression: DesignCompression,
     preview: Option<&DesignPreview>,
-    geometry: Option<&[DesignGeometry]>,
+    geometry: Option<&solidcraft_doc::ModelState>,
 ) -> Result<Vec<u8>> {
     write_design_container_with_thumbnail(doc, compression, preview, geometry, None)
 }
@@ -122,8 +124,21 @@ pub fn write_design_container_with_thumbnail(
     doc: &Document,
     compression: DesignCompression,
     preview: Option<&DesignPreview>,
-    geometry: Option<&[DesignGeometry]>,
+    geometry: Option<&solidcraft_doc::ModelState>,
     thumbnail: Option<&[u8]>,
+) -> Result<Vec<u8>> {
+    write_container(doc, compression, preview, geometry, thumbnail, MAX_DESIGN_BYTES)
+}
+
+/// [`write_design_container_with_thumbnail`] within `budget` bytes for the optional caches (the
+/// container's budget; tests pass less).
+fn write_container(
+    doc: &Document,
+    compression: DesignCompression,
+    preview: Option<&DesignPreview>,
+    geometry: Option<&solidcraft_doc::ModelState>,
+    thumbnail: Option<&[u8]>,
+    budget: usize,
 ) -> Result<Vec<u8>> {
     let mut writer = PackageWriter { zip: zip::ZipWriter::new(Cursor::new(Vec::new())), names: BTreeSet::new(), expanded: 0, resolved: 0 };
     let mut features = Vec::with_capacity(doc.features.len());
@@ -172,18 +187,28 @@ pub fn write_design_container_with_thumbnail(
     let metadata = serde_json::to_vec(&metadata).map_err(invalid)?;
     writer.part("document.json", &metadata, true)?;
     writer.part("container.json", &serde_json::to_vec(&json!({"format": VERSION})).map_err(invalid)?, false)?;
-    if let Some((manifest, data)) = geometry.and_then(|g| native_cache::encode_geometry(g, &metadata).ok())
-        && writer.names.len().saturating_add(2) <= MAX_ENTRIES
-        && writer
-            .expanded
-            .saturating_add(manifest.len())
-            .saturating_add(data.len())
-            .saturating_add(writer.names.len().saturating_mul(256))
-            .saturating_add(65_536)
-            <= MAX_DESIGN_BYTES
-    {
-        writer.part("cache/key.json", &manifest, false)?;
-        writer.part("cache/brep.bin", &data, compression == DesignCompression::Compact)?;
+    // The model cache is optional: one that does not fit the container is left out, never a
+    // failed save.
+    let cache = geometry.and_then(|g| native_cache::encode_model(g, &metadata).ok()).filter(|(manifest, data)| {
+        let fits = writer.names.len().saturating_add(2) <= MAX_ENTRIES
+            && writer
+                .expanded
+                .saturating_add(manifest.len())
+                .saturating_add(data.len())
+                .saturating_add(writer.names.len().saturating_mul(256))
+                .saturating_add(65_536)
+                <= budget;
+        if !fits {
+            log::info!("the model cache ({} MB) does not fit the design file: saved without it", (manifest.len() + data.len()) >> 20);
+        }
+        fits
+    });
+    if let Some((manifest, data)) = cache {
+        let [manifest_entry, payload_entry] = native_cache::ENTRIES;
+        // Deflated whatever the policy: the encoded bodies shrink about fourfold to tenfold, faster
+        // than the extra bytes would be written and read.
+        writer.part(manifest_entry, &manifest, true)?;
+        writer.part(payload_entry, &data, true)?;
     }
     if let Some((manifest, data)) = preview.and_then(|p| encode_preview(p, &metadata).ok())
         && writer.names.len().saturating_add(2) <= MAX_ENTRIES
@@ -193,7 +218,7 @@ pub fn write_design_container_with_thumbnail(
             .saturating_add(data.len())
             .saturating_add(writer.names.len().saturating_mul(256))
             .saturating_add(65_536)
-            <= MAX_DESIGN_BYTES
+            <= budget
     {
         writer.part("cache/preview.json", &manifest, false)?;
         writer.part("cache/preview.bin", &data, false)?;
@@ -483,7 +508,10 @@ impl<R: Read + Seek> DesignContainerReader<R> {
     pub fn preview(&mut self) -> Option<DesignPreview> {
         // An explicitly saved mesh avoids tessellation. Native cache is the default
         // fallback, generating a bounded provisional mesh without source imports.
-        read_preview(&mut self.reader).ok().or_else(|| native_cache::geometry_preview(self.geometry()?).ok())
+        read_preview(&mut self.reader).ok().or_else(|| {
+            let document = self.reader.document(16 << 20).ok()?;
+            native_cache::geometry_preview(&document, self.geometry()?).ok()
+        })
     }
 
     /// Portable PNG picture only; no source blobs or geometry are evaluated.
@@ -491,8 +519,8 @@ impl<R: Read + Seek> DesignContainerReader<R> {
         thumbnail::read(&mut self.reader).ok()
     }
 
-    /// Native geometry is provisional, never a substitute for rebuilding the document.
-    pub fn geometry(&mut self) -> Option<Vec<DesignGeometry>> {
+    /// The cached model state, when this build wrote it for exactly this document.
+    pub fn geometry(&mut self) -> Option<solidcraft_doc::ModelState> {
         let document = self.reader.document(16 << 20).ok()?;
         native_cache::read_geometry_with(&mut self.reader, &document).ok()
     }
@@ -693,11 +721,11 @@ mod tests {
         assert!(result.is_err_and(|e| e.to_string().contains("not a regular file")));
     }
 
-    fn native_geometry() -> Vec<DesignGeometry> {
-        vec![DesignGeometry {
-            name: "Cube".into(),
-            body: solidcraft_kernel::box_solid(solidcraft_geom::Vec3::ZERO, solidcraft_geom::Vec3::new(10., 20., 30.)).unwrap(),
-        }]
+    fn native_geometry() -> solidcraft_doc::ModelState {
+        let cube = solidcraft_kernel::box_solid(solidcraft_geom::Vec3::ZERO, solidcraft_geom::Vec3::new(10., 20., 30.)).unwrap();
+        let mut state = solidcraft_doc::ModelState::default();
+        state.bodies.push(solidcraft_doc::ModelBody::new("Cube".into(), cube, 1));
+        state
     }
 
     #[test]
@@ -709,9 +737,9 @@ mod tests {
         let bodies = native_geometry();
         let bytes = write_design_container_with_cache(&doc, DesignCompression::Fast, None, Some(&bodies)).unwrap();
         let entries = parts(&bytes);
-        assert!(entries.contains_key("cache/brep.bin"));
+        assert!(entries.contains_key("cache/bodies.bin"));
         assert!(!entries.contains_key("cache/preview.bin"));
-        assert_eq!(read_design_geometry(&bytes).unwrap()[0].body.face_count(), bodies[0].body.face_count());
+        assert_eq!(read_design_geometry(&bytes).unwrap().bodies[0].body.face_count(), bodies.bodies[0].body.face_count());
         assert_eq!(bytes, write_design_container_with_cache(&doc, DesignCompression::Fast, None, Some(&bodies)).unwrap());
         let count = std::rc::Rc::new(std::cell::Cell::new(0));
         let mut reader = DesignContainerReader::new(CountingReader { source: Cursor::new(bytes), count: count.clone() }).unwrap();
@@ -722,22 +750,72 @@ mod tests {
     }
 
     #[test]
+    fn model_cache_stores_repeated_parts_once_and_keeps_placed_copies() {
+        use solidcraft_geom::Vec3;
+        let part = solidcraft_kernel::box_solid(Vec3::ZERO, Vec3::new(10., 20., 30.)).unwrap();
+        let share = solidcraft_kernel::DisplayShare::new(part.clone());
+        let t = [[1., 0., 0., 0.], [0., 1., 0., 0.], [0., 0., 1., 0.], [50., 0., 0., 1.]];
+        let mut state = solidcraft_doc::ModelState::default();
+        state.body_counter = 7;
+        for (i, body) in [part.clone(), part.clone()].into_iter().enumerate() {
+            state.bodies.push(solidcraft_doc::ModelBody::new(format!("Part {i}"), body, 1));
+        }
+        for x in [50., 90.] {
+            let moved = solidcraft_kernel::transform(&part, Vec3::new(x, 0., 0.), Vec3::ZERO, Vec3::Z, 0.).unwrap();
+            let mut t = t;
+            t[3][0] = x;
+            let mut b = solidcraft_doc::ModelBody::new(format!("Copy {x}"), moved.with_display_share(&share, t), 2);
+            b.component = 3;
+            b.source_name = Some("Part".into());
+            state.bodies.push(b);
+        }
+        let doc = document();
+        let bytes = write_design_container_with_cache(&doc, DesignCompression::Fast, None, Some(&state)).unwrap();
+        let manifest: Value = serde_json::from_slice(&parts(&bytes)["cache/model.json"]).unwrap();
+        assert_eq!(manifest["bodies"].as_array().unwrap().len(), 3, "the part and each placed copy, once each");
+        let read = read_design_geometry(&bytes).unwrap();
+        assert_eq!(read.body_counter, 7);
+        assert_eq!(read.bodies.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), ["Part 0", "Part 1", "Copy 50", "Copy 90"]);
+        let copies: Vec<_> = read.bodies[2..].iter().map(|b| b.body.display_share().unwrap()).collect();
+        assert_eq!(copies[0].0.id(), copies[1].0.id(), "copies show one display again");
+        assert_eq!(copies[1].1[3][0], 90.);
+        assert_eq!((read.bodies[3].component, read.bodies[3].source_name.as_deref(), read.bodies[3].feature), (3, Some("Part"), 2));
+        for (a, b) in state.bodies.iter().zip(&read.bodies) {
+            assert_eq!(solidcraft_kernel::encode_native_body(&a.body).unwrap(), solidcraft_kernel::encode_native_body(&b.body).unwrap());
+        }
+    }
+
+    /// A model cache that does not fit the design file is left out: the save succeeds, and the
+    /// design reads back as saved.
+    #[test]
+    fn a_model_cache_too_big_for_the_file_is_left_out_not_a_failed_save() {
+        let doc = document();
+        let bytes = write_container(&doc, DesignCompression::Fast, None, Some(&native_geometry()), None, 70_000).unwrap();
+        assert!(!parts(&bytes).contains_key("cache/model.json") && !parts(&bytes).contains_key("cache/bodies.bin"));
+        assert!(read_design_geometry(&bytes).is_none());
+        assert_eq!(crate::read_design(&bytes).unwrap().to_json(), doc.to_json());
+        // With room for it, the same model is kept.
+        let bytes = write_container(&doc, DesignCompression::Fast, None, Some(&native_geometry()), None, MAX_DESIGN_BYTES).unwrap();
+        assert!(read_design_geometry(&bytes).is_some());
+    }
+
+    #[test]
     fn native_cache_mismatch_is_only_a_cache_miss() {
         let doc = document();
         let bytes = write_design_container_with_cache(&doc, DesignCompression::Fast, None, Some(&native_geometry())).unwrap();
         let original = parts(&bytes);
-        for key in ["format", "producer", "app", "document", "payload"] {
+        for key in ["format", "producer", "app", "build", "document", "payload"] {
             let mut entries = original.clone();
-            let mut manifest: Value = serde_json::from_slice(&entries["cache/key.json"]).unwrap();
+            let mut manifest: Value = serde_json::from_slice(&entries["cache/model.json"]).unwrap();
             manifest[key] = json!("unsupported-or-stale");
-            entries.insert("cache/key.json".into(), serde_json::to_vec(&manifest).unwrap());
+            entries.insert("cache/model.json".into(), serde_json::to_vec(&manifest).unwrap());
             let bytes = package(&entries);
             assert!(read_design_geometry(&bytes).is_none());
             assert!(read_design_preview(&bytes).is_none());
             assert_eq!(crate::read_design(&bytes).unwrap().to_json(), doc.to_json());
         }
         let mut entries = original;
-        entries.get_mut("cache/brep.bin").unwrap()[0] ^= 1;
+        entries.get_mut("cache/bodies.bin").unwrap()[0] ^= 1;
         let bytes = package(&entries);
         assert!(read_design_geometry(&bytes).is_none());
         assert_eq!(crate::read_design(&bytes).unwrap().to_json(), doc.to_json());

@@ -99,7 +99,7 @@ fn geo(s: &Session, v: Option<&Value>, cmd: &str, what: &str) -> Result<GeoRef> 
     } else if let Some(at) = p3("edge") {
         GeoRef::Edge { at, name: None }
     } else if let Some(at) = p3("vertex") {
-        GeoRef::Vertex { at }
+        GeoRef::Vertex { at, edges: None }
     } else if let Some(sk) = v.get("sketch") {
         let sketch = sketch_id(s, Some(sk), cmd, what)?;
         match (str_(v, "point"), str_(v, "curve")) {

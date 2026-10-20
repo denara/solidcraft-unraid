@@ -15,10 +15,14 @@ mod metadata;
 const MAX_DEPTH: usize = 8;
 const MAX_ENTRIES: usize = 4096;
 const MAX_FILES: usize = 512;
+const MAX_DIRECTORIES: usize = 256;
+const MAX_DIRECTORY_NAMES: usize = 64 * 1024;
 const MAX_FILE_SIZE: u64 = 256 * 1024 * 1024;
 
 pub struct Listing {
     pub files: Vec<Value>,
+    pub directories: Vec<String>,
+    directory_bytes: usize,
     pub truncated: bool,
 }
 
@@ -58,7 +62,7 @@ fn kind(name: &str) -> &'static str {
 }
 
 pub fn list(root: &Path) -> Result<Listing, String> {
-    let mut listing = Listing { files: Vec::new(), truncated: false };
+    let mut listing = Listing { files: Vec::new(), directories: Vec::new(), directory_bytes: 0, truncated: false };
     let metadata = fs::symlink_metadata(root).map_err(|_| "workspace files are unavailable")?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err("workspace files are unavailable".into());
@@ -66,6 +70,7 @@ pub fn list(root: &Path) -> Result<Listing, String> {
     let mut visited = 0;
     scan(root, "", 0, &mut visited, &mut listing)?;
     listing.files.sort_by(|left, right| left.get("name").and_then(Value::as_str).cmp(&right.get("name").and_then(Value::as_str)));
+    listing.directories.sort();
     grouping::assign(&mut listing.files);
     Ok(listing)
 }
@@ -109,6 +114,12 @@ fn scan(root: &Path, parent: &str, depth: usize, visited: &mut usize, listing: &
             continue;
         }
         if metadata.is_dir() {
+            if listing.directories.len() < MAX_DIRECTORIES && listing.directory_bytes.saturating_add(name.len()) <= MAX_DIRECTORY_NAMES {
+                listing.directory_bytes += name.len();
+                listing.directories.push(name.clone());
+            } else {
+                listing.truncated = true;
+            }
             if depth < MAX_DEPTH {
                 if scan(root, &name, depth + 1, visited, listing)? {
                     return Ok(true);
@@ -349,5 +360,18 @@ mod tests {
         assert!(list(&root.0).unwrap().files.is_empty());
         assert!(revision(&root.0, "linked/secret.solidcraft").is_err());
         assert!(revision(&root.0, "secret.solidcraft").is_err());
+    }
+    #[test]
+    fn empty_directory_inventory_is_bounded_and_explicitly_truncated() {
+        let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir(&root).unwrap();
+        for index in 0..400 {
+            std::fs::create_dir(root.join(format!("Empty-{index}"))).unwrap();
+        }
+        let listing = list(&root).unwrap();
+        assert_eq!(listing.directories.len(), MAX_DIRECTORIES);
+        assert!(listing.truncated);
+        assert!(listing.files.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

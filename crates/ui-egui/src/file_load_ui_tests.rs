@@ -211,6 +211,8 @@ fn a_control_open_answers_after_loading_without_freezing_the_window() {
     assert_eq!(reply["ok"], true, "{reply}");
     assert_eq!(reply["result"], expected);
     assert!(count_rx.try_recv().is_ok(), "inspection answered while the file loaded");
+    // Its Home picture is drawn after it opened, not before.
+    assert!(crate::home::remembering(&w.app.home), "the Home picture is drawn off the UI thread");
     for _ in 0..3 {
         w.frame(vec![]);
     }

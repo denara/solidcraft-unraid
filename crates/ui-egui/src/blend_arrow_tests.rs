@@ -101,3 +101,31 @@ fn dragging_out_along_the_arrow_grows_fillet_and_chamfer_on_both_kinds_of_edge()
         }
     }
 }
+
+/// Chamfer Type "Two Distances" (#2711): Distance 1 runs along the face that faces up most (the
+/// other one with Flip) and Distance 2 along the remaining face, so the window shows an arrow
+/// for each, from the edge into its face.
+#[test]
+fn two_distances_chamfer_has_an_arrow_along_each_face() {
+    let mut h = Harness::new();
+    h.app.run("solid.box", json!({"length": 40, "width": 30, "height": 20})).unwrap();
+    // The top front edge: between the top face (up) and the front face (facing -y).
+    let top_front = Vec3::new(20.0, 0.0, 20.0);
+    let (along_top, along_front) = (Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, -1.0));
+    for (flip, expected) in [(false, (along_top, along_front)), (true, (along_front, along_top))] {
+        h.app.session.selection = vec![edge(&h, top_front)];
+        h.app.start("solid.chamfer");
+        // Equal distances keep the arrow along the bisector, and have no second one.
+        let d = h.app.dialog.as_ref().unwrap();
+        assert!(crate::canvas::chamfer_face_dirs(&h.app, d, top_front).is_none());
+        let Some(Kind::Fillet { ctype, flip: f, .. }) = h.app.dialog.as_mut().map(|d| &mut d.kind) else { panic!("a chamfer window") };
+        (*ctype, *f) = (1, flip);
+        let d = h.app.dialog.as_ref().unwrap();
+        let (t1, t2) = crate::canvas::chamfer_face_dirs(&h.app, d, top_front).expect("both faces");
+        assert!(close(t1, expected.0) && close(t2, expected.1), "flip {flip}: {t1:?} {t2:?}");
+        // Distance 1's arrow is the first one.
+        let dir = anchor(&h.app, d).unwrap().1.unwrap();
+        assert!(close(dir, expected.0), "flip {flip}: arrow {dir:?}");
+        h.app.dialog = None;
+    }
+}

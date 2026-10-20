@@ -722,6 +722,7 @@ fn the_sections_messages_are_in_every_catalog() {
         .collect();
     for (lang, text) in [
         ("cs", include_str!("../../../assets/locales/cs.json")),
+        ("da", include_str!("../../../assets/locales/da.json")),
         ("de", include_str!("../../../assets/locales/de.json")),
         ("ja", include_str!("../../../assets/locales/ja.json")),
         ("ko", include_str!("../../../assets/locales/ko.json")),
@@ -734,7 +735,9 @@ fn the_sections_messages_are_in_every_catalog() {
             let (Some(en), Some(here)) = (english.get(*id), catalog.get(*id)) else {
                 panic!("{lang}: missing message {id} (English: {})", english.contains_key(*id));
             };
-            assert!(lang == "de" || here != en, "{lang}: {id} is the English text {en}");
+            // Danish uses the same established names for these colour-vision modes.
+            let shared_name = lang == "da" && ["ui.colour_vision_deutan", "ui.colour_vision_protan", "ui.colour_vision_tritan"].contains(id);
+            assert!(lang == "de" || shared_name || here != en, "{lang}: {id} is the English text {en}");
         }
     }
 }

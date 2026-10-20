@@ -98,3 +98,38 @@ fn a_single_hole_takes_one_point_and_no_flip() {
         assert!(s.execute("solid.hole", &p).is_err(), "{p}");
     }
 }
+
+/// A lid (rounded corners) with a countersunk hole 1.5 mm from its edge, and a second body `far` away from it.
+/// Returns the lid's volume (the total less the far body's) after the hole and the bodies the hole changed.
+fn lid_with_far_body(far_size: [f64; 3]) -> (f64, Value) {
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "offset": "7.1 mm"}));
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [-40.2, -9.85], "p1": [40.2, 13.05]}));
+    run(&mut s, "sketch.fillet", json!({"points": ["l1.start", "l2.start", "l3.start", "l4.start"], "radius": "2 mm"}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"distance": "2 mm", "operation": "new", "body_name": "lid"}));
+    run(
+        &mut s,
+        "solid.box",
+        json!({"length": far_size[0], "width": far_size[1], "height": far_size[2], "corner": [158, -60, -5.9], "body_name": "far"}),
+    );
+    let r = run(
+        &mut s,
+        "solid.hole",
+        json!({"position": [-38.7, -8.35, 9.1], "diameter": "2.4 mm", "type": "countersink", "cs_diameter": "4.2 mm", "cs_angle": "90 deg"}),
+    );
+    let lid = volume(&mut s) - far_size.iter().product::<f64>();
+    (lid, r["changed_bodies"].clone())
+}
+
+/// #2904: the tool of a hole depends on the part it drills, not on how big some other body of the
+/// model is: a large body far away leaves the countersink, the volume removed and the bodies
+/// changed as they are with a 1 mm cube there.
+#[test]
+fn a_far_body_does_not_change_a_countersunk_hole() {
+    let (small, small_changed) = lid_with_far_body([1.0, 1.0, 1.0]);
+    let (large, large_changed) = lid_with_far_body([178.0, 160.0, 12.5]);
+    assert!((small - large).abs() < 1e-3, "lid volume {small} with a 1 mm far body, {large} with a large one");
+    assert_eq!(small_changed, large_changed, "bodies changed");
+    assert_eq!(large_changed, json!(["lid"]), "only the lid is drilled");
+}

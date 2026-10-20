@@ -3,7 +3,8 @@
 //! by bounding boxes grown by the clearance, then by the bodies' meshes (which lie within their
 //! chord tolerance of the faces); distances are measured on the exact faces and edges
 //! ([`solidcraft_kernel::body_distance`]) and overlaps by intersecting the bodies. The pairs
-//! that are left run in parallel.
+//! that are left run in parallel. A pair whose bodies have not changed or moved since a call
+//! with the same settings measured it is not measured again ([`PairCache`]).
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -25,7 +26,7 @@ pub static COMMANDS: &[CommandSpec] = &[CommandSpec::new("inspect.clearance", "C
      below it is contact, 0) → overlaps: [{a, b, volume_mm3, area_mm2, bbox, center}]; near: [{a, b, distance_mm, from, to, overlap_mm3?: \
      a contact's shared volume below min_volume, exact?: false when measured on the meshes}], nearest by body (the same for pairs that overlap: 0); \
      nearest: {body: [{body, distance_mm}]}; unchecked: [{a, b, reason}] (pairs whose overlap could not be worked out); pairs_checked; \
-     pairs_pruned (ruled out by their boxes); ms. Distances are measured on the exact faces and edges, the meshes only rule pairs out",
+     pairs_reused (of those, measured by an earlier call: neither body changed or moved since); pairs_pruned (ruled out by their boxes); ms. Distances are measured on the exact faces and edges, the meshes only rule pairs out",
 )];
 
 /// Most bodies one call takes.
@@ -44,8 +45,20 @@ enum SkipWithin {
     Component,
 }
 
-/// What one pair came to.
+/// Most pairs [`PairCache`] keeps; it starts over when full.
+const MAX_CACHED: usize = 2 * MAX_PAIRS;
+/// The kernel's tries at intersecting a pin with its hole on one cylinder (each about a second
+/// on real parts; a plain pin on its axis needs one or two).
+const PIN_ATTEMPTS: usize = 4;
+
+/// Pairs measured before, by the two bodies' geometry where they stood
+/// ([`solidcraft_doc::ModelBody::geometry_key`]) and the settings that shape the result
+/// (clearance, smallest overlap, tolerance).
 #[derive(Default)]
+pub(crate) struct PairCache(HashMap<(u64, u64, [u64; 3]), PairResult>);
+
+/// What one pair came to.
+#[derive(Clone, Default)]
 struct PairResult {
     /// Shared volume, area, box and centre.
     overlap: Option<(f64, f64, Aabb3, solidcraft_geom::Vec3)>,
@@ -152,20 +165,40 @@ fn clearance(s: &mut Session, p: &Value) -> Result<Value> {
         }
         out
     };
-    let shapes: Vec<Option<DistanceShape>> = (0..n)
+    // The distance shapes are made only for bodies a pair or a nearest list measures; the boxes
+    // come from the meshes, grown by the chord tolerance as a shape's are.
+    let shapes: Vec<std::sync::OnceLock<Option<DistanceShape>>> = (0..n).map(|_| std::sync::OnceLock::new()).collect();
+    let shape = |i: usize| {
+        shapes
+            .get(i)?
+            .get_or_init(|| match (solid.get(i), meshes.get(i).and_then(Option::as_ref)) {
+                (Some(b), Some(m)) if flag(&used, i) => Some(DistanceShape::new(&b.body, m, b.display_tol())),
+                _ => None,
+            })
+            .as_ref()
+    };
+    let boxes: Vec<Aabb3> = (0..n)
         .map(|i| match (solid.get(i), meshes.get(i).and_then(Option::as_ref)) {
-            (Some(b), Some(m)) if flag(&used, i) => Some(DistanceShape::new(&b.body, m, b.display_tol())),
-            _ => None,
+            (Some(b), Some(m)) if flag(&used, i) => {
+                // Over the triangles with finite corners, as a shape's set of them is.
+                let mut bx = Aabb3::EMPTY;
+                for p in m.triangles.iter().filter_map(|t| m.tri(t)).filter(|p| p.iter().all(|v| v.is_finite())) {
+                    p.into_iter().for_each(|v| bx.add(v));
+                }
+                let chord = b.display_tol();
+                let g = solidcraft_geom::Vec3::new(1.0, 1.0, 1.0) * if chord.is_finite() && chord > 0.0 { chord } else { 0.0 };
+                if bx.is_empty() { bx } else { Aabb3 { min: bx.min - g, max: bx.max + g } }
+            }
+            _ => Aabb3::EMPTY,
         })
         .collect();
-    let shape = |i: usize| shapes.get(i).and_then(Option::as_ref);
-    let boxes: Vec<Aabb3> = (0..n).map(|i| shape(i).map_or(Aabb3::EMPTY, DistanceShape::bounds)).collect();
 
     // Pairs whose boxes, grown by half the clearance each, meet.
     let half = solidcraft_geom::Vec3::new(1.0, 1.0, 1.0) * (gap / 2.0);
     let grown: Vec<Aabb3> = boxes.iter().map(|b| if b.is_empty() { *b } else { Aabb3 { min: b.min - half, max: b.max + half } }).collect();
     let (close, truncated) = super::joints::overlapping_pairs(&grown, MAX_PAIRS);
-    let close: Vec<(usize, usize)> = close.into_iter().filter(|&(i, j)| allowed(i, j) && shape(i).is_some() && shape(j).is_some()).collect();
+    let has_mesh = |i: usize| meshes.get(i).is_some_and(Option::is_some);
+    let close: Vec<(usize, usize)> = close.into_iter().filter(|&(i, j)| allowed(i, j) && has_mesh(i) && has_mesh(j)).collect();
     let mut total = 0usize;
     for i in 0..n {
         for j in i + 1..n {
@@ -175,11 +208,45 @@ fn clearance(s: &mut Session, p: &Value) -> Result<Value> {
         }
     }
 
-    let results = solidcraft_kernel::map_with_local_pools(&close, usize::MAX, |&(i, j)| {
+    // Pairs measured before come from the cache; the rest are measured and kept.
+    let settings = [gap.to_bits(), min_volume.to_bits(), tolerance.to_bits()];
+    let cache_key = |i: usize, j: usize| Some((solid.get(i)?.geometry_key()?, solid.get(j)?.geometry_key()?, settings));
+    let mut results: Vec<Option<solidcraft_kernel::Result<PairResult>>> = {
+        let cache = s.clearance_cache.lock().ok();
+        close.iter().map(|&(i, j)| cache.as_ref().and_then(|c| c.0.get(&cache_key(i, j)?)).cloned().map(Ok)).collect()
+    };
+    let todo: Vec<usize> = (0..close.len()).filter(|&k| results.get(k).is_some_and(Option::is_none)).collect();
+    let reused = close.len() - todo.len();
+    // A body in many pairs is cut down to each pair's region from the same mesh of it.
+    let kept: Vec<std::sync::OnceLock<Option<solidcraft_kernel::Body>>> = (0..n).map(|_| std::sync::OnceLock::new()).collect();
+    let kept_body = |i: usize| kept.get(i)?.get_or_init(|| solid.get(i).map(|b| b.body.keeping_meshes())).as_ref();
+    let measured = solidcraft_kernel::map_with_local_pools(&todo, usize::MAX, |&k| {
+        let Some(&(i, j)) = close.get(k) else { return Ok(PairResult::default()) };
         let (Some(a), Some(b)) = (shape(i), shape(j)) else { return Ok(PairResult::default()) };
         let (Some(ba), Some(bb)) = (solid.get(i), solid.get(j)) else { return Ok(PairResult::default()) };
-        Ok(measure_pair(ba, a, bb, b, gap, min_volume, tolerance))
+        let (Some(ka), Some(kb)) = (kept_body(i), kept_body(j)) else { return Ok(PairResult::default()) };
+        Ok(measure_pair((ba, ka), a, (bb, kb), b, gap, min_volume, tolerance))
     });
+    if let Ok(mut cache) = s.clearance_cache.lock() {
+        for (&k, r) in todo.iter().zip(&measured) {
+            // A pair that could not be worked out is tried again next time.
+            let (Ok(r), Some(&(i, j))) = (r, close.get(k)) else { continue };
+            if r.unchecked.is_some() {
+                continue;
+            }
+            let Some(key) = cache_key(i, j) else { continue };
+            if cache.0.len() >= MAX_CACHED {
+                cache.0.clear();
+            }
+            cache.0.insert(key, r.clone());
+        }
+    }
+    for (k, r) in todo.into_iter().zip(measured) {
+        if let Some(slot) = results.get_mut(k) {
+            *slot = Some(r);
+        }
+    }
+    let results = results.into_iter().map(|r| r.unwrap_or_else(|| Ok(PairResult::default())));
 
     let mut known: HashMap<(usize, usize), f64> = HashMap::new();
     let (mut overlaps, mut near, mut unchecked) = (Vec::new(), Vec::new(), Vec::new());
@@ -240,6 +307,7 @@ fn clearance(s: &mut Session, p: &Value) -> Result<Value> {
         "unchecked": unchecked,
         "bodies": subjects.len(),
         "pairs_checked": close.len(),
+        "pairs_reused": reused,
         "pairs_pruned": total.saturating_sub(close.len()),
         "truncated": truncated > 0,
         "ms": started.elapsed().as_secs_f64() * 1000.0,
@@ -249,9 +317,9 @@ fn clearance(s: &mut Session, p: &Value) -> Result<Value> {
 /// One pair: its overlap when the meshes meet or one holds the other, otherwise its distance
 /// when it may be closer than `gap`.
 fn measure_pair(
-    ba: &solidcraft_doc::ModelBody,
+    (ba, ka): (&solidcraft_doc::ModelBody, &solidcraft_kernel::Body),
     a: &DistanceShape,
-    bb: &solidcraft_doc::ModelBody,
+    (bb, kb): (&solidcraft_doc::ModelBody, &solidcraft_kernel::Body),
     b: &DistanceShape,
     gap: f64,
     min_volume: f64,
@@ -275,41 +343,74 @@ fn measure_pair(
     if touching || holds(ba, bb) || holds(bb, ba) {
         // A pair whose shared part can't be worked out is reported, not passed as clear.
         let region = shared_region(a, b);
-        let (ca, cb) = (clipped(&ba.body, region), clipped(&bb.body, region));
-        let (shared, report) = solidcraft_kernel::capture_boolean_diagnostics(|| {
-            solidcraft_kernel::boolean(ca.as_ref().unwrap_or(&ba.body), cb.as_ref().unwrap_or(&bb.body), solidcraft_kernel::BoolOp::Intersect)
-        });
-        match shared {
-            Err(e) => {
-                out.unchecked = Some(e.to_string());
-                return out;
+        let (ca, cb) = (clipped(ka, region), clipped(kb, region));
+        // A pin of one in a hole of the other of its own size. On its very axis the boolean takes
+        // the two walls as one and answers plain ones at once, but with blends next to them it
+        // tries for minutes and gives up; a hair off the axis it cannot intersect them at all
+        // (and may pass the pin as clear). So a pin on its axis gets a few tries of the boolean
+        // first, and what the walls share is otherwise worked out apart, with a few tries of the
+        // boolean left for when that declines. The body left whole is cut down to where the
+        // other's piece is first, so that both meet only the faces there.
+        let candidate = solidcraft_kernel::coaxial_candidate(ca.as_ref().unwrap_or(ka), cb.as_ref().unwrap_or(kb));
+        let pin = candidate.is_some();
+        let (ca, cb) = match (ca, cb) {
+            (Some(x), None) if pin => {
+                let y = narrowed(kb, &x);
+                (Some(x), y)
             }
-            Ok(shared) => {
-                if let Some(reason) = report.unverified() {
-                    out.unchecked = Some(reason);
+            (None, Some(y)) if pin => (narrowed(ka, &y), Some(y)),
+            other => other,
+        };
+        // A body left whole is the copy that keeps its meshes: meeting several others at one
+        // size, it is meshed once for the booleans of all of them.
+        let (pa, pb) = (ca.as_ref().unwrap_or(ka), cb.as_ref().unwrap_or(kb));
+        let intersect = || {
+            solidcraft_kernel::capture_boolean_diagnostics(|| {
+                let run = || solidcraft_kernel::boolean(pa, pb, solidcraft_kernel::BoolOp::Intersect);
+                if pin { solidcraft_kernel::with_attempt_budget(PIN_ATTEMPTS, run) } else { run() }
+            })
+        };
+        let first = (candidate != Some(false)).then(intersect);
+        let answered = first.as_ref().is_some_and(|(r, report)| r.is_ok() && report.unverified().is_none());
+        let coaxial = if pin && !answered { solidcraft_kernel::coaxial_overlap(pa, pb) } else { None };
+        if let Some(o) = coaxial {
+            if o.volume > 0.0 {
+                out.overlap = Some((o.volume, o.area, o.bbox, o.centroid));
+            }
+        } else {
+            let (shared, report) = first.unwrap_or_else(intersect);
+            let failed =
+                |why: String| if pin { format!("a pin on one cylinder with its hole, whose walls could not be intersected ({why})") } else { why };
+            let shared = match shared {
+                Err(e) => {
+                    out.unchecked = Some(failed(e.to_string()));
                     return out;
                 }
-                if let Some(o) = shared {
-                    match measure_near_origin(&o, region.center()) {
-                        Ok(m) if !plausible(m.volume, m.centroid, m.bbox) => {
-                            out.unchecked = Some(format!(
-                                "the shared part came out malformed ({:.4} mm³ with its centre outside its own box), so it is not measured",
-                                m.volume
-                            ));
+                Ok(shared) => shared,
+            };
+            if let Some(reason) = report.unverified() {
+                out.unchecked = Some(failed(reason));
+                return out;
+            }
+            if let Some(o) = shared {
+                match measure_near_origin(&o, region.center()) {
+                    Ok(m) if !plausible(m.volume, m.centroid, m.bbox) => {
+                        out.unchecked = Some(format!(
+                            "the shared part came out malformed ({:.4} mm³ with its centre outside its own box), so it is not measured",
+                            m.volume
+                        ));
+                        return out;
+                    }
+                    Ok(m) => {
+                        if let Some(reason) = union_disagrees(pa, pb, m.volume, region.center()) {
+                            out.unchecked = Some(reason);
                             return out;
                         }
-                        Ok(m) => {
-                            let (wa, wb) = (ca.as_ref().unwrap_or(&ba.body), cb.as_ref().unwrap_or(&bb.body));
-                            if let Some(reason) = union_disagrees(wa, wb, m.volume, region.center()) {
-                                out.unchecked = Some(reason);
-                                return out;
-                            }
-                            out.overlap = Some((m.volume, m.area, m.bbox, m.centroid));
-                        }
-                        Err(e) => {
-                            out.unchecked = Some(e.to_string());
-                            return out;
-                        }
+                        out.overlap = Some((m.volume, m.area, m.bbox, m.centroid));
+                    }
+                    Err(e) => {
+                        out.unchecked = Some(e.to_string());
+                        return out;
                     }
                 }
             }
@@ -360,6 +461,35 @@ fn shared_region(a: &DistanceShape, b: &DistanceShape) -> Aabb3 {
 /// body is small and its faces there are the same faces. `None`: use the whole body.
 fn clipped(body: &solidcraft_kernel::Body, region: Aabb3) -> Option<solidcraft_kernel::Body> {
     if region.is_empty() || body.size() <= 4.0 * region.diagonal() {
+        return None;
+    }
+    let cut = solidcraft_kernel::box_solid(region.min, region.max).ok()?;
+    let (r, report) = solidcraft_kernel::capture_boolean_diagnostics(|| solidcraft_kernel::boolean(body, &cut, solidcraft_kernel::BoolOp::Intersect));
+    match r {
+        Ok(Some(c)) if report.unverified().is_none() => Some(c),
+        _ => None,
+    }
+}
+
+/// `body` cut down to where it may meet `piece` (their boxes' common part, grown as
+/// [`shared_region`] grows it), when that leaves part of it out. `None`: use the whole body.
+fn narrowed(body: &solidcraft_kernel::Body, piece: &solidcraft_kernel::Body) -> Option<solidcraft_kernel::Body> {
+    let bounds = |b: &solidcraft_kernel::Body| b.tessellate_with((b.size() * 1e-3).max(1e-4), false).ok().map(|m| m.bounds());
+    let (x, y) = (bounds(body)?, bounds(piece)?);
+    let (min, max) = (x.min.max(y.min), x.max.min(y.max));
+    if x.is_empty() || y.is_empty() || !(min.x <= max.x && min.y <= max.y && min.z <= max.z) {
+        return None;
+    }
+    let grow = 1.0 + 0.05 * min.dist(max);
+    let g = solidcraft_geom::Vec3::new(grow, grow, grow);
+    let region = Aabb3 { min: min - g, max: max + g };
+    if region.min.x <= x.min.x
+        && region.min.y <= x.min.y
+        && region.min.z <= x.min.z
+        && x.max.x <= region.max.x
+        && x.max.y <= region.max.y
+        && x.max.z <= region.max.z
+    {
         return None;
     }
     let cut = solidcraft_kernel::box_solid(region.min, region.max).ok()?;

@@ -653,6 +653,13 @@ fn solve_from(
     None
 }
 
+/// Contacts of a convex chamfer in a cross-section normal to a straight edge. The caller
+/// checks that sweeping the section stays on both supports within the fitting tolerance.
+pub(crate) fn straight_chamfer_contacts(f1: &mt::Face, f2: &mt::Face, p: Vec3, d: Vec3, r: f64, tolerance: f64) -> Option<(Vec3, Vec3)> {
+    let section = solve(&[f1], &[f2], p, d, r, -1.0, 0.0, None, tolerance)?;
+    Some((section.q1, section.q2))
+}
+
 /// The section whose two contacts are `chord` apart: the ball's radius is `chord / (2 sin(ψ/2))`
 /// for the `ψ` between the two outward normals where it touches, `|q1 − q2| = 2 r sin(ψ/2)`. The
 /// normals turn as the ball grows against curved faces, so the width is measured on the solved
@@ -931,7 +938,7 @@ fn revolve(ctrl: [mt::Vector4; 3], c: Vec3, axis: Vec3, angle: f64) -> Option<mt
 
 /// Whether the edge is straight: a line, or a curve on the segment between its ends within
 /// `tol` (an earlier blend's contact along a straight edge is a fitted curve).
-fn straight(e: &mt::Edge, tol: f64) -> bool {
+pub(crate) fn straight(e: &mt::Edge, tol: f64) -> bool {
     use mt::{BoundedCurve, ParametricCurve};
     let c = e.curve();
     if matches!(c, mt::Curve::Line(_)) {
@@ -2236,7 +2243,7 @@ fn curve_blend_sized(solid: &Solid, ids: &[mt::EdgeID], size: f64, size_law: Siz
 
 #[path = "curvecorner.rs"]
 mod corner;
-pub(crate) use corner::corner_blend_style;
+pub(crate) use corner::{corner_blend_style, param_on};
 // The planar corner builder the G2 corner work left in place of `corner_blend_style`'s sphere.
 #[allow(unused_imports)]
 pub(crate) use corner::corner_blend;

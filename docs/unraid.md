@@ -15,7 +15,7 @@ The fork is hosted at [denara/solidcraft-unraid](https://github.com/denara/solid
 The public Unraid template names a new container `SolidCraft`; the existing local Compose service,
 image tags, command names, data format and environment variables retain compatibility.
 The first prototype used upstream commit `af536a7`. The current validated snapshot is
-`5122b98af3fc5fe287c2e6d4beee8587a503244b`, packaged as
+`e9b1a077d7e33420791791c651f2e293962a2da1`, packaged as
 `solvecraft-unraid:upstream-5122b98a`. See [update records](unraid-updates.md) for checks,
 the transferable image archive and installation instructions for this update.
 
@@ -75,7 +75,7 @@ restart an Unraid installation automatically.
 | Address | Purpose |
 | --- | --- |
 | `/` | Original browser CAD app; calculations and designs stay in the browser |
-| `/workspace` | Protected, read-only overview of saved MCP files and active sessions |
+| `/workspace` | Protected file overview, confirmed deletion, streamed folder ZIPs and active sessions |
 | `/workspace/api` | The same bounded overview as JSON; requires a dashboard login |
 | `/mcp` | Bearer-authenticated Streamable HTTP MCP; a separate CAD process per session |
 | `/files/NAME` | Authenticated GET download / PUT upload of persistent server files |
@@ -491,3 +491,35 @@ This snapshot writes format 27, with pending boundary-surface-network and rib-no
 The HTTP gateway launches native MCP with an explicit /data/files scope and --quiet. This keeps upstream file confinement active without logging private per-session paths. Browser build URLs are relative, matching upstream's offline/update support; Web and HTTP MCP remain independent.
 
 The headless MCP backend also provides bounded CPU image jobs through render.preflight/start/status/cancel/export. Their images and captured scenes belong to the MCP session. Library and render export file parameters stay confined to /data/files; the browser continues to use its own independent design.
+
+
+### Workspace file management
+
+Workspace deletion is an explicit exception to the otherwise observational dashboard.
+Choose **Löschen …** on a file or an **Echter Ordner** action, review its exact workspace
+path, total file/subfolder counts and bytes, tick the confirmation and choose
+**Endgültig löschen**. There is no recycle bin. The cookie-bound confirmation expires
+after five minutes. A changed revision, active MCP project/source file, concurrent
+write or ZIP transfer prevents deletion; the CAD session is never ended by this action.
+Virtual filename groups have no folder deletion or ZIP action. Search filters do not
+change the scope of a real folder action. Empty real folders remain visible. The
+live inventory caps directories at 256 and 64 KiB of directory names, marking a
+truncated view explicitly; folder confirmations and ZIPs inspect the complete target
+within their separate manifest limits.
+
+**Als ZIP herunterladen** streams a real folder and its descendants directly from
+Rust as ZIP64 with stored entries (no additional compression), safe relative Unicode
+names and empty directories. It creates neither a complete in-memory archive nor a
+server-side ZIP file. Limits: two simultaneous downloads, 2048 entries, 1 MiB total
+path names, 16 GiB uncompressed data and the existing workspace depth/name limits.
+Deletion uses the shared strong file revision limit of 256 MiB per file. Hidden,
+reserved, symlinked or special entries cause the whole action to be rejected; they
+are never silently included or deleted. Data transfer uses 32 KiB chunks and a queue of two chunks, alongside bounded
+read/response buffers and ZIP entry metadata. The browser download must
+complete successfully before an archive is used. Logout, expiry, disconnect, a stalled
+consumer or an external filesystem change interrupts the response. Matching gateway
+writes are rejected for the duration of the transfer; unrelated projects remain usable.
+
+Use `packaging/unraid/workspace-actions-test.ps1` only against a labelled disposable
+candidate container and fresh test volume. Existing model previews and independent
+browser CAD remain read-only with respect to server models.

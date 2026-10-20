@@ -9,15 +9,18 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
+mod aabb2;
 mod arcfit;
 pub mod blend;
 pub mod brep;
 pub mod bspline;
 mod bvh;
+mod chain;
 pub mod compare;
 pub mod env;
 pub mod fill;
 pub mod fill_general;
+mod grid;
 mod mesh;
 pub mod mesh_distance;
 pub mod network;
@@ -30,9 +33,12 @@ pub mod tspline;
 mod unit_vec3;
 mod vec;
 
+pub use aabb2::Aabb2;
 pub use arcfit::MAX_FIT_PIECES;
 pub use blend::hermite_bezier;
 pub use bvh::{Bvh, MeshIndex};
+pub use chain::{Chain, Closed, Ends, Open, Path, Planar, Ring};
+pub use grid::Grid;
 pub use mesh::{Aabb3, BoxedTriangle, InsideIndex, MassProperties, Mesh, MeshMeasure, find_close_pair};
 pub use plane::Plane;
 pub use profile::{Loop2, MAX_BEZIER_CTRL, MAX_BEZIER_DEGREE, MAX_DERIVATIVE_ORDER, Region2, Seg2, bezier, regions_apart};

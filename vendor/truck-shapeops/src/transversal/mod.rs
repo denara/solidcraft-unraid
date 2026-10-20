@@ -9,4 +9,4 @@ pub use intersection_curve::IntersectionCurveWithParameters;
 mod loops_store;
 mod polyline_construction;
 pub use history::{EdgeOrigin, FaceIndex, FaceOrigin, History};
-pub use integrate::{and, and_with_history, or, or_with_history, ShapeOpsCurve, ShapeOpsSurface};
+pub use integrate::{and, and_with_history, and_with_history_meshed, meshes, or, or_with_history, MeshedShell, ShapeOpsCurve, ShapeOpsSurface};

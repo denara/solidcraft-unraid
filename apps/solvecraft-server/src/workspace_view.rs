@@ -1,4 +1,4 @@
-//! Server-rendered, read-only overview of persistent files and independent MCP sessions.
+//! Server-rendered file management and overview of persistent files and independent MCP sessions.
 
 use std::fmt::Write as _;
 
@@ -60,6 +60,8 @@ fn icon(source: &str) -> String {
 }
 
 const CSS: &str = r#"
+.folderactions{display:flex;align-items:center;flex-wrap:wrap;gap:14px;color:var(--dim);font-size:12px}.folderactions>span{margin-right:auto}.danger{color:#ffaeae}.deletewarning{border:1px solid #805052;background:#332125;padding:16px;border-radius:8px;margin:20px 0}.deleteform{display:flex;gap:16px;align-items:center;flex-wrap:wrap}.deleteform .primary{background:#a13e48;color:white}.deleteform label{width:100%}
+
 :root{color-scheme:dark;--bg:#10151b;--panel:#171e26;--raised:#1e2731;--line:#2b3541;--text:#ecf1f5;--dim:#9eafbf;--green:#6cddb4;--amber:#f1c36b;--blue:#9bc8fa}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);font-family:Segoe UI,system-ui,sans-serif;color:var(--text);font-size:14px;line-height:1.5}button,input,select{font:inherit}button,a,select{touch-action:manipulation}button{color:var(--text);cursor:pointer}a{color:inherit}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--green);outline-offset:3px}
 .top{min-height:76px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:20px;padding:16px 40px}.brand{display:flex;align-items:center;gap:12px;font-weight:700;font-size:20px;letter-spacing:-.4px;text-decoration:none}.mark{height:34px;width:34px;border:2px solid var(--green);border-radius:9px;display:grid;place-items:center;color:var(--green);font-size:22px}.brandnote{font-size:12px;color:var(--dim);font-weight:400;margin-left:12px;border-left:1px solid var(--line);padding-left:18px}.topright{display:flex;align-items:center;gap:20px;color:var(--dim);font-size:12px}.topright form{margin:0}.logout{border:0;background:transparent;color:var(--dim);font-size:12px;padding:6px 0}
@@ -219,7 +221,7 @@ fn file_row(html: &mut String, file: &Value) {
     } else {
         ""
     };
-    let short_name = name.rsplit('/').next().unwrap_or(name);
+    let short_name = name.split_once('/').map(|(_, rest)| rest).unwrap_or(name);
     let details = download_url(name).replacen("/workspace/files/", "/workspace/details/", 1);
     let _ = write!(
         html,
@@ -262,7 +264,9 @@ fn file_row(html: &mut String, file: &Value) {
         size(number(file, "size_bytes"))
     );
     edit_link(html, file, "action", "Bearbeiten ↗");
-    let _ = write!(html, "<a class=\"action\" href=\"{}\" download>Download ↓</a></div></td></tr>", download_url(name));
+    let _ = write!(html, "<a class=\"action\" href=\"{}\" download>Download ↓</a>", download_url(name));
+    delete_link(html, name);
+    html.push_str("</div></td></tr>");
 }
 
 fn is_png(name: &str) -> bool {
@@ -338,16 +342,21 @@ fn session_row(html: &mut String, session: &Value) {
     html.push_str("</section>");
 }
 
-fn project_files(html: &mut String, files: &[Value]) {
+fn project_files(html: &mut String, files: &[Value], directories: &[Value]) {
     let mut projects = std::collections::BTreeMap::<String, Vec<&Value>>::new();
     for file in files.iter().take(2000) {
         let project = file.get("project").unwrap_or(&Value::Null);
         let id = text(project, "id");
         projects.entry(if id.is_empty() { text(file, "name").into() } else { id.into() }).or_default().push(file);
     }
+    for directory in directories.iter().filter_map(Value::as_str) {
+        let name = directory.split('/').next().unwrap_or(directory);
+        projects.entry(format!("directory:{name}")).or_default();
+    }
     for (id, files) in projects {
-        let Some(first) = files.first() else { continue };
-        let project = first.get("project").unwrap_or(&Value::Null);
+        let fallback = serde_json::json!({"name":id.strip_prefix("directory:").unwrap_or(&id),"basis":"directory"});
+        let first = files.first().copied().unwrap_or(&Value::Null);
+        let project = first.get("project").unwrap_or(&fallback);
         let name = text(project, "name");
         let name = if text(project, "basis") == "ungrouped" {
             "Weitere Dateien"
@@ -371,6 +380,18 @@ fn project_files(html: &mut String, files: &[Value]) {
             files.len(),
             if files.len() == 1 { "" } else { "en" }
         );
+        if text(project, "basis") == "directory" {
+            // Folder actions use authoritative filesystem paths, never a virtual stem.
+            let prefix = format!("{name}/");
+            for directory in
+                std::iter::once(name).chain(directories.iter().filter_map(Value::as_str).filter(|directory| directory.starts_with(&prefix)))
+            {
+                html.push_str("<tr><td colspan=\"5\"><div class=\"folderactions\">");
+                let _ = write!(html, "<span>Echter Ordner: <strong>{}</strong></span>", escape(directory));
+                folder_actions(html, directory);
+                html.push_str("</div></td></tr>");
+            }
+        }
         for file in files {
             file_row(html, file);
         }
@@ -394,7 +415,7 @@ pub fn page(snapshot: &Value, query: &str, kind: &str) -> String {
     }
     html.push_str("</select><button class=\"secondary\" type=\"submit\">Anzeigen</button></form></section><noscript><p class=\"note\">Aktualisiere diese Seite, um neue Dateien und Sitzungsänderungen zu sehen. Dateidetails lassen sich als eigene Seite öffnen.</p></noscript><div id=\"workspace-live\">");
     html.push_str(&fragment(snapshot, query, kind));
-    html.push_str("</div><dialog id=\"file-dialog\" class=\"filedialog\" aria-labelledby=\"file-dialog-title\"><div class=\"dialoghead\"><h2 id=\"file-dialog-title\">Dateidetails</h2><button id=\"file-dialog-close\" class=\"dialogclose\" type=\"button\" aria-label=\"Dateidetails schließen\">×</button></div><div id=\"file-dialog-content\"></div></dialog>");
+    html.push_str("</div><dialog id=\"file-dialog\" class=\"filedialog\" aria-labelledby=\"file-dialog-title\"><div class=\"dialoghead\"><h2 id=\"file-dialog-title\">Dateidetails</h2><button id=\"file-dialog-close\" class=\"dialogclose\" type=\"button\" aria-label=\"Dialog schließen\">×</button></div><div id=\"file-dialog-content\"></div></dialog>");
     html.push_str("<dialog id=\"observer-dialog\" class=\"filedialog observerdialog\" aria-labelledby=\"observer-title\" aria-describedby=\"observer-note\"><div class=\"dialoghead\"><h2 id=\"observer-title\">Live-Vorschau der MCP-Sitzung</h2><button id=\"observer-close\" class=\"dialogclose\" type=\"button\" autofocus aria-label=\"Live-Vorschau schließen\">×</button></div><div class=\"observerbody\"><div id=\"observer-status\" class=\"observerstatus\" role=\"status\" aria-live=\"polite\"><span class=\"dot\" aria-hidden=\"true\"></span><span id=\"observer-status-text\">Vorschau wird verbunden …</span></div><figure class=\"observerstage\"><img id=\"observer-image\" alt=\"Aktueller Modellstand der beobachteten MCP-Sitzung\" decoding=\"async\" width=\"800\" height=\"500\" hidden><img id=\"observer-next\" alt=\"Aktueller Modellstand der beobachteten MCP-Sitzung\" decoding=\"async\" width=\"800\" height=\"500\" hidden><figcaption id=\"observer-placeholder\" class=\"observerplaceholder\">Das erste Modellbild wird vorbereitet.</figcaption></figure><div id=\"observer-meta\" class=\"observermeta\"></div><div id=\"observer-warning\" class=\"observernote\" role=\"note\"></div><p id=\"observer-note\" class=\"observernote\">Nur ansehen · Echte Bilder des Sitzungsmodells, auch vor dem Speichern. Neue Bilder erscheinen nach abgeschlossenen Befehlen oder Stapeln; während einer Berechnung bleibt der vorherige Stand sichtbar. Die Ansicht verändert weder Modell noch Kamera der KI.</p></div></dialog></main><script type=\"module\" src=\"/workspace/boot.js\"></script></body></html>");
     html
 }
@@ -507,7 +528,14 @@ pub fn fragment(snapshot: &Value, query: &str, kind: &str) -> String {
         "<div class=\"work\"><section class=\"panel file-explorer\" aria-labelledby=\"files-heading\"><div class=\"panelhead\"><div><h2 id=\"files-heading\">Projekte &amp; Dateien <span class=\"counter\">{}</span></h2><div class=\"sub\">Im gemeinsamen Serverspeicher</div></div></div><p class=\"filesintro\">Projektordner bündeln ihre Dateien und Unterordner. Dateien im Hauptordner werden nach passenden Modell-/Exportnamen virtuell gruppiert.</p>",
         files.len()
     );
-    project_files(&mut html, files);
+    let directories = entries(snapshot, "directories")
+        .iter()
+        .filter(|directory| {
+            !filtered || directory.as_str().is_some_and(|name| files.iter().any(|file| text(file, "name").starts_with(&format!("{name}/"))))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    project_files(&mut html, files, &directories);
     if files.is_empty() {
         html.push_str(if filtered {
             "<div class=\"empty\"><strong>Keine passenden Dateien</strong>Ändere den Suchbegriff oder den Dateityp. <a href=\"/workspace\">Alle Dateien anzeigen</a></div>"
@@ -555,13 +583,65 @@ pub fn fragment(snapshot: &Value, query: &str, kind: &str) -> String {
     if sessions.is_empty() && used == 0 {
         html.push_str("<div class=\"empty\"><strong>Alle Sitzungen frei</strong>Sobald sich ein MCP-Client verbindet, erscheint seine Sitzung hier automatisch.</div>");
     }
-    html.push_str("</div><div class=\"unsaved\">Ungespeicherte Änderungen gehen beim Sitzungsende oder Container-Neustart verloren.</div></aside></div><div class=\"bottom\"><section class=\"panel explain\"><h3>Was bedeutet „in Bearbeitung“?</h3><p>Eine Sitzung enthält bestätigte Änderungen, die noch nicht in einer Datei gespeichert sind. „Geöffnet“ bedeutet nur, dass eine Sitzung eine Datei geladen hat. „Führt aus“ beschreibt eine gerade laufende Anfrage. Ein unbekannter Änderungsstatus zählt nicht als bestätigte Bearbeitung.</p><div class=\"legend\"><span><span class=\"dot amber\" aria-hidden=\"true\"></span> Ungespeichert / führt aus</span><span><span class=\"dot blue\" aria-hidden=\"true\"></span> Neuer Entwurf</span><span><span class=\"dot\" aria-hidden=\"true\"></span> Sitzungsplatz belegt</span></div></section><section class=\"panel explain\"><h3>Browser-CAD bleibt unabhängig</h3><p>Diese Übersicht zeigt Dateien und Sitzungen des MCP-Dienstes. Deine Browsermodelle leben weiterhin im Browser. „Bearbeiten“ öffnet eine Kopie des gespeicherten Modells in einem neuen CAD-Tab. Alternativ kannst du Dateien herunterladen und selbst importieren.</p><div class=\"small\">Lesende Übersicht · Sitzungen werden hier nicht beendet</div></section></div><footer><span>SolidCraft · Inoffizielle Unraid-Integration</span><span>Gespeicherte Dateistände · Zeiten in UTC</span></footer>");
+    html.push_str("</div><div class=\"unsaved\">Ungespeicherte Änderungen gehen beim Sitzungsende oder Container-Neustart verloren.</div></aside></div><div class=\"bottom\"><section class=\"panel explain\"><h3>Was bedeutet „in Bearbeitung“?</h3><p>Eine Sitzung enthält bestätigte Änderungen, die noch nicht in einer Datei gespeichert sind. „Geöffnet“ bedeutet nur, dass eine Sitzung eine Datei geladen hat. „Führt aus“ beschreibt eine gerade laufende Anfrage. Ein unbekannter Änderungsstatus zählt nicht als bestätigte Bearbeitung.</p><div class=\"legend\"><span><span class=\"dot amber\" aria-hidden=\"true\"></span> Ungespeichert / führt aus</span><span><span class=\"dot blue\" aria-hidden=\"true\"></span> Neuer Entwurf</span><span><span class=\"dot\" aria-hidden=\"true\"></span> Sitzungsplatz belegt</span></div></section><section class=\"panel explain\"><h3>Browser-CAD bleibt unabhängig</h3><p>Diese Übersicht zeigt Dateien und Sitzungen des MCP-Dienstes. Deine Browsermodelle leben weiterhin im Browser. „Bearbeiten“ öffnet eine Kopie des gespeicherten Modells in einem neuen CAD-Tab. Alternativ kannst du Dateien herunterladen und selbst importieren.</p><div class=\"small\">Dateien nur mit Bestätigung löschen · Sitzungen werden hier nicht beendet</div></section></div><footer><span>SolidCraft · Inoffizielle Unraid-Integration</span><span>Gespeicherte Dateistände · Zeiten in UTC</span></footer>");
+    html
+}
+
+fn delete_link(html: &mut String, name: &str) {
+    let url = download_url(name).replacen("/workspace/files/", "/workspace/delete/", 1);
+    let _ = write!(html, "<a class=\"action danger\" href=\"{url}\" data-file-details=\"{url}\">Löschen …</a>");
+}
+
+fn folder_actions(html: &mut String, name: &str) {
+    let url = download_url(name).replacen("/workspace/files/", "/workspace/archive/", 1);
+    let _ = write!(html, "<a class=\"action\" href=\"{url}\" download>Als ZIP herunterladen ↓</a>");
+    delete_link(html, name);
+}
+
+pub(crate) fn action_failure(message: &str) -> String {
+    let mut html = start("Dateiaktion nicht möglich", None);
+    let _ = write!(
+        html,
+        "<section id=\"file-details\" class=\"panel detailsbody detailpanel\"><h1>Dateiaktion nicht möglich</h1><p class=\"error\" role=\"alert\">{}</p><a class=\"secondary\" href=\"/workspace\">Zurück zum Arbeitsbereich</a></section></main></body></html>",
+        escape(message)
+    );
+    html
+}
+
+pub(crate) fn delete_confirmation(path: &str, csrf: &str, ticket: &str, manifest: &crate::workspace_actions::manifest::Manifest) -> String {
+    let mut html = start("Löschen bestätigen", Some(csrf));
+    let folder = manifest.entries.first().is_some_and(|entry| entry.directory);
+    let label = if folder { "Ordner" } else { "Datei" };
+    let object_label = if folder { "diesen Ordner" } else { "diese Datei" };
+    let _ = write!(
+        html,
+        "<div class=\"panel detailpanel\"><section id=\"file-details\" class=\"detailsbody\"><div class=\"eyebrow\">Löschen bestätigen</div><h1>{label} wirklich löschen?</h1><p class=\"detailspath\">{}</p><div class=\"deletewarning\">Dieser Vorgang entfernt den bestätigten Inhalt endgültig aus dem Serverspeicher. Es gibt keinen Papierkorb.</div><dl class=\"detailgrid\"><dt>Dateien</dt><dd>{}</dd><dt>Unterordner</dt><dd>{}</dd><dt>Gesamtgröße</dt><dd>{}</dd></dl><p class=\"detailnote\">Es wird der vollständige echte Pfad geprüft, unabhängig von Suchfiltern. Ändert sich der Inhalt oder nutzt eine MCP-Sitzung das Projekt, wird das Löschen abgelehnt. Die Bestätigung gilt fünf Minuten.</p><form class=\"deleteform\" method=\"post\" action=\"/workspace/delete\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><input type=\"hidden\" name=\"ticket\" value=\"{}\"><input type=\"hidden\" name=\"path\" value=\"{}\"><label><input type=\"checkbox\" name=\"confirm\" value=\"delete\" required> Ich möchte {object_label} mit dem angezeigten Inhalt endgültig löschen.</label><button class=\"primary\" type=\"submit\">Endgültig löschen</button><a class=\"secondary\" href=\"/workspace\">Abbrechen</a></form><a class=\"detailfallback\" href=\"/workspace\">Zurück zum Arbeitsbereich</a></section></div></main></body></html>",
+        escape(path),
+        manifest.files,
+        manifest.folders.saturating_sub(usize::from(folder)),
+        size(manifest.bytes),
+        escape(csrf),
+        escape(ticket),
+        escape(path)
+    );
     html
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_real_folders_have_actions_but_legacy_virtual_groups_never_do() {
+        let snapshot = serde_json::json!({"directories":["Demo","Demo/empty"],"files":[{"name":"part.step","kind":"export","project":{"id":"stem:part","name":"part","basis":"file_stem"}}],"sessions":[]});
+        let html = page(&snapshot, "", "");
+        assert!(html.contains("/workspace/archive/Demo/empty"));
+        assert!(html.contains("/workspace/delete/Demo"));
+        assert!(html.contains("Virtuelle Gruppe aus Dateinamen"));
+        assert!(!html.contains("/workspace/archive/part"));
+        assert!(!html.contains("/workspace/delete/part\""));
+        assert!(!html.contains("<details open"));
+    }
 
     #[test]
     fn parameter_only_unsaved_design_is_a_draft() {

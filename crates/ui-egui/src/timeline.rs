@@ -2,7 +2,7 @@
 
 pub(crate) use crate::icons::glyphs::transport_glyph;
 use egui::{Rect, Sense, Stroke, UiBuilder, pos2, vec2};
-use serde_json::json;
+use serde_json::{Value, json};
 use solidcraft_engine::doc::{
     FeatureKind, PlaneRef, SketchId,
     construct::{AxisDef, PointDef},
@@ -150,11 +150,18 @@ pub(crate) fn delete_feature(app: &mut SolveApp, id: u64) {
     delete_features(app, vec![id]);
 }
 
+/// Check what deleting `ids` takes with it or makes fail (off the window thread when that takes a
+/// while, #2678), then delete them or ask first.
 pub(crate) fn delete_features(app: &mut SolveApp, ids: Vec<u64>) {
+    let checks = ids.iter().map(|id| ("timeline.dependents".to_string(), json!({ "feature": id }))).collect();
+    app.check_delete(checks, crate::deferred::AfterCheck::Timeline(ids));
+}
+
+/// [`delete_features`] once each feature's `timeline.dependents` report is in.
+pub(crate) fn delete_checked_features(app: &mut SolveApp, ids: Vec<u64>, reports: &[Value]) {
     let mut with = std::collections::BTreeSet::new();
     let mut fail = std::collections::BTreeSet::new();
-    for id in &ids {
-        let deps = app.session.execute("timeline.dependents", &json!({ "feature": id })).unwrap_or_default();
+    for deps in reports {
         for (key, output) in [("deleted_with_it", &mut with), ("would_fail", &mut fail)] {
             output
                 .extend(deps.get(key).and_then(|value| value.as_array()).into_iter().flatten().filter_map(|value| value.as_str().map(String::from)));

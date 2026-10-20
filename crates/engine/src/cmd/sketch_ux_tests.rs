@@ -1524,3 +1524,22 @@ fn the_first_dimension_does_not_scale_a_sketch_that_has_a_size() {
     let out = run(&mut s, "sketch.dimension", json!({"entities": ["l1", "l2"], "value": "60 deg", "scale_sketch": true}));
     assert!(out.get("scaled").is_none(), "{out}");
 }
+
+/// The cursor fallback shares the held solves' frame budget; a scripted drag can finish later.
+#[test]
+fn cursor_fallback_respects_an_exhausted_live_frame_budget() {
+    let mut s = new_sketch();
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [-10, 0]], "ids": ["crank"], "infer": false}));
+    run(&mut s, "sketch.dimension", json!({"entities": ["crank"], "value": 10}));
+    let target = v(-10.0, 16.0);
+    let nearest = target * (10.0 / target.len());
+    super::drag::last_drag::with_frame_work(0, || {
+        run(&mut s, "sketch.drag", json!({"entity": "crank.end", "from": [-10, 0], "to": [target.x, target.y], "live": true}));
+    });
+    let at = pt(&s, "crank.end");
+    assert!(at.dist(nearest) > 1.0, "an exhausted frame must not start unbudgeted cursor work: {at:?}");
+    assert!((at.len() - 10.0).abs() < 1e-6);
+    assert!(s.model.state().sketch(s.active_sketch.unwrap()).unwrap().report.ok());
+    run(&mut s, "sketch.drag", json!({"entity": "crank.end", "from": [at.x, at.y], "to": [target.x, target.y], "live": false}));
+    assert!(pt(&s, "crank.end").dist(nearest) < 1e-4, "scripted motion retains the full cursor objective");
+}

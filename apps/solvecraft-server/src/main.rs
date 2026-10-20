@@ -9,6 +9,7 @@ mod paths;
 mod projects;
 mod sessions;
 mod workspace;
+mod workspace_actions;
 mod workspace_files;
 mod workspace_live;
 mod workspace_media;

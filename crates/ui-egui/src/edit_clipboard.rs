@@ -42,16 +42,39 @@ fn sketch_selection(app: &SolveApp) -> Vec<String> {
 
 /// Is there something Copy would copy?
 pub fn can_copy(app: &SolveApp) -> bool {
-    if app.session.active_sketch.is_some() { !sketch_selection(app).is_empty() } else { !crate::timeline::selected_feature_ids(app).is_empty() }
+    if app.session.active_sketch.is_some() {
+        !sketch_selection(app).is_empty()
+    } else {
+        app.tree.picked_components == [0] || !crate::timeline::selected_feature_ids(app).is_empty()
+    }
 }
 
 /// Is there something Paste would paste here?
 pub fn can_paste(app: &SolveApp) -> bool {
-    if app.session.active_sketch.is_some() { app.session.sketch_clipboard.is_some() } else { !app.session.clipboard.is_empty() }
+    if app.session.active_sketch.is_some() {
+        app.session.sketch_clipboard.is_some()
+    } else {
+        app.linked_design_clipboard.is_some() || !app.session.clipboard.is_empty()
+    }
+}
+
+/// Copy the saved root design. The path stays in this app, outside per-document sessions.
+pub fn copy_design(app: &mut SolveApp) -> bool {
+    let Some(path) = app.session.path.clone().filter(|_| !app.session.is_dirty()) else {
+        app.set_status("Save this design before copying it as a linked component", true);
+        return false;
+    };
+    app.linked_design_clipboard = Some(path);
+    leave_text(format!("SolidCraft linked design: {}", app.session.doc.name));
+    app.set_status("Copied design: switch to the assembly and paste to insert a linked component", false);
+    true
 }
 
 /// Copy the selection: sketch geometry in a sketch, otherwise timeline features.
 pub fn copy(app: &mut SolveApp) -> bool {
+    if app.session.active_sketch.is_none() && app.tree.picked_components == [0] {
+        return copy_design(app);
+    }
     if app.session.active_sketch.is_some() {
         let entities = sketch_selection(app);
         if entities.is_empty() {
@@ -59,6 +82,7 @@ pub fn copy(app: &mut SolveApp) -> bool {
             return false;
         }
         let Ok(out) = app.run("sketch.copy", json!({ "entities": entities })) else { return false };
+        app.linked_design_clipboard = None;
         let n = out.get("curves").and_then(Value::as_u64).unwrap_or(0) + out.get("points").and_then(Value::as_u64).unwrap_or(0);
         let k = out.get("constraints").and_then(Value::as_u64).unwrap_or(0);
         let text = format!("SolidCraft sketch geometry: {n} entities, {k} constraints and dimensions");
@@ -72,6 +96,7 @@ pub fn copy(app: &mut SolveApp) -> bool {
         return false;
     }
     let Ok(out) = app.run("timeline.copy", json!({ "features": features })) else { return false };
+    app.linked_design_clipboard = None;
     let names: Vec<&str> = out.get("copied").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
     app.set_status(format!("Copied {}", names.join(", ")), false);
     leave_text(format!("SolidCraft features: {}", names.join(", ")));
@@ -90,6 +115,7 @@ pub fn cut(app: &mut SolveApp) -> bool {
         return false;
     }
     let Ok(out) = app.run("sketch.cut", json!({ "entities": entities })) else { return false };
+    app.linked_design_clipboard = None;
     let n = out.get("curves").and_then(Value::as_u64).unwrap_or(0) + out.get("points").and_then(Value::as_u64).unwrap_or(0);
     app.set_status(format!("Cut {n} sketch entities"), false);
     leave_text(format!("SolidCraft sketch geometry: {n} entities"));
@@ -125,11 +151,56 @@ pub fn paste(app: &mut SolveApp, at: Option<Pos2>) -> bool {
         app.set_status(format!("Pasted {n} sketch entities (selected: drag them, or press M to move them)"), false);
         return true;
     }
+    if let Some(path) = app.linked_design_clipboard.clone() {
+        let (parent_path, translate) = paste_placement(app, at);
+        let Ok(out) = app.run("component.insert_design", json!({"path": path, "reuse": true, "translate":translate})) else { return false };
+        if let Some(id) = out.get("occurrence").and_then(Value::as_u64) {
+            let mut movement = crate::browser::OccMove::new(id);
+            movement.path = parent_path;
+            movement.path.push(id);
+            movement.baseline = app.session.doc.occurrences.iter().find(|o| o.id == id).map(|o| o.transform);
+            app.tree.occurrence_move = Some(movement);
+        }
+        app.set_status("Pasted linked component: use Move/Copy to position it", false);
+        return true;
+    }
     if app.session.clipboard.is_empty() {
         app.set_status("Nothing to paste: copy timeline features first", true);
         return false;
     }
     app.run("timeline.paste", json!({})).is_ok()
+}
+
+/// Place the copied design's origin on the pointed solid surface, otherwise its parent's
+/// XY plane. With no viewport point or a parallel/behind-camera ray, use the parent origin.
+fn paste_placement(app: &SolveApp, at: Option<Pos2>) -> (Vec<u64>, [f64; 3]) {
+    use solidcraft_engine::{doc, geom::Vec3};
+    let path = app.session.active_occurrence_path.clone().unwrap_or_else(|| app.session.doc.first_path(app.session.active_component));
+    let frame = app.session.occurrence_placement(&path).map(|p| p.world).unwrap_or(doc::IDENTITY);
+    let origin = doc::apply_point(&frame, Vec3::ZERO);
+    let at = at.zip(app.viewport.rect).filter(|(point, rect)| rect.contains(*point));
+    let point = at
+        .and_then(|(at, rect)| {
+            let projection = crate::viewport::projection(app, rect);
+            if let Some(point) = crate::viewport::pick_all(app, &projection, at).into_iter().find_map(|hit| match hit {
+                crate::viewport::Hit::Face { point, .. } => Some(point),
+                _ => None,
+            }) {
+                return point.is_finite().then_some(point);
+            }
+            let (ray_origin, ray_direction) = projection.ray(at);
+            let normal = doc::apply_vector(&frame, Vec3::Z);
+            let denominator = ray_direction.dot(normal);
+            if denominator.abs() < 1e-9 {
+                return None;
+            }
+            let distance = (origin - ray_origin).dot(normal) / denominator;
+            let point = ray_origin + ray_direction * distance;
+            (distance >= 0.0 && point.is_finite()).then_some(point)
+        })
+        .unwrap_or(origin);
+    let local = doc::mat_inverse(&frame).map(|inverse| doc::apply_point(&inverse, point)).filter(|p| p.is_finite()).unwrap_or(Vec3::ZERO);
+    (path, [local.x, local.y, local.z])
 }
 
 /// The frame's Copy, Cut and Paste events (and Ctrl+C / Ctrl+X / Ctrl+V sent as key presses), plus any

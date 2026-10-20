@@ -469,7 +469,7 @@ fn plan_pieces(f: &Region) -> Option<(Vec<[f64; 2]>, Vec<[u32; 3]>)> {
     let mut tris: Vec<[u32; 3]> = Vec::new();
     for pc in &pieces {
         // The patch's own loops, numbered from zero.
-        let mut ids: Vec<u32> = pc.ring.clone();
+        let mut ids: Vec<u32> = pc.ring.to_vec();
         let mut ranges = vec![std::ops::Range { start: 0, end: pc.ring.len() }];
         for hole in &pc.holes {
             ranges.push(ids.len()..ids.len() + hole.len());
@@ -494,12 +494,7 @@ fn plan_pieces(f: &Region) -> Option<(Vec<[f64; 2]>, Vec<[u32; 3]>)> {
             a >= n || b >= n || !f.ranges.iter().any(|r| r.contains(&a) && r.contains(&b) && (a.abs_diff(b) == 1 || a.abs_diff(b) == r.len() - 1))
         };
         let ring = &pc.ring;
-        let switches: Vec<usize> = (0..ring.len())
-            .filter(|&k| {
-                let (p, c, x) = (ring.get((k + ring.len() - 1) % ring.len()), ring.get(k), ring.get((k + 1) % ring.len()));
-                matches!((p, c, x), (Some(&p), Some(&c), Some(&x)) if is_cut(p, c) != is_cut(c, x))
-            })
-            .collect();
+        let switches: Vec<usize> = ring.corners().enumerate().filter(|&(_, (&p, &c, &x))| is_cut(p, c) != is_cut(c, x)).map(|(k, _)| k).collect();
         // The patch is a rectangle in (u, v) with corners cut by free boundary (Lyon et al. §4;
         // completed virtually in §4.2): its bounding box. A grid needs four real sides, so each
         // corner is the node furthest out towards the box's corner (in the box's own

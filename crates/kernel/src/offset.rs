@@ -28,8 +28,9 @@ pub(crate) enum Surf {
     /// outward normal points away from the axis.
     Cone { v: Vec3, a: Vec3, half: f64, convex: bool },
     /// Axis point and unit axis, the tube's centre circle (radius `big` at height `h` along the
-    /// axis) and the tube radius; `convex` when the outward normal points away from the tube's
-    /// centre.
+    /// axis) and the tube radius; `big` is negative on the inner sheet of a spindle torus,
+    /// whose meridian circle's centre lies across the axis. `convex` when the outward normal
+    /// points away from the tube's centre.
     Torus { o: Vec3, a: Vec3, big: f64, h: f64, r: f64, convex: bool },
 }
 
@@ -292,9 +293,10 @@ fn torus_of(f: &mt::Face, s: &[(Vec3, Vec3)], tol: f64) -> Option<Surf> {
     }
     let x = crate::polyhedron::solve3_pub(m, rhs)?;
     let (big, h, r) = (x[0], x[1], x[2]);
-    // (A tube wider than its circle, a spindle torus, is fine: blends use its outer part, where
-    // each point's tube centre is the one on its own side of the axis.)
-    if !(big > 1e-9 && r.abs() > 1e-9) {
+    // A spindle torus also has an inner sheet: a barrel revolved from an arc whose
+    // centre is across the axis. Its signed ring radius is negative; retain that sign
+    // so distances, normals and the moved meridian use the centre on the opposite side.
+    if !(big.abs() > 1e-9 && r.abs() > 1e-9) {
         return None;
     }
     let t = Surf::Torus { o, a, big, h, r: r.abs(), convex: r > 0.0 };

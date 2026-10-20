@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
-use solidcraft_geom::Vec2;
+use solidcraft_geom::{Aabb2, Vec2};
 use solidcraft_sketch::{ConstraintKind, CurveKind, LinkKind, LinkSource, Sketch};
 
 use super::sketch::{edit, target_sketch};
@@ -175,12 +175,8 @@ fn copy(s: &mut Session, p: &Value) -> Result<Value> {
         clip.texts.push((src, path));
     }
     // Bounds of everything copied, as drawn.
-    let mut lo = Vec2::new(f64::INFINITY, f64::INFINITY);
-    let mut hi = Vec2::new(f64::NEG_INFINITY, f64::NEG_INFINITY);
-    let mut add = |q: Vec2| {
-        lo = Vec2::new(lo.x.min(q.x), lo.y.min(q.y));
-        hi = Vec2::new(hi.x.max(q.x), hi.y.max(q.y));
-    };
+    let mut bounds = Aabb2::EMPTY;
+    let mut add = |q: Vec2| bounds.add(q);
     let mut drawn: Vec<usize> = cs.clone();
     for t in &texts {
         drawn.extend(sk.link_curves(t));
@@ -193,11 +189,12 @@ fn copy(s: &mut Session, p: &Value) -> Result<Value> {
             add(*q);
         }
     }
-    if !(lo.x.is_finite() && hi.x.is_finite()) {
+    if bounds.is_empty() {
         return Err(bad(cmd, "nothing to copy"));
     }
-    clip.center = (lo + hi) * 0.5;
-    clip.extent = (hi.x - lo.x).max(hi.y - lo.y);
+    clip.center = bounds.center();
+    let size = bounds.size();
+    clip.extent = size.x.max(size.y);
     let out = json!({
         "curves": clip.curves.len() + texts.iter().map(|t| sk.link_curves(t).len()).sum::<usize>(),
         "points": clip.lone.len(),

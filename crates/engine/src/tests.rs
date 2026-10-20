@@ -325,6 +325,7 @@ mod primitive_points;
 mod rim_cut;
 mod robustness;
 mod robustness_goldens;
+mod sphere_lens;
 mod spiral_join;
 mod step_import_options;
 mod xz_plane;
@@ -802,6 +803,7 @@ fn hostile_params_never_panic() {
         "kind",
         "prefix",
         "orientation",
+        "seam",
         "twist",
         "scale",
         "continuity",
@@ -809,6 +811,11 @@ fn hostile_params_never_panic() {
         "faces",
         "u",
         "v",
+        "keep",
+        "with",
+        "keep_with",
+        "stitch",
+        "extend",
     ];
     // Commands are independent; worker threads take them one at a time (their costs vary a lot).
     let ids: Vec<&str> = command_specs()
@@ -2690,6 +2697,34 @@ fn unequal_chamfers() {
     assert!(s.execute("solid.chamfer", &json!({"edges": [[0, 15, 20]], "distance": 1, "distance2": 2, "angle": "30 deg"})).is_err());
 }
 
+/// Unequal chamfers of a cylinder's circular rims: each cross-section is a right triangle
+/// revolved about the axis (Pappus: area × the path of its centroid).
+#[test]
+fn unequal_chamfers_on_circular_rims() {
+    use std::f64::consts::PI;
+    let ring = |r: [f64; 3], legs: (f64, f64)| 2.0 * PI * (r[0] + r[1] + r[2]) / 3.0 * 0.5 * legs.0 * legs.1;
+    let mut s = Session::default();
+    run(&mut s, "solid.cylinder", json!({"radius": 10, "height": 20}));
+    // The measured volume is of the meshed cylinder: compare what each chamfer takes away.
+    let full = volume(&mut s);
+    assert!(rel(full, PI * 100.0 * 20.0) < 1e-3);
+    // Top rim: 2 across the top (the face facing up), 3 down the wall.
+    run(&mut s, "solid.chamfer", json!({"edges": [[10, 0, 20]], "distance": 2, "distance2": 3}));
+    let top = ring([10.0, 8.0, 10.0], (2.0, 3.0));
+    assert!(rel(full - volume(&mut s), top) < 5e-3, "{} vs {top}", full - volume(&mut s));
+    // Bottom rim: 2 along the bottom at 30° from it (flipped: the wall would be first).
+    run(&mut s, "solid.chamfer", json!({"edges": [[10, 0, 0]], "distance": 2, "angle": "30 deg", "flip": true}));
+    let d2 = 2.0 * 30f64.to_radians().tan();
+    let bottom = ring([10.0, 8.0, 10.0], (2.0, d2));
+    assert!(rel(full - volume(&mut s), top + bottom) < 5e-3, "{} vs {}", full - volume(&mut s), top + bottom);
+    // Flipped on the top rim instead: 2 down the wall, 3 across the top (a different solid).
+    run(&mut s, "edit.undo", json!({}));
+    run(&mut s, "edit.undo", json!({}));
+    run(&mut s, "solid.chamfer", json!({"edges": [[10, 0, 20]], "distance": 2, "distance2": 3, "flip": true}));
+    let flipped = ring([10.0, 7.0, 10.0], (2.0, 3.0));
+    assert!(rel(full - volume(&mut s), flipped) < 5e-3, "{} vs {flipped}", full - volume(&mut s));
+}
+
 /// An enclosure built in the usual order: shell, bosses, then the lip on the rim.
 #[test]
 fn lip_after_boss() {
@@ -3743,4 +3778,16 @@ fn a_sketch_on_one_piece_stays_attached_when_the_side_joins() {
     assert_eq!(faces(&mut s), 6, "the side is straight now: one face");
     let sketch = run(&mut s, "timeline.inspect", json!({"feature": "Sketch2"}));
     assert!(sketch["error"].is_null() && sketch["warning"].is_null(), "{sketch}");
+}
+
+/// With a taper too, a side drawn in two collinear pieces extrudes into one face (#1788).
+#[test]
+fn a_tapered_side_drawn_in_two_collinear_pieces_is_one_face() {
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY"}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [10, 0], [20, 0], [20, 10], [0, 10], [0, 0]]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"distance": 5, "taper": "5 deg"}));
+    let m = run(&mut s, "inspect.measure", json!({}));
+    assert_eq!(m["bodies"][0]["kernel"]["faces"], 6, "{m}");
 }

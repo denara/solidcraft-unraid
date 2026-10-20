@@ -282,6 +282,30 @@ fn construction_follows_the_model() {
     assert!(on_line(o, d, Vec3::new(40.0, 30.0, 50.0)) && on_line(o, d, Vec3::ZERO));
 }
 
+/// #568: a plane through three vertices follows them when a parameter moves them. Two of them
+/// sit on the box's end at x = 40; the box grows to 100 mm, so the vertices nearest the old
+/// picks are the ones at x = 0, on a line with the first: found by the names of the edges that
+/// meet there, they are the moved ones.
+#[test]
+fn a_plane_through_three_vertices_follows_them() {
+    let mut s = Session::default();
+    run(&mut s, "parameters.add", json!({"name": "len", "expression": "40 mm"}));
+    run(&mut s, "solid.box", json!({"length": "len", "width": 30, "height": 20, "body_name": "Box"}));
+    run(
+        &mut s,
+        "construct.plane.three_points",
+        json!({"a": {"vertex": [0, 0, 20]}, "b": {"vertex": [40, 0, 20]}, "c": {"vertex": [40, 30, 0]}, "name": "T"}),
+    );
+    run(&mut s, "parameters.change", json!({"name": "len", "expression": "100 mm"}));
+    let id = s.doc.features.iter().find(|f| f.name == "T").map(|f| f.id).unwrap_or_else(|| panic!("feature T"));
+    let error = s.model.result(id).and_then(|r| r.error.clone());
+    assert_eq!(error, None);
+    let t = plane(&s, "T");
+    for p in [Vec3::new(0.0, 0.0, 20.0), Vec3::new(100.0, 0.0, 20.0), Vec3::new(100.0, 30.0, 0.0)] {
+        assert!(on_plane(&t, p), "{p:?} is off {t:?}");
+    }
+}
+
 /// In a component moved 50 mm along X, picks given in the world land on its geometry, and the
 /// axis and point move with the occurrence.
 #[test]
