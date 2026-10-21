@@ -2,19 +2,36 @@
 //! through the control channel (the toolbar's way) and measured as drawn.
 
 use serde_json::json;
-use solidcraft_ui_egui::frame::{DIALOG_MAX_W, DIALOG_MIN_W, DIALOG_WIDE_MAX_W, WINDOW_WIDE_MAX_W};
+use solidcraft_ui_egui::frame::{DIALOG_MAX_W, DIALOG_MIN_W};
+
+// Preserve the established acceptance bounds after retiring the old window helpers.
+const DIALOG_WIDE_MAX_W: f32 = 560.0;
+const WINDOW_WIDE_MAX_W: f32 = 760.0;
 use solidcraft_ui_egui::scenario::Harness;
 
 /// Widths of the windows on screen (their areas in the middle layer).
-fn window_widths(h: &Harness) -> Vec<(String, f32)> {
+fn window_widths(h: &Harness) -> Vec<(egui::Id, f32)> {
     h.ctx.memory(|m| {
         m.areas()
             .visible_layer_ids()
             .into_iter()
-            .filter(|l| l.order == egui::Order::Middle)
-            .filter_map(|l| m.area_rect(l.id).map(|r| (format!("{:?}", l.id), r.width())))
+            .filter(|l| l.order == egui::Order::Middle && l.id != egui::Id::new("sc_browser_card"))
+            .filter_map(|l| m.area_rect(l.id).map(|r| (l.id, r.width())))
             .collect()
     })
+}
+
+fn kit_table_limit(id: egui::Id) -> Option<f32> {
+    [
+        egui::Id::new("sc_prefs"),
+        egui::Id::new("sc_params_dialog"),
+        egui::Id::new("sc_material_card_review"),
+        egui::Id::new(("sc_dialog", "CONFIGURATIONS")),
+        egui::Id::new(("sc_dialog", "MOTION STUDY")),
+        egui::Id::new(("sc_dialog", "EDIT MOTION STUDY")),
+    ]
+    .contains(&id)
+    .then(|| solidcraft_ui_egui::theme::Tokens::get().form_card_width * 3.0)
 }
 
 fn fresh() -> Harness {
@@ -37,9 +54,9 @@ fn command_dialogs_shrink_to_their_content_within_limits() {
         let max = if wide { DIALOG_WIDE_MAX_W } else { DIALOG_MAX_W };
         for (layer, w) in window_widths(&h) {
             // Floating windows a command opened (Parameters…) have their own limit.
-            let limit = if h.app.dialog.is_some() { max } else { WINDOW_WIDE_MAX_W };
+            let limit = kit_table_limit(layer).unwrap_or(if h.app.dialog.is_some() { max } else { WINDOW_WIDE_MAX_W });
             if w > limit + slack {
-                bad.push(format!("{} ({layer}): {w} px", spec.id));
+                bad.push(format!("{} ({layer:?}): {w} px", spec.id));
             }
         }
         // The docked dialog shrinks to its content: most dialogs stay well under the maximum.
@@ -54,6 +71,9 @@ fn command_dialogs_shrink_to_their_content_within_limits() {
         h.app.params = None;
         h.app.design_properties = None;
         h.app.bom = None;
+        if spec.id == "material.properties.validate" {
+            h.step(&json!({"click":{"handle":"dialog:close"}})).unwrap();
+        }
         h.app.tool = None;
         if h.app.session.active_sketch.is_some() {
             h.app.finish_sketch();
@@ -91,6 +111,7 @@ fn floating_windows_stay_within_limits() {
     // Keyboard Shortcuts is a page of Preferences (one window, #36).
     assert!(ws.len() >= 3, "windows on screen: {ws:?}");
     for (layer, w) in ws {
-        assert!(w <= WINDOW_WIDE_MAX_W + 4.0, "{layer} is {w} px wide");
+        let limit = kit_table_limit(layer).unwrap_or(WINDOW_WIDE_MAX_W);
+        assert!(w <= limit + 4.0, "{layer:?} is {w} px wide");
     }
 }

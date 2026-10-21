@@ -75,7 +75,17 @@ impl ApiBackend {
         let stop = cancel.clone();
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::from(ctx.wake);
         std::thread::spawn(move || {
-            let mut w = Worker { cfg, mcp, next: 0, tools: Vec::new(), history: Vec::new(), events: ev_tx, wake, cancel: stop };
+            let mut w = Worker {
+                cfg,
+                mcp,
+                next: 0,
+                tools: Vec::new(),
+                history: Vec::new(),
+                events: ev_tx,
+                wake,
+                cancel: stop,
+                no_reasoning: Default::default(),
+            };
             w.run(cmd_rx);
         });
         Ok(ApiBackend { cmds: Some(cmd_tx), events, cancel, mcp: handle })
@@ -137,6 +147,8 @@ struct Worker {
     events: Sender<Event>,
     wake: Arc<dyn Fn() + Send + Sync>,
     cancel: Arc<AtomicBool>,
+    /// Set once the endpoint refused tools together with a reasoning effort: later requests ask for none.
+    no_reasoning: std::cell::Cell<bool>,
 }
 
 impl Worker {
@@ -322,7 +334,28 @@ impl Worker {
         let mut body = json!({"model": self.cfg.model, "messages": self.history});
         if !self.tools.is_empty() {
             body["tools"] = Value::Array(self.tools.clone());
+            if self.no_reasoning.get() {
+                body["reasoning_effort"] = json!("none");
+            }
         }
+        let (status, v) = self.post(&body)?;
+        // Some OpenAI models refuse function tools on this endpoint unless the reasoning effort is
+        // "none" (HTTP 400 naming `reasoning_effort`): ask again once with it, and keep it for the
+        // next requests.
+        let refused = status == 400 && !self.tools.is_empty() && !self.no_reasoning.get() && http_error(status, &v).contains("reasoning_effort");
+        if refused {
+            self.no_reasoning.set(true);
+            body["reasoning_effort"] = json!("none");
+            let (status, v) = self.post(&body)?;
+            return if status == 200 { Ok(v) } else { Err(http_error(status, &v)) };
+        }
+        if status != 200 {
+            return Err(http_error(status, &v));
+        }
+        Ok(v)
+    }
+
+    fn post(&self, body: &Value) -> Result<(u16, Value), String> {
         let mut headers = vec![("Content-Type".to_string(), "application/json".to_string())];
         if let Some(k) = &self.cfg.key {
             headers.push(("Authorization".into(), format!("Bearer {k}")));
@@ -351,11 +384,7 @@ impl Worker {
                 Err(_) => return Err("the request ended without an answer".into()),
             }
         };
-        let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        if status != 200 {
-            return Err(http_error(status, &v));
-        }
-        Ok(v)
+        Ok((status, serde_json::from_slice(&bytes).unwrap_or(Value::Null)))
     }
 }
 
@@ -775,5 +804,64 @@ mod tests {
         let cfg = ApiConfig { name: "x".into(), base_url: "http://10.0.0.2/v1".into(), model: "m".into(), key: Some("k".into()), http };
         let ctx = StartContext { cwd: std::env::temp_dir(), bridge: None, tools: None, wake: Box::new(|| {}) };
         assert!(ApiBackend::start(cfg, ctx).is_err());
+    }
+
+    /// A worker with one function tool whose endpoint answers each POST with the next scripted
+    /// (status, body); the requests it received are returned too.
+    fn scripted_worker(answers: Vec<(u16, Value)>) -> (Worker, Arc<std::sync::Mutex<Vec<Value>>>) {
+        let answers = std::sync::Mutex::new(answers.into_iter().rev().collect::<Vec<_>>());
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let log = seen.clone();
+        let http: HttpFn = Arc::new(move |r: &HttpRequest| {
+            log.lock().unwrap().push(serde_json::from_slice(r.body.as_deref().unwrap()).unwrap());
+            let (status, v) = answers.lock().unwrap().pop().expect("no request beyond the script");
+            Ok((status, v.to_string().into_bytes()))
+        });
+        let cfg = ApiConfig { name: "Test".into(), base_url: "http://localhost:1/v1".into(), model: "m".into(), key: Some("sk-secret".into()), http };
+        let (events, _rx) = channel();
+        let w = Worker {
+            cfg,
+            mcp: None,
+            next: 0,
+            tools: vec![json!({"type": "function", "function": {"name": "measure"}})],
+            history: vec![json!({"role": "user", "content": "hi"})],
+            events,
+            wake: Arc::new(|| {}),
+            cancel: Arc::new(AtomicBool::new(false)),
+            no_reasoning: Default::default(),
+        };
+        (w, seen)
+    }
+
+    fn refusal() -> (u16, Value) {
+        (400, json!({"error": {"message": "Function tools with reasoning_effort are not supported for gpt-6.1-sol in /v1/chat/completions."}}))
+    }
+
+    /// Newer OpenAI models answer 400 to function tools without `reasoning_effort: none`: the
+    /// request is replayed once with it, and the next ones carry it at once.
+    #[test]
+    fn a_refusal_of_tools_with_reasoning_effort_is_replayed_once_with_none() {
+        let ok = json!({"choices": [{"message": {"role": "assistant", "content": "Done."}}]});
+        let (w, seen) = scripted_worker(vec![refusal(), (200, ok.clone()), (200, ok.clone())]);
+        assert_eq!(w.request().unwrap(), ok);
+        assert_eq!(w.request().unwrap(), ok);
+        let sent = seen.lock().unwrap();
+        assert_eq!(sent.len(), 3);
+        assert!(sent[0].get("reasoning_effort").is_none());
+        assert_eq!(sent[1]["reasoning_effort"], "none");
+        assert_eq!(sent[2]["reasoning_effort"], "none");
+    }
+
+    /// No loop: a second refusal is the error, after exactly two requests; the message shows the
+    /// endpoint's words but never the key; an unrelated 400 is not replayed at all.
+    #[test]
+    fn the_replay_happens_once_and_only_for_that_refusal() {
+        let (w, seen) = scripted_worker(vec![refusal(), refusal()]);
+        let e = w.request().unwrap_err();
+        assert!(e.starts_with("HTTP 400") && e.contains("reasoning_effort") && !e.contains("sk-secret"), "{e}");
+        assert_eq!(seen.lock().unwrap().len(), 2);
+        let (w, seen) = scripted_worker(vec![(400, json!({"error": {"message": "context length exceeded"}}))]);
+        assert!(w.request().unwrap_err().contains("context length"));
+        assert_eq!(seen.lock().unwrap().len(), 1);
     }
 }

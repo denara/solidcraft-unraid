@@ -25,10 +25,11 @@ const STEP_PROMPTS: [&str; 12] = [
 
 /// The dead zone, as a share of full travel, shown as a percentage.
 pub(crate) fn dead_zone_slider(ui: &mut egui::Ui, share: &mut f32) -> egui::Response {
-    ui.add(
-        egui::Slider::new(share, 0.0..=solidcraft_space_mouse::MAX_DEAD_ZONE_SHARE)
-            .step_by(0.01)
-            .custom_formatter(|v, _| format!("{:.0} %", v * 100.0)),
+    crate::ui_kit::slider(
+        ui,
+        share,
+        0.0..=solidcraft_space_mouse::MAX_DEAD_ZONE_SHARE,
+        crate::ui_kit::Slider { step: Some(0.01), format: |v| format!("{:.0} %", v * 100.0), ..Default::default() },
     )
 }
 
@@ -118,7 +119,8 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                 ui.label(egui::RichText::new(app.tr_label(axis)).strong());
             }
             ui.add_space(6.0);
-            ui.add(egui::ProgressBar::new(progress as f32).text(counter));
+            crate::ui_kit::progress(ui, "space_mouse_calibration", progress as f32);
+            ui.label(counter);
             if let Some(Ok(calibration)) = result {
                 ui.add_space(6.0);
                 dead_zone_pads(ui, &Calibration { dead_zone_share: dead_zone, ..calibration }, raw);
@@ -132,10 +134,13 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
             });
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                back = ui.add_enabled(stage != Stage::Rest, egui::Button::new(app.tr("ui.back"))).clicked();
-                over = matches!(result, Some(Err(_))) && ui.button(app.tr("ui.start_over")).clicked();
-                cancel = ui.button(app.tr("ui.cancel")).clicked();
-                save = matches!(result, Some(Ok(_))) && ui.button(app.tr("ui.save")).clicked();
+                back = ui
+                    .add_enabled_ui(stage != Stage::Rest, |ui| crate::ui_kit::button(ui, app.tr("ui.back"), crate::ui_kit::Button::Normal))
+                    .inner
+                    .clicked();
+                over = matches!(result, Some(Err(_))) && crate::ui_kit::button(ui, app.tr("ui.start_over"), crate::ui_kit::Button::Normal).clicked();
+                cancel = crate::ui_kit::button(ui, app.tr("ui.cancel"), crate::ui_kit::Button::Normal).clicked();
+                save = matches!(result, Some(Ok(_))) && crate::ui_kit::button(ui, app.tr("ui.save"), crate::ui_kit::Button::Normal).clicked();
             });
         });
     if cancel {

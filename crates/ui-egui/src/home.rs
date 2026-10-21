@@ -2,6 +2,7 @@
 //! picture of the design rendered from it. Shown on launch without a file and from the house
 //! button or the first document tab; selecting a design returns to its view.
 
+use crate::fonts::RichTextExt as _;
 use std::collections::HashMap;
 
 use egui::{Color32, CornerRadius, RichText, Sense, Stroke, vec2};
@@ -424,8 +425,17 @@ pub fn open_sample(app: &mut SolveApp, i: usize) {
     }
 }
 
+/// Is this recent design there to open: in memory, or something the host can bring back?
+pub fn available(app: &SolveApp, path: &str) -> bool {
+    solidcraft_engine::io::vfs::exists(path) || app.services.can_restore.as_ref().is_some_and(|can| can(path))
+}
+
 pub fn open_recent(app: &mut SolveApp, path: &str) {
     if !solidcraft_engine::io::vfs::exists(path) {
+        if let Some(restore) = app.services.restore_file.as_ref().filter(|_| available(app, path)) {
+            restore(path);
+            return;
+        }
         app.set_status(format!("{path} is no longer there"), true);
         return;
     }
@@ -454,17 +464,21 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
     egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.panel).inner_margin(egui::Margin::symmetric(36, 24))).show(ui, |ui| {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("SolidCraft").size(26.0).strong().color(t.text));
-                ui.add_space(12.0);
-                ui.label(RichText::new(crate::i18n::tr_label("Start")).size(16.0).color(t.text_dim));
+                ui.label(RichText::new("SolidCraft").size(crate::theme::Tokens::get().font_display).semibold().color(t.text));
+                ui.add_space(t.space_12);
+                ui.label(RichText::new(crate::i18n::tr_label("Start")).size(crate::theme::Tokens::get().font_intro).color(t.text_dim));
             });
-            ui.add_space(16.0);
+            ui.add_space(t.space_16);
             ui.horizontal(|ui| {
                 let big = |ui: &mut egui::Ui, icon: &str, label: &str, primary: bool| -> bool {
                     // The label sets the width: a translation longer than the English one widens
                     // the button instead of running past its edge.
-                    let ink_text = if primary { Color32::WHITE } else { t.text };
-                    let galley = ui.painter().layout_no_wrap(label.to_owned(), egui::FontId::proportional(15.0), ink_text);
+                    let ink_text = if primary { t.on_accent } else { t.text };
+                    let galley = ui.painter().layout_no_wrap(
+                        label.to_owned(),
+                        egui::FontId::proportional(crate::theme::Tokens::get().font_subtitle),
+                        ink_text,
+                    );
                     let width = (56.0 + galley.size().x + 20.0).max(170.0);
                     let (r, resp) = ui.allocate_exact_size(vec2(width, 64.0), Sense::click());
                     let fill = if primary {
@@ -474,8 +488,8 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
                     } else {
                         t.field
                     };
-                    ui.painter().rect(r, 6.0, fill, Stroke::new(1.0, if primary { t.accent } else { t.border }), egui::StrokeKind::Inside);
-                    let ink = if primary { Color32::WHITE } else { t.icon };
+                    ui.painter().rect(r, t.radius_md, fill, Stroke::new(1.0, if primary { t.accent } else { t.border }), egui::StrokeKind::Inside);
+                    let ink = if primary { t.on_accent } else { t.icon };
                     crate::icons::paint(
                         ui.painter(),
                         egui::Rect::from_center_size(r.left_center() + vec2(30.0, 0.0), vec2(30.0, 30.0)),
@@ -490,7 +504,7 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
                 if big(ui, "new", app.tr("ui.new_design"), true) {
                     action = Some(Box::new(|app: &mut SolveApp| crate::documents::new_design(app)));
                 }
-                ui.add_space(10.0);
+                ui.add_space(t.space_10);
                 if big(ui, "open", app.tr("home.open"), false) {
                     action = Some(Box::new(|app: &mut SolveApp| {
                         app.pick_open(|app, path| {
@@ -502,7 +516,7 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
                     }));
                 }
             });
-            ui.add_space(24.0);
+            ui.add_space(t.space_24);
             ui.horizontal_wrapped(|ui| {
                 ui.hyperlink_to(app.tr("home.documentation"), crate::help::DOCS_URL);
                 ui.hyperlink_to(app.tr("home.report_issue"), "https://github.com/tangency-labs/solidcraft/issues/new");
@@ -515,7 +529,7 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
                     crate::prefs::open_at(app, 0);
                 }
             });
-            ui.add_space(16.0);
+            ui.add_space(t.space_16);
             section(ui, app.tr("home.recent"));
             if recent.is_empty() {
                 ui.label(RichText::new(crate::i18n::tr_label("Designs you open or save appear here.")).color(t.text_dim));
@@ -524,9 +538,12 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
                     let Some(p) = recent.get(i) else { return };
                     let path = std::path::Path::new(p);
                     let name = path.file_stem().map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|| p.clone());
-                    let missing = !solidcraft_engine::io::vfs::exists(p);
+                    let missing = !available(app, p);
                     let mut sub = if missing {
                         app.tr("home.missing").to_string()
+                    } else if p.starts_with("/disk/") {
+                        // The web build remembers files it saved on the computer.
+                        crate::i18n::tr_label("On your computer").to_string()
                     } else if p.starts_with("/opfs/") {
                         // The web build keeps designs in the browser's own storage.
                         app.tr("home.in_this_browser").to_string()
@@ -552,12 +569,14 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
                         .on_hover_text(p.as_str());
                     crate::scenario::publish_handle(&format!("home:recent:{i}"), response.rect.center());
                     response.context_menu(|ui| {
-                        if ui.button(crate::i18n::tr_label("Remove from list")).clicked() {
+                        if crate::context_menu::button(ui, crate::i18n::tr_label("Remove from list"), "delete").clicked() {
                             app.home.recent.retain(|x| x != p);
                             app.home.opened_at.remove(p);
                             ui.close();
                         }
-                        if !cfg!(target_arch = "wasm32") && ui.button(crate::i18n::tr_label("Show in folder")).clicked() {
+                        if !cfg!(target_arch = "wasm32")
+                            && crate::context_menu::button(ui, crate::i18n::tr_label("Show in folder"), "folder").clicked()
+                        {
                             if let Some(show) = &app.services.show_in_folder {
                                 show(p);
                             }
@@ -570,7 +589,7 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
                     }
                 });
             }
-            ui.add_space(24.0);
+            ui.add_space(t.space_24);
             section(ui, app.tr("home.samples"));
             grid(ui, samples.len(), |ui, i| {
                 let Some(s) = samples.get(i) else { return };
@@ -596,22 +615,23 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
 
 fn section(ui: &mut egui::Ui, title: &str) {
     let t = Tokens::get();
-    ui.label(RichText::new(title).size(15.0).strong().color(t.text));
-    ui.add_space(8.0);
+    ui.label(RichText::new(title).size(crate::theme::Tokens::get().font_subtitle).semibold().color(t.text));
+    ui.add_space(t.space_8);
 }
 
 /// Cards in rows that fill the width.
 fn grid(ui: &mut egui::Ui, n: usize, mut each: impl FnMut(&mut egui::Ui, usize)) {
+    let t = Tokens::get();
     let w = THUMB[0] as f32 + 16.0;
-    let per_row = ((ui.available_width() + 14.0) / (w + 14.0)).floor().max(1.0) as usize;
+    let per_row = ((ui.available_width() + t.space_14) / (w + t.space_14)).floor().max(1.0) as usize;
     for row in 0..n.div_ceil(per_row) {
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 14.0;
+            ui.spacing_mut().item_spacing.x = t.space_14;
             for i in row * per_row..((row + 1) * per_row).min(n) {
                 each(ui, i);
             }
         });
-        ui.add_space(14.0);
+        ui.add_space(t.space_14);
     }
 }
 
@@ -629,7 +649,7 @@ fn card(ui: &mut egui::Ui, pic: Pic, name: &str, sub: &str, dim: bool) -> egui::
     let hover = resp.hovered();
     ui.painter().rect(
         r,
-        6.0,
+        t.radius_md,
         if hover { t.hover } else { t.field },
         Stroke::new(1.0, if hover { t.accent } else { t.border }),
         egui::StrokeKind::Inside,
@@ -637,7 +657,7 @@ fn card(ui: &mut egui::Ui, pic: Pic, name: &str, sub: &str, dim: bool) -> egui::
     let img = egui::Rect::from_min_size(r.min + vec2(8.0, 8.0), vec2(THUMB[0] as f32, THUMB[1] as f32));
     match pic {
         Pic::Icon(icon) => {
-            ui.painter().rect_filled(img, CornerRadius::same(4), t.panel_header);
+            ui.painter().rect_filled(img, CornerRadius::same(t.radius_sm), t.panel_header);
             crate::icons::paint(ui.painter(), egui::Rect::from_center_size(img.center(), vec2(56.0, 56.0)), icon, t.icon, t.icon_fill, t.icon);
         }
         Pic::Ready(Some(tx)) => {
@@ -645,7 +665,7 @@ fn card(ui: &mut egui::Ui, pic: Pic, name: &str, sub: &str, dim: bool) -> egui::
             ui.painter().image(tx.id(), img, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), tint);
         }
         Pic::Ready(None) => {
-            ui.painter().rect_filled(img, CornerRadius::same(4), t.panel_header);
+            ui.painter().rect_filled(img, CornerRadius::same(t.radius_sm), t.panel_header);
             if !dim {
                 egui::Spinner::new().size(18.0).paint_at(ui, egui::Rect::from_center_size(img.center(), vec2(18.0, 18.0)));
             }
@@ -654,8 +674,14 @@ fn card(ui: &mut egui::Ui, pic: Pic, name: &str, sub: &str, dim: bool) -> egui::
     let ty = img.bottom() + 8.0;
     let clip = egui::Rect::from_min_max(egui::pos2(r.left() + 8.0, ty), egui::pos2(r.right() - 8.0, r.bottom()));
     let p = ui.painter().with_clip_rect(clip);
-    p.text(egui::pos2(r.left() + 10.0, ty), egui::Align2::LEFT_TOP, name, egui::FontId::proportional(14.0), if dim { t.text_dim } else { t.text });
-    p.text(egui::pos2(r.left() + 10.0, ty + 20.0), egui::Align2::LEFT_TOP, sub, egui::FontId::proportional(11.5), t.text_dim);
+    p.text(
+        egui::pos2(r.left() + 10.0, ty),
+        egui::Align2::LEFT_TOP,
+        name,
+        egui::FontId::proportional(t.font_heading),
+        if dim { t.text_dim } else { t.text },
+    );
+    p.text(egui::pos2(r.left() + 10.0, ty + 20.0), egui::Align2::LEFT_TOP, sub, egui::FontId::proportional(t.font_caption), t.text_dim);
     if hover {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
@@ -679,6 +705,24 @@ mod tests {
             assert_eq!(sample_picture(i).unwrap().size, THUMB);
         }
         assert!(sample_picture(samples.len()).is_none());
+    }
+
+    /// A recent design the host can bring back (the browser build's remembered files) is not
+    /// "missing": choosing it asks the host to restore it, and one the host doesn't know still is.
+    #[test]
+    fn a_recent_design_the_host_can_restore_is_asked_for_not_reported_missing() {
+        let mut h = crate::scenario::Harness::new();
+        let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let sink = asked.clone();
+        h.app.services.can_restore = Some(Box::new(|p| p.starts_with("/disk/known/")));
+        h.app.services.restore_file = Some(Box::new(move |p| sink.borrow_mut().push(p.to_string())));
+        assert!(available(&h.app, "/disk/known/Bracket.solidcraft"));
+        assert!(!available(&h.app, "/disk/other/Bracket.solidcraft"));
+        open_recent(&mut h.app, "/disk/known/Bracket.solidcraft");
+        assert_eq!(*asked.borrow(), ["/disk/known/Bracket.solidcraft"]);
+        open_recent(&mut h.app, "/disk/other/Bracket.solidcraft");
+        assert_eq!(asked.borrow().len(), 1, "a file the host doesn't remember is not asked for");
+        assert!(h.app.status.as_ref().is_some_and(|(text, _, error)| *error && text.contains("no longer there")));
     }
 
     /// Rebuild the shipped pictures from the authoritative sample command scripts.

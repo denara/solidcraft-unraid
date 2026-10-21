@@ -425,17 +425,8 @@ fn boxes(app: &SolveApp, ui: &mut egui::Ui, proj: &Proj, t: &mut Tool) -> Option
         let pos = in_view(sp + vec2(-34.0, -11.0), view, ui.ctx().pointer_latest_pos());
         crate::frame::area(egui::Id::new(("sc_dim_area", i))).fixed_pos(pos).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
             let fill = if b.locked { tk.accent_soft } else { tk.panel };
-            egui::Frame::popup(ui.style()).fill(fill).inner_margin(egui::Margin::symmetric(3, 1)).show(ui, |ui| {
-                let r = ui
-                    // The drawing tool handles Enter. Keep the text edit focused when a
-                    // rejected value needs correction, instead of surrendering the keyboard.
-                    .add(egui::TextEdit::singleline(&mut b.value).id(id).desired_width(66.0).return_key(None).event_filter(egui::EventFilter {
-                        tab: true,
-                        horizontal_arrows: true,
-                        vertical_arrows: true,
-                        ..Default::default()
-                    }))
-                    .on_hover_text(b.label);
+            egui::Frame::popup(ui.style()).fill(fill).inner_margin(egui::Margin::symmetric(tk.space_3 as i8, 1)).show(ui, |ui| {
+                let r = crate::ui_kit::placement_field(ui, id, &mut b.value, b.label);
                 // A completion gets first use of forward Tab. Shift+Tab always moves back;
                 // the box reached by egui's generic traversal must not complete its text.
                 let changed = (source.is_none() || (source == Some(i) && tab != Some(true))) && crate::params_dialog::complete(ui, &r, &mut b.value);

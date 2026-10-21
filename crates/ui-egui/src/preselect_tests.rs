@@ -1,6 +1,7 @@
 //! Pre-selection fills every input of a command, each item going to the input that takes its
 //! type, whether the command starts from a shortcut, the toolbar or a menu.
 
+use crate::test_support::app_with_script as app_with;
 use serde_json::json;
 use solidcraft_engine::doc::expr::Kind as ValueKind;
 use solidcraft_engine::geom::Vec3;
@@ -51,8 +52,8 @@ fn confirming_coplanar_body_faces_uses_one_atomic_extrusion() {
     assert!((volume - 11_968.0).abs() < 1e-5, "{volume}");
 }
 
+use crate::SolveApp;
 use crate::dialogs::{Dialog, Kind, apply_commands};
-use crate::{Services, SolveApp};
 
 #[test]
 fn feature_mirror_and_patterns_reopen_as_feature_replays_even_for_body_creators() {
@@ -473,12 +474,6 @@ fn cylinder_emboss_edit_retains_second_source_and_author_paths_and_all_profiles(
     assert_eq!(h.app.session.active_component, 0);
 }
 
-fn app_with(script: serde_json::Value) -> SolveApp {
-    let mut s = Session::default();
-    s.run_script(&script).unwrap();
-    SolveApp::new(s, Services::default())
-}
-
 #[test]
 fn cylinder_emboss_profile_guide_uses_target_or_unique_foreign_sketch_frame() {
     for target_owned in [true, false] {
@@ -660,6 +655,54 @@ fn edges_then_fillet_takes_them_with_chains() {
     assert_eq!(d.inputs[0].items.len(), 2, "box edges are not tangent to others");
     let cmds = apply_commands(&app, &d).unwrap();
     assert_eq!(cmds[0].1["edges"].as_array().unwrap().len(), 2);
+
+    // #3370: on a bar with rounded ends and a slot whose wall lies on the seam between the flat
+    // top and the rounded end, picking the slot's sharp top edge must not chain the two smooth
+    // seams that continue it in a straight line.
+    let mut h = crate::scenario::Harness::new();
+    for (cmd, p) in [
+        ("sketch.create", json!({"plane": "YZ", "name": "Stadium"})),
+        ("sketch.line", json!({"points": [[0, -9.5], [25, -9.5]]})),
+        ("sketch.arc.center_point", json!({"center": [25, 0], "start": [25, -9.5], "end": [25, 9.5]})),
+        ("sketch.line", json!({"points": [[25, 9.5], [0, 9.5]]})),
+        ("sketch.arc.center_point", json!({"center": [0, 0], "start": [0, 9.5], "end": [0, -9.5]})),
+        ("sketch.finish", json!({})),
+        ("solid.extrude", json!({"sketch": "Stadium", "distance": 14})),
+        ("solid.box", json!({"corner": [3.5, -12, -10], "length": 6, "width": 12, "height": 20, "operation": "cut"})),
+    ] {
+        h.app.run(cmd, p).unwrap();
+    }
+    let slot_top = crate::viewport::grouped_selection(&h.app.session, &edge(&h.app, Vec3::new(6.5, 0.0, 9.5)));
+    h.app.session.selection = slot_top.clone();
+    h.app.start("solid.fillet");
+    assert_eq!(h.app.dialog.as_ref().unwrap().inputs[0].items, slot_top, "smooth stadium seams are not chained onto a sharp slot edge");
+
+    // On a rounded slot extrusion, picking one straight top edge chains the 4 tangent top edges;
+    // unticking Tangent Chain leaves only the picked edge, and ticking it again re-chains all 4.
+    let mut h = crate::scenario::Harness::new();
+    for (cmd, p) in [
+        ("sketch.create", json!({"plane":"XY"})),
+        ("sketch.slot.center_to_center", json!({"p0":[-20,0],"p1":[20,0],"width":20})),
+        ("sketch.finish", json!({})),
+        ("solid.extrude", json!({"distance":10})),
+    ] {
+        h.app.run(cmd, p).unwrap();
+    }
+    let top_line = crate::viewport::grouped_selection(&h.app.session, &edge(&h.app, Vec3::new(0.0, 10.0, 10.0)));
+    h.app.session.selection = top_line.clone();
+    h.app.start("solid.fillet");
+    h.frames(2);
+    assert_eq!(h.app.dialog.as_ref().unwrap().inputs[0].items.len(), 4);
+    h.step(&json!({"click":{"handle":"dialog:Tangent Chain"}})).unwrap();
+    assert_eq!(h.app.dialog.as_ref().unwrap().inputs[0].items, top_line);
+    h.step(&json!({"click":{"handle":"dialog:Tangent Chain"}})).unwrap();
+    assert_eq!(h.app.dialog.as_ref().unwrap().inputs[0].items.len(), 4);
+    // Picking while Tangent Chain is off adds only that edge; unpicking with Tangent Chain on removes its chain.
+    h.step(&json!({"click":{"handle":"dialog:Tangent Chain"}})).unwrap();
+    assert_eq!(h.app.dialog.as_ref().unwrap().inputs[0].items, top_line);
+    h.step(&json!({"click":{"handle":"dialog:Tangent Chain"}})).unwrap();
+    h.app.dialog.as_mut().unwrap().pick(&h.app.session, top_line[0].clone());
+    assert!(h.app.dialog.as_ref().unwrap().inputs[0].items.is_empty());
 }
 
 #[test]
@@ -918,6 +961,43 @@ fn shell_direction_and_tangent_chain_round_trip() {
     let e = crate::dialogs::for_feature(&app, id, None).unwrap();
     assert_eq!(e.extra.get("direction"), Some(&json!("outside")));
     assert_eq!(e.extra.get("tangent_chain"), Some(&json!(true)));
+}
+
+#[test]
+fn shell_tangent_chain_highlights_and_counts_faces_without_saving_extra_picks() {
+    let mut h = crate::scenario::Harness::new();
+    h.app.run("solid.box", json!({"length":40,"width":30,"height":20})).unwrap();
+    h.app.run("solid.fillet", json!({"edges":[[20,0,20]],"radius":4})).unwrap();
+    let top = face(&h.app, Vec3::new(20.0, 17.0, 20.0));
+    start(&mut h.app, vec![top.clone()], "solid.shell");
+    h.frames(3);
+    let shown = |app: &SolveApp| -> std::collections::BTreeSet<usize> {
+        app.highlighted()
+            .into_iter()
+            .filter_map(|sel| match sel {
+                Sel::Face { index, .. } => Some(index),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(shown(&h.app).len(), 3, "the top, round and front are one tangent chain");
+    assert!(h.widget("3 selected").is_some());
+    let d = h.app.dialog.as_ref().unwrap();
+    assert_eq!(d.inputs[0].items, vec![top.clone()]);
+    assert_eq!(apply_commands(&h.app, d).unwrap()[0].1["faces"].as_array().unwrap().len(), 1);
+
+    h.step(&json!({"click":{"handle":"dialog:Tangent Chain"}})).unwrap();
+    h.frames(3);
+    assert_eq!(shown(&h.app).len(), 1);
+    assert!(h.widget("1 selected").is_some());
+    assert_eq!(h.app.dialog.as_ref().unwrap().inputs[0].items, vec![top]);
+
+    h.step(&json!({"click":{"handle":"dialog:Tangent Chain"}})).unwrap();
+    h.frames(3);
+    assert_eq!(shown(&h.app).len(), 3);
+    h.step(&json!({"click":{"handle":"dialog:clear:Faces/Body"}})).unwrap();
+    h.frames(3);
+    assert!(h.app.dialog.as_ref().unwrap().highlighted(&h.app.session).is_empty(), "clear must also clear the expanded highlight");
 }
 
 #[test]
@@ -1274,9 +1354,13 @@ fn thread_choices_can_start_without_a_face_and_recover_from_invalid_text() {
     h.step(&json!({"text":"Munknown"})).unwrap();
     h.frames(2);
     assert!(matches!(&h.app.dialog.as_ref().unwrap().kind, Kind::Thread { designation, .. } if designation == "Munknown"));
-    for handle in ["dialog:Size", "dialog:Size:8 mm"] {
-        h.step(&json!({"click":{"handle":handle}})).unwrap();
-    }
+    h.step(&json!({"click":{"handle":"dialog:Size"}})).unwrap();
+    // Plex's taller rows put 8 mm below the first page of this long popup. Scroll the
+    // visible list before clicking its choice, as a person would, rather than a clipped handle.
+    let first = crate::scenario::handle_at("dialog:Size:1.6 mm").unwrap();
+    h.call("ui.scroll", json!({"x":first.x,"y":first.y,"delta":-60}));
+    h.frames(12);
+    h.step(&json!({"click":{"handle":"dialog:Size:8 mm"}})).unwrap();
     assert!(matches!(&h.app.dialog.as_ref().unwrap().kind, Kind::Thread { designation, .. } if designation == "M8x1.25"));
     assert!(apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).is_err(), "a face is still required");
 }
@@ -1314,6 +1398,14 @@ fn modelled_thread_preview_updates_reports_errors_and_cancels_without_changes() 
     }
     assert!(h.app.preview.error.as_deref().is_some_and(|e| e.contains("does not fit")), "{:?}", h.app.preview.error);
     designation(&mut h, "M8x1.3");
+    // The M6 error stays until the new preview starts; wait for it to go, or
+    // `wait_feature_preview` would stop at the stale error on a host that schedules the
+    // preview a few frames later.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while h.app.preview.error.is_some() && std::time::Instant::now() < deadline {
+        h.frames(2);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     wait_feature_preview(&mut h);
     assert!(h.app.preview.error.is_none());
     assert_eq!(h.app.session.doc.to_json(), saved);
@@ -1365,7 +1457,7 @@ fn boundary_fill_finds_the_cells_and_fills_the_ticked_ones() {
     d.inputs[0].items = vec![Sel::Body { name: "Body1".into() }, Sel::Body { name: "Body2".into() }];
     app.dialog = Some(d);
     // The dialog finds the cells on its next frame.
-    let ctx = egui::Context::default();
+    let ctx = crate::fonts::test_context();
     ctx.run_ui(Default::default(), |ui| crate::dialogs::show(&mut app, ui.ctx())).textures_delta.clear();
     let mut d = app.dialog.take().unwrap();
     let Kind::BoundaryFill { cells, .. } = &mut d.kind else { panic!() };
@@ -1946,6 +2038,37 @@ fn every_construct_tool_opens_a_dialog_instead_of_failing() {
     }
 }
 
+/// #2167: Delete Face asks for its faces instead of failing with "`faces` must be a list of
+/// points or face names". Started with nothing selected it opens a dialog; with a face picked
+/// first it takes that face, and OK takes the fillet off.
+#[test]
+fn delete_face_asks_for_faces_and_takes_the_preselected_one() {
+    let mut h = crate::scenario::Harness::new();
+    h.app.run("solid.box", json!({"length":40,"width":30,"height":20,"body_name":"B"})).unwrap();
+    h.app.run("solid.fillet", json!({"edges":[[40,15,20]],"radius":5})).unwrap();
+    let volume = |h: &crate::scenario::Harness| h.app.session.world_state().body("B").unwrap().mesh().measure().volume;
+    let filleted = volume(&h);
+
+    h.app.session.selection.clear();
+    h.app.start("face.delete");
+    h.frames(1);
+    let status = h.app.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+    assert!(!status.contains("must be a list"), "{status}");
+    assert!(h.app.dialog.as_ref().is_some_and(|d| !d.inputs.is_empty()), "Delete Face opens a dialog that asks for faces");
+    crate::dialogs::cancel(&mut h.app);
+
+    // A point on the fillet's surface, 45 degrees round from its axis (35, y, 15).
+    let r = 5.0 * std::f64::consts::FRAC_1_SQRT_2;
+    let point = Vec3::new(35.0 + r, 15.0, 15.0 + r);
+    h.app.session.selection = vec![crate::dialogs::face_sel(&h.app.session, point).expect("the fillet face")];
+    h.app.start("face.delete");
+    h.frames(1);
+    assert_eq!(h.app.dialog.as_ref().unwrap().inputs[0].items.len(), 1, "the selected face fills the input");
+    h.step(&json!({"key":"Enter"})).unwrap();
+    assert!(h.app.dialog.is_none(), "{:?}", h.app.dialog.as_ref().and_then(|d| d.error.clone()));
+    assert!(volume(&h) > filleted + 1.0, "the rounded edge is square again");
+}
+
 /// #2494: two planes selected first, Axis Through Two Planes takes both and makes the axis
 /// where they meet.
 #[test]
@@ -2031,4 +2154,59 @@ fn convert_mesh_asks_for_the_body_and_converts_the_selected_one() {
     assert!(h.app.dialog.is_none(), "{:?}", h.app.dialog.as_ref().and_then(|d| d.error.clone()));
     let state = h.app.session.model.state();
     assert!(!state.body("Mesh").unwrap().body.is_mesh(), "rebuilt as faces");
+}
+
+/// #3745: hovering a large body never waits for its pick index. A long modelled thread's mesh
+/// has a quarter of a million triangles and its index took a third of a second to make, on the
+/// first hover, in the frame. Now the index is made on a worker and the first hovers scan the
+/// mesh: the first hover takes a small part of what making the index takes, and still finds
+/// the face under the pointer.
+#[test]
+fn hovering_a_large_body_does_not_wait_for_its_pick_index() {
+    // A closed ball of 300 000 triangles, inserted as a mesh body.
+    let (rings, segments) = (500usize, 300usize);
+    let at = |i: usize, j: usize| {
+        let (theta, phi) = (std::f64::consts::PI * i as f64 / rings as f64, std::f64::consts::TAU * j as f64 / segments as f64);
+        [20.0 * theta.sin() * phi.cos(), 20.0 * theta.sin() * phi.sin(), 20.0 * theta.cos()]
+    };
+    let mut stl = vec![0u8; 80];
+    let mut tris: Vec<[[f64; 3]; 3]> = Vec::new();
+    for i in 0..rings {
+        for j in 0..segments {
+            let (a, b, c, d) = (at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1));
+            if i > 0 {
+                tris.push([a, b, d]);
+            }
+            if i + 1 < rings {
+                tris.push([b, c, d]);
+            }
+        }
+    }
+    stl.extend((tris.len() as u32).to_le_bytes());
+    for t in &tris {
+        stl.extend([0u8; 12]);
+        for p in t {
+            for c in p {
+                stl.extend((*c as f32).to_le_bytes());
+            }
+        }
+        stl.extend([0u8; 2]);
+    }
+    let mut h = crate::scenario::Harness::new();
+    let path = h.dir.join("ball.stl");
+    std::fs::write(&path, stl).unwrap();
+    h.app.run("file.insert_mesh", json!({"path": path.to_string_lossy()})).unwrap();
+    let mesh = h.app.session.world_state().bodies[0].mesh();
+    assert!(mesh.triangles.len() > 250_000, "{}", mesh.triangles.len());
+    let t = std::time::Instant::now();
+    let _ = solidcraft_engine::geom::MeshIndex::new(&mesh);
+    let index_ms = t.elapsed().as_secs_f64() * 1000.0;
+    h.app.fit_view();
+    h.frames(3);
+    let at = h.at(&json!({"world": [0.0, -20.0, 0.0]})).unwrap();
+    let t = std::time::Instant::now();
+    h.step(&json!({"move": at})).unwrap();
+    let hover_ms = t.elapsed().as_secs_f64() * 1000.0;
+    assert!(matches!(h.app.viewport.hover, Some(crate::viewport::Hit::Face { .. })), "{:?}", h.app.viewport.hover);
+    assert!(hover_ms < index_ms / 3.0, "the first hover took {hover_ms:.1} ms; making the index takes {index_ms:.1} ms");
 }

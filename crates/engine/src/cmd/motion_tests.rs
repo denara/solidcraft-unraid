@@ -71,6 +71,57 @@ fn contact_sets_stop_a_driven_joint_at_touching() {
     assert!(s.execute("contact.create", &json!({"occurrences": ["A"]})).is_err());
 }
 
+/// A base plate and a lid plate (both 40 × 40 × 3) hinged along their shared edge, driven
+/// past flat by `angle` degrees.
+fn hinged_plates(angle: f64) -> Session {
+    let mut s = Session::default();
+    run(
+        &mut s,
+        "solid.box",
+        json!({"length": 40.0, "width": 40.0, "height": 3.0, "corner": [-20.0, -40.0, 0.0], "operation": "new", "body_name": "BasePlate"}),
+    );
+    run(
+        &mut s,
+        "solid.box",
+        json!({"length": 40.0, "width": 40.0, "height": 3.0, "corner": [-20.0, 0.0, 0.0], "operation": "new", "body_name": "LidPlate"}),
+    );
+    run(&mut s, "component.create", json!({"name": "Base", "parent": "root", "activate": false}));
+    run(&mut s, "component.move_bodies", json!({"bodies": ["BasePlate"], "component": "Base"}));
+    run(&mut s, "component.create", json!({"name": "Lid", "parent": "root", "activate": false}));
+    run(&mut s, "component.move_bodies", json!({"bodies": ["LidPlate"], "component": "Lid"}));
+    run(&mut s, "occurrence.ground", json!({"occurrence": "Base:1", "grounded": true}));
+    run(
+        &mut s,
+        "joint.create",
+        json!({"type": "revolute", "name": "Hinge", "flip": true, "limits": [[0.0, 270.0]],
+        "a": {"occurrence": "Base", "point": [0.0, 0.0, 3.0], "z": [1.0, 0.0, 0.0]},
+        "b": {"occurrence": "Lid", "point": [0.0, 0.0, 3.0], "z": [1.0, 0.0, 0.0]}}),
+    );
+    run(&mut s, "joint.drive", json!({"joint": "Hinge", "value": angle, "quiet": true}));
+    run(&mut s, "contact.create", json!({"occurrences": ["Base:1", "Lid:1"]}));
+    s
+}
+
+/// Regression (#3323): past the angles where a corner lies inside the other plate, no vertex,
+/// mid-edge or triangle centre of either plate is inside it, and `contact.check` reported no
+/// collision while `inspect.interference` found the overlap. The faces crossing is the
+/// collision; the check must see it.
+#[test]
+fn contact_check_finds_plates_crossing_face_to_face() {
+    // Flat against the base: touching is not crossing.
+    let mut s = hinged_plates(180.0);
+    assert_eq!(run(&mut s, "contact.check", json!({}))["collisions"].as_array().map(Vec::len), Some(0), "flat");
+    for angle in [210.0, 240.0, 270.0] {
+        let mut s = hinged_plates(angle);
+        let collisions = run(&mut s, "contact.check", json!({}))["collisions"].clone();
+        let c = collisions.as_array().unwrap();
+        assert_eq!(c.len(), 1, "{angle}°: {c:?}");
+        assert_eq!(c[0]["a"], "Base:1");
+        assert_eq!(c[0]["b"], "Lid:1");
+        assert!(c[0]["depth_mm"].as_f64().unwrap() > 0.5, "{angle}°: {c:?}");
+    }
+}
+
 #[test]
 fn contact_uses_preserved_body_placements_after_component_reassignment() {
     let mut s = Session::default();

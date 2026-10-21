@@ -1092,6 +1092,26 @@ fn merge_split_faces(ex: &mut p21::Exchange, paint: &mut HashMap<u64, FaceLook>,
                             };
                             let rotated =
                                 |ring: &Vec<(u64, bool)>, k: usize| ring.iter().skip(k).chain(ring.iter().take(k)).copied().collect::<Vec<_>>();
+                            // Whether a ring leaves its first vertex turning anticlockwise about a
+                            // cylinder's or cone's axis (the way its angle parameter grows).
+                            let turns_with_angle = |ring: &[(u64, bool)]| -> Option<bool> {
+                                let (o, z) = match ka {
+                                    AnalyticKind::Cylinder { o, z, .. } | AnalyticKind::Cone { o, z, .. } => (*o, *z),
+                                    _ => return None,
+                                };
+                                let &(edge, dir) = ring.first()?;
+                                let start = vertex_point(ex, ends((edge, dir))?.0)?;
+                                let mut pts = edge_points(ex, edge, 4)?;
+                                if ex.get(edge)?.params().get(4)?.as_bool()? != dir {
+                                    pts.reverse();
+                                }
+                                let radial = |q: V3| {
+                                    let v = sub(q, o);
+                                    sub(v, mul(z, dot(v, z)))
+                                };
+                                let turn = dot(cross(radial(start), radial(*pts.get(1)?)), z);
+                                (turn != 0.0).then_some(turn > 0.0)
+                            };
                             let mut cands: Vec<u64> = shared.iter().copied().collect();
                             cands.sort();
                             'seam: for keep in cands {
@@ -1099,18 +1119,31 @@ fn merge_split_faces(ex: &mut p21::Exchange, paint: &mut HashMap<u64, FaceLook>,
                                     let Some((a, b)) = ends((e, d)) else { continue };
                                     let (Some(ra), Some(ka0)) = (rings.first(), rings.first().and_then(|r| starts_at(r, a))) else { continue };
                                     let mut lp = rotated(ra, ka0);
-                                    lp.push((e, d));
+                                    let mut back = (e, !d);
                                     match rings.get(1) {
                                         Some(rb) => {
                                             let Some(kb) = starts_at(rb, b) else { continue };
-                                            lp.extend(rotated(rb, kb));
+                                            let ring_b = rotated(rb, kb);
+                                            // Readers put a seam's first use on the side where the
+                                            // angle starts, so the ring after it must turn the way
+                                            // the angle grows; else that ring and the seam's other
+                                            // use go first (#3394).
+                                            if turns_with_angle(&ring_b) == Some(false) {
+                                                let ring_a = std::mem::replace(&mut lp, ring_b);
+                                                lp.push((e, !d));
+                                                lp.extend(ring_a);
+                                                back = (e, d);
+                                            } else {
+                                                lp.push((e, d));
+                                                lp.extend(ring_b);
+                                            }
                                         }
                                         // A cone tip (or a sphere's pole cap): the seam's far end is
                                         // the apex on the axis, off the ring.
-                                        None if starts_at(ra, b).is_none() && on_axis(b) => {}
+                                        None if starts_at(ra, b).is_none() && on_axis(b) => lp.push((e, d)),
                                         None => continue,
                                     }
-                                    lp.push((e, !d));
+                                    lp.push(back);
                                     loops = Some(vec![lp]);
                                     break 'seam;
                                 }
@@ -1840,6 +1873,63 @@ mod tests {
         assert_eq!(hollow.shell_count(), 2);
         let text = crate::step_export(&[&hollow], "test").unwrap();
         assert_eq!(text.matches("BREP_WITH_VOIDS").count(), 1, "{text}");
+    }
+
+    /// #3394: a plate on four tapered legs and a straight peg. Each leg's cone and the peg's
+    /// cylinder are written as one face whose loop runs ring, seam, ring, seam. Readers put the
+    /// seam's first use on the side where the surface's angle starts and lay the next ring out
+    /// from there, so that ring must turn the way the angle grows (anticlockwise about the
+    /// written axis); three of the legs came out the other way and other readers dropped their
+    /// sides.
+    #[test]
+    fn seam_loops_turn_the_way_the_angle_grows() {
+        use solidcraft_geom::{Loop2, Plane, Region2, Vec2};
+        let plate = crate::box_solid(Vec3::new(-60.0, -40.0, 0.0), Vec3::new(60.0, 40.0, 10.0)).unwrap();
+        let mut b = plate;
+        for (x, y) in [(-45.0, -30.0), (45.0, -30.0), (45.0, 30.0), (-45.0, 30.0)] {
+            let disc = Region2 { outer: Loop2::circle(Vec2::new(x, y), 5.0), holes: vec![] };
+            let leg = crate::extrude_tapered(&Plane::XY, &disc, 20.0, -1.0, 2f64.to_radians()).unwrap();
+            b = crate::boolean(&b, &leg, crate::BoolOp::Union).unwrap().unwrap();
+        }
+        let peg = crate::cylinder(Vec3::new(0.0, 0.0, 10.0), Vec3::Z, 4.0, 8.0).unwrap();
+        b = crate::boolean(&b, &peg, crate::BoolOp::Union).unwrap().unwrap();
+        let text = crate::step_export(&[&b], "test").unwrap();
+        let ex = p21::parse(&text).unwrap();
+        let mut seamed = 0;
+        for face in ex.entities.values().filter(|e| e.name() == "ADVANCED_FACE") {
+            let surface = ex.get(face.params().get(2).unwrap().as_ref_id().unwrap()).unwrap();
+            if !matches!(surface.name(), "CONICAL_SURFACE" | "CYLINDRICAL_SURFACE") {
+                continue;
+            }
+            let frame = ex.get(surface.params().get(1).unwrap().as_ref_id().unwrap()).unwrap();
+            let o = triple(&ex, frame.params().get(1).unwrap().as_ref_id().unwrap());
+            let z = triple(&ex, frame.params().get(2).unwrap().as_ref_id().unwrap());
+            for lp in face_edges(&ex, face).unwrap() {
+                let Some(i) = lp.iter().position(|(e, _)| lp.iter().filter(|(f, _)| f == e).count() == 2) else { continue };
+                let &(edge, dir) = lp.get((i + 1) % lp.len()).unwrap();
+                let p = ex.get(edge).unwrap().params();
+                let (v0, v1) = (p.get(1).unwrap().as_ref_id().unwrap(), p.get(2).unwrap().as_ref_id().unwrap());
+                let mut pts = edge_points(&ex, edge, 4).unwrap();
+                if p.get(4).unwrap().as_bool().unwrap() != dir {
+                    pts.reverse();
+                }
+                let start = vertex_point(&ex, if dir { v0 } else { v1 }).unwrap();
+                let radial = |q: V3| {
+                    let v = sub(q, o);
+                    sub(v, mul(z, dot(v, z)))
+                };
+                let turn = dot(cross(radial(start), radial(pts[1])), z);
+                assert!(turn > 0.0, "face #{:?}: the ring after the seam turns against the angle", face.params().first());
+                seamed += 1;
+            }
+        }
+        assert_eq!(seamed, 5, "{text}");
+    }
+
+    /// A CARTESIAN_POINT's or DIRECTION's three numbers.
+    fn triple(ex: &p21::Exchange, id: u64) -> V3 {
+        let c = ex.get(id).unwrap().params().get(1).unwrap().as_list().unwrap();
+        [c[0].as_f64().unwrap(), c[1].as_f64().unwrap(), c[2].as_f64().unwrap()]
     }
 
     #[test]

@@ -302,9 +302,10 @@ impl ContactGeometry {
             let cost = ma
                 .positions
                 .len()
-                .saturating_add(ma.triangles.len().saturating_mul(4))
+                // 4 sample points and 3 edges to probe per triangle of `a` against each triangle of `b` (#3323), and the other way round.
+                .saturating_add(ma.triangles.len().saturating_mul(7))
                 .saturating_mul(mb.triangles.len())
-                .saturating_add(mb.positions.len().saturating_add(mb.triangles.len().saturating_mul(4)).saturating_mul(ma.triangles.len()));
+                .saturating_add(mb.positions.len().saturating_add(mb.triangles.len().saturating_mul(7)).saturating_mul(ma.triangles.len()));
             *work = work.saturating_add(cost);
             if *work > budget {
                 return Err(limit("motion exceeds contact sweep collision budget; simplify the contact set or use smaller increments"));
@@ -522,8 +523,8 @@ fn tri_distance(a: &[Vec3; 3], b: &[Vec3; 3]) -> (f64, Vec3, Vec3) {
     best
 }
 
-/// Where segment pq passes through triangle t (None: it misses, or lies in its plane).
-fn segment_hits_triangle(p: Vec3, q: Vec3, t: &[Vec3; 3]) -> Option<Vec3> {
+/// Where the segment `p`→`q` hits triangle `t` (endpoints count), if it crosses its plane.
+pub(super) fn segment_hits_triangle(p: Vec3, q: Vec3, t: &[Vec3; 3]) -> Option<Vec3> {
     let d = q - p;
     let (e1, e2) = (t[1] - t[0], t[2] - t[0]);
     let h = d.cross(e2);

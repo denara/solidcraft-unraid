@@ -234,7 +234,7 @@ mod tests {
     /// A window that has run a frame, with or without focus. A context that has never run one
     /// reads as unfocused, so the tests run one first, as the app always has.
     fn window(focused: bool) -> egui::Context {
-        let ctx = egui::Context::default();
+        let ctx = crate::fonts::test_context();
         let mut output = ctx.run_ui(egui::RawInput { focused, ..Default::default() }, |_| {});
         output.textures_delta.clear();
         ctx

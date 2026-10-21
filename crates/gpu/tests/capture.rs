@@ -39,6 +39,39 @@ fn session(script: &[(&str, serde_json::Value)]) -> Session {
     s
 }
 
+/// #2888: compiling the viewport on GL used to reject AO's depth textureLoad, even
+/// with AO disabled. Select GL explicitly so a working Vulkan adapter cannot hide it.
+#[test]
+fn opengl_viewport_pipelines_render_a_model() {
+    let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+    desc.backends = wgpu::Backends::GL;
+    let instance = wgpu::Instance::new(desc);
+    let adapter = match pollster::block_on(instance.request_adapter(&Default::default())) {
+        Ok(adapter) => adapter,
+        Err(e) => {
+            let required = std::env::var_os("SOLIDCRAFT_REQUIRE_GPU").is_some() && wgpu::Backends::from_env() == Some(wgpu::Backends::GL);
+            assert!(!required, "OpenGL is required here: {e}");
+            eprintln!("skipping the OpenGL regression: {e}");
+            return;
+        }
+    };
+    assert_eq!(adapter.get_info().backend, wgpu::Backend::Gl);
+    eprintln!("OpenGL regression: {:?}", adapter.get_info());
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_features: solidcraft_gpu::depth_features(&adapter),
+        required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
+        ..Default::default()
+    }))
+    .unwrap();
+    let c = Capturer::new(&adapter, device, queue).unwrap();
+    let s = session(&[("solid.box", json!({"length": 40, "width": 30, "height": 20}))]);
+    let cam = view::home_camera(&s);
+    let img = c.rgba(&view::scene_with_guides(&s, &cam, None, Guides { grid: false, axes: false }), &cam, 160, 100).unwrap();
+    let empty = c.rgba(&Default::default(), &cam, 160, 100).unwrap();
+    let changed = pixels(&img).zip(pixels(&empty)).filter(|(a, b)| a != b).count();
+    assert!(changed > 500, "the model covers only {changed} pixels");
+}
+
 /// Appearances show as the viewport shows them: a body's colour, a face's own look.
 #[test]
 fn pictures_show_appearances() {

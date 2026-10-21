@@ -67,6 +67,17 @@ pub fn publish_handle(name: &str, at: egui::Pos2) {
     HANDLES.with(|h| h.borrow_mut().push((name.to_string(), at)));
 }
 
+/// Publish a rectangle and its centered interaction handle with the same explicit identity.
+pub(crate) fn publish_target(name: &str, rect: egui::Rect) {
+    publish_target_as(name, name, rect);
+}
+
+/// Publish centered geometry with explicit, independently named handle and rectangle aliases.
+pub(crate) fn publish_target_as(handle: &str, rect_name: &str, rect: egui::Rect) {
+    publish_handle(handle, rect.center());
+    publish_rect(rect_name, rect);
+}
+
 /// Where a handle was drawn last frame.
 pub fn handle_at(name: &str) -> Option<egui::Pos2> {
     HANDLES.with(|h| h.borrow().iter().rfind(|(n, _)| n == name).map(|x| x.1))
@@ -84,6 +95,11 @@ pub fn publish_rect(name: &str, r: egui::Rect) {
 
 pub fn rect_of(name: &str) -> Option<egui::Rect> {
     RECTS.with(|h| h.borrow().iter().rfind(|(n, _)| n == name).map(|x| x.1))
+}
+
+#[cfg(test)]
+pub(crate) fn rects(prefix: &str) -> Vec<(String, egui::Rect)> {
+    RECTS.with(|r| r.borrow().iter().filter(|(name, _)| name.starts_with(prefix)).cloned().collect())
 }
 
 /// A number about this frame's drawing, by name ("axis_view_highlights": the axis view's highlighted tips).
@@ -160,7 +176,11 @@ impl Harness {
     pub fn new() -> Harness {
         let mut h = Harness {
             app: SolveApp::new(Session::default(), Services::default()),
-            ctx: egui::Context::default(),
+            ctx: {
+                let ctx = egui::Context::default();
+                crate::fonts::setup_bundled_fonts(&ctx);
+                ctx
+            },
             output: Default::default(),
             dir: scratch_dir(),
             next_file: Rc::new(RefCell::new(None)),
@@ -256,7 +276,9 @@ impl Harness {
         }
         // A file opening, recovering or saving in the background: wait for it (as a person would).
         let began = std::time::Instant::now();
-        while (!self.app.file_load.idle() || self.app.saving.is_some()) && began.elapsed() < std::time::Duration::from_secs(120) {
+        while (!self.app.file_load.idle() || self.app.saving.is_some() || crate::open_meshing::active(&self.app))
+            && began.elapsed() < std::time::Duration::from_secs(120)
+        {
             self.frame();
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
@@ -515,6 +537,7 @@ impl Harness {
                 }
                 drop(old);
                 self.ctx = egui::Context::default();
+                crate::fonts::setup_bundled_fonts(&self.ctx);
                 self.ctx.enable_accesskit();
                 self.install();
                 self.start_autosave();
@@ -778,7 +801,8 @@ pub fn check(h: &mut Harness, e: &Value) -> Result<(), String> {
                 if r.width() < lo - 0.5 || r.width() > hi + 0.5 {
                     return Err(format!("dialog width {:.0}, want {lo}..{hi}", r.width()));
                 }
-                if (r.right() - vp.right()).abs() > 2.0 || r.top() < vp.top() || r.bottom() > vp.bottom() + 1.0 {
+                let clearance = if rect_of("dialog:header").is_some() { crate::theme::Tokens::get().space_8 } else { 0.0 };
+                if (r.right() - (vp.right() - clearance)).abs() > 0.5 || r.top() < vp.top() || r.bottom() > vp.bottom() + 1.0 {
                     return Err(format!("dialog {r:?} is not docked right inside the viewport {vp:?}"));
                 }
             }
@@ -1077,3 +1101,7 @@ pub fn check(h: &mut Harness, e: &Value) -> Result<(), String> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "scenario_publication_tests.rs"]
+mod publication_tests;

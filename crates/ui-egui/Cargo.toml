@@ -36,6 +36,10 @@ tiny-skia = { workspace = true }
 # updated by its installer (MIT; already in the tree as a build dependency).
 winreg = "0.56"
 
+[dev-dependencies]
+# Parse the source guard structurally, including code after inline test modules.
+syn = { workspace = true, features = ["visit"] }
+
 # Pictures pasted into the agent chat; already in the tree, with the same features, through
 # egui-winit's clipboard.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

@@ -114,7 +114,7 @@ The original desktop/stdio MCP server retains its existing behaviour.
 The dashboard groups files by their first real directory component, including nested
 exports. Existing root files use virtual groups based on native model names; exports
 with additional hyphen/underscore suffixes use the longest unambiguous matching model
-stem. Files without a safe match remain in “Weitere Dateien”. Groups start collapsed
+stem. Files without a safe match remain in “Weitere Dateien”. Real-folder ZIP/delete actions sit in a compact bar above the file-table headings; the project name is not repeated. Groups start collapsed
 on every page load; live updates preserve the user's current open/closed choices.
 The file-detail “Projektgruppe” is derived by this integration. The separate “Projekt”
 property comes from the design's optional `metadata.project`; it does not select or

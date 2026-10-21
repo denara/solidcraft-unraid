@@ -73,6 +73,14 @@ pub fn tool_definitions() -> Vec<Value> {
             Effect::ReadOnly,
         ),
         tool(
+            "describe_command",
+            "Describe a command",
+            "One command's parameter docs and, for commands with a typed contract (solid.box, solid.extrude and engine.describe so far), the \
+             JSON Schemas (2020-12) of its parameters (`input`) and of a successful result (`output`); null for the others.",
+            obj(json!({"id": string("Command id, e.g. \"solid.extrude\"")}), &["id"]),
+            Effect::ReadOnly,
+        ),
+        tool(
             "execute",
             "Execute a command",
             "Run one command with JSON parameters, exactly as the toolbar, palette and scripts do. Never opens a dialog. \
@@ -124,11 +132,14 @@ pub fn tool_definitions() -> Vec<Value> {
             "The whole design: user parameters (expression, value, errors), the timeline (features with type, suppressed, \
              rolled back, error, warning, timing), bodies (volume, area, centre of mass, bounding box, face/edge/vertex \
              counts), sketches (curves with ids and coordinates, points, constraints, profiles, degrees of freedom, solve \
-             status), the active sketch, selection and undo depth.",
+             status), assembly joints (what each origin is attached to: occurrence, the feature, face, edge or sketch \
+             curve its face names refer to, whether it resolves and why not; `execute` `joint.inspect {joint}` gives one), \
+             the active sketch, selection and undo depth.",
             obj(
                 json!({
                     "measure": {"type": "boolean", "description": "Measure bodies (default true)"},
                     "sketches": {"type": "boolean", "description": "Full sketch contents (default true; false = summary only)"},
+                    "joints": {"type": "boolean", "description": "Joint definitions as joint.inspect gives them, when the design has joints (default true)"},
                 }),
                 &[],
             ),
@@ -244,6 +255,16 @@ pub fn tool_definitions() -> Vec<Value> {
             ),
             Effect::ReadOnly,
         ),
+        tool(
+            "running",
+            "What the app is running",
+            "What the app is running or has queued right now, for every client: each request's connection and id, method, \
+             command id (a batch's step count), seconds since it arrived (running_s) and whether it still waits its turn \
+             (queued); `self` marks a request sent on the connection that asks. Answers at once, even while the app is busy, \
+             and never shows parameters. Ask it when a call timed out or the app seems slow, before sending a change again.",
+            obj(json!({}), &[]),
+            Effect::ReadOnly,
+        ),
         tool("undo", "Undo", "Undo the last change to the design.", obj(json!({}), &[]), Effect::Edits),
         tool("redo", "Redo", "Redo the last undone change.", obj(json!({}), &[]), Effect::Edits),
         tool(
@@ -267,7 +288,7 @@ pub fn tool_definitions() -> Vec<Value> {
                 json!({
                     "path": string("Path to a .solidcraft, .step/.stp, .3mf, .stl, .obj, .glb or .gltf file"),
                     "up": {"type": "string", "enum": ["z", "y"], "description": "STEP and glTF only. z keeps the file's axes; y: the file has Y up, so its bodies are turned to stand Z up. Default: z for STEP, y for glTF"},
-                    "names": {"type": "string", "enum": ["solid", "product", "instance"], "description": "STEP only. What the bodies are named after: solid (default: the solid's own name, else the product's), product (the part's name) or instance (the assembly occurrence's name, else the product's)"},
+                    "names": {"type": "string", "enum": ["auto", "solid", "product", "instance"], "description": "STEP, IGES, FreeCAD and Rhino. auto (default): keep meaningful solid names, replace placeholders with the nearest named product, else instance; solid: the solid's own name; product: the part's name; instance: the occurrence's name, else the product's"},
                 }),
                 &["path"],
             ),
@@ -388,6 +409,10 @@ fn dispatch(b: &mut dyn Backend, name: &str, a: &Map<String, Value>) -> Result<V
             };
             Ok(Value::Array(all.as_array().map(|v| v.iter().filter(|c| hit(c)).cloned().collect()).unwrap_or_default()))
         }
+        "describe_command" => {
+            let id = str_arg(a, "id").ok_or("`id` is required")?;
+            exec(b, "engine.describe", json!({"command": id}))
+        }
         "execute" => {
             let id = str_arg(a, "command").ok_or("`command` is required")?;
             let v = exec(b, id, a.get("params").cloned().filter(Value::is_object).unwrap_or(json!({})))?;
@@ -403,6 +428,13 @@ fn dispatch(b: &mut dyn Backend, name: &str, a: &Map<String, Value>) -> Result<V
                     .map(|id| exec(b, "sketch.inspect", json!({"sketch": id.clone()})).unwrap_or_else(|e| json!({"id": id, "error": e})))
                     .collect();
                 d["sketches"] = Value::Array(full);
+            }
+            // Joints: what each is attached to (left out when there are none, or the app is older).
+            if a.get("joints").and_then(Value::as_bool).unwrap_or(true)
+                && let Ok(j) = exec(b, "joint.inspect", json!({}))
+                && j["joints"].as_array().is_some_and(|v| !v.is_empty())
+            {
+                d["joints"] = j["joints"].clone();
             }
             Ok(d)
         }
@@ -432,6 +464,7 @@ fn dispatch(b: &mut dyn Backend, name: &str, a: &Map<String, Value>) -> Result<V
             Some(_) => exec(b, "diagnostics.crash_report", pick(a, &["id"])),
             None => exec(b, "diagnostics.crash_reports", pick(a, &["limit"])),
         },
+        "running" => b.call("control.running", json!({})),
         "undo" => exec(b, "edit.undo", json!({})),
         "redo" => exec(b, "edit.redo", json!({})),
         "new_design" => exec(b, "file.new", pick(a, &["name"])),
@@ -478,12 +511,13 @@ impl Undo {
         }
     }
 
-    /// Go back; the number of steps undone.
-    fn rollback(self, b: &mut dyn Backend, steps: usize) -> u64 {
+    /// Go back; (whether the design is back as it was, the number of steps undone). A failed
+    /// rollback says so rather than reporting the flag the caller asked for (#3242).
+    fn rollback(self, b: &mut dyn Backend, steps: usize) -> (bool, u64) {
         match self {
             Undo::Checkpoint(id) => match exec(b, "edit.restore_checkpoint", json!({"checkpoint": id})) {
-                Ok(_) => steps as u64,
-                Err(_) => 0,
+                Ok(_) => (true, steps as u64),
+                Err(_) => (false, 0),
             },
             Undo::Depth(before) => {
                 let after = undo_depth(b).unwrap_or(before);
@@ -494,9 +528,10 @@ impl Undo {
                     }
                     undone += 1;
                 }
-                undone
+                (undone == steps as u64, undone)
             }
-            Undo::None => 0,
+            // Nothing remembered the design; only a first step that failed left nothing behind.
+            Undo::None => (steps == 0, 0),
         }
     }
 
@@ -561,12 +596,12 @@ fn batch(b: &mut dyn Backend, a: &Map<String, Value>) -> Value {
         match r {
             Ok(v) => results.push(if verbose { v } else { compact(v) }),
             Err(e) => {
-                let undone = start.rollback(b, i);
+                let (rolled_back, undone) = start.rollback(b, i);
                 let reply = json!({
                     "ok": false,
                     "completed": i,
                     "failed": {"index": i, "command": command, "error": e},
-                    "rolled_back": rollback,
+                    "rolled_back": rolled_back,
                     "undone": undone,
                     "results": results,
                 });
@@ -594,17 +629,24 @@ fn batch_reply(r: &Value, rollback: bool, verbose: bool) -> Value {
         r["results"].as_array().cloned().unwrap_or_default().into_iter().map(|v| if verbose { v } else { compact(v) }).collect();
     let (mut reply, error) = match r.get("failed").filter(|f| !f.is_null()) {
         None => (json!({"ok": true, "completed": results.len(), "results": results}), false),
-        Some(failed) => (
-            json!({
-                "ok": false,
-                "completed": r["completed"],
-                "failed": failed,
-                "rolled_back": rollback,
-                "undone": r["undone"],
-                "results": results,
-            }),
-            true,
-        ),
+        Some(failed) => {
+            // `rolled_back` tells whether the design went back, not whether a rollback was
+            // asked for (#3242): the app answers with its own `rolled_back`; an app that
+            // predates that field and undid none of the steps it had completed did not go back.
+            let undone = r["undone"].as_u64().unwrap_or(0);
+            let went_back = r.get("rolled_back").and_then(Value::as_bool).unwrap_or(undone > 0 || r["completed"].as_u64() == Some(0));
+            (
+                json!({
+                    "ok": false,
+                    "completed": r["completed"],
+                    "failed": failed,
+                    "rolled_back": rollback && went_back,
+                    "undone": r["undone"],
+                    "results": results,
+                }),
+                true,
+            )
+        }
     };
     // The app timed the steps where they ran.
     if let Some(o) = reply.as_object_mut() {

@@ -111,6 +111,30 @@ fn seam_only_sphere_void_is_turned_inside_out() {
     assert!(rel(m.area, area) < 1e-3, "area {} vs {area}", m.area);
 }
 
+/// A block with a closed cavity, written as BREP_WITH_VOIDS. SolidCraft writes the void's
+/// shell facing into the cavity with ORIENTED_CLOSED_SHELL `.T.`; some exporters write the
+/// same faces with `.F.` (#3730), which turned the void inside out and added its volume. Either
+/// way the cavity is taken out.
+#[test]
+fn a_void_reads_as_a_cavity_whichever_way_its_shell_flag_points() {
+    let block = box_solid(Vec3::ZERO, Vec3::new(40.0, 30.0, 12.5)).unwrap();
+    let cavity = box_solid(Vec3::new(10.0, 12.0, 4.0), Vec3::new(30.0, 18.0, 9.0)).unwrap();
+    let Ok(Some(hollow)) = boolean(&block, &cavity, BoolOp::Cut) else { panic!("cut") };
+    let want = 40.0 * 30.0 * 12.5 - 20.0 * 6.0 * 5.0;
+    assert!(rel(measure(&hollow).unwrap().volume, want) < 1e-9);
+    let text = step_export(&[&hollow], "void").unwrap();
+    let flag = |t: &str| t.lines().filter(|l| l.contains("ORIENTED_CLOSED_SHELL")).map(str::to_owned).collect::<Vec<_>>();
+    let written = flag(&text);
+    assert!(written.len() == 1 && written[0].ends_with(".T.);"), "{written:?}");
+    let flipped = text.replace(&written[0], &written[0].replace(".T.);", ".F.);"));
+    for t in [text, flipped] {
+        let imp = step_import(&t).unwrap();
+        assert!(imp.warnings.is_empty(), "{:?}", imp.warnings);
+        let m = measure(&imp.bodies[0].body).unwrap();
+        assert!(rel(m.volume, want) < 1e-6, "{:?}: volume {} vs {want}", flag(&t), m.volume);
+    }
+}
+
 #[test]
 fn non_antipodal_seam_sphere_does_not_panic() {
     let text = seam_sphere_step(Vec3::ZERO, 2.0, Vec3::Z, Vec3::X, 0.0, false, 2.5);
@@ -767,7 +791,9 @@ fn distinct_parts_convert_together_across_instances() {
 fn later_instances_show_the_first_instances_mesh_placed() {
     let imp = step_import(&two_instance_assembly()).unwrap();
     let (first, second) = (&imp.bodies[0].body, &imp.bodies[1].body);
-    assert!(first.display_of.is_none() && second.display_of.is_some());
+    // The first instance shows the shared mesh as well (meshing its own would mesh the part twice).
+    let (Some(a), Some(b)) = (first.display_of.as_deref(), second.display_of.as_deref()) else { panic!("both instances share a display") };
+    assert!(std::sync::Arc::ptr_eq(&a.0, &b.0));
     let a = first.reference_display_mesh_angular(0.01, crate::DISPLAY_ANGLE).unwrap();
     let b = second.reference_display_mesh_angular(0.01, crate::DISPLAY_ANGLE).unwrap();
     assert_eq!(a.triangles, b.triangles);
@@ -1705,5 +1731,92 @@ fn explicit_outer_bound_crossing_a_closed_nurbs_seam_stays_trimmed() {
         assert!(!mesh.triangles.is_empty(), "{:?}", imp.warnings);
         assert!(mesh.bounds().diagonal() < 10.0, "sense={sense}: {:?}", mesh.bounds());
         assert!((mesh.measure().area - 42.0).abs() < 0.01, "sense={sense}: area {}", mesh.measure().area);
+    }
+}
+
+#[test]
+fn extruded_ellipse_patch_crossing_profile_seam_stays_trimmed() {
+    for (sense, outer) in [(true, true), (false, true), (true, false)] {
+        for radius in [9.0, 3000.0] {
+            let text = shallow_cylinder_patch_at_radius(sense, outer, radius);
+            let old = format!("#5=CYLINDRICAL_SURFACE('',#4,{radius});");
+            let angle = 3.0 / radius;
+            let surface = format!(
+                "#5=SURFACE_OF_LINEAR_EXTRUSION('',#35,#18);
+#35=ELLIPSE('',#36,{radius},{radius});
+#36=AXIS2_PLACEMENT_3D('',#1,#2,#37);
+#37=DIRECTION('',({},{},0.));",
+                angle.cos(),
+                angle.sin()
+            );
+            assert!(text.contains(&old));
+            let text = text.replacen(&old, &surface, 1);
+            let imported = step_import(&text).unwrap();
+            assert_eq!(imported.warnings, ["solid 'Strip': imported as an open body (the shell is not closed)"]);
+            assert_eq!(imported.bodies.len(), 1);
+            let body = &imported.bodies[0].body;
+            assert_eq!(imported.bodies[0].file_faces, 1);
+            let plan = body.display_plan(0.01).unwrap();
+            for mesh in [
+                plan.evaluate(),
+                body.display_mesh_angular(0.01, crate::DISPLAY_ANGLE).unwrap(),
+                body.reference_display_mesh_angular(0.01, crate::DISPLAY_ANGLE).unwrap(),
+                body.tessellate(0.01).unwrap(),
+            ] {
+                assert!(!mesh.triangles.is_empty());
+                assert!(mesh.bounds().diagonal() < 10.0, "radius={radius}, sense={sense}, outer={outer}: {:?}", mesh.bounds());
+                assert!((mesh.measure().area - 42.0).abs() < 0.1, "radius={radius}, sense={sense}, outer={outer}: area {}", mesh.measure().area);
+            }
+        }
+    }
+}
+
+/// Parts of known shape from the step-conformance corpus (`tests/step-conformance`, generated
+/// from formulas by https://github.com/dan335/step-conformance at 96f30bb, CC0 1.0):
+/// each reads back with its exact volume (from the generator's own profile), its box and its
+/// face count. Left out: `torus_ring` (meshes below its equator, a meshing issue for the
+/// tessellation work) and the 1.4 MB `plate_900_holes`.
+#[test]
+fn step_conformance_parts_read_back_their_exact_shape() {
+    // (file, exact volume (mm³), box (min, max), kernel faces, bodies)
+    #[rustfmt::skip]
+    let parts: [(&str, &str, f64, [f64; 6], usize, usize); 17] = [
+        ("cone_point", include_str!("../../../../tests/step-conformance/cone_point.step"), 1000.0 * std::f64::consts::PI, [-10.0, -10.0, 0.0, 10.0, 10.0, 30.0], 2, 1),
+        ("cone_point_vertex", include_str!("../../../../tests/step-conformance/cone_point_vertex.step"), 1000.0 * std::f64::consts::PI, [-10.0, -10.0, 0.0, 10.0, 10.0, 30.0], 2, 1),
+        ("cylinder", include_str!("../../../../tests/step-conformance/cylinder.step"), 9424.778, [-10.0, -10.0, 0.0, 10.0, 10.0, 30.0], 3, 1),
+        ("cylinder_inch", include_str!("../../../../tests/step-conformance/cylinder_inch.step"), 9424.778, [-10.0, -10.0, 0.0, 10.0, 10.0, 30.0], 3, 1),
+        ("cylinder_nurbs", include_str!("../../../../tests/step-conformance/cylinder_nurbs.step"), 9424.778, [-10.0, -10.0, 0.0, 10.0, 10.0, 30.0], 3, 1),
+        ("cylinder_placed", include_str!("../../../../tests/step-conformance/cylinder_placed.step"), 9424.778, [31.835, -33.165, 1.835, 65.485, 0.485, 35.485], 3, 1),
+        ("cylinder_seam", include_str!("../../../../tests/step-conformance/cylinder_seam.step"), 9424.778, [-10.0, -10.0, 0.0, 10.0, 10.0, 30.0], 3, 1),
+        ("cylinder_twice", include_str!("../../../../tests/step-conformance/cylinder_twice.step"), 18849.556, [-10.0, -10.0, 0.0, 90.0, 10.0, 30.0], 6, 2),
+        ("dome", include_str!("../../../../tests/step-conformance/dome.step"), 16755.161, [-20.0, -20.0, 0.0, 20.0, 20.0, 20.0], 2, 1),
+        ("dome_nurbs", include_str!("../../../../tests/step-conformance/dome_nurbs.step"), 16755.161, [-20.0, -20.0, 0.0, 20.0, 20.0, 20.0], 2, 1),
+        ("far_cylinder", include_str!("../../../../tests/step-conformance/far_cylinder.step"), 9424.778, [99990.0, -10.0, 0.0, 100010.0, 10.0, 30.0], 3, 1),
+        ("grooved_shaft", include_str!("../../../../tests/step-conformance/grooved_shaft.step"), 153532.251, [-10.0, -10.0, 0.0, 10.0, 10.0, 501.0], 753, 1),
+        ("plate_100_holes", include_str!("../../../../tests/step-conformance/plate_100_holes.step"), 71588.321, [0.0, 0.0, 0.0, 100.0, 100.0, 10.0], 110, 1),
+        ("sheet_disc", include_str!("../../../../tests/step-conformance/sheet_disc.step"), 193396443.755, [-1800.0, -1800.0, 0.0, 1800.0, 1800.0, 19.0], 3, 1),
+        ("tiny_pin", include_str!("../../../../tests/step-conformance/tiny_pin.step"), std::f64::consts::FRAC_PI_8, [-0.25, -0.25, 0.0, 0.25, 0.25, 2.0], 3, 1),
+        ("torus_ring_nurbs", include_str!("../../../../tests/step-conformance/torus_ring_nurbs.step"), 4934.802, [-25.0, -25.0, 0.0, 25.0, 25.0, 5.0], 2, 1),
+        ("washer", include_str!("../../../../tests/step-conformance/washer.step"), 3534.292, [-20.0, -20.0, 0.0, 20.0, 20.0, 3.0], 4, 1),
+    ];
+    for (name, text, volume, bbox, faces, bodies) in parts {
+        let imp = step_import(text).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(imp.warnings.is_empty(), "{name}: {:?}", imp.warnings);
+        assert_eq!(imp.bodies.len(), bodies, "{name}");
+        let (mut v, mut n) = (0.0, 0);
+        let mut b = solidcraft_geom::Aabb3::EMPTY;
+        for body in &imp.bodies {
+            let m = measure(&body.body).unwrap_or_else(|e| panic!("{name}: {e}"));
+            v += m.volume;
+            n += m.faces;
+            b = b.union(&m.bbox);
+        }
+        assert!(rel(v, volume) < 1e-3, "{name}: volume {v} vs {volume}");
+        assert_eq!(n, faces, "{name}: faces");
+        let [x0, y0, z0, x1, y1, z1] = bbox;
+        let size = Vec3::new(x1 - x0, y1 - y0, z1 - z0).len();
+        for (got, want) in [(b.min, Vec3::new(x0, y0, z0)), (b.max, Vec3::new(x1, y1, z1))] {
+            assert!(got.dist(want) <= size * 1e-3, "{name}: box corner {got:?} vs {want:?}");
+        }
     }
 }

@@ -35,21 +35,32 @@ static ENGLISH: Catalog = Catalog::new("en", "English", include_str!(concat!(env
 static CZECH: Catalog = Catalog::new("cs", "Čeština", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/cs.json")));
 static DANISH: Catalog = Catalog::new("da", "Dansk", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/da.json")));
 static GERMAN: Catalog = Catalog::new("de", "Deutsch", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/de.json")));
+/// English in UK spelling: only the messages whose spelling differs; the rest are English's.
+static ENGLISH_UK: Catalog =
+    Catalog::new("en-GB", "English (UK)", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/en-GB.json")));
 static SPANISH: Catalog = Catalog::new("es", "Español (España)", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/es.json")));
 static FRENCH: Catalog = Catalog::new("fr", "Français", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/fr.json")));
 static GALICIAN: Catalog = Catalog::new("gl", "Galego", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/gl.json")));
+static HUNGARIAN: Catalog = Catalog::new("hu", "Magyar", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/hu.json")));
+static INDONESIAN: Catalog =
+    Catalog::new("id", "Bahasa Indonesia", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/id.json")));
 static ITALIAN: Catalog = Catalog::new("it", "Italiano", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/it.json")));
 static JAPANESE: Catalog = Catalog::new("ja", "日本語", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/ja.json")));
 static KOREAN: Catalog = Catalog::new("ko", "한국어", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/ko.json")));
 static MALAY: Catalog = Catalog::new("ms", "Bahasa Melayu", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/ms.json")));
+static DUTCH: Catalog = Catalog::new("nl", "Nederlands", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/nl.json")));
 static POLISH: Catalog = Catalog::new("pl", "Polski", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/pl.json")));
 static PORTUGUESE_BR: Catalog =
     Catalog::new("pt-BR", "Português (Brasil)", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/pt-BR.json")));
+static ROMANIAN: Catalog = Catalog::new("ro", "Română", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/ro.json")));
 static RUSSIAN: Catalog = Catalog::new("ru", "Русский", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/ru.json")));
+static SWEDISH: Catalog = Catalog::new("sv", "Svenska", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/sv.json")));
 static TURKISH: Catalog = Catalog::new("tr", "Türkçe", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/tr.json")));
 static UKRAINIAN: Catalog = Catalog::new("uk", "Українська", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/uk.json")));
 static VIETNAMESE: Catalog = Catalog::new("vi", "Tiếng Việt", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/vi.json")));
 static CHINESE: Catalog = Catalog::new("zh", "中文", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/zh.json")));
+static CHINESE_TRADITIONAL: Catalog =
+    Catalog::new("zh-TW", "繁體中文", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/zh-TW.json")));
 /// English first (the fallback), then by language id, one per line so that adding a language
 /// doesn't edit a line another addition edits.
 #[rustfmt::skip]
@@ -58,20 +69,27 @@ pub const LOCALES: &[&Catalog] = &[
     &CZECH,
     &DANISH,
     &GERMAN,
+    &ENGLISH_UK,
     &SPANISH,
     &FRENCH,
     &GALICIAN,
+    &HUNGARIAN,
+    &INDONESIAN,
     &ITALIAN,
     &JAPANESE,
     &KOREAN,
     &MALAY,
+    &DUTCH,
     &POLISH,
     &PORTUGUESE_BR,
+    &ROMANIAN,
     &RUSSIAN,
+    &SWEDISH,
     &TURKISH,
     &UKRAINIAN,
     &VIETNAMESE,
     &CHINESE,
+    &CHINESE_TRADITIONAL,
 ];
 
 pub fn is_supported(id: &str) -> bool {
@@ -230,13 +248,24 @@ pub fn tr_name(text: &str) -> String {
 mod tests {
     use super::*;
 
-    /// The languages are listed English first, then by id, so adding one doesn't edit the
-    /// line another addition edits.
+    /// English first, then by id, so adding a locale edits only its own line.
     #[test]
     fn locales_are_listed_english_first_then_by_id() {
         let ids: Vec<&str> = LOCALES.iter().map(|c| c.id).collect();
         assert_eq!(ids.first(), Some(&"en"));
         assert!(ids[1..].is_sorted(), "{ids:?}");
+    }
+
+    /// English (UK) holds only the messages it spells differently; the rest are English's.
+    #[test]
+    fn english_uk_shows_uk_spelling_and_english_for_the_rest() {
+        let (uk, english) = (Locale::for_language("en-GB"), Locale::for_language("en"));
+        assert_eq!(uk.name(), "English (UK)");
+        assert_eq!(uk.label("Center X"), "Centre X");
+        assert_eq!(uk.label("Customize Toolbar"), "Customise Toolbar");
+        assert_eq!(uk.text("ui.design_properties.organization"), "Organisation");
+        assert_eq!(uk.text("ui.preferences"), english.text("ui.preferences"));
+        assert_eq!(english.label("Center X"), "Center X");
     }
 
     /// A new design's name, `Untitled`, is a default name like `Sketch1`: it shows translated
@@ -301,6 +330,10 @@ mod tests {
         let texts = english_texts();
         let mut wanted: Vec<&str> = crate::toolbar::TABS.to_vec();
         wanted.push(crate::toolbar_custom::WORKSPACE);
+        for section in crate::workspace::SECTIONS {
+            wanted.push(section.tab);
+            wanted.push(section.panel);
+        }
         for spec in solidcraft_engine::command_specs() {
             wanted.push(spec.tab);
             wanted.push(spec.panel);
@@ -453,19 +486,17 @@ mod tests {
         assert_eq!(it.given_name("Fillet"), "Fillet");
         assert_eq!(it.label("solid.extrude"), "solid.extrude");
         assert_eq!(it.format("document.save_changes", &[("name", "Staffa {v2}")]), "Salvare le modifiche a Staffa {v2}?");
+        // The bottom command-line hint retired with that surface. A live save prompt
+        // still proves that a substituted value keeps literal JSON braces intact.
         assert_eq!(
-            it.format("ui.command_palette_hint", &[("example", "solid.extrude {\"distance\": 20}")]),
-            "Digita un comando, ad es. solid.extrude {\"distance\": 20}  — oppure premi S per cercare"
+            it.format("document.save_changes", &[("name", "solid.extrude {\"distance\": 20}")]),
+            "Salvare le modifiche a solid.extrude {\"distance\": 20}?"
         );
+        assert_eq!(it.format("ui.browser_bodies_other", &[("count", "2")]), "2 corpi");
     }
 
-    /// `label()`'s id fallback (an argument that matches no other entry's English text is
-    /// looked up as an id directly) is how the Sketch Palette reaches `ui.palette_profile` and
-    /// `ui.palette_points` without colliding with "Profile" / "Points" elsewhere (see the
-    /// comment on `sketch_palette::TOGGLES`). Prove it resolves to each locale's own
-    /// translation, not merely to something: a broken id would fall back to the English catalog
-    /// silently (`Locale::text`'s own fallback chain), so a test that only checks "resolves to a
-    /// non-empty string" would not catch that.
+    /// Stable IDs and source labels share the same translations. A broken ID must not
+    /// silently fall back to English in the sketch palette.
     #[test]
     fn id_labels_resolve_to_their_own_translation_not_an_english_fallback() {
         for (lang, profile, points) in [
@@ -477,13 +508,10 @@ mod tests {
             ("uk", "Профіль", "Точки"),
         ] {
             let locale = Locale::for_language(lang);
-            assert_eq!(locale.label("ui.palette_profile"), profile, "{lang}");
-            assert_eq!(locale.label("ui.palette_points"), points, "{lang}");
+            assert_eq!(locale.label("ui.profile"), profile, "{lang}");
+            assert_eq!(locale.label("ui.points"), points, "{lang}");
         }
-        // The literal English text "Profile" / "Points" must keep naming the pre-existing,
-        // unrelated entries (the SelInput row labels in dialogs.rs, and "Show Profile" /
-        // "Hide Profile" in context_menu.rs), not the palette's own ids: that separation is the
-        // entire reason these two rows pass an id instead of their English text.
+        // Dialog source labels still reach the same shared messages.
         assert_eq!(Locale::for_language("de").label("Profile"), Locale::for_language("de").text("ui.profile"));
         assert_eq!(Locale::for_language("de").label("Points"), Locale::for_language("de").text("ui.points"));
     }
@@ -715,6 +743,28 @@ mod tests {
         assert_eq!(vi.dynamic("Parameters (5)"), "Bảng tham số (5)");
         assert_eq!(vi.dynamic("4 degrees of freedom"), "4 bậc tự do");
         assert_eq!(vi.dynamic("Sketch of bracket"), "Sketch of bracket");
+    }
+
+    #[test]
+    fn new_languages_translate_keys_labels_and_default_names() {
+        for (id, name, preferences, extrude, sketch1, save) in [
+            ("hu", "Magyar", "Beállítások", "Kihúzás", "Vázlat1", "Menti a(z) My {design} módosításait?"),
+            ("id", "Bahasa Indonesia", "Preferensi", "Ekstrusi", "Sketsa1", "Simpan perubahan ke My {design}?"),
+            ("nl", "Nederlands", "Voorkeuren", "Extruderen", "Schets1", "Wijzigingen in My {design} opslaan?"),
+            ("ro", "Română", "Preferințe", "Extrudare", "Schița1", "Salvați modificările în My {design}?"),
+            ("sv", "Svenska", "Inställningar", "Extrudera", "Skiss1", "Spara ändringar i My {design}?"),
+            ("zh-TW", "繁體中文", "偏好設定", "擠出", "草圖1", "儲存對 My {design} 的變更？"),
+        ] {
+            let locale = Locale::for_language(id);
+            assert_eq!(locale.name(), name);
+            assert!(is_supported(id));
+            assert_eq!(locale.text("ui.preferences"), preferences);
+            assert_eq!(locale.label("Extrude"), extrude);
+            assert_eq!(locale.label("NonExistentKey"), "NonExistentKey");
+            assert_eq!(locale.format("document.save_changes", &[("name", "My {design}")]), save);
+            assert_eq!(locale.dynamic("Sketch1"), sketch1);
+            assert_eq!(locale.dynamic("Sketch of bracket"), "Sketch of bracket");
+        }
     }
 
     #[test]

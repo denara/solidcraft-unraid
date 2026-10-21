@@ -611,7 +611,7 @@ pub(super) fn sheet_eval(
                 )));
             }
             let sh = st.sheets.get_mut(i).ok_or_else(|| DocError::Invalid("sheet".into()))?;
-            sh.perforations.push(crate::sheet::SheetPerforation { feature: f.id, diameter: d, pitch, margin, square });
+            sh.perforations.push(crate::sheet::SheetPerforation { feature: f.id, diameter: d, pitch, margin, square, from_right: false });
             Ok(())
         }
         FeatureKind::SheetHem { edges, length, gap, flip, body } => {
@@ -741,8 +741,10 @@ pub(super) fn sheet_eval(
             let t = hi - lo;
             // The face outline: boundary edges of the triangles on that face's plane, where it runs
             // along a round wall an arc of the wall's circle (not chords: the plate check below
-            // compares its area with the exact volume).
-            let plane = Plane::from_normal(face.0 + n * lo, n * -1.0).ok_or_else(|| DocError::Invalid("face".into()))?;
+            // compares its area with the exact volume). The sheet's frame lies on the picked face
+            // (its outer level, `hi`) with z into the material, as with bend edges, so the sheet
+            // takes the plate's place: its thickness runs from `hi` back to `lo`.
+            let plane = Plane::from_normal(face.0 + n * hi, n * -1.0).ok_or_else(|| DocError::Invalid("face".into()))?;
             // Recesses in one face (an engraved label) become pockets; the outline is the other face's.
             let recesses = plate_recesses(&mb.body, &mesh, &plane, face.0, n, (lo, hi), tol)?;
             let mut walls = std::collections::HashMap::new();

@@ -389,3 +389,24 @@ fn a_cylinder_wall_split_along_its_seam_meshes_round() {
         }
     }
 }
+
+/// A body's outline box, made without meshing, holds its display mesh and is not much larger.
+#[test]
+fn outline_bounds_hold_the_display_mesh() {
+    let cube = crate::box_solid(Vec3::ZERO, Vec3::new(40., 30., 10.)).unwrap();
+    let rounded = crate::fillet(&cube, &[Vec3::new(20., 0., 10.)], 3.).unwrap();
+    let rod = crate::cylinder(Vec3::new(5., 5., 0.), Vec3::Z, 4., 25.).unwrap();
+    for body in [cube, rounded, rod] {
+        let outline = body.outline_bounds();
+        let mesh = body.reference_display_mesh_angular(body.size() * 1e-3, crate::DISPLAY_ANGLE).unwrap().bounds();
+        let slack = body.size() * 1e-6;
+        for (lo, hi, m_lo, m_hi) in [
+            (outline.min.x, outline.max.x, mesh.min.x, mesh.max.x),
+            (outline.min.y, outline.max.y, mesh.min.y, mesh.max.y),
+            (outline.min.z, outline.max.z, mesh.min.z, mesh.max.z),
+        ] {
+            assert!(lo <= m_lo + slack && hi >= m_hi - slack, "outline {outline:?} holds the mesh {mesh:?}");
+        }
+        assert!(outline.diagonal() <= mesh.diagonal() * 1.5, "and is not much larger");
+    }
+}

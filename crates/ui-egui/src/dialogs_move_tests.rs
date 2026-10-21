@@ -69,3 +69,33 @@ fn every_move_type_has_somewhere_to_put_its_value_box() {
         assert!(at.is_some(), "{} has nowhere to put its value box", TYPES[mode]);
     }
 }
+
+/// Point to Point takes the origin point as From or To (#3696): a click on the origin dot picks
+/// it, and the body moves from its corner onto the origin.
+#[test]
+fn point_to_point_takes_the_origin_point() {
+    let mut h = crate::scenario::Harness::new();
+    h.app.ui.show_origin = true;
+    h.app.run("solid.box", json!({"length": 20, "width": 20, "height": 20})).unwrap();
+    h.app.run("solid.move", json!({"bodies": ["Body1"], "translate": ["30 mm", "20 mm", "0 mm"]})).unwrap();
+    h.app.cam.distance = 200.0;
+    h.settle();
+    let hi = h.app.session.model.state().body("Body1").unwrap().mesh().bounds().max;
+    h.app.start("solid.move");
+    {
+        let d = h.app.dialog.as_mut().unwrap();
+        d.kind = kind(POINT_TO_POINT);
+        d.inputs = inputs(POINT_TO_POINT);
+        d.inputs[0].items = vec![Sel::Body { name: "Body1".into() }];
+        d.active = 1;
+    }
+    let corner = h.call("ui.at", json!({ "world": [hi.x, hi.y, hi.z] }))["result"].clone();
+    h.step(&json!({ "click": corner })).unwrap();
+    h.app.dialog.as_mut().unwrap().active = 2;
+    let origin = h.call("ui.at", json!({ "world": [0, 0, 0] }))["result"].clone();
+    h.step(&json!({ "click": origin })).unwrap();
+    let d = h.app.dialog.clone().unwrap();
+    assert_eq!(d.inputs[2].items, vec![Sel::Vertex { body: String::new(), point: Vec3::ZERO }], "the origin is the To point");
+    let p = params(&h.app, &d).unwrap();
+    assert_eq!(p["translate"], json!([mm(-hi.x), mm(-hi.y), mm(-hi.z)]), "the corner goes onto the origin");
+}

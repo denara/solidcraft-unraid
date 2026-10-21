@@ -2430,7 +2430,20 @@ impl Cutter {
 }
 
 pub(crate) fn chamfer_tool(cur: &Body, p: Vec3, s: f64, k: usize) -> Result<Cutter> {
-    chamfer_tool_sides(cur, p, s, None, k)
+    let tool = chamfer_tool_sides(cur, p, s, None, k)?;
+    // A straight edge that runs on into a curved one (a slot's side into its end arc) is one
+    // tangent chain: the cutter would chamfer the straight part only, and whether its overshoot
+    // reaches the next edge's material depends on the size of the part (#2672). The blend
+    // follows the whole chain, as it does for a fillet.
+    let all = Body::unique_edges(&cur.solid);
+    let curved_chain = all
+        .get(tool.edge)
+        .and_then(|e| smooth_chain(&cur.solid, e))
+        .is_some_and(|ids| all.iter().any(|e| ids.contains(&e.id()) && !matches!(e.curve(), mt::Curve::Line(_))));
+    if curved_chain {
+        return Err(unsupported("a straight edge continued by a curved one is chamfered with its chain"));
+    }
+    Ok(tool)
 }
 
 /// A straight plane/cylinder edge has one constant chamfer section. Sweep its cutter

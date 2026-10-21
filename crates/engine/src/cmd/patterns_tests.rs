@@ -549,3 +549,29 @@ fn copies_of_a_primitive_cut_only_its_targets() {
         assert!(rel(removed, holes * PI * 9.0 * 10.0) < 1e-3, "{id}: {removed} mm³ cut from Plaque");
     }
 }
+
+/// #3378: a pattern or mirror of a join whose targets the join merged into one body copies onto
+/// that body, as before #2755, instead of looking for the target the join used up.
+#[test]
+fn copies_of_a_join_that_merged_its_targets_join_the_merged_body() {
+    for (copy, n) in [
+        (json!(["solid.pattern.circular", {"features": ["spoke"], "axis": "Y", "count": 5}]), 5.0),
+        (json!(["solid.mirror", {"features": ["spoke"], "plane": {"origin": [0, 0, 0], "normal": [1, 0, 0]}}]), 2.0),
+    ] {
+        let mut s = Session::default();
+        run(&mut s, "solid.cylinder", json!({"radius": 66, "height": 3, "base": [0, 0, 0], "axis": "Y", "body_name": "rim"}));
+        run(&mut s, "solid.cylinder", json!({"radius": 63, "height": 3, "base": [0, 0, 0], "axis": "Y", "operation": "cut", "targets": ["rim"]}));
+        run(&mut s, "solid.cylinder", json!({"radius": 12, "height": 3, "base": [0, 0, 0], "axis": "Y", "body_name": "hub"}));
+        let v0 = volume(&mut s);
+        let spoke = json!({"length": 52, "width": 3, "height": 2.5, "corner": [12, 0, -1.25], "operation": "join", "targets": ["rim", "hub"], "name": "spoke"});
+        run(&mut s, "solid.box", spoke);
+        let v1 = volume(&mut s);
+        let (id, p) = (copy[0].as_str().unwrap_or_default(), copy[1].clone());
+        run(&mut s, id, p);
+        let names = run(&mut s, "inspect.measure", json!({}))["bodies"].as_array().map(|b| b.iter().map(|x| x["name"].clone()).collect::<Vec<_>>());
+        assert_eq!(names, Some(vec![json!("rim")]), "{id}: one body, the merged rim and hub");
+        // Every copy adds what the seed spoke added (curved bodies measure to about 0.02 %; a
+        // missing or doubled spoke is about 5 %).
+        assert!(rel(volume(&mut s), v0 + n * (v1 - v0)) < 1e-3, "{id}: {} vs {}", volume(&mut s), v0 + n * (v1 - v0));
+    }
+}

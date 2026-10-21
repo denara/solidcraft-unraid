@@ -985,6 +985,24 @@ fn convert_box(l: f64, w: f64, t: f64, holes: &[([f64; 2], f64)]) -> Session {
     s
 }
 
+/// A converted plate stays where the plate was, whichever of its faces is picked: the sheet
+/// takes the plate's two faces, not the space one thickness beyond the face picked (a 100 x 60 x 2
+/// plate on XY used to come out at z −2…0 picked on top, and 2…4 picked underneath).
+#[test]
+fn a_converted_plate_stays_where_the_plate_was() {
+    for pick in [[40.0, 15.0, 2.0], [40.0, 15.0, 0.0]] {
+        let mut s = Session::default();
+        run(&mut s, "solid.box", json!({"length": 100, "width": 60, "height": 2, "body_name": "Plate"}));
+        let before = bbox(&mut s);
+        run(&mut s, "sheet.convert", json!({"body": "Plate", "face": pick}));
+        assert!(!s.model.state().sheets.is_empty(), "{pick:?}");
+        let after = bbox(&mut s);
+        let moved = before.0.iter().chain(&before.1).zip(after.0.iter().chain(&after.1)).any(|(a, b)| (a - b).abs() > 1e-9);
+        assert!(!moved, "{pick:?}: {before:?} became {after:?}");
+        assert!((volume(&mut s) - 12_000.0).abs() < 1e-6, "{pick:?}: {}", volume(&mut s));
+    }
+}
+
 /// A long thin strip converts. 1200 x 100 x 1 was refused with "no outline on that face": the
 /// outline's tolerance was a thousandth of the body's size (1.2), more than the thickness, so the
 /// far side's triangles counted as the picked face's and no boundary was left.
@@ -1087,9 +1105,9 @@ fn a_plate_with_an_engraving_converts_with_the_engraving_as_a_pocket() {
         let m = run(&mut s, "inspect.measure", json!({}));
         assert!((m["total"]["volume_mm3"].as_f64().unwrap_or(f64::NAN) - 2380.0).abs() < 1e-6, "{pick:?}: {m}");
         assert!((m["total"]["area_mm2"].as_f64().unwrap_or(f64::NAN) - 5006.0).abs() < 1e-6, "{pick:?}: {m}");
-        // It stays in the face it was cut into (the converted plate is as thick, wherever it lies).
+        // It stays in the face it was cut into, and the plate where it was (z 0…1).
         let (lo, hi) = bbox(&mut s);
-        assert!((hi[2] - lo[2] - 1.0).abs() < 1e-9, "{pick:?}: {lo:?} {hi:?}");
+        assert!(lo[2].abs() < 1e-9 && (hi[2] - 1.0).abs() < 1e-9, "{pick:?}: {lo:?} {hi:?}");
         assert!(!contains(&s, [20.0, 15.0, hi[2] - 0.05]) && contains(&s, [20.0, 15.0, hi[2] - 0.15]), "{pick:?}");
         assert!(contains(&s, [45.0, 30.0, hi[2] - 0.05]), "{pick:?}");
         // The flat pattern: the whole plate, no cut-out, and the engraving as a pocket 0.1 deep.

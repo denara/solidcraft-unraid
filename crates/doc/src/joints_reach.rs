@@ -9,8 +9,8 @@ use solidcraft_geom::Vec3;
 use solidcraft_sketch::linalg;
 
 use super::{
-    Assembly, Held, MAX_LOOP_VALUES, MAX_LOOP_WORK, MAX_LOOPS, Solution, Tree, Values, apply_links, build, closure_gaps, jacobian, joint_values,
-    largest, least_squares, limit_bounds, link_chains, loop_groups, loop_scale, unknowns,
+    Assembly, Held, MAX_LOOP_VALUES, MAX_LOOP_WORK, MAX_LOOPS, Solution, Tree, Values, apply_links, build, close_within, closure_gaps, jacobian,
+    joint_values, largest, least_squares, limit_bounds, link_chains, loop_groups, loop_scale, loose_gap, unknowns,
 };
 use crate::{Document, ModelState, apply_point, apply_vector, mat_mul};
 
@@ -159,7 +159,7 @@ pub fn reach(doc: &Document, st: &ModelState, r: &Reach) -> Result<Reached, Stri
     let mut x = x0.clone();
     let miss = |res: &[f64]| res.iter().take(mt).map(|v| v * v).sum::<f64>().sqrt();
     let before = f(&x0).map_or(f64::INFINITY, |r| miss(&r));
-    let res = approach(&mut f, &|a, b| stride(asm, &vals, &vars, &paced, a, b), mt, &mut x, &bounds, &cap, tol)
+    let res = approach(&mut f, &|a, b| stride(asm, &vals, &vars, &paced, a, b), mt, &mut x, &bounds, &cap, tol, loose_gap(scale))
         .ok_or("a closed loop on its chain is open and can't close (joint.list shows its conflict)")?;
     let mut out = Reached::default();
     let point_miss = res.iter().take(3).map(|v| v * v).sum::<f64>().sqrt();
@@ -219,7 +219,7 @@ pub fn reach(doc: &Document, st: &ModelState, r: &Reach) -> Result<Reached, Stri
             let mut g = |x: &[f64]| misses(tree, asm, r, scale, &drive, &[], x, &mut alone, &spent);
             let (mut xo, bo, co) = (x0.get(..k).unwrap_or_default().to_vec(), bounds.get(..k).unwrap_or_default(), cap.get(..k).unwrap_or_default());
             // The loops left open, nothing to pace.
-            if let Some(ro) = approach(&mut g, &|_, _| 0.0, mt, &mut xo, bo, co, tol)
+            if let Some(ro) = approach(&mut g, &|_, _| 0.0, mt, &mut xo, bo, co, tol, loose_gap(scale))
                 && miss(&ro) < miss(&res) - REACH_TOL.max(1e-9 * miss(&res))
             {
                 out.stopped_by_loop = Some(*first);
@@ -313,7 +313,7 @@ fn stride(asm: &Assembly, vals: &Values, vars: &[(u64, usize)], paced: &[((u64, 
 /// loops' weighted gaps) at zero. Each step is solved over all the rows, values on a limit the
 /// step pushes past held, then put back on the loops (`least_squares` on their gaps) and taken
 /// when it gets closer. It ends at the target, or as close as the limits and loops let it get.
-/// Returns `f` there, or `None` when the loops don't close at the start.
+/// Returns `f` there, or `None` when the loops don't close at the start (within `loose`).
 fn approach(
     f: &mut dyn FnMut(&[f64]) -> Option<Vec<f64>>,
     stride: &dyn Fn(&[f64], &[f64]) -> f64,
@@ -322,16 +322,20 @@ fn approach(
     bounds: &[(f64, f64)],
     cap: &[f64],
     tol: f64,
+    loose: f64,
 ) -> Option<Vec<f64>> {
     let n = x.len();
     let miss = |r: &[f64]| r.iter().take(mt).map(|v| v * v).sum::<f64>();
-    let close = |f: &mut dyn FnMut(&[f64]) -> Option<Vec<f64>>, x: &mut Vec<f64>| {
-        least_squares(&mut |y| f(y).map(|r| r.get(mt..).unwrap_or_default().to_vec()), x, bounds, tol * LOOP_WEIGHT)
-    };
+    // The loops close first, to `tol` or as near as they come within `loose` (`close_within`),
+    // and stay that closed.
     let loops = f(x)?.len() > mt;
-    if loops && !close(f, x) {
-        return None;
+    let mut loop_tol = tol * LOOP_WEIGHT;
+    if loops {
+        loop_tol = close_within(&mut |y| f(y).map(|r| r.get(mt..).unwrap_or_default().to_vec()), x, bounds, loop_tol, loose * LOOP_WEIGHT)?;
     }
+    let close = |f: &mut dyn FnMut(&[f64]) -> Option<Vec<f64>>, x: &mut Vec<f64>| {
+        least_squares(&mut |y| f(y).map(|r| r.get(mt..).unwrap_or_default().to_vec()), x, bounds, loop_tol)
+    };
     let mut r = f(x)?;
     let (mut lambda, mut kicked) = (1e-3, false);
     for _ in 0..MAX_REACH_STEPS {

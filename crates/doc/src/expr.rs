@@ -330,8 +330,13 @@ fn lex_spans(s: &str) -> Result<Vec<(Tok, usize, usize)>, DocError> {
     while let Some(&(_, c)) = cs.get(i) {
         if c.is_whitespace() {
             i += 1;
-        } else if c.is_ascii_digit() || c == '.' {
+        } else if c.is_ascii_digit() || c == '.' || leading_decimal_comma(&cs, i, depth, out.last()) {
             let st = i;
+            // A leading decimal comma (`,5` for 0,5, #2966) starts the number as `.5` would.
+            let leading_comma = c == ',';
+            if leading_comma {
+                i += 1;
+            }
             while cs.get(i).is_some_and(|(_, c)| c.is_ascii_digit() || *c == '.') {
                 i += 1;
             }
@@ -340,7 +345,7 @@ fn lex_spans(s: &str) -> Result<Vec<(Tok, usize, usize)>, DocError> {
             // them a comma separates a function's arguments: `max(1,2)`).
             let digit = |k: usize| cs.get(k).is_some_and(|(_, c)| c.is_ascii_digit());
             let has_point = cs.get(st..i).is_some_and(|ds| ds.iter().any(|(_, c)| *c == '.'));
-            if depth == 0 && !has_point && digit(i.wrapping_sub(1)) && cs.get(i).is_some_and(|(_, c)| *c == ',') && digit(i + 1) {
+            if depth == 0 && !leading_comma && !has_point && digit(i.wrapping_sub(1)) && cs.get(i).is_some_and(|(_, c)| *c == ',') && digit(i + 1) {
                 i += 1;
                 while digit(i) {
                     i += 1;
@@ -411,6 +416,22 @@ fn lex_spans(s: &str) -> Result<Vec<(Tok, usize, usize)>, DocError> {
         }
     }
     Ok(out)
+}
+
+/// Whether the comma at `i` starts a number, as a leading decimal comma (`,5` for 0,5, #2966).
+/// It must be outside parentheses (inside them a comma separates arguments, as for any decimal
+/// comma), be followed by a digit, and stand where an operand is expected: at the start or right
+/// after `+ - * / ^`. A comma after a number, name, `)` or `%` keeps its meaning (`2 ,5` and
+/// `1,5,3` stay errors).
+fn leading_decimal_comma(cs: &[(usize, char)], i: usize, depth: usize, prev: Option<&(Tok, usize, usize)>) -> bool {
+    depth == 0
+        && cs.get(i).is_some_and(|(_, c)| *c == ',')
+        && cs.get(i + 1).is_some_and(|(_, c)| c.is_ascii_digit())
+        && match prev {
+            None => true,
+            Some((Tok::Op(op), _, _)) => "+-*/^".contains(*op),
+            Some(_) => false,
+        }
 }
 
 /// The proper fraction of a mixed number whose whole part ends at `i`: spaces, digits, `/`,
@@ -991,9 +1012,22 @@ mod tests {
         assert_eq!(ev("max(1 mm, 3, 2)", Kind::Length).unwrap(), 3.0);
         assert_eq!(ev("(2,5)", Kind::Unitless).ok(), None, "a comma inside parentheses is not a decimal comma");
         // Not between two digits, or a second comma: still an error.
-        for bad in ["2,", ",5", "2 ,5", "2, 5", "1,5,3", "1.5,3"] {
+        for bad in ["2,", "2 ,5", "2, 5", "1,5,3", "1.5,3", ",5,3", ",5.3", "width ,5", "(1) ,5"] {
             assert!(ev(bad, Kind::Unitless).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_leading_decimal_comma_is_a_number() {
+        // #2966: `,5` is 0,5 where `.5` would be a number: at the start or after an operator.
+        assert_eq!(ev(",5", Kind::Unitless).unwrap(), 0.5);
+        assert_eq!(ev(",5 mm", Kind::Length).unwrap(), 0.5);
+        assert_eq!(ev("-,5", Kind::Unitless).unwrap(), -0.5);
+        assert_eq!(ev("2*,5", Kind::Unitless).unwrap(), 1.0);
+        assert_eq!(ev("width - ,25", Kind::Length).unwrap(), 39.75);
+        // Function arguments are still separated by commas.
+        assert_eq!(ev("max(1,5)", Kind::Unitless).unwrap(), 5.0);
+        assert_eq!(ev("max(,5; 2)", Kind::Unitless).ok(), None, "inside parentheses a comma is a separator");
     }
 
     #[test]

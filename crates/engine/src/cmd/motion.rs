@@ -179,6 +179,8 @@ pub fn collisions(s: &Session) -> Vec<(String, String, f64)> {
 /// How deep one body reaches into the other, when more than a touch (`None`: apart or
 /// touching). Points of each tessellation (vertices, edge midpoints, triangle centres) are
 /// tested against the other closed mesh: inside by ray parity, and deeper than the tolerance.
+/// Edges are tested for crossing the other's surface too: plates crossing face to face have
+/// no sample point inside (#3323).
 fn overlap(a: &Body, b: &Body) -> Option<f64> {
     let (ma, mb) = (a.tessellate((a.size() * 1e-3).max(1e-3)).ok()?, b.tessellate((b.size() * 1e-3).max(1e-3)).ok()?);
     mesh_overlap(&ma, &mb, 1e-4 * a.size().max(b.size()).max(1.0))
@@ -208,8 +210,10 @@ fn deepest(a: &solidcraft_geom::Mesh, b: &solidcraft_geom::Mesh, tol: f64) -> f6
     let tb = tris(b);
     let bx = b.bounds();
     let mut pts: Vec<Vec3> = a.positions.clone();
+    let mut edges: Vec<(Vec3, Vec3)> = Vec::new();
     for [p, q, r] in tris(a) {
         pts.extend([(p + q) * 0.5, (q + r) * 0.5, (r + p) * 0.5, (p + q + r) * (1.0 / 3.0)]);
+        edges.extend([(p, q), (q, r), (r, p)]);
     }
     let mut best = 0.0f64;
     for p in pts.into_iter().take(200_000) {
@@ -225,6 +229,52 @@ fn deepest(a: &solidcraft_geom::Mesh, b: &solidcraft_geom::Mesh, tol: f64) -> f6
         let d = tb.iter().map(|[a, b, c]| closest(p, *a, *b, *c).dist(p)).fold(f64::MAX, f64::min);
         if d > tol.max(best) && inside(p, &tb) {
             best = d;
+        }
+    }
+    for (p, q) in edges.into_iter().take(200_000) {
+        best = best.max(crossing(p, q, &tb, bx, tol));
+    }
+    best
+}
+
+/// Where the edge `p`→`q` of one mesh reaches through the surface `tb` of the other: the
+/// depth, or 0 when it misses, only touches, or grazes (the middle of the chord it cuts must
+/// lie inside, deeper than `tol`, as elsewhere in the check). Two plates crossing each other's
+/// faces put no vertex, mid-edge or triangle centre of either inside the other — the chord an
+/// edge cuts is how that crossing is seen (#3323).
+fn crossing(p: Vec3, q: Vec3, tb: &[[Vec3; 3]], bx: Aabb3, tol: f64) -> f64 {
+    if p.x.max(q.x) < bx.min.x - tol
+        || p.x.min(q.x) > bx.max.x + tol
+        || p.y.max(q.y) < bx.min.y - tol
+        || p.y.min(q.y) > bx.max.y + tol
+        || p.z.max(q.z) < bx.min.z - tol
+        || p.z.min(q.z) > bx.max.z + tol
+    {
+        return 0.0;
+    }
+    let d = q - p;
+    let len2 = d.dot(d);
+    if len2 <= 0.0 {
+        return 0.0;
+    }
+    // Where the edge crosses the surface, along the edge. A crossing at a vertex or along an
+    // edge shared by two triangles is found twice (or more); merges of neighbours leave the
+    // entry and exit of each chord as one pair each.
+    let mut hits: Vec<f64> = tb.iter().filter_map(|t| contact_sweep::segment_hits_triangle(p, q, t)).map(|h| (h - p).dot(d) / len2).collect();
+    if hits.len() < 2 {
+        return 0.0;
+    }
+    hits.sort_by(|x, y| x.total_cmp(y));
+    hits.dedup_by(|x, y| (*x - *y).abs() < 1e-6);
+    let mut best = 0.0;
+    for pair in hits.chunks(2) {
+        if pair.len() < 2 {
+            break;
+        }
+        let m = p + d * ((pair[0] + pair[1]) * 0.5);
+        let deep = tb.iter().map(|[a, b, c]| closest(m, *a, *b, *c).dist(m)).fold(f64::MAX, f64::min);
+        if deep > tol.max(best) && inside(m, tb) {
+            best = deep;
         }
     }
     best

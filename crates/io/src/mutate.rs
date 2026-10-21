@@ -467,6 +467,21 @@ outer
         survives("3MF (production extension)", &mutations(&production, false, 0x2089), usize::MAX, |b| {
             crate::read_3mf(b).ok().map(|(objects, _)| objects.iter().map(|o| o.triangles.len()).sum())
         });
+        // Its model parts' XML mutated and zipped again: mutations of the zip mostly stop at its
+        // checksums, these reach the `p:path` and `objectid` handling.
+        let parts = crate::threemf::tests::production_parts();
+        for (k, (name, xml)) in parts.iter().enumerate() {
+            let rezipped: Vec<Vec<u8>> = mutations(xml.as_bytes(), true, 0x2089 + k as u64)
+                .iter()
+                .map(|m| {
+                    let entries: Vec<(&str, &[u8])> = parts.iter().map(|(n, x)| (*n, if n == name { m.as_slice() } else { x.as_bytes() })).collect();
+                    crate::threemf::tests::package_bytes(&entries)
+                })
+                .collect();
+            survives(&format!("3MF (production extension, {name} mutated)"), &rezipped, usize::MAX, |b| {
+                crate::read_3mf(b).ok().map(|(objects, _)| objects.iter().map(|o| o.triangles.len()).sum())
+            });
+        }
     }
 
     #[test]

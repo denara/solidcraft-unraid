@@ -508,20 +508,6 @@ fn view_list(s: &mut Session, _p: &Value) -> Result<Value> {
     Ok(json!({ "views": s.doc.named_views }))
 }
 
-/// Rename an item key in the browser's groups and orders of a folder.
-fn rename_key(d: &mut solidcraft_doc::Document, folder: &str, old: &str, new: &str) {
-    for g in d.browser_groups.iter_mut().filter(|g| g.folder == folder) {
-        for k in g.items.iter_mut().filter(|k| *k == old) {
-            *k = new.to_string();
-        }
-    }
-    for (_, v) in d.browser_order.iter_mut().filter(|(k, _)| k.ends_with(&format!("/{folder}"))) {
-        for k in v.iter_mut().filter(|k| *k == old) {
-            *k = new.to_string();
-        }
-    }
-}
-
 /// The keys whose strings name bodies, alone or in a list (`body`, `targets`…), at any depth of a
 /// feature: its own fields and the face, edge and link references inside it.
 const BODY_KEYS: [&str; 5] = ["body", "bodies", "target", "targets", "tools"];
@@ -573,18 +559,24 @@ fn rename_body(s: &mut Session, p: &Value) -> Result<Value> {
         let first = f.body_names.first().is_some_and(|n| !n.trim().is_empty());
         f.body_names.get(i).is_none_or(|n| n.trim().is_empty()) && (f.shell_piece_order || i < f.body_names.len() || !first)
     };
-    let later: Vec<(u64, Vec<String>)> = match s.doc.features.iter().position(|f| f.id == fid) {
-        Some(at) if s.doc.features.get(at).is_some_and(|f| counted(f, k)) => s
+    // Bodies later features name after this one (`Top (1)`, a split's other piece) keep their
+    // names too: they would otherwise follow it, and break what names them (#3510).
+    let derived = format!("{old} (");
+    let at = s.doc.features.iter().position(|f| f.id == fid);
+    let counts = at.and_then(|at| s.doc.features.get(at)).is_some_and(|f| counted(f, k));
+    let later: Vec<(u64, Vec<String>)> = match at {
+        Some(at) => s
             .doc
             .features
             .iter()
             .skip(at + 1)
             .filter_map(|f| {
                 let made: Vec<String> = s.model.result(f.id)?.state.bodies.iter().filter(|x| x.feature == f.id).map(|x| x.name.clone()).collect();
-                (0..made.len()).any(|i| counted(f, i)).then_some((f.id, made))
+                let keep = (counts && (0..made.len()).any(|i| counted(f, i))) || made.iter().any(|n| n.starts_with(&derived));
+                keep.then_some((f.id, made))
             })
             .collect(),
-        _ => Vec::new(),
+        None => Vec::new(),
     };
     let d = s.doc_mut();
     for (id, made) in &later {
@@ -638,33 +630,7 @@ fn rename_body(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(e) = failed {
         return Err(bad(cmd, e));
     }
-    if let Some(m) = d.materials.remove(&old) {
-        d.materials.insert(name.to_string(), m);
-    }
-    if let Some(c) = d.appearances.bodies.remove(&old) {
-        d.appearances.bodies.insert(name.to_string(), c);
-    }
-    for f in d.appearances.faces.iter_mut().filter(|f| f.body == old) {
-        f.body = name.to_string();
-    }
-    for column in &mut d.configs.columns {
-        match column {
-            solidcraft_doc::config::Column::Material(body) | solidcraft_doc::config::Column::Appearance(body) if *body == old => {
-                *body = name.to_string();
-            }
-            solidcraft_doc::config::Column::FaceAppearance(target) if target.body == old => {
-                target.body = name.to_string();
-            }
-            _ => {}
-        }
-    }
-    if let Some(o) = d.body_offsets.remove(&old) {
-        d.body_offsets.insert(name.to_string(), o);
-    }
-    if let Some(c) = d.body_components.remove(&old) {
-        d.body_components.insert(name.to_string(), c);
-    }
-    rename_key(d, "bodies", &old, name);
+    d.rename_body_keys(&old, name);
     for b in s.visibility.hidden_bodies.iter_mut().filter(|b| **b == old) {
         *b = name.to_string();
     }
@@ -811,6 +777,26 @@ mod tests {
         assert_eq!(names(&s)[1], b);
     }
 
+    /// #3510: each piece of a split is renamed on its own. Renaming the split body leaves the
+    /// other piece, and the features that use it, as they were.
+    #[test]
+    fn split_pieces_are_renamed_on_their_own() {
+        let ok = |s: &Session| s.model.results.iter().all(|r| r.error.is_none());
+        let mut s = Session::default();
+        run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10, "corner": [0, 0, -5], "body_name": "Top"}));
+        run(&mut s, "solid.split_body", json!({"body": "Top", "plane": "XY"}));
+        assert_eq!(names(&s), vec!["Top", "Top (1)"]);
+        run(&mut s, "solid.move", json!({"bodies": ["Top (1)"], "translate": [0, 0, -5]}));
+        run(&mut s, "body.rename", json!({"body": "Top", "name": "Upper"}));
+        assert_eq!(names(&s), vec!["Upper", "Top (1)"]);
+        assert!(ok(&s), "the move still finds the other piece");
+        run(&mut s, "body.rename", json!({"body": "Top (1)", "name": "Lower"}));
+        assert_eq!(names(&s), vec!["Upper", "Lower"]);
+        assert!(ok(&s), "the move follows the renamed piece");
+        run(&mut s, "edit.undo", json!({}));
+        assert_eq!(names(&s), vec!["Upper", "Top (1)"]);
+    }
+
     /// #1108: a primitive's `targets` are its participants, kept beside its kind; a rename
     /// follows them, as it follows the names inside the kind (a combine's target and tools).
     #[test]
@@ -862,6 +848,44 @@ mod tests {
         assert!(!after.contains(&"Body1".to_string()) && !after.contains(&"Body5".to_string()), "{after:?}");
         run(&mut s, "edit.undo", json!({}));
         assert!(names(&s).contains(&"Body2".to_string()) && names(&s).contains(&"Body4".to_string()), "{:?}", names(&s));
+    }
+
+    /// #3044: a rename changes names only, so it, its undo and its redo evaluate nothing: every
+    /// body keeps its geometry and display mesh, and the model is the one evaluating the renamed
+    /// design gives.
+    #[test]
+    fn renaming_a_body_evaluates_nothing() {
+        let mut s = Session::default();
+        run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10, "body_name": "A"}));
+        run(&mut s, "solid.box", json!({"length": 5, "width": 5, "height": 5, "center": [20, 0, 2.5], "operation": "new", "body_name": "B"}));
+        run(&mut s, "appearance.assign", json!({"bodies": ["A"], "appearance": "Aluminum - Satin"}));
+        let meshes = |s: &Session| s.model.state().bodies.iter().map(|b| std::sync::Arc::as_ptr(&b.mesh())).collect::<Vec<_>>();
+        let shown = meshes(&s);
+        s.evaluations = 0;
+        run(&mut s, "body.rename", json!({"body": "A", "name": "Plate"}));
+        assert_eq!(s.evaluations, 0, "a rename evaluates nothing");
+        assert_eq!(names(&s), vec!["Plate".to_string(), "B".to_string()]);
+        assert_eq!(meshes(&s), shown, "the bodies keep their meshes");
+        assert!(s.doc.appearances.bodies.contains_key("Plate"));
+        // The same model as evaluating the renamed design.
+        let mut fresh = Session::new((*s.doc).clone());
+        fresh.refresh();
+        assert_eq!(names(&fresh), names(&s));
+        s.refresh();
+        assert_eq!(s.model.last_recomputed, 0, "the next evaluation reuses every result");
+        s.evaluations = 0;
+        run(&mut s, "edit.undo", json!({}));
+        assert_eq!(names(&s), vec!["A".to_string(), "B".to_string()]);
+        run(&mut s, "edit.redo", json!({}));
+        assert_eq!(names(&s), vec!["Plate".to_string(), "B".to_string()]);
+        assert_eq!(s.evaluations, 0, "undo and redo of a rename evaluate nothing");
+        assert_eq!(meshes(&s), shown);
+        // A body a later feature uses is renamed in that feature too: that is evaluated.
+        run(&mut s, "solid.combine", json!({"target": "Plate", "tools": ["B"], "operation": "join", "keep_tools": true}));
+        s.evaluations = 0;
+        run(&mut s, "body.rename", json!({"body": "B", "name": "Tool"}));
+        assert!(s.evaluations > 0);
+        assert!(names(&s).contains(&"Tool".to_string()));
     }
 
     #[test]

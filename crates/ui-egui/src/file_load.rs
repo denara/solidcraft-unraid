@@ -19,6 +19,7 @@ use solidcraft_engine::{Session, doc::Document, doc::progress::Progress};
 
 use crate::SolveApp;
 use crate::control::ControlResponse;
+use crate::ui_kit;
 
 /// What a file operation does with its file.
 #[derive(Clone, Debug, PartialEq)]
@@ -737,13 +738,14 @@ fn compute(
     phase.store(1, Ordering::Relaxed);
     let world = session.world_state();
     let placement_ms = view_began.elapsed().as_secs_f64() * 1000.0;
-    let mesh_began = std::time::Instant::now();
-    // Fit, picking and the first viewport frame must not trigger cold tessellation on the UI.
-    world.warm_meshes(|| !progress.is_cancelled());
-    if progress.is_cancelled() {
-        return cancelled();
-    }
-    let tessellation_ms = mesh_began.elapsed().as_secs_f64() * 1000.0;
+    // The display meshes are made once the design is in the window, which shows its bodies as
+    // they come ([`crate::open_meshing`]): framing, picking and drawing never mesh on the UI.
+    // Its outlines frame it in the window until it is meshed: measured here, not there.
+    solidcraft_engine::kernel::for_each_on_threads(&world.bodies, 16, |b| {
+        let _ = b.outline_bounds();
+    });
+    drop(world);
+    let tessellation_ms = 0.0;
     phase.store(2, Ordering::Relaxed);
     let view_ms = view_began.elapsed().as_secs_f64() * 1000.0;
     if profile {
@@ -794,6 +796,9 @@ pub fn tick(app: &mut SolveApp, ctx: &egui::Context) {
             }
             _ if running.cancelled() => request.answer(Err("file operation cancelled".into())),
             Ok(made) if running.matches(&app.session) => {
+                // Not meshed yet: framing it while it goes in must not mesh it here.
+                app.open_meshing_next = true;
+                crate::frame_watch::step(app, "before the open");
                 if request.insert() {
                     app.session.accept_computed(made.session);
                     app.big_operation = true;
@@ -801,17 +806,19 @@ pub fn tick(app: &mut SolveApp, ctx: &egui::Context) {
                     crate::documents::adopt(app, made.session);
                     if request.kind == Kind::Open {
                         app.home.add_recent(&request.path);
-                        if made.thumbnail {
-                            crate::home::remember_source(&mut app.home, &app.session, &request.path);
-                        }
                     }
                 }
                 app.home.open = false;
-                app.fit_view();
+                crate::frame_watch::step(app, "adopt the design");
+                // Shown as its bodies are meshed, framed from their outlines meanwhile; its Home
+                // picture is drawn once they all are.
+                crate::open_meshing::start(app, (request.kind == Kind::Open && made.thumbnail).then(|| request.path.clone()));
+                crate::frame_watch::step(app, "start meshing and frame");
                 // A caller that said which way is up has been answered: no offer to stand the part up.
                 if (request.kind == Kind::Open || request.insert()) && !request.options.contains_key("up") {
                     crate::stand_up::offer(app, &request.path, &running.before, Some(&made.result));
                 }
+                crate::frame_watch::step(app, "stand-up offer");
                 let warnings = made.result.get("warnings").and_then(Value::as_array);
                 if let Kind::Recover { .. } = request.kind {
                     recovered(app, request);
@@ -855,6 +862,17 @@ pub fn tick(app: &mut SolveApp, ctx: &egui::Context) {
 /// The light overlay over everything under the title bar while a file loads. The title bar,
 /// its window buttons and the window's resize edges stay live; the design underneath takes no
 /// pointer input until the file is in.
+/// What a file operation under way is doing (for the frame watch), if one is.
+pub(crate) fn phase(app: &SolveApp) -> Option<&'static str> {
+    let r = app.file_load.running.as_ref()?;
+    Some(match (r.staged.is_some(), r.phase.load(Ordering::Relaxed)) {
+        (true, 0) => "reading the file (staged)",
+        (_, 0) => "reading the file",
+        (_, 1) => "preparing the view",
+        _ => "finishing the open",
+    })
+}
+
 pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     let Some(r) = &app.file_load.running else { return };
     let cancelled = r.cancelled();
@@ -883,8 +901,6 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
             m.surrender_focus(id);
         }
     });
-    let t = crate::theme::Tokens::get();
-    let mut cancel = ctx.input(|i| i.key_pressed(egui::Key::Escape));
     let id = egui::Id::new("file_loading");
     let card_id = id.with("card");
     // Above the dialogs over the design; menus, tooltips and the resize edges stay above it.
@@ -895,64 +911,63 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
         ui.interact(cover, egui::Id::new("file_loading_block"), egui::Sense::click_and_drag());
         ui.painter().rect_filled(cover, 0.0, egui::Color32::from_black_alpha(70));
     });
-    let width = 340.0f32.min(cover.width() - 16.0).max(120.0);
-    // Anchored at its top with Cancel in the heading row: the card grows downwards (the saved
-    // preview, the progress bar) and Cancel never moves under the pointer.
+    // Anchored at its top: the card grows downwards (the saved preview) and Cancel stays put.
     let top = egui::pos2(centre.x, (centre.y - 120.0).max(cover.top() + 8.0));
-    egui::Area::new(card_id).order(egui::Order::Middle).pivot(egui::Align2::CENTER_TOP).fixed_pos(top).show(ctx, |child| {
-        egui::Frame::popup(child.style()).fill(t.panel).show(child, |ui| {
-            ui.set_width(width - 16.0);
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(if cancelled && export {
-                        crate::i18n::tr_label("dxf.cancelling")
-                    } else if cancelled {
-                        "Waiting for file operation"
-                    } else {
-                        match r.request.kind {
-                            Kind::Insert => "Inserting geometry",
-                            Kind::Open => "Opening design",
-                            Kind::Recover { .. } => "Recovering design",
-                            Kind::ExportDxf => crate::i18n::tr_label("dxf.exporting"),
-                        }
-                    })
-                    .strong()
-                    .size(14.0),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let b = ui.button(crate::i18n::tr("ui.cancel"));
-                    crate::scenario::publish_handle("file_loading:cancel", b.rect.center());
-                    cancel |= b.clicked();
-                });
-            });
-            ui.label(egui::RichText::new(format!("{name}…")).weak());
+    let title = if cancelled && export {
+        crate::i18n::tr_label("dxf.cancelling")
+    } else if cancelled {
+        crate::i18n::tr("file_load.waiting")
+    } else {
+        crate::i18n::tr(match r.request.kind {
+            Kind::Insert => "file_load.inserting",
+            Kind::Open => "file_load.opening",
+            Kind::Recover { .. } => "file_load.recovering",
+            Kind::ExportDxf => "dxf.exporting",
+        })
+    };
+    let icon = match r.request.kind {
+        Kind::Insert => "import",
+        Kind::Open => "open",
+        Kind::Recover { .. } => "restore",
+        Kind::ExportDxf => "export",
+    };
+    let (closed, action) = ui_kit::Window::new(card_id, icon, title)
+        .cards(((cover.width() - 16.0) / crate::theme::Tokens::get().form_card_width).clamp(0.5, 1.3))
+        .placed(egui::Align2::CENTER_TOP, top)
+        .actions("", crate::i18n::tr("ui.cancel"), None)
+        .show(ctx, true, |ui| {
+            ui_kit::text(ui, &format!("{name}…"), ui_kit::Text::Report("name", false));
             if let Some(preview) = r.preview.as_ref().filter(|_| !cancelled) {
-                let w = ui.available_width().min(320.0);
+                let w = ui.available_width();
                 ui.image((preview.id(), egui::vec2(w, w * 200.0 / 320.0)));
                 let note = match r.built {
-                    Some(built) => format!("Built so far: {built} of {total} features."),
-                    None => crate::i18n::tr_label("Saved preview. Geometry is being checked before editing.").to_string(),
+                    Some(built) => crate::i18n::format("file_load.built", &[("built", &built.to_string()), ("total", &total.to_string())]),
+                    None => crate::i18n::tr("file_load.preview_note").to_string(),
                 };
-                ui.label(egui::RichText::new(note).small().weak());
+                ui_kit::text(ui, &note, ui_kit::Text::Note("preview"));
             }
-            ui.add_space(4.0);
+            let status = if cancelled && export {
+                crate::i18n::tr_label("dxf.cancel_wait").to_string()
+            } else if cancelled {
+                crate::i18n::tr("file_load.stopping").to_string()
+            } else {
+                match (phase, work) {
+                    (_, work) if r.request.kind == Kind::ExportDxf => crate::dialogs_view_dxf::progress_text(work),
+                    (_, Some(("reading", d, t))) => {
+                        crate::i18n::format("file_load.reading_percent", &[("percent", &(d * 100 / t.max(1)).to_string())])
+                    }
+                    (_, Some((_, d, t))) => crate::i18n::format("file_load.converting", &[("done", &(d + 1).to_string()), ("total", &t.to_string())]),
+                    (1, _) => crate::i18n::tr("file_load.preparing_view").to_string(),
+                    (2, _) => crate::i18n::tr("file_load.preparing_thumbnail").to_string(),
+                    _ if total > 0 => {
+                        crate::i18n::format("file_load.rebuilding", &[("done", &(done + 1).min(total).to_string()), ("total", &total.to_string())])
+                    }
+                    _ => crate::i18n::tr("file_load.reading").to_string(),
+                }
+            };
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(if cancelled && export {
-                    crate::i18n::tr_label("dxf.cancel_wait").to_string()
-                } else if cancelled {
-                    "Waiting for the previous operation to stop...".to_string()
-                } else {
-                    match (phase, work) {
-                        (_, work) if r.request.kind == Kind::ExportDxf => crate::dialogs_view_dxf::progress_text(work),
-                        (_, Some(("reading", d, t))) => format!("Reading the file... {}%", d * 100 / t.max(1)),
-                        (_, Some((_, d, t))) => format!("Converting solid {} of {t}", d + 1),
-                        (1, _) => "Preparing the view...".into(),
-                        (2, _) => "Preparing the thumbnail...".into(),
-                        _ if total > 0 => format!("Rebuilding feature {} of {total}", (done + 1).min(total)),
-                        _ => "Reading the file...".into(),
-                    }
-                });
+                ui_kit::text(ui, &status, ui_kit::Text::Report("status", false));
             });
             // Always there, so the card keeps its height as the phases change.
             let fraction = if cancelled {
@@ -966,9 +981,13 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
             } else {
                 1.0
             };
-            ui.add(egui::ProgressBar::new(fraction).desired_height(6.0));
+            ui_kit::progress(ui, "file_load", fraction);
         });
-    });
+    // Cancel (and Esc) was a handle of its own before the card became a kit Prompt.
+    if let Some(at) = crate::scenario::handle_at("dialog:cancel") {
+        crate::scenario::publish_handle("file_loading:cancel", at);
+    }
+    let cancel = closed || action == ui_kit::Action::Cancel;
     if cancel && !cancelled {
         // Keep the running job until it exits: cancelling must not allow another large
         // import to overlap it in memory. The rebuild stops at its next feature and the
@@ -1082,10 +1101,10 @@ mod tests {
                 app.session.revision += 1;
             }
             let newer = app.session.doc.clone();
-            tick(&mut app, &egui::Context::default());
+            tick(&mut app, &crate::fonts::test_context());
             assert!(app.file_load.running.as_ref().unwrap().preview.is_none());
             tx.send(Ok(Made { session: Session::default(), result: Value::Null, thumbnail: false })).unwrap();
-            tick(&mut app, &egui::Context::default());
+            tick(&mut app, &crate::fonts::test_context());
             assert!(Arc::ptr_eq(&newer, &app.session.doc));
             assert!(app.status.as_ref().unwrap().0.contains("discarded"));
         }
@@ -1143,7 +1162,7 @@ mod tests {
             built: None,
             staged: None,
         });
-        tick(&mut app, &egui::Context::default());
+        tick(&mut app, &crate::fonts::test_context());
         assert!(Arc::ptr_eq(&app.session.doc, &old));
         assert!(!app.file_load.busy());
         assert!(app.status.as_ref().unwrap().0.contains("bad STEP"));
@@ -1174,7 +1193,7 @@ mod tests {
         let mut computed = Session::default();
         computed.execute("solid.box", &serde_json::json!({"length":10,"width":10,"height":10})).unwrap();
         tx.send(Ok(Made { session: computed, result: Value::Null, thumbnail: false })).unwrap();
-        tick(&mut app, &egui::Context::default());
+        tick(&mut app, &crate::fonts::test_context());
         assert!(app.file_load.running.is_none());
         assert!(Arc::ptr_eq(&old, &app.session.doc));
     }
@@ -1192,7 +1211,7 @@ mod tests {
             part.execute("solid.box", &serde_json::json!({"length": 10, "width": 10, "height": 10, "corner": [i * 20, 0, 0]})).unwrap();
         }
         part.execute("file.export", &serde_json::json!({"path": path})).unwrap();
-        let ctx = egui::Context::default();
+        let ctx = crate::fonts::test_context();
         let mut app = SolveApp::new(Session::default(), Default::default());
         let bodies = |app: &SolveApp| app.session.world_state().bodies.len();
         assert!(staged_kind(&Request::new(&path, Kind::Insert)) && staged_kind(&Request::new(&path, Kind::Open)));

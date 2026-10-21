@@ -20,7 +20,15 @@ const VERSION: &str = "solidcraft-container/1";
 const LEGACY_VERSION: &str = "solvecraft-container/1";
 const PREVIEW_VERSION: &str = "solidcraft-preview/1";
 const MAX_ENTRIES: usize = 10_000;
-const MAX_EXPANDED: usize = 512 << 20;
+/// An embedded STEP source may be as large as an import accepts. It is always stored
+/// Deflate-compressed, so the file itself stays within [`MAX_DESIGN_BYTES`] (#3221).
+const MAX_STEP_PART: usize = crate::MAX_STEP_BYTES;
+/// Deflate level for STEP sources. Level 1 uses fixed Huffman codes: a 270 MiB STEP export
+/// shrank to 70 MB in 1.6 s, at level 2 to 47 MB in 3.1 s; higher levels gain little more.
+const STEP_LEVEL: i64 = 2;
+/// Every other part is bounded by the file size limit.
+const MAX_PART: usize = MAX_DESIGN_BYTES;
+const MAX_EXPANDED: usize = MAX_STEP_PART + MAX_DESIGN_BYTES;
 const MESH_MAGIC: &[u8; 8] = b"SCMESH01";
 const MAX_PREVIEW_BYTES: usize = 8 << 20;
 const MAX_PREVIEW_TRIANGLES: usize = 100_000;
@@ -65,7 +73,7 @@ struct PackageWriter {
 
 impl PackageWriter {
     fn part(&mut self, name: &str, bytes: &[u8], compressed: bool) -> Result<()> {
-        if bytes.len() > MAX_DESIGN_BYTES {
+        if bytes.len() > if name.ends_with(".step") { MAX_STEP_PART } else { MAX_PART } {
             return Err(invalid("part too large"));
         }
         if !self.names.insert(name.to_owned()) {
@@ -76,9 +84,20 @@ impl PackageWriter {
             return Err(invalid("package too large"));
         }
         let method = if compressed { zip::CompressionMethod::Deflated } else { zip::CompressionMethod::Stored };
-        let options = zip::write::SimpleFileOptions::default().compression_method(method).compression_level(compressed.then_some(1));
+        let level = if name.ends_with(".step") { STEP_LEVEL } else { 1 };
+        let options = zip::write::SimpleFileOptions::default().compression_method(method).compression_level(compressed.then_some(level));
         self.zip.start_file(name, options).map_err(invalid)?;
         self.zip.write_all(bytes).map_err(invalid)
+    }
+    /// Would `entries` more optional parts of `extra` bytes, stored uncompressed, still keep
+    /// the file within `budget` and its expanded size within the reader's budget?
+    fn room(&self, entries: usize, extra: usize, budget: usize) -> bool {
+        // The bytes written so far, plus what the open compressed part may still hold back.
+        let written = self.zip.get_ref().map_or(usize::MAX, |c| c.get_ref().len()).saturating_add(1 << 20);
+        let directory = self.names.len().saturating_add(entries).saturating_mul(256).saturating_add(65_536);
+        self.names.len().saturating_add(entries) <= MAX_ENTRIES
+            && written.saturating_add(extra).saturating_add(directory) <= budget
+            && self.expanded.saturating_add(extra) <= MAX_EXPANDED
     }
     fn blob(&mut self, bytes: &[u8], extension: &str, compressed: bool) -> Result<Value> {
         self.resolved =
@@ -89,9 +108,70 @@ impl PackageWriter {
     }
 }
 
+/// Counts what is written without keeping it.
+#[derive(Default)]
+struct Measure {
+    position: u64,
+    length: u64,
+}
+
+impl Write for Measure {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.position = self.position.saturating_add(bytes.len() as u64);
+        self.length = self.length.max(self.position);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Seek for Measure {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        let target = match position {
+            SeekFrom::Start(n) => Some(n),
+            SeekFrom::End(n) => self.length.checked_add_signed(n),
+            SeekFrom::Current(n) => self.position.checked_add_signed(n),
+        };
+        self.position = target.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "seek out of range"))?;
+        Ok(self.position)
+    }
+}
+
+/// Room kept in a design file for everything besides one large embedded STEP source.
+const STEP_RESERVE: usize = 4 << 20;
+
+/// Can an import's STEP text be saved in a design? It must be no larger than an import
+/// accepts, and, compressed as a save stores it, leave room in a design file for the rest of
+/// the design. Checked when the file is imported, so it never imports and then fails to save.
+pub fn check_step_storable(step: &str) -> Result<()> {
+    let limit = MAX_DESIGN_BYTES - STEP_RESERVE;
+    if step.len() > MAX_STEP_PART {
+        return Err(IoError::Invalid(format!("STEP file too large ({} MB, limit {} MB)", step.len() >> 20, MAX_STEP_PART >> 20)));
+    }
+    // Deflate adds at most a few bytes per 16 KiB block: smaller text always fits.
+    if step.len() <= limit - (limit >> 10) {
+        return Ok(());
+    }
+    let mut zip = zip::ZipWriter::new(Measure::default());
+    let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated).compression_level(Some(STEP_LEVEL));
+    zip.start_file("blobs/source.step", options).map_err(invalid)?;
+    zip.write_all(step.as_bytes()).map_err(invalid)?;
+    let compressed = usize::try_from(zip.finish().map_err(invalid)?.length).unwrap_or(usize::MAX);
+    if compressed > limit {
+        return Err(IoError::Invalid(format!(
+            "STEP file too large to save in a design: {} MB of STEP text compresses to {} MB, over the {} MB a design file may hold",
+            step.len() >> 20,
+            compressed >> 20,
+            limit >> 20
+        )));
+    }
+    Ok(())
+}
+
 /// Write a compact container, deduplicating payloads by SHA-256. Mesh arrays are
-/// stored directly for low save/open latency; small metadata uses level-one
-/// Deflate. Use the explicit Compact option to compress STEP and meshes too.
+/// stored directly for low save/open latency; STEP sources and small metadata use
+/// fast Deflate. Use the explicit Compact option to compress meshes too.
 pub fn write_design_container(doc: &Document) -> Result<Vec<u8>> {
     write_design_container_with_compression(doc, DesignCompression::Fast)
 }
@@ -113,7 +193,7 @@ pub fn write_design_container_with_cache(
     doc: &Document,
     compression: DesignCompression,
     preview: Option<&DesignPreview>,
-    geometry: Option<&solidcraft_doc::ModelState>,
+    geometry: Option<&solidcraft_doc::SavedModel>,
 ) -> Result<Vec<u8>> {
     write_design_container_with_thumbnail(doc, compression, preview, geometry, None)
 }
@@ -124,7 +204,7 @@ pub fn write_design_container_with_thumbnail(
     doc: &Document,
     compression: DesignCompression,
     preview: Option<&DesignPreview>,
-    geometry: Option<&solidcraft_doc::ModelState>,
+    geometry: Option<&solidcraft_doc::SavedModel>,
     thumbnail: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
     write_container(doc, compression, preview, geometry, thumbnail, MAX_DESIGN_BYTES)
@@ -136,7 +216,7 @@ fn write_container(
     doc: &Document,
     compression: DesignCompression,
     preview: Option<&DesignPreview>,
-    geometry: Option<&solidcraft_doc::ModelState>,
+    geometry: Option<&solidcraft_doc::SavedModel>,
     thumbnail: Option<&[u8]>,
     budget: usize,
 ) -> Result<Vec<u8>> {
@@ -145,7 +225,9 @@ fn write_container(
     for feature in &doc.features {
         let replacements = match &feature.kind {
             FeatureKind::Import { step, .. } => {
-                let blob = writer.blob(step.as_bytes(), "step", compression == DesignCompression::Compact)?;
+                // STEP is text and shrinks several times: always compressed, so an import as large
+                // as MAX_STEP_BYTES still fits in a design file.
+                let blob = writer.blob(step.as_bytes(), "step", true)?;
                 fields([("step", Value::String(String::new())), ("step_blob", blob)])
             }
             FeatureKind::MeshImport { meshes, .. } => {
@@ -190,14 +272,7 @@ fn write_container(
     // The model cache is optional: one that does not fit the container is left out, never a
     // failed save.
     let cache = geometry.and_then(|g| native_cache::encode_model(g, &metadata).ok()).filter(|(manifest, data)| {
-        let fits = writer.names.len().saturating_add(2) <= MAX_ENTRIES
-            && writer
-                .expanded
-                .saturating_add(manifest.len())
-                .saturating_add(data.len())
-                .saturating_add(writer.names.len().saturating_mul(256))
-                .saturating_add(65_536)
-                <= budget;
+        let fits = writer.room(2, manifest.len().saturating_add(data.len()), budget);
         if !fits {
             log::info!("the model cache ({} MB) does not fit the design file: saved without it", (manifest.len() + data.len()) >> 20);
         }
@@ -211,14 +286,7 @@ fn write_container(
         writer.part(payload_entry, &data, true)?;
     }
     if let Some((manifest, data)) = preview.and_then(|p| encode_preview(p, &metadata).ok())
-        && writer.names.len().saturating_add(2) <= MAX_ENTRIES
-        && writer
-            .expanded
-            .saturating_add(manifest.len())
-            .saturating_add(data.len())
-            .saturating_add(writer.names.len().saturating_mul(256))
-            .saturating_add(65_536)
-            <= budget
+        && writer.room(2, manifest.len().saturating_add(data.len()), budget)
     {
         writer.part("cache/preview.json", &manifest, false)?;
         writer.part("cache/preview.bin", &data, false)?;
@@ -228,7 +296,7 @@ fn write_container(
     }
     let bytes = writer.zip.finish().map_err(invalid)?.into_inner();
     if bytes.len() > MAX_DESIGN_BYTES {
-        return Err(invalid("compressed file too large"));
+        return Err(invalid(format!("the design would be {} MB, over the {} MB a design file may hold", bytes.len() >> 20, MAX_DESIGN_BYTES >> 20)));
     }
     Ok(bytes)
 }
@@ -345,7 +413,8 @@ impl<R: Read + Seek> PackageReader<R> {
                 return Err(invalid("duplicate or invalid archive entry"));
             }
             total = total.checked_add(part.size()).ok_or_else(|| invalid("expanded size overflow"))?;
-            if part.size() > MAX_DESIGN_BYTES as u64 || total > MAX_EXPANDED as u64 {
+            let limit = if name.ends_with(".step") { MAX_STEP_PART } else { MAX_PART };
+            if part.size() > limit as u64 || total > MAX_EXPANDED as u64 {
                 return Err(invalid("expanded package too large"));
             }
         }
@@ -360,7 +429,7 @@ impl<R: Read + Seek> PackageReader<R> {
         self.document.as_ref().filter(|d| d.len() <= limit).cloned().ok_or_else(|| invalid("metadata budget"))
     }
     fn part(&mut self, name: &str) -> Result<Vec<u8>> {
-        self.limited_part(name, MAX_DESIGN_BYTES)
+        self.limited_part(name, if name.ends_with(".step") { MAX_STEP_PART } else { MAX_PART })
     }
     fn limited_part(&mut self, name: &str, limit: usize) -> Result<Vec<u8>> {
         let part = self.zip.by_name(name).map_err(|e| invalid(format!("required part `{name}`: {e}")))?;
@@ -369,7 +438,9 @@ impl<R: Read + Seek> PackageReader<R> {
             return Err(invalid("part too large"));
         }
         let mut bytes = Vec::with_capacity(expected as usize);
-        part.take(limit as u64 + 1).read_to_end(&mut bytes).map_err(invalid)?;
+        // A compressed part may expand beyond its declared size (a decompression bomb): stop
+        // one byte past it instead of at the limit.
+        part.take(expected + 1).read_to_end(&mut bytes).map_err(invalid)?;
         if bytes.len() > limit || bytes.len() as u64 != expected {
             return Err(invalid("part too large or length mismatch"));
         }
@@ -510,7 +581,7 @@ impl<R: Read + Seek> DesignContainerReader<R> {
         // fallback, generating a bounded provisional mesh without source imports.
         read_preview(&mut self.reader).ok().or_else(|| {
             let document = self.reader.document(16 << 20).ok()?;
-            native_cache::geometry_preview(&document, self.geometry()?).ok()
+            native_cache::geometry_preview(&document, &self.geometry()?).ok()
         })
     }
 
@@ -519,8 +590,8 @@ impl<R: Read + Seek> DesignContainerReader<R> {
         thumbnail::read(&mut self.reader).ok()
     }
 
-    /// The cached model state, when this build wrote it for exactly this document.
-    pub fn geometry(&mut self) -> Option<solidcraft_doc::ModelState> {
+    /// The saved model, when this build wrote it for exactly this document.
+    pub fn geometry(&mut self) -> Option<solidcraft_doc::SavedModel> {
         let document = self.reader.document(16 << 20).ok()?;
         native_cache::read_geometry_with(&mut self.reader, &document).ok()
     }
@@ -536,9 +607,11 @@ pub(super) fn read(bytes: &[u8]) -> Result<Document> {
 }
 
 /// Open from disk (or browser VFS), publishing only provisional display before
-/// authoritative blob hydration. Desktop keeps one seekable file handle instead
-/// of buffering the complete archive. JSON continues through the normal migrations.
-pub fn read_design_file(path: &str, notify: Option<impl FnOnce(DesignPreview)>) -> Result<Document> {
+/// authoritative blob hydration, with the model the file keeps when this build saved it for
+/// exactly this document ([`solidcraft_doc::Model::adopt`] takes it as the evaluation). Desktop
+/// keeps one seekable file handle instead of buffering the complete archive. JSON continues
+/// through the normal migrations.
+pub fn read_design_file(path: &str, notify: Option<impl FnOnce(DesignPreview)>) -> Result<(Document, Option<solidcraft_doc::SavedModel>)> {
     #[cfg(not(target_arch = "wasm32"))]
     let mut source = {
         crate::vfs::check(path).map_err(invalid)?;
@@ -569,16 +642,19 @@ pub fn read_design_file(path: &str, notify: Option<impl FnOnce(DesignPreview)>) 
     source.seek(SeekFrom::Start(0)).map_err(invalid)?;
     if is_design_container(&prefix) {
         let mut reader = DesignContainerReader::new(source)?;
+        // A design with its model opens without a picture first: the model is the session.
+        let model = reader.geometry();
         if let Some(notify) = notify
-            && let Some(preview) = reader.preview()
+            && model.is_none()
+            && let Ok(preview) = read_preview(&mut reader.reader)
         {
             notify(preview);
         }
-        reader.read_document()
+        Ok((reader.read_document()?, model))
     } else {
         let mut bytes = Vec::new();
         source.take(MAX_DESIGN_BYTES as u64 + 1).read_to_end(&mut bytes).map_err(invalid)?;
-        crate::read_design(&bytes)
+        Ok((crate::read_design(&bytes)?, None))
     }
 }
 
@@ -671,7 +747,7 @@ mod tests {
     #[test]
     fn seekable_preview_defers_large_source_blob_until_document_read() {
         let mut doc = Document::new("Deferred source");
-        let step = "ISO-10303-21;".repeat(200_000);
+        let step = noise(2_600_000);
         doc.add_feature(FeatureKind::Import { file: "large.step".into(), step: step.clone().into(), components: Vec::new(), skip: Vec::new() }, None)
             .unwrap();
         let preview = DesignPreview { meshes: vec![mesh()] };
@@ -680,12 +756,12 @@ mod tests {
         let source = CountingReader { source: Cursor::new(bytes), count: count.clone() };
         let mut reader = DesignContainerReader::new(source).unwrap();
         assert_eq!(reader.preview().unwrap().meshes[0].positions, preview.meshes[0].positions);
-        // ZIP directory scans may touch a bounded suffix of a stored blob. They
+        // ZIP directory scans may touch a bounded suffix of a source blob. They
         // must not load its multi-megabyte payload to obtain the saved picture.
         assert!(count.get() < 256 * 1024, "read {} bytes before display", count.get());
         let restored = reader.read_document().unwrap();
         assert_eq!(restored.to_json(), doc.to_json());
-        assert!(count.get() >= step.len());
+        assert!(count.get() >= step.len() / 4);
     }
 
     #[test]
@@ -693,9 +769,11 @@ mod tests {
         let doc = document();
         let preview = DesignPreview { meshes: vec![mesh()] };
         let mut bytes = write_design_container_with_preview(&doc, DesignCompression::Fast, Some(&preview)).unwrap();
-        let marker = b"ISO-10303-21;";
-        let offset = bytes.windows(marker.len()).position(|part| part == marker).unwrap();
-        bytes[offset] ^= 1;
+        // The first part written is the (compressed) STEP source: damage its data.
+        let name = u16::from_le_bytes([bytes[26], bytes[27]]) as usize;
+        let extra = u16::from_le_bytes([bytes[28], bytes[29]]) as usize;
+        assert!(bytes[30..30 + name].ends_with(b".step"));
+        bytes[30 + name + extra + 2] ^= 0x55;
         let mut reader = DesignContainerReader::new(Cursor::new(bytes)).unwrap();
         assert!(reader.preview().is_some());
         assert!(reader.read_document().is_err());
@@ -717,21 +795,37 @@ mod tests {
     #[test]
     fn file_reader_refuses_nonfiles_before_notifying_preview() {
         let directory = std::env::temp_dir();
-        let result = read_design_file(directory.to_str().unwrap(), Some(|_| panic!("non-file supplied a preview")));
+        let result = read_design_file(directory.to_str().unwrap(), Some(|_| panic!("non-file supplied a preview"))).map(|(doc, _)| doc);
         assert!(result.is_err_and(|e| e.to_string().contains("not a regular file")));
     }
 
-    fn native_geometry() -> solidcraft_doc::ModelState {
-        let cube = solidcraft_kernel::box_solid(solidcraft_geom::Vec3::ZERO, solidcraft_geom::Vec3::new(10., 20., 30.)).unwrap();
-        let mut state = solidcraft_doc::ModelState::default();
-        state.bodies.push(solidcraft_doc::ModelBody::new("Cube".into(), cube, 1));
-        state
+    /// A saved model of one state holding `bodies` (no document evaluated it: enough for the
+    /// container, which stores whatever model it is given).
+    fn saved_model(bodies: Vec<solidcraft_kernel::Body>) -> solidcraft_doc::SavedModel {
+        let records: Vec<Value> = (0..bodies.len())
+            .map(|i| json!({"name": format!("Body{i}"), "feature": 1, "component": 0, "key": "0000000000000001", "names": 0, "body": i}))
+            .collect();
+        let state = json!({
+            "bodies": [[0, bodies.len()]], "sketches": [], "body_counter": 7, "sheets": [], "construct": [], "threads": [],
+            "sketch_keys": [], "blend_edges": {}, "fitted": {}, "tapered": {},
+        });
+        solidcraft_doc::SavedModel {
+            records: json!({
+                "features": [{"id": 1, "fingerprint": "0000000000000000", "ms": 0.0, "skipped": false, "state": 0}],
+                "states": [state], "model_bodies": records, "names": [{"faces": [], "info": []}], "sketches": [],
+            }),
+            bodies,
+        }
+    }
+
+    fn native_geometry() -> solidcraft_doc::SavedModel {
+        saved_model(vec![solidcraft_kernel::box_solid(solidcraft_geom::Vec3::ZERO, solidcraft_geom::Vec3::new(10., 20., 30.)).unwrap()])
     }
 
     #[test]
     fn native_cache_round_trip_and_preview_defer_original_sources() {
         let mut doc = Document::new("Native cache");
-        let step = "ISO-10303-21;".repeat(200_000);
+        let step = noise(2_600_000);
         doc.add_feature(FeatureKind::Import { file: "large.step".into(), step: step.clone().into(), components: Vec::new(), skip: Vec::new() }, None)
             .unwrap();
         let bodies = native_geometry();
@@ -739,14 +833,14 @@ mod tests {
         let entries = parts(&bytes);
         assert!(entries.contains_key("cache/bodies.bin"));
         assert!(!entries.contains_key("cache/preview.bin"));
-        assert_eq!(read_design_geometry(&bytes).unwrap().bodies[0].body.face_count(), bodies.bodies[0].body.face_count());
+        assert_eq!(read_design_geometry(&bytes).unwrap().bodies[0].body.face_count(), bodies.bodies[0].face_count());
         assert_eq!(bytes, write_design_container_with_cache(&doc, DesignCompression::Fast, None, Some(&bodies)).unwrap());
         let count = std::rc::Rc::new(std::cell::Cell::new(0));
         let mut reader = DesignContainerReader::new(CountingReader { source: Cursor::new(bytes), count: count.clone() }).unwrap();
         assert!(!reader.preview().unwrap().meshes.is_empty());
         assert!(count.get() < 256 * 1024, "read {} bytes before native display", count.get());
         assert_eq!(reader.read_document().unwrap().to_json(), doc.to_json());
-        assert!(count.get() >= step.len());
+        assert!(count.get() >= step.len() / 4);
     }
 
     #[test]
@@ -754,34 +848,26 @@ mod tests {
         use solidcraft_geom::Vec3;
         let part = solidcraft_kernel::box_solid(Vec3::ZERO, Vec3::new(10., 20., 30.)).unwrap();
         let share = solidcraft_kernel::DisplayShare::new(part.clone());
-        let t = [[1., 0., 0., 0.], [0., 1., 0., 0.], [0., 0., 1., 0.], [50., 0., 0., 1.]];
-        let mut state = solidcraft_doc::ModelState::default();
-        state.body_counter = 7;
-        for (i, body) in [part.clone(), part.clone()].into_iter().enumerate() {
-            state.bodies.push(solidcraft_doc::ModelBody::new(format!("Part {i}"), body, 1));
-        }
+        let mut bodies = vec![part.clone(), part.clone()];
         for x in [50., 90.] {
             let moved = solidcraft_kernel::transform(&part, Vec3::new(x, 0., 0.), Vec3::ZERO, Vec3::Z, 0.).unwrap();
-            let mut t = t;
-            t[3][0] = x;
-            let mut b = solidcraft_doc::ModelBody::new(format!("Copy {x}"), moved.with_display_share(&share, t), 2);
-            b.component = 3;
-            b.source_name = Some("Part".into());
-            state.bodies.push(b);
+            let t = [[1., 0., 0., 0.], [0., 1., 0., 0.], [0., 0., 1., 0.], [x, 0., 0., 1.]];
+            bodies.push(moved.with_display_share(&share, t));
         }
+        let model = saved_model(bodies);
         let doc = document();
-        let bytes = write_design_container_with_cache(&doc, DesignCompression::Fast, None, Some(&state)).unwrap();
+        let bytes = write_design_container_with_cache(&doc, DesignCompression::Fast, None, Some(&model)).unwrap();
         let manifest: Value = serde_json::from_slice(&parts(&bytes)["cache/model.json"]).unwrap();
-        assert_eq!(manifest["bodies"].as_array().unwrap().len(), 3, "the part and each placed copy, once each");
-        let read = read_design_geometry(&bytes).unwrap();
-        assert_eq!(read.body_counter, 7);
-        assert_eq!(read.bodies.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), ["Part 0", "Part 1", "Copy 50", "Copy 90"]);
-        let copies: Vec<_> = read.bodies[2..].iter().map(|b| b.body.display_share().unwrap()).collect();
+        assert_eq!(manifest["slices"].as_array().unwrap().len(), 3, "the part and each placed copy, once each");
+        let read = DesignContainerReader::new(Cursor::new(&bytes)).unwrap().geometry().unwrap();
+        assert_eq!(read.records, model.records);
+        assert_eq!(read_design_geometry(&bytes).unwrap().body_counter, 7);
+        let copies: Vec<_> = read.bodies[2..].iter().map(|b| b.display_share().unwrap()).collect();
         assert_eq!(copies[0].0.id(), copies[1].0.id(), "copies show one display again");
         assert_eq!(copies[1].1[3][0], 90.);
-        assert_eq!((read.bodies[3].component, read.bodies[3].source_name.as_deref(), read.bodies[3].feature), (3, Some("Part"), 2));
-        for (a, b) in state.bodies.iter().zip(&read.bodies) {
-            assert_eq!(solidcraft_kernel::encode_native_body(&a.body).unwrap(), solidcraft_kernel::encode_native_body(&b.body).unwrap());
+        assert!(read.bodies[0].display_share().is_none());
+        for (a, b) in model.bodies.iter().zip(&read.bodies) {
+            assert_eq!(solidcraft_kernel::encode_native_body(a).unwrap(), solidcraft_kernel::encode_native_body(b).unwrap());
         }
     }
 
@@ -1146,12 +1232,120 @@ mod tests {
         assert!(crate::read_design(&duplicate).is_err());
         let mut bomb = bytes.clone();
         let central = bomb.windows(4).position(|v| v == b"PK\x01\x02").unwrap();
-        bomb[central + 24..central + 28].copy_from_slice(&((MAX_DESIGN_BYTES + 1) as u32).to_le_bytes());
+        bomb[central + 24..central + 28].copy_from_slice(&((MAX_STEP_PART + 1) as u32).to_le_bytes());
         assert!(crate::read_design(&bomb).unwrap_err().to_string().contains("expanded package too large"));
         let mut excessive = bytes;
         let end = excessive.windows(4).rposition(|v| v == b"PK\x05\x06").unwrap();
         excessive[end + 8..end + 12].copy_from_slice(&[0xff; 4]);
         assert!(crate::read_design(&excessive).is_err());
+    }
+
+    /// Printable text that compresses poorly (93 characters: about 6.5 bits each). No `*`, so
+    /// it never ends a STEP comment.
+    fn noise(length: usize) -> String {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        (0..length)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let c = b'!' + ((state >> 32) % 93) as u8;
+                char::from(if c >= b'*' { c + 1 } else { c })
+            })
+            .collect()
+    }
+
+    /// A valid STEP cube, padded with a comment to `length` bytes. `noisy` padding barely
+    /// compresses; otherwise it is repetitive like the text of a real large export.
+    fn padded_step(length: usize, noisy: bool) -> String {
+        use solidcraft_geom::Vec3;
+        let cube = solidcraft_kernel::box_solid(Vec3::ZERO, Vec3::new(10.0, 20.0, 30.0)).unwrap();
+        let step = solidcraft_kernel::step_export(&[&cube], "padded").unwrap();
+        let (head, tail) = step.split_at(step.find("DATA;").unwrap() + 5);
+        let end = length - tail.len() - 2;
+        let mut out = String::with_capacity(length);
+        out.push_str(head);
+        out.push_str("\n/*");
+        if noisy {
+            out.push_str(&noise(end - out.len()));
+        } else {
+            let mut line = 0u64;
+            while out.len() + 64 < end {
+                line += 1;
+                out.push_str(&format!("#{line}=CARTESIAN_POINT('',({}.,{}.5,-{}.25));\n", line % 997, line % 89, line % 13));
+            }
+            out.extend(std::iter::repeat_n(' ', end - out.len()));
+        }
+        out.push_str("*/");
+        out.push_str(tail);
+        assert_eq!(out.len(), length);
+        out
+    }
+
+    /// #3221: a STEP file larger than a design part used to import, then fail to save.
+    #[test]
+    fn step_over_the_part_limit_imports_saves_compressed_and_reopens() {
+        let step = padded_step(MAX_DESIGN_BYTES + (1 << 20), false);
+        let imported = crate::step_import_feature(step.as_bytes(), "large.step").unwrap();
+        drop(step);
+        let mut doc = Document::new("Large import");
+        doc.add_feature(imported.kind, None).unwrap();
+        let bytes = write_design_container(&doc).unwrap();
+        assert!(bytes.len() < MAX_DESIGN_BYTES / 2, "saved {} MB", bytes.len() >> 20);
+        let restored = crate::read_design(&bytes).unwrap();
+        let (Some(FeatureKind::Import { step: before, .. }), Some(FeatureKind::Import { step: after, .. })) =
+            (doc.features.first().map(|f| &f.kind), restored.features.first().map(|f| &f.kind))
+        else {
+            panic!("the reopened design lost its import");
+        };
+        assert!(before.len() > MAX_DESIGN_BYTES && before == after, "the reopened STEP text differs");
+        let reopened = crate::step_import_feature(after.as_bytes(), "large.step").unwrap();
+        assert_eq!(reopened.body_names, imported.body_names);
+        assert_eq!(reopened.import.bodies.len(), 1);
+    }
+
+    #[test]
+    fn step_that_cannot_be_saved_even_compressed_is_refused_at_import() {
+        let step = padded_step(MAX_DESIGN_BYTES + (80 << 20), true);
+        let message = crate::step_import_feature(step.as_bytes(), "noisy.step").err().unwrap().to_string();
+        assert!(message.contains("too large to save in a design"), "{message}");
+    }
+
+    #[test]
+    fn designs_with_uncompressed_step_sources_still_open() {
+        // Saves before #3221 stored the STEP source without compression.
+        let doc = document();
+        let entries = parts(&write_design_container(&doc).unwrap());
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, bytes) in &entries {
+            let method = if name.ends_with(".step") { zip::CompressionMethod::Stored } else { zip::CompressionMethod::Deflated };
+            zip.start_file(name, zip::write::SimpleFileOptions::default().compression_method(method)).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        let old = zip.finish().unwrap().into_inner();
+        assert!(old.windows(13).any(|v| v == b"ISO-10303-21;"));
+        assert_eq!(crate::read_design(&old).unwrap(), doc);
+    }
+
+    #[test]
+    fn decompression_bomb_is_refused_without_expanding_it() {
+        // 64 MiB that deflate to a few hundred kilobytes, declared as a 1 KiB STEP source.
+        let mut doc = Document::new("Bomb");
+        let step = format!("ISO-10303-21;{}", " ".repeat(64 << 20));
+        doc.add_feature(FeatureKind::Import { file: "bomb.step".into(), step: step.into(), components: Vec::new(), skip: Vec::new() }, None).unwrap();
+        let honest = write_design_container(&doc).unwrap();
+        assert!(honest.len() < 1 << 20);
+        let central = honest.windows(4).position(|v| v == b"PK\x01\x02").unwrap();
+        let mut bomb = honest.clone();
+        // The STEP source is the first part: its local header is at 0.
+        bomb[22..26].copy_from_slice(&1024u32.to_le_bytes());
+        bomb[central + 24..central + 28].copy_from_slice(&1024u32.to_le_bytes());
+        let message = crate::read_design(&bomb).unwrap_err().to_string();
+        assert!(message.contains("declared uncompressed size") || message.contains("length mismatch"), "{message}");
+        // An honest declaration over the limit is refused before the part is read at all.
+        let mut over = honest;
+        over[central + 24..central + 28].copy_from_slice(&((MAX_STEP_PART + 1) as u32).to_le_bytes());
+        assert!(crate::read_design(&over).unwrap_err().to_string().contains("expanded package too large"));
     }
 
     #[test]

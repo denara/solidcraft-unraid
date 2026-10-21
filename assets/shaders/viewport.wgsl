@@ -29,7 +29,7 @@ fn near_z(c: vec4<f32>) -> f32 {
 }
 
 @group(1) @binding(2) var acc_t: texture_2d<f32>;
-@group(2) @binding(0) var ao_depth: texture_2d<f32>;
+@group(2) @binding(0) var ao_depth: texture_2d<u32>;
 
 fn clipped(p: vec3<f32>) -> bool {
     return length(u.clip.xyz) > 0.5 && dot(u.clip.xyz, p) > u.clip.w;
@@ -141,19 +141,19 @@ fn solid(i: TOut, front: bool) -> vec4<f32> {
 }
 
 // A single-sample opaque depth map, independent of the window's MSAA and its UI offsets.
-// A color copy of the prepass depth can be loaded on WebGL/OpenGL too; GLSL cannot
-// textureLoad a depth texture, even while AO is switched off.
-struct AoDepth { @location(0) sampled: vec4<f32>, @builtin(frag_depth) tested: f32 }
+// Preserve the depth's bits in R32Uint: GLSL cannot textureLoad a depth texture,
+// and float colour attachments are not available on every GL adapter.
+struct AoDepth {
+    @builtin(frag_depth) depth: f32,
+    @location(0) value: u32,
+};
+
 @fragment
 fn fs_ao_depth(i: TOut, @builtin(front_facing) front: bool) -> AoDepth {
     if (clipped(i.wp) || length(i.n) < 0.5) { discard; }
     var depth = i.pos.z;
     if (!front && length(u.clip.xyz) > 0.5) { depth = cap_depth(i.wp, i.pos.z); }
-    // Linear RGBA8 is renderable on WebGL too. RGB carries 24 depth bits; depth
-    // testing itself still uses the original full-precision value.
-    let q = u32(round(clamp(depth, 0.0, 1.0) * 16777215.0));
-    let packed = vec4<f32>(f32(q & 255u), f32((q >> 8u) & 255u), f32((q >> 16u) & 255u), 255.0) / 255.0;
-    return AoDepth(packed, depth);
+    return AoDepth(depth, bitcast<u32>(depth));
 }
 
 // Deterministic cosine-weighted hemisphere samples. Projecting the sample and a point one
@@ -188,8 +188,7 @@ fn occlusion(i: TOut) -> f32 {
         let ndc = q.xyz / q.w;
         let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
         if (any(uv < vec2<f32>(0.0)) || any(uv >= vec2<f32>(1.0)) || ndc.z < 0.0 || ndc.z > 1.0) { continue; }
-        let packed = textureLoad(ao_depth, vec2<i32>(uv * vec2<f32>(size)), 0).rgb;
-        let d0 = dot(packed, vec3<f32>(255.0, 65280.0, 16711680.0)) / 16777215.0;
+        let d0 = bitcast<f32>(textureLoad(ao_depth, vec2<i32>(uv * vec2<f32>(size)), 0).x);
         let zs = select(ndc.z, 1.0 - ndc.z, flip);
         let zn = select(near.z / near.w, 1.0 - near.z / near.w, flip);
         let d = select(d0, 1.0 - d0, flip);

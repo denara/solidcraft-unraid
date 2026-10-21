@@ -1552,3 +1552,18 @@ fn text_cut_through_a_large_plate_is_one_exact_boolean() {
     // material in either plate (measured on meshes, which are coarser on the larger one).
     assert!(small > 10.0 && rel(large, small) < 5e-2, "{small} {large}");
 }
+
+/// A loft between two sections in one plane is refused (it used to build a flat body of zero
+/// volume and report success).
+#[test]
+fn loft_through_coplanar_sections_is_refused() {
+    let mut s = Session::default();
+    for name in ["A", "B"] {
+        run(&mut s, "sketch.create", json!({"plane": "XY", "name": name}));
+        run(&mut s, "sketch.circle.center", json!({"center": [0, 0], "radius": 10}));
+        run(&mut s, "sketch.finish", json!({}));
+    }
+    let e = s.execute("solid.loft", &json!({"sections": [{"sketch": "A"}, {"sketch": "B"}]})).unwrap_err().to_string();
+    assert!(e.contains("same plane"), "{e}");
+    assert!(s.model.state().bodies.is_empty());
+}

@@ -278,6 +278,18 @@ fn groups(t: &Tokens) -> Vec<Group> {
             &[("timeline_item", t.timeline_item), ("timeline_item_error", t.timeline_item_error), ("hover", t.hover), ("accent_soft", t.accent_soft)],
             &[],
         ),
+        group("card text", &[("form_ink", t.form_ink), ("form_error", t.form_error)], &[("dialog_body", t.dialog_body)]),
+        group("card hints", &[("form_dim", t.form_dim)], &[("dialog_body", t.dialog_body)]),
+        group("card primary", &[("form_primary", t.form_primary)], &[("dialog_body", t.dialog_body)]),
+        // Validation is identified by its words as well as colour. Measure both the
+        // ink and badge surfaces against the corresponding failure states.
+        group(
+            "card validation",
+            &[("form_success", t.form_success), ("form_error", t.form_error)],
+            &[("form_success_fill", t.form_success_fill), ("form_error_fill", t.form_error_fill)],
+        ),
+        group("validation status", &[("form_success", t.form_success), ("error", t.error)], &[("panel", t.panel)]),
+        group("validation surfaces", &[("form_success_fill", t.form_success_fill), ("form_error_fill", t.form_error_fill)], &[]),
         group("UI text", &[("error", t.error), ("warning", t.warning), ("text", t.text)], &[("panel", t.panel)]),
         group("origin axes", &[("axis_x", t.axis_x), ("axis_y", t.axis_y), ("axis_z", t.axis_z)], &[("viewport_top", t.viewport_top)]),
         group("view triad", &[("triad[0]", t.triad[0]), ("triad[1]", t.triad[1]), ("triad[2]", t.triad[2])], &[("viewport_top", t.viewport_top)]),
@@ -356,8 +368,36 @@ fn groups(t: &Tokens) -> Vec<Group> {
             &[("app_bar_icon[0]", t.app_bar_icon[0]), ("app_bar_icon[1]", t.app_bar_icon[1]), ("app_bar_icon[2]", t.app_bar_icon[2])],
             &[("app_bar", t.app_bar)],
         ),
+        // Tab names and icons identify the tabs; each accent must read against the toolbar.
+        group("surface tab", &[("surface_accent", t.surface_accent)], &[("toolbar", t.toolbar)]),
+        group("mesh tab", &[("mesh_accent", t.mesh_accent)], &[("toolbar", t.toolbar)]),
+        group("form tab", &[("form_accent", t.form_accent)], &[("toolbar", t.toolbar)]),
+        group("agent status", &[("agent_ok", t.agent_ok), ("agent_busy", t.agent_busy)], &[("app_bar", t.app_bar)]),
         group("logo", &[("logo[0]", t.logo[0]), ("logo[1]", t.logo[1]), ("logo[2]", t.logo[2])], &[("app_bar", t.app_bar)]),
     ];
+    // Tab fills and small-text inks have distinct jobs: compare each with its actual
+    // grounds, rather than with the same-hue fill/ink. WCAG text ratios are also guarded
+    // in theme::tests::tab_accents_hold_wcag_small_text_contrast_in_both_themes.
+    for (name, ink_name, ink, soft_name, soft) in [
+        ("sketch tab text", "sketch_ink", t.sketch_ink, "sketch_soft", t.sketch_soft),
+        ("surface tab text", "surface_ink", t.surface_ink, "surface_soft", t.surface_soft),
+        ("mesh tab text", "mesh_ink", t.mesh_ink, "mesh_soft", t.mesh_soft),
+        ("form tab text", "form_tab_ink", t.form_tab_ink, "form_soft", t.form_soft),
+        ("sheet tab text", "sheet_ink", t.sheet_ink, "sheet_soft", t.sheet_soft),
+        ("render tab text", "render_ink", t.render_ink, "render_soft", t.render_soft),
+    ] {
+        out.push(group(name, &[(ink_name, ink)], &[(soft_name, soft), ("panel", t.panel)]));
+    }
+    for (name, key, fill) in [
+        ("surface tab fill", "surface_fill", t.surface_fill),
+        ("mesh tab fill", "mesh_fill", t.mesh_fill),
+        ("form tab fill", "form_fill", t.form_fill),
+        ("sheet tab fill", "sheet_fill", t.sheet_fill),
+        ("render tab fill", "render_fill", t.render_fill),
+    ] {
+        out.push(group(name, &[(key, fill)], &[("panel", t.panel)]));
+    }
+    out.push(group("dark pill text", &[("tab_on_fill_dark", t.tab_on_fill_dark)], &[("mesh_fill", t.mesh_fill)]));
     // The removed part of a cut preview is translucent over the body.
     if let Some(sel) = out.iter_mut().find(|g| g.name == "selection") {
         sel.members.push(("preview_cut", over(t.preview_cut, t.body)));
@@ -371,6 +411,71 @@ const SHADED: [&str; 2] = ["analysis.draft", "analysis.access"];
 /// Tokens no colour vision mode needs to keep apart, and why. A new token fails
 /// `every_token_is_measured_or_carries_no_meaning` until it is in a group above or here.
 const NO_MEANING: &[(&str, &str)] = &[
+    ("space_2", "layout dimension"),
+    ("space_3", "layout dimension"),
+    ("space_4", "layout dimension"),
+    ("space_6", "layout dimension"),
+    ("space_8", "layout dimension"),
+    ("space_10", "layout dimension"),
+    ("space_12", "layout dimension"),
+    ("space_14", "layout dimension"),
+    ("space_16", "layout dimension"),
+    ("space_24", "layout dimension"),
+    ("radius_sm", "layout dimension"),
+    ("radius_md", "layout dimension"),
+    ("radius_lg", "layout dimension"),
+    ("radius_xl", "layout dimension"),
+    ("font_badge", "layout dimension"),
+    ("font_micro", "layout dimension"),
+    ("font_panel", "layout dimension"),
+    ("font_small", "layout dimension"),
+    ("font_caption", "layout dimension"),
+    ("font_body", "layout dimension"),
+    ("font_label", "layout dimension"),
+    ("font_button", "layout dimension"),
+    ("font_heading", "layout dimension"),
+    ("font_triad", "layout dimension"),
+    ("font_compass", "layout dimension"),
+    ("font_subtitle", "layout dimension"),
+    ("font_intro", "layout dimension"),
+    ("font_article_heading", "layout dimension"),
+    ("font_title", "layout dimension"),
+    ("font_display", "layout dimension"),
+    ("control_height", "layout dimension"),
+    ("control_radius", "layout dimension"),
+    ("form_label_width", "layout dimension"),
+    ("form_gap_y", "layout dimension"),
+    ("form_footer_height", "layout dimension"),
+    ("form_header_height", "layout dimension"),
+    ("form_card_width", "layout dimension"),
+    ("form_icon_size", "layout dimension"),
+    ("form_close_size", "layout dimension"),
+    ("form_inset", "layout dimension"),
+    ("form_icon_inset", "layout dimension"),
+    ("form_section_icon_size", "layout dimension"),
+    ("form_checkbox_height", "layout dimension"),
+    ("form_button_height", "layout dimension"),
+    ("sketch_palette_width", "layout dimension"),
+    ("sketch_mode_size", "layout dimension"),
+    ("sketch_mode_radius", "layout dimension"),
+    ("sketch_mode_border", "layout dimension"),
+    ("sketch_palette_alpha", "neutral panel opacity"),
+    ("sketch_mode_tint", "selected background tint of the measured sketch accent"),
+    ("sketch_footer_icon_size", "layout dimension"),
+    ("font_section_tracking", "layout dimension"),
+    ("on_accent", "ink on an accent fill"),
+    ("app_bar_hover_subtle", "translucent hover chrome"),
+    ("app_bar_hover_button", "translucent hover chrome"),
+    ("app_bar_hover_strong", "translucent hover chrome"),
+    ("app_bar_tab_active", "the active document tab's surface"),
+    ("dialog_footer", "dense dialog footer band"),
+    ("dialog_rule", "dense dialog divider"),
+    ("control_fill", "input control fill"),
+    ("control_border", "input control border"),
+    ("dialog_label", "dense dialog field label"),
+    ("selected_ink", "foreground of selected elements"),
+    ("selected_bg", "background of selected elements"),
+    ("render_accent", "the Render workspace's identity colour"),
     // The window's chrome: grounds, text and borders (measured as grounds where meaning sits on them).
     ("panel_header", "chrome"),
     ("border", "chrome"),
@@ -384,6 +489,7 @@ const NO_MEANING: &[(&str, &str)] = &[
     ("subheading_bg", "chrome"),
     ("overlay", "a chip's ground over the view"),
     ("app_bar_text", "text"),
+    ("app_bar_separator", "neutral chrome divider"),
     ("app_bar_hover", "a hovered tab, translucent white"),
     ("timeline_marker", "the rollback marker, alone"),
     ("field", "a field's ground"),
@@ -635,18 +741,53 @@ fn each_mode_changes_only_its_table() {
         "icons.draft",
         "bend_up",
         "bend_down",
+        "surface_accent",
+        "mesh_accent",
+        "form_accent",
         "sketch_accent",
         "preview_sketch",
+        "form_success_fill",
     ];
-    let mut red_green_light = red_green_both.to_vec();
-    red_green_light.extend(["sketch_projected", "sketch_locked", "timeline_item_error", "construction_geom"]);
+    let mut red_green_light =
+        red_green_both.into_iter().filter(|name| !["surface_accent", "mesh_accent", "form_accent"].contains(name)).collect::<Vec<_>>();
+    red_green_light.extend(["sketch_projected", "sketch_locked", "timeline_item_error", "construction_geom", "glyph_text", "form_success"]);
     for (dark, mode, want) in [
         (false, ColorVision::Protan, set(&red_green_light)),
         (true, ColorVision::Protan, set(&red_green_both)),
         (false, ColorVision::Deutan, set(&red_green_light)),
         (true, ColorVision::Deutan, set(&red_green_both)),
-        (false, ColorVision::Tritan, set(&["sketch_locked", "box_crossing", "construction_geom", "preview_sketch", "analysis.hatch"])),
-        (true, ColorVision::Tritan, set(&["sketch_locked", "box_crossing", "construction_geom", "glyph_text", "preview_sketch", "analysis.hatch"])),
+        (
+            false,
+            ColorVision::Tritan,
+            set(&[
+                "surface_accent",
+                "mesh_accent",
+                "form_accent",
+                "agent_busy",
+                "sketch_locked",
+                "box_crossing",
+                "construction_geom",
+                "glyph_text",
+                "preview_sketch",
+                "analysis.hatch",
+            ]),
+        ),
+        (
+            true,
+            ColorVision::Tritan,
+            set(&[
+                "surface_accent",
+                "mesh_accent",
+                "form_accent",
+                "agent_busy",
+                "sketch_locked",
+                "box_crossing",
+                "construction_geom",
+                "glyph_text",
+                "preview_sketch",
+                "analysis.hatch",
+            ]),
+        ),
     ] {
         let base = Tokens::themed(dark, ColorVision::Off);
         assert_eq!(changed_fields(&base, &Tokens::themed(dark, mode)), want, "{mode:?}, dark {dark}");
@@ -687,6 +828,33 @@ fn every_mode_keeps_colours_apart_for_its_eye() {
             }
         }
     }
+}
+
+/// Badge meaning must survive each simulation even for subtle default tints (which
+/// the general groups check may otherwise skip when they are close for normal vision).
+#[test]
+fn validation_badges_are_distinct_and_readable_in_every_mode() {
+    let mut failures = Vec::new();
+    for dark in [false, true] {
+        for mode in std::iter::once(ColorVision::Off).chain(MODES) {
+            let t = Tokens::themed(dark, mode);
+            for (name, other) in [("form_error", t.form_error), ("error", t.error)] {
+                let distance = worst(mode, rgb(t.form_success), rgb(other));
+                if distance < FLOOR {
+                    failures.push(format!("{mode:?} dark={dark} form_success vs {name}: {distance:.2}"));
+                }
+            }
+            let distance = worst(mode, rgb(t.form_success_fill), rgb(t.form_error_fill));
+            if distance < FLOOR {
+                failures.push(format!("{mode:?} dark={dark} validation fills: {distance:.2}"));
+            }
+            let contrast = crate::theme::contrast_ratio(t.form_success, t.form_success_fill);
+            if contrast < 4.5 {
+                failures.push(format!("{mode:?} dark={dark} success contrast: {contrast:.2}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]

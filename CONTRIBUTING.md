@@ -199,7 +199,7 @@ Check that validation after merging. They are listed in
 `.config/nextest.toml` and the [testing page](docs/book/src/dev/testing.md):
 
 - `solidcraft-engine`: `tests::hostile_params_never_panic`, everything in `tests::robustness` and
-  the seeds of `tests::robustness_goldens` (`seed_00` … `seed_95`; pull requests matching the workflow's geometry paths run all but the slowest, `SLOW_SEEDS` in `ci.yml`),
+  the seeds of `tests::robustness_goldens` (`seed_00` … `seed_95`; pull requests that change the kernel, truck or the goldens run all but the slowest, `SLOW_SEEDS` in `ci.yml`),
   `pattern_suppress_tests::enclosure_arc_extinction_keeps_a_real_sharp_inner_lip_after_resize_and_reopen`,
   `pattern_suppress_tests::enclosure_datums_follow_wall_height_and_board_depth_with_material_proofs`,
   `cmd::plastic::tests::enclosure_snap_fit_follows_resized_front_wall`, the `atomic_commands` contract tests

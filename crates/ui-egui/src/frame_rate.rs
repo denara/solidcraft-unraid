@@ -48,7 +48,7 @@ pub(crate) fn paint(app: &mut SolveApp, ctx: &egui::Context, painter: &egui::Pai
     ctx.request_repaint();
     let Some(text) = app.frame_rate.label() else { return };
     let t = Tokens::get();
-    let font = FontId::monospace(12.0);
+    let font = FontId::monospace(crate::theme::Tokens::get().font_body);
     let galley = painter.layout_no_wrap(text, font, t.text);
     let size = galley.size() + vec2(16.0, 8.0);
     let r = Rect::from_min_size(pos2(rect.right() - 12.0 - size.x, rect.bottom() - 12.0 - size.y), size);

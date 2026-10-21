@@ -89,17 +89,26 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     let bom = d.rows(app);
     let rows: Vec<Value> = bom["rows"].as_array().cloned().unwrap_or_default();
     let (mut export, mut apply_row) = (None, None);
-    let title = RichText::new(crate::i18n::tr_label("Bill of Materials")).strong().size(13.0);
+    let title = RichText::new(crate::i18n::tr_label("Bill of Materials")).strong().size(t.font_button);
     crate::frame::window(ctx, title, crate::frame::Width::Wide).id(egui::Id::new("sc_bom")).open(&mut open).resizable(true).show(ctx, |ui| {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let was = (d.top, d.by_definition, d.group_children);
-            ui.selectable_value(&mut d.top, false, "Parts only");
-            ui.selectable_value(&mut d.top, true, "Top level");
+            let mut levels = usize::from(d.top);
+            let levels_width = crate::ui_kit::ContentWidth::button(ui, "Parts only").max(crate::ui_kit::ContentWidth::button(ui, "Top level")) * 2.0;
+            ui.allocate_ui(egui::vec2(levels_width, crate::ui_kit::row_height()), |ui| {
+                crate::ui_kit::segmented(ui, &mut levels, &["Parts only", "Top level"], Default::default());
+            });
+            d.top = levels == 1;
             ui.separator();
-            ui.selectable_value(&mut d.by_definition, false, "By part number");
-            ui.selectable_value(&mut d.by_definition, true, "By definition");
+            let mut grouping = usize::from(d.by_definition);
+            let grouping_width =
+                crate::ui_kit::ContentWidth::button(ui, "By part number").max(crate::ui_kit::ContentWidth::button(ui, "By definition")) * 2.0;
+            ui.allocate_ui(egui::vec2(grouping_width, crate::ui_kit::row_height()), |ui| {
+                crate::ui_kit::segmented(ui, &mut grouping, &["By part number", "By definition"], Default::default());
+            });
+            d.by_definition = grouping == 1;
             ui.separator();
-            ui.checkbox(&mut d.group_children, "Sub-parts in their part's row");
+            crate::ui_kit::checkbox(ui, "Sub-parts in their part's row", &mut d.group_children);
             if was != (d.top, d.by_definition, d.group_children) {
                 d.picked = None;
             }
@@ -113,7 +122,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                 ui.end_row();
                 for (i, row) in rows.iter().enumerate() {
                     let picked = d.picked == Some(i);
-                    if ui.selectable_label(picked, text(row, "item")).clicked() {
+                    if crate::ui_kit::list_picker(ui, &i.to_string(), &text(row, "item"), picked).clicked() {
                         d.picked = if picked { None } else { Some(i) };
                         d.fields = [text(row, "part_number"), text(row, "description"), text(row, "revision")];
                     }
@@ -141,11 +150,13 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
             egui::Grid::new("sc_bom_edit").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
                 for (label, field) in ["Part number", "Description", "Revision"].into_iter().zip(d.fields.iter_mut()) {
                     ui.label(label);
-                    ui.add(egui::TextEdit::singleline(field).desired_width(280.0));
+                    ui.allocate_ui(egui::vec2(280.0, crate::ui_kit::row_height()), |ui| {
+                        crate::ui_kit::cell_editor(ui, ui.make_persistent_id(label), field, label, false);
+                    });
                     ui.end_row();
                 }
             });
-            if ui.button("Apply").clicked() {
+            if crate::ui_kit::button(ui, "Apply", crate::ui_kit::Button::Normal).clicked() {
                 apply_row = Some(row.clone());
             }
         }
@@ -155,7 +166,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
         ui.separator();
         ui.horizontal(|ui| {
             for (label, ext) in [("Export CSV…", "csv"), ("Export JSON…", "json")] {
-                if ui.button(label).clicked() {
+                if crate::ui_kit::button(ui, label, crate::ui_kit::Button::Normal).clicked() {
                     export = Some(ext);
                 }
             }

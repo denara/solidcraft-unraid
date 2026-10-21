@@ -60,7 +60,7 @@ fn icon(source: &str) -> String {
 }
 
 const CSS: &str = r#"
-.folderactions{display:flex;align-items:center;flex-wrap:wrap;gap:14px;color:var(--dim);font-size:12px}.folderactions>span{margin-right:auto}.danger{color:#ffaeae}.deletewarning{border:1px solid #805052;background:#332125;padding:16px;border-radius:8px;margin:20px 0}.deleteform{display:flex;gap:16px;align-items:center;flex-wrap:wrap}.deleteform .primary{background:#a13e48;color:white}.deleteform label{width:100%}
+.folderactions{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:14px;padding:6px 20px;border-top:1px solid var(--line);color:var(--dim);font-size:11px;line-height:1.4}.folderactions>span{margin-right:auto;overflow-wrap:anywhere;min-width:0}.folderactions a{white-space:nowrap}.danger{color:#ffaeae}.deletewarning{border:1px solid #805052;background:#332125;padding:16px;border-radius:8px;margin:20px 0}.deleteform{display:flex;gap:16px;align-items:center;flex-wrap:wrap}.deleteform .primary{background:#a13e48;color:white}.deleteform label{width:100%}
 
 :root{color-scheme:dark;--bg:#10151b;--panel:#171e26;--raised:#1e2731;--line:#2b3541;--text:#ecf1f5;--dim:#9eafbf;--green:#6cddb4;--amber:#f1c36b;--blue:#9bc8fa}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);font-family:Segoe UI,system-ui,sans-serif;color:var(--text);font-size:14px;line-height:1.5}button,input,select{font:inherit}button,a,select{touch-action:manipulation}button{color:var(--text);cursor:pointer}a{color:inherit}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--green);outline-offset:3px}
@@ -266,7 +266,7 @@ fn file_row(html: &mut String, file: &Value) {
     edit_link(html, file, "action", "Bearbeiten ↗");
     let _ = write!(html, "<a class=\"action\" href=\"{}\" download>Download ↓</a>", download_url(name));
     delete_link(html, name);
-    html.push_str("</div></td></tr>");
+    html.push_str("</div>");
 }
 
 fn is_png(name: &str) -> bool {
@@ -373,7 +373,7 @@ fn project_files(html: &mut String, files: &[Value], directories: &[Value]) {
         };
         let _ = write!(
             html,
-            "<details class=\"project\" data-project=\"{}\"><summary>{}<div><div class=\"projectname\">{}</div><div class=\"projectmeta\">{basis}</div></div><span class=\"projectcount\">{} Datei{}</span></summary><div class=\"tablewrap\"><table><thead><tr><th scope=\"col\">Name</th><th scope=\"col\">Bearbeitung</th><th scope=\"col\">Zuletzt gespeichert</th><th scope=\"col\">Größe</th><th scope=\"col\">Aktionen</th></tr></thead><tbody>",
+            "<details class=\"project\" data-project=\"{}\"><summary>{}<div><div class=\"projectname\">{}</div><div class=\"projectmeta\">{basis}</div></div><span class=\"projectcount\">{} Datei{}</span></summary>",
             escape(&id),
             icon(ICON_FOLDER),
             escape(name),
@@ -386,12 +386,15 @@ fn project_files(html: &mut String, files: &[Value], directories: &[Value]) {
             for directory in
                 std::iter::once(name).chain(directories.iter().filter_map(Value::as_str).filter(|directory| directory.starts_with(&prefix)))
             {
-                html.push_str("<tr><td colspan=\"5\"><div class=\"folderactions\">");
-                let _ = write!(html, "<span>Echter Ordner: <strong>{}</strong></span>", escape(directory));
+                let _ = write!(html, "<div class=\"folderactions\" role=\"group\" aria-label=\"Ordneraktionen für {}\">", escape(directory));
+                if let Some(relative) = directory.strip_prefix(&prefix) {
+                    let _ = write!(html, "<span>{}</span>", escape(relative));
+                }
                 folder_actions(html, directory);
-                html.push_str("</div></td></tr>");
+                html.push_str("</div>");
             }
         }
+        html.push_str("<div class=\"tablewrap\"><table><thead><tr><th scope=\"col\">Name</th><th scope=\"col\">Bearbeitung</th><th scope=\"col\">Zuletzt gespeichert</th><th scope=\"col\">Größe</th><th scope=\"col\">Aktionen</th></tr></thead><tbody>");
         for file in files {
             file_row(html, file);
         }
@@ -641,6 +644,15 @@ mod tests {
         assert!(!html.contains("/workspace/archive/part"));
         assert!(!html.contains("/workspace/delete/part\""));
         assert!(!html.contains("<details open"));
+        let real_project = html.split("data-project=\"directory:Demo\"").nth(1).unwrap();
+        let summary_end = real_project.find("</summary>").unwrap();
+        let actions = real_project.find("class=\"folderactions\"").unwrap();
+        let columns = real_project.find("<thead>").unwrap();
+        assert!(summary_end < actions && actions < columns);
+        assert!(real_project.contains("aria-label=\"Ordneraktionen für Demo/empty\""));
+        assert!(real_project.contains("<span>empty</span>"));
+        assert!(!html.contains("Echter Ordner"));
+        assert!(!real_project.contains("colspan=\"5\""));
     }
 
     #[test]

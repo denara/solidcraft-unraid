@@ -103,6 +103,28 @@ fn set_back_reports_restored_features() {
     assert_eq!((m.last_recomputed, m.last_restored), (0, 0));
 }
 
+/// #1989: what an evaluation ahead on a copy of the model computed is kept for the run that
+/// follows on the model itself, which finds it there even once the evaluation cache has dropped
+/// it (the cache keeps only a few states of a design with large bodies). Copies keep nothing.
+#[test]
+fn results_kept_ahead_outlive_the_cache() {
+    let (mut doc, _) = plate_doc();
+    let mut m = Model::new();
+    m.evaluate(&doc);
+    doc.set_param("width", "50 mm", None, None).unwrap();
+    let kept = std::sync::Arc::new(KeptResults::default());
+    let mut ahead = m.clone();
+    ahead.keep(Some(kept.clone()));
+    assert!(ahead.clone().kept().is_none(), "a copy keeps nothing");
+    ahead.evaluate(&doc);
+    assert_eq!((ahead.last_recomputed, kept.len()), (2, 2));
+    *m.cache.lock().unwrap() = Default::default();
+    m.keep(Some(kept));
+    m.evaluate(&doc);
+    assert_eq!((m.last_recomputed, m.last_restored), (0, 2), "nothing computed again");
+    assert!(rel(measure(&m.state().bodies[0].body).unwrap().volume, 30000.0) < 1e-9);
+}
+
 #[test]
 fn box_fillet_cut_timeline() {
     let (mut doc, _) = plate_doc();

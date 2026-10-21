@@ -201,6 +201,23 @@ mod tests {
         }
     }
 
+    /// #3745: a highlight never waits for a body's plan mesh: the first ask starts it on a
+    /// worker and answers `None`, and once made it is the plan mesh, in the body's own cell.
+    #[test]
+    fn plan_mesh_soon_makes_it_on_a_worker() {
+        let body = ModelBody::new("Pin".into(), kernel::cylinder(Vec3::ZERO, Vec3::Z, 2., 8.).unwrap(), 1);
+        assert!(body.plan_mesh_soon().is_none(), "not made in the asking frame");
+        let began = std::time::Instant::now();
+        let soon = loop {
+            if let Some(mesh) = body.plan_mesh_soon() {
+                break mesh;
+            }
+            assert!(began.elapsed() < std::time::Duration::from_secs(30), "the worker made it");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        };
+        assert!(Arc::ptr_eq(&soon, &body.plan_mesh().unwrap()), "the same mesh, in the body's cell");
+    }
+
     #[test]
     fn world_instances_warm_one_definition_and_an_edit_replaces_it() {
         let mut doc = crate::Document::new("instances");

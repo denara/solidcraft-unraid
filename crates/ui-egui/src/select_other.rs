@@ -524,7 +524,13 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                 let (r, _) = ui.allocate_exact_size(vec2(w, 20.0), Sense::hover());
                 let title = crate::i18n::tr_label("Select Other").to_uppercase();
                 let title = if p.total > p.rows.len() { format!("{title} · {} / {}", p.rows.len(), p.total) } else { title };
-                ui.painter().text(pos2(r.left() + 8.0, r.center().y), Align2::LEFT_CENTER, title, FontId::proportional(10.5), t.text_dim);
+                ui.painter().text(
+                    pos2(r.left() + 8.0, r.center().y),
+                    Align2::LEFT_CENTER,
+                    title,
+                    FontId::proportional(crate::theme::Tokens::get().font_panel),
+                    t.text_dim,
+                );
                 egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
                     for (i, row) in p.rows.iter().enumerate() {
                         let (r, resp) = ui.allocate_exact_size(vec2(w, 24.0), Sense::click());
@@ -541,7 +547,13 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                             t.icon_fill,
                             t.accent,
                         );
-                        ui.painter().text(pos2(r.left() + 32.0, r.center().y), Align2::LEFT_CENTER, &row.label, FontId::proportional(13.0), t.text);
+                        ui.painter().text(
+                            pos2(r.left() + 32.0, r.center().y),
+                            Align2::LEFT_CENTER,
+                            &row.label,
+                            FontId::proportional(crate::theme::Tokens::get().font_button),
+                            t.text,
+                        );
                         if resp.clicked() {
                             picked = Some(i);
                         }

@@ -1,6 +1,7 @@
 //! Focus-scoped completion keyboard handling before editors and CAD shortcuts see input.
 
-use egui::{Key, RichText};
+use crate::ui_kit;
+use egui::Key;
 
 use crate::params_dialog::{suggestions_for, word_before};
 use crate::theme::Tokens;
@@ -123,31 +124,35 @@ pub(crate) fn complete(ui: &mut egui::Ui, resp: &egui::Response, text: &mut Stri
     let mut pick = if popup.accept { list.get(popup.selected).map(|s| s.text.clone()) } else { None };
     popup.accept = false;
     let t = Tokens::get();
-    crate::frame::area(resp.id.with("completions")).order(egui::Order::Tooltip).fixed_pos(resp.rect.left_bottom() + egui::vec2(0.0, 2.0)).show(
+    let options: Vec<_> = list
+        .iter()
+        .map(|suggestion| ui_kit::PopupOption {
+            text: &suggestion.text,
+            kind: match suggestion.kind.as_str() {
+                "parameter" => crate::i18n::tr_label("Parameter"),
+                "function" => crate::i18n::tr("ui.function"),
+                "unit" => crate::i18n::tr_label("Unit"),
+                "constant" => crate::i18n::tr("ui.constant"),
+                _ => &suggestion.kind,
+            },
+            detail: &suggestion.detail,
+            color: match suggestion.kind.as_str() {
+                "parameter" => t.form_ink,
+                "function" => t.form_primary,
+                _ => t.form_dim,
+            },
+        })
+        .collect();
+    if let Some(index) = ui_kit::popup_list(
         &ctx,
-        |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.set_min_width(resp.rect.width().max(180.0));
-                for (i, suggestion) in list.iter().enumerate() {
-                    let colour = match suggestion.kind.as_str() {
-                        "parameter" => t.text,
-                        "function" => t.accent,
-                        _ => t.text_dim,
-                    };
-                    let r = ui
-                        .add(egui::Button::new(RichText::new(&suggestion.text).color(colour)).selected(i == popup.selected))
-                        .on_hover_text(&suggestion.detail);
-                    if i == popup.selected {
-                        ui.label(RichText::new(&suggestion.detail).small().color(t.text_dim));
-                    }
-                    if r.clicked() {
-                        pick = Some(suggestion.text.clone());
-                    }
-                }
-                ui.label(RichText::new("↑ ↓ choose · Enter / Tab complete · Esc dismiss").small().color(t.text_dim));
-            });
-        },
-    );
+        resp.id.with("completions"),
+        resp.rect,
+        popup.selected,
+        &options,
+        crate::i18n::tr_label("↑ ↓ choose · Enter / Tab complete · Esc dismiss"),
+    ) {
+        pick = list.get(index).map(|suggestion| suggestion.text.clone());
+    }
     ctx.data_mut(|d| d.insert_temp(popup_id(), popup));
     let Some(pick) = pick else { return false };
     let chars: Vec<char> = text.chars().collect();
@@ -181,7 +186,7 @@ mod tests {
 
     impl Editor {
         fn new(text: &str) -> Self {
-            let ctx = egui::Context::default();
+            let ctx = crate::fonts::test_context();
             let mut app = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
             for (name, value) in [("width", 40), ("width_extra", 50), ("wing", 20), ("wire", 10)] {
                 app.run("parameters.add", json!({"name":name,"expression":format!("{value} mm")})).unwrap();

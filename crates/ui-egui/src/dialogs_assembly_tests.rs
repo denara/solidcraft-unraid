@@ -8,13 +8,7 @@ use crate::dialogs::{apply_commands, face_sel, preview_commands};
 /// Components A (grounded) and B: a 20 x 20 x 10 box each, B 30 mm along X.
 fn two_boxes() -> SolveApp {
     let mut s = Session::default();
-    for (name, x) in [("A", 0), ("B", 30)] {
-        s.execute("component.activate", &json!({"component": "root"})).unwrap();
-        s.execute("component.create", &json!({ "name": name })).unwrap();
-        s.execute("solid.box", &json!({"length": 20, "width": 20, "height": 10, "corner": [x, 0, 0]})).unwrap();
-    }
-    s.execute("component.activate", &json!({"component": "root"})).unwrap();
-    s.execute("occurrence.ground", &json!({"occurrence": "A:1", "grounded": true})).unwrap();
+    crate::test_support::grounded_boxes(&[("A", 0), ("B", 30)], |id, p| s.execute(id, &p).unwrap());
     SolveApp::new(s, Services::default())
 }
 
@@ -215,7 +209,7 @@ fn ok_click_survives_a_busy_preview() {
         f.animate = true;
     }
     app.dialog = Some(d);
-    let ctx = egui::Context::default();
+    let ctx = crate::fonts::test_context();
     let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 1000.0));
     let frame = |app: &mut SolveApp, busy: bool, events: Vec<egui::Event>| {
         app.preview.busy = busy;
@@ -267,7 +261,7 @@ fn picks_on_one_component_say_why_and_offer_components() {
     d.pick(&app.session, face_sel(&app.session, Vec3::new(40.0, 10.0, 0.0)).unwrap());
     assert!(apply_commands(&app, &d).is_err(), "one component: no joint");
     app.dialog = Some(d);
-    let ctx = egui::Context::default();
+    let ctx = crate::fonts::test_context();
     let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 1000.0));
     let frame = |app: &mut SolveApp, events: Vec<egui::Event>| {
         let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
@@ -335,7 +329,7 @@ fn drive_value_takes_the_keyboard() {
     app.run("joint.create", json!({"type": "revolute", "a": {"occurrence": a, "face": [10, 10, 10]}, "b": {"occurrence": b, "face": [40, 10, 0]}}))
         .unwrap();
     app.start("joint.drive");
-    let ctx = egui::Context::default();
+    let ctx = crate::fonts::test_context();
     let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 1000.0));
     let frame = |app: &mut SolveApp, events: Vec<egui::Event>| {
         let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };

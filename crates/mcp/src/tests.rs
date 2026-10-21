@@ -88,6 +88,7 @@ fn handshake_and_tools_list() {
     let names: Vec<&str> = tools["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
     for want in [
         "list_commands",
+        "describe_command",
         "execute",
         "batch",
         "inspect_design",
@@ -99,6 +100,7 @@ fn handshake_and_tools_list() {
         "undo",
         "redo",
         "crash_reports",
+        "running",
         "new_design",
         "open",
         "save",
@@ -113,6 +115,8 @@ fn handshake_and_tools_list() {
     let cmds = tool(&mut s, "list_commands", json!({"filter": "fillet"}));
     assert!(cmds.as_array().unwrap().iter().any(|c| c["id"] == "solid.fillet"), "{cmds}");
     assert!(cmds.as_array().unwrap().len() < 5);
+    // Headless, calls run one at a time: none is running while `running` is asked (#3654).
+    assert_eq!(tool(&mut s, "running", json!({})), json!({"running": []}));
 
     let res = call(&mut s, 5, "resources/list", json!({}));
     assert_eq!(res["result"]["resources"].as_array().unwrap().len(), 2);
@@ -293,6 +297,31 @@ fn parameters_drive_the_design() {
     assert!(d["params"].as_array().unwrap().iter().any(|p| p["name"] == "len" && p["value"] == 50.0), "{d}");
 }
 
+/// `inspect_design` gives each joint's definition (as `joint.inspect`) when the design has
+/// joints, leaves the key out when it has none, and `joints: false` leaves them out.
+#[test]
+fn inspect_design_lists_joint_definitions() {
+    let mut s = server();
+    let d = tool(&mut s, "inspect_design", json!({"measure": false, "sketches": false}));
+    assert!(d.get("joints").is_none(), "{d}");
+    for (name, corner) in [("A", [0, 0, 0]), ("B", [20, 0, 0])] {
+        tool(&mut s, "execute", json!({"command": "component.activate", "params": {"component": "root"}}));
+        tool(&mut s, "execute", json!({"command": "component.create", "params": {"name": name}}));
+        tool(&mut s, "execute", json!({"command": "solid.box", "params": {"length": 10, "width": 10, "height": 10, "corner": corner}}));
+    }
+    tool(
+        &mut s,
+        "execute",
+        json!({"command": "joint.create", "params": {"type": "rigid", "name": "Glue", "a": {"occurrence": "A:1", "face": [5, 5, 10]}, "b": {"occurrence": "B:1", "face": [25, 5, 0]}}}),
+    );
+    let d = tool(&mut s, "inspect_design", json!({"measure": false, "sketches": false}));
+    assert_eq!(d["joints"][0]["name"], "Glue", "{d}");
+    assert_eq!(d["joints"][0]["a"]["snap"]["type"], "face_center", "{d}");
+    assert_eq!(d["joints"][0]["b"]["resolves"], true, "{d}");
+    let d = tool(&mut s, "inspect_design", json!({"measure": false, "sketches": false, "joints": false}));
+    assert!(d.get("joints").is_none(), "{d}");
+}
+
 /// `set_parameter` takes the new value as `value` or as `expression` (the name parameters.change
 /// uses), which it used to refuse instead of forwarding.
 #[test]
@@ -393,6 +422,35 @@ fn batch_rolls_back_with_a_full_undo_history() {
     assert_eq!(d["sketches"].as_array().map(Vec::len), Some(0), "{d}");
     assert!(d["active_sketch"].is_null(), "{d}");
     assert_eq!(d["undo"], undo);
+}
+
+/// Regression (#3242): a failed batch containing `file.new` reported `rolled_back: true` and
+/// kept the replacement design. The checkpoint survives the new document, so the design the
+/// batch started in — the 1 mm cube — is back when the batch fails.
+#[test]
+fn a_failed_batch_with_file_new_restores_the_original_design() {
+    let mut s = server();
+    tool(&mut s, "batch", json!({"commands": [{"command": "solid.box", "params": {"length": 1, "width": 1, "height": 1, "body_name": "Original"}}]}));
+    let name = tool(&mut s, "inspect_design", json!({"measure": false, "sketches": false}))["name"].clone();
+    let r = raw_tool(
+        &mut s,
+        "batch",
+        json!({"rollback": true, "commands": [
+            {"command": "file.new", "params": {"name": "Replacement"}},
+            {"command": "solid.box", "params": {"length": 2, "width": 2, "height": 2}},
+            {"command": "not.a.command"},
+        ]}),
+    );
+    assert_eq!(r["result"]["isError"], true, "{r}");
+    let body: Value = serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(body["failed"]["index"], 2, "{body}");
+    assert_eq!(body["rolled_back"], true, "{body}");
+    assert_eq!(body["undone"], 2, "{body}");
+    // The original 1 mm cube is back; the replacement design is gone.
+    assert_eq!(tool(&mut s, "measure", json!({}))["body_count"], 1);
+    assert!(rel(volume(&mut s), 1.0) < 1e-9, "{}", volume(&mut s));
+    let d = tool(&mut s, "inspect_design", json!({"measure": false, "sketches": false}));
+    assert_eq!(d["name"], name, "{d}");
 }
 
 #[test]
@@ -1293,6 +1351,17 @@ fn methods(b: &Recorder) -> Vec<&str> {
     b.calls.iter().map(|(m, _)| m.as_str()).collect()
 }
 
+/// #3654: bridged, `running` asks the app's `control.running`; an older app's refusal is the
+/// tool's error.
+#[test]
+fn running_asks_the_app() {
+    let mut b = Recorder { calls: Vec::new(), batch: Ok(json!({})) };
+    let r = crate::tools::call_tool(&mut b, "running", &json!({}));
+    assert_eq!(methods(&b), ["control.running"]);
+    assert_eq!(r["isError"], json!(true), "{r}");
+    assert!(r["content"][0]["text"].as_str().is_some_and(|t| t.starts_with("unknown method")), "{r}");
+}
+
 /// #743: bridged to an app that has `engine.batch`, a batch is one control request.
 #[test]
 fn batch_is_one_engine_batch_call() {
@@ -1318,6 +1387,27 @@ fn batch_reports_a_failed_engine_batch_like_before() {
         body,
         json!({"ok": false, "completed": 1, "failed": {"index": 1, "command": "a.two", "error": "boom"}, "rolled_back": true, "undone": 1, "results": [{"x": 1}]})
     );
+}
+
+/// `rolled_back` tells whether the design went back, not whether a rollback was asked for
+/// (#3242): the app's `rolled_back`, or, for an app that predates that field, none of the
+/// completed steps undone means the design did not go back.
+#[test]
+fn a_batch_the_app_could_not_roll_back_reports_it() {
+    let failed = |reply: Value| {
+        let (_, body, is_error) = recorded_batch(Ok(reply), json!({"commands": [{"command": "a.one"}, {"command": "a.two"}]}));
+        assert!(is_error);
+        body
+    };
+    let body = failed(
+        json!({"completed": 1, "results": [{"x": 1}], "failed": {"index": 1, "command": "a.two", "error": "boom"}, "rolled_back": false, "undone": 0}),
+    );
+    assert_eq!(body["rolled_back"], false, "{body}");
+    let body = failed(json!({"completed": 1, "results": [{"x": 1}], "failed": {"index": 1, "command": "a.two", "error": "boom"}, "undone": 0}));
+    assert_eq!(body["rolled_back"], false, "{body}");
+    // A first step that failed left nothing to take back.
+    let body = failed(json!({"completed": 0, "results": [], "failed": {"index": 0, "command": "a.one", "error": "boom"}, "undone": 0}));
+    assert_eq!(body["rolled_back"], true, "{body}");
 }
 
 #[test]
@@ -1479,7 +1569,7 @@ fn tool_annotations_tell_the_whole_truth() {
     for name in ["execute", "batch", "save", "export", "open", "screenshot"] {
         assert_eq!(hints(name), (false, true, true), "{name}");
     }
-    for name in ["list_commands", "inspect_design", "measure", "body_topology", "crash_reports"] {
+    for name in ["list_commands", "describe_command", "inspect_design", "measure", "body_topology", "crash_reports", "running"] {
         assert_eq!(hints(name), (true, false, false), "{name}");
     }
     assert_eq!(hints("new_design"), (false, true, false));
@@ -1546,4 +1636,25 @@ fn batch_reports_timings_and_profile() {
     let (_, body, _) = recorded_batch(Err("unknown method `engine.batch`".into()), json!({"commands": [{"command": "a.one"}], "profile": true}));
     assert_eq!(body["timings"][0]["command"], "a.one", "{body}");
     assert!(body["timings"][0].get("profile").is_none(), "{body}");
+}
+
+/// `describe_command` serves a converted command's schemas, and a headless session set to strict
+/// refuses a misspelt key through `execute` without touching the design.
+#[test]
+fn describe_command_and_strict_parameter_checking() {
+    let mut s = server();
+    let d = tool(&mut s, "describe_command", json!({"id": "solid.box"}));
+    assert!(d["input"]["properties"].get("operation").is_some(), "{d}");
+    assert!(d["output"]["properties"].get("created_bodies").is_some(), "{d}");
+
+    let mut headless = Headless::default();
+    headless.session.param_check = solidcraft_engine::schema::ParamCheck::Strict;
+    let mut s = Server::new(Box::new(headless));
+    call(&mut s, 1, "initialize", json!({"protocolVersion": PROTOCOL_VERSION, "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}));
+    let r = raw_tool(&mut s, "execute", json!({"command": "solid.box", "params": {"length": 5, "width": 5, "height": 5, "operaton": "cut"}}));
+    assert_eq!(r["result"]["isError"], json!(true), "{r}");
+    let text = r["result"]["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(text.contains("unknown key `operaton`; did you mean `operation`?"), "{text}");
+    let m = tool(&mut s, "measure", json!({}));
+    assert_eq!(m["body_count"], json!(0), "{m}");
 }

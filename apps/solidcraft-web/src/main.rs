@@ -8,6 +8,8 @@
 
 #[cfg(target_arch = "wasm32")]
 mod api;
+#[cfg(any(target_arch = "wasm32", test))]
+mod disk;
 #[cfg(target_arch = "wasm32")]
 mod files;
 #[cfg(target_arch = "wasm32")]
@@ -27,6 +29,7 @@ mod web {
     use wasm_bindgen::JsCast as _;
 
     use crate::api::Api;
+    use crate::disk::{self, SaveTarget};
     use crate::files::{self, Files, Intent};
     use crate::space_mouse::SpaceMouse;
 
@@ -103,6 +106,10 @@ mod web {
         /// On-demand CJK font: fetched only when a CJK language is selected.
         font: solidcraft_ui_egui::fonts::CjkFontLoader,
         font_result: FontLoadResult,
+        /// The fetched CJK font's bytes: kept so a language change can re-order the fallbacks.
+        cjk_bytes: Option<Vec<u8>>,
+        /// The language the fonts were last set up for (a CJK UI leads with the CJK face).
+        font_language: String,
         space_mouse: SpaceMouse,
         workspace_import: crate::workspace_import::Slot,
     }
@@ -161,6 +168,23 @@ mod web {
                 return;
             }
             files::flush(&self.files);
+            // A write to the computer's disk that failed: the design is not saved after all.
+            for path in self.files.unsaved.borrow_mut().drain(..) {
+                if self.app.session.path.as_deref() == Some(path.as_str()) {
+                    self.app.session.mark_unsaved();
+                }
+            }
+            // Designs opened from the computer's disk (the files window): open them.
+            let opened: Vec<_> = self.files.opened.borrow_mut().drain(..).collect();
+            for path in opened {
+                self.app.open_path(&path);
+                self.files.panel.set(false);
+            }
+            // Recent designs whose file is gone are dropped from the list.
+            for path in self.files.gone.borrow_mut().drain(..) {
+                self.app.home.recent.retain(|r| *r != path);
+                self.app.home.opened_at.remove(&path);
+            }
             for (text, error) in self.files.messages.borrow_mut().drain(..) {
                 self.app.set_status(text, error);
             }
@@ -228,7 +252,9 @@ mod web {
             let mut entries = self.files.entries.borrow().clone();
             entries.sort_by(|a, b| b.modified.total_cmp(&a.modified));
             let recent = &mut self.app.home.recent;
-            recent.retain(|p| vfs::exists(p));
+            let known = self.files.disk_known.borrow().clone();
+            // A design on the computer's disk stays listed while its file is remembered.
+            recent.retain(|p| vfs::exists(p) || disk::parse(p).is_some_and(|(id, _)| known.contains(id)));
             for e in entries.iter().filter(|e| solidcraft_engine::io::is_design_path(&e.name)) {
                 let p = format!("{}{}", files::OPFS, e.name);
                 if !recent.contains(&p) {
@@ -236,6 +262,10 @@ mod web {
                 }
             }
             recent.truncate(solidcraft_ui_egui::home::MAX_RECENT);
+            // Remembered files that no recent design or autosave names are forgotten in time.
+            let recovered = self.files.recovery.borrow().as_ref().and_then(|(_, p)| p.clone());
+            let keep = recent.iter().chain(recovered.as_ref()).filter_map(|p| disk::parse(p)).map(|(id, _)| id.to_string()).collect();
+            disk::prune(keep);
         }
 
         /// The stored designs: open, insert, rename, delete, download; open from the computer.
@@ -264,6 +294,9 @@ mod web {
                             act = Some(("download_open", String::new()));
                         }
                     });
+                    if !disk::supported() {
+                        ui.weak("This browser can't save to a folder: designs stay in this browser. Download design saves a file.");
+                    }
                     ui.separator();
                     if !self.files.ready.get() {
                         ui.horizontal(|ui| {
@@ -310,6 +343,13 @@ mod web {
                                         self.renaming = Some((e.name.clone(), e.name.clone()));
                                         self.rename_focus = true;
                                     }
+                                    if ui
+                                        .small_button("Save to computer…")
+                                        .on_hover_text("A copy in a file you choose; the stored design stays here")
+                                        .clicked()
+                                    {
+                                        act = Some(("save_copy", e.name.clone()));
+                                    }
                                     if ui.small_button("Download").clicked() {
                                         act = Some(("download", e.name.clone()));
                                     }
@@ -343,6 +383,10 @@ mod web {
                             self.app.set_status(e, true);
                         }
                     }
+                    Err(e) => self.app.set_status(e.to_string(), true),
+                },
+                "save_copy" => match vfs::read(&path, solidcraft_engine::io::MAX_DESIGN_BYTES) {
+                    Ok(b) => disk::save_copy(&self.files, &name, b),
                     Err(e) => self.app.set_status(e.to_string(), true),
                 },
                 "download_open" => {
@@ -419,7 +463,10 @@ mod web {
             let done = self.font_result.borrow_mut().take();
             if let Some(res) = done {
                 let installed = match res {
-                    Ok(bytes) => solidcraft_ui_egui::fonts::install_cjk_font(ctx, bytes),
+                    Ok(bytes) => {
+                        self.cjk_bytes = Some(bytes);
+                        true
+                    }
                     Err(err) => {
                         log::warn!("failed to fetch CJK font from {JAPANESE_FONT_PATH}: {err}");
                         false
@@ -431,11 +478,29 @@ mod web {
                     log::warn!("CJK font unavailable; showing English for this session");
                 }
                 self.font.finished(installed, &mut self.app.preferences.language);
+                self.apply_fonts(ctx);
                 ctx.request_repaint();
             }
             if self.font.tick(&mut self.app.preferences.language) {
                 self.fetch_font(ctx);
             }
+            // The CJK face leads only a CJK UI: its Cyrillic glyphs are full-width, so switching
+            // to Ukrainian (or English) must put the Latin face back in front.
+            if self.app.preferences.language != self.font_language {
+                self.apply_fonts(ctx);
+            }
+        }
+
+        /// Set up the UI fonts for the live language, keeping the fetched CJK font as a fallback
+        /// (it leads only for a CJK UI, see [`solidcraft_ui_egui::fonts::install_cjk_font_for`]).
+        fn apply_fonts(&mut self, ctx: &egui::Context) {
+            match self.cjk_bytes.clone() {
+                Some(bytes) => {
+                    solidcraft_ui_egui::fonts::install_cjk_font_for(ctx, bytes, &self.app.preferences.language);
+                }
+                None => solidcraft_ui_egui::fonts::setup_fonts(ctx),
+            }
+            self.font_language.clone_from(&self.app.preferences.language);
         }
 
         /// CJK text on screen with no CJK font yet (an English UI showing a Japanese name):
@@ -553,18 +618,40 @@ mod web {
                         solidcraft_ui_egui::fonts::setup_fonts(&cc.egui_ctx);
                         let files = Rc::new(Files::default());
                         files::start(&files);
-                        let panel = files.clone();
+                        let (panel, opener, saver, shown) = (files.clone(), files.clone(), files.clone(), files.clone());
+                        let (restorable, restorer) = (files.clone(), files.clone());
                         let services = Services {
-                            // Open shows the browser's files (and the computer's, from there).
-                            pick_open: Some(Box::new(move |_: &[&str]| {
+                            // Open shows the browser's open dialog for a design where it has one
+                            // (the file keeps its handle, so Save writes back to it); otherwise,
+                            // and for inserting STEP or meshes, the browser's files window.
+                            pick_open: Some(Box::new(move |exts: &[&str]| {
+                                if disk::handles_open(exts) {
+                                    return Box::pin(disk::pick_open(&opener));
+                                }
                                 panel.panel.set(true);
                                 Box::pin(std::future::ready(None))
                             })),
-                            // Designs are kept in the browser; everything else is downloaded.
-                            pick_save: Some(Box::new(|name: &str, exts: &[&str]| {
+                            // A design is saved to a file the user picks, or kept in the browser
+                            // where the browser can't pick one; everything else is downloaded.
+                            pick_save: Some(Box::new(move |name: &str, exts: &[&str]| {
                                 let design = exts.contains(&solidcraft_engine::io::DESIGN_EXT);
-                                Box::pin(std::future::ready(Some(format!("{}{name}", if design { files::OPFS } else { files::DOWNLOADS }))))
+                                match disk::save_target(disk::supported(), design) {
+                                    SaveTarget::Disk => Box::pin(disk::pick_save(&saver, name)),
+                                    SaveTarget::Browser => {
+                                        saver.say("This browser can't save to a folder: the design is kept in this browser. File > Download design saves a file.", false);
+                                        Box::pin(std::future::ready(Some(format!("{}{name}", files::OPFS))))
+                                    }
+                                    SaveTarget::Download => Box::pin(std::future::ready(Some(format!("{}{name}", files::DOWNLOADS)))),
+                                }
                             })),
+                            // A recent design on the disk, from an earlier session, opens by asking
+                            // the browser for its remembered file.
+                            can_restore: Some(Box::new(move |path: &str| {
+                                disk::parse(path).is_some_and(|(id, _)| restorable.disk_known.borrow().contains(id))
+                            })),
+                            restore_file: Some(Box::new(move |path: &str| disk::restore(&restorer, path))),
+                            download_design: Some(Box::new(files::download)),
+                            browser_files: Some(Box::new(move || shown.panel.set(true))),
                             install_app: Some(crate::install::service(&cc.egui_ctx)),
                             ..Default::default()
                         };
@@ -598,6 +685,7 @@ mod web {
                         if importing {
                             app.set_status("Gespeichertes Modell wird als eigenständige Browserkopie geladen …", false);
                         }
+                        let font_language = app.preferences.language.clone();
                         Ok(Box::new(Shell {
                             app,
                             api,
@@ -609,6 +697,8 @@ mod web {
                             recents_synced: false,
                             font: Default::default(),
                             font_result: Rc::new(std::cell::RefCell::new(None)),
+                            cjk_bytes: None,
+                            font_language,
                             space_mouse: SpaceMouse::default(),
                             workspace_import,
                         }))

@@ -15,6 +15,9 @@ use super::CommandSpec;
 use crate::params::{bad, bool_, num, str_, vec3};
 use crate::{EngineError, Result, Session};
 
+#[path = "joints_inspect.rs"]
+mod inspect;
+
 pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("joint.origin", "Joint Origin", joint_origin).at("SOLID", "CREATE").icon("joint_origin").params(
         "name?, occurrence?: id|name (default: from the pick, or the named face's component), face: [x,y,z] | \"<name>\" (centre of a planar face) | circle: [x,y,z] | \"<name>\" (centre of a round end: a point on its wall or rim, the end's centre, or the round face's name as model.faces lists it) | edge: [x,y,z] (a point on an edge of a planar face: the edge's middle, z out of the face, y into it; on?: [x,y,z] a point on the face (default: the larger planar face beside the edge); corner?: [x,y,z] near one end: the corner there, x and y along its two edges into the face; found again by name, so it follows the face as it changes size) | point: [x,y,z], z?: [x,y,z]; body?: the named face's body; end?: \"<name>\" (a circle's end: the face across its rim there; default the end nearer the pick); x?: [x,y,z] (a direction, world) | \"<face name>\" | {face: [x,y,z]} (the frame's x: a direction, a plane's normal, or the way to another hole's axis; keeps a round origin's turn; a point's x is a direction, laid square to its z, default: chosen from z alone). Faces are kept by name: the origin follows its face, and a circle its end, when the design changes",
@@ -80,9 +83,18 @@ pub static COMMANDS: &[CommandSpec] = &[
         "→ joints (type, occurrences, values, limits; expressions: {offset?, angle?, values?} when they were typed as expressions), origins, links, degrees of freedom, conflicts, floating: [{occurrences, joints}] \
          (joint chains joined to nothing grounded: the solver places none of them, so driving them moves nothing)",
     ),
+    CommandSpec::new("joint.inspect", "Inspect Joint", inspect::inspect).icon("inspect").noundo().params(
+        "joint?: id|name (default: every joint) → joints: [{id, name, type, suppressed, visible, flip, offset (mm), angle (deg), values: as joint.list \
+         gives them, dofs, expressions?: {offset?, angle?, values?}, a, b: {occurrence, occurrence_name, component, component_name, path \
+         (occurrence names from the top, `/` between), snap (as saved: type, pick, face, end, edge, corner, x, point, z, in the component's \
+         coordinates), references: [{role: face|end|x|edge|corner, name, role_in_feature?: (top, side:c1…), feature?: {id, name, type} (the feature that made the face; \
+         error when it is gone), sketch?: {id, name, curve, curve_type} (a face swept from a sketch curve), faces?: [an edge's two faces], \
+         unverified?: a name saved before exact names}], resolves, frame?: {origin, z, x} in the world, error?: why the origin is lost}, \
+         links: [{index, role: driver|driven, …as joint.list}], errors, conflicts}] (reads only: nothing changes)",
+    ),
     CommandSpec::new("joint.solve", "Solve Joints", solve_cmd).icon("compute").params("re-place the occurrences from the joints → conflicts, errors, dof"),
     CommandSpec::new("inspect.interference", "Interference", super::interference::interference).at("SOLID", "INSPECT").icon("interference").noundo().params(
-        "bodies?: [names] (default: all, in world placement); budget_s?: seconds (default 240, at most 86400: pairs not finished by then are listed in unchecked as \"not checked: the time budget … ran out\" and the call returns) → interferences: pairs that overlap with the overlap volume, area, bounding box and centre (a pin a hair off the axis of a hole of its size also has near_coaxial: {offset_mm, length_mm}, its volume the crescent the walls share); unchecked: pairs that could not be checked, with the reason. Bodies are pruned by bounding box first, then by their display meshes (pairs whose meshes stay apart by more than their chord tolerances, neither inside the other, are clear without a boolean), so any number of bodies is fine; the pairs left are intersected exactly, in parallel on desktop, the slowest first; at most 20000 pairs whose boxes overlap are intersected per call (truncated: true and skipped_pairs: n say when more were left out). Also: pairs_candidate (boxes overlap), pairs_cleared (by the meshes), pairs_intersected, pairs_not_checked, budget_exceeded, threads (worker threads; 0: on the calling thread), boolean_ms and tessellate_ms (kernel time summed over the pairs), slowest: [{a, b, ms, boolean_ms, tessellate_ms}] and ms",
+        "bodies?: [names] (default: all, in world placement); budget_s?: seconds (default 240, at most 86400: pairs not finished by then are listed in unchecked as \"not checked: the time budget … ran out\" and the call returns) → interferences: pairs that overlap with the overlap volume, area, bounding box and centre (a pin a hair off the axis of a hole of its size also has near_coaxial: {offset_mm, length_mm}, its volume the crescent the walls share); unchecked: [{a, b, reason}], the pairs that could not be checked, with the reason, and each mesh body (STL, 3MF or OBJ import: not intersected) as {a: name, b: null, reason: \"mesh body: not checked\"}, so count: 0 is not read as no overlap (checked counts the solid bodies). Bodies are pruned by bounding box first, then by their display meshes (pairs whose meshes stay apart by more than their chord tolerances, neither inside the other, are clear without a boolean), so any number of bodies is fine; the pairs left are intersected exactly, in parallel on desktop, the slowest first; at most 20000 pairs whose boxes overlap are intersected per call (truncated: true and skipped_pairs: n say when more were left out). Also: pairs_candidate (boxes overlap), pairs_cleared (by the meshes), pairs_intersected, pairs_not_checked, budget_exceeded, threads (worker threads; 0: on the calling thread), boolean_ms and tessellate_ms (kernel time summed over the pairs), slowest: [{a, b, ms, boolean_ms, tessellate_ms}] and ms",
     ),
 ];
 
@@ -485,7 +497,12 @@ pub(crate) fn joint_id(s: &Session, v: Option<&Value>, cmd: &str) -> Result<u64>
         Some(Value::String(x)) => x.clone(),
         _ => return Err(bad(cmd, "`joint` must be an id or a name")),
     };
-    s.doc.assembly.joints.iter().find(|j| j.id.to_string() == key || j.name == key).map(|j| j.id).ok_or_else(|| bad(cmd, format!("no joint `{key}`")))
+    let joint = if let Some(Value::Number(number)) = v {
+        number.as_u64().and_then(|id| s.doc.assembly.joints.iter().find(|joint| joint.id == id))
+    } else {
+        s.doc.assembly.joints.iter().find(|joint| joint.id.to_string() == key || joint.name == key)
+    };
+    joint.map(|joint| joint.id).ok_or_else(|| bad(cmd, format!("no joint `{key}`")))
 }
 
 /// A joint value: numbers are degrees for angles and mm for distances; text is an expression.
@@ -1319,33 +1336,7 @@ fn list(s: &mut Session, p: &Value) -> Result<Value> {
             out
         })
         .collect();
-    let links: Vec<Value> = s
-        .doc
-        .assembly
-        .links
-        .iter()
-        .map(|l| {
-            let angle = is_angle(s, l.b, l.ib);
-            let offset = if angle { l.offset.to_degrees() } else { l.offset };
-            let ratio = l.ratio / ratio_scale(s, l.a, l.ia, l.b, l.ib);
-            let mut v =
-                json!({"a": l.a, "ia": l.ia, "b": l.b, "ib": l.ib, "ratio": ratio, "offset": offset, "unit": if angle { "deg" } else { "mm" }});
-            if let Some(c) = &l.coupling {
-                v["coupling"] = json!(c);
-                if let Some(Err(e)) = joints::coupling_values(&s.doc, &st, l) {
-                    v["error"] = json!(e.to_string());
-                }
-            }
-            // A cam's follower follows its table, not a ratio: its travel instead.
-            if matches!(l.coupling, Some(Coupling::Cam(_)))
-                && let Some(o) = v.as_object_mut()
-            {
-                o.remove("ratio");
-                o.insert("lift".into(), lift_json(l, angle));
-            }
-            v
-        })
-        .collect();
+    let links: Vec<Value> = s.doc.assembly.links.iter().map(|l| link_json(s, &st, l)).collect();
     let origins: Vec<Value> = s.doc.assembly.origins.iter().map(|o| json!({"name": o.name, "occurrence": o.origin.occurrence})).collect();
     let mut out = sol_json(&sol, p);
     out["joints"] = json!(js);
@@ -1353,6 +1344,29 @@ fn list(s: &mut Session, p: &Value) -> Result<Value> {
     out["origins"] = json!(origins);
     out["floating"] = json!(floating_chains(s, &sol));
     Ok(out)
+}
+
+/// A motion link as `joint.list` and `joint.inspect` give it: ratio per degree, offset in b's
+/// units, a coupling's definition (and why it can't be worked out), a cam's lift in place of a ratio.
+fn link_json(s: &Session, st: &solidcraft_doc::ModelState, l: &MotionLink) -> Value {
+    let angle = is_angle(s, l.b, l.ib);
+    let offset = if angle { l.offset.to_degrees() } else { l.offset };
+    let ratio = l.ratio / ratio_scale(s, l.a, l.ia, l.b, l.ib);
+    let mut v = json!({"a": l.a, "ia": l.ia, "b": l.b, "ib": l.ib, "ratio": ratio, "offset": offset, "unit": if angle { "deg" } else { "mm" }});
+    if let Some(c) = &l.coupling {
+        v["coupling"] = json!(c);
+        if let Some(Err(e)) = joints::coupling_values(&s.doc, st, l) {
+            v["error"] = json!(e.to_string());
+        }
+    }
+    // A cam's follower follows its table, not a ratio: its travel instead.
+    if matches!(l.coupling, Some(Coupling::Cam(_)))
+        && let Some(o) = v.as_object_mut()
+    {
+        o.remove("ratio");
+        o.insert("lift".into(), lift_json(l, angle));
+    }
+    v
 }
 
 fn solve_cmd(s: &mut Session, p: &Value) -> Result<Value> {

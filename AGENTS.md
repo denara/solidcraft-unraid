@@ -16,7 +16,7 @@ new uses of it anywhere else. Public docs/web/Flatpak deployments use project Pa
 
 ## Container prototype baseline
 The first Unraid prototype used upstream commit `af536a7`. The current validated
-container baseline is `e9b1a077d7e33420791791c651f2e293962a2da1`.
+container baseline is `e94900933dafd63e2b32594afbdc879ecd64d2f7`.
 Keep later upstream CAD/UI feature updates separate from this deployment addition;
 advance the baseline only as a separate, validated update. See [update records](docs/unraid-updates.md).
 
@@ -212,8 +212,21 @@ People trust SolidCraft with their designs; a crash loses their work. **This out
   keep monitoring it while the task is active and make its pending status clear at handoff;
   do not claim it merged without checking.
 
+## Upstream contribution checks
+The following contribution/claim rules apply to upstream pull requests, not this fork's
+fixed-snapshot container updates. The single-branch fork workflow above takes precedence.
+
+### Before you start: look at what is already open
+- Work with an authenticated GitHub CLI (`gh auth status`) and `git`; the checks below need both.
+- Pull the whole list, not one search: `gh pr list -R tangency-labs/solidcraft --state open --limit 500`
+  (drafts included) and `gh issue list -R tangency-labs/solidcraft --state open --limit 500`. Look for
+  work on the same issue, the same feature under another number, and PRs that change the files
+  you are about to change (`gh pr list ... --json number,title,files`).
+- If someone already has it, comment on their PR or issue instead of opening a second one. Two
+  PRs for one change can't both land, and one of them is wasted work and CI.
+
 ## Claim = a draft PR
-- Before working on issue #N, check nobody has it: `gh pr list -R bherbruck/solidcraft --state open --search "#N"`.
+- Before working on issue #N, check nobody has it: `gh pr list -R tangency-labs/solidcraft --state open --search "#N"`.
 - If none, branch from the latest `origin/main`, `git commit --allow-empty -m "claim: #N"`, push,
   and open a **draft** PR titled `<summary> (#N)` right away. **The lowest-numbered open PR for an
   issue wins**; if yours lost, close it. Opening the PR is the claim: the bot assigns you and

@@ -1,10 +1,11 @@
-//! The model cache: the evaluated bodies of a design's timeline, saved with it so opening need
-//! not rebuild them. Its SolidCraft schema is independent of the producing kernel; its key ties it
-//! to the exact document, build and platform that computed it (docs/design-container.md).
+//! The model cache: a design's evaluated timeline (every feature's result and the state after
+//! it, [`SavedModel`]), saved with it so opening need not evaluate it again. Bodies use
+//! SolidCraft's exact native B-rep encoding; the key ties the cache to the exact document, build
+//! and platform that computed it (docs/design-container.md).
 use super::*;
-use solidcraft_doc::{ModelBody, ModelState};
+use solidcraft_doc::{ModelState, SavedModel};
 
-const FORMAT: &str = "solidcraft-model-cache/1";
+const FORMAT: &str = "solidcraft-model-cache/2";
 const PRODUCER: &str = "solidcraft-truck-adapter/3";
 const MANIFEST: &str = "cache/model.json";
 const PAYLOAD: &str = "cache/bodies.bin";
@@ -25,53 +26,25 @@ fn matrix(t: &[[f64; 4]; 4]) -> Vec<f64> {
     t.iter().flatten().copied().collect()
 }
 
-fn look(look: &solidcraft_doc::appearance::ImportedLook) -> Value {
-    let faces: Vec<Value> = look.faces.iter().map(|(name, (color, opacity))| json!([name, color, opacity])).collect();
-    json!({"color": look.color, "opacity": look.opacity, "faces": faces})
-}
-
-fn load_look(v: &Value) -> Result<solidcraft_doc::appearance::ImportedLook> {
-    let unit = |x: f32| x.is_finite() && (0.0..=1.0).contains(&x);
-    let color = |v: &Value| -> Result<Option<[f32; 3]>> {
-        let c: Option<[f32; 3]> = serde_json::from_value(v.clone()).map_err(invalid)?;
-        if c.is_some_and(|c| !c.iter().copied().all(unit)) {
-            return Err(invalid("cached colour"));
-        }
-        Ok(c)
-    };
-    let opacity: Option<f32> = serde_json::from_value(v.get("opacity").cloned().unwrap_or(Value::Null)).map_err(invalid)?;
-    if opacity.is_some_and(|o| !unit(o)) {
-        return Err(invalid("cached opacity"));
-    }
-    let mut faces = BTreeMap::new();
-    for f in v.get("faces").and_then(Value::as_array).ok_or_else(|| invalid("cached face looks"))? {
-        let name = f.get(0).and_then(Value::as_str).filter(|n| n.len() <= 1024).ok_or_else(|| invalid("cached face name"))?;
-        let c = color(f.get(1).unwrap_or(&Value::Null))?.ok_or_else(|| invalid("cached face colour"))?;
-        let o = f.get(2).and_then(Value::as_f64).map(|o| o as f32).filter(|o| unit(*o)).ok_or_else(|| invalid("cached face opacity"))?;
-        faces.insert(name.to_owned(), (c, o));
-    }
-    Ok(solidcraft_doc::appearance::ImportedLook { color: color(v.get("color").unwrap_or(&Value::Null))?, opacity, faces })
-}
-
-/// Encode a model state's bodies. Identical bodies (the same part placed many times, a body a
-/// feature passed through) are stored once; a placed copy of a part records the part and its
-/// matrix, so it shows that part's display as it did before saving.
-pub(super) fn encode_model(state: &ModelState, document: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
-    if state.bodies.is_empty() || state.bodies.len() > MAX_RECORDS {
+/// Encode a saved model. Identical bodies (the same part placed many times) are stored once; a
+/// placed copy of a part records the part and its matrix, so it shows that part's display as it
+/// did before saving.
+pub(super) fn encode_model(model: &SavedModel, document: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+    if model.bodies.is_empty() || model.bodies.len() > MAX_RECORDS {
         return Err(invalid("cached body count"));
     }
     // What to encode: every body, and the part every placed copy shows.
     let mut shares: Vec<solidcraft_kernel::DisplayShare> = Vec::new();
     let mut share_index = std::collections::HashMap::new();
-    for b in &state.bodies {
-        if let Some((share, _)) = b.body.display_share() {
+    for b in &model.bodies {
+        if let Some((share, _)) = b.display_share() {
             share_index.entry(share.id()).or_insert_with(|| {
                 shares.push(share.clone());
                 shares.len() - 1
             });
         }
     }
-    let bodies: Vec<&solidcraft_kernel::Body> = state.bodies.iter().map(|b| &b.body).chain(shares.iter().map(|s| s.original())).collect();
+    let bodies: Vec<&solidcraft_kernel::Body> = model.bodies.iter().chain(shares.iter().map(|s| s.original())).collect();
     let encoded = solidcraft_kernel::map_on_threads(&bodies, 16, |b| solidcraft_kernel::encode_native_body(b).ok());
     let mut data = Vec::new();
     let mut slices = Vec::new();
@@ -90,35 +63,18 @@ pub(super) fn encode_model(state: &ModelState, document: &[u8]) -> Result<(Vec<u
         }
         index.push(i);
     }
-    let (body_index, share_body) = index.split_at(state.bodies.len());
-    let mut records = Vec::with_capacity(state.bodies.len());
-    for (b, i) in state.bodies.iter().zip(body_index) {
-        if b.name.len() > 1024 {
-            return Err(invalid("cached body name"));
-        }
-        let mut r = json!({"name": b.name, "body": i, "feature": b.feature, "component": b.component});
-        if let Some(source) = &b.source_name {
-            r["source_name"] = json!(source);
-        }
-        if b.source_transform != solidcraft_doc::IDENTITY {
-            r["source_transform"] = json!(matrix(&b.source_transform));
-        }
-        if b.transferred {
-            r["transferred"] = json!(true);
-        }
-        if let Some(l) = &b.imported {
-            r["imported"] = look(l);
-        }
-        if let Some((share, t)) = b.body.display_share() {
-            let s = share_index.get(&share.id()).ok_or_else(|| invalid("display share"))?;
-            r["share"] = json!([s, matrix(&t)]);
-        }
-        records.push(r);
+    let (body_index, share_body) = index.split_at(model.bodies.len());
+    let mut table = Vec::with_capacity(model.bodies.len());
+    for (b, i) in model.bodies.iter().zip(body_index) {
+        table.push(match b.display_share() {
+            Some((share, t)) => json!([i, share_index.get(&share.id()).ok_or_else(|| invalid("display share"))?, matrix(&t)]),
+            None => json!([i]),
+        });
     }
     let manifest = serde_json::to_vec(&json!({
         "format": FORMAT, "producer": PRODUCER, "app": env!("CARGO_PKG_VERSION"), "build": build(),
         "document": digest(document), "payload": digest(&data),
-        "bodies": slices, "shares": share_body, "body_counter": state.body_counter, "state": records,
+        "slices": slices, "shares": share_body, "bodies": table, "model": model.records,
     }))
     .map_err(invalid)?;
     if manifest.len() > MAX_MANIFEST {
@@ -127,13 +83,13 @@ pub(super) fn encode_model(state: &ModelState, document: &[u8]) -> Result<(Vec<u
     Ok((manifest, data))
 }
 
-/// The cached model state of a design, when it holds one this build computed for exactly this
+/// The final state of the model a design keeps, when this build computed it for exactly this
 /// document. Any failure is a miss, never a document error.
-pub fn read_design_geometry(bytes: &[u8]) -> Option<ModelState> {
+pub fn read_design_geometry(bytes: &[u8]) -> Option<std::sync::Arc<ModelState>> {
     if bytes.len() > MAX_DESIGN_BYTES || !is_design_container(bytes) {
         return None;
     }
-    DesignContainerReader::new(Cursor::new(bytes)).ok()?.geometry()
+    DesignContainerReader::new(Cursor::new(bytes)).ok()?.geometry()?.final_state().ok()
 }
 
 /// Whether `manifest` is a model cache this build wrote for `document`.
@@ -148,12 +104,12 @@ fn current(manifest: &Value, document: &[u8]) -> bool {
         && env!("SOLIDCRAFT_SOURCE_COMMIT") != "unknown"
 }
 
-pub(super) fn read_geometry_with<R: Read + Seek>(reader: &mut PackageReader<R>, document: &[u8]) -> Result<ModelState> {
+pub(super) fn read_geometry_with<R: Read + Seek>(reader: &mut PackageReader<R>, document: &[u8]) -> Result<SavedModel> {
     let container: Value = serde_json::from_slice(&reader.limited_part("container.json", 4096)?).map_err(invalid)?;
     if container.get("format").and_then(Value::as_str) != Some(VERSION) {
         return Err(invalid("container version"));
     }
-    let manifest: Value = serde_json::from_slice(&reader.limited_part(MANIFEST, MAX_MANIFEST)?).map_err(invalid)?;
+    let mut manifest: Value = serde_json::from_slice(&reader.limited_part(MANIFEST, MAX_MANIFEST)?).map_err(invalid)?;
     if !current(&manifest, document) {
         return Err(invalid("model cache key"));
     }
@@ -163,16 +119,16 @@ pub(super) fn read_geometry_with<R: Read + Seek>(reader: &mut PackageReader<R>, 
     if manifest.get("payload").and_then(Value::as_str) != Some(digest(&data).as_str()) {
         return Err(invalid("model cache payload key"));
     }
-    let count = |v: &Value| v.as_u64().and_then(|n| usize::try_from(n).ok()).ok_or_else(|| invalid("model cache number"));
+    let count = |v: Option<&Value>| v.and_then(Value::as_u64).and_then(|n| usize::try_from(n).ok()).ok_or_else(|| invalid("model cache number"));
     let slices = manifest
-        .get("bodies")
+        .get("slices")
         .and_then(Value::as_array)
         .filter(|b| !b.is_empty() && b.len() <= MAX_UNIQUE)
         .ok_or_else(|| invalid("cached bodies"))?;
     let mut end = 0usize;
     let mut parts = Vec::with_capacity(slices.len());
     for s in slices {
-        let (offset, length) = (count(s.get(0).unwrap_or(&Value::Null))?, count(s.get(1).unwrap_or(&Value::Null))?);
+        let (offset, length) = (count(s.get(0))?, count(s.get(1))?);
         if offset != end {
             return Err(invalid("overlapping cached bodies"));
         }
@@ -183,47 +139,33 @@ pub(super) fn read_geometry_with<R: Read + Seek>(reader: &mut PackageReader<R>, 
         return Err(invalid("trailing cached data"));
     }
     let decoded = solidcraft_kernel::map_on_threads(&parts, 16, |bytes| solidcraft_kernel::decode_native_body(bytes).ok());
-    let bodies = decoded.into_iter().map(Option::flatten).collect::<Option<Vec<_>>>().ok_or_else(|| invalid("cached body"))?;
-    let body = |v: &Value| bodies.get(count(v)?).ok_or_else(|| invalid("cached body index"));
+    let unique = decoded.into_iter().map(Option::flatten).collect::<Option<Vec<_>>>().ok_or_else(|| invalid("cached body"))?;
+    let body = |v: Option<&Value>| unique.get(count(v)?).ok_or_else(|| invalid("cached body index"));
     let shares = manifest
         .get("shares")
         .and_then(Value::as_array)
         .filter(|s| s.len() <= MAX_UNIQUE)
         .ok_or_else(|| invalid("cached shares"))?
         .iter()
-        .map(|i| Ok(solidcraft_kernel::DisplayShare::new(body(i)?.clone())))
+        .map(|i| Ok(solidcraft_kernel::DisplayShare::new(body(Some(i))?.clone())))
         .collect::<Result<Vec<_>>>()?;
-    let records =
-        manifest.get("state").and_then(Value::as_array).filter(|s| !s.is_empty() && s.len() <= MAX_RECORDS).ok_or_else(|| invalid("cached state"))?;
-    let mut state = ModelState::default();
-    state.body_counter = count(manifest.get("body_counter").unwrap_or(&Value::Null))?;
-    for r in records {
-        let name = r.get("name").and_then(Value::as_str).filter(|n| n.len() <= 1024).ok_or_else(|| invalid("cached body name"))?;
-        let mut kernel_body = body(r.get("body").unwrap_or(&Value::Null))?.clone();
-        if let Some(share) = r.get("share") {
-            let s = shares.get(count(share.get(0).unwrap_or(&Value::Null))?).ok_or_else(|| invalid("cached share index"))?;
-            let numbers: Vec<f64> = serde_json::from_value(share.get(1).cloned().unwrap_or(Value::Null)).map_err(invalid)?;
-            let t = matrix_of(&numbers)?;
-            kernel_body = kernel_body.with_display_share(s, t);
+    let table = manifest
+        .get("bodies")
+        .and_then(Value::as_array)
+        .filter(|s| !s.is_empty() && s.len() <= MAX_RECORDS)
+        .ok_or_else(|| invalid("cached body table"))?;
+    let mut bodies = Vec::with_capacity(table.len());
+    for entry in table {
+        let mut b = body(entry.get(0))?.clone();
+        if let Some(share) = entry.get(1) {
+            let s = shares.get(count(Some(share))?).ok_or_else(|| invalid("cached share index"))?;
+            let numbers: Vec<f64> = serde_json::from_value(entry.get(2).cloned().unwrap_or(Value::Null)).map_err(invalid)?;
+            b = b.with_display_share(s, matrix_of(&numbers)?);
         }
-        let feature = r.get("feature").and_then(Value::as_u64).ok_or_else(|| invalid("cached body feature"))?;
-        let mut b = ModelBody::new(name.to_owned(), kernel_body, feature);
-        b.component = r.get("component").and_then(Value::as_u64).ok_or_else(|| invalid("cached body component"))?;
-        b.source_name = match r.get("source_name") {
-            None => None,
-            Some(v) => Some(v.as_str().filter(|n| n.len() <= 1024).ok_or_else(|| invalid("cached source name"))?.to_owned()),
-        };
-        if let Some(v) = r.get("source_transform") {
-            let numbers: Vec<f64> = serde_json::from_value(v.clone()).map_err(invalid)?;
-            b.source_transform = matrix_of(&numbers)?;
-        }
-        b.transferred = r.get("transferred").and_then(Value::as_bool).unwrap_or(false);
-        if let Some(l) = r.get("imported") {
-            b.imported = Some(Arc::new(load_look(l)?));
-        }
-        state.bodies.push(b);
+        bodies.push(b);
     }
-    Ok(state)
+    let records = manifest.get_mut("model").map(Value::take).ok_or_else(|| invalid("cached model"))?;
+    Ok(SavedModel { records, bodies })
 }
 
 /// A 4 x 4 matrix from its 16 numbers in storage order, finite.
@@ -238,9 +180,9 @@ fn matrix_of(numbers: &[f64]) -> Result<[[f64; 4]; 4]> {
     Ok(t)
 }
 
-pub(super) fn geometry_preview(document: &[u8], state: ModelState) -> Result<DesignPreview> {
+pub(super) fn geometry_preview(document: &[u8], model: &SavedModel) -> Result<DesignPreview> {
     let doc = Document::from_json(std::str::from_utf8(document).map_err(invalid)?)?;
-    let world = solidcraft_doc::world_state(&doc, &state);
+    let world = solidcraft_doc::world_state(&doc, &*model.final_state()?);
     let mut preview = DesignPreview::default();
     let mut triangles = 0usize;
     let mut display_bytes = 0usize;

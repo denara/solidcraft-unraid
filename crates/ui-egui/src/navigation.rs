@@ -272,6 +272,7 @@ pub(crate) fn handle(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, resp: &e
             i.pointer.delta(),
         )
     });
+    let hover = hover.filter(|p| !crate::shell::covered(app, *p));
     // The right button belongs to the marking menu while it is open.
     let secondary_down = secondary_down && app.viewport.context_menu.is_none();
     // The axis view handles its own clicks; the model underneath must not see them.
@@ -280,7 +281,7 @@ pub(crate) fn handle(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, resp: &e
     // hit test also counts the model as under the pointer a few points past its own edge and
     // inside a window's or a list's edge (#678), so the pointer must be in the viewport too,
     // with no window or menu above it.
-    let inside = resp.contains_pointer() && ui.rect_contains_pointer(rect) && hover.is_some_and(|p| !axes.contains(p));
+    let inside = ui.is_enabled() && resp.contains_pointer() && ui.rect_contains_pointer(rect) && hover.is_some_and(|p| !axes.contains(p));
     app.viewport.mouse = hover.filter(|_| inside);
     // Sketch snap suppression is set once in `viewport::show` from preferences.
     middle_double_click(app, ui, inside);
@@ -408,7 +409,10 @@ pub(crate) fn handle(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, resp: &e
     } else {
         None
     };
-    let dragging = resp.dragged() || (inside && button.is_some());
+    // An orbit started on the viewport owns its button until release, including over a
+    // floating shell card that disables the underlying egui response.
+    let captured_orbit = app.viewport.orbit_from.is_some() && button.is_some();
+    let dragging = resp.dragged() || (inside && button.is_some()) || captured_orbit;
     // Without orbit (a flat page), bindings that orbit do nothing.
     let allowed = |m: NavMode| caps.orbit || m != NavMode::Orbit;
     let motion = modifier_motion(app, ui, inside, hover, mods, picking).filter(|(m, _)| allowed(*m));
@@ -782,7 +786,7 @@ mod tests {
             let mut app = crate::SolveApp::new(s, crate::Services::default());
             app.preferences.nav = preset.into();
             app.viewport.spin = true;
-            let ctx = egui::Context::default();
+            let ctx = crate::fonts::test_context();
             let mut time = 0.0;
             let mut frame = |app: &mut crate::SolveApp, mods: Modifiers, events: Vec<Event>| {
                 time += 1.0 / 60.0;
@@ -847,7 +851,7 @@ mod tests {
             let mut s = solidcraft_engine::Session::default();
             s.execute("solid.box", &serde_json::json!({"length":40,"width":30,"height":20})).unwrap();
             let mut app = crate::SolveApp::new(s, crate::Services::default());
-            let ctx = egui::Context::default();
+            let ctx = crate::fonts::test_context();
             let before = app.cam;
             app.viewport.device_motion = Some(every_axis);
             let raw = egui::RawInput {

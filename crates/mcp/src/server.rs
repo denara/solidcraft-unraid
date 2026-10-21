@@ -31,7 +31,7 @@ and degrees in expressions (internally radians), Z is up. Model like this: `sket
 and dimension (`sketch.dimension {entities, value}`; values may name parameters), `sketch.finish`, then features \
 (`solid.extrude {distance, operation?: new|join|cut|intersect}`, `solid.revolve`, `solid.fillet {edges: [[x,y,z] point on \
 edge], radius}`, `solid.chamfer`, patterns, mirror, primitives). Use `batch` for several steps at once, \
-`list_commands` for ids and parameter docs, `inspect_design` / `measure` to verify, `body_topology` to find edge points, \
+`list_commands` for ids and parameter docs, `describe_command` for a command's schemas, `inspect_design` / `measure` to verify, `body_topology` to find edge points, \
 `set_parameter` to drive the design and `screenshot` to look at it.";
 
 pub struct Server {
