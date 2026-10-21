@@ -47,9 +47,14 @@ $null=Rpc initialize @{protocolVersion='2025-06-18';capabilities=@{};clientInfo=
 try {
  $null=Tool project_select @{name=$taskProject}
  # All paths below use a newly selected, random project in this disposable candidate.
- $scriptText='set -eu; root="/data/files/$1"; test -d "$root"; test ! -e "$root/nested"; mkdir -p "$root/nested/empty"; printf public > "$root/nested/notes.txt"; printf unicode > "$root/nested/Grüße.txt"; : > "$root/nested/zero.txt"; dd if=/dev/zero of="$root/nested/large.bin" bs=1048576 count=256 status=none; printf root > "$root/single.txt"'
+ $scriptText='set -eu; root="/data/files/$1"; test -d "$root"; test ! -e "$root/nested"; mkdir -p "$root/nested/empty" "$root/nested/.private"; printf public > "$root/nested/notes.txt"; printf backup > "$root/nested/notes.txt.bak"; printf private > "$root/nested/.private/store"; printf temporary > "$root/nested/work.tmp"; printf unicode > "$root/nested/Grüße.txt"; : > "$root/nested/zero.txt"; dd if=/dev/zero of="$root/nested/large.bin" bs=1048576 count=256 status=none; printf root > "$root/single.txt"'
  $null=docker exec $ContainerName sh -c $scriptText -- $taskProject
  if($LASTEXITCODE -ne 0){throw 'Disposable file fixtures failed'}
+ $null=Tool new_design
+ $null=Tool save @{path='nested/native.solidcraft'}
+ $null=Tool save @{path='nested/native.solidcraft'}
+ $null=docker exec $ContainerName test -f "/data/files/$taskProject/nested/native.solidcraft.bak"
+ if($LASTEXITCODE -ne 0){throw 'Native save did not create the automatic backup fixture'}
  $null=Invoke-WebRequest "$BaseUrl/workspace/login" -SessionVariable taskBrowser
  $login=Invoke-WebRequest "$BaseUrl/workspace/login" -WebSession $taskBrowser
  $csrf=[regex]::Match($login.Content,'name="csrf" value="([^"]+)"').Groups[1].Value
@@ -84,6 +89,7 @@ try {
  $response=$client.GetAsync("$BaseUrl/workspace/archive/$taskProject/nested",[Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
  if([int]$response.StatusCode -ne 200){throw 'ZIP stream rejected'}
  if($response.Content.Headers.ContentType.MediaType -ne 'application/zip' -or $response.Content.Headers.ContentDisposition.DispositionType -ne 'attachment' -or $response.Content.Headers.ContentDisposition.FileNameStar -ne 'nested.zip'){throw 'ZIP MIME type or attachment filename is incorrect'}
+ if(($response.Headers.GetValues('x-solidcraft-archive-excluded-entries') -join '') -ne '4'){throw 'ZIP exclusion count is incorrect'}
  $stream=$response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
  $buffer=[byte[]]::new(32768);$count=$stream.Read($buffer,0,$buffer.Length)
  if($count -lt 4 -or $buffer[0] -ne 80 -or $buffer[1] -ne 75){throw 'No early ZIP bytes'}
@@ -117,7 +123,8 @@ try {
  if($peak-$before -gt 48MB){throw 'ZIP RSS grew beyond the bounded-memory allowance'}
  $zip=[IO.Compression.ZipFile]::OpenRead([IO.Path]::GetFullPath($archive))
  try {
-  if(-not $zip.GetEntry('nested/empty/') -or -not $zip.GetEntry('nested/Grüße.txt') -or $zip.GetEntry('nested/zero.txt').Length -ne 0 -or $zip.GetEntry('nested/large.bin').Length -ne 256MB){throw 'ZIP paths, Unicode, empties or large content missing'}
+  if($zip.Entries.Count -ne 7 -or -not $zip.GetEntry('nested/native.solidcraft') -or -not $zip.GetEntry('nested/empty/') -or -not $zip.GetEntry('nested/Grüße.txt') -or $zip.GetEntry('nested/zero.txt').Length -ne 0 -or $zip.GetEntry('nested/large.bin').Length -ne 256MB){throw 'ZIP paths, native model, Unicode, empties or large content missing'}
+  if(@($zip.Entries|Where-Object {$_.FullName -match '(?i)(\.bak$|\.tmp$|/\.)'}).Count){throw 'ZIP leaked an excluded backup or private helper'}
   $large=$zip.GetEntry('nested/large.bin').Open()
   try {$actual=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($large))} finally {$large.Dispose()}
   $zeros=[byte[]]::new(32768);$expected=[Security.Cryptography.IncrementalHash]::CreateHash([Security.Cryptography.HashAlgorithmName]::SHA256)
@@ -134,6 +141,11 @@ try {
  }
  if(-not $released){throw 'Cancelled ZIP retained its lease'}
  $client.Dispose()
+ if((Invoke-WebRequest "$BaseUrl/workspace/delete/$taskProject/nested" -WebSession $taskBrowser -SkipHttpErrorCheck).StatusCode -ne 409){throw 'Deletion must not silently exclude hidden files or backups'}
+ # Remove only the known auxiliary fixtures in this verified disposable volume.
+ $cleanupAux='set -eu; root="/data/files/$1/nested"; test -d "$root"; rm -- "$root/notes.txt.bak" "$root/native.solidcraft.bak" "$root/work.tmp" "$root/.private/store"; rmdir -- "$root/.private"'
+ $null=docker exec $ContainerName sh -c $cleanupAux -- $taskProject
+ if($LASTEXITCODE -ne 0){throw 'Disposable auxiliary fixture cleanup failed'}
  $form=Preview "$taskProject/nested"
  $null=Delete $form
  $snapshot=Invoke-RestMethod "$BaseUrl/workspace/api" -WebSession $taskBrowser
@@ -142,7 +154,7 @@ try {
  $form=Preview $otherProject;$null=Delete $form
  $form=Preview $other;$null=Delete $form
  @{result='pass';early_zip_ms=$earlyMs;archive_bytes=(Get-Item $archive).Length;uncompressed_large_bytes=256MB;rss_before_bytes=$before;rss_peak_bytes=$peak;rss_growth_bytes=($peak-$before);covered=@('cookie-CSRF-Origin','strong-delete-revision','active-project','real-file-and-folder-delete','ZIP64-Unicode-empty-nested-large','early-stream-backpressure','matching-MCP-rejection','independent-MCP-save','unrelated-write','abort-release','live-inventory')}|ConvertTo-Json -Depth 5|Set-Content (Join-Path $OutputDirectory 'proof.json') -Encoding utf8
- 'PASS: confirmed deletion and bounded server-streamed folder ZIPs'
+ 'PASS: confirmed deletion and bounded server-streamed folder ZIPs, including automatic native backups'
 } finally {
  if($taskAuth['Mcp-Session-Id']){$null=Invoke-WebRequest "$BaseUrl/mcp" -Method Delete -Headers $taskAuth -SkipHttpErrorCheck}
 }

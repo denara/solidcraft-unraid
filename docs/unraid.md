@@ -511,9 +511,16 @@ Rust as ZIP64 with stored entries (no additional compression), safe relative Uni
 names and empty directories. It creates neither a complete in-memory archive nor a
 server-side ZIP file. Limits: two simultaneous downloads, 2048 entries, 1 MiB total
 path names, 16 GiB uncompressed data and the existing workspace depth/name limits.
-Deletion uses the shared strong file revision limit of 256 MiB per file. Hidden,
-reserved, symlinked or special entries cause the whole action to be rejected; they
-are never silently included or deleted. Data transfer uses 32 KiB chunks and a queue of two chunks, alongside bounded
+Deletion uses the shared strong file revision limit of 256 MiB per file. ZIPs exclude
+hidden, backup (including SolidCraft's automatic `.solidcraft.bak`) and temporary
+entries, using the same name rules as the Workspace inventory. Search filters do not
+restrict the archive. The interface states this policy; the
+`X-SolidCraft-Archive-Excluded-Entries` response header reports the number of excluded
+entries. Excluded directories are not traversed and excluded file contents are not
+read; their names and entry counts still consume the bounded manifest budget.
+Visible invalid/reserved paths, excessive depth, symlinks and special entries still
+reject the archive. Deletion keeps its full, strict manifest and rejects protected
+entries rather than silently deleting unseen files. Data transfer uses 32 KiB chunks and a queue of two chunks, alongside bounded
 read/response buffers and ZIP entry metadata. The browser download must
 complete successfully before an archive is used. Logout, expiry, disconnect, a stalled
 consumer or an external filesystem change interrupts the response. Matching gateway

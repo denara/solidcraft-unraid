@@ -43,14 +43,14 @@ pub fn visible_name(name: &str) -> bool {
     path.components().all(|part| {
         let Component::Normal(part) = part else { return false };
         let Some(part) = part.to_str() else { return false };
-        let lower = part.to_ascii_lowercase();
-        !part.starts_with('.')
-            && !part.ends_with('~')
-            && !lower.ends_with(".tmp")
-            && !lower.ends_with(".part")
-            && !lower.ends_with(".upload")
-            && !lower.ends_with(".bak")
+        !excluded_component(part)
     })
+}
+
+/// Shared inventory/archive exclusions; no file contents are inspected.
+pub(crate) fn excluded_component(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    name.starts_with('.') || name.ends_with('~') || [".tmp", ".part", ".upload", ".bak"].iter().any(|suffix| lower.ends_with(*suffix))
 }
 
 fn kind(name: &str) -> &'static str {

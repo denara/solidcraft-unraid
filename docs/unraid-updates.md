@@ -1,5 +1,39 @@
 # Validated container updates
 
+## 2026-10-21: joined Workspace overview and usable ZIPs after native saves
+
+Preserves validated upstream `e94900933dafd63e2b32594afbdc879ecd64d2f7`
+and all published 0.18.2 integration features; no additional upstream merge or
+design-format change. Search and the four live counters now form one continuous
+panel with subtle dividers, four/two/one columns on desktop/tablet/mobile. The
+filter form remains outside the replaced live fragment, preserving focused,
+unsubmitted search text and the user's open folders during server-push updates.
+
+Native saves create a `.solidcraft.bak` sibling. Previously this normal backup
+blocked the entire folder ZIP, despite being absent from the Workspace listing.
+Archives now use that listing's auxiliary-name exclusions, independent of search
+filters: backup, temporary and hidden entries are omitted without reading their
+contents. The interface explains the policy, and the response reports the number
+of omitted entries. Discovered exclusions still consume bounded manifest budgets.
+Invalid visible paths, excessive nesting, links and special files remain rejected;
+streaming, leases, cookie/Origin checks and final revision validation are retained.
+Deletion deliberately uses the complete strict manifest, never this filtered set.
+
+Relevant validation: 123 gateway tests, formatting and Clippy pass. A fresh-volume
+candidate passes actual MCP modelling/export, Workspace revision/authentication,
+live updates and the expanded action proof. Two actual native saves generate the
+automatic backup; a 256-MiB streamed ZIP contains only the allowed files, Unicode
+and empty folders. First bytes arrive in 25 ms and measured RSS growth is 640 KiB;
+abort, conflicting writes, protected deletion and live inventory checks pass.
+Actual HTTPS Chromium verifies four/two/one-column layouts, preserved focused
+search and open folders across a real SSE file update, and a native ZIP click from
+a filtered view: all allowed project members pass CRC, with no backup included.
+Screenshots and diagnostics remain private in ignored
+`target/workspace-overview-backups-20261021/`.
+
+Publication, archive and local runtime verification are recorded after the exact
+source workflow completes. Unraid data/settings are not modified by these checks.
+
 ## 2026-10-21: Workspace ZIP downloads show errors instead of saving HTML
 
 Preserves validated upstream `e94900933dafd63e2b32594afbdc879ecd64d2f7` and the

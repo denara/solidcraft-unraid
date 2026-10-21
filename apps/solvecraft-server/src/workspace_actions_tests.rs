@@ -221,11 +221,57 @@ async fn manifests_reject_root_traversal_symlinks_reserved_and_special_entries()
     }
     assert_eq!(get(&f, &cookie, "/workspace/archive/Project").await.status(), StatusCode::CONFLICT);
     std::fs::remove_file(f.directory.join("Project/escape")).unwrap();
+    std::os::unix::fs::symlink("/etc/passwd", f.directory.join("Project/private.bak")).unwrap();
+    assert!(crate::workspace_actions::manifest::archive(&f.directory, "Project").is_err());
+    std::fs::remove_file(f.directory.join("Project/private.bak")).unwrap();
     std::fs::write(f.directory.join("Project/.secret"), b"must never be deleted or archived").unwrap();
     for name in ["Project", "", ".", "..", "Project/..", "/etc/passwd", "Project\\escape"] {
         assert!(crate::workspace_actions::manifest::inspect(&f.directory, name, true).is_err(), "{name}");
     }
     assert!(f.directory.join("Project/.secret").exists());
+}
+
+#[tokio::test]
+async fn zip_excludes_backups_hidden_and_temporary_entries_but_deletion_stays_complete() {
+    let f = Fixture::new();
+    let cookie = f.login().await;
+    std::fs::create_dir_all(f.directory.join("Project/nested/empty")).unwrap();
+    std::fs::create_dir_all(f.directory.join("Project/.private")).unwrap();
+    for name in ["part.solidcraft", "nested/Grüße.txt"] {
+        std::fs::write(f.directory.join("Project").join(name), b"public project file").unwrap();
+    }
+    for name in ["part.solidcraft.bak", "nested/part.BAK", ".private/token", "part.tmp", "part.part", "part.upload", "part~"] {
+        std::fs::write(f.directory.join("Project").join(name), b"must never be archived").unwrap();
+    }
+    assert!(crate::workspace_actions::manifest::inspect(&f.directory, "Project", true).is_err());
+    assert_eq!(get(&f, &cookie, "/workspace/delete/Project").await.status(), StatusCode::CONFLICT);
+    let response = get(&f, &cookie, "/workspace/archive/Project").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-solidcraft-archive-excluded-entries"], "7");
+    let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    assert_eq!(zip.len(), 5);
+    for index in 0..zip.len() {
+        let mut file = zip.by_index(index).unwrap();
+        assert!(crate::workspace_files::visible_name(file.name().unwrap().trim_end_matches('/')));
+        if !file.is_dir() {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut file, &mut text).unwrap();
+            assert_eq!(text, "public project file");
+        }
+    }
+    assert!(f.directory.join("Project/part.solidcraft.bak").exists());
+    assert!(f.directory.join("Project/.private/token").exists());
+}
+
+#[tokio::test]
+async fn excluded_archive_entries_still_count_towards_manifest_limits() {
+    let f = Fixture::new();
+    std::fs::create_dir(f.directory.join("Project")).unwrap();
+    for index in 0..2048 {
+        std::fs::write(f.directory.join(format!("Project/{index}.bak")), b"backup").unwrap();
+    }
+    assert!(crate::workspace_actions::manifest::archive(&f.directory, "Project").is_err());
 }
 
 #[tokio::test]

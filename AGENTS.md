@@ -53,7 +53,11 @@ active-project protection and the shared HTTP/MCP file gate. Never delete by vir
 group or delete test data outside an isolated disposable volume. Folder ZIPs stream
 server-side with bounded buffers, ZIP64, capped manifests and path leases that reject
 conflicting writes without holding the global gate for the download. Aborted, changed
-or unauthorized streams must fail and release all resources. Run
+or unauthorized streams must fail and release all resources. ZIPs use the unfiltered
+workspace file set, excluding hidden, backup and temporary entries without reading
+their contents; disclose this policy and the exclusion count. Count excluded entries
+towards manifest limits and preserve link/path checks. Deletion manifests stay complete
+and strict; never reuse the filtered archive manifest for confirmation or deletion. Run
 `packaging/unraid/workspace-actions-test.ps1` when changing these paths.
 Preserve its cookie-only browser authentication, Bearer-only MCP/files authentication,
 authoritative per-session metadata and shared HTTP/MCP file-revision checks. When an

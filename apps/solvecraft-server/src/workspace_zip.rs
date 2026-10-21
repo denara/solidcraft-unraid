@@ -166,7 +166,7 @@ fn create(root: &std::path::Path, name: &str, manifest: &manifest::Manifest, sen
         }
         // Recheck the entire tree before writing the central directory. Gateway writes
         // are excluded by a path lease, external changes cause an HTTP body error.
-        if manifest::inspect(root, name, false).map_err(io::Error::other)? != *manifest {
+        if manifest::archive(root, name).map_err(io::Error::other)? != *manifest {
             return Err(io::Error::other("archive source changed"));
         }
         Ok(())
@@ -198,12 +198,13 @@ pub(crate) async fn download(State(state): State<Arc<AppState>>, headers: Header
     let gate = state.file_gate.lock().await;
     let root = state.config.files.clone();
     let target = name.clone();
-    let manifest = match tokio::task::spawn_blocking(move || manifest::inspect(&root, &target, false)).await {
+    let manifest = match tokio::task::spawn_blocking(move || manifest::archive(&root, &target)).await {
         Ok(Ok(manifest)) if manifest.entries.first().is_some_and(|entry| entry.directory) => manifest,
         Ok(Err(error)) => return super::failure(StatusCode::CONFLICT, error),
         _ => return super::failure(StatusCode::BAD_REQUEST, "ZIP-Downloads sind nur für echte Ordner verfügbar."),
     };
     let id = uuid::Uuid::new_v4().to_string();
+    let excluded = manifest.excluded;
     let transfers = Arc::clone(&state.browser.actions.transfers);
     let Ok(mut active) = transfers.lock() else { return super::failure(StatusCode::SERVICE_UNAVAILABLE, "Dateizugriff nicht verfügbar.") };
     active.insert(id.clone(), name.clone());
@@ -240,6 +241,9 @@ pub(crate) async fn download(State(state): State<Arc<AppState>>, headers: Header
     let reader = Download { channel: receiver, current: Bytes::new(), result, poisoned, state, headers, authorization: None, _lease: lease };
     let mut response = crate::workspace::protect(Body::from_stream(ReaderStream::with_capacity(reader, CHUNK)).into_response());
     response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/zip"));
+    if let Ok(value) = HeaderValue::from_str(&excluded.to_string()) {
+        response.headers_mut().insert("x-solidcraft-archive-excluded-entries", value);
+    }
     response.headers_mut().insert("x-accel-buffering", HeaderValue::from_static("no"));
     response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store, no-transform"));
     let filename = format!("{}.zip", name.rsplit('/').next().unwrap_or("project"));
