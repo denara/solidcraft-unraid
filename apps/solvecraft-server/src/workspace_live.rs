@@ -187,19 +187,26 @@ async fn monitor(state: Arc<AppState>, sender: watch::Sender<Update>) {
 }
 
 pub(crate) fn source_allowed(state: &AppState, headers: &HeaderMap) -> bool {
+    source_rejection(state, headers).is_none()
+}
+
+/// Fixed diagnostic codes only; never expose request headers or deployment values.
+pub(crate) fn source_rejection(state: &AppState, headers: &HeaderMap) -> Option<&'static str> {
     if headers.get("sec-fetch-site").and_then(|value| value.to_str().ok()).is_some_and(|site| !matches!(site, "same-origin" | "none")) {
-        return false;
+        return Some("fetch_site_not_same_origin");
     }
-    let Some(host) = headers.get(header::HOST).and_then(|value| value.to_str().ok()) else { return false };
+    let Some(host) = headers.get(header::HOST).and_then(|value| value.to_str().ok()) else { return Some("host_missing") };
     if !state.config.origins.iter().any(|origin| origin.split_once("://").is_some_and(|(_, authority)| authority == host)) {
-        return false;
+        return Some("host_not_allowed");
     }
-    if let Some(origin) = headers.get(header::ORIGIN) {
-        return origin.to_str().ok().is_some_and(|origin| {
+    if let Some(origin) = headers.get(header::ORIGIN)
+        && !origin.to_str().ok().is_some_and(|origin| {
             state.config.origins.iter().any(|allowed| allowed == origin) && origin.split_once("://").is_some_and(|(_, authority)| authority == host)
-        });
+        })
+    {
+        return Some("origin_not_allowed");
     }
-    true
+    None
 }
 
 pub async fn events(State(state): State<Arc<AppState>>, headers: HeaderMap, uri: Uri) -> Response {

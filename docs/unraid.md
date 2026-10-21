@@ -518,6 +518,12 @@ read/response buffers and ZIP entry metadata. The browser download must
 complete successfully before an archive is used. Logout, expiry, disconnect, a stalled
 consumer or an external filesystem change interrupts the response. Matching gateway
 writes are rejected for the duration of the transfer; unrelated projects remain usable.
+Successful responses provide `application/zip` and an attachment filename ending in
+`.zip`. The link leaves the live Workspace open; rejected requests display their
+error in another tab instead of saving an HTML error page. Origin rejections emit
+`origin.rejected` with endpoint `workspace_zip` and a fixed reason code (no header
+values or credentials). Open downloads from the permitted Workspace address;
+login, origin and filesystem protections remain enforced.
 
 Use `packaging/unraid/workspace-actions-test.ps1` only against a labelled disposable
 candidate container and fresh test volume. Existing model previews and independent

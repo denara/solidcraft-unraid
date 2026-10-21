@@ -183,8 +183,14 @@ pub(crate) async fn download(State(state): State<Arc<AppState>>, headers: Header
     if crate::workspace::browser_session(&state, &headers).await.is_none() {
         return super::failure(StatusCode::UNAUTHORIZED, "Bitte erneut anmelden.");
     }
-    if !crate::workspace_live::source_allowed(&state, &headers) {
-        return super::failure(StatusCode::FORBIDDEN, "Diese Herkunft ist nicht freigegeben.");
+    if let Some(reason) = crate::workspace_live::source_rejection(&state, &headers) {
+        state.audit.emit(crate::audit::Event::OriginRejected, serde_json::json!({"endpoint":"workspace_zip","reason":reason}));
+        return super::failure(
+            StatusCode::FORBIDDEN,
+            &format!(
+                "Diese Herkunft ist nicht freigegeben ({reason}). Bitte den Arbeitsbereich direkt über die freigegebene Adresse öffnen und den ZIP-Link dort anklicken."
+            ),
+        );
     }
     let Ok(permit) = Arc::clone(&state.browser.actions.slots).try_acquire_owned() else {
         return super::failure(StatusCode::TOO_MANY_REQUESTS, "Maximal zwei ZIP-Downloads gleichzeitig. Bitte nach Abschluss erneut versuchen.");

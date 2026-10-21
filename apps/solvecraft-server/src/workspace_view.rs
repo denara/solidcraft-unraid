@@ -597,7 +597,10 @@ fn delete_link(html: &mut String, name: &str) {
 
 fn folder_actions(html: &mut String, name: &str) {
     let url = download_url(name).replacen("/workspace/files/", "/workspace/archive/", 1);
-    let _ = write!(html, "<a class=\"action\" href=\"{url}\" download>Als ZIP herunterladen ↓</a>");
+    // The server attaches successful archives. Forcing `download` here also saves
+    // HTML errors (expired login, origin rejection, manifest conflicts) as .htm.
+    // Keep errors visible in a separate tab without losing the live workspace.
+    let _ = write!(html, "<a class=\"action\" href=\"{url}\" target=\"_blank\" rel=\"noopener\">Als ZIP herunterladen ↓</a>");
     delete_link(html, name);
 }
 
@@ -639,6 +642,8 @@ mod tests {
         let snapshot = serde_json::json!({"directories":["Demo","Demo/empty"],"files":[{"name":"part.step","kind":"export","project":{"id":"stem:part","name":"part","basis":"file_stem"}}],"sessions":[]});
         let html = page(&snapshot, "", "");
         assert!(html.contains("/workspace/archive/Demo/empty"));
+        assert!(html.contains("href=\"/workspace/archive/Demo\" target=\"_blank\" rel=\"noopener\""));
+        assert!(!html.contains("href=\"/workspace/archive/Demo\" download"));
         assert!(html.contains("/workspace/delete/Demo"));
         assert!(html.contains("Virtuelle Gruppe aus Dateinamen"));
         assert!(!html.contains("/workspace/archive/part"));

@@ -123,6 +123,10 @@ async fn zip_preserves_unicode_nested_and_empty_entries_and_rejects_bearer_and_f
     assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
     let response = get(&f, &cookie, "/workspace/archive/Project").await;
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/zip");
+    let disposition = response.headers()[header::CONTENT_DISPOSITION].to_str().unwrap();
+    assert!(disposition.starts_with("attachment;"));
+    assert!(disposition.contains("filename*=UTF-8''%50%72%6F%6A%65%63%74%2E%7A%69%70"));
     let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
     assert_eq!(zip.len(), 5);
@@ -131,6 +135,53 @@ async fn zip_preserves_unicode_nested_and_empty_entries_and_rejects_bearer_and_f
     let mut text = String::new();
     std::io::Read::read_to_string(&mut zip.by_name("Project/Grüße.txt").unwrap(), &mut text).unwrap();
     assert_eq!(text, "public unicode");
+}
+
+#[tokio::test]
+async fn zip_navigation_preserves_origin_checks_and_reports_safe_diagnostics_without_an_attachment() {
+    let f = Fixture::new();
+    let cookie = f.login().await;
+    std::fs::create_dir(f.directory.join("Project")).unwrap();
+    for (key, value, reason) in [
+        ("host", "other.example", "host_not_allowed"),
+        ("origin", "null", "origin_not_allowed"),
+        ("origin", "https://attacker.example/private", "origin_not_allowed"),
+        ("sec-fetch-site", "cross-site", "fetch_site_not_same_origin"),
+        ("sec-fetch-site", "same-site", "fetch_site_not_same_origin"),
+    ] {
+        let mut request = Request::builder()
+            .uri("/workspace/archive/Project")
+            .header(header::HOST, HOST)
+            .header(header::COOKIE, &cookie)
+            .body(Body::empty())
+            .unwrap();
+        request.headers_mut().insert(header::HeaderName::from_bytes(key.as_bytes()).unwrap(), value.parse().unwrap());
+        let response = f.app().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(!response.headers().contains_key(header::CONTENT_DISPOSITION));
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "text/html; charset=utf-8");
+        assert!(body_text(response).await.contains(reason));
+        let rows = f.state.audit.rows.lock().unwrap();
+        let row = rows.last().unwrap();
+        assert!(row.contains("origin.rejected") && row.contains("workspace_zip") && row.contains(reason));
+        assert!(!row.contains(TOKEN) && !row.contains(&cookie) && !row.contains("attacker.example") && !row.contains("other.example"));
+    }
+    // Ordinary same-origin links omit Origin; browsers may send either metadata value.
+    for site in ["same-origin", "none"] {
+        let request = Request::builder()
+            .uri("/workspace/archive/Project")
+            .header(header::HOST, HOST)
+            .header(header::COOKIE, &cookie)
+            .header("sec-fetch-site", site)
+            .header("sec-fetch-mode", "navigate")
+            .body(Body::empty())
+            .unwrap();
+        let response = f.app().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/zip");
+        let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+        assert!(zip::ZipArchive::new(std::io::Cursor::new(bytes)).is_ok());
+    }
 }
 
 #[tokio::test]

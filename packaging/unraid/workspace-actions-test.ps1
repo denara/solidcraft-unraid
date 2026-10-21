@@ -55,6 +55,12 @@ try {
  $csrf=[regex]::Match($login.Content,'name="csrf" value="([^"]+)"').Groups[1].Value
  $null=Invoke-WebRequest "$BaseUrl/workspace/login" -Method Post -WebSession $taskBrowser -Headers @{Origin=$BaseUrl} -Body @{csrf=$csrf;token=$Token}
  $taskBrowser.Headers.Clear()
+ $workspacePage=Invoke-WebRequest "$BaseUrl/workspace" -WebSession $taskBrowser
+ $archiveLink=[regex]::Match($workspacePage.Content,'<a[^>]+href="/workspace/archive/'+[regex]::Escape($taskProject)+'"[^>]*>')
+ if(-not $archiveLink.Success -or $archiveLink.Value -match '\sdownload(?:\s|>|=)' -or $archiveLink.Value -notmatch 'target="_blank"'){throw 'ZIP link must show errors instead of forcing an HTML download'}
+ $rejectedZip=Invoke-WebRequest "$BaseUrl/workspace/archive/$taskProject" -WebSession $taskBrowser -Headers @{Origin='null'} -SkipHttpErrorCheck
+ if($rejectedZip.StatusCode -ne 403 -or $rejectedZip.Headers.'Content-Disposition' -or $rejectedZip.Content -notmatch 'origin_not_allowed'){throw 'ZIP rejection must be visible and keep origin protection'}
+ $taskBrowser.Headers.Clear()
  if((Invoke-WebRequest "$BaseUrl/workspace/delete/$taskProject/single.txt" -WebSession $taskBrowser -SkipHttpErrorCheck).StatusCode -ne 409){throw 'Active MCP project was not protected'}
  $detail=(Tool workspace_list_files @{path="$taskProject/single.txt"}).structuredContent.files[0]
  $null=Invoke-WebRequest "$BaseUrl/mcp" -Method Delete -Headers $taskAuth
@@ -77,6 +83,7 @@ try {
  $timer=[Diagnostics.Stopwatch]::StartNew()
  $response=$client.GetAsync("$BaseUrl/workspace/archive/$taskProject/nested",[Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
  if([int]$response.StatusCode -ne 200){throw 'ZIP stream rejected'}
+ if($response.Content.Headers.ContentType.MediaType -ne 'application/zip' -or $response.Content.Headers.ContentDisposition.DispositionType -ne 'attachment' -or $response.Content.Headers.ContentDisposition.FileNameStar -ne 'nested.zip'){throw 'ZIP MIME type or attachment filename is incorrect'}
  $stream=$response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
  $buffer=[byte[]]::new(32768);$count=$stream.Read($buffer,0,$buffer.Length)
  if($count -lt 4 -or $buffer[0] -ne 80 -or $buffer[1] -ne 75){throw 'No early ZIP bytes'}

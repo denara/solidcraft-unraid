@@ -1,5 +1,31 @@
 # Validated container updates
 
+## 2026-10-21: Workspace ZIP downloads show errors instead of saving HTML
+
+Preserves validated upstream `e94900933dafd63e2b32594afbdc879ecd64d2f7` and the
+published 0.18.2 integration. No new upstream snapshot or CAD/file-format changes.
+The folder link previously forced `download` even for HTML login, origin or manifest
+errors, allowing the browser to offer a misleading `.htm` file. Successful archives
+already supplied a ZIP content type and UTF-8 attachment filename. The link now lets
+the server select attachments and opens failures visibly in a separate tab, retaining
+the live Workspace and folder choices. Origin denials additionally log a fixed reason
+code at `workspace_zip`; their checks and cookie-only authentication are unchanged.
+No proxy, DNS or Unraid runtime settings were modified.
+
+Relevant validation: 121 server regressions, formatting and gateway Clippy pass.
+Tests assert attachment MIME/filename, native navigation without Origin and continued
+rejection of cross-site, mismatched-host and invalid-Origin requests with safe audit
+codes. A fresh-volume candidate passes MCP modelling/export, restart/reopen, Workspace
+revisions, push, thumbnail/handoff, observer, remembered-login and ZIP/deletion checks.
+The action script now verifies ZIP link markup, visible denied responses and real
+attachment headers. An actual HTTPS Chromium click downloads and independently checks
+`Demo-ZIP.zip`; a rejected disposable folder opens its error visibly, creates no HTML
+download and retains the original Workspace/folder state. Public-safe screenshots and
+all diagnostics remain in ignored `target/workspace-zip-download-20261021/`.
+
+Publication and local-runtime evidence will be appended after the exact workflow passes.
+
+
 ## 2026-10-21: upstream 0.18.2 and compact Workspace folder actions
 
 Selected exactly one upstream snapshot, `e94900933dafd63e2b32594afbdc879ecd64d2f7`,
