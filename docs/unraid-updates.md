@@ -23,7 +23,27 @@ attachment headers. An actual HTTPS Chromium click downloads and independently c
 download and retains the original Workspace/folder state. Public-safe screenshots and
 all diagnostics remain in ignored `target/workspace-zip-download-20261021/`.
 
-Publication and local-runtime evidence will be appended after the exact workflow passes.
+Validated source `80c56ca891abe989904a77acdf841e59022b2092` is published on `codex/unraid-mcp-web`.
+The exact [container workflow 39626087876](https://github.com/denara/solidcraft-unraid/actions/runs/39626087876) passed before
+publishing `ghcr.io/denara/solidcraft-unraid:latest` and immutable
+`sha-80c56ca891abe989904a77acdf841e59022b2092`. Both pull anonymously with an empty credential
+configuration; source labels, Linux amd64 and equal image identities were verified.
+Published digest: `sha256:e4db6e70c549f3372b2a38ddddeded3ad9f9886f00ac855bdcfd6fe89957640a`.
+
+The verified registry image is exported as `target/solidcraft-unraid-zip-browser-fix-80c56ca8.tar`, tagged
+`solvecraft-unraid:zip-browser-fix-80c56ca8`, 159200768 bytes.
+Archive SHA256: `c93effb56968aa04635b88adeab98476ad19bf980e1626d5a00b69d15e95a091`.
+A private data/configuration backup and rollback image were retained before refreshing
+the local test runtime. Health, authenticated SDK modelling/PNG, read-only public-design
+reopen, unchanged original file bytes, browser cookie login, push and independent web
+assets pass. Data volume, token, origins, identity and resource/security settings remain
+unchanged. The single local runtime remains at `http://localhost:8781/`; the owned,
+inactive ZIP candidate was removed after saving diagnostics. No volumes or caches were
+deleted. The unchanged canonical catalog template matches fetched catalog main
+`72852d1109f091ff4e8979649ae62c277264d962`, so no catalog commit is needed.
+Unraid installation remains the user's separate step. Later upstream main `728f753b`
+was observed and deferred to the next upstream update, preserving this fixed baseline.
+
 
 
 ## 2026-10-21: upstream 0.18.2 and compact Workspace folder actions
