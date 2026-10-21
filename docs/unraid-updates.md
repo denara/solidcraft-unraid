@@ -31,8 +31,27 @@ a filtered view: all allowed project members pass CRC, with no backup included.
 Screenshots and diagnostics remain private in ignored
 `target/workspace-overview-backups-20261021/`.
 
-Publication, archive and local runtime verification are recorded after the exact
-source workflow completes. Unraid data/settings are not modified by these checks.
+Validated source `4d2884b3c6c181e30ffce950ec268c44551cabc3` is published on
+`codex/unraid-mcp-web`. The exact [container workflow 39635014607](https://github.com/denara/solidcraft-unraid/actions/runs/39635014607)
+passed all image checks before publishing `ghcr.io/denara/solidcraft-unraid:latest`
+and immutable `sha-4d2884b3c6c181e30ffce950ec268c44551cabc3`. Anonymous pulls with
+an empty client configuration, matching Linux amd64 source labels and registry
+digest were verified: `sha256:5a504c00244d6cecd786a00b738ce0852393202634d5ac0d13c6770eab768035`.
+
+The verified image is exported as
+`target/solidcraft-unraid-overview-backups-4d2884b3.tar`, tagged
+`solvecraft-unraid:overview-backups-4d2884b3`, 159208448 bytes.
+Archive SHA256: `cd80ac3a72f3c78960546f1af59b910e50209eb7936138098971583dc478377b`.
+A private data/configuration backup and previous-image rollback were prepared
+before refreshing the local test runtime. Health, authenticated SDK modelling/PNG,
+read-only public-design reopen with unchanged original bytes, browser cookie login,
+push and independent web assets pass. Volume, token, origins, identity and resource/
+security settings are unchanged. The single local runtime remains available at
+`http://localhost:8781/`; the owned, inactive candidate was removed after saving
+diagnostics, without deleting any volume, cache or backup. Canonical XML/icon blobs
+match fetched catalog main `72852d1109f091ff4e8979649ae62c277264d962`; no catalog
+commit is needed. Fetched upstream main `728f753b` remains a separate future update.
+Unraid data/settings were not modified; installation remains the user's step.
 
 ## 2026-10-21: Workspace ZIP downloads show errors instead of saving HTML
 
