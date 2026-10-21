@@ -1,5 +1,106 @@
 # Validated container updates
 
+## 2026-10-21: upstream 0.18.2 and compact Workspace folder actions
+
+Selected exactly one upstream snapshot, `e94900933dafd63e2b32594afbdc879ecd64d2f7`,
+157 commits after the validated `e9b1a077` baseline. The single integration branch
+`codex/unraid-mcp-web` began clean and synchronized at `02b826ae`; fetched fork
+main is an ancestor. All published merge history and integration features remain.
+The original project now redirects to
+[tangency-labs/solidcraft](https://github.com/tangency-labs/solidcraft); its CAD
+features and changes remain documented there. This is container packaging, not
+an application release or an Unraid installation.
+
+Real-folder ZIP/delete actions now sit in a compact bar immediately below the
+project summary and above the table headings. The redundant folder explanation
+and repeated project name are removed. Actual subfolders retain explicit relative
+names and accessible targets; virtual groups have no folder actions. The existing
+view regression covers this order, targets and collapsed initial state. Confirmation,
+revisions, active-project protection, streaming and live updates are preserved.
+
+Merge conflicts retained fork publication/privacy rules, quiet CLI startup plus
+new parameter checks, browser disk/font changes and native-copy handoff. Upstream's
+R32Uint ambient occlusion replaces the older RGBA8 workaround; the retained GLSL
+regression and eight actual required software-OpenGL captures pass. A new lazy
+body-outline cache is isolated in observer snapshots; its cold-cache regression
+passes. Equivalent Option/match corrections in the rewritten upstream dialogs
+satisfy Rust1.95 Clippy without changing behavior. Only local fork package versions
+were adjusted in the merged lockfile; unrelated dependencies were not upgraded.
+Shipped licenses were regenerated with the gateway, Workspace and IBM Plex notices.
+Unmodified upstream OFL text is preserved; the fork diff passes whitespace checks.
+
+No new file-writing command was introduced in this range. New cache/compressed-source
+saves retain their confined output. BOM, linked-source reads, immutable project binding,
+revision checks and folder leases remain protected. The real SDK verifies the new
+command-schema and running-work queries. Existing batch/observer behavior remains covered.
+
+Relevant checks pass: 120 gateway, 60 MCP, two document and two kernel observer-cache,
+34 engine schema, 23 browser-app and one CLI parameter test; 26 native-container IO,
+35 document-format, ten file-command and 18 changed 3MF parser tests; GLSL translation
+and eight actual GPU captures. Native/scoped Wasm Clippy, 13-crate Wasm compatibility,
+formatting, 436 attributed assets, icons, layers, sorted catalogs and licenses pass.
+Both Trunk release builds, the real browser API/queue proof and all 20 offline/update
+scenarios pass. No blanket CAD suite was repeated.
+
+A fresh-volume loopback candidate passes actual 24000 mm3 modelling, PNG/STEP, separate
+sessions, authentication/origin/path/project guards, restart persistence, logging,
+Workspace revisions, remembered login/logout across restarts, SSE, metadata/thumbnails,
+one-use handoff and read-only observer isolation/revocation. Confirmed deletion and
+ZIP streaming pass: first bytes in 16 ms for 256 MiB, with 128 KiB measured server
+RSS growth. All six ZIP entries pass independent CRC checks. Conflicting writes are
+rejected, unrelated MCP work continues and aborted transfers release their leases.
+Only disposable candidate data was deleted.
+
+The actual Workspace bar measures 28.39 px and contains only its two actions. Two
+browser tabs receive a new public file by push and retain their open folder. The
+delete popup still names its exact path and content count; it was cancelled. Embedded
+browser capture timed out, so the original repository Chrome test harness captured
+the actual candidate in Docker, including its independent 0.18.2 CAD copy. No HTML/CSS
+mock was substituted. The one-use fragment was consumed and the server file remained
+byte-for-byte unchanged. Screenshots and evidence stay in ignored
+`target/upstream-e9490093-layout-20261021/`.
+
+Public legacy format13 and previous-container format28 designs reopen with unchanged
+parameters and 24000 mm3 volume, round-trip and export STEP. New saves use `solidcraft/29`;
+previous builds cannot read these files. Save active work and back up server files and
+independent browser designs before updating Unraid; retain a prior image and old files
+for rollback. No automatic file migration or nginx/DNS change is performed.
+
+Validated source `529177c0ed3e29e1fcd364e88c680f97608f5c19` is published on `codex/unraid-mcp-web`.
+The exact [container workflow 39568562688](https://github.com/denara/solidcraft-unraid/actions/runs/39568562688) passed its fresh-image
+modelling, PNG/STEP, authentication, isolation, project/revision, Workspace live/observer,
+ZIP/deletion and login/restart gates before pushing the image. Public Linux amd64 tags:
+`ghcr.io/denara/solidcraft-unraid:latest` and immutable
+`sha-529177c0ed3e29e1fcd364e88c680f97608f5c19`. Both pulled anonymously using an empty Docker credential configuration;
+source labels, architecture and equal image identities were checked. Independent anonymous
+registry access confirms digest `sha256:9bf822f55002286295e74715310ce935832e89a38c2dd8b3abff2d2d9c4aac49`.
+
+Archive: `target/solidcraft-unraid-workspace-layout-529177c0.tar` (159205888 bytes), with own tag
+`solvecraft-unraid:workspace-layout-529177c0`.
+SHA256: `db0e3d24b3fa51e8aea11351b5a52856f704a5e5d6d169db7213547b348d7830`.
+
+The sole surviving local test container `solvecraft-solvecraft-1` is healthy on the
+immutable public image. Its data/configuration were backed up privately, and the same
+data volume, MCP token, complete environment, user, ports/origins and resource/security
+limits were verified unchanged. Authenticated SDK calls, RAM-only 4000 mm3 modelling/PNG,
+read-only reopening of the known public 24000 mm3 fixture with unchanged source bytes,
+Workspace cookie login/logout, metadata/SSE and browser assets pass after replacement.
+No real saved file was overwritten. The idle owned candidate was removed after verifying
+its labels, image, volume and absence of active CAD/build work, with diagnostics retained.
+No volume was deleted. Build containers removed themselves; toolchain images/caches,
+private backups and `solvecraft-unraid:rollback-before-layout-20261021` remain.
+
+Canonical XML and original icon remain identical to `denara/unraid-templates` main
+`72852d1109f091ff4e8979649ae62c277264d962`; no catalog commit or CA resubmission is needed.
+The Overview remains a permanent description of this unofficial integration, with
+upstream changes linked and only this fork's additional features listed separately.
+Final fetch observed later upstream `55587f4ac46ded0411e7e77a91e27e0e760ab5c7`; it is deferred to the next fixed-snapshot update.
+To install, save active work and back up server files and independent browser designs,
+update the existing Unraid container while retaining its data/token/settings, then reload
+the browser. Keep old design copies for rollback because new format29 files cannot be
+read by the previous build. No Unraid deployment, nginx/DNS change, application release,
+release branch/tag or automatic file migration was performed.
+
 ## 2026-10-20: upstream integration and confirmed Workspace file management
 
 Selected exactly one upstream snapshot, `e9b1a077d7e33420791791c651f2e293962a2da1`,
