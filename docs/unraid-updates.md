@@ -52,6 +52,33 @@ compact folder actions and an independent browser copy of the migrated design.
 Screenshots, public fixtures and diagnostics stay in ignored
 `target/upstream-3d3dd274-20261022/`.
 
+Validated merge source `474107be42d20c7f68fcc368514ee4cf83233cb6` is published on
+`codex/unraid-mcp-web`, preserving both parent histories. The exact
+[container workflow 39749624219](https://github.com/denara/solidcraft-unraid/actions/runs/39749624219)
+passed its image checks before publishing `ghcr.io/denara/solidcraft-unraid:latest`
+and immutable `sha-474107be42d20c7f68fcc368514ee4cf83233cb6`. Anonymous pulls using
+an empty client configuration, Linux amd64, matching source labels and equal image
+identities were verified. Public registry digest:
+`sha256:9f7f6a5894b7a5e499234046e0a46751bc663b9d73d5aa69fcc487bd1deed94e`.
+
+The verified image is exported as
+`target/solidcraft-unraid-upstream-3d3dd274-474107be.tar`, tagged
+`solvecraft-unraid:upstream-3d3dd274-474107be`, 159698432 bytes.
+Archive SHA256: `1dede9592eb5e2a910d2fee006ebf5357ad705e03d3b363a6d16ce82e6f0dac7`.
+The private data/configuration backup passed archive integrity checks before the
+local runtime was refreshed. Health, authenticated SDK modelling/PNG, read-only
+public-design reopen with unchanged original bytes, browser cookie login, push,
+saved-model details and independent web assets pass. Data volume, MCP token,
+origins, ports, identity and resource/security settings remain unchanged. Only
+the healthy local development runtime remains at `http://localhost:8781/`.
+The owned inactive candidate was removed after saving diagnostics; no volumes,
+build caches or backups were deleted, and the prior image remains tagged for
+rollback. Canonical XML/icon blobs still match fetched catalog main
+`72852d1109f091ff4e8979649ae62c277264d962`; no catalog commit is needed. Final
+upstream fetch still points to the selected `3d3dd274`. The daily 09:00 task stays
+active. Unraid installation remains the user's separate step; nginx and DNS were
+not modified.
+
 ## 2026-10-21: joined Workspace overview and usable ZIPs after native saves
 
 Preserves validated upstream `e94900933dafd63e2b32594afbdc879ecd64d2f7`
