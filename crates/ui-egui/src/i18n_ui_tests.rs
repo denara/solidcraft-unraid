@@ -197,6 +197,8 @@ fn home_page_renders_in_the_active_language() {
         let rev = h.app.session.revision;
         h.app.home.show(rev);
         h.frames(2);
+        // The recent file counts as there until the background check says it is not.
+        h.app.home.wait_for_existence_checks();
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 1000.0));
         let out = crate::test_support::frame(&h.ctx, egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| h.app.ui(ui));
         let mut texts = Vec::new();

@@ -185,7 +185,7 @@ pub(super) fn show(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect) {
     if let Some(face) = hovered.and_then(|i| faces.get(i)) {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         ui.interact(Rect::from_center_size(hover.unwrap_or(face.centre), vec2(2.0, 2.0)), ui.id().with("navigation_cube_tip"), Sense::hover())
-            .on_hover_text(format!("{} view. Drag to orbit; hold Shift to snap.", face.label));
+            .on_hover_text(format!("{} view. Drag to orbit{}.", face.label, if app.preferences.free_orbit { "" } else { "; hold Shift to snap" }));
         if ui.input(|i| i.pointer.primary_clicked()) {
             navigate(app, None, Some(face.direction));
         }
@@ -217,7 +217,7 @@ pub(super) fn show(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect) {
     crate::scenario::publish_target("axis_view:home", home);
     let home_hover = control(app, ui, home, "home", "Home: isometric view and fit model");
     if active {
-        icons::paint(&painter, home.shrink(4.0 * scale), "home", if home_hover { t.accent } else { t.cube_face }, t.cube_face, t.accent);
+        icons::paint_icon(&painter, home.shrink(4.0 * scale), "home", f32::from((if home_hover { t.accent } else { t.cube_face }).a()) / 255.0);
     }
     let fit = Rect::from_center_size(c + vec2(67.0, 67.0) * scale, vec2(22.0, 22.0) * scale);
     let fit_hover = control(app, ui, fit, "fit", "Fit model in view");
@@ -539,6 +539,30 @@ mod tests {
             h.app.cam = anim.to;
             h.app.cancel_view_animation();
         }
+    }
+
+    /// A view-cube click glides, but a mouse orbit started at once cancels the glide: the camera
+    /// then follows the pointer one to one, and nothing keeps easing after the pointer stops.
+    #[test]
+    fn a_mouse_orbit_right_after_a_cube_click_follows_the_pointer_one_to_one() {
+        let mut h = crate::scenario::Harness::new();
+        h.call("ui.prefs", json!({"navigator_style":"cube"}));
+        h.app.run("solid.box", json!({"length":20,"width":20,"height":20})).unwrap();
+        h.frames(4);
+        let p = crate::scenario::handle_at("navigation_cube:top").unwrap();
+        let button = |pressed| egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        h.app.synthetic.extend([egui::Event::PointerMoved(p), button(true), button(false)]);
+        h.frames(3);
+        assert!(h.app.cam_anim.is_some(), "the click glides");
+        let mut expected = h.app.cam;
+        h.call("ui.drag", json!({"x0":800,"y0":500,"x1":850,"y1":520,"button":"middle","shift":true,"steps":20}));
+        assert!(h.app.cam_anim.is_none(), "the orbit cancels the glide");
+        expected.orbit(50.0, 20.0);
+        // The glide may step once, in the frame the orbit starts and cancels it.
+        assert!((h.app.cam.yaw - expected.yaw).abs() < 0.03 && (h.app.cam.pitch - expected.pitch).abs() < 0.03, "{:?} vs {:?}", h.app.cam, expected);
+        let done = h.app.cam;
+        h.frames(30);
+        assert_eq!(h.app.cam, done, "nothing keeps easing after the pointer stops");
     }
 
     #[test]

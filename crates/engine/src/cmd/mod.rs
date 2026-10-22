@@ -40,6 +40,7 @@ pub(crate) use features::profiles as feature_profiles;
 pub(crate) use features::{EdgeRefForm, edge_ref_form, sketch_key};
 pub use features::{auto_operation, extrude_reach};
 pub use sketch_modify::trim_piece;
+pub use view_dxf::sketch::exportable as view_dxf_exportable;
 mod component_link;
 mod config;
 mod file;

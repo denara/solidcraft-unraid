@@ -215,39 +215,11 @@ pub fn srgb(c: [f32; 3]) -> Color32 {
 /// the same as when they were literals in the WGSL). The light theme's are the headless default.
 pub use solidcraft_engine::render::AnalysisColors;
 
-/// The colours icons draw of their own (`icons::paint` takes ink, fill and accent from its
-/// caller). Every icon colour is a token so a colour vision mode can reach it.
+/// Colours for native viewport markers and the agent pointer. Command artwork uses the SVG palette.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct IconColors {
-    /// Surface sheets: a sheet, a second sheet beside it, a lighter sheet, iso lines and teeth.
-    pub sheet: Color32,
-    pub sheet_2: Color32,
-    pub sheet_light: Color32,
-    pub sheet_line: Color32,
-    /// Highlights (and the white ink of markers and the agent pointer), and the sphere's glint.
     pub highlight: Color32,
-    pub glint: Color32,
-    pub folder: Color32,
-    pub plane: Color32,
-    pub fold: Color32,
-    /// Zebra stripes, and the environment map's sky and floor.
-    pub stripe: Color32,
-    pub sky: Color32,
-    pub floor: Color32,
-    /// Appearance: red, blue and yellow paint dabs.
-    pub paint: [Color32; 3],
-    /// Origin: X, Y and Z arrows.
-    pub axes: [Color32; 3],
-    /// Accessibility: reachable, blocked. Draft: positive, between. Curvature: flat, middle,
-    /// tight.
-    pub access: [Color32; 2],
-    pub draft: [Color32; 2],
-    pub curvature: [Color32; 3],
-    pub interference: Color32,
-    pub warning: Color32,
-    /// The pointer an AI agent moves.
     pub agent: Color32,
-    /// The dark halo under viewport markers (snap points).
     pub marker_halo: Color32,
 }
 
@@ -386,7 +358,6 @@ pub struct Tokens {
     pub error: Color32,
     pub warning: Color32,
     pub icon: Color32,
-    pub icon_fill: Color32,
     pub timeline: Color32,
     pub hover: Color32,
     // ---- viewport selection feedback ----
@@ -462,10 +433,6 @@ pub struct Tokens {
     pub dialog_bg: Color32,
     pub dialog_border: Color32,
     pub chip: Color32,
-    /// Band behind a panel's heading and, lighter, behind its section headings (both set off
-    /// from `dialog_bg`).
-    pub heading_bg: Color32,
-    pub subheading_bg: Color32,
     /// Inside of bodies cut by a section.
     pub section_cap: Color32,
     /// Closed sketch profiles (translucent fill).
@@ -528,8 +495,6 @@ pub struct Tokens {
     pub continuity: [Color32; 4],
     pub analysis: AnalysisColors,
     pub icons: IconColors,
-    /// The application bar's buttons: ink, fill and accent of their icons.
-    pub app_bar_icon: [Color32; 3],
     /// The SolidCraft mark on the application bar: light, mid and dark faces, and its edge.
     pub logo: [Color32; 4],
 }
@@ -735,15 +700,5 @@ mod tests {
                 });
             }
         });
-    }
-
-    /// Title and section bands stand out from a dialog, the title more than its sections.
-    #[test]
-    fn heading_bands_are_darker_than_the_dialog_in_order() {
-        let luma = |c: egui::Color32| u32::from(c.r()) * 3 + u32::from(c.g()) * 6 + u32::from(c.b());
-        for t in [super::Tokens::light(), super::Tokens::dark()] {
-            assert!(luma(t.heading_bg) < luma(t.subheading_bg), "{t:?}");
-            assert!(luma(t.subheading_bg) < luma(t.dialog_bg), "{t:?}");
-        }
     }
 }

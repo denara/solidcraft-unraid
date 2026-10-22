@@ -7,6 +7,7 @@
 //! right of the viewport, the command palette and a bottom or left-sidebar feature timeline.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
+use crate::ui_kit::{Container, Surface};
 
 pub mod access;
 pub mod agent_chat;
@@ -113,6 +114,16 @@ mod status_tests {
             super::friendly_error("solid.shell", "invalid parameters for `solid.shell`: offset: must be positive"),
             "Shell: offset: must be positive"
         );
+        assert_eq!(super::friendly_error("edit.undo", "nothing to undo"), "Undo: nothing to undo");
+        {
+            // The label follows the interface language; the engine's words stay English.
+            let _polish = crate::i18n::scope("pl");
+            assert_eq!(super::friendly_error("edit.undo", "nothing to undo"), "Cofnij: nothing to undo");
+            assert_eq!(
+                super::friendly_error("sketch.dimension", "invalid parameters for `sketch.dimension`: value: `mm` is a unit name"),
+                "Wymiar szkicu: value: `mm` is a unit name"
+            );
+        }
         assert_eq!(super::friendly_error("edit.undo", "nothing to undo"), "Undo: nothing to undo");
         let mut app = super::SolveApp::new(solidcraft_engine::Session::default(), Default::default());
         app.run("solid.box", serde_json::json!({"length": 5, "width": 5, "height": 5})).unwrap();
@@ -246,7 +257,7 @@ pub use control::{ControlRequest, ControlResponse};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct UiState {
-    /// Automation-only shell mode; never persisted in preferences.
+    /// Effective shell mode; automation can override the saved preference for this session.
     pub layout: shell::LayoutMode,
     /// Ribbon tab; SHEET METAL and the contextual SKETCH join the seven design tabs.
     pub tab: String,
@@ -403,7 +414,6 @@ pub struct SolveApp {
     pub install_steps: Option<install::Steps>,
     /// Toolbar buttons the user pinned, removed or reordered.
     pub toolbar_custom: toolbar_custom::ToolbarCustom,
-    pub sketch_choices: sketch_families::Choices,
     /// Preferences kept between runs, and their window.
     pub preferences: prefs::Prefs,
     pub prefs_window: prefs::PrefsWindow,
@@ -504,6 +514,8 @@ pub struct SolveApp {
     applied_fonts_language: String,
     /// The interface font the fonts were last set up with (`Prefs::ui_font`).
     applied_ui_font: String,
+    /// The fonts installed include the system's fallback faces.
+    applied_system_fonts: bool,
 }
 
 impl SolveApp {
@@ -550,7 +562,6 @@ impl SolveApp {
             updater: update::Updater::default(),
             install_steps: None,
             toolbar_custom: toolbar_custom::ToolbarCustom::default(),
-            sketch_choices: sketch_families::Choices::default(),
             preferences: prefs::Prefs::default(),
             prefs_window: prefs::PrefsWindow::default(),
             slicer_menu: dialogs_save_mesh::SlicerMenu::default(),
@@ -605,6 +616,7 @@ impl SolveApp {
             docs: documents::Documents::default(),
             applied_fonts_language: "en".into(),
             applied_ui_font: String::new(),
+            applied_system_fonts: false,
         }
     }
 
@@ -717,6 +729,7 @@ impl SolveApp {
             if !prefs::MSAA.contains(&p.msaa) {
                 p.msaa = prefs::Prefs::default().msaa;
             }
+            self.ui.layout = p.layout;
             self.preferences = p;
         }
         // Saved before the theme was a preference: the Dark/Light flag says which.
@@ -745,6 +758,26 @@ impl SolveApp {
         let r = self.session.execute(id, &params).map_err(|e| e.to_string());
         self.big_operation |= now_ms() - t0 >= recovery_ui::BIG_OPERATION_MS;
         if let Ok(v) = &r {
+            if id == "view.layout" {
+                let layout =
+                    if v.get("mode").and_then(Value::as_str) == Some("compact") { shell::LayoutMode::Docked } else { shell::LayoutMode::Floating };
+                self.preferences.layout = layout;
+                self.ui.layout = layout;
+            }
+            if id == "view.history_layout" {
+                if let Some(width) = v.get("width").and_then(Value::as_f64) {
+                    self.preferences.timeline_left_width = ui_kit::history_snap_width(width as f32);
+                }
+                if let Some(dock) = v.get("dock").and_then(Value::as_str) {
+                    self.preferences.timeline_left = dock != "bottom";
+                    self.preferences.timeline_under_browser = dock == "under_browser";
+                    self.preferences.timeline_collapsed = false;
+                    self.preferences.timeline_left_browser_collapsed = false;
+                }
+                if let Some(collapsed) = v.get("collapsed").and_then(Value::as_bool) {
+                    self.preferences.timeline_collapsed = collapsed;
+                }
+            }
             if matches!(id, "view.ambient_occlusion" | "view.graphics_preset") {
                 self.preferences.ambient_occlusion = v.get("enabled").and_then(Value::as_bool).unwrap_or(false);
                 if id == "view.graphics_preset" {
@@ -795,7 +828,6 @@ impl SolveApp {
                 }
                 if matches!(id, "file.new" | "doc.open" | "doc.recover") {
                     render_workspace::reset_document(self);
-                    self.sketch_choices = sketch_families::Choices::default();
                     dim_view::cancel();
                     self.menu.props = None;
                     sketch_attachment_ui::clear(self);
@@ -847,6 +879,13 @@ impl SolveApp {
         if self.file_load.busy() || self.file_picker.is_some() {
             return;
         }
+        if id == "view.normal_to" {
+            if self.run(id, json!({"camera": self.cam})).is_ok() {
+                self.follow_view_request(true);
+                self.home.open = false;
+            }
+            return;
+        }
         // A disabled command starts nothing, however it was reached. The toolbar greys its
         // button, but a shortcut, the command palette and the control channel all land here.
         // Its reason goes to the status line, so the refusal is never silent.
@@ -875,6 +914,15 @@ impl SolveApp {
             return;
         }
         // A display toggle leaves the current modelling tool and camera in place.
+        if id == "view.layout" {
+            let mode = if self.ui.layout == shell::LayoutMode::Floating { "compact" } else { "floating" };
+            let _ = self.run(id, json!({"mode":mode}));
+            return;
+        }
+        if id == "view.history_layout" {
+            let _ = self.run(id, json!({}));
+            return;
+        }
         if id == "view.ambient_occlusion" {
             let _ = self.run(id, json!({"enabled": !self.preferences.ambient_occlusion}));
             return;
@@ -933,7 +981,7 @@ impl SolveApp {
             return;
         }
         if solidcraft_engine::find_command(id).is_some_and(|c| c.info(&self.session).enabled) {
-            self.sketch_choices.remember(id);
+            self.preferences.sketch_variants.remember(id);
         }
         if id == "parameters.change" {
             params_dialog::open(self);
@@ -1132,16 +1180,23 @@ impl SolveApp {
         v
     }
 
-    /// Is the origin widget shown? Origin planes and axes are drawn and pickable. While Create
-    /// Sketch picks its plane the Origin is always shown, drawn through the model (a plane
-    /// inside a body stays visible), even when the browser hides it.
+    /// Is the origin widget shown? Origin planes and axes are drawn and pickable. While a dialog
+    /// picks a plane ([`SolveApp::picking_plane`]) the Origin is always shown, drawn through the
+    /// model (a plane inside a body stays visible), even when the browser hides it.
     pub fn origin_visible(&self) -> bool {
-        self.ui.show_origin || self.picking_sketch_plane()
+        self.ui.show_origin || self.picking_plane()
     }
 
     /// Is Create Sketch open, waiting for its plane?
     pub fn picking_sketch_plane(&self) -> bool {
         self.dialog.as_ref().is_some_and(|d| matches!(d.kind, dialogs::Kind::Sketch))
+    }
+
+    /// Is a dialog waiting for a plane: Create Sketch, or a dialog whose active input takes origin
+    /// planes (Mirror's plane, Offset Plane, Midplane, the construct tools)? The origin planes are
+    /// shown for it, so they can be picked in the view rather than only in the browser (#2581).
+    pub fn picking_plane(&self) -> bool {
+        self.picking_sketch_plane() || self.dialog.as_ref().is_some_and(|d| d.inputs.get(d.active).is_some_and(|i| i.accept & selection::PLANES != 0))
     }
 
     /// Is the view drawn in perspective? The perspective preference, except while a sketch is
@@ -1223,7 +1278,6 @@ impl SolveApp {
             return;
         }
         self.cam_anim = None;
-        self.viewport.orbit_snap = None;
         self.viewport.orbit_free = None;
         let bounds = viewport::view_bounds(self);
         self.pending_fit = Some((self.cam, bounds, false));
@@ -1233,7 +1287,6 @@ impl SolveApp {
     /// Frame `bounds` at once, keeping the view direction (programmatic use).
     pub fn fit_bounds(&mut self, bounds: solidcraft_engine::geom::Aabb3) {
         self.cancel_view_animation();
-        self.viewport.orbit_snap = None;
         self.viewport.orbit_free = None;
         self.pending_fit = Some((self.cam, bounds, false));
         self.cam = self.fitted_bounds(self.cam, &bounds);
@@ -1279,7 +1332,6 @@ impl SolveApp {
     /// Move the camera to `to` over half a second (ease in-out, orientation slerped).
     pub fn animate_to(&mut self, to: Camera) {
         self.pending_fit = None;
-        self.viewport.orbit_snap = None;
         self.viewport.orbit_free = None;
         if !to.is_valid() {
             return;
@@ -1372,7 +1424,6 @@ impl SolveApp {
             self.animate_to(to);
         } else if to.is_valid() {
             self.cancel_view_animation();
-            self.viewport.orbit_snap = None;
             self.viewport.orbit_free = None;
             self.cam = to;
         }
@@ -1388,7 +1439,6 @@ impl SolveApp {
     /// immediately taking it back on the next frame.
     pub fn begin_external_navigation(&mut self) {
         self.cancel_view_animation();
-        self.viewport.orbit_snap = None;
         self.viewport.orbit_free = None;
         self.viewport.spin = false;
     }
@@ -1502,10 +1552,18 @@ impl SolveApp {
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         expression_complete::begin_frame(ui.ctx());
         let t0 = now_ms();
-        if self.preferences.language != self.applied_fonts_language || self.preferences.ui_font != self.applied_ui_font {
+        // The first frames draw with the bundled faces while the system's CJK, Hangul and Thai
+        // faces are read on a thread; the fonts are installed again once they are there.
+        crate::fonts::load_system_fonts_in_background(ui.ctx());
+        let system_fonts = crate::fonts::system_fonts_ready();
+        if self.preferences.language != self.applied_fonts_language
+            || self.preferences.ui_font != self.applied_ui_font
+            || (system_fonts && !self.applied_system_fonts)
+        {
             self.applied_fonts_language.clone_from(&self.preferences.language);
             self.applied_ui_font.clone_from(&self.preferences.ui_font);
-            crate::fonts::setup_fonts_for(ui.ctx(), &self.preferences.language, &self.preferences.ui_font);
+            self.applied_system_fonts = system_fonts;
+            crate::fonts::setup_fonts_without_waiting(ui.ctx(), &self.preferences.language, &self.preferences.ui_font);
         }
         let _language = crate::i18n::scope(&self.preferences.language);
         let mut report_input = None;
@@ -1531,6 +1589,7 @@ impl SolveApp {
     }
 
     fn cad_ui(&mut self, ui: &mut egui::Ui, report_input: &mut Option<issue_report::CadInput>) {
+        self.ui.layout.publish(ui.ctx());
         scenario::clear_handles();
         self.poll_deferred(ui.ctx());
         self.poll_delete_check(ui.ctx());
@@ -1553,27 +1612,37 @@ impl SolveApp {
                 return;
             }
         }
-        let floating = self.ui.layout == shell::LayoutMode::Floating;
+        let floating = ui_kit::Container::new(ui.ctx(), ui_kit::Surface::Panel).floating();
         let show_timeline = self.ui.show_timeline && !render_workspace::active(self);
         let left_timeline = show_timeline && self.preferences.timeline_left;
+        timeline_left::animate_folds(self, ui.ctx());
         if !floating {
             toolbar::toolbar(self, ui);
         }
         theme::TabAccent::publish(self, ui.ctx());
+        if !floating {
+            agent_chat::show(self, ui);
+        }
         if !floating && show_timeline && !left_timeline {
             timeline::timeline(self, ui);
         }
-        // A floating browser keeps the workspace the whole width and covers viewport input.
-        let browser_float = self.ui.show_browser && (self.preferences.browser_float || (floating && !left_timeline));
-        if !browser_float {
+        // Browser hugs its contents in either layout; it never becomes a full-height blank column.
+        if !self.ui.show_browser {
             self.shell.browser = None;
         }
-        self.shell.history = None;
+        if floating || left_timeline || !show_timeline {
+            self.shell.history = None;
+        }
         let full = ui.available_rect_before_wrap();
         if floating {
-            let cards = shell::Cards::new(full, self.ui.layout);
+            let cards = shell::Cards::new(full, self.ui.layout, toolbar::ribbon_height(self.preferences.ribbon_labels));
             self.shell.cards = vec![cards.workspace, cards.ribbon];
-            self.shell.history = (show_timeline && !left_timeline).then(|| timeline::floating_rect(full));
+            self.shell.history = if left_timeline {
+                let below_ribbon = egui::Rect::from_min_max(egui::pos2(full.left(), cards.bottom), full.max);
+                Some(timeline_left::floating_rect(self, below_ribbon))
+            } else {
+                show_timeline.then(|| timeline::floating_rect(full))
+            };
             // Draw the scene first, then let the unchanged panel layouts cover it. The
             // viewport keeps its full projection even underneath the browser and cards.
             preview::update(self, ui.ctx());
@@ -1599,48 +1668,38 @@ impl SolveApp {
         if floating && show_timeline && !left_timeline {
             timeline::timeline(self, ui);
         }
-        if self.ui.show_browser && !browser_float {
-            if left_timeline {
-                browser::browser_below_timeline(self, ui);
-            } else {
-                browser::browser(self, ui);
-            }
-        } else if left_timeline {
+        if left_timeline {
             timeline_left::left_panel(self, ui);
         }
         if render_workspace::active(self) {
             render_workspace::panel(self, ui);
         }
-        agent_chat::show(self, ui);
-        if browser_float {
-            // The remaining content starts below the ribbon in either shell layout.
-            let viewport = ui.available_rect_before_wrap();
-            browser::floating(self, ui, viewport);
+        if self.ui.show_browser {
+            browser::browser(self, ui);
         }
-        egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
-            if floating {
+        if floating {
+            agent_chat::show(self, ui);
+        }
+        Container::new(ui.ctx(), Surface::Viewport)
+            .central()
+            .frame(Container::new(ui.ctx(), Surface::Viewport).edge_frame(egui::Color32::TRANSPARENT))
+            .show(ui, |ui| {
                 let panel_content = ui.max_rect();
-                let mut content = panel_content;
-                if let Some(history) = self.shell.history {
-                    content.max.y = (history.top() - shell::SHELL_GAP).max(content.top());
+                self.shell.content = Some(shell::workspace_content(self, panel_content));
+                if floating {
+                    self.shell.panels = [
+                        egui::Rect::from_min_max(egui::pos2(full.left(), panel_content.top()), egui::pos2(panel_content.left(), full.bottom())),
+                        egui::Rect::from_min_max(egui::pos2(panel_content.right(), panel_content.top()), full.max),
+                    ]
+                    .into_iter()
+                    .filter(|r| r.is_positive())
+                    .collect();
+                    viewport::refresh_layout(self, ui.ctx().pixels_per_point());
+                } else {
+                    preview::update(self, ui.ctx());
+                    self.show_workspace(ui);
                 }
-                if let Some(browser) = self.shell.browser {
-                    content.min.x = (browser.right() + shell::SHELL_GAP).min(content.right());
-                }
-                self.shell.content = Some(content);
-                self.shell.panels = [
-                    egui::Rect::from_min_max(egui::pos2(full.left(), panel_content.top()), egui::pos2(panel_content.left(), full.bottom())),
-                    egui::Rect::from_min_max(egui::pos2(panel_content.right(), panel_content.top()), full.max),
-                ]
-                .into_iter()
-                .filter(|r| r.is_positive())
-                .collect();
-                viewport::refresh_layout(self, ui.ctx().pixels_per_point());
-            } else {
-                preview::update(self, ui.ctx());
-                self.show_workspace(ui);
-            }
-        });
+            });
         dialogs::show(self, ui.ctx());
         issue_report::CadInput::block(self, ui, report_input);
         sketch_palette::show(self, ui.ctx());
@@ -1819,9 +1878,10 @@ pub fn command_label(id: &str) -> &str {
     solidcraft_engine::find_command(id).map_or(id, |c| c.label)
 }
 
-/// An engine error with the command's label instead of its id: "Shell: offset must be …".
+/// An engine error with the command's label instead of its id: "Shell: offset must be …". The
+/// label follows the interface language; the engine's sentence stays as the engine wrote it.
 pub fn friendly_error(id: &str, e: &str) -> String {
-    let label = command_label(id);
+    let label = i18n::tr_label(command_label(id));
     let msg = e.replace(&format!("invalid parameters for `{id}`: "), "").replace(&format!("{id}: "), "").replace(&format!("`{id}`"), label);
     if msg.starts_with(label) { msg } else { format!("{label}: {msg}") }
 }

@@ -345,6 +345,22 @@ pub fn trim_piece(sk: &Sketch, curve: &str, at: Vec2) -> Option<Vec<Vec2>> {
     Some((0..=n).map(|i| sh.point(a + (b - a) * f64::from(i) / f64::from(n))).collect())
 }
 
+/// Trim and extend refuse an offset's output: its ends are recomputed from its source curves on
+/// every solve, so a new end there would be pulled straight back (the trim reported success and
+/// left the curve whole).
+fn refuse_offset_ends(sk: &Sketch, ci: usize, what: &str, cmd: &str) -> Result<()> {
+    match sk.curves.get(ci).filter(|c| sk.offset_distance(&c.id).is_some()) {
+        Some(c) => Err(bad(
+            cmd,
+            format!(
+                "`{}` is an offset, and its ends follow its source curves: {what} the source curves instead, or break the offset association first",
+                c.id
+            ),
+        )),
+        None => Ok(()),
+    }
+}
+
 fn trim(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "sketch.trim";
     let at = req_vec2(cmd, p, "at")?;
@@ -383,6 +399,7 @@ fn remove_piece(sk: &mut Sketch, ci: usize, at: Vec2, cmd: &str) -> Result<(Valu
         sk.remove_curves(&[ci]);
         return Ok((json!({"deleted": id}), removed));
     }
+    refuse_offset_ends(sk, ci, "trim", cmd)?;
     release_extent(sk, ci);
     let ts: Vec<f64> = cuts.iter().map(|c| c.0).collect();
     let (pieces, pts) = split_at(sk, ci, &ts)?;
@@ -590,6 +607,7 @@ fn extend(s: &mut Session, p: &Value) -> Result<Value> {
             return Err(bad(cmd, rep.failure(|_| "solve the existing sketch constraints before extending".into())));
         }
         let ci = curve_arg(sk, p, cmd)?;
+        refuse_offset_ends(sk, ci, "extend", cmd)?;
         let sh = sk.shape(ci).ok_or_else(|| bad(cmd, "curve"))?;
         let (pa, pb) = match sk.curves.get(ci).map(|c| c.kind.clone()) {
             Some(CurveKind::Line { a, b }) | Some(CurveKind::Arc { a, b, .. }) => (a, b),

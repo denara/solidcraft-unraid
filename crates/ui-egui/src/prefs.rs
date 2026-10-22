@@ -281,6 +281,33 @@ pub enum OrbitAround {
     Cursor,
 }
 
+/// Which program reads the 3D mouse on Linux when both spacenavd and the device itself (hidraw)
+/// are there (Preferences: "3D mouse driver"). Read by the app's reader, not by this crate.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpaceMouseDriver {
+    /// spacenavd when it runs, else the device itself (how it always was).
+    #[default]
+    Automatic,
+    Spacenavd,
+    /// The hidraw device, bypassing spacenavd's settings.
+    Direct,
+}
+
+impl SpaceMouseDriver {
+    pub const ALL: [Self; 3] = [Self::Automatic, Self::Spacenavd, Self::Direct];
+
+    /// The choice as the reader thread shares it (an `AtomicU8`).
+    pub fn to_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Back from [`Self::to_u8`]; anything else reads as Automatic.
+    pub fn from_u8(value: u8) -> Self {
+        Self::ALL.into_iter().find(|driver| driver.to_u8() == value).unwrap_or_default()
+    }
+}
+
 /// The browser sidebar's first width, and the width [`Prefs::default`] restores; the panel
 /// itself clamps what the user drags to its own range.
 pub const DEFAULT_BROWSER_WIDTH: f32 = 250.0;
@@ -351,6 +378,9 @@ preference_settings! {
     default_units: String = "mm".into(), 0;
     /// Mouse mapping: `fusion`, `solidworks` or `inventor`.
     nav: String = "fusion".into(), 1;
+    /// Opt in to rotation through both poles with roll, without the Shift axis-snap spring.
+    /// Independent of mouse bindings; false also preserves existing saved presets' behavior.
+    free_orbit: bool = false, 1 => check_tr("nav.free_orbit.label");
     /// View orientation widget: original signed axes (default) or compact cube.
     navigator_style: NavigatorStyle = NavigatorStyle::default(), 1;
     /// Show the radial ring and enable hold/flick gestures for viewport context menus.
@@ -374,6 +404,11 @@ preference_settings! {
     space_mouse_reverse: [bool; 6] = [false; 6], 1;
     /// Per physical axis of the cap, a multiplier on top of `space_mouse_speed`; 0 switches it off.
     space_mouse_axis_speed: [f32; 6] = [1.0; 6], 1;
+    /// Per physical axis of the cap, which of its motions drives it (`space_mouse::reassigned`),
+    /// applied after calibration; each motion drives exactly one axis.
+    space_mouse_axis_source: [usize; 6] = crate::space_mouse::SAME_AXES, 1;
+    /// Which program reads the 3D mouse when spacenavd and the device itself are both there (Linux).
+    space_mouse_driver: SpaceMouseDriver = SpaceMouseDriver::default(), 1;
     /// Per 3D mouse (`space_mouse::Input::device`), the calibration that puts its axes on
     /// 3Dconnexion's. A device without one is read as it reports. Page resets keep calibrations.
     #[serde(deserialize_with = "calibrations_that_read")]
@@ -407,19 +442,26 @@ preference_settings! {
     custom_themes: Vec<crate::theme_files::ThemeFile> = Vec::new();
     /// Interface language (a registered locale ID).
     language: String = "en".into(), 0;
+    /// Shared workspace composition; system windows and popups retain their purpose.
+    layout: crate::shell::LayoutMode = Default::default(), 0;
+    /// Show command names beneath ribbon icons, independently of workspace layout.
+    ribbon_labels: bool = true, 0 => check_tr("ui.ribbon_labels");
     /// Interface scale (1 = 100 %).
     ui_scale: f32 = 1.0, 0, accept(0.5..=2.5) => slider("ui.ui_scale", 0.5..=2.5, 0.05, |v| format!("{:.0} %", v * 100.0), "prefs:scale");
     /// Interface font: an installed font family (or a font file), or empty for the built-in one
     /// (#1290). Menus, dialogs and labels use it; glyphs it lacks fall back as before.
     ui_font: String = String::new(), 0;
-    /// Put the feature history above the parts browser in the left sidebar instead of along the
-    /// bottom of the viewport.
+    /// Put the feature history to the left of the browser instead of below the viewport.
     timeline_left: bool = false, 0;
-    /// Height of the feature-history section when it shares the left sidebar with the browser.
-    timeline_left_height: f32 = 360.0, 0;
-    /// Whether the browser below the left feature history is collapsed.
+    /// Measured outer width; the contents react to this width without a names mode.
+    timeline_left_width: f32 = 130.0, 0;
+    /// Share the browser column, vertically, instead of a separate left column.
+    timeline_under_browser: bool = false, 0;
+    /// Fold the shared-column history to its header.
+    timeline_collapsed: bool = false, 0;
+    /// Whether the browser beside the vertical history is collapsed to its rail.
     timeline_left_browser_collapsed: bool = false, 0;
-    /// Width of the left sidebar holding the browser (and the feature history above it), which
+    /// Width of the browser sidebar, which
     /// the user drags wider or narrower at its right edge.
     browser_width: f32 = DEFAULT_BROWSER_WIDTH, 0;
     /// Draw the parts browser on a translucent card over the 3D view instead of a column of its
@@ -450,6 +492,9 @@ preference_settings! {
     update: crate::update::Memo = crate::update::Memo::default();
     /// Save as mesh: the last format (`stl` or `3mf`), whether it was sent to a slicer, which one
     /// (an installed slicer's id or a program path), and the programs the user added (newest first).
+    /// The variant last started in each split tool family (Rectangle, Circle, Arc, Slot, Polygon, Line,
+    /// Spline): the family's button and shortcut start it again (`sketch_families`).
+    sketch_variants: crate::sketch_families::Choices = crate::sketch_families::Choices::default();
     save_mesh_format: String = "stl".into();
     /// Hidden edges in the current-view DXF export (false: omit, true: dashed).
     view_dxf_dashed: bool = false;
@@ -557,6 +602,7 @@ pub fn open_at(app: &mut SolveApp, page: usize) {
 struct Snapshot {
     prefs: Prefs,
     dark: bool,
+    layout: crate::shell::LayoutMode,
     grid: bool,
     shadow: bool,
     perspective: bool,
@@ -573,6 +619,7 @@ impl Snapshot {
         Snapshot {
             prefs: app.preferences.clone(),
             dark: app.ui.dark,
+            layout: app.ui.layout,
             grid: app.ui.show_grid,
             shadow: app.ui.ground_shadow,
             perspective: app.ui.perspective,
@@ -591,6 +638,7 @@ impl Snapshot {
         app.preferences = self.prefs;
         app.preferences.update = update;
         app.ui.dark = self.dark;
+        app.ui.layout = self.layout;
         app.ui.show_grid = self.grid;
         app.ui.ground_shadow = self.shadow;
         app.ui.perspective = self.perspective;
@@ -724,6 +772,7 @@ fn defaults(app: &mut SolveApp, page: usize) {
     match page {
         0 => {
             app.ui.dark = true;
+            app.ui.layout = app.preferences.layout;
             app.ui.agent_cursor = Default::default();
             app.autosave_minutes = 5.0;
             set_autosave(app);
@@ -1101,24 +1150,40 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
                 });
             });
             theme_row(app, ui);
+            ui_kit::row(ui, app.tr("ui.workspace_layout"), |ui| {
+                let mut selected = usize::from(app.ui.layout == crate::shell::LayoutMode::Docked);
+                if ui_kit::segmented(
+                    ui,
+                    &mut selected,
+                    &[crate::i18n::tr("ui.layout_floating"), crate::i18n::tr("ui.layout_compact")],
+                    Default::default(),
+                ) {
+                    let _ = app.run("view.layout", json!({"mode": if selected == 1 { "compact" } else { "floating" }}));
+                }
+            });
+            setting::ribbon_labels(app, ui);
             setting::ui_scale(app, ui);
             if !cfg!(target_arch = "wasm32") {
                 ui_kit::row(ui, app.tr_label("Interface font"), |ui| ui_font_row(app, ui));
             }
             ui_kit::row(ui, app.tr("ui.feature_history"), |ui| {
-                let mut selected = usize::from(app.preferences.timeline_left);
+                let mut selected = if app.preferences.timeline_left { if app.preferences.timeline_under_browser { 2 } else { 1 } } else { 0 };
                 if ui_kit::segmented(
                     ui,
                     &mut selected,
-                    &[crate::i18n::tr("ui.timeline_bottom"), crate::i18n::tr("ui.timeline_left_sidebar")],
+                    &[
+                        crate::i18n::tr("ui.timeline_bottom"),
+                        crate::i18n::tr("ui.timeline_left_sidebar"),
+                        crate::i18n::tr("ui.history_below_browser"),
+                    ],
                     Default::default(),
                 ) {
-                    app.preferences.timeline_left = selected == 1;
+                    let _ = app.run("view.history_layout", json!({"dock": match selected { 1=>"left",2=>"under_browser",_=>"bottom" }}));
                 }
             });
             ui_kit::text(ui, app.tr("ui.timeline_left_note"), ui_kit::Text::Note("timeline"));
             ui_kit::row(ui, app.tr_label("Parts browser"), |ui| {
-                setting::browser_float(app, ui);
+                ui.add_enabled_ui(app.ui.layout == crate::shell::LayoutMode::Floating, |ui| setting::browser_float(app, ui));
             });
             ui_kit::text(
                 ui,
@@ -1167,12 +1232,19 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
             if app.preferences.nav == TOUCHPAD_NAV {
                 ui_kit::text(ui, crate::i18n::tr("nav.touchpad.help"), ui_kit::Text::Note("navigation"));
             } else {
-                let snap_help = if app.preferences.nav == OPENSCAD_NAV { "" } else { "; hold Shift during orbit to snap" };
+                let snap_help =
+                    if app.preferences.free_orbit || app.preferences.nav == OPENSCAD_NAV { "" } else { "; hold Shift during orbit to snap" };
                 let raw_help = format!(
                     "{}; Ctrl+left drag on empty space orbits{snap_help}; hold Space to pan; the wheel zooms",
                     nav_preset(&app.preferences.nav).help
                 );
                 ui_kit::text(ui, crate::i18n::tr_label(&raw_help), ui_kit::Text::Note("navigation"));
+            }
+            let free_orbit = setting::free_orbit(app, ui);
+            crate::scenario::publish_rect("prefs:free_orbit", free_orbit.rect);
+            crate::scenario::publish_handle("prefs:free_orbit", free_orbit.rect.center());
+            if app.preferences.free_orbit {
+                ui_kit::text(ui, crate::i18n::tr("nav.free_orbit.help"), ui_kit::Text::Note("free_orbit"));
             }
             setting::radial_context_menu(app, ui);
             crate::mouse_gesture::nav_rows(app, ui, t);
@@ -1231,23 +1303,103 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
             setting::look_at_speed(app, ui);
             setting::space_mouse_enabled(app, ui);
             setting::space_mouse_speed(app, ui);
-            for (axis, name) in SPACE_MOUSE_AXES.iter().enumerate() {
-                ui_kit::row(ui, crate::i18n::tr_label(name), |ui| {
+            // Rows say what they do to the view, through the mapping navigation uses; the choices
+            // are the device's calibrated motions. Neither names a kind of device.
+            let mapping = app.space_mouse.mapping;
+            let rows: Vec<(String, bool)> = (0..6)
+                .map(|row| {
+                    let label = crate::space_mouse::row_label(mapping, row);
+                    let text = crate::i18n::Locale::for_language(&app.preferences.language).format(label, &[("n", &(row + 1).to_string())]);
+                    (text, label == "ui.space_mouse_view_off")
+                })
+                .collect();
+            let (driven_by, driven_by_label) = (app.tr("ui.space_mouse_driven_by").to_owned(), app.tr("ui.space_mouse_driven_by_label").to_owned());
+            let off_tip = app.tr("ui.space_mouse_view_off_tip").to_owned();
+            let motions: Vec<String> = crate::space_mouse::MOTIONS.iter().map(|motion| app.tr(motion).to_owned()).collect();
+            ui_kit::row(ui, app.tr("ui.space_mouse_view_axis"), |ui| {
+                let header = format!("{} · {} · {}", crate::i18n::tr_label("Invert"), crate::i18n::tr_label("Speed"), driven_by_label);
+                ui_kit::text(ui, &header, ui_kit::Text::Note("space_mouse_rows"));
+            });
+            for (axis, (name, off)) in rows.iter().enumerate() {
+                let group = ui_kit::row(ui, name, |ui| {
                     ui.add_enabled_ui(app.preferences.space_mouse_enabled, |ui| {
-                        ui.horizontal(|ui| {
-                            if let Some(reverse) = app.preferences.space_mouse_reverse.get_mut(axis) {
-                                ui_kit::checkbox(ui, crate::i18n::tr_label("Invert"), reverse);
+                        // Invert and speed do nothing on a row the driver turns off. The motion
+                        // choice below stays live, so a motion can still be swapped out of it.
+                        ui.add_enabled_ui(!off, |ui| {
+                            ui.horizontal(|ui| {
+                                if let Some(reverse) = app.preferences.space_mouse_reverse.get_mut(axis) {
+                                    ui_kit::checkbox(ui, crate::i18n::tr_label("Invert"), reverse);
+                                }
+                                if let Some(speed) = app.preferences.space_mouse_axis_speed.get_mut(axis) {
+                                    ui_kit::slider(
+                                        ui,
+                                        speed,
+                                        0.0..=3.0,
+                                        ui_kit::Slider { step: Some(0.05), format: |v| format!("{v:.2}×"), ..Default::default() },
+                                    );
+                                }
+                            });
+                        });
+                    })
+                    .response
+                });
+                if *off {
+                    group.on_hover_text(&off_tip);
+                }
+                ui_kit::row(ui, &driven_by_label, |ui| {
+                    ui.add_enabled_ui(app.preferences.space_mouse_enabled, |ui| {
+                        let source = &mut app.preferences.space_mouse_axis_source;
+                        let current = source.get(axis).copied().unwrap_or(axis);
+                        let mut chosen = current;
+                        ui_kit::dropdown_menu(ui, ("sc_space_mouse_source", axis), motions.get(current).map_or("", String::as_str), |ui| {
+                            for (from, name) in motions.iter().enumerate() {
+                                if ui_kit::list_picker(ui, name, name, chosen == from).clicked() {
+                                    chosen = from;
+                                }
                             }
-                            if let Some(speed) = app.preferences.space_mouse_axis_speed.get_mut(axis) {
-                                ui_kit::slider(
-                                    ui,
-                                    speed,
-                                    0.0..=3.0,
-                                    ui_kit::Slider { step: Some(0.05), format: |v| format!("{v:.2}×"), ..Default::default() },
-                                );
+                        })
+                        .on_hover_text(&driven_by);
+                        if chosen != current {
+                            crate::space_mouse::reassign(source, axis, chosen);
+                        }
+                    });
+                });
+            }
+            ui_kit::row(ui, "", |ui| {
+                let reassigned = app.preferences.space_mouse_axis_source != crate::space_mouse::SAME_AXES;
+                ui.add_enabled_ui(app.preferences.space_mouse_enabled && reassigned, |ui| {
+                    if ui_kit::button(ui, app.tr("ui.space_mouse_reset_axes"), ui_kit::Button::Normal).clicked() {
+                        app.preferences.space_mouse_axis_source = crate::space_mouse::SAME_AXES;
+                    }
+                });
+            });
+            // Only where the reader has seen the choice: Linux, with spacenavd and the device both there.
+            if let Some(present) = app.space_mouse.drivers.filter(|present| present.spacenavd || present.direct) {
+                let [label, auto, direct, only_spacenavd, only_direct] =
+                    ["driver", "driver_auto", "driver_direct", "driver_only_spacenavd", "driver_only_direct"]
+                        .map(|key| app.tr(&format!("ui.space_mouse_{key}")).to_owned());
+                let driver = &mut app.preferences.space_mouse_driver;
+                ui_kit::row(ui, &label, |ui| match (present.spacenavd, present.direct) {
+                    (true, true) => {
+                        let name = |driver| match driver {
+                            SpaceMouseDriver::Automatic => auto.as_str(),
+                            SpaceMouseDriver::Spacenavd => "spacenavd",
+                            SpaceMouseDriver::Direct => direct.as_str(),
+                        };
+                        ui_kit::dropdown_menu(ui, "sc_space_mouse_driver", name(*driver), |ui| {
+                            for choice in SpaceMouseDriver::ALL {
+                                if ui_kit::list_picker(ui, name(choice), name(choice), *driver == choice).clicked() {
+                                    *driver = choice;
+                                }
                             }
                         });
-                    });
+                    }
+                    (true, false) => {
+                        ui_kit::text(ui, &only_spacenavd, ui_kit::Text::Note("space_mouse_driver"));
+                    }
+                    (false, _) => {
+                        ui_kit::text(ui, &only_direct, ui_kit::Text::Note("space_mouse_driver"));
+                    }
                 });
             }
             ui_kit::row(ui, app.tr("ui.space_mouse_calibration"), |ui| {
@@ -1633,10 +1785,6 @@ fn current_theme_file(app: &SolveApp) -> serde_json::Value {
     }
 }
 
-/// The cap's physical axes, in the order of `Prefs::space_mouse_reverse`.
-pub(crate) const SPACE_MOUSE_AXES: [&str; 6] =
-    ["Push left / right", "Push forward / back", "Lift / press", "Tilt forward / back", "Tilt left / right", "Twist"];
-
 /// Fold a setting an older release kept in its own field into the one this version reads.
 /// `orbit_cursor` (`true` = the point under the cursor) became `orbit_around`. A 3D mouse
 /// calibration that can't be used as it is (a hand edit) is dropped, so the device is read as it
@@ -1645,6 +1793,10 @@ pub fn migrate(mut p: Prefs) -> Prefs {
     if p.orbit_cursor {
         p.orbit_around = OrbitAround::Cursor;
         p.orbit_cursor = false;
+    }
+    if !crate::space_mouse::drives_each_once(p.space_mouse_axis_source) {
+        log::warn!("preferences: the 3D mouse axis assignment {:?} doesn't drive each axis once; using the default", p.space_mouse_axis_source);
+        p.space_mouse_axis_source = crate::space_mouse::SAME_AXES;
     }
     p.space_mouse_calibrations.retain(|device, calibration| {
         let usable = calibration.is_usable();
@@ -1749,6 +1901,9 @@ pub fn set(app: &mut SolveApp, p: &serde_json::Value) -> Result<serde_json::Valu
     }
     let up_changed = new.up_axis != app.preferences.up_axis;
     let msaa_changed = new.msaa != app.preferences.msaa;
+    if p.get("layout").is_some() {
+        app.ui.layout = new.layout;
+    }
     app.preferences = new;
     if msaa_changed {
         save_graphics(app);
@@ -1792,7 +1947,7 @@ mod tests {
         let mut h = crate::scenario::Harness::new();
         let out = h.call("ui.prefs", json!({"theme": "gruvbox-dark-hard"}));
         assert_eq!(out["result"]["theme"], "gruvbox-dark-hard", "{out}");
-        assert!(out["result"]["theme_ids"].as_array().is_some_and(|ids| ids.len() == 9), "{out}");
+        assert!(out["result"]["theme_ids"].as_array().is_some_and(|ids| ids.len() == 3 + crate::theme_files::builtin().len()), "{out}");
         h.frames(2);
         let hard = crate::theme_files::find("gruvbox-dark-hard", &[]).map(crate::theme_files::resolve).unwrap();
         assert!(h.app.ui.dark);
@@ -2061,6 +2216,26 @@ mod tests {
     }
 
     #[test]
+    fn free_orbit_defaults_off_and_follows_preferences_transactions() {
+        let old: Prefs = serde_json::from_value(json!({"nav":"solidworks"})).unwrap();
+        assert!(!old.free_orbit);
+        let mut h = crate::scenario::Harness::new();
+        h.call("ui.prefs", json!({"open":"Navigation"}));
+        h.step(&json!({"click":{"handle":"prefs:free_orbit"}})).unwrap();
+        assert!(h.app.preferences.free_orbit);
+        let mut restored = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
+        restored.load_prefs(&h.app.prefs());
+        assert!(restored.preferences.free_orbit);
+        h.call("ui.prefs", json!({"button":"cancel"}));
+        assert!(!h.app.preferences.free_orbit);
+        h.call("ui.prefs", json!({"open":"Navigation","free_orbit":true,"button":"apply"}));
+        h.call("ui.prefs", json!({"button":"defaults"}));
+        assert!(!h.app.preferences.free_orbit);
+        h.call("ui.prefs", json!({"button":"cancel"}));
+        assert!(h.app.preferences.free_orbit);
+    }
+
+    #[test]
     fn radial_context_menu_defaults_off_and_follows_preferences_transactions() {
         assert!(!Prefs::default().radial_context_menu);
         let old: Prefs = serde_json::from_value(json!({"nav":"solidworks","zoom_reverse":true})).unwrap();
@@ -2321,7 +2496,6 @@ mod tests {
 
         // Switch language to Japanese
         set(&mut app, &json!({"language": "ja", "timeline_left": true})).unwrap();
-        app.preferences.timeline_left_height = 275.0;
         app.preferences.timeline_left_browser_collapsed = true;
         assert_eq!(app.preferences.language, "ja");
         assert!(app.preferences.timeline_left);
@@ -2333,7 +2507,6 @@ mod tests {
         other.load_prefs(&app.prefs());
         assert_eq!(other.preferences.language, "ja");
         assert!(other.preferences.timeline_left);
-        assert_eq!(other.preferences.timeline_left_height, 275.0);
         assert!(other.preferences.timeline_left_browser_collapsed);
         assert_eq!(other.tr("ui.preferences"), "環境設定");
     }

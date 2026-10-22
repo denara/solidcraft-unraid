@@ -1361,7 +1361,10 @@ fn thread_choices_can_start_without_a_face_and_recover_from_invalid_text() {
     h.call("ui.scroll", json!({"x":first.x,"y":first.y,"delta":-60}));
     h.frames(12);
     h.step(&json!({"click":{"handle":"dialog:Size:8 mm"}})).unwrap();
-    assert!(matches!(&h.app.dialog.as_ref().unwrap().kind, Kind::Thread { designation, .. } if designation == "M8x1.25"));
+    assert!(matches!(&h.app.dialog.as_ref().unwrap().kind, Kind::Thread { designation, .. } if designation == "M8"));
+    if let Kind::Thread { designation, .. } = &h.app.dialog.as_ref().unwrap().kind {
+        assert_eq!(solidcraft_engine::doc::parse_metric_thread(designation), Some((8.0, 1.25)));
+    }
     assert!(apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).is_err(), "a face is still required");
 }
 
@@ -1388,7 +1391,19 @@ fn modelled_thread_preview_updates_reports_errors_and_cancels_without_changes() 
     designation(&mut h, "M8x1.3");
     wait_feature_preview(&mut h);
     assert_ne!(h.app.preview.key, first_key, "changing pitch updates the preview before OK");
+    // An 8 mm shaft is turned down for an M6.
+    let m8_key = h.app.preview.key;
     designation(&mut h, "M6x1.3");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while h.app.preview.key == m8_key && std::time::Instant::now() < deadline {
+        h.frames(2);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    wait_feature_preview(&mut h);
+    assert!(h.app.preview.error.is_none(), "{:?}", h.app.preview.error);
+    assert_eq!(h.app.preview.replaced, ["Body1"]);
+    // A shaft thinner than the thread is still refused.
+    designation(&mut h, "M10x1.5");
     for _ in 0..500 {
         h.frames(2);
         if !h.app.preview.busy && h.app.preview.error.is_some() {
@@ -1398,7 +1413,7 @@ fn modelled_thread_preview_updates_reports_errors_and_cancels_without_changes() 
     }
     assert!(h.app.preview.error.as_deref().is_some_and(|e| e.contains("does not fit")), "{:?}", h.app.preview.error);
     designation(&mut h, "M8x1.3");
-    // The M6 error stays until the new preview starts; wait for it to go, or
+    // The M10 error stays until the new preview starts; wait for it to go, or
     // `wait_feature_preview` would stop at the stale error on a host that schedules the
     // preview a few frames later.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
@@ -1486,6 +1501,32 @@ fn align_snaps_to_centres_and_edge_middles() {
     let p = apply_commands(&app, &d).unwrap().remove(0).1;
     assert_eq!(p["from"]["snap"], json!("face_center"));
     assert_eq!(p["to"]["snap"], json!("edge_mid"));
+}
+
+/// The Align dialog takes a plane (viewport or browser click) and the origin plane stays a plane
+/// in the command, so the bodies follow it when it moves.
+#[test]
+fn align_accepts_a_plane_click() {
+    let mut app = boxed();
+    let mut d = start(&mut app, vec![], "solid.align");
+    d.inputs[0].items = vec![Sel::Body { name: "Body1".into() }];
+    d.inputs[1].items = vec![face(&app, Vec3::new(20.0, 15.0, 0.0))];
+    let plane = crate::viewport::Hit::Plane { name: "XZ".into(), point: Vec3::ZERO };
+    d.active = 2;
+    let sel = d.candidate(&app.session, &plane);
+    assert_eq!(sel, Some(Sel::Plane { name: "XZ".into() }), "the To input takes a plane");
+    d.pick(&app.session, sel.unwrap());
+    let p = apply_commands(&app, &d).unwrap().remove(0).1;
+    assert_eq!(p["to_plane"], json!("XZ"));
+    assert!(p.get("to").is_none() && p["from_face"].is_array());
+    // The origin point is a From/To too.
+    let origin = crate::viewport::Hit::Vertex { body: String::new(), point: Vec3::ZERO };
+    let sel = d.candidate(&app.session, &origin);
+    assert!(sel.is_some(), "the To input takes the origin point");
+    d.inputs[2].items.clear();
+    d.pick(&app.session, sel.unwrap());
+    let p = apply_commands(&app, &d).unwrap().remove(0).1;
+    assert_eq!(p["to"], json!("origin"));
 }
 
 #[test]

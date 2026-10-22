@@ -15,6 +15,15 @@ Before choosing a task, check the [command inventory](docs/features.md) and
 
 Questions, ideas or want to say what you're working on? Join the [Discord](https://discord.gg/FtU4NQNVDH).
 
+## Kernel work is paused
+
+We're evaluating a new geometry kernel. Until that's decided, please don't open issues, pull
+requests or discussions about kernel work: booleans, fillets, chamfers, shell, offsets, sweeps and
+lofts, threads and holes, STEP/IGES import and export, tessellation, or anything else that changes
+`crates/kernel/`. The pinned issue on the tracker explains it. New ones get the `kernel-paused`
+label (`.github/workflows/kernel-paused.yml`) and a maintainer answers them. Crashes and data loss
+are still taken as issues, and everything outside the kernel carries on as normal.
+
 ## Get it running (about 10 minutes on a fast machine)
 
 You need stable Rust 1.95 or newer (required by egui/eframe 0.36). For the web

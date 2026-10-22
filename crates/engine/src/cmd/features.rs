@@ -92,7 +92,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("solid.thread", "Thread", thread)
         .at("SOLID", "CREATE")
         .icon("thread")
-        .params("face: [x,y,z] on a cylindrical face; designation?: ISO metric (\"M8\", \"M8x1\"; default: the size that fits); length?: expr (default: the whole face); modeled?: bool (default false). Cosmetic: the model is unchanged, model.threads lists it. Modeled: cuts the thread profile into the body"),
+        .params("face: [x,y,z] on a cylindrical face; designation?: ISO metric (\"M8\", \"M8x1\"; default: the size that fits); length?: expr (default: the whole face); modeled?: bool (default false). Cosmetic: the model is unchanged, model.threads lists it. Modeled: cuts the thread profile into the body; a shaft thicker than the thread is first turned down to its major diameter over the threaded length"),
     CommandSpec::new("solid.shell", "Shell", shell)
         .at("SOLID", "MODIFY")
         .icon("shell")
@@ -180,6 +180,16 @@ const START_PROBE_MM: f64 = 0.1;
 /// past a body's far side read as a Join (#1257).
 pub fn auto_operation(s: &Session, p: &Value) -> Option<&'static str> {
     auto_operation_in(s, p, true)
+}
+
+impl Session {
+    /// Whether a cut or intersect that names no bodies takes part in every body of `st`: the
+    /// active component has no body of its own while the model has some (a sketch in the
+    /// assembly's root cutting through its parts, #1234). The command and its preview both ask
+    /// this, so the preview never refuses a cut the command makes (#3085).
+    pub fn cut_takes_every_body(&self, st: &solidcraft_doc::ModelState) -> bool {
+        !st.bodies.is_empty() && !st.bodies.iter().any(|b| self.doc.model_body_component(b) == self.active_component)
+    }
 }
 
 fn auto_operation_in(s: &Session, p: &Value, world_faces: bool) -> Option<&'static str> {
@@ -503,10 +513,8 @@ fn add_feature_in(s: &mut Session, p: &Value, kind: FeatureKind, world: bool) ->
         && !primitive
         && (matches!(str_(p, "operation").and_then(Operation::parse), Some(Operation::Cut | Operation::Intersect))
             || matches!(&kind, FeatureKind::Extrude { operation: Operation::Cut | Operation::Intersect, .. }))
-        && {
-            let st = s.model.state();
-            !st.bodies.is_empty() && !st.bodies.iter().any(|b| s.doc.model_body_component(b) == s.active_component)
-        } {
+        && s.cut_takes_every_body(&s.model.state())
+    {
         vec!["*".to_string()]
     } else {
         participants
@@ -1481,22 +1489,26 @@ fn mirror(s: &mut Session, p: &Value) -> Result<Value> {
 
 /// Bodies picked where the viewport shows them: each world name ("Body1", or "Body1 (Occ:2)"
 /// for a further instance) becomes its component's body name, with the occurrence path of the
-/// placement it was picked at. Names stay as they are (and no placement is kept) while every
-/// component is in place, or when one of them is not a body.
+/// placement it was picked at (where the copy goes). Names stay as they are, and no placement is
+/// kept, while every body is in the active component and every component in place, or when one
+/// of them is not a body.
 fn placed_bodies(s: &Session, names: Vec<String>, cmd: &str) -> Result<(Vec<String>, Vec<Vec<u64>>)> {
-    if names.is_empty() || !crate::frames::placed(s) {
+    if names.is_empty() || s.doc.occurrences.is_empty() {
         return Ok((names, Vec::new()));
     }
     let frames = s.doc.body_frames_with_source(&s.model.state());
     let mut picked = Vec::with_capacity(names.len());
     for name in &names {
-        let Some((_, own, _, path, _)) = frames.iter().find(|(world, ..)| world == name) else { return Ok((names, Vec::new())) };
-        if path.iter().any(|id| s.pending_moves.contains_key(id)) {
-            return Err(bad(cmd, format!("`{name}` has a position that is not captured yet: Capture Position (component.capture_position) first")));
-        }
-        picked.push((own.clone(), path.clone()));
+        let Some((_, own, component, path, _)) = frames.iter().find(|(world, ..)| world == name) else { return Ok((names, Vec::new())) };
+        picked.push((own.clone(), *component, path.clone()));
     }
-    Ok(picked.into_iter().unzip())
+    if !crate::frames::placed(s) && picked.iter().all(|(_, component, _)| *component == s.active_component) {
+        return Ok((names, Vec::new()));
+    }
+    if let Some((name, ..)) = picked.iter().find(|(_, _, path)| path.iter().any(|id| s.pending_moves.contains_key(id))) {
+        return Err(bad(cmd, format!("`{name}` has a position that is not captured yet: Capture Position (component.capture_position) first")));
+    }
+    Ok(picked.into_iter().map(|(own, _, path)| (own, path)).unzip())
 }
 
 /// The other name of an origin plane (`Top` for `XY`, `XY` for `Top`...), if `name` is one.

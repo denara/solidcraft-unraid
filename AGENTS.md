@@ -16,7 +16,7 @@ new uses of it anywhere else. Public docs/web/Flatpak deployments use project Pa
 
 ## Container prototype baseline
 The first Unraid prototype used upstream commit `af536a7`. The current validated
-container baseline is `e94900933dafd63e2b32594afbdc879ecd64d2f7`.
+container baseline is `3d3dd27439995f37eaed1feaa1c53a0e42d2fe39`.
 Keep later upstream CAD/UI feature updates separate from this deployment addition;
 advance the baseline only as a separate, validated update. See [update records](docs/unraid-updates.md).
 
@@ -171,6 +171,14 @@ People trust SolidCraft with their designs; a crash loses their work. **This out
   egui/eframe/winit/wgpu/rfd. **The UI crate is swappable.** Only `crates/kernel` may use `truck`.
 - **The UI is thin**: panels read engine state and act through `app.run(id, params)` /
   `app.start(id)`. Colours come from `theme::Tokens`.
+- **One outer UI container**: all panels, floating sheets, menus, overlays and platform UI
+  windows use `ui_kit::Container` (directly or through `Panel`, `Window`, `Confirm`, `Menu`).
+  Declare the semantic `Surface`; workspace panels use its shared layout policy and chrome.
+  System/report windows use `ui_kit::Window`; its low-level host builder is kit-private.
+  Do not construct raw egui hosts, outer popup/window frames or shadows in feature modules.
+  `cargo xtask ui-containers` recursively checks source/examples in all current and future crates
+  and apps. It runs in the fast repository CI job and `cargo xtask ci`, with no caller allowances.
+  See `docs/ui-container-audit.md` for the inventory and legitimate content/native exceptions.
 - **One set of camera controls**: every page or canvas with a camera (viewport, Render
   preview, future flat pattern or drawing pages) calls `navigation::handle` with its `NavCaps`
   (orbit off for flat 2D pages). New canvases must use `navigation::handle`; never hand-roll
@@ -283,12 +291,14 @@ before the draft is verified.
 milestone task lands. `cargo xtask features` regenerates `docs/features.md` (SolidCraft's
 commands by area, from the registry) when commands are added or renamed.
 
-The container integration omits upstream's macOS Finder, 3Dconnexion driver FFI and Windows native-crash/resize-border unsafe bridges; command-line
+The container integration omits upstream's macOS Finder, 3Dconnexion driver FFI and Windows native-crash/resize-border/work-area unsafe bridges; command-line
 file opening and all Linux/container behavior are preserved. The driver compatibility API reports Unsupported without starting a thread; shared pure-Rust HID handling is retained. CAD and UI logic remain Rust.
 The upstream JavaScript service worker is browser infrastructure, independent of HTTP MCP.
 
 Design-format additions follow upstream's per-change files under crates/doc/src/format/pending/.
 The fork regenerates shipped licences after integration so its HTTP gateway remains covered.
+STEP worker placements use the existing bounded topology copier (`ops::placed_topology`),
+as explicit transforms do, to preserve repeated periodic seam edges without generic-builder panics.
 
 ## Lists many changes add to
 Keep message catalogs sorted (cargo xtask lists --fix), module lines in their sorted group,

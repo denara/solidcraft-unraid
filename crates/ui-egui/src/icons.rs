@@ -31,14 +31,7 @@ enum Finish {
 #[derive(Clone, Default)]
 struct Cache(Arc<Mutex<HashMap<(&'static str, Look, u32, Finish), TextureHandle>>>);
 
-/// Draw the icon `name` in `r`. The ink, fill and accent colours the callers pass are no longer
-/// used: the palette decides. Only the ink's opacity is kept, so a dimmed (disabled) button dims
-/// its icon.
-pub fn paint(p: &Painter, r: Rect, name: &str, ink: Color32, _fill: Color32, _accent: Color32) {
-    paint_icon(p, r, name, f32::from(ink.a()) / 255.0);
-}
-
-/// [`paint`] with an explicit opacity (0 to 1).
+/// Draw palette-owned icon artwork with an explicit opacity (0 to 1).
 pub fn paint_icon(p: &Painter, r: Rect, name: &str, opacity: f32) {
     paint_on(p, r, name, None, opacity);
 }

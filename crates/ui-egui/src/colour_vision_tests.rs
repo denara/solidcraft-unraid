@@ -251,7 +251,6 @@ fn groups(t: &Tokens) -> Vec<Group> {
     let lift = |c: Color32| {
         Color32::from_rgb(c.r().saturating_add(t.hover_face_lift), c.g().saturating_add(t.hover_face_lift), c.b().saturating_add(t.hover_face_lift))
     };
-    let ic = &t.icons;
     let a = &t.analysis;
     let mut out = vec![
         group(
@@ -336,37 +335,6 @@ fn groups(t: &Tokens) -> Vec<Group> {
             "ribbon accents",
             &[("glyph_text", t.glyph_text), ("sketch_accent", t.sketch_accent), ("construction_geom", t.construction_geom)],
             &[("toolbar", t.toolbar)],
-        ),
-        group(
-            "origin icon",
-            &[("icons.axes[0]", ic.axes[0]), ("icons.axes[1]", ic.axes[1]), ("icons.axes[2]", ic.axes[2])],
-            &[("toolbar", t.toolbar)],
-        ),
-        group(
-            "accessibility icon",
-            &[("icons.access[0]", ic.access[0]), ("icons.access[1]", ic.access[1]), ("icon_fill", t.icon_fill), ("icon", t.icon)],
-            &[],
-        ),
-        group("draft icon", &[("icons.draft[0]", ic.draft[0]), ("icons.draft[1]", ic.draft[1]), ("icon", t.icon)], &[]),
-        group(
-            "curvature icon",
-            &[("icons.curvature[0]", ic.curvature[0]), ("icons.curvature[1]", ic.curvature[1]), ("icons.curvature[2]", ic.curvature[2])],
-            &[],
-        ),
-        group(
-            "appearance icon",
-            &[("icons.paint[0]", ic.paint[0]), ("icons.paint[1]", ic.paint[1]), ("icons.paint[2]", ic.paint[2]), ("icon_fill", t.icon_fill)],
-            &[],
-        ),
-        group("environment icon", &[("icons.sky", ic.sky), ("icons.floor", ic.floor), ("icons.highlight", ic.highlight)], &[]),
-        group("warning icon", &[("icons.warning", ic.warning), ("icon", t.icon)], &[("toolbar", t.toolbar)]),
-        group("interference icon", &[("icons.interference", ic.interference), ("icon", t.icon)], &[("toolbar", t.toolbar)]),
-        group("folder icons", &[("icons.folder", ic.folder), ("icons.plane", ic.plane), ("icons.fold", ic.fold), ("icon", t.icon)], &[]),
-        group("sheet icons", &[("icons.sheet", ic.sheet), ("icons.sheet_2", ic.sheet_2), ("icon", t.icon)], &[]),
-        group(
-            "app bar buttons",
-            &[("app_bar_icon[0]", t.app_bar_icon[0]), ("app_bar_icon[1]", t.app_bar_icon[1]), ("app_bar_icon[2]", t.app_bar_icon[2])],
-            &[("app_bar", t.app_bar)],
         ),
         // Tab names and icons identify the tabs; each accent must read against the toolbar.
         group("surface tab", &[("surface_accent", t.surface_accent)], &[("toolbar", t.toolbar)]),
@@ -478,6 +446,7 @@ const NO_MEANING: &[(&str, &str)] = &[
     ("render_accent", "the Render workspace's identity colour"),
     // The window's chrome: grounds, text and borders (measured as grounds where meaning sits on them).
     ("panel_header", "chrome"),
+    ("icon", "neutral control ink; command artwork uses the SVG palette"),
     ("border", "chrome"),
     ("text_dim", "secondary text"),
     ("accent", "the one interface accent"),
@@ -485,8 +454,6 @@ const NO_MEANING: &[(&str, &str)] = &[
     ("dialog_bg", "chrome"),
     ("dialog_border", "chrome"),
     ("chip", "a label's ground"),
-    ("heading_bg", "chrome"),
-    ("subheading_bg", "chrome"),
     ("overlay", "a chip's ground over the view"),
     ("app_bar_text", "text"),
     ("app_bar_separator", "neutral chrome divider"),
@@ -528,10 +495,7 @@ const NO_MEANING: &[(&str, &str)] = &[
     ("analysis.hatch", "a flag: stripes on the failing faces"),
     ("logo[3]", "the mark's white edge"),
     // Icon colours that are a shade of a measured one, or one mark alone.
-    ("icons.sheet_light", "a lighter shade of a sheet"),
-    ("icons.sheet_line", "lines on a sheet"),
-    ("icons.glint", "a highlight"),
-    ("icons.stripe", "zebra stripes, grey"),
+    ("icons.highlight", "white ink on viewport markers and the agent pointer"),
     ("icons.agent", "the agent's pointer, alone"),
     ("icons.marker_halo", "a dark halo under a marker"),
 ];
@@ -736,9 +700,6 @@ fn each_mode_changes_only_its_table() {
         "analysis.draft",
         "analysis.access",
         "analysis.hatch",
-        "icons.axes",
-        "icons.access",
-        "icons.draft",
         "bend_up",
         "bend_down",
         "surface_accent",

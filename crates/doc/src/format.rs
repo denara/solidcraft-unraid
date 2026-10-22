@@ -1250,7 +1250,9 @@ mod tests {
         file["format"] = Value::from("solidcraft/23");
         let opened = read(&file.to_string()).unwrap();
         assert_eq!(opened.format, format_string(FORMAT));
-        assert_eq!(opened.features, plain.features);
+        let mut kept = plain.features.clone();
+        kept.iter_mut().for_each(|f| f.kernel_piece_order = true);
+        assert_eq!(opened.features, kept);
         // One that chooses its relief says so in the file, which is stamped 24 and keeps it.
         let mut own = Document::new("A");
         own.add_feature(flange(Some("round"), Some("6 mm")), None).unwrap();
@@ -1742,7 +1744,7 @@ mod tests {
         legacy["format"] = Value::from("solidcraft/6");
         let original_table = legacy["configs"].clone();
         let upgraded = read(&legacy.to_string()).unwrap();
-        d.features.iter_mut().for_each(|f| f.shell_piece_order = true);
+        d.features.iter_mut().for_each(|f| (f.shell_piece_order, f.kernel_piece_order) = (true, true));
         assert_eq!(upgraded, d, "the identity migration preserves the complete design");
         assert_eq!(serde_json::to_value(&upgraded.configs).unwrap(), original_table);
         assert_eq!(upgraded.format, format_string(FORMAT));
@@ -1796,9 +1798,12 @@ mod tests {
         legacy["format"] = Value::from("solidcraft/7");
         let mut features = legacy["features"].clone();
         pieces_in_shell_order(&mut features);
+        for f in features.as_array_mut().into_iter().flatten() {
+            f["kernel_piece_order"] = Value::Bool(true);
+        }
         let params = legacy["params"].clone();
         let upgraded = read(&legacy.to_string()).unwrap();
-        d.features.iter_mut().for_each(|f| f.shell_piece_order = true);
+        d.features.iter_mut().for_each(|f| (f.shell_piece_order, f.kernel_piece_order) = (true, true));
         assert_eq!(upgraded, d);
         let upgraded_json: Value = serde_json::from_str(&upgraded.to_json()).unwrap();
         assert_eq!(upgraded_json["features"], features);

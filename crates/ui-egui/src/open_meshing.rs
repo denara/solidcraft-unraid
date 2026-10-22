@@ -4,7 +4,7 @@
 //! file) and placed; the display meshes are made afterwards, off the UI thread. Until they all
 //! are, the viewport draws the bodies already meshed ([`shown_world`]), so the first parts show
 //! within moments and the window stays responsive while the rest come in. The first placement of
-//! every part is meshed first: its other placements only move that mesh. The view is framed from
+//! every part is meshed first: its other placements are drawn from that mesh. The view is framed from
 //! the bodies' outlines meanwhile, and framed again from the meshes when they are all made, unless
 //! the camera was moved in between. Editing the design meanwhile meshes the new world instead.
 //!
@@ -15,6 +15,7 @@
 //!
 //! Display only: commands, picking of what is drawn and exports read the session's world as ever.
 
+use crate::ui_kit::{Container, Surface};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -70,10 +71,12 @@ impl Meshing {
                     return;
                 }
                 if let Some(b) = world.bodies.get(i) {
-                    let _ = b.mesh();
+                    // What the viewport draws and picks: a placed part's shared mesh, not a
+                    // moved copy of it (its placements are drawn as instances of it).
+                    let _ = b.mesh_in_place();
                     if plans {
                         let _ = b.display_plan();
-                        let _ = b.plan_mesh();
+                        let _ = b.plan_mesh_in_place_at(solidcraft_engine::doc::display_quality::current());
                     }
                 }
                 if let Ok(mut r) = ready.lock() {
@@ -137,13 +140,14 @@ pub(crate) fn show(app: &SolveApp, ctx: &egui::Context) {
     let (Some((done, total)), Some(view)) = (progress(app), app.viewport.rect) else { return };
     let t = crate::theme::Tokens::get();
     let at = egui::pos2(view.left() + 12.0, view.bottom() - 12.0);
-    egui::Area::new(egui::Id::new("open_meshing"))
+    Container::new(ctx, Surface::Toast)
+        .area(egui::Id::new("open_meshing"))
         .order(egui::Order::Foreground)
         .pivot(egui::Align2::LEFT_BOTTOM)
         .fixed_pos(at)
         .interactable(false)
         .show(ctx, |ui| {
-            egui::Frame::popup(ui.style()).fill(t.panel).show(ui, |ui| {
+            Container::popup_frame(ui.style()).fill(t.panel).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label(egui::RichText::new(format!("Loading parts {done}/{total}")).color(t.text));

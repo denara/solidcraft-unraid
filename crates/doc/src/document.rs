@@ -685,8 +685,10 @@ pub enum FeatureKind {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         combine: bool,
         /// Where each of `bodies` is mirrored from: the occurrence path of the placement it was
-        /// picked at. The body is mirrored where that placement shows it, as the feature's own
-        /// component sees it. Empty in older designs, which mirror the bodies' own geometry.
+        /// picked at. The body is mirrored where that placement shows it, in the plane of the
+        /// feature's own component, and its copy joins the body's component (or, when that is
+        /// placed more than once, the innermost component around it placed once). Empty in older
+        /// designs, which mirror the bodies' own geometry.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         placements: Vec<Vec<u64>>,
     },
@@ -950,6 +952,15 @@ pub enum FeatureKind {
         /// Normals the same way instead of facing each other.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         flip: bool,
+        /// A plane the bodies move with (an origin or construction plane): its origin and normal
+        /// are the `from` point and normal, worked out again whenever the plane moves.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_plane: Option<PlaneRef>,
+        /// A plane the bodies move onto: after turning to meet it (when `from` has a normal) the
+        /// `from` point is brought onto the plane along its normal, so the plane may move and the
+        /// bodies follow. Replaces `to`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to_plane: Option<PlaneRef>,
     },
     /// A helical coil: a circular or square section swept `turns` times about `axis`, rising
     /// `pitch` per turn, on a helix of `diameter` (the section's centre, or its inside or outside).
@@ -2320,6 +2331,12 @@ pub struct Feature {
     /// where newer ones number them after the first name (`Ribs (4)`, #373).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub shell_piece_order: bool,
+    /// The pieces of a face this feature splits are numbered in the kernel's order and by the
+    /// index of the face they came from, as builds before #3902 numbered them, instead of by
+    /// place. Set on the features of designs saved before then, whose stored `#k` face names
+    /// mean that numbering.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub kernel_piece_order: bool,
     #[serde(flatten)]
     pub kind: FeatureKind,
 }
@@ -3021,6 +3038,7 @@ impl Document {
             face_names: Vec::new(),
             participants: Vec::new(),
             shell_piece_order: false,
+            kernel_piece_order: false,
             kind,
         };
         self.place_feature(f);
@@ -3209,10 +3227,11 @@ impl Document {
         if name.len() > 64 {
             return Some("parameter names are at most 64 characters".into());
         }
-        if expr::is_reserved(name) {
-            return Some(format!("`{name}` is a unit, constant or function name"));
+        match expr::reserved_kind(name) {
+            Some("constant") => Some(format!("`{name}` is a constant, so it cannot be a parameter name")),
+            Some(kind) => Some(format!("`{name}` is a {kind} name, so it cannot be a parameter name")),
+            None => None,
         }
-        None
     }
 
     /// Add or change a parameter. Fails if the result would not evaluate. A new parameter

@@ -50,6 +50,7 @@ raw-window-handle = "0.6"
 # The window's resize border and DPI size (src/native_frame.rs): the window procedure, hit test, DPI.
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Diagnostics_Debug",

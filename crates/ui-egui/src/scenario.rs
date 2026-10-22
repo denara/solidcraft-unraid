@@ -269,7 +269,7 @@ impl Harness {
     pub fn settle(&mut self) {
         for _ in 0..2000 {
             // Queued input used up and the view no longer moving.
-            if self.app.synthetic.is_empty() && self.app.cam_anim.is_none() && self.app.viewport.orbit_snap.is_none() {
+            if self.app.synthetic.is_empty() && self.app.cam_anim.is_none() {
                 break;
             }
             self.frame();
@@ -385,7 +385,7 @@ impl Harness {
         let basis = |c: &solidcraft_engine::render::Camera| c.basis();
         let mut prev = basis(&self.app.cam);
         self.app.animate_view(v);
-        if self.app.cam_anim.is_none() && self.app.viewport.orbit_snap.is_none() {
+        if self.app.cam_anim.is_none() {
             return Err(format!("view_anim {v}: no animation started"));
         }
         let mut worst = (0.0f64, 0usize);
@@ -398,7 +398,7 @@ impl Harness {
                 worst = (d, i);
             }
             prev = now;
-            if self.app.cam_anim.is_none() && self.app.viewport.orbit_snap.is_none() {
+            if self.app.cam_anim.is_none() {
                 if worst.0 > max_deg {
                     return Err(format!("view_anim {v}: frame {} of {} turns the view {:.1}° (limit {max_deg}°)", worst.1 + 1, i + 1, worst.0));
                 }

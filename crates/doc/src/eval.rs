@@ -184,6 +184,50 @@ impl ModelBody {
             .clone()
     }
 
+    /// Identity of this body's display geometry, without meshing it: the cell its mesh is kept
+    /// in, shared by every clone of the body (timeline snapshots, world states that place it
+    /// unchanged) and, while it is held, by no other body.
+    pub fn display_identity(&self) -> Arc<dyn std::any::Any + Send + Sync> {
+        self.mesh.clone()
+    }
+
+    /// [`ModelBody::mesh`] as a shared mesh and the move that places it: for a rigid placement
+    /// of a definition, the definition's own mesh (the same one for every placement of it) and
+    /// the placement; for any other body its own mesh, unmoved. The mesh moved by the matrix is
+    /// `mesh()`, so a viewport can draw every placement of a part from one copy of its
+    /// triangles, without making the moved copies.
+    pub fn mesh_in_place(&self) -> (Arc<Mesh>, crate::Mat) {
+        match self.mesh_placement.as_deref() {
+            Some(placed) => placed.source_mesh(),
+            None => (self.mesh(), crate::IDENTITY),
+        }
+    }
+
+    /// The box of [`ModelBody::mesh`] without making a placement's moved copy: the shared mesh's
+    /// points, moved.
+    pub fn mesh_bounds(&self) -> solidcraft_geom::Aabb3 {
+        if let Some(mesh) = self.cached_mesh() {
+            return mesh.bounds();
+        }
+        let (mesh, m) = self.mesh_in_place();
+        if crate::is_identity(&m) {
+            return mesh.bounds();
+        }
+        mesh.positions.iter().fold(solidcraft_geom::Aabb3::EMPTY, |mut b, p| {
+            b.add(crate::apply_point(&m, *p));
+            b
+        })
+    }
+
+    /// [`ModelBody::plan_mesh_at`] as a shared mesh and the move that places it, as
+    /// [`ModelBody::mesh_in_place`] does for the reference mesh.
+    pub fn plan_mesh_in_place_at(&self, q: crate::display_quality::DisplayQuality) -> Option<(Arc<Mesh>, crate::Mat)> {
+        match self.mesh_placement.as_deref() {
+            Some(placed) => placed.source_plan_mesh(q, &self.name),
+            None => Some((self.plan_mesh_at(q)?, crate::IDENTITY)),
+        }
+    }
+
     /// [`ModelBody::plan_mesh`] if it is made already; otherwise it is made on a worker thread
     /// (once, however often this is asked) and `None` comes back meanwhile, so a caller drawing a
     /// frame (a face highlighted under the pointer) is not held up by a large body's plan
@@ -345,11 +389,12 @@ fn format_thread(d: f64, p: f64) -> String {
 /// The automatic ISO metric designation for a cylindrical face, using the same fit check as
 /// a thread feature without an explicit size. This query does not change the model.
 pub fn suggested_thread(st: &ModelState, p: Vec3) -> Result<String> {
-    thread_on(st, 0, p, None, None).map(|t| t.designation)
+    thread_on(st, 0, p, None, None, false).map(|t| t.designation)
 }
 
-/// A cosmetic thread on the cylindrical face at `p`.
-fn thread_on(st: &ModelState, feature: u64, p: Vec3, designation: Option<&str>, length: Option<f64>) -> Result<ThreadInfo> {
+/// A cosmetic thread on the cylindrical face at `p`. A `turned` (modelled) thread also fits a
+/// shaft thicker than it, which it turns down to its major diameter first.
+fn thread_on(st: &ModelState, feature: u64, p: Vec3, designation: Option<&str>, length: Option<f64>, turned: bool) -> Result<ThreadInfo> {
     let (body, cyl) = st
         .bodies
         .iter()
@@ -367,7 +412,7 @@ fn thread_on(st: &ModelState, feature: u64, p: Vec3, designation: Option<&str>, 
     let fits = if cyl.internal {
         (major - pitch * 1.0825 - dia).abs() < 0.2 * major || (major - pitch - dia).abs() < 0.15 * major
     } else {
-        (major - dia).abs() < 0.15 * major
+        (major - dia).abs() < 0.15 * major || (turned && dia > major)
     };
     if !fits {
         return Err(DocError::Invalid(format!(
@@ -487,6 +532,73 @@ fn thread_groove(t: &ThreadInfo, radius: f64, open: (bool, bool)) -> Result<soli
         return Err(DocError::Invalid("the modelled thread is too fine for this diameter; use a cosmetic thread".into()));
     }
     Ok(kernel::sweep_helix_mesh(&plane, &section, base, *k, p, (s1 - s0) / p, stations as usize)?)
+}
+
+/// What a modelled external thread turns off a shaft thicker than its major diameter before it
+/// cuts, as a lathe would: the ring between the major diameter and the shaft over the threaded
+/// length, run on past an end of the face that nothing of the part (`mb`) lies beyond. `None`
+/// for a shaft no thicker than the thread. Its inner wall is the turned face, named `turned`;
+/// an end that stops inside the face leaves a shoulder, `shoulder:start` or `shoulder:end`.
+fn thread_turn(t: &ThreadInfo, cyl: &kernel::CylinderFace, mb: &ModelBody) -> Result<Option<Traced>> {
+    let (p, r) = (t.pitch, t.major_diameter / 2.0);
+    if t.internal || !(cyl.radius > r * (1.0 + 1e-6)) {
+        return Ok(None);
+    }
+    let k = t.axis;
+    let u = k.cross(if k.x.abs() < 0.9 { Vec3::new(1.0, 0.0, 0.0) } else { Vec3::new(0.0, 1.0, 0.0) });
+    let u = u.normalized().ok_or_else(|| DocError::Invalid("thread axis".into()))?;
+    let v = k.cross(u);
+    let mesh = mb.mesh();
+    let solid_round = |s: f64, radius: f64| {
+        (0..12).any(|i| {
+            let a = std::f64::consts::TAU * f64::from(i) / 12.0;
+            mesh.contains(t.axis_point + *k * s + (u * a.cos() + v * a.sin()) * radius)
+        })
+    };
+    // The ring reaches a little past the shaft; the part must not go on there (a shaft standing
+    // in a corner, a rounded edge), or the turning would cut into it.
+    let out = cyl.radius + 0.1 * p;
+    if [0.25, 0.5, 0.75].iter().any(|f| solid_round(t.start + (t.end - t.start) * f, cyl.radius + 0.05 * p)) {
+        return Err(DocError::Invalid(format!(
+            "this {} mm shaft is too thick for a modelled {} thread, and the part around it keeps it from being turned down; make the shaft {} mm",
+            show_mm(2.0 * cyl.radius),
+            t.designation,
+            show_mm(t.major_diameter)
+        )));
+    }
+    // Past a free end of the face out into the air; elsewhere square at the threaded length's end.
+    let tol = p * 1e-3;
+    let mid = (r + cyl.radius) / 2.0;
+    let free = |at: f64, s: f64, past: f64| (at - s).abs() < tol && !solid_round(s + past * 0.5 * p, mid);
+    let (open0, open1) = (free(cyl.start, t.start, -1.0), free(cyl.end, t.end, 1.0));
+    let s0 = if open0 { t.start - p } else { t.start };
+    let s1 = if open1 { t.end + p } else { t.end };
+    let plane = Plane { origin: t.axis_point, x: u, y: *k };
+    let ring = [Vec2::new(r, s0), Vec2::new(out, s0), Vec2::new(out, s1), Vec2::new(r, s1)];
+    let region = Region2 { outer: solidcraft_geom::Loop2::polygon(&ring), holes: vec![] };
+    let ring = kernel::revolve(&plane, &[region], Vec2::ZERO, Vec2::Y, std::f64::consts::TAU)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| DocError::Invalid("thread: the shaft turned down to the thread".into()))?;
+    // The ring's sides by profile segment: its start end, outside, end end, inner wall.
+    let role = |segment: usize| -> Vec<String> {
+        match segment {
+            0 if !open0 => vec!["shoulder:start".into()],
+            2 if !open1 => vec!["shoulder:end".into()],
+            3 => vec!["turned".into()],
+            _ => Vec::new(),
+        }
+    };
+    let roles = ring.history().filter(|h| h.operands == 0).map(|h| {
+        h.faces
+            .iter()
+            .map(|f| match f.origins.as_slice() {
+                [kernel::history::FaceOrigin::Profile { segment }] => role(*segment),
+                _ => Vec::new(),
+            })
+            .collect()
+    });
+    Ok(Some(Traced::made(ring, roles)))
 }
 
 /// A constant fillet of `edges`; with [`FilletFit::Reduce`](crate::FilletFit::Reduce), a radius too
@@ -1237,14 +1349,31 @@ fn placement_digest(doc: &Document, f: &Feature) -> u64 {
         FeatureKind::Revolve { to, .. } => to.is_some(),
         _ => false,
     };
-    // A mirror of placed bodies follows where they are placed.
-    let placed_mirror = matches!(&f.kind, FeatureKind::Mirror { placements, .. } if !placements.is_empty());
+    // A mirror of placed bodies follows the placements it was picked at and its own component's
+    // frame, not every occurrence: moving an unrelated one leaves it (and its cache) alone.
+    if let FeatureKind::Mirror { placements, bodies, .. } = &f.kind
+        && !placements.is_empty()
+    {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        doc.component_transform(f.component).iter().flatten().for_each(|x| x.to_bits().hash(&mut h));
+        for placed in placements.iter().map(|path| mirror_copy_frame(doc, path)) {
+            placed.is_some().hash(&mut h);
+            if let Some((component, frame, picked)) = placed {
+                component.hash(&mut h);
+                frame.iter().chain(&picked).flatten().for_each(|x| x.to_bits().hash(&mut h));
+            }
+        }
+        for b in bodies {
+            serde_json::to_string(&doc.body_offsets.get(&b.0)).unwrap_or_default().hash(&mut h);
+        }
+        return h.finish();
+    }
     // A combine moves tools placed differently from its target into the target's frame (#3383).
     let combine = matches!(&f.kind, FeatureKind::Combine { .. });
     if !to_object && !combine && drawn_tools_change_bodies(&f.kind) {
         return drawn_tools_digest(doc, f);
     }
-    if to_object || placed_mirror || combine {
+    if to_object || combine {
         return if doc.occurrences.is_empty() && doc.body_offsets.is_empty() { 0 } else { placements_hash(doc) };
     }
     let FeatureKind::Sketch { plane, sketch } = &f.kind else { return 0 };
@@ -4698,18 +4827,69 @@ fn mirror_matrix(pl: &Plane) -> Mat {
 
 const MAX_INSTANCES: usize = 1000;
 
-/// Where a mirrored body is, in the frame of the mirror's component: through the placement it
-/// was picked at and the feature's component frame. `None` when that is the body's own frame
-/// (and in older designs, which saved no placement).
-fn mirrored_placement(doc: &Document, f: &Feature, mb: &ModelBody, path: Option<&[u64]>) -> Result<Option<Mat>> {
+/// Where a mirrored body was picked and where its copy goes: the component the copy joins and
+/// that component's world frame, and the frame the body's own geometry is in where it was picked
+/// (its placement `path`, with its offset). `None` in older designs, which saved no placement and
+/// mirror the body's own geometry.
+fn mirrored_placement(doc: &Document, mb: &ModelBody, path: Option<&[u64]>) -> Result<Option<(u64, Mat, Mat)>> {
     let Some(path) = path else { return Ok(None) };
-    let owner = doc.model_body_component(mb);
     let lost = || DocError::Invalid(format!("the placement `{}` was mirrored at no longer exists", mb.name));
-    let world = doc.path_transform(owner, path).ok_or_else(lost)?;
-    let world = doc.model_body_offset(mb).map(|offset| crate::mat_mul(&world, offset)).unwrap_or(world);
-    let inverse = crate::mat_inverse(&doc.component_transform(f.component)).ok_or_else(lost)?;
-    let rel = crate::mat_mul(&inverse, &world);
-    Ok((!crate::is_identity(&rel)).then_some(rel))
+    // A stale or edited path that leads to another component no longer shows the body.
+    let (at, _) = doc.path_placement(path).ok_or_else(lost)?;
+    if !placement_shows(doc, mb, at) {
+        return Err(lost());
+    }
+    let (component, frame, picked) = mirror_copy_frame(doc, path).ok_or_else(lost)?;
+    let source = doc.model_body_offset(mb).map(|offset| crate::mat_mul(&picked, offset)).unwrap_or(picked);
+    Ok(Some((component, frame, source)))
+}
+
+/// Whether a placement of component `at` shows body `mb`: `at` is the body's component. That is
+/// the evaluated body's own where a transfer recorded it, else the component its name is recorded
+/// in (an import's bodies) or its feature's. Inserting the same file again reuses the body names
+/// and points them at the new insert's components: when the recorded component lies outside the
+/// components the body's own feature made, the name is another body's, and the placement only has
+/// to lie inside the components the body's feature made.
+fn placement_shows(doc: &Document, mb: &ModelBody, at: u64) -> bool {
+    let owner = doc.model_body_component(mb);
+    if owner == at {
+        return true;
+    }
+    if mb.transferred || mb.source_name.is_some() {
+        return false;
+    }
+    let made_in = doc.feature(mb.feature).map(|f| f.component).unwrap_or(0);
+    !component_within(doc, owner, made_in) && component_within(doc, at, made_in)
+}
+
+/// Whether component `c` is `ancestor` or lies inside it (every component lies in the root).
+fn component_within(doc: &Document, mut c: u64, ancestor: u64) -> bool {
+    for _ in 0..=doc.components.len() {
+        if c == ancestor || ancestor == 0 {
+            return true;
+        }
+        match doc.components.iter().find(|x| x.id == c) {
+            Some(x) if c != 0 => c = x.parent,
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// For a body mirrored at placement `path` (which, not the body's name, says where it is: a later
+/// insert can reuse the name): the component its copy joins, that component's world frame, and
+/// the placement's world frame. The copy joins the body's component, or, when that component is
+/// placed more than once (a copy there would show at every placement), the innermost component
+/// around it that is placed once.
+fn mirror_copy_frame(doc: &Document, path: &[u64]) -> Option<(u64, Mat, Mat)> {
+    let (_, picked) = doc.path_placement(path)?;
+    let placed_once = |id: &u64| {
+        let component = doc.occurrences.iter().find(|o| o.id == *id).map(|o| o.component);
+        doc.occurrences.iter().filter(|o| Some(o.component) == component).count() == 1
+    };
+    let once = path.iter().take_while(|id| placed_once(id)).count();
+    let (component, frame) = doc.path_placement(path.get(..once)?)?;
+    Some((component, frame, picked))
 }
 
 /// The placements (column-major matrices) of a pattern's copies, the original excluded.
@@ -5449,7 +5629,7 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
                 let r = val(vals, diameter, Kind::Length)? / 2.0;
                 for p in spots {
                     let wall = p + dir.any_perp() * r + dir * (r * 0.5);
-                    let t = thread_on(st, f.id, wall, Some(d), None)?;
+                    let t = thread_on(st, f.id, wall, Some(d), None, false)?;
                     st.threads.push(t);
                 }
             }
@@ -5460,7 +5640,7 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
                 Some(e) => Some(val(vals, e, Kind::Length)?),
                 None => None,
             };
-            let t = thread_on(st, f.id, face.0, designation.as_deref(), l)?;
+            let t = thread_on(st, f.id, face.0, designation.as_deref(), l, *modeled)?;
             if !*modeled {
                 st.threads.push(t);
                 return Ok(());
@@ -5469,14 +5649,24 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
             let Some(mb) = st.bodies.get(i).cloned() else { return Err(DocError::Invalid("body".into())) };
             let cyl = kernel::cylinder_face_at(&mb.body, face.0).ok_or_else(|| DocError::Invalid("no cylindrical face there to thread".into()))?;
             let tol = t.pitch * 1e-3;
-            let groove = thread_groove(&t, cyl.radius, ((t.start - cyl.start).abs() < tol, (t.end - cyl.end).abs() < tol))?;
+            // A shaft thicker than the thread is turned down to its major diameter first.
+            let input = mb.traced();
+            let (input, radius) = match thread_turn(&t, &cyl, &mb)? {
+                Some(ring) => {
+                    let turned = kernel::boolean(&input.body, &ring.body, BoolOp::Cut)?
+                        .ok_or_else(|| DocError::Invalid("turning the shaft down removed everything".into()))?;
+                    (Traced::step(turned, &[&input, &ring]), t.major_diameter / 2.0)
+                }
+                None => (input, cyl.radius),
+            };
+            let groove = thread_groove(&t, radius, ((t.start - cyl.start).abs() < tol, (t.end - cyl.end).abs() < tol))?;
             // The B-rep boolean can't take helical walls in reasonable time: the body is cut
             // faceted (curved faces within a two-hundredth of the pitch).
-            let nb = kernel::faceted_boolean(&mb.body, &groove, BoolOp::Cut, t.pitch * 0.005)?
+            let nb = kernel::faceted_boolean(&input.body, &groove, BoolOp::Cut, t.pitch * 0.005)?
                 .ok_or_else(|| DocError::Invalid("the thread removed everything".into()))?;
             // The groove's faces are its triangles, with no role to name them by.
             let groove = crate::lineage::Lineage::unnamed_faces(groove.triangles.len());
-            let lineage = mb.traced().lineage.and_then(|l| crate::lineage::Lineage::step(&nb, &[&l, &groove]));
+            let lineage = input.lineage.and_then(|l| crate::lineage::Lineage::step(&nb, &[&l, &groove]));
             let nb = Traced { body: nb, lineage };
             if let Some(slot) = st.bodies.get_mut(i) {
                 *slot = ModelBody::traced_new(mb.name, nb, mb.feature);
@@ -5733,16 +5923,18 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
             for (k, n) in bodies.iter().enumerate() {
                 let i = st.bodies.iter().position(|b| &b.name == n).ok_or_else(|| DocError::Unknown(format!("body `{n}`")))?;
                 let Some(mb) = st.bodies.get(i).cloned() else { continue };
-                // A body of a component placed elsewhere is mirrored where it is shown: the copy
-                // (in this feature's component) from its placement, a joined body in its own frame.
-                let placed = mirrored_placement(doc, f, &mb, placements.get(k).map(Vec::as_slice))?;
-                let (copy, own) = match placed {
-                    Some(rel) => {
-                        let inverse = crate::mat_inverse(&rel).ok_or_else(|| DocError::Invalid(format!("the placement of `{n}` is singular")))?;
-                        let copy = crate::mat_mul(&m, &rel);
-                        (copy, crate::mat_mul(&inverse, &copy))
+                // A body picked where a placement shows it is mirrored there: the copy goes beside
+                // it into the component that placement shows, a joined body stays in its own frame.
+                let (component, copy, own) = match mirrored_placement(doc, &mb, placements.get(k).map(Vec::as_slice))? {
+                    Some((component, frame, source)) => {
+                        let singular = || DocError::Invalid(format!("the placement `{n}` was mirrored at is singular"));
+                        let inverse = |m: &Mat| crate::mat_inverse(m).ok_or_else(singular);
+                        // The plane is in this feature's component: the body mirrored in the world.
+                        let here = doc.component_transform(f.component);
+                        let world = crate::mat_mul(&crate::mat_mul(&here, &m), &crate::mat_mul(&inverse(&here)?, &source));
+                        (Some(component), crate::mat_mul(&inverse(&frame)?, &world), crate::mat_mul(&inverse(&source)?, &world))
                     }
-                    None => (m, m),
+                    None => (None, m, m),
                 };
                 let mirrored = moved_copy(&mb, kernel::transform_matrix(&mb.body, if *combine { own } else { copy })?, 1);
                 if *combine {
@@ -5765,7 +5957,13 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
                 } else {
                     let name = copy_body_name(st, f, output, &mb.name);
                     copy_sheet(st, &mb.name, &name, &copy);
-                    st.bodies.push(ModelBody::traced_new(name, mirrored, f.id));
+                    let mut body = ModelBody::traced_new(name, mirrored, f.id);
+                    if let Some(c) = component.filter(|c| *c != f.component) {
+                        // Kept in that component as a moved body is (and through later features).
+                        body.component = c;
+                        body.transferred = true;
+                    }
+                    st.bodies.push(body);
                     output += 1;
                 }
             }

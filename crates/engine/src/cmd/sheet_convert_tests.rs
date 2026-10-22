@@ -359,7 +359,10 @@ fn designs_from_before_bend_edges_open_unchanged() {
     assert!(!older.to_string().contains("\"bends\""), "{older}");
     older["format"] = json!("solidcraft/16");
     let doc = solidcraft_doc::Document::from_json(&older.to_string()).unwrap();
-    assert_eq!(doc, *s.doc);
+    // An older design keeps the numbering of the pieces it was saved with (#3902).
+    let mut same = solidcraft_doc::Document::clone(&s.doc);
+    same.features.iter_mut().for_each(|f| f.kernel_piece_order = true);
+    assert_eq!(doc, same);
     let mut reopened = Session::new(doc);
     assert!(reopened.model.results.iter().all(|x| x.error.is_none()));
     assert!(same_size(flat_size(&mut reopened), (100.0, 60.0), 1e-9), "{:?}", flat_size(&mut reopened));

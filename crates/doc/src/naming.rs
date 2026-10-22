@@ -241,13 +241,11 @@ pub(crate) fn names(b: &ModelBody) -> Arc<Names> {
         .get_or_init(|| {
             // Exact history needs no mesh; geometry does (its face count is the mesh's).
             let names = match b.names.origin.as_ref() {
-                Some(o) if o.depth < MAX_DEPTH => b
-                    .names
-                    .lineage
-                    .as_ref()
-                    .and_then(|l| crate::history_names::derive(b, o, l))
-                    .unwrap_or_else(|| Names::unverified(geometric_names(b, o, face_count(b)), &mesh_adjacency(b))),
-                _ => Names::unverified((0..face_count(b)).map(|k| format!("{}:face:{k}", b.name)).collect(), &[]),
+                Some(o) if o.depth < MAX_DEPTH => b.names.lineage.as_ref().and_then(|l| crate::history_names::derive(b, o, l)).unwrap_or_else(|| {
+                    let centres = || face_centres(b);
+                    Names::unverified(geometric_names(b, o, face_count(b)), &mesh_adjacency(b), crate::history_names::by_place(&o.feature, &centres))
+                }),
+                _ => Names::unverified((0..face_count(b)).map(|k| format!("{}:face:{k}", b.name)).collect(), &[], None),
             };
             Arc::new(names)
         })
@@ -519,40 +517,52 @@ fn number_pieces(names: &mut [String], pts: &[Vec<Vec3>], mark: char) {
             let ps = pts.get(j).cloned().unwrap_or_default();
             ps.iter().fold(Vec3::ZERO, |a, p| a + *p) * (1.0 / ps.len().max(1) as f64)
         };
-        let cs: Vec<(usize, Vec3)> = same.iter().map(|j| (*j, centre(*j))).collect();
-        let ext = cs.iter().map(|(_, c)| *c).collect::<Aabb3>().size();
-        let key = |c: Vec3| {
-            if ext.x >= ext.y && ext.x >= ext.z {
-                (c.x, c.y, c.z)
-            } else if ext.y >= ext.z {
-                (c.y, c.z, c.x)
-            } else {
-                (c.z, c.x, c.y)
-            }
-        };
-        let mut order = cs.clone();
-        // Pieces lying almost level along the sort axis differ only in the last bits of their centre:
-        // the centre is the mean of a tessellated boundary, and that depends on where the loop's
-        // polyline starts, which can differ between processes. Comparing the keys with a tolerance
-        // makes those pieces equal, so the stable sort keeps the order they arrived in and a name
-        // keeps its number across runs (solidcraft#569). total_cmp keeps a NaN deterministic.
-        let tol = ext.x.max(ext.y).max(ext.z).max(1.0) * 1e-9;
-        let bucket = |c: Vec3| {
-            let k = key(c);
-            // Rounding onto the grid, rather than comparing with a tolerance, is what keeps this a
-            // total order: `a` and `b` in one bucket and `b` and `c` in the next must not leave `a`
-            // and `c` in different ones, or the sort has no order to work with. Since Rust 1.81
-            // `sort_by` may panic on a comparator that is not one. Two pieces can still flip when
-            // they straddle a bucket edge; that is the price of a key that ignores their low bits.
-            ((k.0 / tol).round() as i64, (k.1 / tol).round() as i64, (k.2 / tol).round() as i64)
-        };
-        order.sort_by_key(|a| bucket(a.1));
-        for (k, (j, _)) in order.iter().enumerate() {
+        let order = along_spread(same.iter().map(|j| (*j, centre(*j))).collect());
+        for (k, j) in order.iter().enumerate() {
             if let Some(slot) = names.get_mut(*j) {
                 *slot = format!("{n}{mark}{}", k + 1);
             }
         }
     }
+}
+
+/// The items of `cs` (index, centre) ordered along the longest axis of their centres' spread,
+/// then the next: how the pieces of one face or edge are numbered, the same on every run
+/// whatever order the kernel gives them in.
+pub(crate) fn along_spread(cs: Vec<(usize, Vec3)>) -> Vec<usize> {
+    let ext = cs.iter().map(|(_, c)| *c).collect::<Aabb3>().size();
+    let key = |c: Vec3| {
+        if ext.x >= ext.y && ext.x >= ext.z {
+            (c.x, c.y, c.z)
+        } else if ext.y >= ext.z {
+            (c.y, c.z, c.x)
+        } else {
+            (c.z, c.x, c.y)
+        }
+    };
+    let mut order = cs;
+    // Pieces lying almost level along the sort axis differ only in the last bits of their centre:
+    // the centre is the mean of a tessellated boundary, and that depends on where the loop's
+    // polyline starts, which can differ between processes. Comparing the keys with a tolerance
+    // makes those pieces equal, so the stable sort keeps the order they arrived in and a name
+    // keeps its number across runs (solidcraft#569).
+    let tol = ext.x.max(ext.y).max(ext.z).max(1.0) * 1e-9;
+    let bucket = |c: Vec3| {
+        let k = key(c);
+        // Rounding onto the grid, rather than comparing with a tolerance, is what keeps this a
+        // total order: `a` and `b` in one bucket and `b` and `c` in the next must not leave `a`
+        // and `c` in different ones, or the sort has no order to work with. Since Rust 1.81
+        // `sort_by` may panic on a comparator that is not one. Two pieces can still flip when
+        // they straddle a bucket edge; that is the price of a key that ignores their low bits.
+        ((k.0 / tol).round() as i64, (k.1 / tol).round() as i64, (k.2 / tol).round() as i64)
+    };
+    order.sort_by_key(|a| bucket(a.1));
+    order.into_iter().map(|(j, _)| j).collect()
+}
+
+/// Each face's centre: the mean of the sampled centres of its triangles.
+pub(crate) fn face_centres(b: &ModelBody) -> Vec<Vec3> {
+    samples(&b.mesh(), face_count(b)).into_iter().map(|ps| ps.iter().fold(Vec3::ZERO, |a, p| a + *p) * (1.0 / ps.len().max(1) as f64)).collect()
 }
 
 /// The name of a face new to `f`.

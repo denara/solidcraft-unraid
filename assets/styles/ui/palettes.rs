@@ -107,7 +107,6 @@ impl Tokens {
             error: Color32::from_rgb(214, 54, 54),
             warning: Color32::from_rgb(222, 150, 30),
             icon: Color32::from_rgb(70, 78, 92),
-            icon_fill: Color32::from_rgb(178, 196, 222),
             timeline: Color32::from_rgb(232, 235, 240),
             hover: Color32::from_rgb(226, 234, 246),
             sel_face: Color32::from_rgb(76, 127, 203),
@@ -157,8 +156,6 @@ impl Tokens {
             dialog_bg: Color32::from_rgb(250, 251, 252),
             dialog_border: Color32::from_rgb(213, 219, 227),
             chip: Color32::from_rgb(38, 120, 218),
-            heading_bg: Color32::from_rgb(218, 223, 231),
-            subheading_bg: Color32::from_rgb(234, 237, 242),
             profile_fill: Color32::from_rgba_unmultiplied_const(255, 196, 120, 70),
             glyph_bg: Color32::WHITE,
             glyph_edge: Color32::from_rgb(190, 110, 100),
@@ -203,30 +200,7 @@ impl Tokens {
                 Color32::from_rgb(204, 0, 140),
             ],
             analysis: AnalysisColors::DEFAULT,
-            icons: IconColors {
-                sheet: Color32::from_rgb(170, 200, 240),
-                sheet_2: Color32::from_rgb(150, 185, 235),
-                sheet_light: Color32::from_rgb(214, 229, 248),
-                sheet_line: Color32::from_rgb(127, 166, 218),
-                highlight: Color32::WHITE,
-                glint: Color32::from_rgba_premultiplied(160, 160, 160, 160),
-                folder: Color32::from_rgb(236, 200, 110),
-                plane: Color32::from_rgb(244, 214, 150),
-                fold: Color32::from_rgb(130, 140, 160),
-                stripe: Color32::from_gray(30),
-                sky: Color32::from_rgb(190, 205, 230),
-                floor: Color32::from_rgb(60, 62, 70),
-                paint: [Color32::from_rgb(220, 70, 60), Color32::from_rgb(70, 150, 230), Color32::from_rgb(240, 200, 60)],
-                axes: [Color32::from_rgb(210, 60, 60), Color32::from_rgb(60, 160, 60), Color32::from_rgb(60, 100, 220)],
-                access: [Color32::from_rgb(70, 180, 90), Color32::from_rgb(220, 70, 60)],
-                draft: [Color32::from_rgb(70, 180, 90), Color32::from_rgb(235, 200, 50)],
-                curvature: [Color32::from_rgb(60, 110, 230), Color32::from_rgb(70, 190, 90), Color32::from_rgb(225, 60, 45)],
-                interference: Color32::from_rgb(225, 70, 60),
-                warning: Color32::from_rgb(250, 200, 60),
-                agent: Color32::from_rgb(168, 85, 247),
-                marker_halo: Color32::from_black_alpha(150),
-            },
-            app_bar_icon: [Color32::from_rgb(225, 230, 238), Color32::from_rgb(120, 140, 170), Color32::from_rgb(120, 190, 255)],
+            icons: IconColors { highlight: Color32::WHITE, agent: Color32::from_rgb(168, 85, 247), marker_halo: Color32::from_black_alpha(150) },
             logo: [Color32::from_rgb(96, 158, 236), Color32::from_rgb(58, 136, 238), Color32::from_rgb(55, 108, 197), Color32::WHITE],
         }
     }
@@ -306,7 +280,6 @@ impl Tokens {
         t.error = Color32::from_rgb(240, 100, 96);
         t.warning = Color32::from_rgb(236, 170, 70);
         t.icon = Color32::from_rgb(208, 214, 226);
-        t.icon_fill = Color32::from_rgb(86, 112, 150);
         t.timeline = Color32::from_rgb(33, 37, 45);
         t.hover = Color32::from_rgb(54, 61, 74);
         t.hover_edge_halo = Color32::from_rgb(203, 203, 203);
@@ -328,8 +301,6 @@ impl Tokens {
         t.dialog_bg = Color32::from_rgb(59, 68, 83);
         t.dialog_border = Color32::from_rgb(72, 83, 99);
         t.chip = Color32::from_rgb(59, 101, 168);
-        t.heading_bg = Color32::from_rgb(38, 44, 55);
-        t.subheading_bg = Color32::from_rgb(48, 55, 68);
         t.glyph_bg = Color32::from_rgb(44, 50, 60);
         t.glyph_edge = Color32::from_rgb(200, 130, 120);
         t.glyph_text = icon_primary(crate::icon_svg::CONSTRAINT_PRIMARY[1]);
@@ -373,15 +344,8 @@ impl Tokens {
         if !dark {
             t.form_success = Color32::from_rgb(39, 88, 78);
         }
-        // The icons that show the same meanings follow; on the dark toolbar the blue is a little
-        // stronger, to stay clear of the icon fill.
-        let good = if dark { Color32::from_rgb(35, 115, 245) } else { Color32::from_rgb(51, 115, 230) };
-        t.icons.axes[0] = t.triad[0];
-        t.icons.axes[1] = t.triad[1];
-        t.icons.access = [good, Color32::from_rgb(217, 102, 13)];
         t.construction_geom = icon_primary(crate::icon_svg::CONSTRUCTION_RED_GREEN[dark as usize]);
         t.glyph_text = icon_primary(crate::icon_svg::CONSTRAINT_RED_GREEN[dark as usize]);
-        t.icons.draft = [good, Color32::from_rgb(242, 230, 153)];
         t.surface_accent = if dark { Color32::from_rgb(200, 135, 55) } else { Color32::from_rgb(164, 80, 0) };
         t.mesh_accent = if dark { Color32::from_rgb(190, 175, 70) } else { Color32::from_rgb(130, 103, 0) };
         t.form_accent = if dark { Color32::from_rgb(165, 135, 220) } else { Color32::from_rgb(115, 73, 205) };

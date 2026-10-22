@@ -500,7 +500,7 @@ fn circle3(a: V3, b: V3, c: V3) -> Option<(V3, f64, V3)> {
 fn analytic_revolution(ex: &p21::Exchange, e: &p21::Entity) -> Option<Analytic> {
     use crate::step_in::geom::{self, CurveGeo};
     use truck_modeling::{BoundedCurve, ParametricCurve};
-    let cx = crate::step_in::Ctx { ex, len: 1.0, ang: 1.0, tol: 1e-6 };
+    let cx = crate::step_in::Ctx { ex, len: 1.0, ang: 1.0, tol: 1e-6, snap: 1e-6 };
     let p = e.params();
     let (ao, ad) = geom::axis1(&cx, p.get(2)?.as_ref_id()?).ok()?;
     let (oa, a) = ([ao.x, ao.y, ao.z], [ad.x, ad.y, ad.z]);
@@ -641,7 +641,7 @@ fn planar_bspline(ex: &p21::Exchange, e: &p21::Entity) -> Option<AnalyticKind> {
     if !(e.has("B_SPLINE_SURFACE") || e.name() == "B_SPLINE_SURFACE_WITH_KNOTS") {
         return None;
     }
-    let cx = crate::step_in::Ctx { ex, len: 1.0, ang: 1.0, tol: 1e-6 };
+    let cx = crate::step_in::Ctx { ex, len: 1.0, ang: 1.0, tol: 1e-6, snap: 1e-6 };
     let s = crate::step_in::geom::bspline_surface(&cx, e).ok()?;
     let (ctrl, (u0, u1), (v0, v1)) = match &s {
         truck_modeling::Surface::BSplineSurface(b) => {
@@ -678,7 +678,7 @@ fn ruled_bspline(ex: &p21::Exchange, e: &p21::Entity) -> Option<Analytic> {
     if !(e.has("B_SPLINE_SURFACE") || e.name() == "B_SPLINE_SURFACE_WITH_KNOTS") {
         return None;
     }
-    let cx = crate::step_in::Ctx { ex, len: 1.0, ang: 1.0, tol: 1e-6 };
+    let cx = crate::step_in::Ctx { ex, len: 1.0, ang: 1.0, tol: 1e-6, snap: 1e-6 };
     let s = crate::step_in::geom::bspline_surface(&cx, e).ok()?;
     let (Some((u0, u1)), Some((v0, v1))) = s.try_range_tuple() else { return None };
     let at = |u: f64, v: f64| {
@@ -790,7 +790,7 @@ fn edge_points(ex: &p21::Exchange, edge: u64, n: usize) -> Option<Vec<V3>> {
     use truck_modeling::{BoundedCurve, ParametricCurve};
     let p = ex.get(edge)?.params();
     let ends = [vertex_point(ex, p.get(1)?.as_ref_id()?)?, vertex_point(ex, p.get(2)?.as_ref_id()?)?];
-    let cx = crate::step_in::Ctx { ex, len: 1.0, ang: 1.0, tol: 1e-6 };
+    let cx = crate::step_in::Ctx { ex, len: 1.0, ang: 1.0, tol: 1e-6, snap: 1e-6 };
     let sample = |f: &dyn Fn(f64) -> truck_modeling::Point3, (t0, t1): (f64, f64)| {
         (0..=n).map(|k| f(t0 + (t1 - t0) * k as f64 / n.max(1) as f64)).map(|q| [q.x, q.y, q.z]).collect::<Vec<V3>>()
     };
@@ -859,7 +859,7 @@ fn collapse_short_edges(ex: &mut p21::Exchange) {
         // The curve itself must be short too (not a whole circle between two coincident vertices).
         let short = e.params().get(3).and_then(Param::as_ref_id).and_then(|c| {
             use truck_modeling::{BoundedCurve, ParametricCurve};
-            let cx = crate::step_in::Ctx { ex, len: 1.0, ang: 1.0, tol: 1e-6 };
+            let cx = crate::step_in::Ctx { ex, len: 1.0, ang: 1.0, tol: 1e-6, snap: 1e-6 };
             let mid = match crate::step_in::geom::curve(&cx, c, 0).ok()? {
                 crate::step_in::geom::CurveGeo::Line { .. } => return Some(true),
                 crate::step_in::geom::CurveGeo::BSpline(c) => c.subs((c.range_tuple().0 + c.range_tuple().1) / 2.0),
@@ -996,7 +996,7 @@ fn merge_split_faces(ex: &mut p21::Exchange, paint: &mut HashMap<u64, FaceLook>,
                             "SURFACE_OF_REVOLUTION" => analytic_revolution(ex, se),
                             // Coplanar pieces (a face split where a mirrored half was glued on).
                             "PLANE" => {
-                                let cx = crate::step_in::Ctx { ex, len: 1.0, ang: 1.0, tol: 1e-6 };
+                                let cx = crate::step_in::Ctx { ex, len: 1.0, ang: 1.0, tol: 1e-6, snap: 1e-6 };
                                 let f = crate::step_in::geom::frame(&cx, se.params().get(1)?.as_ref_id()?).ok()?;
                                 let v = |a: truck_modeling::Vector3| [a.x, a.y, a.z];
                                 Some(Analytic { kind: AnalyticKind::Plane { o: [f.o.x, f.o.y, f.o.z], z: v(f.z), x: v(f.x) }, flip: false })
@@ -1438,7 +1438,7 @@ fn trimmed_sheets(ex: &p21::Exchange, analytic: &HashMap<u64, V3>) -> HashMap<u6
             continue;
         };
         let pts: Vec<V3> = pts.into_iter().flatten().collect();
-        let cx = crate::step_in::Ctx { ex, len: 1.0, ang: 1.0, tol: 1e-6 };
+        let cx = crate::step_in::Ctx { ex, len: 1.0, ang: 1.0, tol: 1e-6, snap: 1e-6 };
         let Ok(sheet) = crate::step_in::geom::bspline_surface(&cx, se) else { continue };
         if let Ok(Some(cut)) = crate::guard("STEP sheet trim", || Ok(trim_sheet(&sheet, &pts))) {
             out.insert(sid, cut);

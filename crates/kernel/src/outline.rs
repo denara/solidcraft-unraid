@@ -503,6 +503,7 @@ fn divided(body: &Body, faces: &[usize], other: &[(mt::Edge, Piece)], fr: &Frame
     let split = Body {
         solid: std::sync::Arc::new(solid),
         size: 0.0,
+        boundary_tol: body.boundary_tol,
         volume: Some(std::sync::Arc::new(std::sync::Mutex::new(None))),
         coarse_missing: None,
         mesh: None,

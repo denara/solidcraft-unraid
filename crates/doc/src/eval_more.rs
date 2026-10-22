@@ -116,19 +116,35 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
             }
             Ok(())
         }
-        FeatureKind::Align { bodies, from, to, from_normal, to_normal, flip } => {
+        FeatureKind::Align { bodies, from, to, from_normal, to_normal, flip, from_plane, to_plane } => {
+            // A plane on either side is worked out now, so the bodies follow it when it moves.
+            let (mut from, mut from_normal) = (from.0, from_normal.and_then(|n| n.normalized()));
+            if let Some(p) = from_plane {
+                let pl = doc.resolve_plane_in(vals, p, 0, Some(&*st))?;
+                (from, from_normal) = (pl.origin, Some(pl.normal()));
+            }
+            let target = to_plane.as_ref().map(|p| doc.resolve_plane_in(vals, p, 0, Some(&*st))).transpose()?;
+            let (to, to_normal) = match &target {
+                Some(pl) => (pl.origin, Some(pl.normal())),
+                None => (to.0, to_normal.and_then(|n| n.normalized())),
+            };
             let mut m = translation(Vec3::ZERO);
-            if let (Some(a), Some(b)) = (from_normal.and_then(|n| n.normalized()), to_normal.and_then(|n| n.normalized())) {
+            if let (Some(a), Some(b)) = (from_normal, to_normal) {
                 // Turn `a` onto −b (faces meet) or b (flipped), about the `from` point.
                 let want = if *flip { b } else { b * -1.0 };
                 let axis = a.cross(want);
                 let ang = axis.len().atan2(a.dot(want));
                 let axis = axis.normalized().unwrap_or_else(|| a.any_perp());
                 if ang.abs() > 1e-12 {
-                    m = rotation(from.0, axis, ang);
+                    m = rotation(from, axis, ang);
                 }
             }
-            let d = to.0 - from.0;
+            // Onto a plane the point goes straight along the plane's normal (nothing slides
+            // across it); onto a point it lands on it.
+            let d = match (&target, to_normal) {
+                (Some(_), Some(n)) => n * (to - from).dot(n),
+                _ => to - from,
+            };
             m[3][0] += d.x;
             m[3][1] += d.y;
             m[3][2] += d.z;

@@ -68,6 +68,8 @@ pub(crate) struct Footer<'a> {
     pub selected: Option<Action>,
     pub danger: bool,
     pub confirm: bool,
+    /// Parent surface corners; the footer inherits only its two bottom corners.
+    pub corners: Option<egui::CornerRadius>,
 }
 
 pub(crate) fn footer(ui: &mut Ui, ok_label: &str, cancel_label: &str, ok_enabled: bool, options: Footer<'_>) -> Action {
@@ -82,7 +84,7 @@ pub(super) fn footer_with_left(
     options: Footer<'_>,
     left: impl FnOnce(&mut Ui),
 ) -> Action {
-    let Footer { apply: apply_label, status, selected, danger, confirm } = options;
+    let Footer { apply: apply_label, status, selected, danger, confirm, corners } = options;
     let t = Tokens::get();
     let ok_enabled = ok_enabled && !ok_label.is_empty();
     // The footer is a full-width band (the card has no margin of its own): its own fill, a rule
@@ -91,8 +93,12 @@ pub(super) fn footer_with_left(
         vec2(dimension(ui.available_width()), t.form_footer_height + if confirm { t.space_4 } else { 0.0 }),
         egui::Sense::hover(),
     );
-    let corner = t.radius_xl.saturating_sub(1);
-    ui.painter().rect_filled(band, egui::CornerRadius { nw: 0, ne: 0, sw: corner, se: corner }, t.dialog_footer);
+    let corners = corners.unwrap_or(egui::CornerRadius::same(t.radius_xl));
+    ui.painter().rect_filled(
+        band,
+        egui::CornerRadius { nw: 0, ne: 0, sw: corners.sw.saturating_sub(1), se: corners.se.saturating_sub(1) },
+        t.dialog_footer,
+    );
     ui.painter().hline(band.x_range(), band.top(), egui::Stroke::new(1.0, t.dialog_rule));
     scenario::publish_rect("dialog:footer", band);
     scenario::publish_count("dialog:ok:enabled", f64::from(ok_enabled && ui.is_enabled()));
@@ -220,16 +226,14 @@ pub(crate) fn button_pair(ui: &mut egui::Ui, key: &str, states: [bool; 2], butto
                 let left = rect.center().x - (galley.size().x + icon_width) / 2.0;
                 let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(rect));
                 if let Some(icon) = button.icon {
-                    crate::icons::paint(
+                    crate::icons::paint_icon(
                         &painter,
                         egui::Rect::from_center_size(
                             egui::pos2(left + t.sketch_footer_icon_size / 2.0, rect.center().y),
                             vec2(t.sketch_footer_icon_size, t.sketch_footer_icon_size),
                         ),
                         icon,
-                        t.icon,
-                        t.icon_fill,
-                        t.form_primary,
+                        f32::from(t.icon.a()) / 255.0,
                     );
                 }
                 painter.galley(egui::pos2(left + icon_width, rect.center().y - galley.size().y / 2.0), galley, t.form_ink);
@@ -246,13 +250,13 @@ pub(crate) fn button_pair(ui: &mut egui::Ui, key: &str, states: [bool; 2], butto
 }
 
 /// Secondary button variants preserve native sizing and enabled-button translation.
-pub(crate) enum Button {
+pub enum Button {
     Normal,
     Small,
     Enabled(bool),
 }
 
-pub(crate) fn button(ui: &mut Ui, label: impl Into<egui::WidgetText>, options: Button) -> Response {
+pub fn button(ui: &mut Ui, label: impl Into<egui::WidgetText>, options: Button) -> Response {
     let label = label.into();
     let key = label.text().to_owned();
     let draw = |ui: &mut Ui, label| match options {

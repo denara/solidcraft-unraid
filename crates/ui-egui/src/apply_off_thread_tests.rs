@@ -64,11 +64,16 @@ fn ok_computes_off_the_window_thread_saying_so_then_applies() {
 fn cancel_while_computing_applies_nothing() {
     let mut h = square_on_a_block();
     h.app.apply_off_thread = Some(Duration::ZERO);
+    // Held, as the preview's evaluation is in the cache and would otherwise be in before OK's
+    // wait is over, applying at once.
+    let (finish, gate) = std::sync::mpsc::channel();
+    h.app.apply_gate = Some(std::sync::Arc::new(std::sync::Mutex::new(gate)));
     let features = h.app.session.doc.features.len();
     h.step(&json!({"key": "Enter"})).unwrap();
     assert!(h.app.applying.is_some());
     h.step(&json!({"key": "Escape"})).unwrap();
     assert!(h.app.applying.is_none() && h.app.dialog.is_none());
+    finish.send(()).unwrap();
     h.frames(5);
     assert_eq!(h.app.session.doc.features.len(), features);
 }
@@ -81,9 +86,13 @@ fn cancel_while_computing_applies_nothing() {
 fn ok_computing_off_the_window_thread_does_not_apply_in_the_frame_it_starts() {
     let mut h = square_on_a_block();
     h.app.apply_off_thread = Some(Duration::ZERO);
+    // Held past OK's wait (the evaluation is in the cache), then let go before the next frame.
+    let (finish, gate) = std::sync::mpsc::channel();
+    h.app.apply_gate = Some(std::sync::Arc::new(std::sync::Mutex::new(gate)));
     let features = h.app.session.doc.features.len();
     h.step(&json!({"key": "Enter"})).unwrap();
     assert!(h.app.applying.is_some(), "the dialog is computing");
+    finish.send(()).unwrap();
     assert_eq!(h.app.session.doc.features.len(), features, "nothing applied in the frame it started");
     // A frame later the evaluation is in and the feature is applied.
     until_applied(&mut h);

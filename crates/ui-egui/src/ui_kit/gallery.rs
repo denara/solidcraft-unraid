@@ -1,5 +1,6 @@
 //! Table-driven layout/paint references in both themes. No window or GPU required.
 use super::*;
+use crate::ui_kit::{Container, Surface};
 use crate::{scenario, theme::Tokens};
 use egui::{Ui, vec2};
 
@@ -28,6 +29,147 @@ macro_rules! element {
 
 // One entry per element/variant: names, rendering and geometry expectations stay together.
 const ELEMENTS: &[Element] = &[
+    element!("assistant_entry", |ui, _| {
+        let t = Tokens::get();
+        egui::Frame::NONE.fill(t.app_bar).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                for state in [
+                    AssistantEntryState::Quiet,
+                    AssistantEntryState::Ready,
+                    AssistantEntryState::Busy,
+                    AssistantEntryState::NeedsAuth,
+                    AssistantEntryState::Stopped,
+                    AssistantEntryState::Waiting(3),
+                ] {
+                    let (_, response) = ui.allocate_exact_size(vec2(t.space_24 + t.space_8, t.space_24 + t.space_8), egui::Sense::click());
+                    assistant_entry(ui, &response, state, false, false);
+                }
+            });
+        });
+    }),
+    element!("assistant_header", |ui, _| {
+        assistant_header(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Assistant");
+                assistant_badge(ui, "Ready", AssistantTone::Success);
+            });
+        });
+    }),
+    element!("assistant_controls", |ui, _| {
+        assistant_controls(ui, |ui| {
+            button(ui, "Connect", Button::Normal);
+        });
+    }),
+    element!("assistant_badge", |ui, _| {
+        ui.horizontal(|ui| {
+            for (label, tone) in [
+                ("Ready", AssistantTone::Success),
+                ("Working", AssistantTone::Working),
+                ("Waiting", AssistantTone::Warning),
+                ("Error", AssistantTone::Error),
+                ("Offline", AssistantTone::Neutral),
+            ] {
+                assistant_badge(ui, label, tone);
+            }
+        });
+    }),
+    element!("assistant_bubble", |ui, _| {
+        assistant_bubble(ui, |ui| {
+            ui.label("Set the plate thickness to 8 mm.");
+        });
+    }),
+    element!("assistant_prose", |ui, _| {
+        assistant_prose(ui, |ui| {
+            ui.label("The thickness is now 8 mm. The design rebuilt successfully.");
+        });
+    }),
+    element!("assistant_tool_status", |ui, _| {
+        ui.horizontal(|ui| {
+            for state in [AssistantToolState::Pending, AssistantToolState::Running, AssistantToolState::Done, AssistantToolState::Failed] {
+                assistant_tool_status(ui, state);
+            }
+        });
+    }),
+    element!("assistant_tool", |ui, _| {
+        assistant_tool_frame(ui, false, |ui| {
+            ui.monospace("parameters.set");
+            assistant_tool_detail(ui, |ui| {
+                ui.monospace("thickness = 8 mm");
+            });
+        });
+    }),
+    element!("assistant_tool_failed", |ui, _| {
+        assistant_tool_frame(ui, false, |ui| {
+            assistant_tool_row(ui, true, |ui| {
+                ui.monospace("solid.fillet");
+            });
+        });
+    }),
+    element!("assistant_approval", |ui, _| {
+        assistant_approval(ui, "Allow the Assistant to run this?", |ui| {
+            ui.label("Change the design parameter.");
+            assistant_actions(ui, |ui| {
+                primary_button(ui, "Allow once");
+                button(ui, "Always allow", Button::Normal);
+                button(ui, "Deny", Button::Normal);
+            });
+        });
+    }),
+    element!("assistant_composer", |ui, s| {
+        assistant_composer_footer(ui, |ui| {
+            assistant_composer(ui, false, |ui| {
+                assistant_input(ui, ui.id().with("assistant_gallery"), &mut s.value, "Ask for a change…");
+            });
+        });
+    }),
+    element!("assistant_composer_focused", |ui, _| {
+        assistant_composer(ui, true, |ui| {
+            ui.label("Ask for a change…");
+        });
+    }),
+    element!("assistant_send", |ui, _| {
+        ui.horizontal(|ui| {
+            assistant_send(ui, true, false, "Send");
+            assistant_send(ui, true, true, "Stop");
+            assistant_send(ui, false, false, "Send");
+        });
+    }),
+    element!("assistant_empty", |ui, _| {
+        assistant_empty(ui, "Set up an assistant", "Choose an installed agent in Preferences.", |ui| {
+            button(ui, "Open Preferences", Button::Normal);
+        });
+    }),
+    element!("assistant_banner", |ui, _| {
+        assistant_banner(ui, AssistantTone::Warning, |ui| {
+            ui.label("Paused after the configured step limit.");
+        });
+    }),
+    element!("history_transport", |ui, _| {
+        ui.horizontal(|ui| {
+            let side = Tokens::get().space_24;
+            for control in HistoryTransport::ALL {
+                let (rect, _) = ui.allocate_exact_size(vec2(side, side), egui::Sense::hover());
+                control.show(ui, rect);
+            }
+        });
+    }),
+    element!("history_marker", |ui, _| {
+        let t = Tokens::get();
+        let accent = crate::theme::TabAccent::for_tab(&t, "SURFACE");
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(vec2(t.space_24 * 7.0, t.space_12), egui::Sense::hover());
+            ui.painter().rect_filled(rect, 0.0, t.panel);
+            history_marker(ui.painter(), rect, true, accent);
+            let (rect, _) = ui.allocate_exact_size(vec2(t.space_12, t.control_height), egui::Sense::hover());
+            ui.painter().rect_filled(rect, 0.0, t.timeline);
+            history_marker(ui.painter(), rect, false, accent);
+        });
+    }),
+    element!("history_seam_rest", |ui, _| history_seam_example(ui, HistoryHandleState::Rest)),
+    element!("history_seam_hover", |ui, _| history_seam_example(ui, HistoryHandleState::Hover)),
+    element!("history_seam_drag", |ui, _| history_seam_example(ui, HistoryHandleState::Drag)),
+    element!("history_icons", |ui, _| history_example(ui, false)),
+    element!("history_names", |ui, _| history_example(ui, true)),
     element!("command_search", |ui, _| {
         let mut query = "fillet".to_owned();
         CommandSearch::field(
@@ -320,6 +462,9 @@ const ELEMENTS: &[Element] = &[
     element!("slider_integer_without_editor", |ui, _| {
         slider(ui, &mut 12.0, 0.0..=100.0, Slider { show_value: false, integer: true, ..Default::default() });
     }),
+    element!("canvas_value_field", |ui, s| {
+        canvas_value_field(ui, ui.id().with("canvas_value"), &mut s.value);
+    }),
     element!("placement_field", |ui, s| {
         placement_field(ui, ui.id().with("placement"), &mut s.value, "Distance");
     }),
@@ -439,6 +584,13 @@ const ELEMENTS: &[Element] = &[
         for open in [true, false] {
             let (rect, _) = ui.allocate_exact_size(vec2(t.form_close_size, t.form_close_size), egui::Sense::hover());
             ui.push_id(open, |ui| disclosure_button_at(ui, rect, open, crate::i18n::tr_label(if open { "Collapse" } else { "Expand" })));
+        }
+    }),
+    element!("panel_disclosure_button_at", |ui, _| {
+        let t = Tokens::get();
+        for open in [true, false] {
+            let (rect, _) = ui.allocate_exact_size(vec2(t.form_close_size, t.form_close_size), egui::Sense::hover());
+            ui.push_id(open, |ui| panel_disclosure_button_at(ui, rect, open, crate::i18n::tr_label(if open { "Collapse" } else { "Expand" })));
         }
     }),
     element!("dropdown_indicator", |ui, _| {
@@ -713,7 +865,7 @@ const ELEMENTS: &[Element] = &[
 fn example(ui: &mut Ui, element: &Element) -> (&'static str, Option<&'static str>) {
     let mut sample = Sample { value: "12 mm".into(), second: "25 mm".into(), selected: 0, checked: true };
     let rect = ui.scope(|ui| (element.draw)(ui, &mut sample)).response.rect;
-    if matches!(element.name, "menu" | "menu_submenu" | "rename_menu" | "workspace_menu" | "command_search") {
+    if matches!(element.name, "menu" | "menu_submenu" | "rename_menu" | "workspace_menu" | "command_search" | "history_icons" | "history_names") {
         // A popup's elevation is painted outside its layout rectangle. Reserve those
         // actual shadow bounds as part of the gallery sample, keeping the paint guard strict.
         ui.expand_to_include_rect(rect + Menu::frame().shadow.margin());
@@ -1070,6 +1222,112 @@ fn gallery_covers_every_inline_element() {
     }
 }
 
+#[cfg(test)]
+fn history_seam_example(ui: &mut Ui, state: HistoryHandleState) {
+    let t = Tokens::get();
+    let allocation = ui.allocate_space(vec2(280.0, 250.0)).1;
+    for (names, offset) in [(false, 0.0), (true, 125.0)] {
+        let width = if state == HistoryHandleState::Drag { 112.0 } else { history_width(names) };
+        // Separate samples vertically so the guide/chip fits within the gallery allocation.
+        let card = egui::Rect::from_min_size(allocation.min + vec2(t.space_8, offset + t.space_8), vec2(width, 104.0));
+        ui.painter().rect(card, t.radius_lg, t.panel, egui::Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
+        HistorySeam::new(card).paint(ui.painter(), card, names, state);
+    }
+}
+
+#[cfg(test)]
+fn history_example(ui: &mut Ui, names: bool) {
+    let mut app = crate::test_support::sample_app();
+    app.preferences.timeline_left = true;
+    app.preferences.timeline_left_width = crate::ui_kit::history_width(names);
+    app.run("timeline.roll_to", serde_json::json!({"position":3})).unwrap();
+    let feature = app.session.doc.features.get(2).unwrap().id;
+    app.run("select.set", serde_json::json!({"items":[{"type":"feature","id":feature}]})).unwrap();
+    let width = crate::timeline_left::strip_width(&app);
+    let rect = ui.allocate_space(vec2(width, 650.0)).1;
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect.shrink(5.0)), |ui| {
+        ui.painter().add(Container::new(ui.ctx(), Surface::Panel).frame(ui.ctx(), Tokens::get().panel, crate::frame::Side::Left).paint(rect));
+        crate::timeline_left::left_timeline(&mut app, ui);
+    });
+}
+
+/// CPU captures of the actual vertical strip and browser, in both themes and widths.
+#[test]
+fn history_board_in_both_themes_and_widths() {
+    use super::checks::tests::{raster, textures_update};
+    use std::collections::HashMap;
+    let previous = crate::theme::is_dark();
+    for dark in [false, true] {
+        for names in [false, true] {
+            for collapsed in [false, true] {
+                for state in [HistoryHandleState::Rest, HistoryHandleState::Hover, HistoryHandleState::Drag] {
+                    crate::theme::set_dark(dark);
+                    let ctx = crate::fonts::test_context();
+                    ctx.set_visuals(if dark { egui::Visuals::dark() } else { egui::Visuals::light() });
+                    ctx.global_style_mut(|style| style.animation_time = 0.0);
+                    let mut app = crate::test_support::sample_app();
+                    app.preferences.timeline_left = true;
+                    app.preferences.timeline_left_width = crate::ui_kit::history_width(names);
+                    app.preferences.timeline_left_browser_collapsed = collapsed;
+                    app.run("timeline.roll_to", serde_json::json!({"position":3})).unwrap();
+                    let feature = app.session.doc.features.get(2).unwrap().id;
+                    app.run("select.set", serde_json::json!({"items":[{"type":"feature","id":feature}]})).unwrap();
+                    let bounds = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(560.0, 680.0));
+                    let mut textures = HashMap::new();
+                    let mut image = None;
+                    let mut drag_start = None;
+                    for pass in 0..9 {
+                        let mut events = vec![];
+                        if pass >= 2 {
+                            let card = app.shell.history.unwrap();
+                            if state == HistoryHandleState::Hover {
+                                events.push(egui::Event::PointerMoved(card.right_center()));
+                            } else if state == HistoryHandleState::Drag {
+                                let start = *drag_start.get_or_insert(egui::pos2(card.right() - 4.0, card.top() + 12.0));
+                                if pass == 2 {
+                                    events = crate::test_support::pointer(start, true);
+                                } else if pass == 3 {
+                                    events.push(egui::Event::PointerMoved(start + vec2(112.0 - history_width(names), 0.0)));
+                                }
+                            }
+                        }
+                        let mut output = ctx.run_ui(
+                            egui::RawInput { screen_rect: Some(bounds), time: Some(pass as f64 * 0.2), focused: true, events, ..Default::default() },
+                            |ui| {
+                                ui.painter().rect_filled(bounds, 0.0, Tokens::get().viewport_top);
+                                crate::timeline_left::left_panel(&mut app, ui);
+                                crate::browser::browser(&mut app, ui);
+                            },
+                        );
+                        textures_update(&mut textures, &output.textures_delta);
+                        output.textures_delta.clear();
+                        image = Some(raster(&ctx, output.shapes, output.pixels_per_point, bounds, &textures));
+                    }
+                    if state == HistoryHandleState::Drag {
+                        assert_eq!(app.shell.history_drag_width, Some(112.0));
+                        assert_eq!(app.shell.history.unwrap().width(), 112.0);
+                    }
+                    assert!(app.shell.history.unwrap().right() < app.shell.browser.unwrap().left());
+                    if let Ok(dir) = std::env::var("SOLIDCRAFT_HISTORY_EVIDENCE") {
+                        std::fs::create_dir_all(&dir).unwrap();
+                        image
+                            .unwrap()
+                            .save(std::path::Path::new(&dir).join(format!(
+                                "history-{}-{}-{}-{:?}.png",
+                                if names { "names" } else { "icons" },
+                                if collapsed { "rail" } else { "browser" },
+                                if dark { "dark" } else { "light" },
+                                state
+                            )))
+                            .unwrap();
+                    }
+                }
+            }
+        }
+    }
+    crate::theme::set_dark(previous);
+}
+
 /// Render actual egui geometry without a desktop window. Opt-in PNGs are reviewer evidence.
 #[test]
 fn menu_board_in_both_themes() {
@@ -1186,20 +1444,20 @@ fn command_search_board_in_both_themes() {
 }
 
 /// Exercise the actual surface painters, including deliberately shared artwork whose
-/// own accent differs from its tone or tab.
+/// own accent differs from its tone, tab or feature kind.
 #[test]
-fn confirm_radial_and_menu_danger_keep_multitone_artwork() {
+fn confirm_radial_and_history_rows_keep_multitone_artwork() {
     let previous = crate::theme::is_dark();
     for dark in [false, true] {
         crate::theme::set_dark(dark);
         let mut cases = vec![
-            ("warning", "extrude", "MODEL", Some("construction"), 20),
-            ("danger", "extrude", "MODEL", Some("constraint"), 20),
-            ("info", "extrude", "MODEL", None, 20),
-            ("warning", "status_warning", "MODEL", Some("construction"), 20),
-            ("danger", "delete", "MODEL", Some("constraint"), 20),
-            ("danger_menu", "delete", "MODEL", Some("constraint"), 16),
-            ("info", "surface_extrude", "MODEL", None, 20),
+            ("warning", "extrude", "", "MODEL", Some("construction"), 20),
+            ("danger", "extrude", "", "MODEL", Some("constraint"), 20),
+            ("info", "extrude", "", "MODEL", None, 20),
+            ("warning", "status_warning", "", "MODEL", Some("construction"), 20),
+            ("danger", "delete", "", "MODEL", Some("constraint"), 20),
+            ("danger_menu", "delete", "", "MODEL", Some("constraint"), 16),
+            ("info", "surface_extrude", "", "MODEL", None, 20),
         ];
         for (tab, ramp) in [
             ("SKETCH", Some("sketch")),
@@ -1212,11 +1470,26 @@ fn confirm_radial_and_menu_danger_keep_multitone_artwork() {
             ("unknown", None),
         ] {
             for surface in ["radial", "radial_hover"] {
-                cases.push((surface, "extrude", tab, ramp, 24));
+                cases.push((surface, "extrude", "", tab, ramp, 24));
             }
         }
+        for (kind, ramp) in [
+            ("Sketch", Some("sketch")),
+            ("SurfaceExtrudeFeature", Some("surface")),
+            ("MeshFeature", Some("mesh")),
+            ("FormFeature", Some("form")),
+            ("ExtrudeFeature", None),
+        ] {
+            for (surface, side) in [("history_names", 15), ("history_icons", 19)] {
+                cases.push((surface, "extrude", kind, "MODEL", ramp, side));
+            }
+        }
+        // Surface feature names without the Surface prefix use the same alias rule
+        // as the browser's timeline::icon_of assignments.
+        cases.push(("history_names", "surface_extrude", "ExtrudeFeature", "MODEL", Some("surface"), 15));
+        cases.push(("history_names", "continuity", "MatchFeature", "MODEL", Some("surface"), 15));
         let mut dominant_accents: std::collections::HashMap<&str, std::collections::HashSet<egui::Color32>> = std::collections::HashMap::new();
-        for (surface, icon, tab, ramp, side) in cases {
+        for (surface, icon, kind, tab, ramp, side) in cases {
             let ctx = crate::fonts::test_context();
             ctx.set_visuals(if dark { egui::Visuals::dark() } else { egui::Visuals::light() });
             let mut app = crate::SolveApp::new(Default::default(), Default::default());
@@ -1239,6 +1512,26 @@ fn confirm_radial_and_menu_danger_keep_multitone_artwork() {
                         item.danger = true;
                         item.show(ui);
                     }
+                    "history_names" | "history_icons" => {
+                        let style = if surface == "history_names" { HistoryStyle::Names } else { HistoryStyle::Icons };
+                        HistoryChip {
+                            icon,
+                            name: "Extrude1",
+                            kind,
+                            selected: false,
+                            hovered: false,
+                            dim: false,
+                            suppressed: false,
+                            error: false,
+                            warning: false,
+                            accent: crate::theme::TabAccent::for_tab(&Tokens::get(), "MODEL"),
+                        }
+                        .paint(
+                            ui.painter(),
+                            egui::Rect::from_min_size(egui::pos2(20.0, 20.0), vec2(158.0, style.height())),
+                            style,
+                        );
+                    }
                     _ => {
                         let tone = match surface {
                             "warning" => Tone::Warning,
@@ -1260,7 +1553,7 @@ fn confirm_radial_and_menu_danger_keep_multitone_artwork() {
                 })
                 .expect("the surface must upload its icon texture");
             let colours: std::collections::HashSet<_> = image.pixels.iter().filter(|pixel| pixel.a() == 255).copied().collect();
-            assert!(colours.len() >= 2, "{surface}/{icon}/{tab}, dark={dark}: opaque artwork is a silhouette");
+            assert!(colours.len() >= 2, "{surface}/{icon}/{kind}/{tab}, dark={dark}: opaque artwork is a silhouette");
             let resolved = crate::icon_svg::resolve(icon);
             assert!(!resolved.placeholder, "{icon} needs a master");
             let look = crate::icon_svg::Look { dark, accent: ramp.and_then(crate::icon_svg::accent_index), vision: crate::theme::vision() };
@@ -1282,7 +1575,7 @@ fn confirm_radial_and_menu_danger_keep_multitone_artwork() {
             assert_eq!(
                 image.as_ref(),
                 &egui::ColorImage::from_rgba_premultiplied([side, side], expected.data()),
-                "{surface}/{tab}: preserve roles with {ramp:?}"
+                "{surface}/{kind}/{tab}: preserve roles with {ramp:?}"
             );
             if icon == "extrude" {
                 let dominant = ["active-1", "active-2", "active-3"]
@@ -1293,7 +1586,7 @@ fn confirm_radial_and_menu_danger_keep_multitone_artwork() {
                     .into_iter()
                     .max_by_key(|(count, _)| *count)
                     .unwrap();
-                assert!(dominant.0 > 0, "{surface}/{tab}: missing accent pixels");
+                assert!(dominant.0 > 0, "{surface}/{kind}/{tab}: missing accent pixels");
                 let group = if matches!(surface, "warning" | "danger" | "info") { "confirm" } else { surface };
                 dominant_accents.entry(group).or_default().insert(dominant.1);
             }
@@ -1302,11 +1595,13 @@ fn confirm_radial_and_menu_danger_keep_multitone_artwork() {
                 super::checks::tests::textures_update(&mut textures, &output.textures_delta);
                 let capture = super::checks::tests::raster(&ctx, output.shapes.clone(), output.pixels_per_point, bounds, &textures);
                 std::fs::create_dir_all(&dir).unwrap();
-                capture.save(std::path::Path::new(&dir).join(format!("{surface}-{icon}-{tab}-{}.png", if dark { "dark" } else { "light" }))).unwrap();
+                capture
+                    .save(std::path::Path::new(&dir).join(format!("{surface}-{icon}-{kind}-{tab}-{}.png", if dark { "dark" } else { "light" })))
+                    .unwrap();
             }
             output.textures_delta.clear();
         }
-        for (group, count) in [("confirm", 3), ("radial", 5), ("radial_hover", 5)] {
+        for (group, count) in [("confirm", 3), ("radial", 5), ("radial_hover", 5), ("history_names", 5), ("history_icons", 5)] {
             assert_eq!(dominant_accents[group].len(), count, "{group}, dark={dark}: dominant accent pixels must differ across mappings");
         }
     }

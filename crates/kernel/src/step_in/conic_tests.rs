@@ -35,7 +35,7 @@ fn extruded_ellipse_seam_uses_profile_angles_for_oblique_sweeps() {
 {TAIL}"
     );
     let ex = p21::parse(&text).unwrap();
-    let cx = Ctx { ex: &ex, len: 1.0, ang: 1.0, tol: 1e-6 };
+    let cx = Ctx { ex: &ex, len: 1.0, ang: 1.0, tol: 1e-6, snap: 1e-6 };
     let origin = mt::Point3::new(10.0, -20.0, 3.0);
     let d = mt::Vector3::new(0.5, 0.25, 1.0).normalize();
     let point = |angle: f64, h: f64| origin + mt::Vector3::new(9.0 * angle.cos(), 4.0 * angle.sin(), 0.0) + d * h;

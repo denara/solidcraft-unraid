@@ -116,11 +116,11 @@ pub fn command_for(app: &SolveApp, key: &str) -> Option<&'static str> {
 /// starts in the new sketch.
 pub fn press(app: &mut SolveApp, key: &str) {
     if let Some(id) = command_for(app, key) {
-        app.start(id);
+        app.start(app.preferences.sketch_variants.resolve(id));
     } else if let Some(id) = sketch_tool_for(app, key) {
         app.start("sketch.create");
         if let Some(d) = app.dialog.as_mut().filter(|d| matches!(d.kind, crate::dialogs::Kind::Sketch)) {
-            d.then_start = Some(id);
+            d.then_start = Some(app.preferences.sketch_variants.resolve(id));
         }
     }
 }

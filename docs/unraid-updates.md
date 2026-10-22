@@ -1,5 +1,57 @@
 # Validated container updates
 
+## 2026-10-22: upstream 0.19.0 with all published integration features
+
+Selected exactly one upstream snapshot, `3d3dd27439995f37eaed1feaa1c53a0e42d2fe39`,
+45 commits after validated `e9490093`. The sole integration branch
+`codex/unraid-mcp-web` began clean and synchronized at `2be5b67b`; fetched fork
+main is an ancestor. Docker Desktop was unavailable at the scheduled start; the
+same fixed-snapshot update resumed once the development runtime was available.
+SolidCraft features and changes remain documented by the
+[original project](https://github.com/tangency-labs/solidcraft). This integration
+does not publish an application release or install anything on Unraid.
+
+The merge retains the fork's omission of native Windows unsafe bridges, including
+the new work-area caller, and preserves upstream's completion-cache cleanup.
+An existing STEP regression exposed a generic placement copier rejecting a valid
+periodic cylinder seam. Private body placement now uses the fork's existing
+bounded topology-preserving copier, as explicit transforms already did; the
+existing parallel preparation test reproduces the failure and passes after this
+fix. A conditional context binding avoids an unused-variable warning on Wasm.
+Only the two fork package versions were adjusted in the lockfile; dependencies
+were not independently upgraded. License regeneration retains gateway coverage.
+
+The real-site offline test driver previously waited for more held downloads than
+Chromium's six-connection limit allowed. It now waits for one held request to
+establish the failed-download overlap. Its copied real builds also receive one
+unique fixture asset, so overlapping-version downloads genuinely overlap instead
+of completing immediately because all copied bundle filenames are identical.
+These changes affect temporary test fixtures only; shipped app and service-worker
+behavior are unchanged. All real-site and stand-in offline scenarios pass.
+
+Relevant checks: 123 gateway, 60 MCP, 36 document-format, 26 native-design IO,
+ten file-command, 11 placed-mirror, 14 view-DXF, 70 STEP, 16 IGES, 56 tessellation,
+eight completion, five window-fit, two CLI-help and 23 browser-app tests pass
+(existing ignored cases remain ignored). GLSL and eight actual software-OpenGL
+captures, document/kernel observer-cache regressions, native/scoped Wasm Clippy,
+13-crate Wasm compatibility, formatting, licenses, assets, icons, layers, sorted
+catalogs and UI-container checks pass. Both release browser clients and native
+gateway/CLI binaries build.
+
+A fresh-volume candidate passes modelling/PNG/STEP export, authentication,
+revision/path/origin separation, immutable projects, restart persistence, logging,
+Workspace push/metadata/thumbnails/native handoff, remembered login, read-only
+observer and deletion/ZIP checks. The 256-MiB ZIP starts in 9 ms with measured
+RSS growth of zero; integrity, Unicode/empty/nested entries, backup exclusion,
+concurrent write leases and aborted-download cleanup pass. Real SDK 1.32.1 opens
+legacy format 13 and previous native format 29, preserving source bytes, parameters,
+24000 mm3 volume and all named split-face centroids on migration to format 30.
+Current-view DXF and BOM outputs retain complete path/revision confinement.
+Actual Chromium verifies the joined live overview, initially collapsed groups,
+compact folder actions and an independent browser copy of the migrated design.
+Screenshots, public fixtures and diagnostics stay in ignored
+`target/upstream-3d3dd274-20261022/`.
+
 ## 2026-10-21: joined Workspace overview and usable ZIPs after native saves
 
 Preserves validated upstream `e94900933dafd63e2b32594afbdc879ecd64d2f7`

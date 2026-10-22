@@ -114,6 +114,9 @@ pub(crate) struct Ctx<'a> {
     pub ang: f64,
     /// Vertex-on-curve tolerance (mm).
     pub tol: f64,
+    /// Farthest an edge's vertex may sit off its curve and still be moved onto it (mm, at least
+    /// `tol`): see [`snap_limit`].
+    pub snap: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -121,9 +124,29 @@ struct Units {
     len: f64,
     ang: f64,
     tol: f64,
+    snap: f64,
 }
 
-const DEFAULT_UNITS: Units = Units { len: 1.0, ang: 1.0, tol: 0.01 };
+const DEFAULT_UNITS: Units = Units { len: 1.0, ang: 1.0, tol: 0.01, snap: 0.01 };
+
+/// Largest tolerance a file can ask for (mm), however coarse the accuracy it declares.
+const MAX_TOL: f64 = 1.0;
+
+/// Gap between an edge's vertex and its curve that is still read as the same point, as a share
+/// of the model's size: the chord error the kernel's own coarse meshes allow at that size
+/// (`Body::size() * 1e-3`), so moving the vertex onto the curve changes the shape by less than
+/// those meshes already do.
+const SNAP_SHARE: f64 = 1e-3;
+
+/// Farthest a vertex may sit off its edge's curve and be moved onto it (mm): the file's own
+/// tolerance `tol`, or up to [`SNAP_SHARE`] of the model's size `extent` (mm) when that is
+/// larger. Some exporters write vertices further off than the accuracy they declare (a surface
+/// export may declare 0.01 mm and join two curves 0.38 mm apart at a vertex between them).
+/// Never more than [`MAX_TOL`], so a far stray point cannot turn the check off.
+fn snap_limit(tol: f64, extent: f64) -> f64 {
+    let share = if extent.is_finite() { extent * SNAP_SHARE } else { 0.0 };
+    tol.max(share.min(MAX_TOL))
+}
 
 fn si_prefix(p: Option<&Param>) -> f64 {
     match p.and_then(Param::as_enum) {
@@ -208,7 +231,8 @@ fn context_units(ex: &Exchange, ctx: Option<u64>, cache: &mut HashMap<u64, Units
             }
         }
     }
-    u.tol = tol_file.filter(|t| t.is_finite() && *t > 0.0).map(|t| (t * 10.0).max(1e-3)).unwrap_or(u.len * 1e-2).clamp(1e-4, 1.0);
+    u.tol = tol_file.filter(|t| t.is_finite() && *t > 0.0).map(|t| (t * 10.0).max(1e-3)).unwrap_or(u.len * 1e-2).clamp(1e-4, MAX_TOL);
+    u.snap = snap_limit(u.tol, ex.vertex_extent() * u.len);
     cache.insert(id, u);
     u
 }
@@ -560,7 +584,7 @@ impl Reader {
     }
 
     fn placement_matrix(&mut self, item: u64, u: Units) -> R<mt::Matrix4> {
-        let cx = Ctx { ex: &self.ex, len: u.len, ang: u.ang, tol: u.tol };
+        let cx = Ctx { ex: &self.ex, len: u.len, ang: u.ang, tol: u.tol, snap: u.snap };
         let e = geom::entity(&cx, item)?;
         if matches!(e.name(), "CARTESIAN_TRANSFORMATION_OPERATOR_3D" | "CARTESIAN_TRANSFORMATION_OPERATOR_3D_NON_UNIFORM") {
             let p = e.params();
@@ -761,7 +785,7 @@ impl Reader {
             };
             let placement = self.batches.get(p.batch).map_or(mt::Matrix4::from_scale(1.0), |b| b.m);
             sources.push((i, item));
-            jobs.push(parallel::Job { source, placement, check_mesh: !self.unmeshed_checked.contains(&item) });
+            jobs.push(parallel::Job { source, placement, check_mesh: !self.unmeshed_checked.contains(&item), tol: units.tol });
         }
         // Reading and orienting new parts is shared out between the workers.
         let prepared = parallel::bodies(&ex, &jobs, self.workers);

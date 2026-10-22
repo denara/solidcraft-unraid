@@ -22,9 +22,20 @@ mod control_server;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 mod space_mouse;
 mod startup;
+#[cfg(test)]
+mod window_fit;
 
 use solidcraft_engine::{Session, io};
 use solidcraft_ui_egui::{Services, SolveApp};
+
+/// `SOLIDCRAFT_PROFILE_STARTUP=1` prints the time since launch at each startup step.
+fn mark(step: &str) {
+    static START: std::sync::OnceLock<(std::time::Instant, bool)> = std::sync::OnceLock::new();
+    let (start, on) = START.get_or_init(|| (std::time::Instant::now(), solidcraft_engine::geom::env::var_os("PROFILE_STARTUP").is_some()));
+    if *on {
+        eprintln!("startup {:>6.0} ms  {step}", start.elapsed().as_secs_f64() * 1000.0);
+    }
+}
 
 struct App {
     solve: SolveApp,
@@ -32,6 +43,8 @@ struct App {
     starting: Option<std::path::PathBuf>,
     /// Frames begun; the second one means the first was drawn (startup is over).
     frames: u32,
+    /// Started over the control channel: the window doesn't ask for the foreground.
+    take_focus_unwanted: bool,
     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     space_mouse: space_mouse::SpaceMouse,
 }
@@ -40,9 +53,18 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.frames < 2 {
             self.frames += 1;
+            mark(if self.frames == 1 { "first frame begins" } else { "second frame begins (first presented)" });
             // A second frame right away, which means the first was presented: the app is up.
             ctx.request_repaint();
             if self.frames == 2 {
+                // The window is shown only once its first frame is presented, and Windows then
+                // keeps a window of a process started from a shortcut or an installer behind the
+                // others. Ask for the foreground once, now that it is on screen; never again, so
+                // later frames don't take the focus from whatever the user moved to. Automation
+                // over the control channel keeps the focus where it is.
+                if !self.take_focus_unwanted {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
                 solidcraft_engine::crash::phase(solidcraft_engine::crash::RUNNING);
                 if let Some(dir) = self.starting.take() {
                     startup::started(&dir);
@@ -467,6 +489,7 @@ fn app_viewport() -> Result<egui::ViewportBuilder, eframe::Error> {
 const APP_ID: &str = solidcraft_engine::io::APP_ID;
 
 fn main() -> eframe::Result {
+    mark("main");
     adopt_legacy_settings();
     let mut safe_mode = startup::env_on(std::env::var(startup::SAFE_MODE_ENV).ok().as_deref());
     let mut control_port: Option<u16> = solidcraft_engine::geom::env::var("CONTROL_PORT").and_then(|p| p.parse().ok());
@@ -572,13 +595,17 @@ fn main() -> eframe::Result {
     let created = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let created_in_app = created.clone();
     let starting = settings.clone();
+    mark("run_native");
     let result = eframe::run_native(
         "SolidCraft",
         options,
         Box::new(move |cc| {
             created_in_app.store(true, std::sync::atomic::Ordering::SeqCst);
             solidcraft_engine::crash::phase("app setup");
-            solidcraft_ui_egui::fonts::setup_fonts(&cc.egui_ctx);
+            mark("window and device ready");
+            solidcraft_ui_egui::fonts::setup_bundled_fonts(&cc.egui_ctx);
+            solidcraft_ui_egui::fonts::load_system_fonts_in_background(&cc.egui_ctx);
+            mark("fonts");
             let mut app = SolveApp::new(Session::default(), services(cc));
             app.apply_off_thread = Some(solidcraft_ui_egui::dialogs::APPLY_AT_ONCE);
             app.custom_titlebar = CUSTOM_TITLEBAR;
@@ -596,6 +623,7 @@ fn main() -> eframe::Result {
             if let Some(p) = cc.storage.and_then(|s| solidcraft_ui_egui::prefs::stored(|k| s.get_string(k))).filter(|_| !safe_mode) {
                 app.load_prefs(&p);
             }
+            mark("app state and prefs");
             if let Some(rs) = &cc.wgpu_render_state {
                 eprintln!("SolidCraft graphics: {:?}, MSAA {}x (requested {}x)", rs.adapter.get_info().backend, rs.msaa_samples, samples);
                 solidcraft_engine::crash::phase("viewport pipelines (shader compile)");
@@ -611,6 +639,7 @@ fn main() -> eframe::Result {
                     info.backend, info.name, info.driver, rs.msaa_samples
                 ));
             }
+            mark("viewport pipelines");
             if let Some(port) = control_port {
                 let rx = control_server::start(port, cc.egui_ctx.clone());
                 app = app.with_control(rx);
@@ -657,11 +686,13 @@ fn main() -> eframe::Result {
             }
             #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
             let space_mouse = space_mouse::SpaceMouse::start(&cc.egui_ctx);
+            mark("app created");
             solidcraft_engine::crash::phase("first frame");
             Ok(Box::new(App {
                 solve: app,
                 starting,
                 frames: 0,
+                take_focus_unwanted: control_port.is_some(),
                 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
                 space_mouse,
             }))

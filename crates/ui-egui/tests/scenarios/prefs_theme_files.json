@@ -1,5 +1,5 @@
 [
-  {"note": "#2255: the Theme list offers the built-in theme files (Gruvbox) after Dark, Light and System; picking one applies at once, Cancel puts the theme back."},
+  {"note": "#2255: the Theme list offers the built-in theme files (Gruvbox, SolidCraft 95, …) after Dark, Light and System; picking one applies at once, Cancel puts the theme back."},
   {"click": {"handle": "titlebar:preferences"}},
   {"expect": {"prefs": {"dialog": "General", "theme": "dark", "dark": true}}},
   {"click": {"handle": "prefs:theme"}},
@@ -8,6 +8,9 @@
   {"click": {"handle": "prefs:theme"}},
   {"click": {"handle": "prefs:theme:gruvbox-dark"}},
   {"expect": {"prefs": {"theme": "gruvbox-dark", "dark": true}}},
+  {"click": {"handle": "prefs:theme"}},
+  {"click": {"handle": "prefs:theme:solidcraft-95"}},
+  {"expect": {"prefs": {"theme": "solidcraft-95", "dark": false}}},
   {"widget": "Cancel"},
   {"expect": {"prefs": {"dialog": null, "theme": "dark", "dark": true}}}
 ]

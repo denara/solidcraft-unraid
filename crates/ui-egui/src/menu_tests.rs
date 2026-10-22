@@ -848,6 +848,41 @@ fn menus_near_the_window_corner_open_inward() {
     }
 }
 
+/// #3313: renaming a body by typing in the Rename box and pressing Enter (or Tab) renames it.
+#[test]
+fn typing_a_new_body_name_and_enter_renames_it() {
+    for confirm in ["Enter", "Tab"] {
+        let mut h = crate::scenario::Harness::new();
+        h.app.run("solid.box", json!({"length": 10, "width": 10, "height": 10})).unwrap();
+        let b = h.app.session.model.state().bodies[0].name.clone();
+        h.app.run("select.set", json!({"items": [{"type": "body", "name": b}]})).unwrap();
+        h.frames(2);
+        h.step(&json!({"key": "F2"})).unwrap();
+        h.frames(2);
+        assert!(h.app.menu.rename.is_some(), "F2 opens the Rename box");
+        h.step(&json!({"text": "Lid"})).unwrap();
+        h.frames(1);
+        h.step(&json!({"key": confirm})).unwrap();
+        h.frames(2);
+        let names: Vec<String> = h.app.session.model.state().bodies.iter().map(|b| b.name.clone()).collect();
+        assert_eq!(names, ["Lid"], "{confirm} renames the body; status {:?}", h.app.status);
+    }
+    // Escape still cancels.
+    let mut h = crate::scenario::Harness::new();
+    h.app.run("solid.box", json!({"length": 10, "width": 10, "height": 10})).unwrap();
+    let b = h.app.session.model.state().bodies[0].name.clone();
+    h.app.run("select.set", json!({"items": [{"type": "body", "name": b.clone()}]})).unwrap();
+    h.frames(2);
+    h.step(&json!({"key": "F2"})).unwrap();
+    h.frames(2);
+    h.step(&json!({"text": "Lid"})).unwrap();
+    h.frames(1);
+    h.step(&json!({"key": "Escape"})).unwrap();
+    h.frames(2);
+    assert!(h.app.menu.rename.is_none());
+    assert_eq!(h.app.session.model.state().bodies[0].name, b, "Escape keeps the old name");
+}
+
 #[test]
 fn contribution_picked_faces_open_their_own_feature_after_later_modifiers() {
     use solidcraft_engine::{Sel, geom::Vec3};

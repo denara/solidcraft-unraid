@@ -33,6 +33,7 @@ fn surface_of(shell: mt::Shell) -> Body {
     Body {
         solid: std::sync::Arc::new(mt::Solid::new_unchecked(vec![shell])),
         size: 0.0,
+        boundary_tol: None,
         volume: Some(std::sync::Arc::new(std::sync::Mutex::new(None))),
         coarse_missing: None,
         mesh: None,

@@ -98,9 +98,9 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
         (Stage::Done, Some(Ok(_))) => "ui.space_mouse_calibration_done",
         (Stage::Done, _) => "ui.space_mouse_calibration_no_response",
     };
-    // The axis that barely moved, as Preferences names it.
+    // The calibrated motion that barely moved, as Preferences names it.
     let weak = match result {
-        Some(Err(Problem::NoResponse(axis))) => crate::prefs::SPACE_MOUSE_AXES.get(axis).copied(),
+        Some(Err(Problem::NoResponse(axis))) => crate::space_mouse::MOTIONS.get(axis).copied(),
         _ => None,
     };
     let counter = match stage {
@@ -109,14 +109,11 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
         Stage::Done => format!("{0} / {0}", STEP_PROMPTS.len()),
     };
     let (mut back, mut over, mut cancel, mut save) = (false, false, false, false);
-    crate::frame::window(ctx, app.tr("ui.space_mouse_calibrate_title"), crate::frame::Width::Normal)
-        .id(egui::Id::new("sc_space_mouse_calibration"))
-        .collapsible(false)
-        .resizable(false)
-        .show(ctx, |ui| {
+    let closed = crate::ui_kit::Window::new(egui::Id::new("sc_space_mouse_calibration"), "settings", app.tr("ui.space_mouse_calibrate_title"))
+        .show_body(ctx, |ui| {
             ui.label(app.tr(prompt));
             if let Some(axis) = weak {
-                ui.label(egui::RichText::new(app.tr_label(axis)).strong());
+                ui.label(egui::RichText::new(app.tr(axis)).strong());
             }
             ui.add_space(6.0);
             crate::ui_kit::progress(ui, "space_mouse_calibration", progress as f32);
@@ -128,6 +125,10 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
             // The device's six raw axes as they come, so the jitter at rest is there to see.
             let reading = raw.map(|value| format!("{value:>6}")).join(" ");
             ui.label(egui::RichText::new(format!("{}: {reading}", app.tr("ui.space_mouse_reading"))).monospace());
+            // A reassignment made in Preferences stays on top of whatever this records.
+            if app.preferences.space_mouse_axis_source != crate::space_mouse::SAME_AXES {
+                ui.label(egui::RichText::new(app.tr("ui.space_mouse_axes_reassigned")).small());
+            }
             ui.horizontal(|ui| {
                 ui.label(app.tr("ui.space_mouse_dead_zone"));
                 dead_zone_slider(ui, &mut dead_zone).on_hover_text(app.tr("ui.space_mouse_dead_zone_tip"));
@@ -143,7 +144,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                 save = matches!(result, Some(Ok(_))) && crate::ui_kit::button(ui, app.tr("ui.save"), crate::ui_kit::Button::Normal).clicked();
             });
         });
-    if cancel {
+    if cancel || closed {
         app.space_mouse.calibrating = None;
     } else if let Some((device, wizard)) = &mut app.space_mouse.calibrating {
         wizard.set_dead_zone_share(dead_zone);

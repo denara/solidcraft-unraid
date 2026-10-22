@@ -203,9 +203,11 @@ scale	false
 screw	false
 section	false
 select	false
+send	false
 settings	false
 sheet_rules	false
 shell	false
+shield	false
 silhouette	false
 sketch	false
 sketch_break	false
