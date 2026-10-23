@@ -14,7 +14,7 @@ These specialised contents remain in their owners:
 
 | Surface / source | Content ownership |
 | --- | --- |
-| Start page: `home.rs` | Shared Home components with cached thumbnails and page navigation |
+| Start page: `home.rs` | File-page composition, asynchronous thumbnail caches and links; navigation, action tiles, recent rows, samples and recovery surfaces use `ui_kit::FileView` |
 | Assistant transcript/composer containers, gallery and docking: `agent_chat/panel.rs` | Conversation/media layout, rich selectable content, drag/docking behavior; matching controls use the kit |
 | Native file/program pickers: `file_picker.rs`, host services | Host-native sheets have no egui control surface; load/progress cards use the kit |
 | Command-result ranking/list/pins: `shortcut_box.rs` | Search layout and ranking; popup shell and matching controls use the kit |

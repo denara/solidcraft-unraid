@@ -225,6 +225,37 @@ pub struct IconColors {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tokens {
+    /// File/start presentation, with explicit foreground/background pairs.
+    pub file_dim: Color32,
+    pub file_recovery_well: Color32,
+    pub file_action_height: f32,
+    pub file_back_height: f32,
+    pub file_recovery_icon: f32,
+    pub file_grid_gap: f32,
+    pub file_background: Color32,
+    pub file_surface: Color32,
+    pub file_border: Color32,
+    /// Neutral multiplication tint for File-view model thumbnails.
+    pub file_image_tint: Color32,
+    pub file_rail: Color32,
+    pub file_rail_ink: Color32,
+    pub file_rail_hover: Color32,
+    pub file_primary: Color32,
+    pub file_primary_ink: Color32,
+    pub file_primary_border: Color32,
+    pub file_recovery: Color32,
+    pub file_recovery_ink: Color32,
+    pub file_recovery_border: Color32,
+    pub file_nav_width: f32,
+    pub file_nav_height: f32,
+    pub file_tile_height: f32,
+    pub file_tile_icon: f32,
+    pub file_recent_height: f32,
+    pub file_sample_image_height: f32,
+    pub file_content_inset_x: f32,
+    pub file_content_inset_y: f32,
+    pub file_section_gap: f32,
+    pub font_start_title: f32,
     // Shared dimensions in logical pixels; identical in both themes.
     pub space_2: f32,
     pub space_3: f32,
@@ -591,6 +622,28 @@ pub fn apply(ctx: &egui::Context) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn file_view_foreground_pairs_hold_small_text_contrast_without_changing_accent() {
+        for dark in [false, true] {
+            for vision in super::ColorVision::ALL {
+                let t = super::Tokens::themed(dark, vision);
+                for (ink, surface) in [
+                    (t.file_rail_ink, t.file_rail),
+                    (t.file_rail_ink, t.file_rail_hover),
+                    (t.file_primary_ink, t.file_primary),
+                    (t.file_primary_ink, t.file_background),
+                    (t.file_recovery_ink, t.file_recovery),
+                    (t.form_ink, t.file_surface),
+                    (t.file_dim, t.file_surface),
+                    (t.file_dim, t.file_background),
+                    (t.file_dim, t.file_primary),
+                ] {
+                    assert!(super::contrast_ratio(ink, surface) >= 4.5, "dark={dark}: {ink:?} on {surface:?}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn tab_accents_map_explicit_tokens_without_changing_model() {
         for dark in [false, true] {

@@ -19,8 +19,11 @@ fn window_widths(h: &Harness) -> Vec<(egui::Id, f32)> {
 }
 
 fn kit_table_limit(id: egui::Id) -> Option<f32> {
+    // The accepted Preferences board has a page list and one control/preview pair at 880 pt.
+    if id == egui::Id::new("sc_prefs") {
+        return Some(solidcraft_ui_egui::theme::Tokens::get().form_card_width * 10.0 / 3.0);
+    }
     [
-        egui::Id::new("sc_prefs"),
         egui::Id::new("sc_bom"),
         egui::Id::new("sc_gesture_editor"),
         egui::Id::new("sc_params_dialog"),
@@ -112,7 +115,7 @@ fn floating_windows_stay_within_limits() {
     // Keyboard Shortcuts is a page of Preferences (one window, #36).
     assert!(ws.len() >= 3, "windows on screen: {ws:?}");
     for (layer, w) in ws {
-        let limit = solidcraft_ui_egui::theme::Tokens::get().form_card_width * 3.0;
+        let limit = kit_table_limit(layer).unwrap_or(solidcraft_ui_egui::theme::Tokens::get().form_card_width * 3.0);
         assert!(w <= limit + 4.0, "{layer:?} is {w} px wide");
     }
 }

@@ -379,6 +379,35 @@ const SHADED: [&str; 2] = ["analysis.draft", "analysis.access"];
 /// Tokens no colour vision mode needs to keep apart, and why. A new token fails
 /// `every_token_is_measured_or_carries_no_meaning` until it is in a group above or here.
 const NO_MEANING: &[(&str, &str)] = &[
+    ("file_dim", "File view secondary text, WCAG guarded in theme tests"),
+    ("file_recovery_well", "decorative recovery icon ground"),
+    ("file_action_height", "layout dimension"),
+    ("file_back_height", "layout dimension"),
+    ("file_recovery_icon", "layout dimension"),
+    ("file_grid_gap", "layout dimension"),
+    ("file_nav_width", "layout dimension"),
+    ("file_nav_height", "layout dimension"),
+    ("file_tile_height", "layout dimension"),
+    ("file_tile_icon", "layout dimension"),
+    ("file_recent_height", "layout dimension"),
+    ("file_sample_image_height", "layout dimension"),
+    ("file_content_inset_x", "layout dimension"),
+    ("file_content_inset_y", "layout dimension"),
+    ("file_section_gap", "layout dimension"),
+    ("font_start_title", "layout dimension"),
+    ("file_background", "File view chrome; paired text contrast is guarded in theme tests"),
+    ("file_surface", "File view chrome; paired text contrast is guarded in theme tests"),
+    ("file_image_tint", "neutral image multiplication; model pixels retain their original colours"),
+    ("file_border", "File view chrome; paired text contrast is guarded in theme tests"),
+    ("file_rail", "File view chrome; paired text contrast is guarded in theme tests"),
+    ("file_rail_ink", "File view chrome; paired text contrast is guarded in theme tests"),
+    ("file_rail_hover", "File view chrome; paired text contrast is guarded in theme tests"),
+    ("file_primary", "File view chrome; paired text contrast is guarded in theme tests"),
+    ("file_primary_ink", "File view chrome; paired text contrast is guarded in theme tests"),
+    ("file_primary_border", "File view chrome; paired text contrast is guarded in theme tests"),
+    ("file_recovery", "File view chrome; paired text contrast is guarded in theme tests"),
+    ("file_recovery_ink", "File view chrome; paired text contrast is guarded in theme tests"),
+    ("file_recovery_border", "File view chrome; paired text contrast is guarded in theme tests"),
     ("space_2", "layout dimension"),
     ("space_3", "layout dimension"),
     ("space_4", "layout dimension"),
@@ -846,7 +875,7 @@ fn the_sections_messages_are_in_every_catalog() {
     let ids: Vec<&str> = ColorVision::ALL
         .into_iter()
         .flat_map(|m| [m.label_id(), m.help_id()])
-        .chain(crate::prefs::COLOUR_VISION_SAMPLE)
+        .chain(crate::ui_kit::COLOUR_VISION_SAMPLE)
         .chain(["ui.colour_vision", "ui.colour_vision_mode", "ui.colour_vision_sample", "ui.colour_vision_note"])
         .collect();
     for (lang, text) in [
@@ -984,22 +1013,22 @@ fn random_values_never_panic_and_only_the_four_ids_are_taken() {
 }
 
 #[test]
-fn cancel_puts_the_mode_back_ok_keeps_it_and_restore_defaults_resets_graphics_only() {
+fn cancel_puts_the_mode_back_ok_keeps_it_and_restore_defaults_resets_interface_only() {
     let mut app = app();
     let control = |app: &mut crate::SolveApp, p: serde_json::Value| crate::prefs::control(app, &p).unwrap();
-    control(&mut app, json!({"open": "Graphics"}));
+    control(&mut app, json!({"open": "Interface"}));
     control(&mut app, json!({"color_vision": "protan"}));
     assert_eq!(app.preferences.color_vision, ColorVision::Protan);
     control(&mut app, json!({"button": "cancel"}));
     assert_eq!(app.preferences.color_vision, ColorVision::Off);
-    control(&mut app, json!({"open": "Graphics"}));
+    control(&mut app, json!({"open": "Interface"}));
     control(&mut app, json!({"color_vision": "tritan", "button": "ok"}));
     assert_eq!(app.preferences.color_vision, ColorVision::Tritan);
     // Restore Defaults on another page leaves it.
     control(&mut app, json!({"open": "General"}));
     control(&mut app, json!({"button": "defaults"}));
     assert_eq!(app.preferences.color_vision, ColorVision::Tritan);
-    control(&mut app, json!({"open": "Graphics"}));
+    control(&mut app, json!({"open": "Interface"}));
     control(&mut app, json!({"button": "defaults"}));
     assert_eq!(app.preferences.color_vision, ColorVision::Off);
     control(&mut app, json!({"button": "ok"}));

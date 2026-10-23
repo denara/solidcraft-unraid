@@ -1007,16 +1007,12 @@ pub fn animate(app: &SolveApp, k: &Asm, cmds: &mut Vec<(String, Value)>) {
                 None
             }
             // As-built joints start at zero: drive the new one after it is made.
-            None => Some(next_joint_id(&app.session)),
+            None => app.session.doc.next_item_id().ok(),
         },
     };
     if let Some(id) = drive {
         cmds.push(("joint.drive".into(), json!({"joint": id, "values": values})));
     }
-}
-
-fn next_joint_id(s: &Session) -> u64 {
-    s.doc.assembly.joints.iter().map(|j| j.id).max().unwrap_or(0) + 1
 }
 
 /// Joint and drive previews: the commands run on a scratch copy and the placed model before and

@@ -368,6 +368,8 @@ pub enum AxisRef {
     World { axis: String },
     /// Any line in the sketch plane, in world coordinates.
     Line { origin: Position, dir: Dir },
+    /// A construction axis feature, by name, where it is when the revolve is evaluated.
+    Construction { name: FeatureName },
 }
 
 /// Persistent cylindrical Emboss selection, authored in the feature component frame.
@@ -1854,14 +1856,16 @@ fn fair_keep_edges() -> bool {
     true
 }
 
-/// Triangles of one imported mesh body (millimetres).
+/// Triangles of one imported mesh body (millimetres). The arrays are shared by clones: every
+/// edit keeps the design as it was for undo, and a scanned part's triangles (hundreds of
+/// megabytes) are not copied for that.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MeshData {
     pub name: String,
     /// x, y, z per vertex.
-    pub positions: Vec<f64>,
+    pub positions: std::sync::Arc<[f64]>,
     /// Three vertex indices per triangle.
-    pub triangles: Vec<u32>,
+    pub triangles: std::sync::Arc<[u32]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<[f32; 3]>,
 }
@@ -2026,6 +2030,10 @@ pub enum PatternKind {
         alignment: solidcraft_sketch::PatternAlignment,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         reversed: bool,
+        /// A construction axis the copies turn about, by name, followed when it moves;
+        /// `origin` and `axis` are where it was when the pattern was made.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        axis_feature: Option<FeatureName>,
     },
     /// Copies along a chain of sketch curves: instance k moves by path(k·spacing) − path(0),
     /// measured along the path from its start.
@@ -2618,6 +2626,33 @@ impl Default for Document {
 }
 
 impl Document {
+    /// The next shared identity, including auxiliary lists written by older versions or
+    /// populated programmatically. Reading it does not reserve an id (used by joint previews).
+    pub fn next_item_id(&self) -> Result<u64> {
+        let a = &self.assembly;
+        let largest = self
+            .browser_groups
+            .iter()
+            .map(|g| g.id)
+            .chain(self.timeline_groups.iter().map(|g| g.id))
+            .chain(self.canvases.iter().map(|c| c.id))
+            .chain(a.joints.iter().map(|j| j.id))
+            .chain(a.contact_sets.iter().map(|c| c.id))
+            .chain(a.studies.iter().map(|s| s.id))
+            .chain(a.exploded.iter().map(|v| v.id))
+            .max()
+            .unwrap_or(0);
+        let floor = largest.checked_add(1).ok_or_else(|| DocError::Invalid("too many items in the design".into()))?;
+        Ok(self.next_id.max(floor).max(1))
+    }
+
+    /// Reserve an identity in the saved counter. Removing an item never rewinds this counter.
+    pub fn allocate_id(&mut self) -> Result<u64> {
+        let id = self.next_item_id()?;
+        self.next_id = id.checked_add(1).ok_or_else(|| DocError::Invalid("too many items in the design".into()))?;
+        Ok(id)
+    }
+
     pub fn new(name: &str) -> Self {
         Document {
             render: Default::default(),

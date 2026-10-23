@@ -370,6 +370,13 @@ fn requested_menu_icons_have_artwork_and_match_manifest() {
     let path = geometry.dir.join("audit.solidcraft");
     geometry.app.run("file.save", json!({"path":path})).unwrap();
     geometry.app.home.recent = vec![path.to_string_lossy().into_owned()];
+    geometry.app.recoverable.push(solidcraft_engine::recovery::Entry {
+        id: "icon-audit".into(),
+        path: Some("audit.solidcraft".into()),
+        name: "Audit design".into(),
+        saved_at: 0,
+        features: 1,
+    });
     geometry.app.home.open = true;
     geometry.frames(3);
     context_rows(&mut geometry, "home:recent:", &mut requested);

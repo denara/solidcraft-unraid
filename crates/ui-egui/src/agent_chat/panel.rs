@@ -883,20 +883,6 @@ fn desktop_body(app: &mut SolveApp, ui: &mut egui::Ui) {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-pub(super) fn login_chip(ui: &mut egui::Ui, login: &str) {
-    let t = Tokens::get();
-    let (text, color) = match login {
-        "signed_in" => (tr("ui.agent_chat_signed_in"), t.accent),
-        "key" => (tr("ui.agent_chat_key_in_env"), t.accent),
-        "signed_out" => (tr("ui.agent_chat_not_signed_in"), t.warning),
-        _ => return,
-    };
-    egui::Frame::NONE.stroke(Stroke::new(1.0, color)).corner_radius(8.0).inner_margin(egui::Margin::symmetric(6, 1)).show(ui, |ui| {
-        ui.label(RichText::new(text).color(color).size(crate::theme::Tokens::get().font_small));
-    });
-}
-
 /// The header's second row: the agent this conversation uses (a compact switcher), the agent's
 /// own mode when it has modes, and the state of its login.
 #[cfg(not(target_arch = "wasm32"))]

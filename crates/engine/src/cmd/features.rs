@@ -29,7 +29,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("solid.revolve", "Revolve", revolve)
         .at("SOLID", "CREATE")
         .icon("revolve")
-        .params("axis: sketch line id | x | y (sketch axes) | X|Y|Z (world); angle?: expr (default 360 deg); angle2?: expr (Two Sides: the other side's angle); direction?: symmetric (angle split either side, independent of axis direction); convention?: sketch_normal|legacy_axis_start (default sketch_normal; legacy retains older angular starts); to?: [x,y,z] (To Object: turn until that face, vertex or point); sketch?, profiles? | face: [x,y,z] (a planar body face as the profile) and face_body?: name (whose face, where faces of several bodies meet), operation?, targets?, name?, body_name?"),
+        .params("axis: sketch line id | x | y (sketch axes) | X|Y|Z (world) | construction axis name (followed when edited) | {origin, dir}; angle?: expr (default 360 deg); angle2?: expr (Two Sides: the other side's angle); direction?: symmetric (angle split either side, independent of axis direction); convention?: sketch_normal|legacy_axis_start (default sketch_normal; legacy retains older angular starts); to?: [x,y,z] (To Object: turn until that face, vertex or point); sketch?, profiles? | face: [x,y,z] (a planar body face as the profile) and face_body?: name (whose face, where faces of several bodies meet), operation?, targets?, name?, body_name?"),
     CommandSpec::new("solid.sweep", "Sweep", sweep)
         .at("SOLID", "CREATE")
         .icon("sweep")
@@ -58,7 +58,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("solid.pattern.circular", "Circular Pattern", pattern_circ)
         .at("SOLID", "CREATE")
         .icon("pattern_circ")
-        .params("features: [names] | bodies: [names] | components: [names]; axis: X|Y|Z | {origin, dir}; count; angle? (default 360 deg; partial arcs include both ends); alignment?: left|center|right (default right; original stays fixed); reversed?: bool (Flip; selects the extra side for even centered counts)"),
+        .params("features: [names] | bodies: [names] | components: [names]; axis: X|Y|Z | construction axis name (followed when edited) | {origin, dir}; count; angle? (default 360 deg; partial arcs include both ends); alignment?: left|center|right (default right; original stays fixed); reversed?: bool (Flip; selects the extra side for even centered counts)"),
     CommandSpec::new("solid.pattern.path", "Pattern on Path", pattern_path)
         .at("SOLID", "CREATE")
         .icon("pattern_path")
@@ -108,7 +108,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("construct.plane.at_angle", "Plane at Angle", plane_angle)
         .at("SOLID", "CONSTRUCT")
         .icon("plane_angle")
-        .params("base: XY|XZ|YZ|plane name; axis: X|Y|Z|{origin, dir}; angle: expr; name?"),
+        .params("base: XY|XZ|YZ|plane name; axis: X|Y|Z|construction axis name (where it is now)|{origin, dir}; angle: expr; name?"),
     CommandSpec::new("solid.split_face", "Split Face", split_face)
         .at("SOLID", "MODIFY")
         .icon("split_face")
@@ -816,7 +816,7 @@ fn revolve(s: &mut Session, p: &Value) -> Result<Value> {
         }
         None => (feature_sketch(s, p, cmd)?, None),
     };
-    let axis = axis_param(p, cmd)?;
+    let axis = axis_param(s, sketch, p, cmd)?;
     let angle = expr(p, "angle").unwrap_or_else(|| "360 deg".into());
     check_expr(s, &angle, Kind::Angle, cmd, "angle")?;
     let profiles = match face_profile {
@@ -852,9 +852,10 @@ fn revolve(s: &mut Session, p: &Value) -> Result<Value> {
     add_feature(s, p, kind)
 }
 
-/// A revolve axis from its parameter: a sketch line id, the sketch's x or y axis, a world axis,
-/// or {origin, dir}.
-pub(super) fn axis_param(p: &Value, cmd: &str) -> Result<AxisRef> {
+/// A revolve axis of `sketch` from its parameter: a sketch line id, the sketch's x or y axis, a
+/// world axis, a construction axis by name (followed when it is edited) or {origin, dir}. A line
+/// of the sketch wins over a construction axis of the same name.
+pub(super) fn axis_param(s: &Session, sketch: u64, p: &Value, cmd: &str) -> Result<AxisRef> {
     if let Some(o) = p.get("axis").filter(|v| v.is_object()) {
         let origin = o.get("origin").and_then(vec3).unwrap_or(Vec3::ZERO);
         let dir = o.get("dir").and_then(vec3).ok_or_else(|| bad(cmd, "axis needs `dir`"))?;
@@ -863,9 +864,20 @@ pub(super) fn axis_param(p: &Value, cmd: &str) -> Result<AxisRef> {
     match str_(p, "axis") {
         Some(a @ ("X" | "Y" | "Z")) => Ok(AxisRef::World { axis: a.into() }),
         Some(a @ ("x" | "y")) => Ok(AxisRef::SketchAxis { axis: a.into() }),
+        Some(name) if !is_sketch_line(s, sketch, name) && is_construction_axis(s, name) => Ok(AxisRef::Construction { name: name.into() }),
         Some(id) => Ok(AxisRef::SketchLine { curve: id.into() }),
-        None => Err(bad(cmd, "`axis` must be a sketch line id, x, y (sketch axes), X, Y, Z or {origin, dir}")),
+        None => Err(bad(cmd, "`axis` must be a sketch line id, x, y (sketch axes), X, Y, Z, a construction axis or {origin, dir}")),
     }
+}
+
+/// Whether `curve` is a curve of the sketch feature `sketch`.
+fn is_sketch_line(s: &Session, sketch: u64, curve: &str) -> bool {
+    matches!(s.doc.feature(sketch).map(|f| &f.kind), Some(FeatureKind::Sketch { sketch, .. }) if sketch.curve_index(curve).is_some())
+}
+
+/// Whether `name` is a construction axis feature of the design.
+fn is_construction_axis(s: &Session, name: &str) -> bool {
+    s.doc.find_feature(name).is_some_and(|f| matches!(f.kind, FeatureKind::ConstructionAxis { .. }))
 }
 
 fn radius_expr(s: &Session, p: &Value, cmd: &str) -> Result<Expr> {
@@ -1325,13 +1337,22 @@ fn source_features(s: &Session, p: &Value, cmd: &str) -> Result<Vec<String>> {
     Ok(names)
 }
 
-fn axis_line(p: &Value, cmd: &str) -> Result<(Vec3, Vec3)> {
+/// An axis line from `axis`: X, Y, Z, a construction axis by name or {origin, dir}. A construction
+/// axis comes back where it is now, with its name.
+fn axis_line(s: &Session, p: &Value, cmd: &str) -> Result<(Vec3, Vec3, Option<FeatureName>)> {
     match p.get("axis") {
         Some(Value::String(a)) => match a.to_ascii_uppercase().as_str() {
-            "X" => Ok((Vec3::ZERO, Vec3::X)),
-            "Y" => Ok((Vec3::ZERO, Vec3::Y)),
-            "Z" => Ok((Vec3::ZERO, Vec3::Z)),
-            _ => Err(bad(cmd, "axis must be X, Y, Z or {origin, dir}")),
+            "X" => Ok((Vec3::ZERO, Vec3::X, None)),
+            "Y" => Ok((Vec3::ZERO, Vec3::Y, None)),
+            "Z" => Ok((Vec3::ZERO, Vec3::Z, None)),
+            _ if is_construction_axis(s, a) => {
+                let (_, _, origin, dir) = crate::view::construction_axes(s)
+                    .into_iter()
+                    .find(|(_, name, _, _)| name == a)
+                    .ok_or_else(|| bad(cmd, format!("construction axis `{a}` has no geometry: fix its definition first")))?;
+                Ok((origin, dir, Some(a.as_str().into())))
+            }
+            _ => Err(bad(cmd, "axis must be X, Y, Z, a construction axis or {origin, dir}")),
         },
         Some(o @ Value::Object(_)) => {
             let origin = match o.get("origin") {
@@ -1341,7 +1362,7 @@ fn axis_line(p: &Value, cmd: &str) -> Result<(Vec3, Vec3)> {
                 })?,
             };
             let dir = o.get("dir").and_then(vec3).and_then(|d| d.normalized()).ok_or_else(|| bad(cmd, "axis needs a non-zero `dir`"))?;
-            Ok((origin, dir))
+            Ok((origin, dir, None))
         }
         _ => Err(bad(cmd, "`axis` is required")),
     }
@@ -1425,7 +1446,7 @@ fn pattern_rect(s: &mut Session, p: &Value) -> Result<Value> {
 fn pattern_circ(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "solid.pattern.circular";
     let (features, bodies) = pattern_sources(s, p, cmd)?;
-    let (origin, axis) = axis_line(p, cmd)?;
+    let (origin, axis, axis_feature) = axis_line(s, p, cmd)?;
     let count = req_expr(cmd, p, "count")?;
     check_expr(s, &count, Kind::Unitless, cmd, "count")?;
     let angle = expr(p, "angle").unwrap_or_else(|| "360 deg".into());
@@ -1437,6 +1458,7 @@ fn pattern_circ(s: &mut Session, p: &Value) -> Result<Value> {
         angle,
         alignment: super::alignment_param(p, "alignment", cmd)?,
         reversed: super::reversed_param(p, "reversed", cmd)?,
+        axis_feature,
     };
     finish_pattern(s, p, features, pattern, bodies)
 }
@@ -1613,7 +1635,8 @@ fn plane_offset(s: &mut Session, p: &Value) -> Result<Value> {
 fn plane_angle(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "construct.plane.at_angle";
     let base = plane_param(s, p.get("base"), cmd)?;
-    let (axis_origin, axis_dir) = axis_line(p, cmd)?;
+    // The plane keeps the axis line as it is now.
+    let (axis_origin, axis_dir, _) = axis_line(s, p, cmd)?;
     let angle = req_expr(cmd, p, "angle")?;
     check_expr(s, &angle, Kind::Angle, cmd, "angle")?;
     add_feature(

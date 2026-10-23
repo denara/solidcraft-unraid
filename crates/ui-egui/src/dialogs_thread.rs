@@ -61,7 +61,7 @@ impl HoleThreadDraft {
 pub(crate) fn hole_rows(ui: &mut egui::Ui, doc: &Document, designation: &mut String, custom: &mut Option<HoleThreadDraft>) -> bool {
     let designation_id = ui.make_persistent_id("hole_thread_designation");
     form_row(ui, "Profile", |ui| {
-        ui.label(tr("ISO metric"));
+        ui.label(tr("thread.iso_metric"));
     });
 
     let sizes = metric_thread_sizes();
@@ -107,7 +107,7 @@ pub(crate) fn hole_rows(ui: &mut egui::Ui, doc: &Document, designation: &mut Str
                 ui.label(format!("{:.3} mm", d - p));
             }
             None => {
-                ui.label(tr("Select size"));
+                ui.label(tr("thread.select_size"));
             }
         }
     });
@@ -117,7 +117,7 @@ pub(crate) fn hole_rows(ui: &mut egui::Ui, doc: &Document, designation: &mut Str
 /// Returns (Enter pressed, automatic sizing requested).
 pub(crate) fn rows(ui: &mut egui::Ui, designation: &mut String, suggested: &mut Option<String>, modeled: &mut bool, full: &mut bool) -> (bool, bool) {
     form_row(ui, "Profile", |ui| {
-        ui.label(tr("ISO metric"));
+        ui.label(tr("thread.iso_metric"));
     });
 
     let before = designation.trim().is_empty() || suggested.as_deref() == Some(designation.as_str());

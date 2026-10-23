@@ -107,6 +107,9 @@ macro_rules! theme_keys {
             let Tokens {
                 $($one: _,)* $($many: _,)*
                 hover_face_lift: _, analysis: _, icons: _,
+                file_action_height: _, file_back_height: _, file_recovery_icon: _, file_grid_gap: _,
+                file_nav_width: _, file_nav_height: _, file_tile_height: _, file_tile_icon: _, file_recent_height: _,
+                file_sample_image_height: _, file_content_inset_x: _, file_content_inset_y: _, file_section_gap: _, font_start_title: _,
                 space_2: _, space_3: _, space_4: _, space_6: _, space_8: _, space_10: _,
                 space_12: _, space_14: _, space_16: _, space_24: _, radius_sm: _, radius_md: _,
                 radius_lg: _, radius_xl: _, font_badge: _, font_micro: _, font_panel: _, font_small: _,
@@ -124,6 +127,8 @@ macro_rules! theme_keys {
 
 theme_keys! {
     one: [
+        file_dim, file_recovery_well, file_background, file_surface, file_border, file_image_tint, file_rail, file_rail_ink, file_rail_hover,
+        file_primary, file_primary_ink, file_primary_border, file_recovery, file_recovery_ink, file_recovery_border,
         app_bar, toolbar, panel, panel_header, border, text, text_dim, accent, accent_soft, sketch_accent, error, warning,
         icon, timeline, hover, sel_face, sel_edge, sel_edge_rim, hover_edge, hover_edge_halo, sel_profile,
         sel_profile_edge, hover_profile, hover_profile_edge, sel_vertex, origin_plane, origin_plane_edge, origin_plane_hover,

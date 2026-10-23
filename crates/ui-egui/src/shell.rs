@@ -130,6 +130,26 @@ pub(crate) fn covered(app: &SolveApp, p: egui::Pos2) -> bool {
     covered_rects(app).iter().any(|r| r.contains(p))
 }
 
+/// Space reserved below viewport overlays by the floating History card. Its rect is set before
+/// the viewport is painted, so showing or hiding History takes effect in the same frame. History
+/// docked as the left sidebar sits beside the viewport, not below it, so it reserves nothing.
+pub(crate) fn viewport_bottom_inset(app: &SolveApp, viewport: Rect) -> f32 {
+    if app.ui.layout != LayoutMode::Floating || (app.ui.show_timeline && app.preferences.timeline_left) {
+        return 0.0;
+    }
+    app.shell
+        .history
+        .filter(|r| r.is_finite() && r.width() >= 1.0 && r.height() >= 30.0)
+        .map_or(0.0, |history| (viewport.bottom() - history.top() + SHELL_GAP).clamp(0.0, viewport.height().max(0.0)))
+}
+
+/// Bottom-anchored overlays share the content area's History clearance without moving the
+/// viewport's projection or its left and right anchors.
+pub(crate) fn bottom_overlay_rect(app: &SolveApp, mut viewport: Rect) -> Rect {
+    viewport.max.y -= viewport_bottom_inset(app, viewport);
+    viewport
+}
+
 /// The former central panel remains the anchor for controls and docked panels.
 pub(crate) fn content_rect(app: &SolveApp, viewport: Rect) -> Rect {
     app.shell.content.unwrap_or(viewport).intersect(viewport)

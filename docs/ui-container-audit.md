@@ -1,7 +1,7 @@
 # Layout-aware container audit
 
 Shared container foundation (#4411) and compact composition (#2029), on top of
-History #3953 and Assistant #3985. General preferences save Floating or Compact;
+History #3953 and Assistant #3985. Interface preferences save Floating or Compact;
 `view.layout` changes the same preference without changing the design.
 
 ## Ownership

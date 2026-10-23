@@ -80,3 +80,22 @@ fn offset_plane_rejects_bad_face_picks_without_panicking() {
         assert_eq!(s.doc.features.len(), features, "{base}");
     }
 }
+
+/// #3567: an Offset Plane redefined with itself as its base was accepted while the old plane
+/// stood beside the new one, and then failed with "plane offsets nested too deeply". It is
+/// refused with a plain message, and the plane is left as it was.
+#[test]
+fn offset_plane_redefined_on_itself_is_refused() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 40, "width": 30, "height": 20, "corner": [10, 0, 0]}));
+    run(&mut s, "construct.plane.offset", json!({"base": {"face": [30, 0, 10]}, "offset": 10, "name": "Side"}));
+    assert!((plane(&s, "Side").origin.y + 10.0).abs() < 1e-9, "{:?}", plane(&s, "Side"));
+    let saved = s.doc.to_json();
+    let redefine = |base: Value| json!({"feature": "Side", "command": "construct.plane.offset", "params": {"base": base, "offset": "7"}});
+    let e = s.execute("timeline.redefine", &redefine(json!("Side"))).unwrap_err().to_string();
+    assert!(e.contains("can't be built on itself"), "{e}");
+    assert_eq!(s.doc.to_json(), saved);
+    // The same edit on the face it was built on works.
+    run(&mut s, "timeline.redefine", redefine(json!({"face": [30, 0, 10]})));
+    assert!((plane(&s, "Side").origin.y + 7.0).abs() < 1e-9, "{:?}", plane(&s, "Side"));
+}

@@ -381,6 +381,8 @@ pub struct Window<'a> {
     closeable: bool,
     width: f32,
     body_padding: bool,
+    page_rows: f32,
+    page_padding: egui::Vec2,
     left_slot: bool,
 }
 
@@ -401,6 +403,8 @@ impl<'a> Window<'a> {
             closeable: true,
             width: Tokens::get().form_card_width * 1.5,
             body_padding: true,
+            page_rows: 16.0,
+            page_padding: vec2(Tokens::get().space_16, Tokens::get().space_16),
             left_slot: false,
         }
     }
@@ -442,6 +446,22 @@ impl<'a> Window<'a> {
     pub fn cards(mut self, cards: f32) -> Self {
         if cards.is_finite() && cards > 0.0 {
             self.width = Tokens::get().form_card_width * cards.min(16.0);
+        }
+        self
+    }
+
+    /// Maximum page-body height in control rows, still bounded by the viewport.
+    pub(crate) fn page_rows(mut self, rows: f32) -> Self {
+        if rows.is_finite() {
+            self.page_rows = rows.clamp(1.0, 32.0);
+        }
+        self
+    }
+
+    /// Content inset for a page-based window, independent of its navigation rail.
+    pub(crate) fn page_padding(mut self, padding: egui::Vec2) -> Self {
+        if padding.is_finite() {
+            self.page_padding = padding.max(egui::Vec2::ZERO);
         }
         self
     }
@@ -524,7 +544,9 @@ impl<'a> Window<'a> {
         left: impl FnOnce(&mut Ui),
     ) -> (bool, super::Action) {
         self.body_padding = false;
-        self.show_with_left(ctx, true, |ui| page_list(ui, selected, pages, state), left)
+        let rows = self.page_rows;
+        let padding = self.page_padding;
+        self.show_with_left(ctx, true, |ui| page_list_sized(ui, selected, pages, state, rows, padding), left)
     }
 
     /// The same bounded card frame, either movable or an input-blocking modal.
@@ -573,15 +595,21 @@ impl<'a> Window<'a> {
 pub(crate) struct WindowPage<S> {
     pub icon: &'static str,
     pub label: &'static str,
+    pub group: Option<&'static str>,
     pub handle: &'static str,
     pub scroll: bool,
     pub draw: fn(&mut Ui, &mut S),
 }
 
+#[cfg(test)]
 pub(super) fn page_list<S>(ui: &mut Ui, selected: &mut usize, pages: &[WindowPage<S>], state: &mut S) {
+    page_list_sized(ui, selected, pages, state, 16.0, vec2(Tokens::get().space_16, Tokens::get().space_16));
+}
+
+fn page_list_sized<S>(ui: &mut Ui, selected: &mut usize, pages: &[WindowPage<S>], state: &mut S, rows: f32, padding: egui::Vec2) {
     let t = Tokens::get();
     let height = (dimension(ui.ctx().content_rect().height()) - t.form_header_height - t.form_footer_height - t.space_24 * 3.0)
-        .clamp(0.0, t.control_height * 16.0);
+        .clamp(0.0, t.control_height * rows);
     let (body, _) = ui.allocate_exact_size(vec2(dimension(ui.available_width()), height), egui::Sense::hover());
     let width = (t.form_label_width * 2.0 + t.space_24 * 2.0).min(body.width());
     let nav = egui::Rect::from_min_size(body.min, vec2(width, body.height()));
@@ -589,11 +617,17 @@ pub(super) fn page_list<S>(ui: &mut Ui, selected: &mut usize, pages: &[WindowPag
     ui.painter().vline(nav.right(), nav.y_range(), egui::Stroke::new(1.0, t.dialog_rule));
     scenario::publish_rect("dialog:pages", nav);
     *selected = (*selected).min(pages.len().saturating_sub(1));
-    ui.scope_builder(egui::UiBuilder::new().max_rect(nav.shrink2(vec2(t.space_8, t.space_10))), |ui| {
+    ui.scope_builder(egui::UiBuilder::new().max_rect(nav.shrink2(vec2(t.space_8, t.space_6))), |ui| {
         ui.set_clip_rect(ui.clip_rect().intersect(nav));
         ui.spacing_mut().item_spacing.y = t.space_2;
         egui::ScrollArea::vertical().id_salt("window_pages").show(ui, |ui| {
             for (index, page) in pages.iter().enumerate() {
+                if let Some(group) = page.group {
+                    ui.add_space(t.space_8);
+                    let (rect, _) = ui.allocate_exact_size(vec2(dimension(ui.available_width()), t.space_24), egui::Sense::hover());
+                    let rect = rect.shrink2(vec2(t.space_10, 0.0));
+                    paint_text(ui, rect, &crate::i18n::tr(group).to_uppercase(), crate::fonts::semibold(t.font_small), t.form_dim, true);
+                }
                 let label = crate::i18n::tr(page.label);
                 let (rect, response) =
                     ui.allocate_exact_size(vec2(dimension(ui.available_width()), t.control_height + t.space_4), egui::Sense::click());
@@ -627,23 +661,26 @@ pub(super) fn page_list<S>(ui: &mut Ui, selected: &mut usize, pages: &[WindowPag
         });
     });
     let content = egui::Rect::from_min_max(egui::pos2(nav.right(), body.top()), body.max);
-    let content = content.shrink2(vec2(t.space_16.min(content.width() / 2.0), t.space_16.min(content.height() / 2.0)));
-    ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| {
-        ui.set_clip_rect(ui.clip_rect().intersect(content));
-        ui.spacing_mut().item_spacing.y = t.form_gap_y;
-        if let Some(page) = pages.get(*selected) {
-            if page.scroll {
-                let scroll = egui::ScrollArea::vertical()
-                    .id_salt(("sc_prefs_page", *selected))
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| (page.draw)(ui, state));
-                scenario::publish_rect("dialog:page_body", scroll.inner_rect);
-            } else {
-                (page.draw)(ui, state);
-                scenario::publish_rect("dialog:page_body", content);
+    let content = content.shrink2(vec2(padding.x.min(content.width() / 2.0), padding.y.min(content.height() / 2.0)));
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(content)
+            .ui_stack_info(egui::UiStackInfo::default().with_tag_value(super::preferences::PAGE_SCROLL_GUTTER, padding.x)),
+        |ui| {
+            let clip = egui::Rect::from_min_max(content.min, egui::pos2(body.right(), content.bottom()));
+            ui.set_clip_rect(ui.clip_rect().intersect(clip));
+            ui.spacing_mut().item_spacing.y = t.form_gap_y;
+            if let Some(page) = pages.get(*selected) {
+                if page.scroll {
+                    let scroll = super::settings_scroll(ui, ("sc_prefs_page", *selected), |ui| (page.draw)(ui, state));
+                    scenario::publish_rect("dialog:page_body", scroll.inner_rect);
+                } else {
+                    (page.draw)(ui, state);
+                    scenario::publish_rect("dialog:page_body", content);
+                }
             }
-        }
-    });
+        },
+    );
 }
 
 #[cfg(test)]

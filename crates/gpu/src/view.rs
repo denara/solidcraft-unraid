@@ -15,6 +15,7 @@ use wgpu::util::DeviceExt;
 use crate::pbr;
 
 mod ao;
+mod oit;
 
 /// Triangle vertex: position (3 × f32), normal (3 × f32), sRGB colour (4 × u8).
 pub const TRI_SIZE: usize = 28;
@@ -35,6 +36,27 @@ const UNIFORM_SIZE: u64 = 384;
 pub struct PlannedBody {
     pub plan: Arc<solidcraft_geom::tess::TessPlan>,
     pub face_colors: Vec<[u8; 4]>,
+}
+
+/// A quick hasher for welding (the keys are coordinates' bits, from the design, not chosen to
+/// collide): the standard one made welding a 2 M-triangle scan take half a second.
+#[derive(Default)]
+struct WeldHasher(u64);
+
+impl std::hash::Hasher for WeldHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.write_u32(u32::from(*b));
+        }
+    }
+
+    fn write_u32(&mut self, x: u32) {
+        self.0 = (self.0.rotate_left(5) ^ u64::from(x)).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
 }
 
 /// A vertex of [`SharedTris`]: position and normal (3 × f32 each).
@@ -69,10 +91,11 @@ impl SharedTris {
         });
         let mut out = SharedTris { flat, ..Default::default() };
         out.indices.reserve_exact(mesh.triangles.len() * 3);
-        let mut seen: std::collections::HashMap<[u32; 6], u32> = std::collections::HashMap::with_capacity(mesh.positions.len());
+        let mut seen: std::collections::HashMap<[u32; 6], u32, std::hash::BuildHasherDefault<WeldHasher>> =
+            std::collections::HashMap::with_capacity_and_hasher(mesh.positions.len() / 2, Default::default());
         for t in &mesh.triangles {
-            let Some(corners) = t.iter().map(|i| corner(*i)).collect::<Option<Vec<_>>>() else { continue };
-            for (p, n) in corners {
+            let [Some(a), Some(b), Some(c)] = t.map(corner) else { continue };
+            for (p, n) in [a, b, c] {
                 let [x, y, z] = bits(p);
                 let [a, b, c] = if flat { [0; 3] } else { bits(n) };
                 let next = u32::try_from(out.vertices.len() / SHARED_SIZE).unwrap_or(u32::MAX);
@@ -95,6 +118,29 @@ impl SharedTris {
                 hi[k] = hi[k].max(p[k]);
             }
         }
+        out.bounds = [lo, hi];
+        out
+    }
+
+    /// A simplified copy of a mesh ([`solidcraft_geom::simplify::Level`]): its vertices already
+    /// shared, its triangles lit flat (each fragment with its triangle's own normal).
+    pub fn from_level(level: &solidcraft_geom::simplify::Level) -> SharedTris {
+        let mut out = SharedTris { flat: true, ..Default::default() };
+        out.vertices.reserve_exact(level.positions.len() * SHARED_SIZE);
+        let mut lo = [f32::INFINITY; 3];
+        let mut hi = [f32::NEG_INFINITY; 3];
+        for p in &level.positions {
+            let p = p.to_f32();
+            for k in 0..3 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
+            }
+            for v in p.iter().chain(&[0.0f32; 3]) {
+                out.vertices.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        let n = u32::try_from(level.positions.len()).unwrap_or(u32::MAX);
+        out.indices = level.triangles.iter().filter(|t| t.iter().all(|i| *i < n)).flatten().copied().collect();
         out.bounds = [lo, hi];
         out
     }
@@ -138,6 +184,18 @@ impl SharedTris {
     }
 }
 
+/// How an [`InstancedMesh`]'s placements are drawn: opaque, or see-through (their colour's alpha)
+/// as faded context (another component active) or as glass (an appearance's opacity).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum InstanceLook {
+    #[default]
+    Opaque,
+    /// With the translucent triangles ([`GpuScene::trans`]): no depth written.
+    Faded,
+    /// With the see-through bodies ([`GpuScene::glass`]): far sides, then near sides.
+    Glass,
+}
+
 /// Triangles drawn at several places: a part placed by many occurrences keeps one copy of its
 /// triangles on the GPU, drawn once per placement, however often it is placed.
 #[derive(Clone)]
@@ -149,6 +207,12 @@ pub struct InstancedMesh {
     pub tris: Arc<SharedTris>,
     /// The placements, [`INSTANCE_SIZE`] bytes each ([`InstancedMesh::place`]).
     pub instances: Vec<u8>,
+    /// How its placements are drawn (see-through ones are drawn back to front).
+    pub look: InstanceLook,
+    /// Coarser copies of the triangles, finest first, each with how far it strays from them (mm,
+    /// in the part's frame): a placement small on screen is drawn from the coarsest whose error
+    /// stays under [`LOD_PX`] there ([`Batches::cull`]).
+    pub levels: Vec<(Arc<SharedTris>, f32)>,
 }
 
 impl InstancedMesh {
@@ -240,7 +304,11 @@ impl GpuScene {
             out.hidden.extend_from_slice(&block.bytes.hidden);
         }
         for m in std::mem::take(&mut self.instanced) {
-            m.expand_into(&mut out.tris);
+            match m.look {
+                InstanceLook::Opaque => m.expand_into(&mut out.tris),
+                InstanceLook::Faded => m.expand_into(&mut out.trans),
+                InstanceLook::Glass => m.expand_into(&mut out.glass),
+            }
         }
         out.tris.append(&mut self.tris);
         out.trans.append(&mut self.trans);
@@ -566,6 +634,61 @@ impl SharedGpu {
     }
 }
 
+/// How far (pixels) a level of detail may stray from the full triangles where a placement is
+/// drawn from it.
+pub const LOD_PX: f32 = 0.75;
+
+/// Pixels per millimetre where a placement (`rows`, see [`INSTANCE_SIZE`]) of a box (`bounds`)
+/// is nearest the eye, along whichever of its axes shows largest, in the view `vp` (columns) of
+/// `size` pixels. Infinite when a corner of it is at or behind the eye, or for a box that is not
+/// finite: such a placement is drawn in full.
+pub fn placement_scale(rows: &[[f32; 4]; 3], bounds: &[[f32; 3]; 2], vp: &[[f32; 4]; 4], size: [f32; 2]) -> f32 {
+    let [lo, hi] = bounds;
+    if !lo.iter().chain(hi).all(|x| x.is_finite()) {
+        return f32::INFINITY;
+    }
+    let clip = |p: [f32; 3]| -> [f32; 4] {
+        let w = rows.map(|r| r[0] * p[0] + r[1] * p[1] + r[2] * p[2] + r[3]);
+        std::array::from_fn(|k| vp[0][k] * w[0] + vp[1][k] * w[1] + vp[2][k] * w[2] + vp[3][k])
+    };
+    let corners: [[f32; 3]; 8] = std::array::from_fn(|i| {
+        [if i & 1 == 0 { lo[0] } else { hi[0] }, if i & 2 == 0 { lo[1] } else { hi[1] }, if i & 4 == 0 { lo[2] } else { hi[2] }]
+    });
+    let mut nearest = (f32::INFINITY, corners[0]);
+    for c in corners {
+        let w = clip(c)[3];
+        if !(w > 1e-6) {
+            return f32::INFINITY;
+        }
+        if w < nearest.0 {
+            nearest = (w, c);
+        }
+    }
+    let screen = |c: [f32; 4]| [c[0] / c[3] * size[0] * 0.5, c[1] / c[3] * size[1] * 0.5];
+    let (_, c) = nearest;
+    let at = screen(clip(c));
+    let mut scale = 0.0f32;
+    for k in 0..3 {
+        // A step of a hundredth of the box (at least a micrometre) along each axis.
+        let step = ((hi[k] - lo[k]) * 0.01).max(1e-3);
+        let mut q = c;
+        q[k] += step;
+        let qc = clip(q);
+        if !(qc[3] > 1e-6) {
+            return f32::INFINITY;
+        }
+        let s = screen(qc);
+        scale = scale.max(((s[0] - at[0]).powi(2) + (s[1] - at[1]).powi(2)).sqrt() / step);
+    }
+    if scale.is_finite() { scale } else { f32::INFINITY }
+}
+
+/// The coarsest level whose error (mm; level 0, the full triangles, has none) stays under
+/// [`LOD_PX`] at `scale` pixels per millimetre.
+pub fn level_for(errors: &[f32], scale: f32) -> usize {
+    errors.iter().rposition(|e| *e * scale <= LOD_PX).unwrap_or(0)
+}
+
 /// Whether a box (`bounds`, min and max) moved by a placement (`rows`, see [`INSTANCE_SIZE`])
 /// may be seen in the view `vp` (the view-projection, columns, depth 0 near and 1 far): `false`
 /// only when all its corners lie beyond the same side of the view (left, right, top, bottom,
@@ -590,23 +713,43 @@ pub fn placed_box_in_view(rows: &[[f32; 4]; 3], bounds: &[[f32; 3]; 2], vp: &[[f
     !out.iter().any(|o| *o)
 }
 
-/// An [`InstancedMesh`] on the GPU: its triangles (shared with the next scene while its key
-/// comes back) and the placements in view.
-struct InstancedDraw {
+/// One level of an [`InstancedDraw`]: its triangles and the placements drawn from it.
+struct LevelDraw {
     tris: Arc<SharedGpu>,
     flat: bool,
+    /// How far it strays from the full triangles (mm; 0 for them).
+    error: f32,
+    /// The placements drawn from it, first `count` of them ([`Batches::cull`]).
+    instances: wgpu::Buffer,
+    count: u32,
+}
+
+/// An [`InstancedMesh`] on the GPU: its triangles and coarser levels (shared with the next scene
+/// while they come back), and the placements in view, each drawn from its level.
+struct InstancedDraw {
+    look: InstanceLook,
+    /// The full triangles first, then coarser ones.
+    levels: Vec<LevelDraw>,
     bounds: [[f32; 3]; 2],
     /// Every placement ([`INSTANCE_SIZE`] bytes each), as the scene has them.
     placements: Vec<u8>,
-    /// The placements in view, first `count` of them ([`Batches::cull`]).
-    instances: wgpu::Buffer,
-    count: u32,
-    /// Which placements `instances` holds now (none drawn yet: `None`).
-    shown: Option<Vec<u32>>,
+    /// Which placements the levels hold now, with their level (none drawn yet: `None`).
+    shown: Option<Vec<(u32, u8)>>,
 }
 
 impl InstancedDraw {
-    /// Draw every placement with `pipeline` (the placements in vertex buffer 1).
+    /// Draw every placement in view, from its level, with `smooth` or `flat` as the level's
+    /// triangles are lit.
+    pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, smooth: &wgpu::RenderPipeline, flat: &wgpu::RenderPipeline) {
+        for level in &self.levels {
+            pass.set_pipeline(if level.flat { flat } else { smooth });
+            level.draw(pass);
+        }
+    }
+}
+
+impl LevelDraw {
+    /// Draw its placements (in vertex buffer 1).
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
         if self.count == 0 {
             return;
@@ -674,9 +817,9 @@ struct Batches {
     guide_lines: Option<Batch>,
     planned: Vec<PlannedDraw>,
     instanced: Vec<InstancedDraw>,
-    /// The instanced meshes' triangles on the GPU by key, with the triangles they were uploaded
-    /// from.
-    instanced_tris: std::collections::HashMap<u64, (Arc<SharedTris>, Arc<SharedGpu>)>,
+    /// The instanced meshes' triangles (and their levels) on the GPU, by the address of the
+    /// triangles they were uploaded from (held, so it stays theirs).
+    instanced_tris: std::collections::HashMap<usize, (Arc<SharedTris>, Arc<SharedGpu>)>,
     /// Evaluated chunks by their plans' addresses, holding the plans so the addresses stay
     /// theirs: a chunk whose plans are unchanged is not evaluated again when the scene is rebuilt.
     resident: std::collections::HashMap<Vec<usize>, (Vec<Arc<solidcraft_geom::tess::TessPlan>>, Arc<crate::GpuMesh>)>,
@@ -743,21 +886,30 @@ impl Batches {
             if count == 0 {
                 continue;
             }
-            let tris = match kept.remove(&m.key).or_else(|| self.instanced_tris.remove(&m.key)).filter(|(b, _)| Arc::ptr_eq(b, &m.tris)) {
-                Some(t) => t,
-                None => match SharedGpu::new(device, &m.tris) {
-                    Some(g) => (m.tris.clone(), Arc::new(g)),
-                    None => continue,
-                },
-            };
             let placements = m.instances.get(..count as usize * INSTANCE_SIZE).unwrap_or_default().to_vec();
-            let instances = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("sc_instances"),
-                contents: &placements,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            });
-            out.push(InstancedDraw { tris: tris.1.clone(), flat: m.tris.flat, bounds: m.tris.bounds, placements, instances, count, shown: None });
-            self.instanced_tris.insert(m.key, tris);
+            let mut levels = Vec::with_capacity(1 + m.levels.len());
+            for (i, (tris, error)) in std::iter::once((&m.tris, 0.0f32)).chain(m.levels.iter().map(|(t, e)| (t, *e))).enumerate() {
+                let key = Arc::as_ptr(tris) as usize;
+                let gpu = match kept.remove(&key).or_else(|| self.instanced_tris.remove(&key)).filter(|(b, _)| Arc::ptr_eq(b, tris)) {
+                    Some(t) => t,
+                    None => match SharedGpu::new(device, tris) {
+                        Some(g) => (tris.clone(), Arc::new(g)),
+                        None => continue,
+                    },
+                };
+                // Until the first cull, every placement is drawn in full.
+                let instances = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("sc_instances"),
+                    contents: &placements,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                });
+                let count = if i == 0 { count } else { 0 };
+                levels.push(LevelDraw { tris: gpu.1.clone(), flat: tris.flat, error, instances, count });
+                self.instanced_tris.insert(key, gpu);
+            }
+            if !levels.is_empty() {
+                out.push(InstancedDraw { look: m.look, levels, bounds: m.tris.bounds, placements, shown: None });
+            }
         }
         out
     }
@@ -765,34 +917,57 @@ impl Batches {
     /// Keep only the placements of the instanced meshes that may be seen in the view `vp` (see
     /// [`placed_box_in_view`]): a part placed many times, most of it out of the view, draws
     /// only what is in it. The placements are written again only when that set changes.
-    fn cull(&mut self, queue: &wgpu::Queue, vp: &[[f32; 4]; 4]) {
+    /// Each placement's level of detail is chosen here too: the coarsest whose error stays under
+    /// [`LOD_PX`] where it is drawn ([`placement_scale`], [`level_for`]), in a view of `size`
+    /// pixels.
+    fn cull(&mut self, queue: &wgpu::Queue, vp: &[[f32; 4]; 4], size: [f32; 2]) {
         let f = |b: &[u8], i: usize| b.get(i..i + 4).and_then(|x| x.try_into().ok()).map_or(0.0, f32::from_le_bytes);
         for d in &mut self.instanced {
-            let shown: Vec<u32> = d
+            let errors: Vec<f32> = d.levels.iter().map(|l| l.error).collect();
+            let mut shown: Vec<(u32, u8)> = d
                 .placements
                 .as_chunks::<INSTANCE_SIZE>()
                 .0
                 .iter()
                 .enumerate()
-                .filter(|(_, p)| {
+                .filter_map(|(i, p)| {
                     let rows = [0, 1, 2].map(|r| [f(&p[..], 16 * r), f(&p[..], 16 * r + 4), f(&p[..], 16 * r + 8), f(&p[..], 16 * r + 12)]);
-                    placed_box_in_view(&rows, &d.bounds, vp)
+                    placed_box_in_view(&rows, &d.bounds, vp).then(|| {
+                        let level = if errors.len() > 1 { level_for(&errors, placement_scale(&rows, &d.bounds, vp, size)) } else { 0 };
+                        (i as u32, u8::try_from(level).unwrap_or(0))
+                    })
                 })
-                .map(|(i, _)| i as u32)
                 .collect();
+            // See-through placements back to front (by their box's centre), so each blends over
+            // what lies behind it.
+            if d.look != InstanceLook::Opaque {
+                let depth = |i: u32| {
+                    let p = d.placements.get(i as usize * INSTANCE_SIZE..(i as usize + 1) * INSTANCE_SIZE).unwrap_or_default();
+                    let rows = [0, 1, 2].map(|r| [f(p, 16 * r), f(p, 16 * r + 4), f(p, 16 * r + 8), f(p, 16 * r + 12)]);
+                    let [lo, hi] = d.bounds;
+                    let c = [0, 1, 2].map(|k| (lo[k] + hi[k]) * 0.5);
+                    let w = rows.map(|r| r[0] * c[0] + r[1] * c[1] + r[2] * c[2] + r[3]);
+                    let clip: [f32; 4] = std::array::from_fn(|k| vp[0][k] * w[0] + vp[1][k] * w[1] + vp[2][k] * w[2] + vp[3][k]);
+                    if clip[3].abs() > 1e-12 { clip[2] / clip[3] } else { f32::INFINITY }
+                };
+                shown.sort_by(|a, b| depth(b.0).total_cmp(&depth(a.0)).then(a.0.cmp(&b.0)));
+            }
             if d.shown.as_ref() == Some(&shown) {
                 continue;
             }
-            let bytes: Vec<u8> = shown
-                .iter()
-                .filter_map(|i| d.placements.get(*i as usize * INSTANCE_SIZE..(*i as usize + 1) * INSTANCE_SIZE))
-                .flatten()
-                .copied()
-                .collect();
-            if !bytes.is_empty() {
-                queue.write_buffer(&d.instances, 0, &bytes);
+            for (k, level) in d.levels.iter_mut().enumerate() {
+                let bytes: Vec<u8> = shown
+                    .iter()
+                    .filter(|(_, l)| usize::from(*l) == k)
+                    .filter_map(|(i, _)| d.placements.get(*i as usize * INSTANCE_SIZE..(*i as usize + 1) * INSTANCE_SIZE))
+                    .flatten()
+                    .copied()
+                    .collect();
+                if !bytes.is_empty() {
+                    queue.write_buffer(&level.instances, 0, &bytes);
+                }
+                level.count = u32::try_from(bytes.len() / INSTANCE_SIZE).unwrap_or(u32::MAX);
             }
-            d.count = u32::try_from(shown.len()).unwrap_or(u32::MAX);
             d.shown = Some(shown);
         }
     }
@@ -878,6 +1053,10 @@ pub struct Renderer {
     tri_cut_instanced: Option<(wgpu::RenderPipeline, wgpu::RenderPipeline)>,
     /// `tri_instanced` and `tri_cut_instanced` for flat triangles.
     tri_instanced_flat: wgpu::RenderPipeline,
+    /// `glass_far`, `glass_near` and `trans` for instanced meshes, smooth and flat.
+    glass_far_instanced: (wgpu::RenderPipeline, wgpu::RenderPipeline),
+    glass_near_instanced: (wgpu::RenderPipeline, wgpu::RenderPipeline),
+    trans_instanced: (wgpu::RenderPipeline, wgpu::RenderPipeline),
     tri_cut_instanced_flat: Option<(wgpu::RenderPipeline, wgpu::RenderPipeline)>,
     /// The tessellation compute pipeline, where the device runs compute shaders.
     tess: Option<crate::TessGpu>,
@@ -927,6 +1106,15 @@ pub struct Renderer {
     max_texture: u32,
     /// Supersampling (#1288): the filter that draws the supersampled frame into the viewport.
     ss_blit: wgpu::RenderPipeline,
+    /// The frame drawn offscreen at the viewport's own size (for the see-through surfaces' order-
+    /// independent transparency), copied as it is.
+    copy_blit: wgpu::RenderPipeline,
+    /// The offscreen frame is not at the viewport's size: filtered ([`Renderer::ss_blit`]).
+    ss_scaled: bool,
+    /// Order-independent transparency for the model's see-through surfaces (`None` where the
+    /// device cannot blend into float targets: they are sorted instead), and its targets.
+    oit: Option<oit::Pipelines>,
+    oit_targets: Option<oit::Targets>,
     ss_bgl: wgpu::BindGroupLayout,
     /// The supersampled frame's textures, kept while its size stays.
     ss: Option<Supersampled>,
@@ -1000,6 +1188,11 @@ fn vs(@builtin(vertex_index) i: u32) -> O {
     o.pos = vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
     o.uv = vec2<f32>(x, y);
     return o;
+}
+/// The frame as it is (drawn at the viewport's own size).
+@fragment
+fn fs_copy(i: O) -> @location(0) vec4<f32> {
+    return textureSampleLevel(src, smp, i.uv, 0.0);
 }
 @fragment
 fn fs(i: O) -> @location(0) vec4<f32> {
@@ -1271,6 +1464,37 @@ impl Renderer {
                 cache: None,
             })
         };
+        // See-through instanced meshes: blended, depth tested, not written; `cull` for glass.
+        let placed_see_through = [Some(shared_layout()), Some(instance_layout())];
+        let see_through = |label: &str, source: TriSource, cull: Option<wgpu::Face>| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some(source.entry()),
+                    buffers: &placed_see_through,
+                    compilation_options: Default::default(),
+                },
+                primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: cull, ..Default::default() },
+                depth_stencil: depth(wgpu::CompareFunction::LessEqual, false),
+                multisample: wgpu::MultisampleState { count: t.samples.max(1), mask: !0, alpha_to_coverage_enabled: false },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some(&source.fragment("fs_tri")),
+                    targets: &[Some(wgpu::ColorTargetState { format: t.format, blend: alpha, write_mask: wgpu::ColorWrites::ALL })],
+                    compilation_options: Default::default(),
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let both = |label: &str, cull: Option<wgpu::Face>| {
+            (see_through(label, TriSource::Instanced, cull), see_through(&format!("{label}_flat"), TriSource::InstancedFlat, cull))
+        };
+        let glass_far_instanced = both("sc_glass_far_instanced", Some(wgpu::Face::Front));
+        let glass_near_instanced = both("sc_glass_near_instanced", Some(wgpu::Face::Back));
+        let trans_instanced = both("sc_trans_instanced", None);
         let image_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("sc_image"),
             entries: &[
@@ -1438,26 +1662,30 @@ impl Renderer {
         });
         // The frame is premultiplied (drawn over transparent black), so it goes over the
         // viewport's background premultiplied; the viewport's depth is left as it is.
-        let ss_blit = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("sc_ssaa"),
-            layout: Some(&ss_layout),
-            vertex: wgpu::VertexState { module: &ss_module, entry_point: Some("vs"), buffers: &[], compilation_options: Default::default() },
-            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, ..Default::default() },
-            depth_stencil: depth(wgpu::CompareFunction::Always, false),
-            multisample: wgpu::MultisampleState { count: t.samples.max(1), mask: !0, alpha_to_coverage_enabled: false },
-            fragment: Some(wgpu::FragmentState {
-                module: &ss_module,
-                entry_point: Some("fs"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: t.format,
-                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let blit = |entry: &str| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("sc_ssaa"),
+                layout: Some(&ss_layout),
+                vertex: wgpu::VertexState { module: &ss_module, entry_point: Some("vs"), buffers: &[], compilation_options: Default::default() },
+                primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, ..Default::default() },
+                depth_stencil: depth(wgpu::CompareFunction::Always, false),
+                multisample: wgpu::MultisampleState { count: t.samples.max(1), mask: !0, alpha_to_coverage_enabled: false },
+                fragment: Some(wgpu::FragmentState {
+                    module: &ss_module,
+                    entry_point: Some(entry),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: t.format,
+                        blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let (ss_blit, copy_blit) = (blit("fs"), blit("fs_copy"));
+        let oit = oit::Pipelines::new(device, &module, &layout, t.format, t.depth, t.samples);
         let depth_reset = t.depth.filter(|_| reversed).map(|format| {
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("sc_depth_reset"),
@@ -1497,6 +1725,10 @@ impl Renderer {
             target: t,
             max_texture: device.limits().max_texture_dimension_2d,
             ss_blit,
+            copy_blit,
+            ss_scaled: false,
+            oit,
+            oit_targets: None,
             ss_bgl,
             ss: None,
             ss_ready: false,
@@ -1519,6 +1751,9 @@ impl Renderer {
                 TriSource::InstancedFlat,
             ),
             tri_cut_instanced_flat: cut(TriSource::InstancedFlat),
+            glass_far_instanced,
+            glass_near_instanced,
+            trans_instanced,
             tess,
             access_bgl,
             access_bind,
@@ -1630,6 +1865,11 @@ pub fn sort_back_to_front(bytes: &[u8], back: [f32; 3]) -> Vec<u8> {
 }
 
 impl Batches {
+    /// Whether it has see-through surfaces (glass or faded, instanced or not).
+    fn see_through(&self) -> bool {
+        self.glass.is_some() || self.trans.is_some() || self.instanced.iter().any(|d| d.look != InstanceLook::Opaque)
+    }
+
     /// Re-sort the glass for a new view direction (when it turned more than about 2 degrees).
     fn sort_glass(&mut self, queue: &wgpu::Queue, back: [f32; 3]) {
         let (Some(g), false) = (&self.glass, self.glass_cpu.is_empty()) else { return };
@@ -1692,8 +1932,13 @@ impl Renderer {
         res.sketch.take(device, cb.sketch_key, &cb.sketch_slot, None);
         res.highlight.take(device, cb.hl_key, &cb.hl_slot, None);
         res.preview.take(device, cb.pv_key, &cb.pv_slot, None);
-        res.model.sort_glass(queue, cb.back);
-        res.model.cull(queue, &cb.view_proj);
+        // See-through surfaces are drawn without sorting where the device can (order-independent
+        // transparency, in an offscreen frame); else their triangles are sorted for the view.
+        let see_through = res.oit.is_some() && res.model.see_through();
+        if !see_through {
+            res.model.sort_glass(queue, cb.back);
+        }
+        res.model.cull(queue, &cb.view_proj, cb.size_px);
         queue.write_buffer(&res.uniform, 0, &uniform_bytes(cb, cb.size_px[0], cb.size_px[1], res.linear_out, res.target.reversed_depth()));
         if let Some(a) = &cb.access
             && a.version != res.access_version
@@ -1751,7 +1996,7 @@ impl Renderer {
                 res.quads.push((img.id, b));
             }
         }
-        res.ss_ready = cb.ssaa != 1.0 && res.supersample(device, encoder, cb);
+        res.ss_ready = (cb.ssaa != 1.0 || see_through) && res.supersample(device, encoder, cb, see_through);
     }
 
     /// Draw the frame into `pass` within `viewport` (x, y, width, height in physical pixels):
@@ -1765,7 +2010,7 @@ impl Renderer {
         if self.ss_ready
             && let Some(ss) = &self.ss
         {
-            pass.set_pipeline(&self.ss_blit);
+            pass.set_pipeline(if self.ss_scaled { &self.ss_blit } else { &self.copy_blit });
             pass.set_bind_group(0, &ss.bind, &[]);
             pass.draw(0..3, 0..1);
             return;
@@ -1774,7 +2019,7 @@ impl Renderer {
             pass.set_pipeline(reset);
             pass.draw(0..3, 0..1);
         }
-        self.draw(frame, pass);
+        self.draw(frame, pass, Phase::All);
     }
 
     /// The target the pipelines draw into.
@@ -1785,7 +2030,7 @@ impl Renderer {
 
 impl Renderer {
     /// Draw the frame's scenes into `pass` (its viewport already set).
-    fn draw(&self, cb: &Frame, pass: &mut wgpu::RenderPass<'static>) {
+    fn draw(&self, cb: &Frame, pass: &mut wgpu::RenderPass<'static>, phase: Phase) {
         let res = self;
         pass.set_bind_group(0, &res.bind, &[]);
         let tris = |pass: &mut wgpu::RenderPass<'static>, p: &wgpu::RenderPipeline, b: &Option<Batch>| {
@@ -1813,6 +2058,12 @@ impl Renderer {
         } else {
             (&res.model, &res.sketch, &res.highlight, &res.preview)
         };
+        if phase == Phase::AfterSeeThrough {
+            pass.set_bind_group(1, &res.access_bind, &[]);
+            pass.set_bind_group(2, &res.ao.bind, &[]);
+            Self::draw_over(res, pass, sk, h, pv, m, &tris, &lines);
+            return;
+        }
         lines(pass, &res.overlay, &m.under);
         lines(pass, &res.overlay, &sk.under);
         pass.set_bind_group(1, &res.access_bind, &[]);
@@ -1828,9 +2079,8 @@ impl Renderer {
         };
         // Instanced meshes, with the pipeline for smooth and for flat triangles.
         let instanced = |pass: &mut wgpu::RenderPass<'static>, smooth: &wgpu::RenderPipeline, flat: &wgpu::RenderPipeline| {
-            for d in &m.instanced {
-                pass.set_pipeline(if d.flat { flat } else { smooth });
-                d.draw(pass);
+            for d in m.instanced.iter().filter(|d| d.look == InstanceLook::Opaque) {
+                d.draw(pass, smooth, flat);
             }
         };
         let sectioned = cb.clip[..3].iter().map(|c| c * c).sum::<f32>() > 0.25;
@@ -1878,9 +2128,37 @@ impl Renderer {
             }
         }
         tris(pass, &res.ghost, &pv.ghost);
+        if phase == Phase::BeforeSeeThrough {
+            return;
+        }
+        // See-through instanced meshes (placements back to front) with the rest of their kind.
+        let see_through =
+            |pass: &mut wgpu::RenderPass<'static>, look: InstanceLook, (smooth, flat): &(wgpu::RenderPipeline, wgpu::RenderPipeline)| {
+                for d in m.instanced.iter().filter(|d| d.look == look) {
+                    d.draw(pass, smooth, flat);
+                }
+            };
         tris(pass, &res.glass_far, &m.glass);
+        see_through(pass, InstanceLook::Glass, &res.glass_far_instanced);
         tris(pass, &res.glass_near, &m.glass);
+        see_through(pass, InstanceLook::Glass, &res.glass_near_instanced);
         tris(pass, &res.trans, &m.trans);
+        see_through(pass, InstanceLook::Faded, &res.trans_instanced);
+        Self::draw_over(res, pass, sk, h, pv, m, &tris, &lines);
+    }
+
+    /// What is drawn over the model's see-through surfaces.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_over(
+        res: &Renderer,
+        pass: &mut wgpu::RenderPass<'static>,
+        sk: &Batches,
+        h: &Batches,
+        pv: &Batches,
+        m: &Batches,
+        tris: &dyn Fn(&mut wgpu::RenderPass<'static>, &wgpu::RenderPipeline, &Option<Batch>),
+        lines: &dyn Fn(&mut wgpu::RenderPass<'static>, &wgpu::RenderPipeline, &Option<Batch>),
+    ) {
         tris(pass, &res.trans, &sk.trans);
         tris(pass, &res.trans, &h.trans);
         tris(pass, &res.guide_trans, &h.guide_trans);
@@ -1890,48 +2168,94 @@ impl Renderer {
         lines(pass, &res.overlay, &sk.overlays);
         lines(pass, &res.overlay, &h.overlays);
     }
+
+    /// The model's see-through surfaces into the order-independent transparency's targets.
+    fn draw_see_through(&self, pass: &mut wgpu::RenderPass<'static>, p: &oit::Pipelines) {
+        let m = &self.model;
+        pass.set_bind_group(0, &self.bind, &[]);
+        pass.set_pipeline(&p.built);
+        for batch in [&m.glass, &m.trans].into_iter().flatten() {
+            for (buffer, count) in &batch.parts {
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                pass.draw(0..*count, 0..1);
+            }
+        }
+        for d in m.instanced.iter().filter(|d| d.look != InstanceLook::Opaque) {
+            d.draw(pass, &p.instanced, &p.instanced_flat);
+        }
+    }
 }
 
 impl Renderer {
     /// Draw the frame supersampled (`cb.ssaa` times the viewport's pixels each way, within the
     /// device's texture limit and the memory budget) into textures of the viewport's kind.
     /// `false` when it cannot be (too small a gain, a zero-sized viewport): drawn as usual.
-    fn supersample(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, cb: &Frame) -> bool {
-        let Some(size) = supersampled_size(cb.size_px, cb.ssaa, self.max_texture, self.target.samples) else {
+    fn supersample(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, cb: &Frame, see_through: bool) -> bool {
+        // Supersampled when asked (and worth it); else, for order-independent transparency, at
+        // the viewport's own size.
+        let own = || {
+            let [w, h] = cb.size_px;
+            (w >= 1.0 && h >= 1.0)
+                .then(|| [(w.round() as u32).clamp(1, self.max_texture.max(1)), (h.round() as u32).clamp(1, self.max_texture.max(1))])
+        };
+        let scaled = if cb.ssaa != 1.0 { supersampled_size(cb.size_px, cb.ssaa, self.max_texture, self.target.samples) } else { None };
+        let Some(size) = scaled.or_else(|| if see_through { own() } else { None }) else {
             self.ss = None;
             return false;
         };
+        self.ss_scaled = scaled.is_some();
         if self.ss.as_ref().is_none_or(|ss| ss.size != size) {
             self.ss = Some(self.supersampled(device, size));
         }
+        if see_through
+            && let Some(p) = &self.oit
+            && self.oit_targets.as_ref().is_none_or(|t| t.size != size)
+        {
+            self.oit_targets = Some(p.targets(device, size, self.target.samples));
+        }
         let Some(ss) = &self.ss else { return false };
         let depth_format = self.target.depth;
-        let mut pass = encoder
-            .begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("sc_ssaa"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &ss.color,
-                    depth_slice: None,
-                    resolve_target: ss.resolve.as_ref(),
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
-                })],
-                depth_stencil_attachment: ss.depth.as_ref().map(|view| wgpu::RenderPassDepthStencilAttachment {
-                    view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(far_depth(self.target.reversed_depth())),
-                        store: wgpu::StoreOp::Discard,
+        let stencil = depth_format.is_some_and(|f| f.has_stencil_aspect());
+        // The depth is kept for the passes after the first when there are see-through surfaces.
+        let keep = if see_through { wgpu::StoreOp::Store } else { wgpu::StoreOp::Discard };
+        let pass = |encoder: &mut wgpu::CommandEncoder, first: bool| {
+            let load = |clear| if first { wgpu::LoadOp::Clear(clear) } else { wgpu::LoadOp::Load };
+            encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("sc_ssaa"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &ss.color,
+                        depth_slice: None,
+                        resolve_target: ss.resolve.as_ref(),
+                        ops: wgpu::Operations { load: load(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                    })],
+                    depth_stencil_attachment: ss.depth.as_ref().map(|view| wgpu::RenderPassDepthStencilAttachment {
+                        view,
+                        depth_ops: Some(wgpu::Operations { load: load_depth(first, far_depth(self.target.reversed_depth())), store: keep }),
+                        stencil_ops: stencil.then_some(wgpu::Operations { load: load_depth(first, 0), store: keep }),
                     }),
-                    stencil_ops: depth_format
-                        .filter(|f| f.has_stencil_aspect())
-                        .map(|_| wgpu::Operations { load: wgpu::LoadOp::Clear(0), store: wgpu::StoreOp::Discard }),
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            })
-            .forget_lifetime();
-        pass.set_viewport(0.0, 0.0, size[0] as f32, size[1] as f32, 0.0, 1.0);
-        self.draw(cb, &mut pass);
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                })
+                .forget_lifetime()
+        };
+        let (Some(p), Some(t), true) = (&self.oit, &self.oit_targets, see_through) else {
+            let mut first = pass(encoder, true);
+            first.set_viewport(0.0, 0.0, size[0] as f32, size[1] as f32, 0.0, 1.0);
+            self.draw(cb, &mut first, Phase::All);
+            return true;
+        };
+        {
+            let mut first = pass(encoder, true);
+            first.set_viewport(0.0, 0.0, size[0] as f32, size[1] as f32, 0.0, 1.0);
+            self.draw(cb, &mut first, Phase::BeforeSeeThrough);
+        }
+        p.accumulate(encoder, t, ss.depth.as_ref(), stencil, |pass| self.draw_see_through(pass, p));
+        p.composite(encoder, t, &ss.color, ss.resolve.as_ref());
+        let mut over = pass(encoder, false);
+        over.set_viewport(0.0, 0.0, size[0] as f32, size[1] as f32, 0.0, 1.0);
+        self.draw(cb, &mut over, Phase::AfterSeeThrough);
         true
     }
 
@@ -1970,6 +2294,22 @@ impl Renderer {
         });
         Supersampled { size, color, resolve, depth, bind }
     }
+}
+
+/// Which part of a frame [`Renderer::draw`] draws.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Phase {
+    /// All of it, the model's see-through surfaces sorted.
+    All,
+    /// Up to the model's see-through surfaces, which order-independent transparency draws.
+    BeforeSeeThrough,
+    /// What is drawn over them (sketch fills, highlights, X-ray, overlays).
+    AfterSeeThrough,
+}
+
+/// A depth (or stencil) attachment's load: cleared to `clear` for the first pass, else kept.
+fn load_depth<T>(first: bool, clear: T) -> wgpu::LoadOp<T> {
+    if first { wgpu::LoadOp::Clear(clear) } else { wgpu::LoadOp::Load }
 }
 
 /// Uniform bytes for a frame.
@@ -2036,6 +2376,41 @@ mod tests {
         assert!(placed_box_in_view(&at(-0.5, -0.5, -20.0), &[[0.0, 0.0, 0.0], [1.0, 1.0, 21.0]], &persp), "from in front of the eye to behind it");
         // A box that is not finite is drawn (never culled by mistake).
         assert!(placed_box_in_view(&at(30.0, 0.0, -10.0), &[[f32::NAN; 3], [1.0; 3]], &persp));
+    }
+
+    /// A placement's pixels per millimetre: in an orthographic view the same anywhere, along the
+    /// axis that shows largest (a turned box too); in perspective, larger nearer the eye, and
+    /// infinite (drawn in full) with a corner behind it. The level chosen is the coarsest whose
+    /// error stays under `LOD_PX` there.
+    #[test]
+    fn levels_of_detail_follow_the_size_on_screen() {
+        use super::{LOD_PX, level_for, placement_scale};
+        let unit = [[0.0f32, 0.0, 0.0], [1.0, 1.0, 1.0]];
+        let at = |x: f32, y: f32, z: f32| [[1.0, 0.0, 0.0, x], [0.0, 1.0, 0.0, y], [0.0, 0.0, 1.0, z]];
+        // Orthographic over x, y in -10..10 on a 200 × 200 view: 10 px a millimetre.
+        let ortho = [[0.1, 0.0, 0.0, 0.0], [0.0, 0.1, 0.0, 0.0], [0.0, 0.0, 0.005, 0.0], [0.0, 0.0, 0.5, 1.0]];
+        let size = [200.0, 200.0];
+        assert!((placement_scale(&at(0.0, 0.0, 0.0), &unit, &ortho, size) - 10.0).abs() < 1e-3);
+        assert!((placement_scale(&at(5.0, -3.0, 0.0), &unit, &ortho, size) - 10.0).abs() < 1e-3);
+        let (c, s) = (0.6f32.cos(), 0.6f32.sin());
+        let turned = [[c, -s, 0.0, 0.0], [s, c, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]];
+        assert!((placement_scale(&turned, &unit, &ortho, size) - 10.0).abs() < 1e-2);
+        // Perspective looking down -z from the origin (w = -z), 90° over 200 px.
+        let persp = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, -1.0, -1.0], [0.0, 0.0, -1.0, 0.0]];
+        let near = placement_scale(&at(0.0, 0.0, -10.0), &unit, &persp, size);
+        let far = placement_scale(&at(0.0, 0.0, -100.0), &unit, &persp, size);
+        assert!((near - 100.0 / 9.0).abs() < 0.2, "nearest corner at depth 9: {near}");
+        assert!(far < near / 9.0 && far > 0.0, "{far} vs {near}");
+        assert!(placement_scale(&at(0.0, 0.0, 0.5), &unit, &persp, size).is_infinite(), "a corner behind the eye");
+        assert!(placement_scale(&at(0.0, 0.0, -10.0), &[[f32::NAN; 3], [1.0; 3]], &persp, size).is_infinite());
+        // The coarsest level within LOD_PX: errors 0 (full), 0.05, 0.2, 1.0 mm.
+        let errors = [0.0, 0.05, 0.2, 1.0];
+        assert_eq!(level_for(&errors, f32::INFINITY), 0);
+        assert_eq!(level_for(&errors, 100.0), 0, "5 px for the first level");
+        assert_eq!(level_for(&errors, 10.0), 1);
+        assert_eq!(level_for(&errors, LOD_PX / 0.2), 2);
+        assert_eq!(level_for(&errors, 0.5), 3);
+        assert_eq!(level_for(&[0.0], 0.001), 0);
     }
 
     /// Shared vertices: a flat mesh's by position alone (an STL's facets: one normal per
@@ -2190,6 +2565,149 @@ mod glass_tests {
         let scene = 524_434_680usize;
         assert_eq!(scene.div_ceil(buffer_chunk(TRI_SIZE, limit)), 2);
         assert!(buffer_chunk(TRI_SIZE, 1) >= TRI_SIZE * 6, "a tiny limit still holds one unit");
+    }
+
+    /// The middle pixel of `scene` drawn looking down -Z (x, y in -10..10) into a 64 × 64 frame,
+    /// with order-independent transparency (`oit`) or with the see-through triangles sorted.
+    /// `None` without a GPU adapter.
+    fn middle_pixel(scene: GpuScene, oit: bool) -> Option<[u8; 4]> {
+        const SIZE: u32 = 64;
+        let (_, device, queue) = crate::open_headless().ok()?;
+        let depth = crate::depth_format(&device, true);
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let mut r = Renderer::new(&device, GpuTarget { format, depth: Some(depth), samples: 1, tess: false }, None);
+        assert!(r.oit.is_some(), "this device does order-independent transparency");
+        if !oit {
+            r.oit = None;
+        }
+        let none = || Arc::new(Mutex::new(None));
+        let frame = Frame {
+            product: false,
+            key: 1,
+            slot: Arc::new(Mutex::new(Some(scene))),
+            sketch_key: 0,
+            sketch_slot: none(),
+            hl_key: 0,
+            hl_slot: none(),
+            pv_key: 0,
+            pv_slot: none(),
+            pv_hide: false,
+            view_proj: [[0.1, 0.0, 0.0, 0.0], [0.0, 0.1, 0.0, 0.0], [0.0, 0.0, -0.01, 0.0], [0.0, 0.0, 0.5, 1.0]],
+            back: [0.0, 0.0, 1.0],
+            size_px: [SIZE as f32; 2],
+            clip: [0.0; 4],
+            cap: [0.0; 4],
+            images: Vec::new(),
+            analysis: [0.0; 8],
+            analysis_colors: [0.0; 36],
+            access: None,
+            outline: false,
+            eye: [0.0, 0.0, 100.0, 0.0],
+            ao_radius: 0.0,
+            ssaa: 1.0,
+        };
+        let texture = |format, usage| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            })
+        };
+        let color = texture(format, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
+        let depth_tex = texture(depth, wgpu::TextureUsages::RENDER_ATTACHMENT);
+        let (color_view, depth_view) = (color.create_view(&Default::default()), depth_tex.create_view(&Default::default()));
+        let mut encoder = device.create_command_encoder(&Default::default());
+        r.prepare(&device, &queue, &mut encoder, &frame);
+        {
+            let mut pass = encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: None,
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &color_view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::WHITE), store: wgpu::StoreOp::Store },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(far_depth(reversed_depth(Some(depth)))),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: depth
+                            .has_stencil_aspect()
+                            .then_some(wgpu::Operations { load: wgpu::LoadOp::Clear(0), store: wgpu::StoreOp::Store }),
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                })
+                .forget_lifetime();
+            r.paint(&frame, &mut pass, [0.0, 0.0, SIZE as f32, SIZE as f32]);
+        }
+        let read = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: u64::from(SIZE * SIZE * 4),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            color.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &read,
+                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(SIZE * 4), rows_per_image: Some(SIZE) },
+            },
+            wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        );
+        queue.submit([encoder.finish()]);
+        read.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
+        let bytes = read.slice(..).get_mapped_range().ok()?.to_vec();
+        let at = ((SIZE / 2 * SIZE + SIZE / 2) * 4) as usize;
+        bytes.get(at..at + 4).and_then(|p| p.try_into().ok())
+    }
+
+    /// Two see-through squares, one at z = 5 (near) and one at z = -5, in `near` and `far`
+    /// colours, given near first or far first.
+    fn two_layers(near: [u8; 4], far: [u8; 4], near_first: bool) -> GpuScene {
+        let mut sc = GpuScene::default();
+        let mut layers = [(5.0f32, near), (-5.0, far)];
+        if !near_first {
+            layers.reverse();
+        }
+        for (z, c) in layers {
+            for p in [[-5.0, -5.0], [5.0, -5.0], [5.0, 5.0], [-5.0, -5.0], [5.0, 5.0], [-5.0, 5.0]] {
+                sc.glass_tri([p[0], p[1], z], [0.0, 0.0, 1.0], c);
+            }
+        }
+        sc
+    }
+
+    /// Order-independent transparency: the same see-through layers give the same picture in
+    /// whichever order they come, the same as sorting them where they share a colour, and close to
+    /// it where they do not (the weighted average of their colours, by how much they cover).
+    /// Skipped without a GPU adapter.
+    #[test]
+    fn see_through_layers_blend_in_any_order() {
+        let (blue, red) = ([40, 80, 220, 128], [220, 40, 40, 128]);
+        let Some(either) = middle_pixel(two_layers(blue, red, true), true) else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let other = middle_pixel(two_layers(blue, red, false), true).unwrap();
+        assert!(either.iter().zip(other).all(|(a, b)| a.abs_diff(b) <= 1), "{either:?} vs {other:?}");
+        let near = |a: [u8; 4], b: [u8; 4], by: u8| a.iter().zip(b).all(|(x, y)| x.abs_diff(y) <= by);
+        let same = middle_pixel(two_layers(blue, blue, false), true).unwrap();
+        let sorted = middle_pixel(two_layers(blue, blue, false), false).unwrap();
+        assert!(near(same, sorted, 3), "one colour: {same:?} vs sorted {sorted:?}");
+        let sorted = middle_pixel(two_layers(blue, red, false), false).unwrap();
+        assert!(near(either, sorted, 48), "two colours: {either:?} vs sorted {sorted:?}");
+        assert!(either[0] > 100 && either[2] > 100, "both colours show: {either:?}");
     }
 
     #[test]

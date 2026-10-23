@@ -31,9 +31,10 @@ preferences, manager cards, prompts, context menus and the sketch palette. Impor
 - `Window` composes the shared Panel frame with a 40 pt icon/title/close header,
   padded content and optional 48 pt footer. `show_with_left` pins a left action beside
   the right-aligned buttons. `show_pages` accepts declarative `WindowPage` entries
-  (existing icon, i18n label key, stable handle, scroll policy and draw callback).
+  (icon, i18n label key, optional group heading, stable handle, scroll policy and draw callback).
   Its 188 pt soft page list has 32 pt icon/label rows, selected tint/ink and a divider.
-  All nine existing Preferences pages retain their order, settings and handles.
+  Preferences has nine grouped pages; legacy control-channel page names remain aliases.
+  `page_rows` opts into a taller body while preserving viewport bounds.
   `actions`, `anchor`/`placed`, `cards`, `fields` and `keep_open_on_escape` retain
   existing window behavior. Empty action labels omit the footer.
 - `Confirm` is an input-blocking modal using the same card frame and footer controls.
@@ -55,6 +56,14 @@ preferences, manager cards, prompts, context menus and the sketch palette. Impor
   target so nearby sketch picks are not intercepted; alignment stays shared.
 - Scenario handles and accessible labels are API. Consolidated options preserve
   the former geometry, wrapping, native metadata and publication keys.
+
+Preference compositions use `settings_heading`, shared disclosure `settings_section` headings and
+`settings_pair` for responsive controls beside one specimen. `option_card` supplies the
+shared illustrated radio control. `settings_form` and `settings_block_hint` define aligned label grids; `theme_rail` keeps the import tile fixed beside a scrollbar-free scrolling row. `PreferenceFigure` owns theme swatches, orbit pivots,
+quality, anti-aliasing, contact shading and up-axis figures. `layout_preview` follows the
+four workspace choices without opening another viewport. Scale, palette, autosave, mouse
+and live-axis specimens share tokens and the gallery; live bars show actual calibrated
+input and introduce no repaint timer.
 
 ## Elements
 
@@ -413,3 +422,49 @@ border strip without changing logical panel allocations. The application bar has
 an independent surface role.
 The saved `Prefs::layout` is changed through `view.layout`; `ui.set` may still make a
 transient automation override.
+## File/start presentation
+
+`FileView` owns File surfaces and controls. It accepts translated strings, existing
+icon ids and cached thumbnail textures; callers retain commands, document state,
+persistence, thumbnail jobs and recovery decisions.
+
+- `page`, `content` and `rail` own the page background, responsive insets and
+  full-height rail fill/clip. `navigation` also supports the narrow navigation menu.
+  Callers supply layout rectangles, scrolling and entry order.
+- `nav_row` accepts a stable id, label, shortcut, selection and enabled state.
+  `back_to` accepts a translated `{name}` template, paints the document name
+  semibold and reuses the mirrored chevron and outlined keycap. `separator`
+  supplies grouped rules. Disabled rows cannot activate.
+- `title`, `subtitle`, `detail` and `section` own typography. `section` accepts a
+  token-based heading/body gap: `space_12` for New, `space_10` for Recent/Samples.
+  Callers retain semantic section order and the larger `file_section_gap`.
+- `grid` provides responsive columns with 14 pt gutters and no trailing row gap.
+  `action_tile` supplies an 84 pt card with 44 pt original artwork and vertically
+  centered label/subtitle. `tile_min_width` informs responsive columns.
+- `recent_list` owns the rounded border and zero row gap. `recent_row` accepts a
+  `RecentRow`, paints internal separators, medium names and workspace dots, and
+  retains title/path at narrow widths. Callers handle unavailable-file actions.
+- `sample_grid(ui, id, &[SampleCard])` measures each row's tallest content and
+  stretches cards to equal bottoms without clipping descriptions. Responses stay
+  in sample order, with stable `{id}:{index}` ids. Artwork inputs remain unchanged.
+- `recovery_banner` accepts `RecoveryMessage` segments for a bold title, normal
+  message, monospace filename and normal suffix. Actions align right or wrap below
+  at narrow widths. Discard is optional for summaries; the return value is
+  `(recover_response, optional_discard_response)`. `recovery_review` uses the same
+  geometry with per-design Discard. Callers provide truthful metadata.
+
+The exported `file_*` colour tokens provide readable light/dark foreground and
+background pairs, including File-specific secondary text. Thumbnails retain the
+neutral `file_image_tint`; icon and text colours do not change their pixels.
+Spacing, dimensions, fonts and radii come from `theme::Tokens`.
+
+Gallery and geometry tests cover these components. To capture the actual File
+view using public temporary fixtures, set `SOLIDCRAFT_FILE_EVIDENCE` to an output
+directory and run `file_view_application_evidence_in_both_themes_and_widths` with
+`--ignored`. It produces desktop and 420 pt narrow PNGs in both themes.
+
+`button_at(ui, id, rect, label, Button::Primary/Normal)` places the same shared
+native button used by `button` inside a bounded, centred layout. It preserves
+stable identity, enabled state and exact caller-owned geometry. Recovery actions
+use this component rather than custom button painters. The recovery well renders
+the existing restore artwork through its construction accent ramp.

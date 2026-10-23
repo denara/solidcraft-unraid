@@ -85,6 +85,27 @@ fn feature_mirror_and_patterns_reopen_as_feature_replays_even_for_body_creators(
     }
 }
 
+/// #3567: an Offset Plane built on a face reopened with its Plane input empty when the face's
+/// plane origin lay off the face (here the world origin's foot, beside the box), so OK asked to
+/// pick a plane first. It reopens with the face, and OK keeps the plane on it.
+#[test]
+fn offset_plane_on_a_face_reopens_with_the_face() {
+    let mut app = app_with(json!([
+        {"command":"solid.box","params":{"length":40,"width":30,"height":20,"corner":[10,0,0],"body_name":"Plate"}},
+        {"command":"construct.plane.offset","params":{"base":{"face":[30,0,10]},"offset":10,"name":"Side"}}
+    ]));
+    let side = app.session.doc.find_feature("Side").unwrap().clone();
+    let d = crate::dialogs::for_feature(&app, side.id, None).unwrap();
+    assert!(matches!(d.inputs[0].items.as_slice(), [Sel::Face { body, .. }] if body == "Plate"), "{:?}", d.inputs[0].items);
+    let (edit, p) = apply_commands(&app, &d).unwrap().remove(0);
+    assert_eq!(edit, "timeline.redefine");
+    app.session.execute(&edit, &p).unwrap();
+    assert!(app.session.model.results.iter().all(|r| r.error.is_none()), "{:?}", app.session.model.results);
+    let state = app.session.model.state();
+    let plane = state.construct.iter().find(|c| c.name == "Side").map(|c| c.geom.clone());
+    assert!(matches!(plane, Some(solidcraft_engine::doc::construct::ConstructGeom::Plane(pl)) if (pl.origin.y + 10.0).abs() < 1e-9), "{plane:?}");
+}
+
 #[test]
 fn feature_pattern_controls_preview_without_committing_and_cancel_cleanly() {
     for command in ["solid.pattern.rectangular", "solid.pattern.circular"] {

@@ -1,4 +1,4 @@
-# SolidCraft — instructions for agents
+# SolidCraft â€” instructions for agents
 
 SolidCraft is a clean-room, open-source, pure-Rust parametric 3D CAD application:
 sketches with a constraint solver, a parametric timeline of features, a B-rep
@@ -16,7 +16,7 @@ new uses of it anywhere else. Public docs/web/Flatpak deployments use project Pa
 
 ## Container prototype baseline
 The first Unraid prototype used upstream commit `af536a7`. The current validated
-container baseline is `3d3dd27439995f37eaed1feaa1c53a0e42d2fe39`.
+container baseline is `edf57cec293dcea301201f1d5173b33e16351466`.
 Keep later upstream CAD/UI feature updates separate from this deployment addition;
 advance the baseline only as a separate, validated update. See [update records](docs/unraid-updates.md).
 
@@ -91,7 +91,8 @@ independent opaque observer handles, background snapshot preparation/rendering a
 bounded shared image caches. Observation must not write files, change the agent's
 camera/document/history or create observer-induced MCP busy errors. Preserve isolated
 cold display caches, render priority/budgets, image-body authorization/leases and
-logout/expiry/session-end invalidation. Run `packaging/unraid/observer-test.ps1`
+logout/expiry/session-end invalidation. Contact-mesh caches are isolated in observation
+snapshots; ordinary scratch previews keep sharing their cache. Run `packaging/unraid/observer-test.ps1`
 against the isolated candidate when changing the worker, observation or gateway.
 
 Requested upstream updates merge one selected upstream snapshot and retain all published
@@ -107,7 +108,7 @@ template metadata to `denara/unraid-templates` after the combined image passes p
    and the relevant `plan/architecture.md` section.
 2. Kernel and library decisions: `plan/adr/0001-geometry-kernel.md` (what we may depend on, what
    is rejected for licence reasons).
-3. Follow the autonomous operation protocol (`plan/execution-plan.md` §6). Don't stop to ask
+3. Follow the autonomous operation protocol (`plan/execution-plan.md` Â§6). Don't stop to ask
    unless it lists the decision as the owner's.
 
 `plan/` is gitignored (local only).
@@ -117,7 +118,7 @@ People trust SolidCraft with their designs; a crash loses their work. **This out
 - **No panics in non-test code:** no `unwrap()`, `expect()`, `panic!`, `unreachable!`, `todo!`,
   `unimplemented!`; no `unsafe` (`unsafe_code = "forbid"`).
 - **Errors are `Result<T, E>`** through the crate's error type and `?`. An unfinished feature
-  returns an error ("not supported yet: …"); it never panics.
+  returns an error ("not supported yet: â€¦"); it never panics.
 - **Input-derived numbers are hostile** (command parameters, design files, control-channel
   input): `get()` not `[i]`, finite checks, caps on sizes and loop counts.
 - **Third-party kernel calls are guarded:** everything that calls `truck` goes through
@@ -131,7 +132,7 @@ People trust SolidCraft with their designs; a crash loses their work. **This out
 - **Prove it:** every crash fix lands with a regression test (see `hostile_params_never_panic`); a
   crash report's `design.solidcraft` + `replay.json` is the test's starting point.
 - **Where tests go:** a regression test goes into the existing test file for its area (booleans, blends,
-  shell, sweep, STEP, naming…), never a new file named after the bug (#3226).
+  shell, sweep, STEP, namingâ€¦), never a new file named after the bug (#3226).
 - Every production crate root carries
   `#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]`.
 
@@ -144,15 +145,15 @@ People trust SolidCraft with their designs; a crash loses their work. **This out
   tools. Never copy another product's code, icons, artwork, help text, tooltips, templates or
   materials. File formats come from public specifications.
 - **No commercial CAD products.** Agents must not drive, script, automate or extract data from
-  commercial CAD products (Fusion, SolidWorks, Onshape, …) for this project: no test data,
+  commercial CAD products (Fusion, SolidWorks, Onshape, â€¦) for this project: no test data,
   measurements, command lists, ids or files produced with them.
 - **Never read, copy or link GPL/LGPL/AGPL code**: OpenCASCADE, FreeCAD (incl. planegcs),
-  SolveSpace, CadQuery/OCP, LibreCAD, QCAD — don't even read their sources. (`tools/freecad-oracle/`
+  SolveSpace, CadQuery/OCP, LibreCAD, QCAD â€” don't even read their sources. (`tools/freecad-oracle/`
   runs FreeCAD as a separate program through its public scripting API to compute reference values;
   nothing from FreeCAD is linked, vendored or shipped.) The sketch solver and the blend
   operations are our own.
-- **Assets — absolutely essential.** SolidCraft contains **no iconography, images, fonts or
-  artwork from commercial CAD products — ever.** Command icons are the original SVG masters in
+- **Assets â€” absolutely essential.** SolidCraft contains **no iconography, images, fonts or
+  artwork from commercial CAD products â€” ever.** Command icons are the original SVG masters in
   `assets/icons/ui/design/svg/`, compiled through `crates/ui-egui/src/icon_svg.rs`.
   **Before any icon, icon assignment or media edit, read `assets/AGENTS.md`,
   `assets/icons/ui/AGENTS.md` and `assets/icons/ui/STYLE_GUIDE.md`.** Use the canonical
@@ -166,8 +167,8 @@ People trust SolidCraft with their designs; a crash loses their work. **This out
   dialogs, sketch tools, palette, scripts, CLI and control channel all reach the same commands.
 - **Programmatic calls never open dialogs.** `engine.execute` runs the JSON form; only toolbar
   clicks (`ui.start`) start interactive tools and dialogs, which then run commands.
-- **Layering** is enforced by `cargo xtask layers`: L0 `geom` → L1 `sketch`, `kernel`, `render`
-  → L2 `doc` → L3 `io` → L4 `engine` → L5 `ui-egui` → apps. Nothing below L5 depends on
+- **Layering** is enforced by `cargo xtask layers`: L0 `geom` â†’ L1 `sketch`, `kernel`, `render`
+  â†’ L2 `doc` â†’ L3 `io` â†’ L4 `engine` â†’ L5 `ui-egui` â†’ apps. Nothing below L5 depends on
   egui/eframe/winit/wgpu/rfd. **The UI crate is swappable.** Only `crates/kernel` may use `truck`.
 - **The UI is thin**: panels read engine state and act through `app.run(id, params)` /
   `app.start(id)`. Colours come from `theme::Tokens`.
@@ -291,7 +292,7 @@ before the draft is verified.
 milestone task lands. `cargo xtask features` regenerates `docs/features.md` (SolidCraft's
 commands by area, from the registry) when commands are added or renamed.
 
-The container integration omits upstream's macOS Finder, 3Dconnexion driver FFI and Windows native-crash/resize-border/work-area unsafe bridges; command-line
+The container integration omits upstream's macOS Finder, 3Dconnexion driver FFI and Windows native-crash/resize-border/work-area/HID-discovery unsafe bridges; command-line
 file opening and all Linux/container behavior are preserved. The driver compatibility API reports Unsupported without starting a thread; shared pure-Rust HID handling is retained. CAD and UI logic remain Rust.
 The upstream JavaScript service worker is browser infrastructure, independent of HTTP MCP.
 

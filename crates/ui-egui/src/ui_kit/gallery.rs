@@ -29,6 +29,95 @@ macro_rules! element {
 
 // One entry per element/variant: names, rendering and geometry expectations stay together.
 const ELEMENTS: &[Element] = &[
+    element!("settings_form", |ui, state| {
+        settings_form(ui, Tokens::get().form_label_width, |ui| {
+            row(ui, "Sample", |ui| {
+                field(ui, &mut state.value);
+            });
+        });
+    }),
+    element!("settings_composition", |ui, _| {
+        settings_heading(ui, "Interface", "Appearance and workspace");
+        settings_section(ui, "gallery_settings", "Layout", |ui| {
+            settings_pair(
+                ui,
+                |ui| {
+                    text(ui, "Controls", Text::Inline);
+                },
+                |ui, ()| layout_preview(ui, LayoutPreview { compact: true, labels: false, history: 2, translucent: false }),
+            )
+        });
+    }),
+    element!("settings_permission_choices", |ui, state| {
+        settings_choices(
+            ui,
+            &[
+                SettingsChoice {
+                    key: "gallery:ask",
+                    title: "Ask first",
+                    summary: "Confirm changes before they run.",
+                    detail: "Full permission details",
+                },
+                SettingsChoice {
+                    key: "gallery:edits",
+                    title: "Allow edits",
+                    summary: "Ask before running other tools.",
+                    detail: "Full permission details",
+                },
+                SettingsChoice {
+                    key: "gallery:all",
+                    title: "Allow all",
+                    summary: "Run supported tools without asking.",
+                    detail: "Full permission details",
+                },
+            ],
+            &mut state.selected,
+        );
+        settings_pointer_preview(ui, true, "Normal", true);
+    }),
+    element!("preference_theme_rail", |ui, _| {
+        theme_rail(
+            ui,
+            |ui| {
+                for label in ["Light", "Dark", "System"] {
+                    option_card(
+                        ui,
+                        label,
+                        Some("Built in"),
+                        label == "Light",
+                        true,
+                        PreferenceFigure::Theme { palette: Tokens::light().into(), system: label == "System" },
+                    );
+                }
+            },
+            |ui| {
+                theme_import_tile(ui, "Import…", "theme file");
+            },
+        );
+    }),
+    element!("preference_option_cards", |ui, _| {
+        ui.horizontal_wrapped(|ui| {
+            for figure in [
+                PreferenceFigure::Theme { palette: Tokens::light().into(), system: true },
+                PreferenceFigure::Pivot(2),
+                PreferenceFigure::Quality(24),
+                PreferenceFigure::Antialiasing(8),
+                PreferenceFigure::ContactShading(true),
+                PreferenceFigure::UpAxis(true),
+            ] {
+                option_card(ui, "Choice", Some("Example"), true, true, figure);
+            }
+        });
+    }),
+    element!("preference_specimens", |ui, _| {
+        tab_accent_strip(ui);
+        scale_specimen(ui, 1.1);
+        status_palette_sample(ui, crate::theme::ColorVision::Deutan);
+        colour_vision_sample(ui, &Tokens::get());
+        settings_autosave_timeline(ui, 5.0);
+        settings_axis_row(ui, "Push X", 0.6, [0.1, 0.2], |_| {}, |_| {}, |_| {});
+        settings_mouse_mapping(ui, &[(vec!["Shift".into(), "Middle drag".into()], "Orbit".into())], |_| {});
+    }),
     element!("assistant_entry", |ui, _| {
         let t = Tokens::get();
         egui::Frame::NONE.fill(t.app_bar).show(ui, |ui| {
@@ -170,6 +259,75 @@ const ELEMENTS: &[Element] = &[
     element!("history_seam_drag", |ui, _| history_seam_example(ui, HistoryHandleState::Drag)),
     element!("history_icons", |ui, _| history_example(ui, false)),
     element!("history_names", |ui, _| history_example(ui, true)),
+    element!("file_navigation", |ui, _| {
+        FileView::navigation(ui, |ui| {
+            FileView::back_to(ui, "gallery:file:back", "Back to {name}", "Sample Plate", "Esc");
+            FileView::nav_row(ui, "gallery:file:start", "Start", "", true, true);
+            FileView::nav_row(ui, "gallery:file:open", "Open", "Ctrl+O", false, true);
+            FileView::separator(ui);
+            FileView::nav_row(ui, "gallery:file:save", "Save", "Ctrl+S", false, false);
+        });
+    }),
+    element!("file_action", |ui, _| {
+        FileView::action_tile(ui, "gallery:file:new", ui.available_width(), "new", "New design", "Millimetres · opens in Design", true);
+    }),
+    element!("file_recovery_banner", |ui, _| {
+        FileView::recovery_banner(
+            ui,
+            "gallery:recovery",
+            super::file_view::RecoveryMessage {
+                title: "1 design was recovered",
+                before_filename: " after SolidCraft closed unexpectedly: ",
+                filename: "enclosure-lid.solidcraft",
+                after_filename: ", 2 minutes ago.",
+            },
+            "Recover",
+            Some("Discard"),
+        );
+    }),
+    element!("file_recovery_review", |ui, _| {
+        FileView::recovery_review(ui, "gallery:recovery-review", "Sample Plate", " · 14 features · 2 minutes ago", "Recover", "Discard");
+    }),
+    element!("file_recent_list", |ui, _| {
+        FileView::recent_list(ui, |ui| {
+            for id in ["first", "second"] {
+                FileView::recent_row(
+                    ui,
+                    id,
+                    RecentRow {
+                        title: "Sample Plate",
+                        path: "Designs/sample-plate.solidcraft",
+                        when: "Open now",
+                        workspace: "Design",
+                        thumbnail: None,
+                    },
+                );
+            }
+        });
+    }),
+    element!("file_recent", |ui, _| {
+        FileView::recent_row(
+            ui,
+            "gallery:file:recent",
+            RecentRow { title: "Sample Plate", path: "Designs/sample-plate.solidcraft", when: "Open now", workspace: "Design", thumbnail: None },
+        );
+    }),
+    element!("file_sample", |ui, _| {
+        FileView::sample_grid(
+            ui,
+            "gallery:file:sample",
+            &[SampleCard { title: "Sample Plate", description: "Parametric plate with holes and a bored boss", icon: "new", thumbnail: None }],
+        );
+    }),
+    element!("file_recovery", |ui, _| {
+        FileView::recovery_banner(
+            ui,
+            "gallery:recovery-summary",
+            super::file_view::RecoveryMessage { title: "2 designs have unsaved changes", before_filename: "", filename: "", after_filename: "" },
+            "Review",
+            None,
+        );
+    }),
     element!("command_search", |ui, _| {
         let mut query = "fillet".to_owned();
         CommandSearch::field(
@@ -275,6 +433,7 @@ const ELEMENTS: &[Element] = &[
             ui,
             &mut s.selected,
             &[WindowPage {
+                group: Some("prefs.input"),
                 icon: "settings",
                 label: "ui.general",
                 handle: "gallery:page",
@@ -769,6 +928,11 @@ const ELEMENTS: &[Element] = &[
             button(ui, "Add", Button::Normal);
         });
     }),
+    element!("button_at", |ui, _| {
+        let t = Tokens::get();
+        let (rect, _) = ui.allocate_exact_size(vec2(t.space_24 * 5.0, t.file_action_height), egui::Sense::hover());
+        button_at(ui, "gallery:button_at", rect, "Recover", Button::Primary);
+    }),
     element!("small_button", "dialog:row:Gallery", Some("dialog:button:Gallery:×"), |ui, _| {
         row(ui, "Gallery", |ui| {
             button(ui, "×", Button::Small);
@@ -803,6 +967,10 @@ const ELEMENTS: &[Element] = &[
     element!("icon_button_at", |ui, _| {
         let (rect, _) = ui.allocate_exact_size(vec2(row_height(), row_height()), egui::Sense::hover());
         icon_button_at(ui, rect, "close", "Close");
+    }),
+    element!("quiet_icon_button_at", |ui, _| {
+        let (rect, _) = ui.allocate_exact_size(vec2(row_height(), row_height()), egui::Sense::hover());
+        quiet_icon_button_at(ui, rect, "plus", "Add shortcut");
     }),
     element!("keyboard", |ui, _| {
         assert_eq!(keyboard(ui.ctx(), true), Action::None);
@@ -1689,4 +1857,68 @@ fn command_search_ribbon_transition_clips_content_in_both_themes() {
         }
     }
     crate::theme::set_dark(previous);
+}
+
+/// Opt-in CPU capture of the actual File view, with public temporary fixtures only.
+#[test]
+#[ignore = "set SOLIDCRAFT_FILE_EVIDENCE to an output directory and run explicitly"]
+fn file_view_application_evidence_in_both_themes_and_widths() {
+    use super::checks::tests::{raster, textures_update};
+    use std::collections::HashMap;
+    let output_dir = std::path::PathBuf::from(std::env::var("SOLIDCRAFT_FILE_EVIDENCE").expect("set SOLIDCRAFT_FILE_EVIDENCE"));
+    std::fs::create_dir_all(&output_dir).unwrap();
+    let fixture_dir = std::env::temp_dir().join(format!("solidcraft-file-evidence-{}", std::process::id()));
+    std::fs::create_dir_all(&fixture_dir).unwrap();
+    let path = fixture_dir.join("sample-plate.solidcraft");
+    let fixture = path.to_string_lossy().to_string();
+    let mut sample = crate::test_support::sample_app();
+    sample.session.execute("file.save_as", &serde_json::json!({"path":fixture})).unwrap();
+    let previous = crate::theme::is_dark();
+    for dark in [false, true] {
+        for (name, size) in [("desktop", vec2(1440.0, 1000.0)), ("narrow", vec2(420.0, 1000.0))] {
+            let ctx = crate::fonts::test_context();
+            let mut app = crate::test_support::sample_app();
+            app.home.show(0);
+            app.home.add_recent(&fixture);
+            app.session.path = Some(fixture.clone());
+            let preview = image::load_from_memory(include_bytes!("../../../../assets/samples/exports/0.png")).unwrap().to_rgba8();
+            let preview = egui::ColorImage::from_rgba_unmultiplied([preview.width() as usize, preview.height() as usize], preview.as_raw());
+            crate::home::install(&mut app.home, &ctx, &fixture, Some(preview));
+            app.preferences.theme = if dark { "dark" } else { "light" }.into();
+            app.ui.dark = dark;
+            app.recoverable.push(solidcraft_engine::recovery::Entry {
+                id: "public-evidence".into(),
+                path: Some("enclosure-lid.solidcraft".into()),
+                name: "Enclosure lid".into(),
+                saved_at: web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap().as_secs().saturating_sub(120),
+                features: 14,
+            });
+            crate::theme::set_dark(dark);
+            crate::theme::apply(&ctx);
+            let bounds = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+            let mut textures = HashMap::new();
+            for frame in 0..6 {
+                let mut input =
+                    egui::RawInput { screen_rect: Some(bounds), time: Some(f64::from(frame) / 60.0), focused: true, ..Default::default() };
+                app.raw_input_hook(&mut input);
+                let mut output = ctx.run_ui(input, |ui| {
+                    app.logic(ui.ctx());
+                    app.ui(ui);
+                });
+                textures_update(&mut textures, &output.textures_delta);
+                if frame == 5 {
+                    assert!(app.home.open);
+                    let page = scenario::rect_of("home:page").expect("actual File view allocation");
+                    assert!(bounds.contains_rect(page));
+                    raster(&ctx, output.shapes.clone(), output.pixels_per_point, bounds, &textures)
+                        .save(output_dir.join(format!("file-{name}-{}.png", if dark { "dark" } else { "light" })))
+                        .unwrap();
+                }
+                output.textures_delta.clear();
+            }
+        }
+    }
+    crate::theme::set_dark(previous);
+    std::fs::remove_file(path).unwrap();
+    std::fs::remove_dir(fixture_dir).unwrap();
 }

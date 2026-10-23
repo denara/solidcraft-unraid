@@ -15,7 +15,7 @@ The fork is hosted at [denara/solidcraft-unraid](https://github.com/denara/solid
 The public Unraid template names a new container `SolidCraft`; the existing local Compose service,
 image tags, command names, data format and environment variables retain compatibility.
 The first prototype used upstream commit `af536a7`. The current validated snapshot is
-`3d3dd27439995f37eaed1feaa1c53a0e42d2fe39`. See [update records](unraid-updates.md) for checks,
+`edf57cec293dcea301201f1d5173b33e16351466`. See [update records](unraid-updates.md) for checks,
 the transferable image archive and installation instructions for this update.
 
 For future requested updates, use the repository skill
@@ -485,7 +485,7 @@ Linked components may read and refresh designs only under /data/files, including
 stored in uploaded documents. The gateway supplies a per-subprocess link root; resolved
 paths and parent folders are checked again by the engine, with symlinks refused. Desktop
 linked components retain their normal behavior when no network link root is supplied.
-This snapshot writes format 30. Validated format-29 files, including partial pending migrations and split-face identities, open without modifying their source files. Keep pre-update server and separate browser-design backups; older builds cannot read newly saved designs.
+This snapshot writes format 31. Validated native format-30 files and legacy format-13 designs open without modifying their source files; parameters, measurements and named split faces are preserved. Keep pre-update server and separate browser-design backups; older builds cannot read newly saved designs.
 
 The HTTP gateway launches native MCP with an explicit /data/files scope and --quiet. This keeps upstream file confinement active without logging private per-session paths. Browser build URLs are relative, matching upstream's offline/update support; Web and HTTP MCP remain independent.
 

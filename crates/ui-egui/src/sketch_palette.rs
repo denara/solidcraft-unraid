@@ -1012,7 +1012,7 @@ mod tests {
     }
 
     /// A double Esc on a sketch left blank takes it away (no empty sketch in the browser or the
-    /// timeline, one undo step) and puts the view back; one line is enough to keep it.
+    /// timeline, one undo step) and leaves the view alone; one line is enough to keep it.
     #[test]
     fn a_quick_double_escape_discards_a_blank_sketch_and_keeps_one_with_a_line() {
         let mut h = crate::scenario::Harness::new();
@@ -1026,7 +1026,7 @@ mod tests {
         h.step(&json!({"key":"Escape"})).unwrap();
         h.step(&json!({"key":"Escape"})).unwrap();
         h.settle();
-        crate::scenario::check(&mut h, &json!({"sketching": false, "camera": {"yaw_deg": -45, "pitch_deg": 35}})).unwrap();
+        crate::scenario::check(&mut h, &json!({"sketching": false, "camera": {"yaw_deg": 0, "pitch_deg": 90}})).unwrap();
         assert_eq!(h.app.ui.tab, "MODEL");
         assert!(h.app.session.doc.features.is_empty(), "the blank sketch is gone");
         assert!(crate::scenario::handles("timeline:").iter().all(|(n, _)| !n.contains("Sketch")));

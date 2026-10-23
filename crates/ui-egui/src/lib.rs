@@ -92,6 +92,7 @@ mod material_card_review;
 mod measurement_ui_tests;
 #[cfg(test)]
 mod menu_tests;
+pub(crate) mod mesh_lod;
 pub mod messages;
 #[cfg(test)]
 mod pattern_arrow_tests;
@@ -159,7 +160,6 @@ pub mod mouse_gesture;
 pub(crate) mod navigation;
 pub(crate) mod open_meshing;
 pub mod params_dialog;
-pub(crate) mod pick_buffer;
 pub(crate) mod pick_index;
 pub(crate) mod plugins;
 pub mod prefs;
@@ -368,8 +368,6 @@ pub struct SolveApp {
     pub cam_anim: Option<CameraAnim>,
     /// Seconds since start, as of this frame.
     pub now: f64,
-    /// The view before the current sketch started (Finish Sketch returns to it).
-    pub pre_sketch_cam: Option<Camera>,
     /// The history marker before Edit Sketch rolled the timeline to the sketch; Finish Sketch
     /// restores it.
     pub pre_sketch_marker: Option<Option<usize>>,
@@ -442,6 +440,8 @@ pub struct SolveApp {
     /// When Esc was last pressed (input time): a second press soon after finishes the sketch.
     pub last_escape: Option<f64>,
     pub status: Option<(String, f64, bool)>,
+    /// The status message offers Undo (a click on it undoes the last step), as after an automatic stand-up.
+    pub status_undo: bool,
     pub quit_requested: bool,
     /// Autosave into the recovery folder (the desktop app turns it on).
     pub autosave: Option<recovery_ui::Autosaves>,
@@ -536,7 +536,6 @@ impl SolveApp {
             cam: Camera::default(),
             cam_anim: None,
             now: 0.0,
-            pre_sketch_cam: None,
             pre_sketch_marker: None,
             services,
             file_picker: None,
@@ -577,6 +576,7 @@ impl SolveApp {
             esc_handled: false,
             last_escape: None,
             status: None,
+            status_undo: false,
             quit_requested: false,
             autosave: None,
             recoverable: Vec::new(),
@@ -1112,7 +1112,7 @@ impl SolveApp {
 
     /// Edit a sketch: roll the timeline to just after it (back, so later features don't hide
     /// it, or forward from before it, where it isn't built yet: #2716), turn the camera to face
-    /// it, and remember both so Finish Sketch puts them back. Editing the sketch that is already open does nothing; editing another one
+    /// it, and remember the marker so Finish Sketch puts it back. Editing the sketch that is already open does nothing; editing another one
     /// finishes the current sketch first, so edit sessions never nest.
     pub fn edit_sketch(&mut self, id: u64) {
         if let solidcraft_engine::doc::FaceAttachmentStatus::Lost { message, .. } =
@@ -1133,7 +1133,6 @@ impl SolveApp {
         let Some(idx) = self.session.doc.feature_index(id) else { return };
         let marker = self.session.doc.marker;
         let rolled = marker != Some(idx + 1) && self.run("timeline.roll_to", json!({ "position": idx + 1 })).is_ok();
-        let before = self.cam;
         if self.run("sketch.edit", json!({ "sketch": id })).is_err() {
             if rolled {
                 self.restore_marker(marker);
@@ -1141,12 +1140,11 @@ impl SolveApp {
             return;
         }
         self.pre_sketch_marker = rolled.then_some(marker);
-        self.pre_sketch_cam = Some(before);
         dialogs::look_at_sketch(self);
     }
 
-    /// Finish the active sketch: stop editing, restore the history marker Edit Sketch moved and
-    /// return to the view from before the sketch.
+    /// Finish the active sketch: stop editing and restore the history marker Edit Sketch moved.
+    /// The camera stays where it is, however the sketch is left.
     pub fn finish_sketch(&mut self) {
         sketch_text_move::cancel_drag(self);
         if sketch_text::editing(self) || self.dialog.as_ref().is_some_and(|d| matches!(d.kind, dialogs::Kind::TextMove(_))) {
@@ -1157,9 +1155,6 @@ impl SolveApp {
         let _ = self.run("sketch.finish", json!({}));
         if let Some(marker) = self.pre_sketch_marker.take() {
             self.restore_marker(marker);
-        }
-        if let Some(c) = self.pre_sketch_cam.take() {
-            self.animate_to(c);
         }
     }
 
@@ -1209,6 +1204,7 @@ impl SolveApp {
         let (text, at) = (s.into(), now_ms());
         self.messages.push(&text, error, at);
         self.status = Some((text, at, error));
+        self.status_undo = false;
     }
 
     pub fn open_path(&mut self, path: &str) {
@@ -1607,6 +1603,9 @@ impl SolveApp {
         if self.home.open {
             home::show(self, ui);
             if self.home.open {
+                // Agent detection runs in the background and is only received by `agent_chat::poll`
+                // Polling here is required for the detection to complete on Home
+                agent_chat::poll(self, ui.ctx());
                 // Preferences and Keyboard Shortcuts open from Home too (its links, the gear, Ctrl+,).
                 prefs::show(self, ui.ctx());
                 return;

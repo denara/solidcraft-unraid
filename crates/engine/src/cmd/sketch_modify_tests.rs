@@ -1841,3 +1841,33 @@ fn trim_and_extend_refuse_an_offsets_ends_until_its_association_is_broken() {
         "{sh:?}"
     );
 }
+
+/// #2874: an offset's corners follow its source curves, so filleting them is refused before
+/// anything changes (the whole batch), instead of leaving full circles and an unsolved sketch.
+/// Once the offset association is broken the same corners round normally.
+#[test]
+fn fillet_refuses_an_offsets_corners_until_its_association_is_broken() {
+    let mut s = new_sketch();
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [40, 30]}));
+    let out = ids(&run(&mut s, "sketch.offset", json!({"curves": ["l1", "l2", "l3", "l4"], "distance": "2 mm", "side": [-5, -5]}))["curves"]);
+    assert_eq!(out, ["l5", "l6", "l7", "l8"]);
+    let before = serde_json::to_value(sketch(&s)).unwrap();
+    let corners = json!({"points": ["l5.start", "l5.end", "l6.end", "l7.end"], "radius": "2 mm"});
+    let e = s.execute("sketch.fillet", &corners).unwrap_err().to_string();
+    assert!(e.contains("offset") && e.contains("break the offset association"), "{e}");
+    assert_eq!(serde_json::to_value(sketch(&s)).unwrap(), before, "a refused fillet changes nothing");
+    let e = s.execute("sketch.chamfer.equal_distance", &json!({"point": "l6.end", "distance": 1})).unwrap_err().to_string();
+    assert!(e.contains("offset"), "{e}");
+
+    run(&mut s, "sketch.offset.break", json!({"curve": "l5"}));
+    let f = run(&mut s, "sketch.fillet", corners);
+    assert_eq!(f["sketch"]["solved"], json!(true), "{f}");
+    let sk = sketch(&s);
+    let arcs = ids(&f["curves"]);
+    assert_eq!(arcs.len(), 4);
+    for arc in &arcs {
+        let ai = sk.curve_index(arc).unwrap();
+        assert!(matches!(sk.curves[ai].kind, CurveKind::Arc { .. }), "{arc} is a trimmed arc");
+        assert!((sk.radius(ai).unwrap() - 2.0).abs() < 1e-7);
+    }
+}

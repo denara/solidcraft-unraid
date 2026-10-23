@@ -15,10 +15,12 @@ pub(crate) struct Segments<'a> {
     pub states: &'a [bool],
     pub compact: bool,
     pub primary: bool,
+    pub intrinsic: bool,
+    pub proportional: bool,
 }
 
 pub(crate) fn segmented(ui: &mut Ui, selected: &mut usize, options: &[&str], config: Segments<'_>) -> bool {
-    let Segments { states, compact, primary } = config;
+    let Segments { states, compact, primary, intrinsic, proportional } = config;
     let t = Tokens::get();
     let segment_width = dimension(ui.available_width()) / options.len().max(1) as f32;
     let widest = options
@@ -27,18 +29,30 @@ pub(crate) fn segmented(ui: &mut Ui, selected: &mut usize, options: &[&str], con
             ui.painter().layout_no_wrap(crate::i18n::tr_label(option).to_string(), crate::fonts::semibold(t.font_label), t.form_ink).size().x
         })
         .fold(0.0, f32::max);
-    if !compact && widest + 2.0 * t.space_8 > segment_width {
+    if !intrinsic && !proportional && !compact && widest + 2.0 * t.space_8 > segment_width {
         let before = *selected;
         let id = format!("segments_fallback_{}", label(ui));
         dropdown(ui, &id, selected, options);
         return *selected != before;
     }
-    let (rect, _) = ui.allocate_exact_size(vec2(dimension(ui.available_width()), row_height()), egui::Sense::hover());
+    let natural: Vec<_> = options
+        .iter()
+        .map(|option| {
+            ui.painter().layout_no_wrap((*option).to_owned(), crate::fonts::semibold(t.font_label), t.form_ink).size().x.ceil() + t.space_16
+        })
+        .collect();
+    let total = natural.iter().sum::<f32>();
+    let desired = if intrinsic { total.min(dimension(ui.available_width())) } else { dimension(ui.available_width()) };
+    let (rect, _) = ui.allocate_exact_size(vec2(desired, row_height()), egui::Sense::hover());
     ui.painter().rect_filled(rect, t.control_radius, t.control_fill);
-    let width = rect.width() / options.len().max(1) as f32;
+    let equal_width = rect.width() / options.len().max(1) as f32;
     let mut clicked = false;
+    let mut x = rect.left();
     for (index, option) in options.iter().enumerate() {
-        let segment = egui::Rect::from_min_size(rect.min + vec2(index as f32 * width, 0.0), vec2(width, rect.height()));
+        let width =
+            if (intrinsic || proportional) && total > 0.0 { natural.get(index).copied().unwrap_or(0.0) * rect.width() / total } else { equal_width };
+        let segment = egui::Rect::from_min_size(egui::pos2(x, rect.top()), vec2(width, rect.height()));
+        x += width;
         let response = ui.interact(segment, ui.make_persistent_id(("segment", index)), egui::Sense::click());
         let on = states.get(index).copied().unwrap_or(*selected == index);
         let rounding = egui::CornerRadius {

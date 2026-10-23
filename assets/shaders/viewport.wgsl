@@ -147,6 +147,48 @@ fn fs_solid_cut_flat(i: FOut, @builtin(front_facing) front: bool) -> CutOut {
     return o;
 }
 
+/// Weighted blended order-independent transparency (`view/oit.rs`): a see-through fragment's
+/// colour, premultiplied and weighted by its alpha and nearness, into the accumulation target,
+/// and its alpha into the revealage target (which keeps what is behind it by 1 - alpha).
+struct Oit {
+    @location(0) accum: vec4<f32>,
+    @location(1) reveal: vec4<f32>,
+};
+
+fn oit(c: vec4<f32>, z: f32) -> Oit {
+    let a = clamp(c.a, 0.0, 1.0);
+    // Depth 0 near and 1 far, whichever way the buffer runs.
+    let d = select(z, 1.0 - z, reversed());
+    let w = clamp(a * max(1e-2, 3e3 * pow(1.0 - d, 3.0)), 1e-2, 3e3);
+    var o: Oit;
+    o.accum = vec4<f32>(c.rgb * a, a) * w;
+    o.reveal = vec4<f32>(a);
+    return o;
+}
+
+@fragment
+fn fs_oit(i: TOut) -> Oit {
+    if (clipped(i.wp)) { discard; }
+    return oit(shade(i), i.pos.z);
+}
+
+@fragment
+fn fs_oit_flat(i: FOut, @builtin(front_facing) front: bool) -> Oit {
+    let t = flat_fragment(i, front);
+    let o = oit(shade(t), t.pos.z);
+    if (clipped(t.wp)) { discard; }
+    return o;
+}
+
+/// A see-through flat-shaded placement (faded or glass), shaded like `fs_tri`.
+@fragment
+fn fs_tri_flat(i: FOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    let t = flat_fragment(i, front);
+    let c = shade(t);
+    if (clipped(t.wp)) { discard; }
+    return c;
+}
+
 @fragment
 fn fs_ao_depth_flat(i: FOut, @builtin(front_facing) front: bool) -> AoDepth {
     let t = flat_fragment(i, front);

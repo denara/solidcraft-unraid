@@ -552,3 +552,10 @@ fn a_curve_over_a_tiny_knot_span_still_bounds_its_faces() {
         assert!(rel(m.volume, 6000.0) < 1e-6 && rel(m.area, 2200.0) < 1e-6, "span {span}: {} {}", m.volume, m.area);
     }
 }
+
+#[test]
+fn the_global_sections_native_system_becomes_the_originating_system() {
+    let imp = round_trip(&box_solid(Vec3::ZERO, Vec3::new(10.0, 20.0, 30.0)).unwrap());
+    assert_eq!(imp.system, "SolidCraft");
+    assert_eq!(imp.preprocessor, "SolidCraft IGES");
+}

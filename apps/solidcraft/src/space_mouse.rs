@@ -8,6 +8,8 @@ mod hidraw;
 #[cfg(target_os = "linux")]
 mod spacenavd;
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+use std::ffi::CString;
 #[cfg(target_os = "linux")]
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,7 +18,9 @@ use std::time::{Duration, Instant};
 
 use egui::Context;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-use hidapi::{DeviceInfo, HidApi};
+use hidapi::DeviceInfo;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+use hidapi::HidApi;
 use quick_xml::Reader;
 use quick_xml::events::Event;
 use solidcraft_space_mouse::Layout;
@@ -317,18 +321,32 @@ fn reset(ctx: &Context, shared: &Mutex<Reading>) {
     ctx.request_repaint();
 }
 
+/// The HID interfaces that are 3D mice, using the existing safe hidapi enumeration.
+/// The container fork omits the Windows native Plug and Play bridge.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn candidates(api: &mut HidApi) -> Vec<CString> {
+    if let Err(error) = api.refresh_devices() {
+        log::warn!("3D mouse: device scan failed: {error}");
+        return Vec::new();
+    }
+    api.device_list().filter(|info| is_3d_mouse(info)).map(|info| info.path().to_owned()).collect()
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn hid_api() -> hidapi::HidResult<HidApi> {
+    HidApi::new()
+}
+
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 fn reader(ctx: Context, shared: Arc<Mutex<Reading>>) {
-    let Ok(mut api) = HidApi::new() else {
+    let Ok(mut api) = hid_api() else {
         log::warn!("3D mouse: HID initialization failed");
         return;
     };
     loop {
-        if let Err(error) = api.refresh_devices() {
-            log::warn!("3D mouse: device scan failed: {error}");
-        } else if let Some((device, layout, ids)) = api.device_list().filter(|info| is_3d_mouse(info)).find_map(|info| {
-            let device = info
-                .open_device(&api)
+        if let Some((device, layout, ids)) = candidates(&mut api).into_iter().find_map(|path| {
+            let device = api
+                .open_path(&path)
                 .inspect_err(|error| {
                     // On macOS: missing Input Monitoring permission, or the 3DxWare helper holding the device.
                     // The driver having the device is the reason it cannot be opened, not a problem.
@@ -337,6 +355,8 @@ fn reader(ctx: Context, shared: Arc<Mutex<Reading>>) {
                     }
                 })
                 .ok()?;
+            // Read when the device was opened, from this device alone.
+            let info = device.get_device_info().ok()?;
             let layout = device_layout(&device, info.vendor_id())?;
             Some((device, layout, (info.vendor_id(), info.product_id())))
         }) {

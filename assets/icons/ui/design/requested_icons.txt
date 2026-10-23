@@ -239,6 +239,7 @@ split_face	false
 spun	false
 star	false
 status_error	false
+status_recovery	false
 style	false
 suppress	false
 surface_blend	false

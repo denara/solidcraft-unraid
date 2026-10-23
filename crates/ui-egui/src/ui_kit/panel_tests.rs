@@ -310,6 +310,7 @@ fn window_pages_have_shared_metrics_callbacks_and_a_pinned_left_footer_action() 
         let mut drawn = 0;
         let pages = [
             WindowPage {
+                group: None,
                 icon: "settings",
                 label: "ui.general",
                 handle: "test:page:general",
@@ -320,6 +321,7 @@ fn window_pages_have_shared_metrics_callbacks_and_a_pinned_left_footer_action() 
                 },
             },
             WindowPage {
+                group: None,
                 icon: "orbit",
                 label: "ui.navigation",
                 handle: "test:page:navigation",

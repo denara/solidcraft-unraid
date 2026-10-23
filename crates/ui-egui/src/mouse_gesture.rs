@@ -572,41 +572,36 @@ fn apply(list: &mut Vec<String>, op: Op) -> bool {
 /// The rows of Preferences › Navigation that belong to gestures: the switch, the button that
 /// opens the editor, and what the mouse mode has to be.
 pub(crate) fn nav_rows(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
-    let note = |ui: &mut egui::Ui, s: &str| {
-        ui.label("");
-        ui.add(egui::Label::new(egui::RichText::new(crate::i18n::tr_label(s)).size(t.font_small).color(t.text_dim)).wrap());
-        ui.end_row();
-    };
-    ui.label(crate::i18n::tr_label("Mouse gestures"));
-    ui.horizontal(|ui| {
-        crate::ui_kit::checkbox(ui, crate::i18n::tr_label("Ring of tools on the right button"), &mut app.preferences.mouse_gestures.enabled);
-        let customize = crate::ui_kit::button(ui, crate::i18n::tr_label("Customize…"), crate::ui_kit::Button::Normal);
-        crate::scenario::publish_handle("gestures:customize", customize.rect.center());
-        if customize.clicked() {
-            app.gesture.editor.open = true;
-            app.gesture.editor.studio = Studio::of(app);
-        }
-    });
-    ui.end_row();
-    if app.preferences.nav != MOUSE_MODE {
-        ui.label("");
+    crate::ui_kit::settings_block(ui, crate::i18n::tr_label("Mouse gestures"), t.space_24 * 6.0 + t.space_6, |ui| {
         ui.horizontal_wrapped(|ui| {
-            ui.colored_label(
-                t.warning,
+            crate::ui_kit::checkbox(ui, crate::i18n::tr_label("Ring of tools on the right button"), &mut app.preferences.mouse_gestures.enabled);
+            let customize = crate::ui_kit::button(ui, crate::i18n::tr_label("Customize…"), crate::ui_kit::Button::Normal);
+            crate::scenario::publish_handle("gestures:customize", customize.rect.center());
+            if customize.clicked() {
+                app.gesture.editor.open = true;
+                app.gesture.editor.studio = Studio::of(app);
+            }
+        });
+        if app.preferences.nav != MOUSE_MODE {
+            crate::ui_kit::text(
+                ui,
                 crate::i18n::tr_label("Mouse gestures only work with the SolidWorks mouse mode (the wheel orbits, Ctrl + wheel pans)."),
+                crate::ui_kit::Text::Hint("mouse_gesture_mode"),
             );
             if crate::ui_kit::button(ui, crate::i18n::tr_label("Use the SolidWorks mouse mode"), crate::ui_kit::Button::Normal).clicked() {
                 app.preferences.nav = MOUSE_MODE.to_string();
                 app.preferences.zoom_reverse = crate::prefs::nav_preset(MOUSE_MODE).reverse_zoom;
             }
-        });
-        ui.end_row();
-    } else if app.preferences.mouse_gestures.enabled {
-        note(
-            ui,
-            "With gestures on, the right button no longer orbits the view: hold it and move to open the ring, then touch a tool's zone. A plain right-click still opens the menu.",
-        );
-    }
+        } else if app.preferences.mouse_gestures.enabled {
+            crate::ui_kit::text(
+                ui,
+                crate::i18n::tr_label(
+                    "With gestures on, the right button no longer orbits the view: hold it and move to open the ring, then touch a tool's zone. A plain right-click still opens the menu.",
+                ),
+                crate::ui_kit::Text::Hint("mouse_gesture_help"),
+            );
+        }
+    });
 }
 
 /// The customization window: pick a studio, then how many tools its ring holds, which, and in

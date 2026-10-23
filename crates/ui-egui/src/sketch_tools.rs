@@ -203,7 +203,8 @@ fn continuity_legend(app: &SolveApp, painter: &egui::Painter, proj: &Proj) {
     let (row, pad, swatch) = (18.0, 8.0, 22.0);
     let text_width = rows.iter().map(|(label, _)| painter.layout_no_wrap(label.to_string(), font.clone(), tk.text).size().x).fold(0.0, f32::max);
     let size = egui::vec2(pad + swatch + 8.0 + text_width + pad, rows.len() as f32 * row + 2.0 * pad);
-    let frame = egui::Rect::from_min_size(proj.rect.left_bottom() + egui::vec2(16.0, -(size.y + 16.0)), size);
+    let available = crate::shell::bottom_overlay_rect(app, proj.rect);
+    let frame = egui::Rect::from_min_size(available.left_bottom() + egui::vec2(16.0, -(size.y + 16.0)), size);
     painter.rect_filled(frame, 4.0, tk.panel.gamma_multiply(0.9));
     crate::scenario::publish_rect("continuity_legend", frame);
     for (i, (label, col)) in rows.iter().enumerate() {

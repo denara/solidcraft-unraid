@@ -630,8 +630,8 @@ fn file_menu(app: &mut SolveApp, ctx: &egui::Context) {
     }
 }
 
-/// Whether the open design is on screen. Home hides it, so commands that act on it (save,
-/// undo, insert, export, tool shortcuts) are off there.
+/// Whether the design is on screen: viewport/menu editing stays disabled behind File.
+/// File owns its explicit Save/Save As/export actions and returns to the design before dispatch.
 pub fn design_shown(app: &SolveApp) -> bool {
     !app.home.open
 }
@@ -648,7 +648,7 @@ pub fn save(app: &mut SolveApp) {
     }
 }
 
-fn save_as(app: &mut SolveApp) {
+pub(crate) fn save_as(app: &mut SolveApp) {
     save_as_with_extension(app, solidcraft_engine::io::DESIGN_EXT);
 }
 
@@ -679,7 +679,7 @@ fn download_design(app: &mut SolveApp) {
     }
 }
 
-fn export(app: &mut SolveApp, ext: &str) {
+pub(crate) fn export(app: &mut SolveApp, ext: &str) {
     export_as(app, ext, None);
 }
 
@@ -2334,8 +2334,8 @@ mod home_tests {
     use super::*;
 
     /// Home hides the design: its Undo and Redo buttons, the File menu's Insert, Save
-    /// and Export, and the design's keyboard shortcuts leave it alone. They work again once
-    /// the design is back.
+    /// and Export, and CAD keyboard shortcuts leave it alone. File-view Save shortcuts
+    /// have their own regression coverage; viewport actions work again after returning.
     #[test]
     fn design_actions_are_off_on_home() {
         // A design with history both ways, a selection and unsaved changes, behind Home.
@@ -2378,7 +2378,7 @@ mod home_tests {
         for icon in ["undo", "redo"] {
             actions.push((format!("{icon} button"), Box::new(move |h| click(h, &format!("appbar:{icon}")))));
         }
-        for (key, cmd) in [("S", true), ("Z", true), ("Y", true), ("Delete", false), ("V", false), ("E", false), ("S", false)] {
+        for (key, cmd) in [("Z", true), ("Y", true), ("Delete", false), ("V", false), ("E", false), ("S", false)] {
             let name = if cmd { format!("Ctrl+{key}") } else { key.to_string() };
             actions.push((name, Box::new(move |h| drop(h.call("ui.key", json!({"key": key, "cmd": cmd}))))));
         }
@@ -2389,7 +2389,10 @@ mod home_tests {
                 Box::new(move |h| {
                     h.ctx.data_mut(|d| d.insert_temp(egui::Id::new("sc_file_menu"), false));
                     click(h, "appbar:folder");
-                    let _ = h.step(&json!({"widget": item}));
+                    // A same-named File navigation action is now present: target the menu row explicitly.
+                    if let Some(at) = crate::scenario::handle_at(&format!("menu:{item}")) {
+                        h.call("ui.click", json!({"x":at.x,"y":at.y}));
+                    }
                 }),
             ));
         }

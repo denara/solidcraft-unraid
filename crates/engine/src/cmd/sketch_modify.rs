@@ -758,6 +758,26 @@ fn refuse_infinite_corner(sk: &Sketch, p: &Value, cmd: &str) -> Result<()> {
     if at_corner { Err(bad(cmd, "an infinite line has no corner to round or cut: make it a normal line first")) } else { Ok(()) }
 }
 
+/// Fillets and chamfers refuse a corner of an offset's output (#2874). The output's ends are
+/// recomputed from its source curves on every solve, so a corner cut there would be pulled back
+/// to the sharp corner, leaving full circles and an unsolved sketch.
+fn refuse_offset_corner(sk: &Sketch, p: &Value, cmd: &str) -> Result<()> {
+    let output = |c: usize| sk.curves.get(c).filter(|c| sk.offset_distance(&c.id).is_some()).map(|c| c.id.clone());
+    let found = match str_(p, "point").and_then(|r| sk.resolve_point(r)) {
+        Some(q) => (0..sk.curves.len()).filter(|c| sk.curves.get(*c).is_some_and(|x| x.kind.uses(q))).find_map(output),
+        None => ["a", "b"].iter().find_map(|k| str_(p, k).and_then(|i| sk.curve_index(i)).and_then(output)),
+    };
+    match found {
+        Some(id) => Err(bad(
+            cmd,
+            format!(
+                "`{id}` is an offset, and its corners follow its source curves: round or cut the source corners before offsetting, or break the offset association first"
+            ),
+        )),
+        None => Ok(()),
+    }
+}
+
 /// A corner of two lines: (line a, line b, corner point, far end of a, far end of b).
 fn corner(sk: &Sketch, p: &Value, cmd: &str) -> Result<(usize, usize, usize, usize, usize)> {
     let ends = |l: usize| match sk.curves.get(l).map(|c| &c.kind) {
@@ -976,6 +996,7 @@ fn kept_json(kept: Vec<CornerKept>) -> (Vec<String>, Vec<String>) {
 /// the arc, the tangent constraints and what became of the corner point.
 fn fillet_corner(sk: &mut Sketch, p: &Value, r: f64, cmd: &str) -> Result<(usize, Vec<String>, CornerKept)> {
     refuse_infinite_corner(sk, p, cmd)?;
+    refuse_offset_corner(sk, p, cmd)?;
     weld_corner(sk, p);
     let (la, lb, c, fa, fb) = match corner(sk, p, cmd) {
         Ok(x) => x,
@@ -1086,6 +1107,7 @@ fn round_corner(sk: &mut Sketch, p: &Value, r: f64, cmd: &str) -> Result<Option<
 fn chamfer(s: &mut Session, p: &Value, cmd: &str, dists: impl FnOnce(f64) -> Result<(f64, f64)>) -> Result<Value> {
     let (out, info) = edit(s, p, cmd, false, |sk, _| {
         refuse_infinite_corner(sk, p, cmd)?;
+        refuse_offset_corner(sk, p, cmd)?;
         weld_corner(sk, p);
         let (la, lb, c, fa, fb) = corner(sk, p, cmd)?;
         let (pc, pa, pb) = (sk.point(c).unwrap_or_default(), sk.point(fa).unwrap_or_default(), sk.point(fb).unwrap_or_default());

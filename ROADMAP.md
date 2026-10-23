@@ -23,11 +23,11 @@ management now supports explicitly confirmed deletion of files and real folders 
 active-project/revision protection, plus bounded server-streamed ZIP64 folder downloads.
 Empty folders are included; virtual legacy groups never receive bulk deletion actions.
 Compact real-folder actions precede the file-table headings without repeating the project name.
-Fork deployment status updated 2026-10-21; upstream CAD milestones remain below.
+Fork deployment status updated 2026-10-23; upstream CAD milestones remain below.
 Requested upstream updates use the repository's
 [update skill](.agents/skills/update-solvecraft-unraid/SKILL.md), with a fixed target snapshot,
 isolated validation and local-only private deployment settings.
-The container's validated upstream baseline is `3d3dd274` (SolidCraft 0.19.0, format 30, previously `e9490093`);
+The container's validated upstream baseline is `edf57cec` (SolidCraft 0.20.0, format 31, previously `3d3dd274`);
 the Linux image passes the changed CAD/UI tests and real web/MCP, restart and old-design
 compatibility checks. See [update records](docs/unraid-updates.md).
 
@@ -95,6 +95,11 @@ M6 navigation preferences include **Touchpad**: Shift + pointer movement pans, A
 pointer movement orbits without a mouse button, and vertical scrolling zooms. Other presets
 retain their saved two-finger scroll preference; camera motion is available through
 `view.navigate` and modifier-aware `ui.move` automation.
+
+UI redesign (#2016): the File/start view (#2027) uses shared light/dark navigation,
+action tiles, recent rows and sample cards, with recovery review and Save As/Export
+entry points. Document loading, sample caches and recovery safety retain their
+existing command paths.
 
 M11 precursor: File → Export Current View as DXF exports shown placed bodies and sketches from the current
 camera as a 2D millimetre drawing, with hidden edges omitted or dashed. Vector occlusion splits

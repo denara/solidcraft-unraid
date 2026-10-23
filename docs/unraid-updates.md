@@ -1,5 +1,61 @@
 # Validated container updates
 
+## 2026-10-23: upstream 0.20.0 with preserved observer and browser isolation
+
+Selected exactly one upstream snapshot, `edf57cec293dcea301201f1d5173b33e16351466`,
+24 commits after validated `3d3dd274`. Sole branch `codex/unraid-mcp-web` began
+clean and synchronized at `8b0dcfe9`; fetched fork main is an ancestor. Upstream
+features and changes remain documented by the
+[original project](https://github.com/tangency-labs/solidcraft). This container
+update creates no application release, release tag or Unraid installation.
+
+Conflicts in agent instructions, native app imports and session scratch state
+retain the integration rules and upstream behavior. The new unsafe Windows
+HID-discovery bridge is omitted, preserving existing safe enumeration and Linux
+HID behavior. New contact-mesh caches remain shared by ordinary scratch previews,
+but observer snapshots get a separate cold cache. A regression holds the editing
+cache lock and proves observation does not wait on it. Existing isolated display
+caches and the bounded STEP placement copier are preserved.
+
+Two new native-only deferred/apply enum variants and match arms now have platform
+guards matching their constructors. Strict Wasm checks pass without suppressing
+warnings or changing synchronous browser behavior. Two new headless UI tests
+explicitly clear discarded texture uploads, retaining all text/click/layout
+assertions. These harness corrections do not change shipped application behavior.
+No new runtime dependency or toolchain change; the existing proc-macro2 addition
+is test-only. Shipped licenses were regenerated and checked.
+
+Targeted checks pass: 123 gateway, 60 MCP, 37 format, three simplification,
+26 native-design IO, 70 STEP and 17 IGES cases, plus relevant immutable-ID,
+construction-axis, motion/contact, offset-plane, sketch-edit and placed-mirror
+regressions. Mesh-size, ahead-evaluation and cold observer-cache cases pass.
+Changed UI groups include 92 UI-kit, 16 colour-vision, 12 viewport-overlay,
+four frame-rate and nine import-orientation cases; all 23 browser-app tests pass.
+Existing ignored cases remain ignored. The native desktop entry point checks
+with all targets. Native/scoped Wasm Clippy, 13-crate Wasm compatibility, formatting,
+licenses, assets, icons, layers, sorted catalogs and UI-container gates pass.
+Release gateway/CLI binaries and both browser clients build.
+
+All 21 GPU unit cases and eight actual required software-OpenGL captures pass,
+including order-independent transparency and rejected-pipeline error handling.
+The real browser API proves modelling, undo/redo, bounded queues and errors;
+all real-site offline/update scenarios pass. Actual Chromium verifies the live
+joined Workspace, collapsed initial groups, compact actions and an independent
+migrated design in the 0.20.0 browser app. Server bytes remain unchanged afterwards.
+
+A fresh-volume candidate passes MCP modelling/PNG/STEP, authentication,
+project/path/origin/revision separation, logging, restart/reopen, Workspace push,
+metadata, thumbnails, native handoff, remembered login, observation and file actions.
+A 256-MiB ZIP starts in 9 ms with measured RSS growth of 256 KiB; backup exclusion,
+integrity, abort cleanup and write leases pass. SDK 1.32.1 opens legacy format 13
+and previous native format 30, preserving source bytes, parameters, 24000 mm3
+volume and named split-face centroids. New format-31 saves pass archive CRC checks.
+Construction-axis migration and BOM/DXF output confinement/revisions remain covered.
+No new file-writing command/output set was introduced. Import-header tests use
+analytic SolidCraft exports and synthetic metadata, never commercial CAD data.
+Screenshots, public fixtures and diagnostics stay in ignored
+`target/upstream-edf57cec-20261023/`. Canonical XML/icon blobs are unchanged.
+
 ## 2026-10-22: upstream 0.19.0 with all published integration features
 
 Selected exactly one upstream snapshot, `3d3dd27439995f37eaed1feaa1c53a0e42d2fe39`,

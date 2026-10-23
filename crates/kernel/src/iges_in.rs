@@ -100,6 +100,8 @@ struct Iges {
     unit: f64,
     /// Minimum resolution (model units).
     resolution: f64,
+    /// Global section field 5: the system that wrote the file.
+    native_system: String,
 }
 
 /// Split parameter text into fields at `delim`, stopping at `rdelim`; Hollerith strings (`nH…`)
@@ -281,7 +283,7 @@ fn parse(text: &str) -> R<Iges> {
     if des.is_empty() {
         return Err("the file has no entities".into());
     }
-    Ok(Iges { des, params, unit, resolution })
+    Ok(Iges { des, params, unit, resolution, native_system: field(5).trim().to_string() })
 }
 
 /// A model curve segment ready for an edge: STEP curve id, its end points, points a quarter and
@@ -1320,8 +1322,17 @@ fn translate(text: &str) -> std::result::Result<(String, Vec<String>), String> {
         let psa = t.o.add(format!("PRESENTATION_STYLE_ASSIGNMENT((#{ssu}))"));
         t.o.add(format!("STYLED_ITEM('color',(#{psa}),#{item})"));
     }
-    let mut s = String::from(
-        "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('IGES import'),'2;1');\nFILE_NAME('','',(''),(''),'SolidCraft IGES','','');\nFILE_SCHEMA(('AUTOMOTIVE_DESIGN'));\nENDSEC;\nDATA;\n",
+    // The global section's native system ID (field 5) is the file's originating system.
+    let native: String = f
+        .native_system
+        .chars()
+        .filter(|c| c.is_ascii() && !c.is_ascii_control())
+        .map(|c| if c == '\\' { ' ' } else { c })
+        .collect::<String>()
+        .replace('\'', "''");
+    let mut s = format!(
+        "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('IGES import'),'2;1');\nFILE_NAME('','',(''),(''),'SolidCraft IGES','{}','');\nFILE_SCHEMA(('AUTOMOTIVE_DESIGN'));\nENDSEC;\nDATA;\n",
+        native.trim()
     );
     for (i, l) in t.o.lines.iter().enumerate() {
         let _ = writeln!(s, "#{}={l};", i + 1);
