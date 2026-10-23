@@ -56,6 +56,34 @@ analytic SolidCraft exports and synthetic metadata, never commercial CAD data.
 Screenshots, public fixtures and diagnostics stay in ignored
 `target/upstream-edf57cec-20261023/`. Canonical XML/icon blobs are unchanged.
 
+Validated merge `8d9ebd25ca2bbd5d3578b5a3898d4dfc51b89cfe` remains in published
+history. Final tested source `82f82a23ed59b91890cee8ca29fbf79896b0a3dc` includes the
+follow-up restoring the original UTF-8 text in one test fixture; the targeted
+existing case and formatting pass. The exact
+[container workflow 39923092497](https://github.com/denara/solidcraft-unraid/actions/runs/39923092497)
+passed all image checks before publishing `ghcr.io/denara/solidcraft-unraid:latest`
+and immutable `sha-82f82a23ed59b91890cee8ca29fbf79896b0a3dc`. Anonymous pulls with an
+empty client configuration verify Linux amd64, matching source labels and equal
+image identities. Public registry digest:
+`sha256:49c5b3fbeb4548a757616768339c6472f837ba0cec418b8fc234a0ab0758db50`.
+
+The verified image is exported as
+`target/solidcraft-unraid-upstream-edf57cec-82f82a23.tar`, tagged
+`solvecraft-unraid:upstream-edf57cec-82f82a23`, 160353792 bytes.
+Archive SHA256: `11d4c324b0ee3472f2e6a1ca3d15baa5122fcd3d3dc73aba04fc142025c67032`.
+A private data/configuration backup passed archive integrity checks before the
+local test runtime was refreshed. Health, authenticated SDK modelling/PNG,
+read-only public-model reopen with unchanged original bytes, browser cookie login,
+push, saved-model details and independent web assets pass. Data volume, MCP token,
+origins, ports, identity and resource/security settings remain unchanged. Only the
+healthy local development runtime remains at `http://localhost:8781/`. The owned
+inactive candidate was removed after saving diagnostics, without deleting any
+volume, build cache or backup; the previous image is retained for rollback.
+Canonical XML/icon blobs match fetched catalog main
+`72852d1109f091ff4e8979649ae62c277264d962`, so no catalog commit is needed.
+Final upstream fetch still points to selected `edf57cec`. Unraid installation
+remains the user's separate step; nginx and DNS were not changed.
+
 ## 2026-10-22: upstream 0.19.0 with all published integration features
 
 Selected exactly one upstream snapshot, `3d3dd27439995f37eaed1feaa1c53a0e42d2fe39`,
