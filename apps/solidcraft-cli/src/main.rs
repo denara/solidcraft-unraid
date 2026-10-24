@@ -6,13 +6,16 @@
 //! solidcraft-cli script <design.solidcraft> [--out script.json]     the design's history as a command script
 //! solidcraft-cli bench-open <design.solidcraft | part.step> [--parse-only] [--save OUT.solidcraft] [--display LEVEL [--edit NAME EXPR]] [--ops script.json] loading timings as JSON lines
 //! solidcraft-cli bench-agent [--scale F] [--save F] [--script-out F] a ~1,300-body design built command by command, timed
+//! solidcraft-cli bench-assistant --connect 127.0.0.1:PORT [--token T] --base-url URL --model NAME [--tasks 1,2,5] [--repeat N]
+//!                                 [--timeout-s 300] [--json out.json] [--markdown out.md]
+//!                                                             the standard Assistant model test (#4851) on a running app
 //! solidcraft-cli snapshot <script|design> [--in design|part.step] --out shot.png [--width W] [--height H] [--view iso|front|top|…|NAME | --camera JSON] [--no-grid] [--no-axes]
 //!                                                             [--body NAME:opacity=0.3,color=#rrggbb]... [--tool NAME]... [--section z=27]
 //! solidcraft-cli exec <command> [json-params]                 run one command on an empty design
 //! solidcraft-cli commands                                     the command registry as JSON
 //! solidcraft-cli recipe <recipe.json>                         translate an oracle recipe to a script
 //! solidcraft-cli oracle <case-dir>...                         replay recipes and compare with expected.json
-//! solidcraft-cli mcp [--in design|script] [--connect HOST:PORT [--token T]] [--allow-path DIR]... [--allow-any-path] [--quiet]
+//! solidcraft-cli mcp [--headless] [--in design|script] [--connect HOST:PORT [--token T]] [--allow-path DIR]... [--allow-any-path] [--quiet]
 //!                    [--param-check off|warn|strict]
 //!                                                             MCP server on stdio (docs/mcp.md)
 //! solidcraft-cli licences                                     SolidCraft's licence and the third-party licences
@@ -24,6 +27,7 @@
 #![forbid(unsafe_code)]
 
 mod bench_agent;
+mod bench_assistant;
 mod crashes;
 mod fuzz;
 mod logger;
@@ -57,6 +61,7 @@ const USAGE: &str = "usage:
       (--ops: after opening, run each command of the script and undo it, timing the command, the
        evaluations it caused and the view it leaves: placing and meshing what changed)
   solidcraft-cli bench-agent [--scale F] [--save design.solidcraft] [--script-out script.json]
+  solidcraft-cli bench-assistant --connect 127.0.0.1:PORT [--token T] --base-url URL --model NAME [--tasks 1,2,5] [--repeat N] [--timeout-s 300] [--json out.json] [--markdown out.md]
   solidcraft-cli snapshot <script|design> [--in design.solidcraft|part.step] --out shot.png [--width W] [--height H] [--view NAME | --camera JSON] [--no-grid] [--no-axes]
       [--body NAME:opacity=0.3,color=#rrggbb]... [--tool NAME]... [--section z=27]
   solidcraft-cli snapshot --in <design.solidcraft|part.step> --out shot.png ...
@@ -76,7 +81,7 @@ const USAGE: &str = "usage:
   solidcraft-cli recipe <recipe.json>
   solidcraft-cli oracle <case-dir>... [--json]
   solidcraft-cli fuzz [--from N] [--count N] [--jobs J] [--timeout S] [--steps N] [--minimise] [--out DIR] [--report FILE]
-  solidcraft-cli mcp [--in design.solidcraft|script.json] [--connect 127.0.0.1:PORT [--token T]] [--allow-path DIR]... [--allow-any-path] [--quiet]
+  solidcraft-cli mcp [--headless] [--in design.solidcraft|script.json] [--connect 127.0.0.1:PORT [--token T]] [--allow-path DIR]... [--allow-any-path] [--quiet]
                      [--param-check off|warn|strict]
   solidcraft-cli crashes [list [--json] | show <id> | replay <id> | dir | clear [<id>]]
   solidcraft-cli licences
@@ -136,6 +141,8 @@ fn main() -> ExitCode {
         Some("bench-open") => cmd_bench_open(&args[1..]),
         // A ~1,300-body design built command by command, as an agent builds one over MCP.
         Some("bench-agent") => bench_agent::run(&args[1..]),
+        // The standard Assistant model test (#4851), run against a desktop app over its control channel.
+        Some("bench-assistant") => bench_assistant::run(&args[1..]),
         Some("--version" | "-V") => {
             println!("solidcraft-cli {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -595,15 +602,35 @@ fn cmd_mcp(args: &[String]) -> Result<(), String> {
             Box::new(remote)
         }
         (None, Some(path)) => Box::new(solidcraft_mcp::Headless::new(load_checked(path, param_check)?)),
+        // No arguments: the running desktop app, found through the discovery file it wrote
+        // (docs/control-protocol.md); none running (or `--headless`): a session of its own.
         (None, None) => {
+            if !args.iter().any(|a| a == "--headless")
+                && let Some(port) = discover_app()
+            {
+                eprintln!("solidcraft mcp: bridged to the running app at 127.0.0.1:{port} (--headless starts a session of its own)");
+                return serve_mcp(Box::new(solidcraft_mcp::Remote::new(&format!("127.0.0.1:{port}"), flag(args, "--token"))), scope);
+            }
             let mut headless = solidcraft_mcp::Headless::default();
             headless.session.param_check = param_check;
             Box::new(headless)
         }
     };
+    serve_mcp(backend, scope)
+}
+
+fn serve_mcp(backend: Box<dyn solidcraft_mcp::Backend>, scope: Option<solidcraft_engine::io::vfs::PathScope>) -> Result<(), String> {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     solidcraft_mcp::Server::new(backend).with_path_scope(scope).serve(stdin.lock(), stdout.lock()).map_err(|e| e.to_string())
+}
+
+/// The port of the running desktop app: the one its discovery file names, if something listens
+/// there (a file left by an app that crashed names a closed port).
+fn discover_app() -> Option<u16> {
+    let port = solidcraft_engine::control_auth::read_current_port()?;
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(500)).ok().map(|_| port)
 }
 
 /// `save-stress <path> <rounds>`: save a design of a few hundred kilobytes `rounds` times, its
@@ -718,9 +745,10 @@ pub(crate) fn cmd_bench_open(args: &[String]) -> Result<(), String> {
     let t = std::time::Instant::now();
     let s = Session::opened(doc, saved.as_ref());
     drop(read);
-    // Taken from the file: nothing evaluated (SOLIDCRAFT_NO_MODEL_CACHE evaluates anyway).
+    // Taken from the file: nothing evaluated (SOLIDCRAFT_NO_MODEL_CACHE evaluates anyway), or
+    // only the features whose state a thinned file left out.
     let adopted = saved.is_some() && s.model.last_recomputed == 0;
-    println!("{}", json!({"step": "evaluate", "ms": t.elapsed().as_secs_f64() * 1000.0, "adopted": adopted}));
+    println!("{}", json!({"step": "evaluate", "ms": t.elapsed().as_secs_f64() * 1000.0, "adopted": adopted, "recomputed": s.model.last_recomputed}));
     for r in &s.model.results {
         println!("{}", json!({"step": "feature", "id": r.id, "name": r.name, "ms": r.ms, "error": r.error}));
     }

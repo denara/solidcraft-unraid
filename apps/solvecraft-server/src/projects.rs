@@ -188,4 +188,27 @@ mod tests {
         std::fs::remove_file(root.join("Escape")).unwrap();
         std::fs::remove_dir(root).unwrap();
     }
+    #[test]
+    fn normalized_tool_batches_and_component_extract_share_strong_write_revisions() {
+        let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir(&root).unwrap();
+        let project = select(&root, "Demo").unwrap();
+        std::fs::write(project.join("part.solidcraft"), b"existing").unwrap();
+        for step in [
+            json!({"command":"save","params":{"path":"part.solidcraft"}}),
+            json!({"command":"execute","params":{"command":"component.extract","params":{"component":"Part","path":"part.solidcraft"}}}),
+        ] {
+            let mut message = json!({"params":{"name":"batch","arguments":{"commands":[step]}}});
+            prepare(&root, "Demo", &mut message).unwrap();
+            let ops = crate::workspace_model::operations(&root, &message, None).unwrap();
+            assert_eq!(ops.len(), 1);
+            assert!(matches!(&ops[0], FileOperation::Save(name) | FileOperation::Write(name) if name == "Demo/part.solidcraft"));
+            check_writes("Demo", &ops).unwrap();
+            assert!(crate::workspace_model::check_revisions(&root, &Default::default(), &ops, &Value::Null).is_err());
+            let revision = crate::workspace_files::revision(&root, "Demo/part.solidcraft").unwrap().unwrap();
+            crate::workspace_model::check_revisions(&root, &Default::default(), &ops, &json!({"Demo/part.solidcraft":revision})).unwrap();
+            assert_eq!(std::fs::read(project.join("part.solidcraft")).unwrap(), b"existing");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

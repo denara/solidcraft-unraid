@@ -89,7 +89,9 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
     fn command(root: &Path, id: &str, args: &Value, current: &mut Option<String>, out: &mut Vec<FileOperation>) -> Result<(), String> {
         match id {
             "file.new" => *current = None,
-            "component.insert_design" | "component.relink" | "component.update_links" => out.push(FileOperation::ReadSources),
+            "component.insert_design" | "component.relink" | "component.update_links" | "component.replace_with_link" => {
+                out.push(FileOperation::ReadSources)
+            }
             "doc.open" => {
                 if let Some(path) = name(root, args)? {
                     *current = (!imports_as_new(&path)).then(|| path.clone());
@@ -133,7 +135,8 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
                     out.push(FileOperation::Write(path));
                 }
             }
-            "file.save_mesh"
+            "component.extract"
+            | "file.save_mesh"
             | "render.export"
             | "motion.export"
             | "parameters.export"

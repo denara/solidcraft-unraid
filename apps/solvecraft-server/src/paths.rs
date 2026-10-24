@@ -57,18 +57,45 @@ pub fn prepare_tool(root: &Path, tool: &str, value: &mut Value) -> Result<(), St
                     return Err("too many batch commands".into());
                 }
                 for step in steps {
-                    if let Some(object) = step.as_object_mut()
-                        && !object.contains_key("command")
-                        && let Some(id) = object.get("id").and_then(Value::as_str).map(str::to_owned)
-                    {
-                        object.insert("command".into(), Value::String(id));
-                    }
+                    normalize_batch_step(step)?;
                 }
             }
             commands(root, value, 0)
         }
         _ => Ok(()),
     }
+}
+
+/// Normalize the worker's tool aliases before confinement and revision preflight.
+/// Only actual batch steps are changed; geometry/feature IDs remain data.
+fn normalize_batch_step(step: &mut Value) -> Result<(), String> {
+    let Some(object) = step.as_object_mut() else { return Ok(()) };
+    let Some(command) = object.get("command").or_else(|| object.get("id")).and_then(Value::as_str).map(str::to_owned) else { return Ok(()) };
+    let args = object.get("params").cloned().unwrap_or(Value::Null);
+    let (mapped, params) = match command.as_str() {
+        "crash_reports" => return Err("shared desktop crash reports are unavailable through the network gateway".into()),
+        "execute" => {
+            let inner = args.get("command").and_then(Value::as_str).ok_or("an execute batch step needs command")?;
+            if !inner.contains('.') {
+                return Err("an execute batch step needs an engine command, not a tool alias".into());
+            }
+            (inner, args.get("params").filter(|p| p.is_object()).cloned().unwrap_or_else(|| serde_json::json!({})))
+        }
+        "save" | "open" | "export" | "new_design" => {
+            let (mapped, keys): (&str, &[&str]) = match command.as_str() {
+                "save" => ("file.save", &["path", "format"]),
+                "open" => ("doc.open", &["path", "up", "names"]),
+                "export" => ("file.export", &["path", "format", "bodies", "mesh_prefix", "effort", "velocity"]),
+                _ => ("file.new", &["name"]),
+            };
+            let params = keys.iter().filter_map(|key| args.get(*key).cloned().map(|value| ((*key).to_owned(), value))).collect();
+            (mapped, Value::Object(params))
+        }
+        _ => (command.as_str(), args),
+    };
+    object.insert("command".into(), Value::String(mapped.to_owned()));
+    object.insert("params".into(), params);
+    Ok(())
 }
 
 fn commands(root: &Path, value: &mut Value, depth: usize) -> Result<(), String> {
@@ -100,7 +127,8 @@ fn commands(root: &Path, value: &mut Value, depth: usize) -> Result<(), String> 
             let geometry = object.get("command").and_then(Value::as_str).is_some_and(|c| {
                 (c.starts_with("solid.") && c != "solid.decal")
                     || c.starts_with("construct.")
-                    || (c.starts_with("component.") && !matches!(c, "component.insert_design" | "component.relink"))
+                    || (c.starts_with("component.")
+                        && !matches!(c, "component.insert_design" | "component.relink" | "component.extract" | "component.replace_with_link"))
                     || c.starts_with("occurrence.")
             });
             if !geometry
@@ -210,5 +238,26 @@ mod tests {
         assert_eq!(call["params"]["path"], json!(root.join("parts/source.solidcraft")));
         let mut escape = json!({"command":"component.relink","params":{"component":"Part","path":"../secret.solidcraft"}});
         assert!(commands(&root, &mut escape, 0).is_err());
+    }
+    #[test]
+    fn worker_tool_aliases_receive_confinement_and_recovery_checks_before_execution() {
+        let root = std::env::temp_dir();
+        for (command, params) in [
+            ("save", json!({"path":"../outside.solidcraft"})),
+            ("open", json!({"path":"/etc/passwd"})),
+            ("execute", json!({"command":"component.extract","params":{"path":"../part.solidcraft"}})),
+            ("execute", json!({"command":"diagnostics.crash_reports.clear"})),
+            ("crash_reports", json!({})),
+            ("component.replace_with_link", json!({"path":"../part.solidcraft"})),
+        ] {
+            assert!(prepare_tool(&root, "batch", &mut json!({"commands":[{"command":command,"params":params}]})).is_err(), "{command}");
+        }
+        let mut batch = json!({"commands":[{"id":"save","params":{"path":"part.solidcraft"}},
+            {"command":"execute","params":{"command":"component.extract","params":{"component":"Part","path":"extract.solidcraft"}}}]});
+        prepare_tool(&root, "batch", &mut batch).unwrap();
+        assert_eq!(batch["commands"][0]["command"], "file.save");
+        assert_eq!(batch["commands"][0]["params"]["path"], json!(root.join("part.solidcraft")));
+        assert_eq!(batch["commands"][1]["command"], "component.extract");
+        assert_eq!(batch["commands"][1]["params"]["path"], json!(root.join("extract.solidcraft")));
     }
 }

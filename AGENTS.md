@@ -16,7 +16,7 @@ new uses of it anywhere else. Public docs/web/Flatpak deployments use project Pa
 
 ## Container prototype baseline
 The first Unraid prototype used upstream commit `af536a7`. The current validated
-container baseline is `edf57cec293dcea301201f1d5173b33e16351466`.
+container baseline is `807e367bdb03210dba188118fe000acd0a4b3725`.
 Keep later upstream CAD/UI feature updates separate from this deployment addition;
 advance the baseline only as a separate, validated update. See [update records](docs/unraid-updates.md).
 
@@ -63,6 +63,10 @@ Preserve its cookie-only browser authentication, Bearer-only MCP/files authentic
 authoritative per-session metadata and shared HTTP/MCP file-revision checks. When an
 upstream update adds file-writing commands, review their entire output set against
 `workspace_model` and path confinement before enabling them through the gateway.
+Normalize MCP batch tool aliases before project/path/revision preflight and launch gateway
+workers explicitly with `--headless`; desktop discovery must never attach a network session
+to a running desktop app. New `component.extract` destinations and
+`component.replace_with_link` source paths retain file confinement and shared revision gates.
 Run `packaging/unraid/workspace-test.ps1` against an isolated candidate along with
 the existing modelling, persistence, logging and browser checks.
 

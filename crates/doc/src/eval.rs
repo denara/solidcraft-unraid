@@ -17,6 +17,8 @@ use crate::expr::{self, Kind, Value};
 use crate::lineage::Traced;
 use crate::{AxisRef, DocError, Document, Feature, FeatureKind, HoleKind, Operation, PlaneRef, ProfileSel, Result};
 
+type JointFaces = (Body, kernel::Result<Arc<[kernel::FaceInfo]>>);
+
 /// A body in the evaluated model.
 #[derive(Clone, Debug)]
 pub struct ModelBody {
@@ -31,6 +33,9 @@ pub struct ModelBody {
     // Timeline snapshots are cloned before meshes are requested. Share the cell itself so
     // meshing any snapshot also warms every unchanged copy of this body.
     mesh: Arc<OnceLock<Arc<Mesh>>>,
+    /// Joint face measurements use their own tolerance, independent of display quality.
+    /// Shared by snapshots of this geometry; the body identity guards direct replacement.
+    joint_faces: Arc<OnceLock<JointFaces>>,
     /// Lazy canonical reference triangles for a proper rigid occurrence placement.
     mesh_placement: Option<Arc<placed_mesh::PlacedMesh>>,
     /// The display plan (none when the body has no plan: a mesh body, or one the planner
@@ -92,6 +97,7 @@ impl ModelBody {
             body,
             feature,
             mesh: Arc::new(OnceLock::new()),
+            joint_faces: Arc::new(OnceLock::new()),
             mesh_placement: None,
             plan: Arc::new(Default::default()),
             plan_mesh: Arc::new(Default::default()),
@@ -105,6 +111,19 @@ impl ModelBody {
             source_key: 0,
             outline: Arc::new(OnceLock::new()),
         }
+    }
+
+    /// Face measurements for joint origins, at their original chord tolerance. Pose changes
+    /// and scratch copies share them; a geometry edit makes a new body and cache.
+    pub(crate) fn joint_faces(&self) -> Result<Arc<[kernel::FaceInfo]>> {
+        let measure = || {
+            #[cfg(test)]
+            cost_tests::count(|c| c.joint_faces += 1);
+            let tol = (self.body.size() * 2e-3).max(1e-3);
+            self.body.faces(tol).map(Arc::from)
+        };
+        let (body, faces) = self.joint_faces.get_or_init(|| (self.body.clone(), measure()));
+        if body.same(&self.body) { faces.clone().map_err(Into::into) } else { measure().map_err(Into::into) }
     }
 
     /// A box around the body without meshing it ([`Body::outline_bounds`]), worked out once.
@@ -718,6 +737,12 @@ pub struct ModelState {
     /// Shared between states: a feature that does not change a sketch keeps it as it was.
     pub sketches: Vec<Arc<SolvedSketch>>,
     pub body_counter: usize,
+    /// Body names the design used and must not use again (a name a `body.rename` freed, #4957),
+    /// and the names stored on the suppressed features so far, so a body made while a feature is
+    /// suppressed keeps its name once it is back (#4302). The counter starts over at every
+    /// evaluation, so without these a design that is evaluated again hands such a name to the next
+    /// body.
+    pub reserved_body_names: std::collections::BTreeSet<String>,
     /// Sheet metal bodies (by body name) and their flat patterns.
     pub sheets: Vec<crate::sheet::SheetBody>,
     /// Construction planes, axes and points as evaluated (by feature).
@@ -753,6 +778,9 @@ impl ModelState {
             self.sketch_keys.get(&s.feature).hash(&mut h);
         }
         self.body_counter.hash(&mut h);
+        for n in &self.reserved_body_names {
+            n.hash(&mut h);
+        }
         for (feature, points) in &self.blend_edges {
             feature.hash(&mut h);
             for p in points {
@@ -1018,6 +1046,11 @@ pub struct FeatureResult {
     pub stale: bool,
     #[serde(skip)]
     fingerprint: u64,
+    /// Taken from a saved model that did not keep this feature's state (#3220): `state` only
+    /// stands in for it until [`Model::evaluate`] evaluates the feature again, which
+    /// [`Model::adopt`] does before the model is used.
+    #[serde(skip)]
+    unkept: bool,
     #[serde(skip)]
     pub state: Arc<ModelState>,
 }
@@ -1466,6 +1499,7 @@ fn placement_digest(doc: &Document, f: &Feature, st: Option<&ModelState>) -> u64
         FeatureKind::Sweep { path_sketch, .. }
         | FeatureKind::SurfaceSweep { path_sketch, .. }
         | FeatureKind::Pipe { path_sketch, .. }
+        | FeatureKind::FrameMember { path_sketch, .. }
         | FeatureKind::Pattern { pattern: crate::PatternKind::Path { path_sketch, .. }, .. } => Some(*path_sketch),
         _ => None,
     };
@@ -1477,7 +1511,9 @@ fn placement_digest(doc: &Document, f: &Feature, st: Option<&ModelState>) -> u64
         | FeatureKind::SurfaceLoft { rails, .. } => rails,
         _ => &[],
     };
-    if path.as_ref().is_some_and(wired) || rails.iter().any(|r| wired(&r.sketch)) {
+    // Members map their frame sketch into their own component's frame, 2D lines included.
+    let member = matches!(f.kind, FeatureKind::FrameMember { .. });
+    if path.as_ref().is_some_and(|p| member || wired(p)) || rails.iter().any(|r| wired(&r.sketch)) {
         if let Some(path) = path {
             reads.sketch(doc, path.0);
         }
@@ -1763,7 +1799,10 @@ impl Model {
         let (vals, perr) = evaluation_values(doc);
         self.param_errors = perr;
         let mut prev_fp = 0u64;
-        let mut state = self.empty.clone();
+        // The names the design must not use again travel with the state (#4957).
+        let mut state = std::sync::Arc::new(ModelState { reserved_body_names: doc.reserved_body_names.clone(), ..(*self.empty).clone() });
+        // Those and the names stored on the suppressed features so far (#4302).
+        let mut reserved = doc.reserved_body_names.clone();
         let mut out: Vec<FeatureResult> = Vec::with_capacity(doc.features.len());
         let mut reuse = !self.no_cache;
         let mut recomputed = 0;
@@ -1786,11 +1825,16 @@ impl Model {
             let cancelled = watched.step(i);
             let fp = chain_fingerprint(doc, &vals, f, prev_fp, rolled_back, &self.step_digests, Some(&state));
             prev_fp = fp;
+            let current = |old: &&FeatureResult| old.id == f.id && old.fingerprint == fp && !old.stale;
+            // A state the saved model did not keep is evaluated again from the one before it; the
+            // results after it that the model did keep still stand (#3220).
+            let unkept = reuse && self.results.get(i).filter(current).is_some_and(|old| old.unkept);
+            if f.suppressed && !rolled_back {
+                reserved.extend(f.body_names.iter().map(|n| n.trim()).filter(|n| !n.is_empty()).map(str::to_string));
+            }
             if reuse
-                && let Some(old) = self.results.get(i)
-                && old.id == f.id
-                && old.fingerprint == fp
-                && !old.stale
+                && !unkept
+                && let Some(old) = self.results.get(i).filter(current)
             {
                 if !old.skipped {
                     state = old.state.clone();
@@ -1798,7 +1842,7 @@ impl Model {
                 out.push(old.clone());
                 continue;
             }
-            reuse = false;
+            reuse = unkept && !cancelled;
             if f.suppressed || rolled_back || cancelled {
                 out.push(FeatureResult {
                     id: f.id,
@@ -1810,9 +1854,15 @@ impl Model {
                     skipped: true,
                     stale: false,
                     fingerprint: fp,
+                    unkept: false,
                     state: state.clone(),
                 });
                 continue;
+            }
+            // Taken from the design each time: a state taken from an earlier evaluation may have
+            // been made before a rename freed a name or a feature was suppressed.
+            if state.reserved_body_names != reserved {
+                Arc::make_mut(&mut state).reserved_body_names.clone_from(&reserved);
             }
             // The same feature on the same inputs: its earlier result.
             let key = cache_key(f, fp, fingerprint(0, f, &vals, false, &self.step_digests) ^ placement_digest(doc, f, Some(&state)), ctx, &state);
@@ -1827,6 +1877,8 @@ impl Model {
                 if c.error.is_none() {
                     state = c.state.clone();
                 }
+                // A kept result after a failed one would not be this evaluation's.
+                reuse &= c.error.is_none();
                 out.push(FeatureResult {
                     id: f.id,
                     name: f.name.clone(),
@@ -1837,6 +1889,7 @@ impl Model {
                     skipped: false,
                     stale: false,
                     fingerprint: fp,
+                    unkept: false,
                     state: state.clone(),
                 });
                 continue;
@@ -1847,12 +1900,15 @@ impl Model {
                 if r.error.is_none() {
                     state = r.state.clone();
                 }
-                out.push(FeatureResult { state: state.clone(), ..r.clone() });
+                reuse &= r.error.is_none();
+                out.push(FeatureResult { state: state.clone(), unkept: false, ..r.clone() });
                 continue;
             }
             recomputed += 1;
             let t0 = now();
             let mut next = (*state).clone();
+            // The names the design must not use again travel with the state (#4957, #4302).
+            next.reserved_body_names.clone_from(&reserved);
             for b in &mut next.bodies {
                 b.made = crate::lineage::Made::Before;
             }
@@ -1930,6 +1986,7 @@ impl Model {
                     append_warning(&mut warning, note);
                 }
                 track_altered_sheets(&state, &mut next, f, &mut warning);
+                note_join_apart(&state, &next, f, &mut warning);
             } else {
                 boolean_diagnostics = Default::default();
             }
@@ -1976,6 +2033,7 @@ impl Model {
                     m.put(key, e);
                 }
             }
+            reuse &= error.is_none();
             out.push(FeatureResult {
                 id: f.id,
                 name: f.name.clone(),
@@ -1986,6 +2044,7 @@ impl Model {
                 skipped: false,
                 stale: false,
                 fingerprint: fp,
+                unkept: false,
                 state: state.clone(),
             });
         }
@@ -2000,23 +2059,36 @@ impl Model {
     /// Follow a rename of body `old` to `new` without evaluating anything (#3044): `doc` is the
     /// design after the rename, which changed nothing but names, so every result keeps its
     /// geometry and meshes and only the body's name (and the names worked out from it) changes.
+    /// Later features that change the body (a pattern, a chamfer, a join) keep their results
+    /// too (#2467): a feature's geometry doesn't depend on its bodies' names.
     /// False, leaving the model as it was, when the rename can't be followed that way and the
-    /// design must be evaluated: the model isn't the design's, the body is changed by a later
-    /// feature, or is sheet metal, threaded, or named in a later feature's face references.
+    /// design must be evaluated: the model isn't the design's, a body of that name comes and goes
+    /// or isn't the same body throughout, a later body's name is worked out from it (`X (2)`), a
+    /// message quotes it, or it is sheet metal, threaded, or named in a later feature's face
+    /// references.
     pub fn rename_body(&mut self, doc: &Document, old: &str, new: &str) -> bool {
         if self.results.len() != doc.features.len() || self.results.iter().zip(&doc.features).any(|(r, f)| r.id != f.id || r.stale) {
             return false;
         }
         let Some(at) = self.results.iter().position(|r| r.state.body(old).is_some()) else { return false };
-        let Some(made) = self.results.get(at).and_then(|r| r.state.body(old)).map(|b| Arc::as_ptr(&b.mesh)) else { return false };
-        // Untouched from the feature that made it to the end, and nothing else holds its name.
-        let untouched = self.results.iter().skip(at).all(|r| r.state.body(old).is_some_and(|b| Arc::as_ptr(&b.mesh) == made));
+        let Some(feature) = self.results.get(at).and_then(|r| r.state.body(old)).map(|b| b.feature) else { return false };
+        // One body from the feature that made it until it is gone (joined into another), and no
+        // other body's name comes from its name.
+        let held: Vec<bool> = self.results.iter().skip(at).map(|r| r.state.body(old).is_some()).collect();
+        let one_run = held.iter().skip_while(|h| **h).all(|h| !*h);
+        let derived = format!("{old} (");
+        let same_body = self
+            .results
+            .iter()
+            .skip(at)
+            .all(|r| r.state.bodies.iter().all(|b| if b.name == old { b.feature == feature } else { !b.name.starts_with(&derived) }));
+        let quoted = self.results.iter().skip(at).any(|r| [&r.error, &r.warning].into_iter().flatten().any(|m| m.contains(old)));
         let named_elsewhere = self
             .results
             .iter()
             .any(|r| r.state.body(new).is_some() || r.state.sheets.iter().any(|x| x.body == old) || r.state.threads.iter().any(|t| t.body == old));
         let faces_named = doc.features.iter().skip(at + 1).any(|f| f.face_names.iter().any(|n| n.contains(old)));
-        if !untouched || named_elsewhere || faces_named {
+        if !one_run || !same_body || quoted || named_elsewhere || faces_named {
             return false;
         }
         // States shared between results stay shared.
@@ -2030,6 +2102,8 @@ impl Model {
                         b.name = new.to_string();
                         b.names = b.names.renamed();
                     }
+                    // The names the design must not use again travel with the state (#4957).
+                    st.reserved_body_names = doc.reserved_body_names.clone();
                     Arc::new(st)
                 })
                 .clone();
@@ -2145,8 +2219,10 @@ pub fn select_profiles(ss: &SolvedSketch, sel: &ProfileSel) -> Result<Vec<Region
             solidcraft_sketch::without_text_counters(&ss.sketch, chosen).into_iter().map(|p| p.region).collect()
         }
         ProfileSel::Indices { indices } => {
+            // A design file may list a profile more than once; it is still one profile.
+            let mut seen = std::collections::BTreeSet::new();
             let mut v = Vec::new();
-            for i in indices {
+            for i in indices.iter().filter(|i| seen.insert(**i)) {
                 v.push(ps.get(*i).ok_or_else(|| DocError::Unknown(format!("profile {i} of {}", ss.name)))?.region.clone());
             }
             v
@@ -2212,7 +2288,8 @@ fn new_name(state: &mut ModelState, f: &Feature, k: usize) -> String {
     loop {
         state.body_counter += 1;
         let n = format!("Body{}", state.body_counter);
-        if state.body(&n).is_none() {
+        // A name a rename freed is not handed out again (#4957).
+        if state.body(&n).is_none() && !state.reserved_body_names.contains(&n) {
             return n;
         }
     }
@@ -2285,6 +2362,59 @@ fn track_altered_sheets(before: &ModelState, after: &mut ModelState, f: &Feature
                 ),
             );
         }
+    }
+}
+
+/// A Join whose material meets none of its targets still joins it, to the first target as a
+/// separate piece (see `apply_traced`): a valid body in several pieces, but rarely what was meant
+/// when Join was left on by mistake. Says so when a feature's Join leaves the bodies it changed
+/// in more pieces than they had (#4434). Combine joins the bodies it is given, apart or not.
+fn note_join_apart(before: &ModelState, after: &ModelState, f: &Feature, warning: &mut Option<String>) {
+    let operation = match &f.kind {
+        FeatureKind::Extrude { operation, .. }
+        | FeatureKind::Revolve { operation, .. }
+        | FeatureKind::Box { operation, .. }
+        | FeatureKind::Cylinder { operation, .. }
+        | FeatureKind::Sphere { operation, .. }
+        | FeatureKind::Torus { operation, .. }
+        | FeatureKind::Loft { operation, .. }
+        | FeatureKind::Sweep { operation, .. }
+        | FeatureKind::Pipe { operation, .. }
+        | FeatureKind::Coil { operation, .. }
+        | FeatureKind::BoundaryFill { operation, .. }
+        | FeatureKind::Thicken { operation, .. }
+        | FeatureKind::SurfaceNetwork { operation, .. } => *operation,
+        _ => return,
+    };
+    if operation != Operation::Join {
+        return;
+    }
+    let pieces = |b: &Body| b.lumps().map_or(1, |l| l.len());
+    // Pieces of the bodies the join changed or absorbed before it, and of those it kept after.
+    let (mut had, mut have) = (0usize, 0usize);
+    let mut grown: Vec<(&str, usize)> = Vec::new();
+    for was in &before.bodies {
+        match after.body(&was.name) {
+            Some(now) if now.body.same_shape(&was.body) => {}
+            Some(now) => {
+                let (old, new) = (pieces(&was.body), pieces(&now.body));
+                had += old;
+                have += new;
+                if new > old {
+                    grown.push((now.name.as_str(), new));
+                }
+            }
+            None => had += pieces(&was.body),
+        }
+    }
+    if have <= had {
+        return;
+    }
+    for (name, n) in grown {
+        append_warning(
+            warning,
+            format!("the joined piece doesn't touch `{name}`, so `{name}` is now in {n} separate pieces (New Body makes it a body of its own)"),
+        );
     }
 }
 
@@ -2399,6 +2529,33 @@ fn clear_tools_as_one(tools: Vec<Traced>) -> Vec<Traced> {
     }
 }
 
+/// An intersect never deletes a body by accident (#5295): it is refused when nothing of a named
+/// target would remain, when nothing of any target would remain, or when the tools meet a target
+/// and the boolean still came out empty. Only an unnamed target the tools miss altogether is
+/// removed, as an intersect with every body does (#5160).
+pub(crate) fn empty_intersection(bodies: &[&str]) -> DocError {
+    let body = match bodies {
+        [one] => format!("`{one}`"),
+        [first, rest @ ..] => format!("`{first}` and {} more", rest.len()),
+        [] => "the target body".to_string(),
+    };
+    DocError::Invalid(format!("the intersection is empty: nothing of {body} would remain; check that the profile overlaps the body"))
+}
+
+/// The bodies a feature's boolean takes part in, and whether they were named rather than taken
+/// by default (every body, or the feature's component).
+pub(crate) fn boolean_scope(state: &ModelState, f: &Feature, targets: &[String]) -> (bool, Vec<String>) {
+    let effective = if targets.is_empty() { &f.participants } else { targets };
+    let all = effective.len() == 1 && effective.first().is_some_and(|t| t == "*");
+    let names = state
+        .bodies
+        .iter()
+        .filter(|b| all || if effective.is_empty() { b.component == f.component || b.feature == f.id } else { effective.contains(&b.name) })
+        .map(|b| b.name.clone())
+        .collect();
+    (!all && !effective.is_empty(), names)
+}
+
 /// [`apply_op`] with tools whose lineage is known: the bodies it makes or changes keep theirs.
 fn apply_traced(state: &mut ModelState, f: &Feature, tools: Vec<Traced>, op: Operation, targets: &[String]) -> Result<()> {
     let tools = if op == Operation::Intersect { intersection_tool_union(tools)? } else { tools };
@@ -2406,6 +2563,7 @@ fn apply_traced(state: &mut ModelState, f: &Feature, tools: Vec<Traced>, op: Ope
     // of its component (and what it made itself): other components are left alone.
     let targets: &[String] = if targets.is_empty() { &f.participants } else { targets };
     let all = targets.len() == 1 && targets.first().is_some_and(|t| t == "*");
+    let named = !all && !targets.is_empty();
     let target_idx: Vec<usize> = if all {
         (0..state.bodies.len()).collect()
     } else if targets.is_empty() {
@@ -2540,6 +2698,24 @@ fn apply_traced(state: &mut ModelState, f: &Feature, tools: Vec<Traced>, op: Ope
                         None => None,
                     };
                 }
+                if op == Operation::Intersect && acc.as_ref().is_none_or(|b| b.body.face_count() == 0) {
+                    let Some(mb) = state.bodies.get(ti) else { continue };
+                    // A tool that meets the body yet leaves nothing is a failed boolean, not an empty result.
+                    let mut met = false;
+                    if !named && !mb.body.is_mesh() {
+                        for t in &tools {
+                            if mb.body.meets(&tool_in(t, into)?.body)? {
+                                met = true;
+                                break;
+                            }
+                        }
+                    }
+                    if named || met {
+                        return Err(empty_intersection(&[mb.name.as_str()]));
+                    }
+                    remove.push(ti);
+                    continue;
+                }
                 match acc {
                     Some(b) => {
                         if let Some(mb) = state.bodies.get_mut(ti) {
@@ -2548,6 +2724,10 @@ fn apply_traced(state: &mut ModelState, f: &Feature, tools: Vec<Traced>, op: Ope
                     }
                     None => remove.push(ti),
                 }
+            }
+            if op == Operation::Intersect && target_idx.iter().all(|i| remove.contains(i)) {
+                let names: Vec<&str> = target_idx.iter().filter_map(|i| state.bodies.get(*i)).map(|b| b.name.as_str()).collect();
+                return Err(empty_intersection(&names));
             }
             let mut i = 0;
             state.bodies.retain(|_| {
@@ -3492,6 +3672,7 @@ fn hole_spots(vals: &BTreeMap<String, Value>, st: &ModelState, f: &Feature) -> R
         _ => {
             let dir = direction.normalized().ok_or_else(|| DocError::Invalid("hole direction".into()))?;
             let at = hole_on_surface(st, single_hole_position(vals, st, position, at, points)?, dir, &[]);
+            let at = with_references(vals, st, f, at, dir)?;
             let dir = hole_dir_into_face(st, at, dir);
             return Ok((vec![hole_on_surface(st, at, dir, &[])], dir));
         }
@@ -3539,6 +3720,7 @@ fn hole_spots_raw(vals: &BTreeMap<String, Value>, st: &ModelState, f: &Feature) 
         _ => {
             let dir = direction.normalized().ok_or_else(|| DocError::Invalid("hole direction".into()))?;
             let p = single_hole_position(vals, st, position, at, points)?;
+            let p = if hole_references(f).is_empty() { p } else { with_references(vals, st, f, hole_on_surface(st, p, dir, &[]), dir)? };
             Ok((vec![p], hole_dir_into_face(st, hole_on_surface(st, p, dir, &[]), dir)))
         }
     }
@@ -3558,6 +3740,35 @@ fn single_hole_position(
     let id = sp.ids.first().ok_or_else(|| DocError::Invalid("a Single hole needs its sketch point".into()))?;
     let p = ss.sketch.points.iter().find(|p| &p.id == id).ok_or_else(|| DocError::Unknown(format!("sketch point `{id}`")))?;
     Ok(ss.plane.to_world(p.pos))
+}
+
+/// A hole's reference edges (#37); none for any other feature.
+fn hole_references(f: &Feature) -> &[crate::HoleReference] {
+    match &f.kind {
+        FeatureKind::Hole { references, .. } => references,
+        _ => &[],
+    }
+}
+
+/// Where a Single hole with reference edges (#37) is drilled: at its distances from the edges'
+/// lines, in the plane of the face at `at` (on the surface), the edges found by their names, else
+/// their points. A hole without reference edges stays at `at`.
+fn with_references(vals: &BTreeMap<String, Value>, st: &ModelState, f: &Feature, at: Vec3, dir: Vec3) -> Result<Vec3> {
+    let references = hole_references(f);
+    if references.is_empty() {
+        return Ok(at);
+    }
+    let mut distances = Vec::with_capacity(references.len());
+    for r in references {
+        distances.push(Document::eval_in(vals, &r.distance, Kind::Length)?);
+    }
+    let edges: Vec<(Vec3, Option<&str>)> = references.iter().enumerate().map(|(i, r)| (r.edge.0, f.edge_names.get(i).map(String::as_str))).collect();
+    let frame = crate::hole_reference::reference_frame(st, at, dir, &edges, false)?;
+    let centre = frame.place(at, &distances)?;
+    if !crate::hole_reference::on_reference_face(st, &frame, centre) {
+        return Err(DocError::Invalid("the reference distances put the hole's centre off its face".into()));
+    }
+    Ok(centre)
 }
 
 /// Where a hole placed by position is drilled: its `at` expressions evaluated, so it follows the
@@ -5040,6 +5251,7 @@ fn feature_op(f: &Feature) -> (Operation, Vec<String>) {
         FeatureKind::Pipe { operation, targets, .. } => (*operation, crate::plain(targets)),
         FeatureKind::Loft { operation, targets, .. } | FeatureKind::Sweep { operation, targets, .. } => (*operation, crate::plain(targets)),
         FeatureKind::Coil { operation, targets, .. } => (*operation, crate::plain(targets)),
+        FeatureKind::Rib { .. } => (Operation::Join, Vec::new()),
         _ => (Operation::NewBody, Vec::new()),
     }
 }
@@ -5310,6 +5522,23 @@ fn path_at(segs: &[kernel::PathSeg], d: f64) -> (Vec3, Vec3) {
     (Vec3::ZERO, Vec3::X)
 }
 
+/// Whether a copy has no material to cut in any of its eligible targets.
+fn copy_misses(st: &ModelState, f: &Feature, targets: &[String], tools: &[Traced]) -> bool {
+    let targets = if targets.is_empty() { &f.participants } else { targets };
+    let all = targets.len() == 1 && targets.first().is_some_and(|t| t == "*");
+    st.bodies
+        .iter()
+        .filter(|b| all || if targets.is_empty() { b.component == f.component || b.feature == f.id } else { targets.contains(&b.name) })
+        .all(|b| {
+            tools.iter().all(|t| {
+                // A diagnostic must neither reject an otherwise valid cut nor add its own
+                // retries to the feature's report. An inconclusive probe is not a miss.
+                let (intersection, _) = kernel::capture_boolean_diagnostics(|| kernel::boolean(&b.body, &t.body, BoolOp::Intersect));
+                matches!(intersection, Ok(None))
+            })
+        })
+}
+
 /// Apply transformed copies of the tools of `features` (patterns, mirrors).
 fn replay(
     doc: &Document,
@@ -5333,6 +5562,7 @@ fn replay(
             format!("{list} suppressed and not copied")
         });
     }
+    let (mut missed, mut total) = (0usize, 0usize);
     for name in features.iter().filter(|n| !suppressed.contains(n)) {
         // A sketch and its extrude often share a name; the feature that makes geometry wins.
         let src = doc
@@ -5380,6 +5610,7 @@ fn replay(
         let present: Vec<String> = targets.iter().filter(|t| st.bodies.iter().any(|b| &b.name == *t)).cloned().collect();
         let targets = if present.is_empty() { targets } else { present };
         let mut copies = Vec::new();
+        let mut instances = Vec::with_capacity(mats.len());
         if let FeatureKind::Hole { diameter, depth, hole, to, .. } = &src.kind {
             // A hole is drilled again at each copy of its spot (found on the surface there), so
             // a blind hole's depth counts from the face at the copy, not from the bottom of the
@@ -5387,6 +5618,7 @@ fn replay(
             let (spots, dir) = hole_spots_raw(vals, st, src)?;
             for (k, m) in mats.iter().enumerate() {
                 let d = crate::apply_vector(m, dir).normalized().ok_or_else(|| DocError::Invalid("hole direction".into()))?;
+                let start = copies.len();
                 for p in &spots {
                     let at = hole_on_surface(st, crate::apply_point(m, *p), d, hole_scope(src));
                     let to = to.map(|t| crate::apply_point(m, t.0));
@@ -5398,13 +5630,34 @@ fn replay(
                             .map(|t| Traced { lineage: t.lineage.map(|l| l.copied(src.id, k + 1)), body: t.body }),
                     );
                 }
+                instances.push(start..copies.len());
+            }
+        } else if let FeatureKind::Rib { .. } = &src.kind {
+            // A rib is built again at each copy of its sketch, against the bodies there (#4593):
+            // its walls run until they meet the body, which may not lie the same way there.
+            for (k, m) in mats.iter().enumerate() {
+                for body in more::rib_tools(vals, st, src, Some(m))? {
+                    // Each copy's faces are named as the rib's, with the instance.
+                    let t = Traced::unnamed(body);
+                    copies.push(Traced { lineage: t.lineage.map(|l| l.copied(src.id, k + 1)), body: t.body });
+                }
             }
         } else {
             // Each copy's faces are named as the source feature's, with the instance.
             let tools = feature_tools_with_constructor(doc, vals, src, st, &mut None)?;
             for (k, m) in mats.iter().enumerate() {
+                let start = copies.len();
                 for t in &tools {
                     copies.push(t.copied(kernel::transform_matrix(&t.body, *m)?, src.id, k + 1));
+                }
+                instances.push(start..copies.len());
+            }
+        }
+        if op == Operation::Cut {
+            for instance in instances {
+                if let Some(tools) = copies.get(instance) {
+                    total += 1;
+                    missed += usize::from(copy_misses(st, f, &targets, tools));
                 }
             }
         }
@@ -5418,6 +5671,9 @@ fn replay(
             apply_traced(st, &named, copies, op, &targets)?;
         }
     }
+    if missed > 0 {
+        append_warning(warning, format!("{missed} of {total} cut copies remove no material"));
+    }
     Ok(())
 }
 
@@ -5426,6 +5682,8 @@ mod model_cache;
 #[path = "eval_more.rs"]
 mod more;
 pub use model_cache::SavedModel;
+#[path = "eval_frame.rs"]
+pub(crate) mod frame_member;
 #[path = "eval_surface.rs"]
 mod surface;
 
@@ -6494,6 +6752,7 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
             }
             Ok(())
         }
+        FeatureKind::FrameMember { .. } => frame_member::evaluate(doc, vals, f, st),
         FeatureKind::BoundingSolid { bodies, margin } => {
             let m = val(vals, margin, Kind::Length)?;
             let mut bb = solidcraft_geom::Aabb3::EMPTY;

@@ -95,6 +95,13 @@ pub(crate) fn begin_frame(ctx: &egui::Context) {
     ctx.data_mut(|d| d.insert_temp(popup_id(), popup));
 }
 
+/// Whether `editor`'s suggestions were drawn in the last frame.
+#[cfg(test)]
+pub(crate) fn showing(ctx: &egui::Context, editor: egui::Id) -> bool {
+    ctx.data(|d| d.get_temp::<Popup>(popup_id()))
+        .is_some_and(|p| p.editor == editor && p.count > 0 && !p.dismissed && p.frame.saturating_add(1) >= ctx.cumulative_frame_nr())
+}
+
 pub(crate) fn complete(ui: &mut egui::Ui, resp: &egui::Response, text: &mut String) -> bool {
     let ctx = ui.ctx().clone();
     // A press on a suggestion takes the focus from the editor before the list can see it
@@ -117,8 +124,11 @@ pub(crate) fn complete(ui: &mut egui::Ui, resp: &egui::Response, text: &mut Stri
     let state = egui::TextEdit::load_state(&ctx, resp.id);
     let cursor = state.as_ref().and_then(|s| s.cursor.char_range()).map(|r| r.primary.index.0).unwrap_or_else(|| text.chars().count());
     let (start, word) = word_before(text, cursor);
-    let previous = ctx.data(|d| d.get_temp::<Popup>(popup_id()));
-    let mut popup = previous.filter(|p| p.editor == resp.id && p.word == word && p.cursor == cursor).unwrap_or(Popup {
+    let previous = ctx.data(|d| d.get_temp::<Popup>(popup_id())).filter(|p| p.editor == resp.id);
+    // Dismissed suggestions stay closed until this box is typed in: another control rewriting
+    // its text (a slider dragged while the box keeps the focus) or a moved caret is no reason.
+    let dismissed = previous.as_ref().is_some_and(|p| p.dismissed) && !resp.changed();
+    let mut popup = previous.filter(|p| p.word == word && p.cursor == cursor).unwrap_or(Popup {
         editor: resp.id,
         frame: 0,
         word,
@@ -126,15 +136,21 @@ pub(crate) fn complete(ui: &mut egui::Ui, resp: &egui::Response, text: &mut Stri
         selected: 0,
         count: 0,
         accept: false,
-        dismissed: false,
+        dismissed,
         explicit: false,
         rows: Vec::new(),
     });
+    // Never over a control being dragged: the drag dismisses them.
+    if ctx.dragged_id().is_some_and(|id| id != resp.id) {
+        popup.dismissed = true;
+    }
     let list = suggestions_for(&ctx, &popup.word, popup.explicit);
     popup.frame = ctx.cumulative_frame_nr();
     popup.count = list.len();
     popup.selected = popup.selected.min(list.len().saturating_sub(1));
     if list.is_empty() || popup.dismissed {
+        // Nothing drawn: a press where the rows were is not on one.
+        popup.rows.clear();
         ctx.data_mut(|d| d.insert_temp(popup_id(), popup));
         return false;
     }
@@ -335,6 +351,23 @@ mod tests {
         e.key(Key::Enter);
         assert!(!e.accepted);
         assert!(e.leaked.contains(&Key::Enter));
+    }
+
+    /// Text another control writes into the box (a slider drag) leaves dismissed suggestions
+    /// closed, though they would offer something for the new word; typing opens them again.
+    #[test]
+    fn dismissed_suggestions_stay_closed_until_the_box_is_typed_in() {
+        let mut e = Editor::new("wid");
+        assert!(showing(&e.ctx, e.id));
+        e.key(Key::Escape);
+        assert!(!showing(&e.ctx, e.id));
+        e.text = "wir".into();
+        e.frame(Vec::new());
+        assert!(!suggestions(&e.ctx, "wir").is_empty());
+        assert!(!showing(&e.ctx, e.id), "a rewritten value does not reopen them");
+        e.key(Key::Backspace);
+        assert_eq!(e.text, "wi");
+        assert!(showing(&e.ctx, e.id), "typing does");
     }
 
     #[test]

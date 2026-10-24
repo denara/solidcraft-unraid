@@ -8,6 +8,8 @@ const fn icon_primary(rgb: [u8; 3]) -> Color32 {
 impl Tokens {
     pub const fn light() -> Tokens {
         Tokens {
+            borders: crate::theme::Borders::LEGACY,
+            icon_palette: None,
             file_dim: Color32::from_rgb(58, 70, 86),
             file_recovery_well: Color32::from_rgb(247, 226, 184),
             file_action_height: 32.0,
@@ -230,7 +232,7 @@ impl Tokens {
             ],
             analysis: AnalysisColors::DEFAULT,
             icons: IconColors { highlight: Color32::WHITE, agent: Color32::from_rgb(168, 85, 247), marker_halo: Color32::from_black_alpha(150) },
-            logo: [Color32::from_rgb(96, 158, 236), Color32::from_rgb(58, 136, 238), Color32::from_rgb(55, 108, 197), Color32::WHITE],
+            logo: [Color32::from_rgb(96, 158, 236), Color32::from_rgb(58, 136, 238), Color32::from_rgb(55, 108, 197)],
         }
     }
     pub const fn dark() -> Tokens {

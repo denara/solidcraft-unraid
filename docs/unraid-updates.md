@@ -1,5 +1,78 @@
 # Validated container updates
 
+## 2026-10-24: upstream 0.21.0 with preserved workspace and scoped MCP aliases
+
+Selected exactly one upstream snapshot, `807e367bdb03210dba188118fe000acd0a4b3725`,
+150 commits after validated `edf57cec`. The sole branch `codex/unraid-mcp-web`
+began clean and synchronized at `44378d02`; fetched fork main remains an ancestor.
+Upstream CAD features and changes belong to the
+[original project](https://github.com/tangency-labs/solidcraft). This container
+integration creates no application release, release tag or Unraid installation.
+
+Merge resolutions retain private-file ignores, the gateway, independent browser
+handoffs, observer isolation and upstream native-menu/browser-navigation behavior.
+Existing omissions of unsafe native platform bridges remain. Observer snapshots
+keep cold display/contact caches; the new immutable motion-trace cache is shared
+without sharing mutable editor locks. The gateway explicitly starts `--headless`
+workers, preserving independent network sessions despite upstream desktop discovery.
+New batch tool aliases are normalized before path/project/revision preflight.
+`component.extract` destinations and `component.replace_with_link` sources now
+participate in the same confinement and shared file gate; extraction cannot bypass
+strong overwrite revisions. Regressions cover nested aliases, recovery denial,
+traversal, project binding and unchanged conflicting file bytes.
+
+The new square-theme search test intentionally discards an egui frame without
+applying texture uploads. Explicitly clearing those deltas fixes its debug-only
+harness panic while retaining every geometry assertion. The failing case and all
+remaining selected UI groups pass; production drawing behavior is unchanged.
+The SDK proof accepts the new skill-reference tool's valid plain Markdown reply
+alongside JSON tool replies. No application JavaScript or runtime dependency was
+added by this integration. Upstream cadmpeg 0.6.3 and new dependency metadata were
+reviewed: new packages are permissively licensed; only fcstd/rhino/step codecs are
+enabled. Shipped notices were regenerated with gateway coverage.
+
+Relevant checks pass: 125 gateway, 75 MCP, four CLI discovery/quiet-mode, 39 format,
+138 IO and 24 browser-app cases, plus selected kernel intersection/face-source,
+hollow/revolve, engine frame/component/extraction/motion/joint/sketch/hole,
+observer-cache and sketch-offset regressions. Changed UI groups cover preferences,
+themes, parameters, documents, selection, timeline, navigation, frame/hole dialogs,
+dimensions, viewport overlays and bounded device previews. Existing ignored cases
+remain ignored. Native workspace Clippy, changed-test Clippy, scoped Wasm Clippy,
+13-crate Wasm compatibility, formatting, licenses, assets (462 files), icons
+(290 masters), layers, catalogs and UI-container gates pass. Both browser clients
+and release CLI/gateway binaries build. This is targeted validation, not a rerun
+of the complete geometry suite.
+
+All 28 GPU unit cases and nine required actual software-OpenGL captures pass.
+The real browser API proves modelling/undo/redo, bounded queues/errors and browser
+Ctrl+Tab handling; all real-site offline/update scenarios pass. Actual Chromium
+verifies the joined live Workspace, initially collapsed groups, compact folder
+actions and PNG thumbnails, and opens the migrated native model in the independent
+0.21.0 browser app. Server bytes remain unchanged after the browser handoff.
+
+A fresh-volume candidate passes real MCP modelling/PNG/STEP, independent sessions,
+authentication, project/path/origin/revision checks, logging, restart/reopen,
+Workspace push/metadata/thumbnails/native handoff, remembered login/revocation,
+read-only observation and deletion/ZIP checks. The 256-MiB ZIP starts in 8 ms with
+measured RSS growth of 128 KiB; integrity, Unicode/empty/nested entries, backup
+exclusion, abort cleanup and write leases pass. SDK 1.32.1 opens legacy format 13
+and previous native format 31, preserving parameters, 24000 mm3 volume, original
+bytes and named split-face centroids. New native format-35 saves pass ZIP CRC
+checks. Actual SDK calls prove batch aliases and component extraction enforce
+path/revision protection, and verify the new pending and bundled-reference tools.
+BOM/DXF output guards remain covered. Private evidence stays under ignored
+`target/upstream-807e367b-20261024/`.
+
+New saves require a newer reader: back up server files and separate browser designs
+before updating, and keep the previous image/pre-update files for rollback. The
+original upstream app icon is mirrored exactly into the canonical Unraid asset;
+the product Overview remains unchanged. Source/image publication, archive checksum,
+local runtime refresh and catalog icon synchronization are recorded after their
+final checks. No Unraid installation or nginx/DNS change is performed.
+
+A pre-push fetch observed four later upstream commits through `8b65d41b`; they are
+deferred to the next fixed-snapshot update. The validated target remains `807e367b`.
+
 ## 2026-10-23: upstream 0.20.0 with preserved observer and browser isolation
 
 Selected exactly one upstream snapshot, `edf57cec293dcea301201f1d5173b33e16351466`,

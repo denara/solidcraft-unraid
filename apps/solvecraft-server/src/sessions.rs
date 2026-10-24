@@ -282,6 +282,7 @@ impl Worker {
     ) -> Result<Self, String> {
         let mut child = Command::new(&config.cli)
             .arg("mcp")
+            .arg("--headless")
             .arg("--allow-path")
             .arg(&config.files)
             .arg("--quiet")

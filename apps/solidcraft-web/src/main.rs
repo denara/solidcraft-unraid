@@ -19,6 +19,14 @@ mod space_mouse;
 #[cfg(any(target_arch = "wasm32", test))]
 mod workspace_import;
 
+/// The browser switches tabs with Ctrl+Tab and Ctrl+Shift+Tab, so the page leaves those keys to
+/// it (#5227); plain Tab and Shift+Tab still move between the app's fields. (Ctrl+PageUp and
+/// Ctrl+PageDown already reach the browser.)
+#[cfg(any(target_arch = "wasm32", test))]
+fn browser_switches_tabs(key: &str, ctrl: bool) -> bool {
+    ctrl && key == "Tab"
+}
+
 #[cfg(target_arch = "wasm32")]
 mod web {
     use std::rc::Rc;
@@ -86,6 +94,20 @@ mod web {
         on_unload.forget();
     }
 
+    /// eframe cancels the browser's action for every Tab it gets, so the browser couldn't switch
+    /// tabs while the app has the keyboard. Its tab-switching keys stop here, on the way down to
+    /// the canvas, before eframe sees them; the browser then acts on them as usual.
+    fn leave_tab_switching_to_browser(window: &web_sys::Window) {
+        let on_key = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(|e: web_sys::KeyboardEvent| {
+            if crate::browser_switches_tabs(&e.key(), e.ctrl_key()) {
+                e.stop_propagation();
+            }
+        });
+        let _ = window.add_event_listener_with_callback_and_bool("keydown", on_key.as_ref().unchecked_ref(), true);
+        // The listener lives as long as the page.
+        on_key.forget();
+    }
+
     const JAPANESE_FONT_PATH: &str = "./fonts/BIZUDPGothic-Regular.ttf";
 
     type FontLoadResult = Rc<std::cell::RefCell<Option<Result<Vec<u8>, String>>>>;
@@ -112,6 +134,7 @@ mod web {
         font_language: String,
         space_mouse: SpaceMouse,
         workspace_import: crate::workspace_import::Slot,
+        wheel_gestures: solidcraft_ui_egui::WebWheelGestures,
     }
 
     impl Shell {
@@ -532,6 +555,10 @@ mod web {
             UNSAVED.with(|u| u.set(solidcraft_ui_egui::documents::any_dirty(&self.app)));
         }
         fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+            let now = raw.time.unwrap_or_else(|| ctx.input(|i| i.time));
+            if let Some(delay) = self.wheel_gestures.update(raw, now) {
+                ctx.request_repaint_after(delay);
+            }
             files::take_drops(&self.files, raw);
             // Before the app's own hook, which adds the control channel's events.
             self.space_mouse.raw_input_hook(ctx, self.app.preferences.space_mouse_enabled, raw);
@@ -598,6 +625,7 @@ mod web {
         wasm_bindgen_futures::spawn_local(async {
             let Some(window) = web_sys::window() else { return };
             ask_before_unload(&window);
+            leave_tab_switching_to_browser(&window);
             let Some(document) = window.document() else { return };
             let Some(canvas) = document.get_element_by_id(CANVAS_ID).and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok()) else {
                 log::error!("missing <canvas id=\"{CANVAS_ID}\">");
@@ -700,6 +728,7 @@ mod web {
                             font_language,
                             space_mouse: SpaceMouse::default(),
                             workspace_import,
+                            wheel_gestures: solidcraft_ui_egui::WebWheelGestures::default(),
                         }))
                     }),
                 )
@@ -724,4 +753,18 @@ fn main() {
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
     eprintln!("solidcraft-web only runs in the browser: build it with `trunk build --release` in apps/solidcraft-web");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_ctrl_tab_is_left_to_the_browser() {
+        // Ctrl+Tab and Ctrl+Shift+Tab (the event's key is "Tab" either way) switch browser tabs.
+        assert!(browser_switches_tabs("Tab", true));
+        // Tab and Shift+Tab move between the app's fields; Ctrl with other keys stays the app's.
+        assert!(!browser_switches_tabs("Tab", false));
+        assert!(!browser_switches_tabs("s", true));
+    }
 }

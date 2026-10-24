@@ -6,11 +6,50 @@ fn run(s: &mut Session, command: &str, p: Value) -> Value {
     s.execute(command, &p).unwrap()
 }
 fn created(s: &mut Session, name: &str) -> (u64, u64) {
-    let c = run(s, "component.create", json!({"name": name}));
+    let c = run(s, "component.create", json!({"name": name, "grounded": false}));
     (c["component"].as_u64().unwrap(), c["occurrence"].as_u64().unwrap())
 }
 fn near(value: &Value, expected: f64) {
     assert!((value.as_f64().unwrap() - expected).abs() < 1e-6, "{value} != {expected}");
+}
+
+#[test]
+fn component_create_rejects_bodies_without_changing_design() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length":10,"width":10,"height":10,"body_name":"Body1"}));
+    let doc = s.doc.clone();
+    let active_path = s.active_occurrence_path.clone();
+    let error = s.execute("component.create", &json!({"name":"Part","bodies":["Body1"]})).unwrap_err();
+    assert!(matches!(&error, crate::EngineError::BadParams { cmd, .. } if cmd == "component.create"));
+    let msg = error.to_string();
+    for expected in ["bodies", "name, parent, parent_path, activate", "component.move_bodies", "component.from_bodies"] {
+        assert!(msg.contains(expected), "{msg}");
+    }
+    assert_eq!(s.doc, doc);
+    assert_eq!(s.active_component, 0);
+    assert_eq!(s.active_occurrence_path, active_path);
+    assert_eq!(s.doc.model_body_component(s.model.state().body("Body1").unwrap()), 0);
+}
+
+#[test]
+fn component_create_rejects_unknown_keys_and_accepts_documented_keys() {
+    let mut s = Session::default();
+    let (parent, occurrence) = created(&mut s, "Parent");
+    let params = json!({"name":"Child","parent":parent,"parent_path":[occurrence],"activate":false});
+    let mut invalid = params.clone();
+    invalid["activte"] = json!(true);
+    let doc = s.doc.clone();
+    let error = s.execute("component.create", &invalid).unwrap_err().to_string();
+    assert!(error.contains("activte"), "{error}");
+    assert!(error.contains("name, parent, parent_path, activate"), "{error}");
+    assert_eq!(s.doc, doc);
+    assert_eq!(s.active_component, parent);
+    assert_eq!(s.active_occurrence_path, Some(vec![occurrence]));
+    let child = run(&mut s, "component.create", params);
+    assert_eq!(child["name"], "Child");
+    assert_eq!(child["parent"], parent);
+    assert_eq!(s.active_component, parent);
+    assert_eq!(s.active_occurrence_path, Some(vec![occurrence]));
 }
 
 #[test]
@@ -788,4 +827,36 @@ fn joins_into_a_moved_occurrence_meet_the_tool_where_it_is_shown() {
     run(&mut s, "solid.extrude", json!({"through_all": true, "operation": "cut", "targets": ["C"]}));
     let want = 10.0 * 10.0 * 10.0 - 4.0 * 4.0 * 10.0;
     assert!((volume(&s, "C") - want).abs() < 1e-6 * want, "C: {} vs {want}", volume(&s, "C"));
+}
+
+#[test]
+fn component_delete_removes_joints_to_its_occurrences_and_undo_restores_them() {
+    let mut s = Session::default();
+    for (name, corner) in [("Arm", [20, -2, -2]), ("Kept", [-2, 20, -2])] {
+        run(&mut s, "component.activate", json!({"component": 0}));
+        created(&mut s, name);
+        run(&mut s, "solid.box", json!({"length": 4, "width": 4, "height": 4, "corner": corner}));
+    }
+    run(
+        &mut s,
+        "joint.create",
+        json!({"type": "revolute", "a": {"occurrence": 0, "point": [0,0,0]}, "b": {"occurrence": "Arm", "point": [0,0,0]}, "name": "Pivot"}),
+    );
+    run(
+        &mut s,
+        "joint.create",
+        json!({"type": "rigid", "a": {"occurrence": 0, "point": [0,0,0]}, "b": {"occurrence": "Kept", "point": [0,0,0]}, "name": "Held"}),
+    );
+    let arm = s.doc.find_component("Arm").unwrap();
+    let before = s.doc.clone();
+
+    let reply = run(&mut s, "component.delete", json!({"component": "Arm"}));
+    let features: Vec<u64> = before.features.iter().filter(|f| f.component == arm).map(|f| f.id).collect();
+    assert_eq!(reply, json!({"deleted": [arm], "features": features}));
+    let joints: Vec<&str> = s.doc.assembly.joints.iter().map(|j| j.name.as_str()).collect();
+    assert_eq!(joints, ["Held"]);
+    run(&mut s, "joint.list", json!({}));
+
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!(s.doc, before);
 }

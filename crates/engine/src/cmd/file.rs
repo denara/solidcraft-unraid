@@ -50,7 +50,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .noundo()
         .params("path; format?: stl|stla|obj|step|3mf|3mf-tagged|urdf|json (default from extension; 3mf-tagged: 3MF whose triangles carry their B-rep face, at full precision, for meshing and analysis tools; docs/formats/3mf-face-tags.md; urdf: the whole assembly as a robot, with STL meshes written next to it; docs/urdf.md); bodies?: [names] (JSON and URDF export the complete design); urdf only: mesh_prefix? (before each mesh file name, e.g. package://robot/meshes/), effort? (default 1000), velocity? (default 10)"),
     CommandSpec::new("file.save_mesh", "Save As Mesh", save_mesh)
-        .at("MESH", "MODIFY")
+        .at("INSERT", "FILES")
         .icon("mesh_export")
         .noundo()
         .params("path; format?: stl|3mf|3mf-tagged (default from the extension, else stl; 3mf-tagged: docs/formats/3mf-face-tags.md); bodies?: [names] (default: all); ascii?: bool (STL); slicer?: id, name or program path from file.slicers (open the saved file there)"),
@@ -794,7 +794,7 @@ mod tests {
     #[test]
     fn preview_saves_do_not_build_cold_placements_or_persist_transient_edits() {
         let mut s = Session::default();
-        let created = s.execute("component.create", &json!({"name":"PreviewPart"})).unwrap();
+        let created = s.execute("component.create", &json!({"name":"PreviewPart","grounded":false})).unwrap();
         let occurrence = created["occurrence"].as_u64().unwrap();
         s.execute("solid.box", &json!({"length":2,"width":3,"height":4,"body_name":"Block","operation":"new"})).unwrap();
         for body in &s.model.state().bodies {
@@ -1094,5 +1094,34 @@ mod tests {
         assert!(stopped.model.results.iter().all(|r| r.skipped), "no feature was rebuilt after Cancel");
         assert!(stopped.world_state().bodies.is_empty());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Every option the format registry offers is a parameter its owning command documents,
+    /// so the registry and the commands can't drift apart.
+    #[test]
+    fn registry_options_name_documented_command_parameters() {
+        use solidcraft_io::formats;
+        let params_of = |id: &str| crate::find_command(id).map(|c| c.params).unwrap_or_else(|| panic!("registry names unknown command {id}"));
+        for f in formats::FORMATS {
+            if let Some(import) = &f.import {
+                for o in import.options {
+                    for id in ["doc.open", if import.target == formats::ImportTarget::Mesh { "file.insert_mesh" } else { "file.insert_step" }] {
+                        assert!(params_of(id).contains(o.param), "{}: `{}` is not a documented parameter of {id}", f.id, o.param);
+                    }
+                }
+            }
+            if let Some(export) = &f.export {
+                let params = params_of(export.command);
+                if let Some(format) = export.format {
+                    assert!(params.contains(format), "{}: `{format}` is not a documented format of {}", f.id, export.command);
+                }
+                for o in export.options {
+                    assert!(params.contains(o.param), "{}: `{}` is not a documented parameter of {}", f.id, o.param, export.command);
+                }
+            }
+        }
+        for o in formats::DESIGN_SAVE_OPTIONS {
+            assert!(params_of("file.save_as").contains(o.param), "`{}` is not a documented parameter of file.save_as", o.param);
+        }
     }
 }

@@ -123,6 +123,7 @@ pub(super) fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
                 ui_kit::checkbox(left, crate::i18n::tr_label("Grid"), &mut app.ui.show_grid);
                 ui_kit::checkbox(left, crate::i18n::tr_label("Perspective view"), &mut app.ui.perspective);
                 setting::show_frame_rate(app, left).on_hover_text(app.tr("settings.frame_rate_note"));
+                setting::reference_geometry_through_bodies(app, left).on_hover_text(app.tr("settings.reference_geometry_through_bodies_help"));
             }
             if let Some(right) = columns.get_mut(1) {
                 ui_kit::checkbox(right, crate::i18n::tr_label("Ground shadow"), &mut app.ui.ground_shadow);
