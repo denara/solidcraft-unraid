@@ -73,6 +73,48 @@ final checks. No Unraid installation or nginx/DNS change is performed.
 A pre-push fetch observed four later upstream commits through `8b65d41b`; they are
 deferred to the next fixed-snapshot update. The validated target remains `807e367b`.
 
+Publication passed [container workflow 40077973605](https://github.com/denara/solidcraft-unraid/actions/runs/40077973605)
+from validated merge/source `e17621c17700073031573087203449b3a0de3134`. The fresh CI image passed real
+MCP modelling/PNG/STEP, authentication/origin/path checks, independent sessions,
+restart persistence, Workspace revisions/push/native handoffs, project binding,
+read-only observation, deletion/ZIP streaming, remembered-login restarts and
+operational logging/privacy before registry publication. Public Linux amd64 tags:
+`ghcr.io/denara/solidcraft-unraid:latest` and immutable
+`sha-e17621c17700073031573087203449b3a0de3134`. Anonymous pulls using an empty client configuration and
+an anonymous registry manifest verify source labels, architecture and equal image
+identities. Registry digest:
+`sha256:8fefc9275b5d666360c7c1fd3407e65f9472ffd319bc6c8d7f5dd7ddd7896aee`.
+
+Archive: `target/solidcraft-unraid-upstream-807e367b-e17621c1.tar`, 164232192 bytes,
+tagged `solvecraft-unraid:upstream-807e367b-e17621c1`.
+SHA256: `47ce6ad46858719e0807b8a17394f3ae895e368425f29d7c06fc03224b073032`.
+
+A private data/configuration backup passed archive integrity checks before the
+local development runtime was refreshed to the immutable public image. Health,
+authenticated SDK modelling/PNG, read-only reopening of the known public 24000 mm3
+fixture with unchanged bytes, browser-cookie login/logout, metadata, push and web
+assets pass. Data volume, MCP token, origins, ports, identity and resource/security
+limits remain unchanged. The sole remaining local test container
+`solvecraft-solvecraft-1` is healthy at 0.21.0, `http://localhost:8781/`.
+The previous 0.20.0 image is retained as
+`solvecraft-unraid:rollback-before-upstream-807e367b-20261024`.
+Four inactive build/check containers and the unused candidate were removed after
+label/image/workspace-mount/activity checks and diagnostic preservation. All
+volumes, reusable build/toolchain images, caches, private backups and the rollback
+image remain. No global prune was used.
+
+After image publication, catalog main `98f194ce87ad4dcab8892a6a51d8bd5b40744050` synchronized the
+original canonical app icon and updated its provenance. The canonical XML is
+unchanged; profile, license and other metadata are preserved. No new CA submission
+or agreement was needed. The final upstream fetch still points to `8b65d41b`, four
+commits after this fixed snapshot; these remain for the next validated update.
+
+To install on Unraid, save active work, back up server files and independent
+browser designs, update the existing container while retaining its data/token/
+settings and reload the browser. Keep pre-update files for rollback: the previous
+build cannot open newly saved format-35 designs. This task did not install on
+Unraid or change nginx/DNS.
+
 ## 2026-10-23: upstream 0.20.0 with preserved observer and browser isolation
 
 Selected exactly one upstream snapshot, `edf57cec293dcea301201f1d5173b33e16351466`,
