@@ -103,6 +103,7 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
                 Some(f) if matches!(f.kind, FeatureKind::ConstructionAxis { .. }) => features.push(f.id),
                 _ => skip("the origin axes can't be deleted".into()),
             },
+            Sel::SketchMidpoint { .. } => skip("a midpoint belongs to its sketch edge".into()),
             Sel::Body { name } => bodies.push(name.clone()),
             Sel::Face { body, point, .. } => match faces.iter_mut().find(|(b, _)| b == body) {
                 Some((_, ps)) => ps.push(*point),

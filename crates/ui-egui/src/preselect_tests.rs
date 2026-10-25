@@ -270,7 +270,7 @@ fn path_plane_click_retains_source_and_previews_then_edits_in_place() {
     let duplicate = h.app.run("sketch.line3d", json!({"points":[[-30,0,0],[-20,0,0]]})).unwrap()["curves"][0].as_str().unwrap().to_string();
     assert_eq!(wire, duplicate, "exercise duplicate curve ids in different sketches");
     h.app.run("sketch.finish", json!({})).unwrap();
-    h.app.ui.show_origin = false;
+    h.app.set_origin_shown(false);
     h.settle();
     h.call("ui.view", json!({"view":"home"}));
     h.call("ui.view", json!({"view":"fit"}));
@@ -737,6 +737,56 @@ fn face_then_extrude_press_pulls_it() {
     let d = start(&mut app, vec![top], "solid.extrude");
     let cmds = apply_commands(&app, &d).unwrap();
     assert!(cmds[0].1.get("face").is_some());
+}
+
+/// Press Pull on a hole's wall offsets it, rather than refusing it as Extrude does (#2873).
+#[test]
+fn curved_face_then_press_pull_offsets_it() {
+    let mut app = app_with(json!([
+        {"command": "solid.box", "params": {"length": 40, "width": 30, "height": 20}},
+        {"command": "solid.cylinder", "params": {"radius": 5, "height": 20, "base": [20, 15, 0], "operation": "cut"}}
+    ]));
+    let st = app.session.model.state();
+    let wall = st.body("Body1").unwrap().body.faces(0.01).unwrap().into_iter().find(|f| f.plane_normal.is_none()).unwrap().index;
+    drop(st);
+    let d = start(&mut app, vec![Sel::Face { body: "Body1".into(), index: wall, point: Vec3::new(25.0, 15.0, 10.0) }], "solid.press_pull");
+    assert!(matches!(d.kind, Kind::OffsetFaces { .. }));
+    let cmds = apply_commands(&app, &d).unwrap();
+    assert_eq!(cmds[0].0, "solid.offset_face");
+}
+
+/// Press Pull with nothing selected: a click on a hole's wall reopens it as Offset Face, a click
+/// on the top keeps the extrude (#2873).
+#[test]
+fn press_pull_then_curved_face_offsets_it() {
+    let script = json!([
+        {"command": "solid.box", "params": {"length": 40, "width": 30, "height": 20}},
+        {"command": "solid.cylinder", "params": {"radius": 5, "height": 20, "base": [20, 15, 0], "operation": "cut"}}
+    ]);
+    let mut app = app_with(script.clone());
+    let st = app.session.model.state();
+    let wall = st.body("Body1").unwrap().body.faces(0.01).unwrap().into_iter().find(|f| f.plane_normal.is_none()).unwrap().index;
+    drop(st);
+    app.start("solid.press_pull");
+    assert!(matches!(app.dialog.as_ref().unwrap().kind, Kind::Extrude { .. }));
+    let p = Vec3::new(25.0, 15.0, 10.0);
+    let hit = crate::viewport::Hit::Face { body: "Body1".into(), index: wall, point: p };
+    crate::viewport::dialog_pick(&mut app, &hit, Sel::Face { body: "Body1".into(), index: wall, point: p });
+    let d = app.dialog.clone().unwrap();
+    assert!(matches!(d.kind, Kind::OffsetFaces { .. }));
+    // Both halves of the hole's wall.
+    assert_eq!(d.inputs[0].items.len(), 2);
+
+    let mut app = app_with(script);
+    app.start("solid.press_pull");
+    let top = face(&app, Vec3::new(20.0, 15.0, 20.0));
+    let hit = crate::viewport::Hit::Face {
+        body: "Body1".into(),
+        index: if let Sel::Face { index, .. } = &top { *index } else { 0 },
+        point: Vec3::new(5.0, 5.0, 20.0),
+    };
+    crate::viewport::dialog_pick(&mut app, &hit, top);
+    assert!(matches!(app.dialog.as_ref().unwrap().kind, Kind::Extrude { .. }));
 }
 
 #[test]
@@ -2316,4 +2366,28 @@ fn combine_takes_bodies_clicked_in_the_browser_in(layout: &str, control: bool) {
     let d = h.app.dialog.as_ref().expect("Combine stays open");
     assert_eq!(d.inputs[0].items, vec![Sel::Body { name: "Block".into() }], "{layout} control={control} target: {:?}", d.inputs);
     assert_eq!(d.inputs[1].items, vec![Sel::Body { name: "Cutter".into() }], "{layout} control={control} tools: {:?}", d.inputs);
+}
+
+/// The model's box (what every `projection` reads for the scene's depth) is kept per world state,
+/// so a design with hundreds of sketches no longer samples them all again each frame, and it still
+/// follows the model: a sketch added far away grows it.
+#[test]
+fn model_bounds_are_kept_until_the_model_changes() {
+    let mut app = app_with(json!([
+        {"command": "sketch.create", "params": {"plane": "XY", "name": "Near"}},
+        {"command": "sketch.circle.center", "params": {"center": [0, 0], "radius": 10}},
+        {"command": "sketch.finish", "params": {}},
+    ]));
+    let near = crate::viewport::model_bounds(&app);
+    assert!((near.max.x - 10.0).abs() < 1e-6, "{near:?}");
+    assert_eq!(crate::viewport::model_bounds(&app), near, "the same state gives the same box");
+    for (cmd, p) in [
+        ("sketch.create", json!({"plane": "XY", "name": "Far"})),
+        ("sketch.circle.center", json!({"center": [500, 0], "radius": 5})),
+        ("sketch.finish", json!({})),
+    ] {
+        app.run(cmd, p).unwrap();
+    }
+    let far = crate::viewport::model_bounds(&app);
+    assert!((far.max.x - 505.0).abs() < 1e-6, "a new sketch grows the box: {far:?}");
 }

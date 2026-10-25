@@ -27,6 +27,8 @@ pub struct AddState {
     pub base_url: String,
     pub model: String,
     pub key: String,
+    /// Seconds one model request may take.
+    pub request_timeout_s: u64,
     pub error: Option<String>,
     test: Option<Test>,
 }
@@ -60,6 +62,7 @@ pub fn open_add(app: &mut SolveApp) {
     app.agent_chat.settings.add = Some(AddState {
         base_url: preset.map(|p| p.base_url.to_string()).unwrap_or_default(),
         name: preset.map(|p| p.name.to_string()).unwrap_or_default(),
+        request_timeout_s: agents::DEFAULT_REQUEST_TIMEOUT_S,
         ..Default::default()
     });
 }
@@ -106,6 +109,14 @@ fn start_test(app: &SolveApp, e: &agents::Entry, key: Option<String>) -> Test {
         }
     }
     Test::Running(rx)
+}
+
+/// An endpoint's request timeout field: seconds, 30 s to an hour.
+fn timeout_field(ui: &mut egui::Ui, secs: &mut u64, handle: &str) -> bool {
+    let r = ui_kit::number_field(ui, secs, agents::MIN_REQUEST_TIMEOUT_S..=agents::MAX_REQUEST_TIMEOUT_S, 5.0, " s")
+        .on_hover_text(tr("ui.ai_request_timeout_hint"));
+    crate::scenario::publish_target(handle, r.rect);
+    r.changed()
 }
 
 fn test_line(ui: &mut egui::Ui, test: &Option<&Test>) {
@@ -277,6 +288,7 @@ fn agents_section(app: &mut SolveApp, ui: &mut egui::Ui) {
     let default = if all.iter().any(|e| &e.id == d) { Some(d.clone()) } else { all.first().map(|e| e.id.clone()) };
     let mut remove: Option<String> = None;
     let mut test: Option<agents::Entry> = None;
+    let mut retimed: Option<(String, u64)> = None;
     let t = crate::theme::Tokens::get();
     ui_kit::settings_section(ui, "agents", tr("ui.ai_agents"), |ui| {
         if app.agent_chat.detecting.is_some() {
@@ -329,7 +341,9 @@ fn agents_section(app: &mut SolveApp, ui: &mut egui::Ui) {
                         }
                     });
                     ui_kit::settings_short_note(ui, &entry.detail());
-                    ui_kit::settings_form(ui, t.form_label_width + t.space_16, |ui| {
+                    // Wide enough for an endpoint's "Request timeout" too, so both rows line up.
+                    let label_w = (t.form_label_width + t.space_16).max(ui_kit::ContentWidth::label(ui, tr("ui.ai_request_timeout")) + t.space_16);
+                    ui_kit::settings_form(ui, label_w, |ui| {
                         ui_kit::row(ui, tr("ui.ai_permissions"), |ui| {
                             let current = app.preferences.agent_permissions.get(&entry.id).copied();
                             let shown = current.map_or_else(|| tr("ui.ai_mode_global").to_owned(), |mode| mode.label().to_owned());
@@ -355,6 +369,19 @@ fn agents_section(app: &mut SolveApp, ui: &mut egui::Ui) {
                             }
                         });
                     });
+                    if entry.kind == Kind::Api
+                        && let Some(c) = app.preferences.agents.iter_mut().find(|c| c.id == entry.id)
+                    {
+                        ui_kit::settings_form(ui, label_w, |ui| {
+                            ui_kit::row(ui, tr("ui.ai_request_timeout"), |ui| {
+                                let mut secs = entry.request_timeout_s;
+                                if timeout_field(ui, &mut secs, &format!("prefs:ai_timeout:{}", entry.id)) {
+                                    c.request_timeout_s = secs;
+                                    retimed = Some((entry.id.clone(), secs));
+                                }
+                            });
+                        });
+                    }
                     if app.preferences.agent_permissions.get(&entry.id) == Some(&Mode::All) {
                         ui_kit::text(ui, tr("ai.prefs.override_all_warning"), ui_kit::Text::Report("agent_permissions_warning", true))
                             .on_hover_text(tr("ui.ai_mode_all_warning"));
@@ -378,6 +405,13 @@ fn agents_section(app: &mut SolveApp, ui: &mut egui::Ui) {
         let key = if e.key { app.services.secrets.as_ref().and_then(|s| s.get(&e.id).ok().flatten()) } else { None };
         let started = start_test(app, &e, key);
         app.agent_chat.settings.tests.insert(e.id.clone(), started);
+    }
+    // The running conversation uses a new timeout from its next request on.
+    if let Some((id, secs)) = retimed
+        && app.agent_chat.running_id == id
+        && let Some(b) = app.agent_chat.backend.as_mut()
+    {
+        b.set_request_timeout(secs);
     }
     if let Some(id) = remove {
         app.preferences.agents.retain(|a| a.id != id);
@@ -513,6 +547,9 @@ pub fn dialog(app: &mut SolveApp, ctx: &egui::Context) {
                     ui_kit::row(ui, tr("ui.ai_model"), |ui| {
                         ui_kit::text_field(ui, &mut s.model, tr("ui.ai_model_hint"));
                     });
+                    ui_kit::row(ui, tr("ui.ai_request_timeout"), |ui| {
+                        timeout_field(ui, &mut s.request_timeout_s, "ai_add:request_timeout");
+                    });
                     ui_kit::row(ui, tr("ui.ai_key"), |ui| {
                         ui.add_enabled_ui(has_keychain, |ui| {
                             let r = ui_kit::password_field(ui, egui::Id::new("sc_ai_add_key"), &mut s.key, tr("ui.ai_key_hint"));
@@ -550,6 +587,7 @@ pub fn dialog(app: &mut SolveApp, ctx: &egui::Context) {
                 base_url: url.clone().unwrap_or_default(),
                 model: s.model.trim().to_string(),
                 key: false,
+                request_timeout_s: s.request_timeout_s,
             };
             let key = Some(s.key.trim().to_string()).filter(|k| !k.is_empty());
             let result = match url {
@@ -599,6 +637,7 @@ fn add_agent(app: &mut SolveApp) -> Result<(), String> {
             c.kind = s.protocol.kind();
             c.base_url = agents::normalize_url(&s.base_url)?;
             c.model = s.model.trim().to_string();
+            c.request_timeout_s = s.request_timeout_s.clamp(agents::MIN_REQUEST_TIMEOUT_S, agents::MAX_REQUEST_TIMEOUT_S);
             if c.model.is_empty() {
                 return Err(tr("ui.ai_need_model").to_string());
             }

@@ -37,7 +37,7 @@ const MAX_ITERS: usize = 500;
 /// 128 MB matrix; past that the request grows to gigabytes and an allocation failure aborts the
 /// process, which no panic guard can intercept. A component this size is reported as failed and
 /// its geometry left alone.
-const MAX_COMPONENT_VARS: usize = 4_000;
+pub const MAX_COMPONENT_VARS: usize = 4_000;
 /// Converged when every residual is below this (mm).
 const TOL: f64 = 1e-9;
 /// A solution is accepted when every residual is below this (mm).
@@ -84,6 +84,10 @@ pub struct SolveReport {
     /// analysis, and only for components of at most a few hundred variables.
     #[serde(default)]
     pub redundant: Vec<String>,
+    /// The unknowns of the largest connected group too large to solve ([`MAX_COMPONENT_VARS`]):
+    /// the solve fails without a conflicting constraint to name (#5280).
+    #[serde(default)]
+    pub oversized: Option<usize>,
 }
 
 impl SolveReport {
@@ -100,6 +104,11 @@ impl SolveReport {
     /// Why a solve failed or turned over: the constraints whose orientation the edit flips,
     /// or else `conflict` of the constraints still violated (listed, comma-separated).
     pub fn failure(&self, conflict: impl FnOnce(&str) -> String) -> String {
+        if let Some(n) = self.oversized {
+            return format!(
+                "the sketch joins {n} unknowns (point coordinates and radii) in one connected group, more than the {MAX_COMPONENT_VARS} the solver takes at once; a pattern joins all its copies: make fewer copies, or split them over several patterns or sketches"
+            );
+        }
         if self.folded.is_empty() {
             conflict(&self.failing.join(", "))
         } else {
@@ -969,6 +978,26 @@ fn lm(sk: &Sketch, lay: &Layout, blocks: &[(Block, Vec<usize>)], vars: &[usize],
     lm_capped(sk, lay, blocks, vars, x, col, MAX_ITERS)
 }
 
+/// [`lm`], counting its work against a live drag frame's numerical allowance when `budget` has
+/// one ([`Budget::frame`]). The solve itself runs as it would without it.
+fn lm_in(
+    sk: &Sketch,
+    lay: &Layout,
+    blocks: &[(Block, Vec<usize>)],
+    vars: &[usize],
+    x: &mut Vec<f64>,
+    col: &[usize],
+    budget: &mut Budget,
+) -> (usize, f64) {
+    if !budget.counts_numeric() {
+        return lm(sk, lay, blocks, vars, x, col);
+    }
+    let mut meter = Budget::new(usize::MAX);
+    let out = lm_capped_with_budget(sk, lay, blocks, vars, x, col, MAX_ITERS, Some(&mut meter)).unwrap_or((0, f64::INFINITY));
+    budget.charge_numeric(meter.spent());
+    out
+}
+
 /// [`lm`] with at most `max_iters` iterations.
 fn lm_capped(
     sk: &Sketch,
@@ -1461,6 +1490,165 @@ pub fn solve_after_edit_with_analysis(sk: &mut Sketch, old: &DrivingValues, stor
     solve_from(sk, &Hold::default(), stored, analysis, Some(&old_values), &mut Budget::full())
 }
 
+/// The orientations of `stored` that `solved` (the same sketch, its links moved and solved
+/// again) turned over, by constraint id: the sides of unsigned offsets and the turns of
+/// distance triangles, each read where `stored` has its points and where `solved` has them.
+/// A solve after its links moved checks none of these when no value changed, so a jump can
+/// land on the mirror image of a part of the sketch and still report it solved. Empty when the
+/// two sketches are not the same entities (a link was rebuilt).
+pub fn flips_from_stored(solved: &Sketch, stored: &Sketch) -> Vec<String> {
+    let aligned = solved.points.len() == stored.points.len()
+        && solved.curves.len() == stored.curves.len()
+        && solved.constraints.len() == stored.constraints.len()
+        && solved.points.iter().zip(&stored.points).all(|(p, q)| p.id == q.id)
+        && solved.constraints.iter().zip(&stored.constraints).all(|(c, d)| c.id == d.id);
+    if !aligned {
+        return Vec::new();
+    }
+    let hold = Hold::default();
+    let (lay_before, lay_now) = (layout(stored, &hold), layout(solved, &hold));
+    let (x_before, x_now) = (initial_x(stored, &lay_before), initial_x(solved, &lay_now));
+    let before = State { sk: stored, lay: &lay_before, x: &x_before };
+    let now = State { sk: solved, lay: &lay_now, x: &x_now };
+    let (blocks, _) = build_blocks(stored, &lay_before, &points_on_curves(stored));
+    let mut out: Vec<String> = Vec::new();
+    for (o, cs) in orients(&before, &blocks) {
+        if reference_orientation(&before, o).zip(orientation(&now, o)).is_some_and(|(b, n)| b != n) {
+            for ci in cs {
+                if let Some(c) = stored.constraints.get(ci)
+                    && !out.contains(&c.id)
+                {
+                    out.push(c.id.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The finest steps a link move is split into: a walk that needs smaller ones gives up.
+const LINK_STEPS: usize = 4096;
+/// The walk's first step (in [`LINK_STEPS`]), small enough to stay on the stored solution's
+/// branch; the secant of it predicts the next.
+const LINK_FIRST_STEP: usize = 4;
+/// Most solves one [`solve_after_link_move`] may spend.
+const LINK_STEP_SOLVES: usize = 400;
+
+/// [`solve_after_edit`] for a sketch whose linked (or fixed) points moved far from where
+/// `stored` has them, when that solve fails or turns the sketch over (also as
+/// [`flips_from_stored`] tells): one jump can take a
+/// sketch of many constraints to a solution it cannot reach (the iteration fails) or to
+/// another one (a dimension's side flips), although the sketch solves where the links are now
+/// when it is drawn there. The changed values are solved first with the links where they were
+/// stored; then the moved points are walked from there to where they are now, in steps that
+/// halve where a step fails or turns a constraint over and grow again where they solve, each
+/// solved from the last two solutions carried on along their secant. `sk` is the stored sketch with its links refreshed and
+/// its new values applied (what [`solve_after_edit`] takes), `old` the values `stored` is
+/// solved for. `None` (and `sk` left as it was) when nothing moved, the point lists differ (a
+/// link was rebuilt), or the walk does not reach the end.
+pub fn solve_after_link_move(sk: &mut Sketch, stored: &Sketch, old: &DrivingValues, analysis: Analysis) -> Option<SolveReport> {
+    let aligned = sk.points.len() == stored.points.len() && sk.points.iter().zip(&stored.points).all(|(p, q)| p.id == q.id);
+    if !aligned || sk.curves.len() != stored.curves.len() {
+        return None;
+    }
+    let to: Vec<Vec2> = sk.points.iter().map(|p| p.pos).collect();
+    let from: Vec<Vec2> = stored.points.iter().map(|p| p.pos).collect();
+    let moving: Vec<usize> =
+        sk.points.iter().enumerate().filter(|(i, p)| (p.fixed || p.link.is_some()) && from.get(*i) != to.get(*i)).map(|(i, _)| i).collect();
+    // Linked circles keep their radius as a constant: it is walked with the points.
+    let radius = |c: &crate::model::Curve| match c.kind {
+        CurveKind::Circle { r, .. } | CurveKind::Ellipse { r, .. } if c.link.is_some() => Some(r),
+        _ => None,
+    };
+    let radii: Vec<(usize, f64, f64)> = sk
+        .curves
+        .iter()
+        .zip(&stored.curves)
+        .enumerate()
+        .filter_map(|(i, (c, s))| Some((i, radius(s)?, radius(c)?)))
+        .filter(|(_, a, b)| a != b)
+        .collect();
+    if moving.is_empty() && radii.is_empty() {
+        return None;
+    }
+    let target = sk.clone();
+    // The walk's sketch at `t` of the way: the moved points there, every other point where the
+    // last solved step left it.
+    let at = |t: f64, solved: &[Vec2]| -> Sketch {
+        let mut step = target.clone();
+        for (p, s) in step.points.iter_mut().zip(solved) {
+            p.pos = *s;
+        }
+        for &i in &moving {
+            if let (Some(p), Some(a), Some(b)) = (step.points.get_mut(i), from.get(i), to.get(i)) {
+                p.pos = *a + (*b - *a) * t;
+            }
+        }
+        for &(i, a, b) in &radii {
+            if let Some(crate::model::Curve { kind: CurveKind::Circle { r, .. } | CurveKind::Ellipse { r, .. }, .. }) = step.curves.get_mut(i) {
+                *r = a + (b - a) * t;
+            }
+        }
+        step
+    };
+    // The new values where the links were stored (a value edit, continued as `solve_after_edit` does).
+    let mut first = at(0.0, &from);
+    if !solve_after_edit_with_analysis(&mut first, old, None, Analysis::StatusOnly).keeps_orientation() {
+        return None;
+    }
+    let mut solved: Vec<Vec2> = first.points.iter().map(|p| p.pos).collect();
+    let values = target.driving_values();
+    // Predictor and corrector: each step starts from the last two solutions carried on along
+    // their secant (a tangent to a moving circle moves with it instead of hopping to the
+    // circle's other side) and is solved from there. A tiny first step gives the secant; a
+    // step grows while it solves, and stays below one that failed (a failed solve costs the
+    // iteration's whole budget) until a run of solved steps lets it grow again.
+    let mut prev: Option<(usize, Vec<Vec2>)> = None;
+    let (mut t, mut h, mut cap, mut run, mut spent) = (0usize, LINK_FIRST_STEP, LINK_STEPS, 0usize, 0usize);
+    while t < LINK_STEPS {
+        if spent >= LINK_STEP_SOLVES {
+            return None;
+        }
+        spent += 1;
+        let next = (t + h).min(LINK_STEPS);
+        let start: Vec<Vec2> = match &prev {
+            Some((tp, pp)) if *tp < t => {
+                let k = (next - t) as f64 / (t - tp) as f64;
+                solved.iter().zip(pp).map(|(s, p)| *s + (*s - *p) * k).collect()
+            }
+            _ => solved.clone(),
+        };
+        let mut step = at(next as f64 / LINK_STEPS as f64, &start);
+        let last = at(t as f64 / LINK_STEPS as f64, &solved);
+        let before = step.positions_in(&last);
+        if solve_after_edit_with_analysis(&mut step, &values, before.as_deref(), Analysis::StatusOnly).keeps_orientation()
+            && flips_from_stored(&step, &last).is_empty()
+        {
+            prev = Some((t, std::mem::replace(&mut solved, step.points.iter().map(|p| p.pos).collect())));
+            t = next;
+            run += 1;
+            if run >= 3 {
+                (cap, run) = ((2 * cap).min(LINK_STEPS), 0);
+            }
+            h = (2 * h).min(cap).max(1);
+        } else if h > 1 {
+            (cap, run) = ((h / 2).max(1), 0);
+            h /= 2;
+        } else {
+            return None;
+        }
+    }
+    let mut done = target;
+    for (p, s) in done.points.iter_mut().zip(&solved) {
+        p.pos = *s;
+    }
+    let report = solve_with(&mut done, &Hold::default(), Some(&solved), analysis, None);
+    (report.keeps_orientation() && flips_from_stored(&done, stored).is_empty()).then(|| {
+        *sk = done;
+        report
+    })
+}
+
 impl Sketch {
     /// Each dimension's driving value by constraint id, as [`solve_after_value_edit`] takes
     /// them.
@@ -1834,6 +2022,16 @@ fn orients(s: &State, sub: &[(Block, Vec<usize>)]) -> Vec<(Orient, Vec<usize>)> 
                     out.push((Orient::OfLine(*centre, l, value + s.round(c).1), vec![*ci]));
                 }
             }
+            // A line tangent to a circle away from both their ends: the circle stays on its side
+            // (the other tangent of that direction is a diameter away).
+            ConstraintKind::Tangent { a, b } => {
+                let (l, c) = if s.is_line(a) { (a, b) } else { (b, a) };
+                if s.is_line(l)
+                    && let Some(CurveKind::Circle { c: centre, .. } | CurveKind::Arc { c: centre, .. }) = s.sk.curves.get(c).map(|x| &x.kind)
+                {
+                    out.push((Orient::OfLine(*centre, l, s.round(c).1), vec![*ci]));
+                }
+            }
             _ => {}
         }
     }
@@ -2097,7 +2295,7 @@ fn solve_inner(
                     let rest = unpinned(vars, &pin, None);
                     let rest_blocks = blocks_reading(&sub, &rest);
                     columns(&mut col, &rest, vars);
-                    let (its, r) = if rest.is_empty() { (0, 0.0) } else { lm(sk, &lay, &rest_blocks, &rest, &mut x, &col) };
+                    let (its, r) = if rest.is_empty() { (0, 0.0) } else { lm_in(sk, &lay, &rest_blocks, &rest, &mut x, &col, budget) };
                     iterations += its;
                     residual = r;
                     solved = residual < ACCEPT;
@@ -2121,7 +2319,7 @@ fn solve_inner(
             // the seed did not move it.
             let reseeded = unseeded.as_ref().filter(|plain| vars.iter().any(|v| plain.get(*v).is_some_and(Option::is_some)));
             if !(solved || pinned_failed && reseeded.is_some()) {
-                let (its, r) = lm(sk, &lay, &sub, vars, &mut x, &col);
+                let (its, r) = lm_in(sk, &lay, &sub, vars, &mut x, &col, budget);
                 iterations += its;
                 residual = r;
             }
@@ -2135,7 +2333,7 @@ fn solve_inner(
                         *s = plain.get(v).copied().flatten().unwrap_or(*s0);
                     }
                 }
-                let (its, r) = lm(sk, &lay, &sub, vars, &mut x, &col);
+                let (its, r) = lm_in(sk, &lay, &sub, vars, &mut x, &col, budget);
                 iterations += its;
                 residual = r;
             }
@@ -2166,7 +2364,7 @@ fn solve_inner(
                 iterations += its;
                 if !done {
                     // The last sub-step's solution, solved for the new values in one jump.
-                    let (its, r) = lm(sk, &lay, &sub, vars, &mut from, &col);
+                    let (its, r) = lm_in(sk, &lay, &sub, vars, &mut from, &col, budget);
                     iterations += its;
                     done = edit.holds(r, &State { sk, lay: &lay, x: &from });
                 }
@@ -2198,7 +2396,8 @@ fn solve_inner(
     let mut rank = 0;
     let mut redundant: Vec<String> = Vec::new();
     // A component too large to solve is a failure, not an allocation.
-    if comps.iter().any(|(_, vars, bis)| !bis.is_empty() && oversized(vars)) {
+    let too_large = comps.iter().filter(|(_, vars, bis)| !bis.is_empty() && oversized(vars)).map(|(_, vars, _)| vars.len()).max();
+    if too_large.is_some() {
         max_residual = f64::MAX;
     }
     let mut check = |r: &[f64], owner: &[usize], blocks: &[(Block, Vec<usize>)], failing: &mut Vec<String>| {
@@ -2389,6 +2588,7 @@ fn solve_inner(
         point_determined,
         curve_determined,
         redundant,
+        oversized: too_large,
     }
 }
 

@@ -2,6 +2,38 @@
 use super::*;
 use crate::scenario::{self, Harness};
 
+#[test]
+fn measure_input_fits_external_sketch_geometry() {
+    let mut h = Harness::new();
+    let curve = Sel::ExternalSketchCurve { sketch: 17, id: "line1".into() };
+    let point = Sel::ExternalSketchPoint { sketch: 17, id: "p1".into() };
+    h.app.session.selection = vec![curve.clone(), point.clone()];
+    let mut d = Dialog::for_command(&h.app, "inspect.measure").unwrap();
+    let accept = d.inputs.first().unwrap().accept;
+    assert!(fits(accept, &curve));
+    assert!(fits(accept, &point));
+    assert_eq!(d.items(), vec![curve.clone(), point.clone()]);
+    assert_eq!(d.candidate(&h.app.session, &Hit::SketchCurve { sketch: 17, id: "line1".into(), straight: true }), Some(curve.clone()));
+    assert_eq!(
+        d.candidate(&h.app.session, &Hit::SketchPoint { sketch: 17, id: "p1".into(), at: solidcraft_engine::geom::Vec2::new(0.0, 0.0) }),
+        Some(point.clone())
+    );
+    d.take_box(&h.app.session, vec![curve.clone(), point.clone()], false);
+    assert_eq!(d.items(), vec![curve, point]);
+}
+
+#[test]
+fn feature_inputs_reject_external_sketch_geometry() {
+    let h = Harness::new();
+    for (command, sel) in [
+        ("solid.pipe", Sel::ExternalSketchCurve { sketch: 17, id: "line1".into() }),
+        ("solid.hole", Sel::ExternalSketchPoint { sketch: 17, id: "p1".into() }),
+    ] {
+        let d = Dialog::for_command(&h.app, command).unwrap();
+        assert!(!fits(d.inputs.first().unwrap().accept, &sel), "{command}");
+    }
+}
+
 fn fixture() -> Harness {
     let mut h = Harness::new();
     for (name, x) in [("A", 0), ("B", 30), ("C", 60), ("D", 90)] {
@@ -34,6 +66,9 @@ fn representative(h: &Harness, command: &str) -> Dialog {
         if command == "joint.gear" {
             continue;
         }
+        if command == "solid.coil" {
+            continue; // an empty Profile input keeps the primitive section, which this form checks
+        }
         if matches!(input.label, "Rail" | "Second Rail" | "Pass through" | "Direction" | "Roller (optional)" | "Tip (optional)") {
             continue;
         }
@@ -60,7 +95,9 @@ fn representative(h: &Harness, command: &str) -> Dialog {
         } else if input.accept & CURVES != 0 || command == "sheet.fold" && index == 0 {
             vec![Sel::SketchCurve { id: path.clone() }]
         } else if input.accept & AXES != 0 {
-            vec![Sel::Axis { name: "Z".into() }]
+            // The Revolve fixture's profile is in XY; its preview needs an axis in that plane.
+            let axis = if command == "solid.revolve" { "Y" } else { "Z" };
+            vec![Sel::Axis { name: axis.into() }]
         } else if input.accept & (FACES | PLANAR_FACES) != 0 {
             vec![face_sel(s, point).unwrap()]
         } else if input.accept & EDGES != 0 {
@@ -214,6 +251,60 @@ form_case!(revolve, "solid.revolve", ["Angle", "Direction", "Type"]);
 form_case!(shell, "solid.shell", ["Thickness", "Direction"]);
 form_case!(draft, "solid.draft", ["Angle"]);
 form_case!(mirror, "solid.mirror", ["Operation"]);
+
+fn mirror_preselection() -> (Harness, Vec<Sel>) {
+    let mut h = Harness::new();
+    h.app.run("sketch.create", json!({"plane":"XY","name":"Sketch1"})).unwrap();
+    h.app.run("sketch.rectangle.two_point", json!({"p0":[2,2],"p1":[6,6]})).unwrap();
+    h.app.run("sketch.finish", json!({})).unwrap();
+    h.app.run("solid.extrude", json!({"sketch":"Sketch1","distance":5})).unwrap();
+    let id = h.app.session.doc.features.iter().find(|f| f.name == "Extrude1").unwrap().id;
+    let picked = vec![Sel::Feature { id }];
+    h.app.session.selection = picked.clone();
+    h.app.start("solid.mirror");
+    h.frames(4);
+    assert_eq!(h.app.dialog.as_ref().unwrap().inputs[0].items, picked);
+    (h, picked)
+}
+
+fn mirror_object_type(h: &mut Harness, choice: &str) {
+    h.step(&json!({"click":{"handle":"dialog:Object Type"}})).unwrap();
+    h.step(&json!({"click":{"handle":format!("dialog:Object Type:{choice}")}})).unwrap();
+}
+
+#[test]
+fn mirror_object_type_switch_back_restores_preselected_feature() {
+    let (mut h, picked) = mirror_preselection();
+    mirror_object_type(&mut h, "Bodies");
+    assert!(h.app.dialog.as_ref().unwrap().inputs[0].items.is_empty());
+    mirror_object_type(&mut h, "Features");
+    let d = h.app.dialog.as_mut().unwrap();
+    assert_eq!(d.inputs[0].items, picked);
+    d.inputs[1].items = vec![Sel::Plane { name: "YZ".into() }];
+    let commands = apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap();
+    assert_eq!(commands[0].1["features"], json!(["Extrude1"]));
+    for (command, params) in commands {
+        h.app.run(&command, params).unwrap();
+    }
+    assert_eq!(h.app.session.world_state().bodies.len(), 2);
+}
+
+#[test]
+fn mirror_timeline_click_keeps_picked_feature() {
+    let (mut h, picked) = mirror_preselection();
+    // Mirror moves on to the plane; the objects input takes timeline clicks once it is active.
+    h.step(&json!({"click":{"handle":"dialog:Features"}})).unwrap();
+    assert_eq!(h.app.dialog.as_ref().unwrap().active, 0);
+    h.step(&json!({"click":{"handle":"timeline:Extrude1"}})).unwrap();
+    assert_eq!(h.app.dialog.as_ref().unwrap().inputs[0].items, picked);
+    // Wait out the double-click time: a double click opens the feature to edit.
+    h.frames(30);
+    h.step(&json!({"click":{"handle":"timeline:Extrude1"},"ctrl":true})).unwrap();
+    let d = h.app.dialog.as_ref().unwrap();
+    assert!(matches!(d.kind, Kind::Mirror));
+    assert!(d.inputs[0].items.is_empty());
+}
+
 form_case!(loft, "solid.loft", ["Operation"]);
 form_case!(sweep, "solid.sweep", ["Orientation"]);
 form_case!(offset_plane, "construct.plane.offset", ["Distance"]);
@@ -291,6 +382,20 @@ fn registry_dialog_inventory_has_no_unclassified_feature_forms() {
         let Some(d) = Dialog::for_command(&h.app, spec.id) else { continue };
         assert!(super::command(&d.kind).is_some(), "{}: {:?}", spec.id, d.kind);
     }
+}
+
+#[test]
+fn revolve_layout_fixture_builds_a_valid_solid() {
+    let mut h = fixture();
+    let d = representative(&h, "solid.revolve");
+    let before = h.app.session.model.results.len();
+    let commands = crate::dialogs::preview_commands(&h.app, &d).unwrap();
+    assert!(!commands.is_empty());
+    for (command, params) in commands {
+        h.app.run(&command, params).unwrap();
+    }
+    assert!(h.app.session.model.results.len() > before);
+    assert!(h.app.session.model.results.iter().all(|result| result.error.is_none()));
 }
 
 #[test]
@@ -453,4 +558,21 @@ fn solid_pattern_quantity_arrows_step_the_count_the_command_receives() {
         h.step(&json!({"click":{"handle":"dialog:cancel"}})).unwrap();
         h.settle();
     }
+}
+
+#[test]
+fn coil_from_a_profile_hides_the_primitive_section() {
+    let h = fixture();
+    let mut d = Dialog::for_command(&h.app, "solid.coil").unwrap();
+    let sketch = h.app.session.world_state().sketches[0].feature;
+    d.inputs[0].items = vec![Sel::Profile { sketch, index: 0 }];
+    let commands = apply_commands(&h.app, &d).unwrap();
+    let (id, p) = &commands[0];
+    assert_eq!(id, "solid.coil");
+    assert_eq!(p["sketch"], json!(sketch));
+    assert_eq!(p["profiles"], json!([0]));
+    assert!(p.get("diameter").is_none(), "{p}");
+    assert!(p.get("section_size").is_none(), "{p}");
+    assert!(p.get("revolutions").is_some() && p.get("pitch").is_some(), "{p}");
+    assert!(p.get("operation").is_some(), "{p}");
 }

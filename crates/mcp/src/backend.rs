@@ -268,8 +268,9 @@ impl Remote {
         }
         let mut msg = json!({"id": id, "method": method, "params": params});
         // The token goes with every request (an app restarted mid-session has a new one).
-        if let Some(t) = solidcraft_engine::control_auth::client_token(self.port, self.explicit_token.as_deref()) {
-            msg["token"] = json!(t);
+        let token = solidcraft_engine::control_auth::client_token(self.port, self.explicit_token.as_deref());
+        if let Some(t) = &token {
+            msg["token"] = json!(t.token);
         }
         msg.to_string()
     }
@@ -423,7 +424,11 @@ impl Remote {
             self.settle_earlier()?;
             return self.call_once(method, params, false);
         }
-        outcome(&v)
+        // A refused token: say which token file it came from (and whether it is stale).
+        outcome(&v).map_err(|error| {
+            solidcraft_engine::control_auth::client_token(self.port, self.explicit_token.as_deref())
+                .map_or_else(|| error.clone(), |t| t.explain_error(&error))
+        })
     }
 }
 

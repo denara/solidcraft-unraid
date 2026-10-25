@@ -38,7 +38,7 @@ pub fn diagnostics(app: &SolveApp) -> String {
     )
 }
 
-/// Run a Help menu item: `docs`, `about`, `shortcuts`, `messages`, `report`, `crashes`.
+/// Run a Help menu item: `docs`, `about`, `shortcuts`, `messages`, `report`, `crashes`, `install_cli` (macOS).
 pub fn run(app: &mut SolveApp, ctx: &egui::Context, item: &str) {
     app.help.menu = false;
     match item {
@@ -49,6 +49,10 @@ pub fn run(app: &mut SolveApp, ctx: &egui::Context, item: &str) {
             app.keymap.read_only = true;
         }
         "crashes" => crate::crash_ui::open(app),
+        "install_cli" => {
+            let (msg, error) = crate::cli_link::install_from_menu();
+            app.set_status(msg, error);
+        }
         "messages" => app.messages.open = true,
         "report" => {
             let dialog = app.dialog.clone();
@@ -77,7 +81,11 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context, anchor: egui::Pos2) {
                         ("messages", "Messages…", "list"),
                         ("report", "Report an Issue…", "bug_report"),
                         ("crashes", "Crash Reports…", "status_error"),
-                    ] {
+                        ("install_cli", "Install solidcraft-cli command", "settings"),
+                    ]
+                    .into_iter()
+                    .filter(|(id, ..)| *id != "install_cli" || cfg!(target_os = "macos"))
+                    {
                         if crate::context_menu::list_row(ui, &crate::context_menu::Item::action(id, label, icon)).is_some() {
                             pick = Some(id);
                         }

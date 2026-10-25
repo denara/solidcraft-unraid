@@ -101,7 +101,7 @@ fn assistant(h: &mut Harness, requested: &mut BTreeMap<String, bool>) {
     use solidcraft_ui_egui::agent_chat::{Item, backend::ToolStatus};
     h.call("ui.agent_chat", json!({"features":true,"open":true,"picker":false,"width":440}));
     h.app.agent_chat.items = vec![
-        Item::User { text: "Round the plate edges".into(), image: false, pictures: vec![], files: vec![] },
+        Item::User { text: "Round the plate edges".into(), image: false, pictures: vec![], context: Default::default(), files: vec![] },
         Item::Tool {
             id: "audit".into(),
             title: "solid.fillet".into(),

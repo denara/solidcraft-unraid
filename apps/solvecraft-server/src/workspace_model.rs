@@ -92,6 +92,7 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
             "component.insert_design" | "component.relink" | "component.update_links" | "component.replace_with_link" => {
                 out.push(FileOperation::ReadSources)
             }
+            "render.hdr.inspect" | "render.settings.capture_hdr" | "render.preflight" | "render.start" => out.push(FileOperation::ReadSources),
             "doc.open" => {
                 if let Some(path) = name(root, args)? {
                     *current = (!imports_as_new(&path)).then(|| path.clone());
@@ -349,7 +350,16 @@ mod tests {
         let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
         std::fs::create_dir(&root).unwrap();
         std::fs::write(root.join("source.solidcraft"), b"public fixture").unwrap();
-        for command in ["component.insert_design", "component.relink", "component.update_links"] {
+        for command in [
+            "component.insert_design",
+            "component.relink",
+            "component.update_links",
+            "component.replace_with_link",
+            "render.hdr.inspect",
+            "render.settings.capture_hdr",
+            "render.preflight",
+            "render.start",
+        ] {
             let call = json!({"params":{"name":"execute","arguments":{"command":command,"params":{"path":root.join("source.solidcraft")}}}});
             assert_eq!(operations(&root, &call, None).unwrap(), vec![FileOperation::ReadSources]);
         }

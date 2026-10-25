@@ -46,7 +46,7 @@ use std::sync::mpsc::Sender;
 use serde_json::{Value, json};
 use solidcraft_engine::io::vfs;
 use solidcraft_engine::render::StandardView;
-use solidcraft_engine::timing;
+use solidcraft_engine::{batch_params, timing};
 
 use crate::SolveApp;
 
@@ -85,6 +85,24 @@ fn wrap(r: Result<Value, String>) -> Outcome {
     }
 }
 
+/// The design's own Sketches folder (`Visibility::hidden_folders`), which `showSketches` sets.
+const SKETCHES_FOLDER: &str = "c0/sketches";
+
+/// `UiState` as `ui.inspect` and `ui.set` report it, with the browser's view of the design
+/// (kept in the session) under the names the UI state used to give it.
+fn ui_state(app: &SolveApp) -> Value {
+    let mut u = serde_json::to_value(&app.ui).unwrap_or_default();
+    let v = &app.session.visibility;
+    if let Some(o) = u.as_object_mut() {
+        o.insert("showOrigin".into(), json!(app.origin_shown()));
+        o.insert("showSketches".into(), json!(!app.session.folder_hidden(SKETCHES_FOLDER)));
+        o.insert("hiddenProfiles".into(), json!(v.hidden_profiles));
+        o.insert("shownDims".into(), json!(v.shown_dimensions));
+        o.insert("lockedBodies".into(), json!(v.locked_bodies));
+    }
+    u
+}
+
 fn key_from(name: &str) -> Option<egui::Key> {
     egui::Key::from_name(name).or(match name.to_ascii_lowercase().as_str() {
         "enter" | "return" => Some(egui::Key::Enter),
@@ -99,9 +117,25 @@ fn key_from(name: &str) -> Option<egui::Key> {
 /// Run one command as `engine.execute` does: through `app.run`, then the first-body fit and the
 /// camera the command asked for.
 fn execute(app: &mut SolveApp, id: &str, params: Value) -> Result<Value, String> {
+    // `view.pick` is answered by the viewport, not the engine: pixels and rays need the
+    // window's camera and pick index, and the command must not touch the document, the
+    // selection or the undo stack. Intercepted here so `engine.execute` and `engine.batch`
+    // (and through them MCP `execute` and `batch`) reach it like any other command.
+    if id == "view.pick" {
+        return crate::view_pick::pick_command(app, &params);
+    }
     let r = app.run(id, params);
     if r.is_ok()
-        && !matches!(id, "view.layout" | "view.navigate" | "view.ambient_occlusion" | "view.graphics_preset" | "view.history_layout")
+        && !matches!(
+            id,
+            "view.layout"
+                | "view.navigate"
+                | "view.ambient_occlusion"
+                | "view.graphics_preset"
+                | "view.history_layout"
+                | "browser.expand_all"
+                | "browser.collapse_all"
+        )
         && app.session.active_sketch.is_none()
         && app.session.world_state().bodies.len() == 1
         && app.session.undo.len() <= 2
@@ -161,23 +195,44 @@ fn batch(app: &mut SolveApp, p: &Value) -> Outcome {
     let clock = timing::Clock::start();
     let checkpoint = if rollback { app.run("edit.checkpoint", json!({})).ok().and_then(|v| v["checkpoint"].as_u64()) } else { None };
     let mut results = Vec::with_capacity(steps.len());
-    for (i, step) in steps.iter().enumerate() {
-        let (r, took) = timing::time(profile, || match command(step) {
-            Some(id) => execute(app, id, step.get("params").cloned().filter(|v| !v.is_null()).unwrap_or(json!({}))),
-            None => Err("missing `command`".to_string()),
-        });
-        if timed {
-            rows.push(took.to_json(i, command(step).unwrap_or_default()));
-        }
-        match r {
-            Ok(v) => results.push(v),
-            Err(e) => {
-                let restored = checkpoint.is_some_and(|id| app.run("edit.restore_checkpoint", json!({"checkpoint": id})).is_ok());
-                let failed = json!({"index": i, "command": command(step), "error": e});
-                // `rolled_back`: the design really is back at its checkpoint.
-                let reply =
-                    json!({"completed": i, "results": results, "failed": failed, "undone": if restored { i } else { 0 }, "rolled_back": restored});
-                return ok(with_timings(reply, timed, rows, clock.ms()));
+    // With `coalesce_parameters`, each run of plain parameter edits rebuilds once (#5822); a run
+    // whose combined edit is refused goes step by step, so a refused edit is named by its step.
+    let coalesce = p.get("coalesce_parameters").and_then(Value::as_bool).unwrap_or(false);
+    for run in batch_params::plan(steps, coalesce) {
+        let singles = match run {
+            batch_params::BatchRun::Step(i) => vec![i],
+            batch_params::BatchRun::Params { steps: indices, changes } => {
+                let (r, took) = timing::time(profile, || execute(app, "parameters.change", batch_params::combined_params(&changes)));
+                match r {
+                    Ok(v) => {
+                        if timed {
+                            rows.push(took.to_json(indices.first().copied().unwrap_or(0), "parameters.change"));
+                        }
+                        results.extend(batch_params::step_results(steps, &indices, &v));
+                        continue;
+                    }
+                    Err(_) => indices,
+                }
+            }
+        };
+        for i in singles {
+            let Some(step) = steps.get(i) else { continue };
+            let (r, took) = timing::time(profile, || match command(step) {
+                Some(id) => execute(app, id, step.get("params").cloned().filter(|v| !v.is_null()).unwrap_or(json!({}))),
+                None => Err("missing `command`".to_string()),
+            });
+            if timed {
+                rows.push(took.to_json(i, command(step).unwrap_or_default()));
+            }
+            match r {
+                Ok(v) => results.push(v),
+                Err(e) => {
+                    let restored = checkpoint.is_some_and(|id| app.run("edit.restore_checkpoint", json!({"checkpoint": id})).is_ok());
+                    let failed = json!({"index": i, "command": command(step), "error": e});
+                    // `rolled_back`: the design really is back at its checkpoint.
+                    let reply = json!({"completed": i, "results": results, "failed": failed, "undone": if restored { i } else { 0 }, "rolled_back": restored});
+                    return ok(with_timings(reply, timed, rows, clock.ms()));
+                }
             }
         }
     }
@@ -304,7 +359,8 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
         "document.inspect" => wrap(app.session.execute("document.inspect", p).map_err(|e| e.to_string())),
         "ui.messages" => ok(crate::messages::control(app, p)),
         "ui.inspect" => ok(json!({
-            "ui": serde_json::to_value(&app.ui).unwrap_or_default(),
+            "render": crate::render_workspace::inspect_state(app),
+            "ui": ui_state(app),
             "visibility": app.session.visibility,
             "viewport": app.viewport.rect.map(|r| json!([r.left(), r.top(), r.width(), r.height()])),
             "camera": app.cam,
@@ -314,6 +370,10 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
             "hover": app.viewport.hover.as_ref().map(|h| format!("{h:?}")),
             "renderer": if app.viewport.gpu.is_some() { "gpu" } else { "cpu" },
             "frame_ms": app.frame_ms,
+            "draw": app.viewport.draw_stats.as_ref().and_then(|s| s.lock().ok().map(|d| json!({
+                "draw_calls": d.draw_calls, "triangles": d.triangles, "line_segments": d.line_segments, "supersampled": d.supersampled,
+            }))),
+            "adapter": app.viewport.adapter,
             "file_busy": app.file_load.busy(),
             "file_picker_busy": app.file_picker_busy(),
             "file_dialog_open": app.file_picker_busy(),
@@ -353,26 +413,46 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
         }
         "ui.set" => {
             // What is hidden lives in the session (`browser.visibility`); `ui.set` still sets it.
-            const VIS: [(&str, &str); 6] = [
+            const VIS: [(&str, &str); 9] = [
                 ("hiddenBodies", "hidden_bodies"),
                 ("hiddenOrigin", "hidden_origin"),
                 ("hiddenSketches", "hidden_sketches"),
                 ("shownSketches", "shown_sketches"),
                 ("hiddenJoints", "hidden_joints"),
+                ("hiddenProfiles", "hidden_profiles"),
+                ("shownDims", "shown_dimensions"),
+                ("lockedBodies", "locked_bodies"),
                 ("hiddenFolders", "hidden_folders"),
             ];
             let mut cur = serde_json::to_value(&app.ui).unwrap_or(json!({}));
             let mut vis = serde_json::to_value(&app.session.visibility).unwrap_or(json!({}));
+            let mut sketches = None;
             if let (Some(o), Some(vo), Some(src)) = (cur.as_object_mut(), vis.as_object_mut(), p.as_object()) {
                 for (k, v) in src {
-                    match VIS.iter().find(|(camel, _)| camel == k) {
-                        Some((_, snake)) => vo.insert(snake.to_string(), v.clone()),
-                        None => o.insert(k.clone(), v.clone()),
+                    let shown = |v: &Value| v.as_bool().map(|b| json!(!b)).unwrap_or_else(|| v.clone());
+                    match (VIS.iter().find(|(camel, _)| camel == k), k.as_str()) {
+                        (Some((_, snake)), _) => vo.insert(snake.to_string(), v.clone()),
+                        (None, "showOrigin") => vo.insert("origin_hidden".into(), shown(v)),
+                        (None, "showSketches") => {
+                            sketches = Some(v.as_bool().ok_or_else(|| "`showSketches` must be true or false".to_string()));
+                            None
+                        }
+                        _ => o.insert(k.clone(), v.clone()),
                     };
                 }
             }
+            let sketches = match sketches.transpose() {
+                Ok(s) => s,
+                Err(e) => return err(e),
+            };
             match (serde_json::from_value::<crate::UiState>(cur), serde_json::from_value::<solidcraft_engine::Visibility>(vis)) {
-                (Ok(mut u), Ok(v)) => {
+                (Ok(mut u), Ok(mut v)) => {
+                    if let Some(shown) = sketches {
+                        v.hidden_folders.retain(|k| k != SKETCHES_FOLDER);
+                        if !shown {
+                            v.hidden_folders.push(SKETCHES_FOLDER.to_string());
+                        }
+                    }
                     if (u.tab == "RENDER") != crate::render_workspace::active(app)
                         && let Err(e) = crate::render_workspace::enter(app, u.tab == "RENDER")
                     {
@@ -381,7 +461,7 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
                     u.ribbon_context = app.ui.ribbon_context.clone();
                     app.ui = u;
                     app.session.visibility = v;
-                    ok(serde_json::to_value(&app.ui).unwrap_or_default())
+                    ok(ui_state(app))
                 }
                 (Err(e), _) | (_, Err(e)) => err(e),
             }
@@ -552,6 +632,7 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
             let list = crate::scenario::handles(s("prefix").unwrap_or(""));
             ok(json!(list.into_iter().map(|(n, p)| json!({"name": n, "x": p.x, "y": p.y})).collect::<Vec<_>>()))
         }
+        "ui.pick" => wrap(crate::view_pick::pick_command(app, p)),
         "ui.at" => {
             if let Some(path) = p.get("occurrence").and_then(Value::as_array) {
                 let ids: Option<Vec<u64>> = path.iter().map(Value::as_u64).collect();
@@ -1153,12 +1234,12 @@ mod tests {
         assert!(shot(&mut app, json!({})) == no_grid);
         assert!(shot(&mut app, json!({"grid": true})) == all);
         // With the Origin off too it has neither; `axes: true` puts the axes back.
-        app.ui.show_origin = false;
+        app.set_origin_shown(false);
         assert!(shot(&mut app, json!({})) == bare);
         assert!(shot(&mut app, json!({"axes": true})) == no_grid);
         // The Origin and the Grid back on: the first picture again.
         app.ui.show_grid = true;
-        app.ui.show_origin = true;
+        app.set_origin_shown(true);
         assert!(shot(&mut app, json!({})) == all);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1195,6 +1276,44 @@ mod tests {
         assert!(v["result"].get("failed").is_none(), "{v}");
         assert!(frames <= 2, "a batch of 80 steps took {frames} frames");
         assert_eq!(inspect(&mut h)["sketches"].as_array().map(Vec::len), Some(40));
+    }
+
+    /// #5822: `engine.batch {coalesce_parameters}` sets a run of parameter edits together, one
+    /// rebuild, and answers each step; a refused edit is named by its own step and the batch goes
+    /// back. Unasked, each edit runs on its own as before.
+    #[test]
+    fn engine_batch_coalesces_parameter_edits_when_asked() {
+        let mut h = crate::scenario::Harness::new();
+        let build = json!([
+            {"command": "parameters.add", "params": {"name": "w", "expression": "10 mm"}},
+            {"command": "parameters.add", "params": {"name": "d", "expression": "10 mm"}},
+            {"command": "solid.box", "params": {"length": "w", "width": "d", "height": 10}},
+        ]);
+        assert_eq!(batch(&mut h, json!({"commands": build}))["ok"], true);
+        let edits = json!([
+            {"command": "parameters.change", "params": {"name": "w", "expression": "20 mm"}},
+            {"command": "parameters.change", "params": {"name": "d", "expression": "30 mm"}},
+        ]);
+        let v = batch(&mut h, json!({"commands": edits, "coalesce_parameters": true}));
+        let results = v["result"]["results"].as_array().unwrap();
+        assert_eq!(results.len(), 2, "{v}");
+        assert!(results.iter().all(|r| r["coalesced"] == 2), "{v}");
+        assert_eq!(results[1]["value"], 30.0, "{v}");
+        let volume = |h: &mut crate::scenario::Harness| {
+            h.call("engine.execute", json!({"command": "inspect.measure", "params": {}}))["result"]["total"]["volume_mm3"].as_f64()
+        };
+        assert!(volume(&mut h).is_some_and(|v| (v - 6000.0).abs() < 1e-6));
+        let bad = json!([
+            {"command": "parameters.change", "params": {"name": "w", "expression": "5 mm"}},
+            {"command": "parameters.change", "params": {"name": "d", "expression": "1 +"}},
+        ]);
+        let v = batch(&mut h, json!({"commands": bad, "coalesce_parameters": true}));
+        assert_eq!(v["result"]["failed"]["index"], 1, "{v}");
+        assert_eq!(v["result"]["rolled_back"], true, "{v}");
+        assert!(volume(&mut h).is_some_and(|v| (v - 6000.0).abs() < 1e-6), "the batch went back");
+        // Unasked: one result per edit, none coalesced.
+        let v = batch(&mut h, json!({"commands": edits}));
+        assert!(v["result"]["results"].as_array().unwrap().iter().all(|r| r.get("coalesced").is_none()), "{v}");
     }
 
     /// #1833: `engine.batch` times its steps where they run, the failing one included, with the

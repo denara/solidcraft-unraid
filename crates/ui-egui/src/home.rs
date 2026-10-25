@@ -35,6 +35,10 @@ pub struct HomeState {
     /// Recent design paths, newest first (kept in the preferences).
     pub recent: Vec<String>,
     pub opened_at: std::collections::BTreeMap<String, u64>,
+    /// Designs the user removed from the list. Kept in the preferences so a host that rebuilds
+    /// the recent list from its stored designs (the web build, see `sync_recents`) does not add
+    /// them back. Opening or saving a design clears it from here.
+    pub forgotten: std::collections::BTreeSet<String>,
     thumbs: HashMap<String, Option<egui::TextureHandle>>,
     samples: HashMap<usize, Session>,
     /// Keys asked for and not made yet.
@@ -94,6 +98,17 @@ impl HomeState {
         self.opened_at.insert(path.to_string(), web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
         self.opened_at.retain(|p, _| self.recent.contains(p));
         self.thumbs.remove(path);
+        // Opening or saving a design undoes an earlier removal from the list.
+        self.forgotten.remove(path);
+    }
+
+    /// Drop a design from the recent list and remember that the user did so, so a host that
+    /// rebuilds the list from its stored designs (the web build) does not add it back.
+    pub fn forget(&mut self, path: &str) {
+        self.recent.retain(|p| p != path);
+        self.opened_at.remove(path);
+        self.thumbs.remove(path);
+        self.forgotten.insert(path.to_string());
     }
 }
 
@@ -183,6 +198,21 @@ fn remember_at(s: &Session, key: &str, #[cfg(not(target_arch = "wasm32"))] ident
         }
     }
     Some(img)
+}
+
+/// Waits up to `within` for the threads drawing Home pictures, and drops what they made: the
+/// window is going, and a picture still on the GPU as the process exits can crash the driver.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn finish_pictures(h: &mut HomeState, within: std::time::Duration) {
+    let end = std::time::Instant::now() + within;
+    for rx in [h.rx.take(), h.sample_rx.take(), h.remembering.take()].into_iter().flatten() {
+        // Each thread sends what it made and ends; its channel closes when it has.
+        while let Some(left) = end.checked_duration_since(std::time::Instant::now()) {
+            if let Err(std::sync::mpsc::RecvTimeoutError::Disconnected) = rx.recv_timeout(left) {
+                break;
+            }
+        }
+    }
 }
 
 /// A Home picture is being drawn off the UI thread.
@@ -796,8 +826,7 @@ fn start_content(app: &mut SolveApp, ui: &mut egui::Ui, action: &mut Option<File
                     publish(&format!("home:recent:{index}"), &response);
                     ui_kit::Menu::context(&response, |ui| {
                         if crate::context_menu::button(ui, app.tr_label("Remove from list"), "delete").clicked() {
-                            app.home.recent.retain(|x| x != path);
-                            app.home.opened_at.remove(path);
+                            app.home.forget(path);
                             ui.close();
                         }
                         if !cfg!(target_arch = "wasm32") && crate::context_menu::button(ui, app.tr_label("Show in folder"), "folder").clicked() {
@@ -843,7 +872,7 @@ fn texture(texture: Option<&egui::TextureHandle>) -> Option<(egui::TextureId, eg
 }
 
 /// Abbreviate only an actual home-directory ancestor; the source path is kept for actions.
-fn friendly_path(path: &str) -> String {
+pub(crate) fn friendly_path(path: &str) -> String {
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
     abbreviated_path(path, home.as_deref().map(std::path::Path::new))
 }
@@ -1245,6 +1274,29 @@ mod tests {
         assert!(app.home.rx.is_some());
         assert_eq!(app.session.doc.name, "Sheet Metal Bracket");
         assert!(!app.session.is_dirty());
+    }
+
+    /// The shipped picture of the sample being opened can arrive after it was asked for: that is
+    /// not its build failing, and the sample still opens (#4349 fixed it; it had made the
+    /// `s15_start_page_sample_save_reopen` scenario fail depending on timing).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_sample_picture_arriving_while_the_sample_builds_is_not_a_failed_build() {
+        let mut app = SolveApp::new(Session::default(), Default::default());
+        let (pictures, rx) = std::sync::mpsc::channel();
+        app.home.rx = Some(rx);
+        let ctx = egui::Context::default();
+        open_sample(&mut app, 0);
+        assert!(app.home.open && app.home.wanted == Some(0));
+        pictures.send(("sample:0".into(), sample_picture(0), None)).unwrap();
+        let began = std::time::Instant::now();
+        while app.home.open && began.elapsed() < std::time::Duration::from_secs(30) {
+            poll(&mut app, &ctx);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(app.status.as_ref().is_none_or(|(_, _, error)| !error), "{:?}", app.status);
+        assert!(!app.home.open, "the sample opens once built");
+        assert_eq!(app.session.doc.name, "Sample Plate");
     }
 
     #[test]

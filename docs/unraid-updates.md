@@ -1,5 +1,77 @@
 # Validated container updates
 
+## 2026-10-25: upstream 0.22.0 with scoped renderer sources and preserved integrations
+
+Selected exactly one upstream snapshot, `ac53fc1e6fab85a50bdc410178cc75133183393f`,
+178 commits after validated `807e367b`. The sole branch `codex/unraid-mcp-web`
+began clean and synchronized at `7fd57ad0`; fetched fork main is still an ancestor.
+For upstream CAD features and changes see the
+[original project](https://github.com/tangency-labs/solidcraft). This integration
+does not create an application release or install anything on Unraid.
+
+Merge resolutions preserve the gateway, independent browser copies, native CLI
+quiet mode and all Workspace, project, login, deletion, ZIP and observer behavior.
+The fork's unsafe native-platform bridge omissions remain. Linked-component paths
+retain confinement while adopting upstream's new face/joint handling. Observer
+snapshots retain cold contact/display caches and never inherit the new render-job
+hosts; ordinary scratch sessions keep upstream render-job sharing. Immutable
+settled-joint state can be shared without sharing mutable observer work.
+
+Nested HDR/texture file sources in rendering arguments now resolve relative to
+the selected project with bounded recursion, traversal/hidden/symlink rejection
+and closed built-in resource identifiers. HDR inspection, settings capture,
+preflight and job preparation use the shared HTTP/MCP read gate. New render PNG/
+EXR destinations retain the existing strong overwrite-revision gate; existing
+multi-file output restrictions remain. New and changed command output sets were
+reviewed. Four narrow upstream compatibility corrections retain behavior: reuse
+the existing finite-radiance predicate, simplify equivalent HDR/arc input checks,
+and compile the Unix-only CLI-link helper only on Unix. Existing boundary
+regressions pass: 16 deterministic raytrace, three HDR container and five arc
+extension cases. No lint suppression or weakened input validation was added.
+
+Relevant selected tests pass across format/resources, IO, kernel profiles and
+faces, engine rendering/components/configuration/parameters/motion/sketches,
+observer isolation, UI rendering/navigation and sketch solving. This includes
+126 gateway, 76 MCP, 499 renderer and 136 GPU unit cases; existing ignored tests
+remain ignored. Targeted gateway path/read-gate groups pass after their final
+edits. CLI discovery/quiet mode, command help, headless GPU refusal and all 24
+browser-app cases pass. Native workspace Clippy with all targets, 13-crate Wasm
+compatibility, scoped Wasm Clippy, formatting, licenses, assets (789 files), icon,
+layer, catalog-order and UI-container gates pass. Both browser clients and native
+release binaries build. This is selected validation rather than a complete
+geometry-suite rerun.
+
+All ten required actual software-OpenGL captures and 12 stand-up-offer UI cases
+pass. Real browser API modelling/undo/redo, DXF, bounded queues/errors and tab
+handling pass; every real-site offline/update scenario passes. Actual Chromium
+checks the live joined Workspace, initially collapsed groups, compact 28-pixel
+folder actions, PNG thumbnails and an independent native copy in browser CAD
+0.22.0. The source design remains byte-identical after the handoff.
+
+A fresh-volume candidate passes MCP modelling/PNG/STEP, independent sessions,
+authentication/origin/path/revision checks, logging, restart/reopen, Workspace
+push/metadata/thumbnails/handoffs, remembered login/revocation, read-only
+observation and deletion/ZIP checks. The 256-MiB ZIP starts in 8 ms with measured
+RSS growth of 128 KiB; integrity, Unicode/empty/nested entries, backup exclusion,
+abort release and concurrent write leases pass. SDK 1.32.1 opens legacy format 13
+and previous native format 35, preserving parameters, 24000 mm3 volume, original
+bytes and named split-face centroids. New format-36 saves pass ZIP CRC checks,
+including a captured HDR resource that reopens and renders through its saved
+setup. Real CPU HDR/PNG rendering, nested-source confinement, render-job session
+isolation, output revisions, coalesced parameter batches, alias/extraction guards
+and BOM/DXF outputs pass. CPU EXR refusal leaves no output file. Private evidence
+and screenshots stay under ignored `target/upstream-ac53fc1e-20261025/`.
+
+New saves require a newer reader: back up server files and separate browser
+designs before updating, and keep the previous image/pre-update files for
+rollback. The canonical Unraid XML and original app icon match the catalog;
+its permanent product Overview is unchanged. Image publication, archive checksum,
+local runtime refresh and final catalog comparison are recorded after their
+checks. No Unraid installation or nginx/DNS change is performed.
+
+A pre-push fetch observed 20 later upstream commits through `bbc3aa43`; they are
+deferred to the next fixed-snapshot update. The validated target remains `ac53fc1e`.
+
 ## 2026-10-24: upstream 0.21.0 with preserved workspace and scoped MCP aliases
 
 Selected exactly one upstream snapshot, `807e367bdb03210dba188118fe000acd0a4b3725`,

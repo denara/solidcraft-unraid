@@ -75,7 +75,7 @@ fn every_move_type_has_somewhere_to_put_its_value_box() {
 #[test]
 fn point_to_point_takes_the_origin_point() {
     let mut h = crate::scenario::Harness::new();
-    h.app.ui.show_origin = true;
+    h.app.set_origin_shown(true);
     h.app.run("solid.box", json!({"length": 20, "width": 20, "height": 20})).unwrap();
     h.app.run("solid.move", json!({"bodies": ["Body1"], "translate": ["30 mm", "20 mm", "0 mm"]})).unwrap();
     h.app.cam.distance = 200.0;
@@ -166,7 +166,7 @@ fn component_selection_fixture() -> crate::scenario::Harness {
     }
     h.app.ui.show_browser = false;
     h.app.ui.show_timeline = false;
-    h.app.ui.show_origin = false;
+    h.app.set_origin_shown(false);
     h.step(&json!({"call": "ui.view", "params": {"view": "top"}})).unwrap();
     // Keep the selection rectangle to the right of the Move dialog.
     h.step(&json!({"call": "ui.camera", "params": {"target": [0, 0, 0], "distance": 250}})).unwrap();

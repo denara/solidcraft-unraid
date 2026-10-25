@@ -214,11 +214,18 @@ impl Harness {
 
     /// Lay out and draw one frame (feeding queued pointer and key events).
     pub fn frame(&mut self) {
+        self.frame_with(Vec::new());
+    }
+
+    /// One frame that receives all these events at once (a quick tap, or input queued during a
+    /// slow frame), before any queued ones.
+    pub fn frame_with(&mut self, events: Vec<egui::Event>) {
         self.time += 1.0 / 60.0;
         let mut raw = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, self.size)),
             time: Some(self.time),
             focused: true,
+            events,
             ..Default::default()
         };
         self.app.raw_input_hook(&mut raw);

@@ -35,7 +35,7 @@ fn new_token() -> Option<String> {
 pub fn remove_token_file() {
     if let Ok(files) = TOKEN_FILES.lock() {
         for p in files.iter() {
-            let _ = std::fs::remove_file(p);
+            control_auth::remove_token_file(p);
         }
     }
     if let Some(port) = APP_PORT.lock().ok().and_then(|p| *p) {

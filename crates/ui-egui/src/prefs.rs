@@ -457,6 +457,8 @@ preference_settings! {
     navigator_style: NavigatorStyle = NavigatorStyle::default(), PAGE_NAVIGATION;
     /// Show the radial ring and enable hold/flick gestures for viewport context menus.
     radial_context_menu: bool = false, PAGE_NAVIGATION => check("Radial context menu");
+    /// Work on the model directly in the viewport (pull a face to extrude or cut); off by default.
+    direct_interaction: bool = false, PAGE_NAVIGATION => check("Direct interaction", "Work on the model directly in the viewport. Press a flat face or a profile and pull: up extrudes, down into a body cuts, and sideways movement sets the step size");
     /// Mouse gestures: a ring of tools on the right button.
     mouse_gestures: crate::mouse_gesture::Config = Default::default(), PAGE_NAVIGATION;
     /// The wheel zooms out when turned forward.
@@ -508,6 +510,9 @@ preference_settings! {
     space_mouse_offered: std::collections::BTreeSet<String> = Default::default();
     /// Anti-aliasing samples (applies on restart).
     msaa: u32 = 4, PAGE_GRAPHICS;
+    /// Linux: the window system the app opens with at its next start (#3083): `auto` (XWayland
+    /// whenever there is an X display, native Wayland on niri), `wayland` or `x11`.
+    window_system: String = "auto".into(), PAGE_GRAPHICS;
     /// Soft contact shading in the GPU viewport; optional and applied immediately.
     ambient_occlusion: bool = false, PAGE_GRAPHICS;
     /// The grid turns to the upright origin plane facing a side view (#1470). Off by default: the
@@ -526,6 +531,8 @@ preference_settings! {
     supersampling_adaptive: bool = true, PAGE_GRAPHICS => check_tr("ui.supersampling_adaptive");
     /// Show the frame rate in the view's corner (the view then redraws every frame).
     show_frame_rate: bool = false, PAGE_GRAPHICS => check_id("ui.frame_rate");
+    /// With the frame rate: a frame-time graph, a histogram and what the GPU drew (#2548).
+    frame_rate_details: bool = false, PAGE_GRAPHICS;
     /// Show world X/Y/Z component dimensions beside the total distance in Measure.
     measure_axis_distances: bool = true, PAGE_GRAPHICS => check_id("settings.measure_axis_distances");
     /// Decimals shown for lengths and angles.
@@ -588,6 +595,8 @@ preference_settings! {
     /// hole moves the hole there (`hole_place`). Off by default: a second pick on its face takes
     /// the hole out, and a hole is moved by taking it out and picking again.
     hole_moves: bool = false, PAGE_DESIGN => check("Move holes by clicking or dragging");
+    /// The browser's Origin folder starts hidden in designs that don't keep its eye themselves.
+    hide_origin: bool = false, PAGE_DESIGN => check_tr("ui.hide_origin_by_default");
     /// What a middle-button double-click in the view does: `home`, `fit` or `off`.
     middle_double_click: String = "home".into(), PAGE_NAVIGATION;
     /// Colour vision mode (#778): `off`, `protan`, `deutan` or `tritan`.
@@ -651,9 +660,14 @@ preference_settings! {
     suppress_sketch_snap: ModifierCombo = ModifierCombo::CTRL_ALT, PAGE_SKETCH;
     /// Whether Alt/Option also frees gizmo / canvas manipulator arrows (Primary always does).
     manipulator_free_alt: bool = true, PAGE_SKETCH;
+    /// A sketch tool's shortcut pressed again before the first point steps to the tool's next
+    /// creation mode (#2459). Off (the default): the key starts the tool again, as it always has.
+    shortcut_cycles_modes: bool = false, PAGE_SKETCH;
     /// When true: Shift+click adds without removing; Primary toggles.
     /// When false (default): Shift and Primary both toggle.
     selection_shift_add_only: bool = false, PAGE_SKETCH;
+    /// Drive Joints shows the moved parts' old place as a ghost (its Show ghost box, #5905).
+    drive_joints_ghost: bool = true, PAGE_DESIGN;
     /// Plugin ids turned off (Preferences › Plugins). An installed plugin whose id is absent is on.
     disabled_plugins: std::collections::BTreeSet<String> = std::collections::BTreeSet::new(), PAGE_PLUGINS;
 }
@@ -741,7 +755,7 @@ impl Snapshot {
         }
     }
     fn restore(self, app: &mut SolveApp) {
-        let msaa = app.preferences.msaa;
+        let graphics = (app.preferences.msaa, app.preferences.window_system.clone());
         let units_changed = app.preferences.default_units != self.prefs.default_units;
         // Update bookkeeping isn't a setting: a check that finished while the dialog was open stays.
         let update = std::mem::take(&mut app.preferences.update);
@@ -762,7 +776,7 @@ impl Snapshot {
         set_autosave(app);
         app.session.auto_project = self.auto_project;
         app.keymap.custom = self.keys;
-        if app.preferences.msaa != msaa {
+        if (app.preferences.msaa, app.preferences.window_system.clone()) != graphics {
             save_graphics(app);
         }
     }
@@ -917,7 +931,7 @@ fn ui_font_row(app: &mut SolveApp, ui: &mut egui::Ui) {
 
 /// Restore Defaults for one page.
 fn defaults(app: &mut SolveApp, page: usize) {
-    let msaa = app.preferences.msaa;
+    let (msaa, window_system) = (app.preferences.msaa, app.preferences.window_system.clone());
     let units = app.preferences.default_units.clone();
     reset_preferences(&mut app.preferences, page);
     if app.preferences.default_units != units {
@@ -940,7 +954,7 @@ fn defaults(app: &mut SolveApp, page: usize) {
             app.ui.show_grid = true;
             app.ui.ground_shadow = true;
             app.ui.perspective = false;
-            if app.preferences.msaa != msaa {
+            if app.preferences.msaa != msaa || app.preferences.window_system != window_system {
                 save_graphics(app);
             }
         }
@@ -1083,6 +1097,10 @@ pub(crate) fn pivot_under(app: &SolveApp, proj: &crate::viewport::Proj, at: Pos2
             _ => {}
         }
     }
+    // Over empty space: the middle of the bodies in view, not of everything shown (#2616).
+    if let Some(c) = crate::viewport::in_view_centre(app, proj) {
+        return c;
+    }
     let b = crate::viewport::view_bounds(app);
     if b.is_empty() { app.cam.target } else { b.center() }
 }
@@ -1130,8 +1148,46 @@ pub fn show_mm_bare(app: &SolveApp, v: f64) -> String {
     length_number(v, &app.session.doc.units, app.preferences.length_decimals)
 }
 
-/// Write the anti-aliasing setting where the host reads it at start (the window's samples can't
-/// change while it is open).
+/// The window system choices (`Prefs::window_system`, #3083).
+pub const WINDOW_SYSTEMS: [&str; 3] = ["auto", "wayland", "x11"];
+/// winit's issue for dropping files onto a window on native Wayland, which the note links to.
+pub const WAYLAND_DROP_ISSUE: &str = "https://github.com/rust-windowing/winit/issues/1881";
+
+/// Linux: Graphics › Window system (#3083). It applies at the next start; the note under it says
+/// which one is running now, and when native Wayland is in use or chosen, that some features are
+/// limited there, linking to [`WAYLAND_DROP_ISSUE`].
+#[cfg(target_os = "linux")]
+fn window_system_row(app: &mut SolveApp, ui: &mut egui::Ui) {
+    let t = Tokens::get();
+    let label = |id: &str| crate::i18n::tr(&format!("ui.window_system_{id}")).to_string();
+    let labels = WINDOW_SYSTEMS.map(label);
+    // The note below says that it applies after a restart, and which one runs now.
+    let response = ui.allocate_ui_with_layout(egui::vec2(t.form_card_width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+        let mut selected = WINDOW_SYSTEMS.iter().position(|id| *id == app.preferences.window_system).unwrap_or(0);
+        if ui_kit::segmented(ui, &mut selected, &labels.each_ref().map(String::as_str), ui_kit::Segments::default())
+            && let Some(id) = WINDOW_SYSTEMS.get(selected)
+        {
+            app.preferences.window_system = (*id).into();
+        }
+    });
+    crate::scenario::publish_handle("prefs:window_system", response.response.rect.center());
+    let now = app.services.window_system.map(label);
+    let text = match &now {
+        Some(now) => crate::i18n::format("settings.window_system_note_now", &[("now", now)]),
+        None => app.tr("settings.msaa_applies_on_restart").to_string(),
+    };
+    ui_kit::text(ui, &text, ui_kit::Text::Hint("window_system"));
+    let choice = app.preferences.window_system.as_str();
+    if choice == "wayland" || (choice == "auto" && app.services.window_system == Some("wayland")) {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new(app.tr("settings.window_system_wayland_limited")).size(t.font_small).color(t.warning));
+            ui.hyperlink_to(egui::RichText::new(app.tr("settings.window_system_details")).size(t.font_small), WAYLAND_DROP_ISSUE);
+        });
+    }
+}
+
+/// Write the anti-aliasing and window system settings where the host reads them at start (neither
+/// can change while the window is open).
 fn save_graphics(app: &SolveApp) {
     if let Some(path) = &app.services.graphics_path {
         // Other settings in the file (the graphics `backend`) stay as they are.
@@ -1141,6 +1197,7 @@ fn save_graphics(app: &SolveApp) {
             .filter(serde_json::Value::is_object)
             .unwrap_or_else(|| json!({}));
         graphics["msaa"] = json!(app.preferences.msaa);
+        graphics["window_system"] = json!(app.preferences.window_system);
         let _ = std::fs::write(path, graphics.to_string());
     }
 }
@@ -1253,7 +1310,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
         ui_kit::Action::Cancel => Some("cancel"),
         ui_kit::Action::None => button,
     };
-    if app.preferences.msaa != before.msaa {
+    if app.preferences.msaa != before.msaa || app.preferences.window_system != before.window_system {
         save_graphics(app);
     }
     if app.preferences.up_axis != before.up_axis {
@@ -1390,7 +1447,7 @@ fn space_mouse_rows(app: &mut SolveApp, ui: &mut egui::Ui) {
                 ui_kit::slider(
                     ui,
                     &mut app.preferences.space_mouse_speed,
-                    0.25..=3.0,
+                    0.25..=5.0,
                     ui_kit::Slider { step: Some(0.05), format: |value| format!("{value:.2}×"), ..Default::default() },
                 );
             });
@@ -2090,6 +2147,9 @@ pub fn set(app: &mut SolveApp, p: &serde_json::Value) -> Result<serde_json::Valu
     if !UNITS.contains(&new.default_units.as_str()) {
         return Err(format!("units must be one of {}", UNITS.join(", ")));
     }
+    if !WINDOW_SYSTEMS.contains(&new.window_system.as_str()) {
+        return Err(format!("`window_system` must be one of {}", WINDOW_SYSTEMS.join(", ")));
+    }
     if !NAV_PRESETS.iter().any(|p| p.id == new.nav) || !MSAA.contains(&new.msaa) {
         return Err(format!("`nav` must be one of {} and `msaa` 1, 2, 4 or 8", NAV_PRESETS.iter().map(|p| p.id).collect::<Vec<_>>().join(", ")));
     }
@@ -2134,7 +2194,7 @@ pub fn set(app: &mut SolveApp, p: &serde_json::Value) -> Result<serde_json::Valu
     }
     let units_changed = new.default_units != app.preferences.default_units;
     let up_changed = new.up_axis != app.preferences.up_axis;
-    let msaa_changed = new.msaa != app.preferences.msaa;
+    let msaa_changed = new.msaa != app.preferences.msaa || new.window_system != app.preferences.window_system;
     if p.get("layout").is_some() {
         app.ui.layout = new.layout;
     }
@@ -3254,6 +3314,24 @@ mod tests {
     /// next frame draws with their colours (dark following the base), an export gives the theme
     /// back complete, imported themes are saved with the preferences, Remove falls back to the
     /// base and Cancel takes an import back.
+    /// #6161: the theme strip shows a chevron at each end with more themes past it; a click
+    /// scrolls that way.
+    #[test]
+    fn the_theme_strip_shows_where_more_themes_are() {
+        use serde_json::json;
+        let mut h = crate::scenario::Harness::new();
+        h.call("ui.prefs", json!({"open": "Interface"}));
+        h.frames(4);
+        let shown = |name: &str| crate::scenario::handle_at(name).is_some();
+        assert!(shown("theme_rail:next"), "more themes than fit: a chevron on the right");
+        assert!(!shown("theme_rail:previous"), "nothing before the first");
+        let first = crate::scenario::handle_at("prefs:theme:light").unwrap();
+        h.step(&json!({"click": {"handle": "theme_rail:next"}})).unwrap();
+        h.frames(4);
+        assert!(shown("theme_rail:previous"), "scrolled: a chevron on the left too");
+        assert!(crate::scenario::handle_at("prefs:theme:light").is_none_or(|p| p.x < first.x), "the strip moved");
+    }
+
     #[test]
     fn system_theme_tile_export_uses_os_brightness_without_selecting_it() {
         let mut app = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
@@ -3438,6 +3516,37 @@ mod tests {
 
     use super::*;
     use crate::navigation::orbit;
+
+    /// Graphics › Window system (#3083): saved in `graphics.json` beside the other start-up
+    /// settings, refused when unknown, taken back by Cancel; on Linux the pane says which one runs
+    /// now and, for native Wayland, that some features are limited, with the link.
+    #[test]
+    fn the_window_system_is_saved_for_the_next_start() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("sc_window_system_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("graphics.json");
+        std::fs::write(&path, r#"{"msaa":4,"backend":"vulkan"}"#).unwrap();
+        let saved = || -> serde_json::Value { serde_json::from_str(&std::fs::read_to_string(&path).unwrap_or_default()).unwrap_or_default() };
+        let mut h = crate::scenario::Harness::new();
+        h.app.services.graphics_path = Some(path.to_string_lossy().to_string());
+        h.app.services.window_system = Some("x11");
+        assert_eq!(h.app.preferences.window_system, "auto");
+        let out = h.call("ui.prefs", json!({"window_system": "wayland"}));
+        assert_eq!(out["result"]["window_system"], "wayland", "{out}");
+        assert_eq!((saved()["window_system"].as_str(), saved()["backend"].as_str()), (Some("wayland"), Some("vulkan")), "the other settings stay");
+        assert!(h.call("ui.prefs", json!({"window_system": "mir"}))["error"].as_str().is_some_and(|e| e.contains("window_system")));
+        assert_eq!(h.app.preferences.window_system, "wayland", "a refused value changes nothing");
+
+        h.call("ui.prefs", json!({"open": "Graphics"}));
+        h.frames(2);
+        assert_eq!(crate::scenario::handle_at("prefs:window_system").is_some(), cfg!(target_os = "linux"), "the row is on Linux only");
+        h.call("ui.prefs", json!({"window_system": "x11"}));
+        let out = h.call("ui.prefs", json!({"button": "cancel"}));
+        assert_eq!(out["result"]["window_system"], "wayland", "Cancel takes the change back");
+        assert_eq!(saved()["window_system"], "wayland", "and the file with it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn unsupported_saved_msaa_is_reset_to_the_default_with_a_notice() {

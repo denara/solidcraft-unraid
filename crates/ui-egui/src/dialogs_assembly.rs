@@ -422,6 +422,19 @@ pub fn circle_of(pts: &[Vec3]) -> Option<(Vec3, Vec3)> {
     pts.iter().all(|p| (p.dist(center) - r).abs() < tol && (*p - center).dot(normal).abs() < tol).then_some((center, normal))
 }
 
+/// Axis of a straight edge. Its largest component points positive so reversing the
+/// tessellation does not reverse a joint's drive direction.
+fn straight_edge_axis(pts: &[Vec3]) -> Option<Vec3> {
+    let (a, b) = (*pts.first()?, *pts.last()?);
+    let dir = (b - a).normalized()?;
+    let tol = 1e-6 * a.dist(b).max(1.0);
+    if !pts.iter().all(|p| (*p - a).cross(dir).len() < tol) {
+        return None;
+    }
+    let leading = [dir.x, dir.y, dir.z].into_iter().max_by(|a, b| a.abs().total_cmp(&b.abs()))?;
+    Some(if leading < 0.0 { -dir } else { dir })
+}
+
 /// Normal of the mesh face `f` near `p`.
 fn face_normal_near(m: &Mesh, f: u32, p: Vec3) -> Option<Vec3> {
     m.triangles
@@ -473,7 +486,9 @@ pub fn snap_of(s: &Session, sel: &Sel) -> Option<SnapPt> {
                 }
                 None => {
                     let mid = polyline_mid(e);
-                    let z = m.edge_faces.get(*index).and_then(|fs| fs.first()).and_then(|f| face_normal_near(&m, *f, mid)).unwrap_or(Vec3::Z);
+                    let z = straight_edge_axis(e)
+                        .or_else(|| m.edge_faces.get(*index).and_then(|fs| fs.first()).and_then(|f| face_normal_near(&m, *f, mid)))
+                        .unwrap_or(Vec3::Z);
                     (body, SnapPt { at: mid, z, kind: SnapKind::EdgeMid, param: json!({"point": pt(mid), "z": pt(z)}) })
                 }
             }
@@ -667,6 +682,10 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Asm, inputs: &mut [Se
                     ui.label(RichText::new(why).color(t.warning));
                 });
             }
+            // The moved parts' old place, drawn as a ghost; remembered between uses (#5905).
+            form_row(ui, "Show ghost", |ui| {
+                crate::ui_kit::checkbox(ui, "", &mut app.preferences.drive_joints_ghost);
+            });
         }
         Asm::MotionLink { a, b, ia, ib, ratio, offset } => {
             let s = &app.session;
@@ -1047,6 +1066,9 @@ pub fn world_preview(s: &Session, cmds: &[(String, Value)], colors: Colors) -> O
     let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::preview::build(&before, &after, colors)));
     Some(match built {
         Ok(mut b) => {
+            if !colors.ghost {
+                b.scene.ghost.clear();
+            }
             b.bounds = after.bodies.iter().fold(Aabb3::EMPTY, |acc, x| acc.union(&x.mesh().bounds()));
             b.stopped = stopped;
             Ok(b)

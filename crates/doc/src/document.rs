@@ -721,6 +721,11 @@ pub enum FeatureKind {
         /// A cosmetic thread in the holes (e.g. "M6x1").
         #[serde(default, skip_serializing_if = "Option::is_none")]
         thread: Option<String>,
+        /// Threaded depth from the cylindrical wall's entry; `None` = its full useful length.
+        /// Independent of the drill depth and excluding the drill point and entry recess.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[walk(length = "Thread depth")]
+        thread_depth: Option<Expr>,
         /// To Object: drill down to the face (or point) here instead of `depth`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         to: Option<FacePick>,
@@ -1005,14 +1010,23 @@ pub enum FeatureKind {
         base: PointExpr,
         #[serde(default = "z_axis")]
         axis: Dir,
+        /// The sketch whose plane and profile the coil sweeps. Its absence means the primitive
+        /// circular or square section below.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sketch: Option<SketchId>,
+        #[serde(default = "all_profiles", skip_serializing_if = "profiles_are_all")]
+        #[walk(profiles_of = sketch)]
+        profiles: ProfileSel,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         #[walk(length = "Diameter")]
-        diameter: Expr,
+        diameter: Option<Expr>,
         #[walk(length = "Pitch")]
         pitch: Expr,
         #[walk(unitless = "Revolutions")]
         turns: Expr,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         #[walk(length = "Section size")]
-        section_size: Expr,
+        section_size: Option<Expr>,
         #[serde(default)]
         section: CoilSection,
         /// -1 inside, 0 on the centre, 1 outside of the diameter.
@@ -2015,12 +2029,20 @@ pub enum HoleKind {
         cb_diameter: Expr,
         #[walk(length = "Counterbore depth")]
         cb_depth: Expr,
+        /// Optional drill point below the narrow cylindrical bore; absent stays flat.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[walk(angle = "Tip angle")]
+        tip_angle: Option<Expr>,
     },
     Countersink {
         #[walk(length = "Countersink diameter")]
         cs_diameter: Expr,
         #[walk(angle = "Countersink angle")]
         cs_angle: Expr,
+        /// Optional drill point, independent of the entry countersink.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[walk(angle = "Tip angle")]
+        tip_angle: Option<Expr>,
     },
 }
 
@@ -2395,6 +2417,11 @@ pub struct Feature {
     /// independent base of a copied component.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub inserted: bool,
+    /// The Import feature of a linked design (Insert Design): the names that design gave the
+    /// faces of its bodies (by body, then face, in the file's order; empty where not known), so
+    /// its faces are named after them and references follow them through Update Links (#3330).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub link_faces: Vec<Vec<String>>,
     #[serde(flatten)]
     pub kind: FeatureKind,
 }
@@ -2405,6 +2432,10 @@ fn inside_str() -> String {
 
 pub(crate) fn all_profiles() -> ProfileSel {
     ProfileSel::All
+}
+
+fn profiles_are_all(p: &ProfileSel) -> bool {
+    matches!(p, ProfileSel::All)
 }
 
 fn yes() -> bool {
@@ -2447,7 +2478,7 @@ pub struct DesignLink {
 /// The document.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Document {
-    /// Named, renderer-independent setups. Device/job state is never saved here.
+    /// Named image intent and immutable embedded HDR sources. Active jobs and device state are not saved.
     #[serde(default, skip_serializing_if = "crate::render_settings::RenderSettings::is_empty")]
     pub render: std::sync::Arc<crate::render_settings::RenderSettings>,
     #[serde(default = "default_format")]
@@ -2538,13 +2569,15 @@ pub struct Document {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub named_views: Vec<NamedView>,
     /// What was hidden when the design was saved. A session takes it from here when the design
-    /// opens and keeps the live state itself (`browser.visibility`: saved, not an undo step), so
-    /// a document in a session leaves this empty; the session puts it back when it saves.
+    /// opens and keeps the live state itself (`browser.visibility`: saved, and undone like any
+    /// other change), so a document in a session leaves this empty; the session puts it back when
+    /// it saves.
     #[serde(default, skip_serializing_if = "Visibility::is_empty")]
     pub visibility: Visibility,
 }
 
-/// Items hidden or shown one by one. Saved with the design, but not an undo step.
+/// The browser's view of a design: items and folders hidden or shown, sketch profiles and
+/// dimensions shown, bodies locked. Saved with the design and an undo step of its own.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Visibility {
@@ -2561,6 +2594,18 @@ pub struct Visibility {
     /// Assembly joints by id: their glyphs are not drawn (they still constrain and move).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hidden_joints: Vec<u64>,
+    /// The browser's Origin folder is hidden (`None`: the app's preference decides).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin_hidden: Option<bool>,
+    /// Finished sketches whose closed profiles are not shaded, by feature id.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hidden_profiles: Vec<u64>,
+    /// Finished sketches whose dimensions are shown, by feature id.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub shown_dimensions: Vec<u64>,
+    /// Bodies locked in the browser (no move or delete), by name.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub locked_bodies: Vec<String>,
     /// Browser folders and groups hidden themselves, by tree key: `<scope>/<folder>` or
     /// `<scope>/g<group id>`, where the scope is `c0` (the design) or `o:<placement path>`
     /// (`o:4/9/bodies`). Their items keep their own state: they are drawn again, as they were,
@@ -2578,6 +2623,10 @@ impl Visibility {
             && self.hidden_sketches.is_empty()
             && self.shown_sketches.is_empty()
             && self.hidden_joints.is_empty()
+            && self.origin_hidden.is_none()
+            && self.hidden_profiles.is_empty()
+            && self.shown_dimensions.is_empty()
+            && self.locked_bodies.is_empty()
             && self.hidden_folders.is_empty()
     }
 }
@@ -2989,6 +3038,24 @@ impl Document {
         if body.transferred || body.source_name.is_some() { body.component } else { self.legacy_body_component(&body.name, body.feature) }
     }
 
+    /// [`Document::model_body_component`] of every body of `state`, in its order, with the
+    /// timeline looked up once: placing a large assembly asked it of every body for every
+    /// placement, each time searching the features.
+    pub fn model_body_components(&self, state: &crate::ModelState) -> Vec<u64> {
+        let features: std::collections::HashMap<u64, u64> = self.features.iter().rev().map(|f| (f.id, f.component)).collect();
+        state
+            .bodies
+            .iter()
+            .map(|b| {
+                if b.transferred || b.source_name.is_some() {
+                    b.component
+                } else {
+                    self.body_components.get(&b.name).copied().unwrap_or_else(|| features.get(&b.feature).copied().unwrap_or(0))
+                }
+            })
+            .collect()
+    }
+
     /// The components that own a body in `state` ([`Document::model_body_component`] of each),
     /// in one pass: the timeline is looked up once, not once per body.
     pub fn body_owners(&self, state: &crate::ModelState) -> std::collections::HashSet<u64> {
@@ -3055,6 +3122,7 @@ impl Document {
 
     /// Read a design file's JSON (any format this build knows; older ones are upgraded).
     pub fn from_json(s: &str) -> Result<Document> {
+        crate::render_resources::check_json_budget(s)?;
         let d = crate::format::read(s)?;
         if d.features.len() > MAX_FEATURES || d.params.len() > MAX_PARAMS {
             return Err(DocError::Invalid("document too large".into()));
@@ -3085,14 +3153,11 @@ impl Document {
     }
 
     fn unique_name(&self, base: &str) -> String {
-        let mut n = 1;
-        loop {
-            let name = format!("{base}{n}");
-            if !self.features.iter().any(|f| f.name == name) {
-                return name;
-            }
-            n += 1;
-        }
+        // The numbers taken after `base`, gathered once: the thousandth cylinder of a design
+        // tried Cylinder1, Cylinder2 … each against every feature's name.
+        let taken = crate::params::numbers_after(base, self.features.iter().map(|f| f.name.as_str()));
+        let n = (1..).find(|n| !taken.contains(n)).unwrap_or(1);
+        format!("{base}{n}")
     }
 
     /// The deepest timeline folder spanning the insertion slot between `marker - 1` and
@@ -3160,6 +3225,7 @@ impl Document {
             shell_piece_order: false,
             kernel_piece_order: false,
             inserted: false,
+            link_faces: Vec::new(),
             kind,
         };
         self.place_feature(f);
@@ -3306,9 +3372,9 @@ impl Document {
                 _ => true,
             })
             .collect();
-        self.appearances
-            .faces
-            .retain(|face| !face.strict_name || !face.name.as_ref().is_some_and(|name| gone.iter().any(|id| name.starts_with(&format!("F{id}:")))));
+        self.appearances.faces.retain(|face| {
+            !face.strict_name || !face.name.as_ref().and_then(|name| crate::persistent_name::made_by(name)).is_some_and(|made| gone.contains(&made))
+        });
         if keep.contains(&false) {
             let mut k = keep.iter();
             self.configs.columns.retain(|_| k.next().copied().unwrap_or(true));
@@ -3646,7 +3712,9 @@ impl Document {
     /// `moved_from`: the stored sketch, when `sk` is that sketch with its links refreshed. A
     /// link's points are where their source is now; the sides and turns the solve keeps are
     /// those of the stored state ([`Sketch::positions_in`]), not the ones read beside a line
-    /// that has moved past a point.
+    /// that has moved past a point. Where the links moved so far that the solve fails or turns
+    /// part of the sketch over, they are walked there in steps
+    /// ([`solidcraft_sketch::solve_after_link_move`]).
     pub fn solve_sketch(
         &self,
         vals: &std::collections::BTreeMap<String, expr::Value>,
@@ -3675,7 +3743,31 @@ impl Document {
         // Offsets always require another solve after refresh. Only that last report is
         // published; the first report only decides which state the second solve starts from.
         let first_analysis = if offsets { solidcraft_sketch::Analysis::StatusOnly } else { analysis };
+        // A linked or fixed point is not where the stored sketch has it.
+        let given_moved = moved_from
+            .is_some_and(|from| sk.points.iter().zip(&from.points).any(|(p, q)| (p.fixed || p.link.is_some()) && p.id == q.id && p.pos != q.pos));
         let mut report = solidcraft_sketch::solve_after_edit_with_analysis(sk, stored, was(sk).as_deref(), first_analysis);
+        // Links that moved far (a large change of a size upstream): when the jump fails, or
+        // lands on the mirror image of a side or turn the stored sketch has, walked there in
+        // steps; a turn the walk cannot avoid either is reported as one.
+        if let Some(from) = moved_from.filter(|_| given_moved) {
+            let flips = if report.ok() { solidcraft_sketch::flips_from_stored(sk, from) } else { Vec::new() };
+            if !report.keeps_orientation() || !flips.is_empty() {
+                match solidcraft_sketch::solve_after_link_move(sk, from, stored, first_analysis) {
+                    Some(walked) => report = walked,
+                    None => {
+                        for id in flips {
+                            if !report.failing.contains(&id) {
+                                report.failing.push(id.clone());
+                            }
+                            if !report.folded.contains(&id) {
+                                report.folded.push(id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if offsets {
             // Source dimensions may have moved curves during the solve.
             sk.refresh_offsets()?;
@@ -3703,7 +3795,13 @@ pub struct UserMaterial {
     pub density: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub appearance: Option<crate::appearance::Look>,
+    /// Candidate engineering data; independent of assigned mass density and optics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub physical_card: Option<crate::physical_material::ValidatedCard>,
 }
+
+/// Bound design-owned definitions consistently in commands and normal file loading.
+pub const MAX_USER_MATERIALS: usize = 1000;
 
 /// Largest density a material may have (g/cm³); the densest elements are about 22.6.
 pub const MAX_DENSITY: f64 = 1000.0;

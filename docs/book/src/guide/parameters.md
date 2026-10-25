@@ -10,7 +10,7 @@ name (`d1`, `d2`, …). Click another driving dimension to use its name: when th
 just a number (such as `10` or `10 mm`) the name replaces it; otherwise it goes in at the
 cursor, replacing selected text and keeping what you typed, so typing `10 + ` and clicking
 `d1` gives `10 + d1`. Add arithmetic such as `/ 2` to build a dependent dimension. Press **Enter** to apply
-the expression or **Escape** to cancel the edit. When placing a new dimension, `width = 40` adds
+the expression or **Escape** to cancel the edit. When placing a new dimension, `width = 40` (or `#width = 40`) adds
 the user parameter `width` with that value (a bare number is in the design's units) and
 dimensions with it; a name that is already taken is refused.
 Add and edit user parameters through the existing **Change Parameters** command.
@@ -25,7 +25,11 @@ editable. In expression fields, type a parameter or dimension name for autocompl
 or press **Ctrl+Space** to open suggestions, including in an empty field.
 **Up/Down** selects an autocomplete suggestion,
 **Enter/Tab** accepts it, and **Escape** dismisses the suggestions. Accepting a suggestion
-does not also submit the parameter.
+does not also submit the parameter. When what you typed is already a complete name
+(`width`), longer names such as `width_extra` stay listed without a selection: **Enter**
+applies what you typed, and **Up/Down** picks one of them first. A unit right after a number
+(`10 mm`) is left alone; anywhere else a unit is a prefix like any other, so `rad` followed by
+**Enter** gives `radius`.
 
 Expressions are unit-aware: `2 * width + 5 mm`, `angle / 2`, `sqrt(area)`, `1 in + 3 mm`, using
 `+ - * / ^`, parentheses, `sin cos tan asin acos atan atan2 sqrt abs min max floor ceil round mod
@@ -54,3 +58,21 @@ The table's Library picker selects material or appearance values. Choose **Follo
 to clear an appearance override. Custom looks retain their colour and opacity across
 activation, undo and save/reopen. See
 [configuration commands and examples](https://github.com/bherbruck/solidcraft/blob/main/docs/configurations.md).
+
+## Checking a design across a parameter's range
+
+**Parameter Sweep** (`inspect.parameter_sweep`) rebuilds a copy of the design at each of a
+parameter's values and reports what no longer holds, so a design meant to be driven by its
+parameters (one template, many sizes) can be checked before it is trusted. The design itself is
+not changed.
+
+```json
+{"command": "inspect.parameter_sweep", "params": {"parameter": "Width", "from": 300, "to": 510, "steps": 21}}
+```
+
+`values` lists the values instead (numbers or expressions). For each value it gives the rebuild's
+time and what changed from the design as it is now: features that fail (`failed`) or warn
+(`warned`), joints whose origin is no longer found (`joints_lost`) or turned over on its own part
+(`joints_flipped`, more than 90°), sketch planes that turned over (`sketches_flipped`) and sketch
+solves that fail or only hold by flipping a triangle's turn or an offset's side (`sketches_failed`).
+`summary` counts the values that show each.

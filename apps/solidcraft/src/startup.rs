@@ -21,6 +21,25 @@ pub const RENDERER_ENV: &str = "SOLIDCRAFT_RENDERER";
 pub const FAILED_STARTS_FOR_SAFE_MODE: u32 = 2;
 const MARKER: &str = "starting";
 
+/// Explicit application-settings isolation for side-by-side builds and native UI
+/// acceptance. A supplied invalid path refuses startup rather than falling back
+/// to the user's ordinary settings. No directory is read or created here.
+pub fn settings_directory(override_path: Option<&std::ffi::OsStr>, default: Option<PathBuf>) -> Result<Option<PathBuf>, String> {
+    match override_path {
+        None => Ok(default),
+        Some(raw) => {
+            let path = PathBuf::from(raw);
+            if raw.is_empty() || !path.is_absolute() {
+                return Err("SOLIDCRAFT_SETTINGS_DIR must be a nonempty absolute directory path".into());
+            }
+            if path.exists() && !path.is_dir() {
+                return Err("SOLIDCRAFT_SETTINGS_DIR names a file, not a directory".into());
+            }
+            Ok(Some(path))
+        }
+    }
+}
+
 /// Whether an environment value switches something on.
 pub fn env_on(v: Option<&str>) -> bool {
     v.map(str::trim).is_some_and(|v| !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
@@ -189,6 +208,18 @@ pub fn has_hardware_adapter(backends: eframe::wgpu::Backends) -> bool {
     adapters.iter().any(|a| a.get_info().device_type != eframe::wgpu::DeviceType::Cpu)
 }
 
+/// The environment variable that switches wgpu's indirect-call validation on or off.
+pub const INDIRECT_VALIDATION_ENV: &str = "WGPU_VALIDATION_INDIRECT_CALL";
+
+/// The instance flags for the window. wgpu's indirect-call validation compiles a compute shader
+/// when the device is created, and on Intel Macs (macOS 12 with Intel Iris graphics, #3024,
+/// #3080, #4605) the Metal compiler refuses it: the device is lost and the window never opens.
+/// So on an Intel Mac the validation is left off, unless the user turned it on or off with
+/// `WGPU_VALIDATION_INDIRECT_CALL` themselves.
+pub fn window_instance_flags(flags: eframe::wgpu::InstanceFlags, intel_mac: bool, env: Option<&str>) -> eframe::wgpu::InstanceFlags {
+    if intel_mac && env.map(str::trim).is_none_or(str::is_empty) { flags - eframe::wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL } else { flags }
+}
+
 /// The message shown when no window could be opened at all.
 pub fn no_window_message(error: &str, settings: Option<&Path>) -> String {
     let folder = settings.map(|d| d.display().to_string()).unwrap_or_else(|| "the SolidCraft settings folder".into());
@@ -212,6 +243,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn isolated_settings_are_explicit_absolute_and_never_fall_back() {
+        let default = std::env::temp_dir().join("ordinary-settings");
+        assert_eq!(settings_directory(None, Some(default.clone())).unwrap(), Some(default.clone()));
+        let selected = std::env::temp_dir().join("solidcraft-isolated-settings-fixture");
+        assert_eq!(settings_directory(Some(selected.as_os_str()), Some(default.clone())).unwrap(), Some(selected));
+        for raw in ["", "relative/settings", "../ordinary"] {
+            assert!(settings_directory(Some(std::ffi::OsStr::new(raw)), Some(default.clone())).is_err());
+        }
+        let file = std::env::current_exe().unwrap();
+        assert!(settings_directory(Some(file.as_os_str()), Some(default)).is_err());
+    }
+
+    #[test]
+    fn intel_macs_start_without_indirect_call_validation() {
+        use eframe::wgpu::InstanceFlags as F;
+        let on = F::VALIDATION | F::VALIDATION_INDIRECT_CALL;
+        assert_eq!(window_instance_flags(on, true, None), F::VALIDATION);
+        assert_eq!(window_instance_flags(on, true, Some("  ")), F::VALIDATION);
+        // The user's own choice stands, on or off.
+        assert_eq!(window_instance_flags(on, true, Some("1")), on);
+        assert_eq!(window_instance_flags(F::VALIDATION, true, Some("0")), F::VALIDATION);
+        // Every other machine keeps what it had.
+        assert_eq!(window_instance_flags(on, false, None), on);
     }
 
     #[test]

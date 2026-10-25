@@ -62,6 +62,11 @@ made. Contact sets stop motion where bodies would pass through each other,
 **Motion Study** keys joint values along a timeline, and **Interference** shows overlapping
 volumes in red, lists the pairs closer than its **Clearance** and each body's nearest neighbour.
 
+In the Joint and Joint Origin dialogs, picking a straight edge puts the origin at its midpoint
+with the motion axis along that edge. A revolute joint turns about the picked edge; a slider
+moves along it. Round edges use their circle's centre and normal. Existing saved joint origins
+keep their axes.
+
 A joint origin on a face or a hole keeps the turn it had when it was picked: when the face tilts
 (a bend angle or a rotation changing with a parameter) the part on it tilts with the face but
 doesn't spin about it.
@@ -288,6 +293,11 @@ are drawn by the same renderer as `solidcraft-cli snapshot`, on a copy of the de
 changed. A GIF keeps one palette for all its frames, so colours don't flicker, and stores only
 what changed from one frame to the next. Frames are capped: at most 1000, and a GIF holds at most
 2^26 pixels of frames (about 160 frames of 800 × 500).
+An exploded view animates the same way: give its name or id as `view` (instead of a `study` or a
+`joint`) and the parts come apart at a steady pace, from the assembled placement to where the view
+shows them; `back: true` brings them back together, exploded at the middle frame. That takes 41
+frames by default, or 81 with `back`, and the home view frames the parts both assembled and
+exploded. As with `explode.show`, the design keeps its placements.
 
 **Motion analysis.** The **Motion Study** dialog's **Study** box opens a saved study to edit, and
 by its timeline the dialog charts what the study does.

@@ -14,7 +14,7 @@ use solidcraft_engine::geom::{Vec2, Vec3};
 use crate::SolveApp;
 use crate::tool_modifiers::{Audit, Binding, Match, ModAction, ModifierCombo, Scope, ToolModifiers, Trigger};
 use crate::tools::{Kind, Tool};
-use crate::viewport::{Hit, Proj, pick, sketch_point_at};
+use crate::viewport::{Hit, Proj, pick_for_tool as pick, sketch_point_at};
 
 const DRAW_SCOPES: &[Scope] = &[Scope::SketchDraw, Scope::SketchDrag];
 const NONE: &[Scope] = &[];
@@ -851,9 +851,13 @@ pub fn on_click(app: &mut SolveApp, tool: &mut Tool, proj: &Proj, pos: Pos2) {
         Mode::ModelRef if matches!(cmd, "canvas.insert" | "canvas.decal") => {
             let Some(path) = IMAGE.with(|i| i.borrow().clone()) else { return };
             let decal = cmd == "canvas.decal";
+            // A plane the view shows edge-on can't show the image: at the origin its square is
+            // under the cursor too, and the image went onto it out of sight (#4717).
+            let (_, ray) = proj.ray(pos);
+            let seen = |name: &str| crate::dialogs::plane_by_name(&app.session, name).is_some_and(|pl| pl.normal().dot(ray).abs() > 0.2 * ray.len());
             let target = hits.iter().find_map(|h| match h {
                 Hit::Face { point, .. } => Some((json!({"face": [point.x, point.y, point.z]}), *point)),
-                Hit::Plane { name, point } if !decal => Some((json!(name), *point)),
+                Hit::Plane { name, point } if !decal && seen(name) => Some((json!(name), *point)),
                 _ => None,
             });
             // Empty space while sketching: the sketch plane.
@@ -1136,6 +1140,31 @@ pub(crate) fn trim_hover_piece(app: &SolveApp, sketch: u64, id: &str) -> Option<
     piece
 }
 
+/// Extend preview: the geometry that would be added, based on the hover position over curve `id`
+/// of `sketch`. Returns None when extend is not active or the geometry does not support a
+/// preview. An arc grows along its own circle, in either direction, as a new arc.
+fn extend_preview_piece(app: &SolveApp, sketch: u64, id: &str) -> Option<Vec<Vec2>> {
+    let tool = app.tool.as_ref().filter(|t| t.cmd == "sketch.extend")?;
+    let hover = tool.hover.as_ref()?;
+    if active_sketch(app) != Some(sketch) {
+        return None;
+    }
+    let st = app.session.world_state();
+    let sk = st.sketch(sketch)?;
+    let hover_pos = hover.0;
+    let ci = sk.sketch.curve_index(id)?;
+    let kind = sk.sketch.curves.get(ci)?.kind.clone();
+    // Arcs extend along their circle either way round, up to the first geometry in the way.
+    if let solidcraft_engine::sketch::CurveKind::Arc { .. } = kind {
+        return solidcraft_engine::cmd::extend_arc_preview(&sk.sketch, ci, hover_pos);
+    }
+    let solidcraft_engine::sketch::CurveKind::Line { a, b } = kind else { return None };
+    let at_b = hover_pos.dist(sk.sketch.point(b)?) <= hover_pos.dist(sk.sketch.point(a)?);
+    let end = sk.sketch.point(if at_b { b } else { a })?;
+    let hit = solidcraft_engine::cmd::extend_preview(&sk.sketch, ci, hover_pos)?;
+    Some(vec![end, hit])
+}
+
 /// Rubber band for point tools and pick markers.
 pub fn preview(app: &SolveApp, t: &Tool, painter: &egui::Painter, proj: &Proj) {
     let Some(sid) = active_sketch(app) else { return };
@@ -1149,6 +1178,14 @@ pub fn preview(app: &SolveApp, t: &Tool, painter: &egui::Painter, proj: &Proj) {
         let world: Vec<_> = piece.iter().map(|p| ss.plane.to_world(*p)).collect();
         // In the error colour, thicker than a hover: it is what the click deletes.
         crate::tools::paint_sketch_path(&world, 0, painter, proj, Stroke::new(4.5, tk.error));
+    }
+    // Extend preview: the line or arc that would be added (or the end that would move).
+    if let Some(crate::viewport::Hit::SketchCurve { sketch, id, .. }) = &app.viewport.hover
+        && let Some(preview_line) = extend_preview_piece(app, *sketch, id)
+    {
+        let world: Vec<_> = preview_line.iter().map(|p| ss.plane.to_world(*p)).collect();
+        // Draw the preview extension line using preview_new color (same as fillet/chamfer preview)
+        crate::tools::paint_sketch_path(&world, 0, painter, proj, Stroke::new(2.0, tk.preview_new.gamma_multiply(0.9)));
     }
     let stroke = Stroke::new(1.5, tk.sketch_accent);
     // A Trim drag: the pieces it will remove, then the path drawn so far.

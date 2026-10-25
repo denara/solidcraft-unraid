@@ -17,7 +17,9 @@
 - **Browser** (left). The design as a tree: document settings and units, named views, the
   origin, bodies, sketches, construction planes, canvases, joints and components. The eye shows or
   hides an item, a component's radio button makes it the active component, and right-clicking any
-  row gives that item's menu. Rows drag into groups and other components.
+  row gives that item's menu. Right-click the design or a component and choose **Expand All** or
+  **Collapse All** to open or close every folder under that row (the design row stays visible
+  when the whole tree is collapsed). Rows drag into groups and other components.
 - **Viewport.** Click to select, Shift or Ctrl to add (Preferences › Selection), drag for a window or crossing box. While sketching, Ctrl/Cmd or Alt/Option suppress auto-snap by default; Shift prefers a midpoint. To
   reach something under something else (two lines drawn on top of each other, coincident points,
   an edge in front of a face, overlapping bodies), hold the left button still for half a second
@@ -181,6 +183,21 @@ Command icons use the shared SVG palette.
 
 Imported themes are kept with your preferences, so they work in the browser app too. Colour
 vision modes still apply on top of any theme.
+
+Graphics › **Frame rate** shows frames per second in the view's bottom-right corner. Click it,
+or turn on **Frame rate details**, for the performance overlay:
+
+- a graph of the last few seconds of frames, one bar per frame, with lines at 60 and 30 frames
+  per second. The triangles drawn are a line over it, and a tick at the top marks each frame that
+  rebuilt the scene, so you can see how geometry changes the frame time;
+- a histogram of frame times, the 1% low (the mean of the slowest 1% of frames) and the worst
+  frame, which show stutters that an average hides;
+- what the GPU drew last frame (triangles, line segments, draw calls), the viewport's size in
+  pixels with its MSAA and supersampling, the time the interface took, the last scene build and
+  the graphics backend and adapter.
+
+While the readout is on, the view redraws every frame. With vertical sync the frame rate tops
+out at the display's refresh rate; the interface time and the GPU counts still show the work.
 
 Navigation › **Smooth wheel zoom** is on by default. Turn it off to apply each wheel or
 trackpad event immediately, with no smoothing tail. It is independent of **Animate view

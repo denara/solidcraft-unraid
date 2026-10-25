@@ -16,7 +16,7 @@ new uses of it anywhere else. Public docs/web/Flatpak deployments use project Pa
 
 ## Container prototype baseline
 The first Unraid prototype used upstream commit `af536a7`. The current validated
-container baseline is `807e367bdb03210dba188118fe000acd0a4b3725`.
+container baseline is `ac53fc1e6fab85a50bdc410178cc75133183393f`.
 Keep later upstream CAD/UI feature updates separate from this deployment addition;
 advance the baseline only as a separate, validated update. See [update records](docs/unraid-updates.md).
 
@@ -67,6 +67,8 @@ Normalize MCP batch tool aliases before project/path/revision preflight and laun
 workers explicitly with `--headless`; desktop discovery must never attach a network session
 to a running desktop app. New `component.extract` destinations and
 `component.replace_with_link` source paths retain file confinement and shared revision gates.
+Nested renderer file sources remain project-relative and share the HTTP/MCP read gate.
+Observer snapshots never inherit render-job hosts; ordinary scratch rendering retains them.
 Run `packaging/unraid/workspace-test.ps1` against an isolated candidate along with
 the existing modelling, persistence, logging and browser checks.
 
@@ -241,6 +243,9 @@ fixed-snapshot container updates. The single-branch fork workflow above takes pr
   you are about to change (`gh pr list ... --json number,title,files`).
 - If someone already has it, comment on their PR or issue instead of opening a second one. Two
   PRs for one change can't both land, and one of them is wasted work and CI.
+
+- Keep the `Changes a default:` line in the PR description filled in, and don't open a second PR for
+  an issue a lower-numbered open PR already closes; `pr-checks.yml` fails both (CONTRIBUTING.md, "Sending a change").
 
 ## Claim = a draft PR
 - Before working on issue #N, check nobody has it: `gh pr list -R tangency-labs/solidcraft --state open --search "#N"`.

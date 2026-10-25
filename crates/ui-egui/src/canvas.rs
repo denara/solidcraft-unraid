@@ -77,6 +77,9 @@ pub fn anchor(app: &SolveApp, d: &Dialog) -> Option<(Vec3, Option<Vec3>)> {
             (ss.plane.to_world(ss.sketch.point(ss.sketch.resolve_point(point)?)?), None)
         }
         Sel::Body { name } => (st.body(name)?.mesh().bounds().center(), None),
+        // A feature picked as a whole (a pattern or mirror of features): the middle of what it
+        // made, as a body sits at the middle of its box.
+        Sel::Feature { id } => (crate::viewport::feature_bounds(app, *id)?.center(), None),
         Sel::Plane { name } => {
             let pl = solidcraft_engine::geom::Plane::named(name).or_else(|| {
                 solidcraft_engine::view::construction_planes(&app.session).into_iter().find(|(_, n, _)| n == name).map(|(_, _, pl)| pl)
@@ -116,7 +119,9 @@ pub fn anchor(app: &SolveApp, d: &Dialog) -> Option<(Vec3, Option<Vec3>)> {
             let dir = by_sketch.first().and_then(|(sk, ids)| solidcraft_engine::doc::sketch_hole_direction(&st, *sk, ids, flip));
             (at, normal.or(dir.map(|d| -d)))
         }
-        Kind::Section { .. } | Kind::OffsetPlane { .. } | Kind::OffsetFaces { .. } => (at, normal),
+        // A curved face offsets along its outward normal where it was picked.
+        Kind::OffsetFaces { .. } => (at, normal.or_else(|| solidcraft_engine::doc::hole_direction_at(&st, at).map(|d| -d))),
+        Kind::Section { .. } | Kind::OffsetPlane { .. } => (at, normal),
         // Fillet radii and chamfer distances grow the way `blend_grow_dir` gives (into the body
         // on an outside edge, into the open corner on an inside one); shell thickness grows into
         // the body.
@@ -127,6 +132,11 @@ pub fn anchor(app: &SolveApp, d: &Dialog) -> Option<(Vec3, Option<Vec3>)> {
             (at, along_face.or_else(|| st.body(body).and_then(|b| blend_grow_dir(&b.mesh(), *index, at))))
         }
         Kind::Fillet { .. } | Kind::Shell { .. } => (at, normal.map(|n| -n)),
+        // A hem's handle starts on the centre line of its layer and runs to its tip (#5828).
+        Kind::Sheet(crate::dialogs_sheet::Sm::Hem { .. }) => match crate::dialogs_sheet::hem_handle(app, d) {
+            Some((start, dir)) => (start, Some(dir)),
+            None => (at, normal),
+        },
         Kind::Sheet(_) => (at, crate::dialogs_sheet::arrow(app, d).or(normal)),
         Kind::Plastic(_) => (at, normal),
         Kind::PatternRect { .. } => (at, d.inputs.get(1).and_then(|i| i.items.first()).and_then(|x| crate::dialogs::axis_of(app, x)).map(|a| a.1)),
@@ -363,7 +373,7 @@ pub fn snap_step(half_height: f64) -> f64 {
 }
 
 /// Parameter along the line `base + dir * t` closest to the view ray through `pos`.
-fn along(proj: &Proj, pos: Pos2, base: Vec3, dir: Vec3) -> Option<f64> {
+pub(crate) fn along(proj: &Proj, pos: Pos2, base: Vec3, dir: Vec3) -> Option<f64> {
     let (o, r) = proj.ray(pos);
     let w0 = base - o;
     let (b, d, e) = (dir.dot(r), dir.dot(w0), r.dot(w0));
@@ -537,6 +547,29 @@ fn draw(app: &SolveApp, ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj,
     if radius_spline_handles(app, ui, painter, proj, d) {
         dir = None;
     }
+    // Two-sided sketch offset: Distance 2 is its own dimension, the other way from Distance.
+    // One Side and Symmetric keep the single Distance box.
+    if let Kind::SketchModify(crate::sketch_modify_ui::Mod::Offset { distance2, mode, .. }) = &mut d.kind
+        && crate::sketch_modify_ui::offset_two_sides(*mode)
+        && let Some(n) = dir
+        && let Some(l2) = app.session.doc.eval(distance2, ValueKind::Length).ok().filter(|v| v.is_finite())
+    {
+        let before = distance2.clone();
+        if let Some(ts) =
+            drag_arrow(ui, painter, proj, base, bs, -n, l2.abs(), false, egui::Id::new("sc_manipulator_offset2"), half_height, distance2)
+        {
+            // Its own area and field, so it does not share Distance's focus or text.
+            value_box_in(
+                ui,
+                (egui::Id::new("sc_canvas_area2"), egui::Id::new("sc_canvas_value2")),
+                "Distance 2",
+                distance2,
+                (ts + vec2(14.0, 8.0), egui::Align2::LEFT_TOP),
+                *distance2 != before,
+                false,
+            );
+        }
+    }
     let Some((label, kind, value)) = d.primary() else { return };
     let len = all_span.or_else(|| {
         if to_span.is_some() && value.trim().is_empty() { Some(0.0) } else { app.session.doc.eval(value, kind).ok().filter(|v| v.is_finite()) }
@@ -565,7 +598,8 @@ fn draw(app: &SolveApp, ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj,
             box_at = ts + vec2(14.0, -12.0);
         }
     }
-    value_box(ui, label, value, box_at, focus || *value != before);
+    let note = crate::drag_extrude::step_note(app);
+    value_box_noted(ui, label, value, box_at, focus || *value != before, note.as_deref());
     if *value != before
         && let Kind::Extrude { all, .. } = &mut d.kind
     {
@@ -590,17 +624,36 @@ fn value_box_with(ui: &mut egui::Ui, label: &str, value: &mut String, at: Pos2, 
     value_box_in(ui, ids, label, value, (at, egui::Align2::LEFT_TOP), select_all, keep_tab);
 }
 
+/// [`value_box`] with a note after the field (a pull's step size).
+fn value_box_noted(ui: &mut egui::Ui, label: &str, value: &mut String, at: Pos2, select_all: bool, note: Option<&str>) {
+    let ids = (egui::Id::new("sc_canvas_area"), egui::Id::new("sc_canvas_value"));
+    value_box_full(ui, ids, label, value, (at, egui::Align2::LEFT_TOP), (select_all, false), note);
+}
+
 /// [`value_box_with`] under its own ids (its area's and its field's), for a value beside the main
 /// one (a hole's reference distances), with the point of the box that sits at `at`. Returns where
 /// the field is.
 pub(crate) fn value_box_in(
     ui: &mut egui::Ui,
+    ids: (egui::Id, egui::Id),
+    label: &str,
+    value: &mut String,
+    at: (Pos2, egui::Align2),
+    select_all: bool,
+    keep_tab: bool,
+) -> Option<egui::Rect> {
+    value_box_full(ui, ids, label, value, at, (select_all, keep_tab), None)
+}
+
+/// [`value_box_in`] with a short dimmed note after the field (a pull's step size).
+fn value_box_full(
+    ui: &mut egui::Ui,
     (area, id): (egui::Id, egui::Id),
     label: &str,
     value: &mut String,
     (at, pivot): (Pos2, egui::Align2),
-    select_all: bool,
-    keep_tab: bool,
+    (select_all, keep_tab): (bool, bool),
+    note: Option<&str>,
 ) -> Option<egui::Rect> {
     let t = Tokens::get();
     let mut field = None;
@@ -616,6 +669,9 @@ pub(crate) fn value_box_in(
                     let mut st = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
                     st.cursor.set_char_range(Some(egui::text_selection::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(n))));
                     st.store(ui.ctx(), id);
+                }
+                if let Some(note) = note {
+                    ui.label(egui::RichText::new(note).color(t.text_dim).size(crate::theme::Tokens::get().font_caption));
                 }
                 field = Some(r.rect);
             });

@@ -19,7 +19,7 @@ fn screen(h: &mut Harness, p: Vec3) -> [f64; 2] {
 /// A 50 × 40 × 10 plate from the origin, seen from the top.
 fn plate() -> Harness {
     let mut h = Harness::new();
-    h.app.ui.show_origin = false;
+    h.app.set_origin_shown(false);
     h.app.run("solid.box", json!({"length": 50, "width": 40, "height": 10, "corner": [0, 0, 0]})).unwrap();
     h.step(&json!({"call": "ui.view", "params": {"view": "top"}})).unwrap();
     h.settle();

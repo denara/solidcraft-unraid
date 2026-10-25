@@ -419,6 +419,8 @@ fn timeline_contents(app: &mut SolveApp, ui: &mut egui::Ui, floating: bool) {
                 .map(|f| (f.id, f.name.clone(), icon_of(&f.kind), f.suppressed, f.kind.type_name(), TimelineKind::of(&f.kind)))
                 .collect();
             let order: Vec<u64> = feats.iter().map(|f| f.0).collect();
+            // Find in Timeline: scroll the found feature into the strip on this frame (#5850).
+            let reveal = app.tree.timeline_reveal.take();
             // The feature whose body is under the cursor in the viewport.
             let st = app.session.world_state();
             let from_view = match &app.viewport.hover {
@@ -441,6 +443,9 @@ fn timeline_contents(app: &mut SolveApp, ui: &mut egui::Ui, floating: bool) {
                 }
                 xs.push(x);
                 let br = Rect::from_min_size(pos2(x, r.top() + 6.0), vec2(28.0, 28.0));
+                if reveal == Some(*id) {
+                    ui.scroll_to_rect(br, Some(egui::Align::Center));
+                }
                 crate::scenario::publish_handle(&format!("timeline:{name}"), br.center());
                 let resp = ui.interact(br, ui.id().with(("feat", *id)), Sense::click_and_drag());
                 let res = app.session.model.result(*id);
@@ -456,7 +461,7 @@ fn timeline_contents(app: &mut SolveApp, ui: &mut egui::Ui, floating: bool) {
                     icon,
                     name,
                     kind: ty,
-                    selected: sel || (floating && marker > 0 && i == marker - 1),
+                    selected: sel,
                     hovered: resp.hovered() || from_view == Some(*id),
                     dim: rolled,
                     suppressed: *suppressed,
@@ -466,11 +471,15 @@ fn timeline_contents(app: &mut SolveApp, ui: &mut egui::Ui, floating: bool) {
                     accent: if drag == Some(Drag::Feature(*id)) { crate::theme::TabAccent::for_tab(&t, "SKETCH") } else { accent },
                 }
                 .paint(&p, br, crate::ui_kit::HistoryStyle::Bottom);
+                if floating && marker > 0 && i == marker - 1 {
+                    p.circle_filled(pos2(br.center().x, br.bottom() + t.space_3), t.space_2, accent.color);
+                }
                 let mut tip = status_text(name, ty, err.as_deref(), warn.as_deref());
                 if let Some(r) = res {
                     tip += &format!("\n{:.1} ms", r.ms);
                 }
-                tip += "\nDouble-click to edit · drag to reorder · right-click for more";
+                tip.push('\n');
+                tip.push_str(crate::i18n::tr("timeline.feature_hint"));
                 if resp.drag_started() {
                     drag = Some(Drag::Feature(*id));
                 }
@@ -479,8 +488,14 @@ fn timeline_contents(app: &mut SolveApp, ui: &mut egui::Ui, floating: bool) {
                     // A dialog input that takes features (pattern objects) gets the click.
                     let takes = app.dialog.as_ref().and_then(|d| d.active_input()).is_some_and(|i| i.accept & crate::selection::FEATURES != 0);
                     if takes {
+                        // A click adds the feature and keeps one already picked (it shows as
+                        // selected); Ctrl+click takes it out, as Ctrl+click toggles outside a dialog.
+                        let toggle = ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
                         if let Some(mut d) = app.dialog.take() {
-                            d.pick(&app.session, solidcraft_engine::Sel::Feature { id: *id });
+                            let feature = solidcraft_engine::Sel::Feature { id: *id };
+                            if toggle || !d.active_input().is_some_and(|i| i.items.contains(&feature)) {
+                                d.pick(&app.session, feature);
+                            }
                             app.dialog = Some(d);
                         }
                     } else {
@@ -768,6 +783,38 @@ mod tests {
         assert_eq!(moved.y, first.y);
     }
 
+    /// Find in Timeline on the last body of a history longer than the timeline scrolls its
+    /// feature into view, in the bottom strip and in the history on the left (#5850).
+    #[test]
+    fn find_in_timeline_scrolls_both_timelines_to_the_found_feature() {
+        for left in [false, true] {
+            let mut h = Harness::new();
+            h.app.preferences.timeline_left = left;
+            for i in 0..80 {
+                h.app.run("sketch.create", json!({"plane": "XY", "name": format!("S{i}")})).unwrap();
+                h.app.run("sketch.finish", json!({})).unwrap();
+            }
+            h.app.run("solid.box", json!({"length": 10, "width": 10, "height": 10, "name": "Last", "body_name": "Plate"})).unwrap();
+            h.app.run("select.clear", json!({})).unwrap();
+            h.frames(4);
+            let shown = |h: &Harness| {
+                let history = h.app.shell.history.unwrap();
+                let found = crate::scenario::handle_at("timeline:Last").unwrap();
+                history.contains(found)
+            };
+            assert!(!shown(&h), "left={left}: the last feature starts outside the timeline");
+
+            let target = crate::context_menu::Target::Body { name: "Plate".into() };
+            let item = crate::context_menu::items(&h.app, &target).into_iter().find(|item| item.id == "ui.findTimeline").unwrap();
+            crate::context_menu::run_item(&mut h.app, &item, egui::pos2(0.0, 0.0));
+            h.frames(30);
+            let last = h.app.session.doc.find_feature("Last").unwrap().id;
+            assert_eq!(h.app.session.selection, [solidcraft_engine::Sel::Feature { id: last }], "left={left}");
+            assert!(shown(&h), "left={left}: Find in Timeline scrolled the found feature into the timeline");
+            assert!(h.app.tree.timeline_reveal.is_none(), "left={left}: the request is done once drawn");
+        }
+    }
+
     #[test]
     fn the_feature_menu_edits_its_profile_sketch_in_both_timelines() {
         for left in [false, true] {
@@ -1051,31 +1098,49 @@ mod tests {
         h.app.ui.tab = "SURFACE".into();
         let t = crate::theme::Tokens::get();
         let accent = crate::theme::TabAccent::for_tab(&t, "SURFACE");
-        let ctx = crate::fonts::test_context();
-        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| super::timeline(&mut h.app, ui));
-        out.textures_delta.clear();
-        let texts: Vec<_> = out
-            .shapes
-            .iter()
-            .filter_map(|s| match &s.shape {
-                egui::Shape::Text(text) => Some(text.galley.text()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(texts, ["History"]);
-        let chips: Vec<_> = out
-            .shapes
-            .iter()
-            .filter_map(|s| match &s.shape {
-                egui::Shape::Rect(r) if r.rect.size() == egui::vec2(28.0, 28.0) => Some(r),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(chips.len(), 2);
-        assert_eq!(chips.last().unwrap().fill, accent.soft);
-        assert_eq!(chips.last().unwrap().stroke.color, accent.color);
-        let marker = crate::scenario::rect_of("history:marker").unwrap();
-        assert!(out.shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Circle(c)
-            if marker.contains(c.center) && c.fill == t.timeline && c.stroke == egui::Stroke::new(t.space_2, accent.color))));
+        for marker_position in [None, Some(1), Some(0)] {
+            h.app.session.doc_mut().marker = marker_position;
+            let marker_index = marker_position.unwrap_or(2);
+            for selected in [None, Some(0), Some(1)] {
+                h.app.session.selection =
+                    selected.map(|i| solidcraft_engine::Sel::Feature { id: h.app.session.doc.features[i].id }).into_iter().collect();
+                let ctx = crate::fonts::test_context();
+                let mut out = ctx.run_ui(egui::RawInput::default(), |ui| super::timeline(&mut h.app, ui));
+                out.textures_delta.clear();
+                let texts: Vec<_> = out
+                    .shapes
+                    .iter()
+                    .filter_map(|s| match &s.shape {
+                        egui::Shape::Text(text) => Some(text.galley.text()),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(texts, ["History"]);
+                let chips: Vec<_> = out
+                    .shapes
+                    .iter()
+                    .filter_map(|s| match &s.shape {
+                        egui::Shape::Rect(r) if r.rect.size() == egui::vec2(28.0, 28.0) => Some(r),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(chips.len(), 2);
+                for (i, chip) in chips.iter().enumerate() {
+                    let opacity = if i >= marker_index { 0.42 } else { 1.0 };
+                    let (fill, edge) = if selected == Some(i) { (accent.soft, accent.color) } else { (t.timeline_item, t.border) };
+                    assert_eq!(chip.fill, fill.gamma_multiply(opacity), "marker={marker_position:?}, selected={selected:?}, chip={i}");
+                    assert_eq!(chip.stroke.color, edge.gamma_multiply(opacity));
+                    let dot_center = egui::pos2(chip.rect.center().x, chip.rect.bottom() + t.space_3);
+                    let has_dot = out.shapes.iter().any(|s| {
+                        matches!(&s.shape, egui::Shape::Circle(c)
+                        if c.center == dot_center && c.radius == t.space_2 && c.fill == accent.color && c.stroke == egui::Stroke::NONE)
+                    });
+                    assert_eq!(has_dot, marker_index > 0 && i == marker_index - 1);
+                }
+                let marker = crate::scenario::rect_of("history:marker").unwrap();
+                assert!(out.shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Circle(c)
+                    if marker.contains(c.center) && c.fill == t.timeline && c.stroke == egui::Stroke::new(t.space_2, accent.color))));
+            }
+        }
     }
 }

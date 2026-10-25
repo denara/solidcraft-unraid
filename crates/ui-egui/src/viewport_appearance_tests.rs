@@ -24,7 +24,7 @@ fn placed_step_body_uses_imported_opacity_until_a_design_look_overrides_it() {
     session.execute("occurrence.copy", &json!({"component":component,"translate":[30,0,0]})).unwrap();
     let mut app = SolveApp::new(session, Services::default());
     app.ui.ground_shadow = false;
-    app.ui.show_origin = false;
+    app.set_origin_shown(false);
     let placed = app.session.world_state().bodies.iter().find(|b| b.name != source).unwrap().name.clone();
     app.session.selection = vec![solidcraft_engine::Sel::Body { name: placed }];
     app.start("appearance.assign");
@@ -62,7 +62,7 @@ fn theme_switches_refresh_cached_viewport_colours_without_remeshing() {
     let mut h = crate::scenario::Harness::new();
     h.app.home.open = false;
     h.app.ui.ground_shadow = false;
-    h.app.ui.show_origin = false;
+    h.app.set_origin_shown(false);
     h.app.run("solid.box", json!({"length": 20, "width": 15, "height": 10})).unwrap();
     h.app.viewport.gpu = Some(super::GpuTarget { format: egui_wgpu::wgpu::TextureFormat::Rgba8Unorm, depth: None, samples: 1, tess: false });
     let body = h.app.session.world_state().bodies[0].name.clone();

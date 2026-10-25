@@ -5,7 +5,7 @@ members = ["crates/*", "apps/*", "xtask"]
 exclude = ["vendor"]
 
 [workspace.package]
-version = "0.21.0"
+version = "0.22.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.95"
@@ -13,6 +13,7 @@ authors = ["SolidCraft contributors"]
 repository = "https://github.com/bherbruck/solidcraft"
 
 [workspace.dependencies]
+robust = "1.2"
 # internal
 solidcraft-geom = { path = "crates/geom" }
 solidcraft-sketch = { path = "crates/sketch" }

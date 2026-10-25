@@ -44,6 +44,45 @@ fn file_fields(root: &Path, value: &mut Value) -> Result<(), String> {
     Ok(())
 }
 
+/// Renderer inputs may nest file sources in environments, textures and typed jobs.
+fn render_file_fields(root: &Path, value: &mut Value, depth: usize) -> Result<(), String> {
+    if depth > 32 {
+        return Err("render arguments are nested too deeply".into());
+    }
+    if let Value::Object(object) = value {
+        for key in ["path", "dir", "font_path"] {
+            if let Some(item) = object.get_mut(key)
+                && let Some(name) = item.as_str()
+            {
+                if key == "path"
+                    && let Some(builtin) = name.strip_prefix("builtin://")
+                {
+                    // A closed registry lookup never opens a filesystem path.
+                    if builtin.is_empty() || builtin.len() > 256 || builtin.chars().any(|c| !c.is_ascii_alphanumeric() && !"/_-".contains(c)) {
+                        return Err("invalid built-in render resource identifier".into());
+                    }
+                } else {
+                    *item = Value::String(resolve(root, name)?.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    match value {
+        Value::Object(object) => {
+            for child in object.values_mut() {
+                render_file_fields(root, child, depth + 1)?;
+            }
+        }
+        Value::Array(array) => {
+            for child in array {
+                render_file_fields(root, child, depth + 1)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 pub fn prepare_tool(root: &Path, tool: &str, value: &mut Value) -> Result<(), String> {
     match tool {
         "crash_reports" => Err("shared desktop crash reports are unavailable through the network gateway".into()),
@@ -131,11 +170,16 @@ fn commands(root: &Path, value: &mut Value, depth: usize) -> Result<(), String> 
                         && !matches!(c, "component.insert_design" | "component.relink" | "component.extract" | "component.replace_with_link"))
                     || c.starts_with("occurrence.")
             });
+            let render = object.get("command").and_then(Value::as_str).is_some_and(|id| id.starts_with("render."));
             if !geometry
                 && object.get("command").is_some()
                 && let Some(params) = object.get_mut("params")
             {
-                file_fields(root, params)?;
+                if render {
+                    render_file_fields(root, params, 0)?;
+                } else {
+                    file_fields(root, params)?;
+                }
             }
             for item in object.values_mut() {
                 commands(root, item, depth + 1)?;
@@ -259,5 +303,21 @@ mod tests {
         assert_eq!(batch["commands"][0]["params"]["path"], json!(root.join("part.solidcraft")));
         assert_eq!(batch["commands"][1]["command"], "component.extract");
         assert_eq!(batch["commands"][1]["params"]["path"], json!(root.join("extract.solidcraft")));
+    }
+    #[test]
+    fn nested_render_sources_follow_the_project_scope_in_direct_and_alias_batches() {
+        let root = std::env::temp_dir();
+        let mut direct = json!({"command":"render.start","params":{"environment":{"kind":"hdr","path":"sky.hdr"},
+            "raytrace":{"textures":[{"path":"colour.png"}]}}});
+        prepare_tool(&root, "execute", &mut direct).unwrap();
+        assert_eq!(direct["params"]["environment"]["path"], json!(root.join("sky.hdr")));
+        assert_eq!(direct["params"]["raytrace"]["textures"][0]["path"], json!(root.join("colour.png")));
+        let mut builtin = json!({"command":"render.preflight","params":{"raytrace":{"textures":[{"path":"builtin://SURF-001/base_color"}]}}});
+        prepare_tool(&root, "execute", &mut builtin).unwrap();
+        assert_eq!(builtin["params"]["raytrace"]["textures"][0]["path"], "builtin://SURF-001/base_color");
+        for path in ["../secret.hdr", "/etc/passwd", "folder/.private", "colour.png.bak"] {
+            let mut batch = json!({"commands":[{"command":"execute","params":{"command":"render.preflight","params":{"settings":{"job":{"options":{"environment":{"path":path}}}}}}}]});
+            assert!(prepare_tool(&root, "batch", &mut batch).is_err(), "{path}");
+        }
     }
 }

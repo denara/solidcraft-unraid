@@ -1043,7 +1043,7 @@ const ELEMENTS: &[Element] = &[
             ui.ctx(),
             ui.id().with("popup"),
             anchor,
-            0,
+            Some(0),
             &[PopupOption { kind: "parameter", text: "Width", detail: "10 mm", color: Tokens::get().text }],
             "Choose",
         );
@@ -1325,7 +1325,7 @@ fn popup_suggestions_and_selectable_lists_keep_click_selection() {
                 ui.ctx(),
                 egui::Id::new("suggestions"),
                 egui::Rect::from_min_size(egui::pos2(10.0, 10.0), vec2(220.0, 24.0)),
-                0,
+                Some(0),
                 &[
                     PopupOption { kind: "parameter", text: "width", detail: "Parameter · 10 mm", color: Tokens::get().text },
                     PopupOption { kind: "parameter", text: "height", detail: "Parameter · 20 mm", color: Tokens::get().text },

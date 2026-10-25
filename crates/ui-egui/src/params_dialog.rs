@@ -203,6 +203,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
         ui_kit::Panel::feature_frame(ctx, app.ui.layout, side),
     )
     .wide()
+    .body_rows(16.0)
     .reset_scroll(d.reset_scroll);
     let panel = if side == crate::frame::Side::Left {
         let available = palette.map_or(viewport.width(), |r| (r.left() - viewport.left() - crate::theme::Tokens::get().space_8).max(0.0));
@@ -752,17 +753,31 @@ pub(crate) fn suggestions_for(ctx: &egui::Context, word: &str, explicit: bool) -
         return Vec::new();
     }
     let all = ctx.data(|d| d.get_temp::<Cache>(cache_id())).map(|c| c.all).unwrap_or_default();
-    // A complete token is ready to submit, even when longer names share its prefix.
-    if !explicit && all.iter().any(|s| s.text == word) {
-        return Vec::new();
-    }
+    // A complete token stays out of its own list; longer names that start with it are still
+    // offered (passively: see `expression_complete`, #3663), but only those: `in` lists `inner`,
+    // not every name with `in` somewhere in it. A typed unit is complete in every sense, so only
+    // parameters, functions and constants extend it: `in` does not offer `inch`.
+    let exact = !explicit && all.iter().any(|s| s.text == word);
     let w = word.to_ascii_lowercase();
-    let offered = |s: &&Suggestion| explicit || s.text.trim_end_matches('(') != word;
+    let offered = |s: &&Suggestion| (explicit || s.text.trim_end_matches('(') != word) && !(exact && s.kind == "unit");
     let starts = |s: &&Suggestion| s.text.to_ascii_lowercase().starts_with(&w);
     // A parameter is also offered for a word anywhere in its name (`side` finds
     // `cab_side_thickness`, #2757), after the names that start with it.
-    let within = |s: &&Suggestion| s.kind == "parameter" && !starts(s) && s.text.to_ascii_lowercase().contains(&w);
+    let within = |s: &&Suggestion| !exact && s.kind == "parameter" && !starts(s) && s.text.to_ascii_lowercase().contains(&w);
     all.iter().filter(|s| starts(s) && offered(s)).chain(all.iter().filter(|s| within(s) && offered(s))).take(8).cloned().collect()
+}
+
+/// Is `word` itself one of the known tokens (a parameter or dimension name, a constant or a
+/// unit)? Such a word is ready to submit as typed; the popup then only offers longer names.
+pub(crate) fn exact_token(ctx: &egui::Context, word: &str) -> bool {
+    let all = ctx.data(|d| d.get_temp::<Cache>(cache_id())).map(|c| c.all).unwrap_or_default();
+    all.iter().any(|s| s.text == word)
+}
+
+/// Is `word` a unit (`mm`, `in`, `deg`, ...)?
+pub(crate) fn unit_token(ctx: &egui::Context, word: &str) -> bool {
+    let all = ctx.data(|d| d.get_temp::<Cache>(cache_id())).map(|c| c.all).unwrap_or_default();
+    all.iter().any(|s| s.kind == "unit" && s.text == word)
 }
 
 /// Offer keyboard and pointer completions under a focused expression box.
@@ -977,9 +992,26 @@ mod tests {
         let ctx = crate::fonts::test_context();
         let mut app = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
         let _ = app.run("parameters.add", json!({"name": "width", "expression": "40 mm"}));
+        let _ = app.run("parameters.add", json!({"name": "radius", "expression": "10 mm"}));
+        let _ = app.run("parameters.add", json!({"name": "rounding", "expression": "3 mm"}));
         publish(&mut app, &ctx);
         let s = suggestions(&ctx, "wi");
         assert_eq!(s.first().map(|x| x.text.as_str()), Some("width"));
+        // A name that extends a unit is still offered at the unit's own prefix (#3663); the
+        // prefix itself is a complete token, so the caller knows Enter should submit it.
+        assert!(suggestions(&ctx, "rad").iter().any(|x| x.text == "radius"));
+        assert!(!suggestions(&ctx, "rad").iter().any(|x| x.text == "rad"));
+        // A typed unit is not extended by other units: `in` offers no `inch` (a popup there sat
+        // over dialog buttons); a prefix that is not itself a unit still does. A complete token
+        // is extended only by names that start with it: `in` does not list `rounding` (a fillet
+        // dialog opening on `2 in` showed it over the OK button), while `und` still does (#2757).
+        assert!(suggestions(&ctx, "in").is_empty() && suggestions(&ctx, "mm").is_empty());
+        assert!(suggestions(&ctx, "und").iter().any(|x| x.text == "rounding"));
+        assert!(unit_token(&ctx, "in") && unit_token(&ctx, "rad") && !unit_token(&ctx, "radius") && !unit_token(&ctx, "i"));
+        let m: Vec<String> = suggestions(&ctx, "m").into_iter().map(|x| x.kind).collect();
+        assert!(!m.is_empty() && m.iter().all(|k| k == "function"), "{m:?}");
+        assert!(suggestions(&ctx, "i").iter().any(|x| x.text == "inch"));
+        assert!(exact_token(&ctx, "rad") && exact_token(&ctx, "width") && !exact_token(&ctx, "radi") && !exact_token(&ctx, "wi"));
         assert!(suggestions(&ctx, "ata").iter().any(|x| x.text == "atan2("));
         assert!(suggestions(&ctx, "1").is_empty());
         // The dialog's rows come from the engine.
@@ -1080,7 +1112,7 @@ mod tests {
         let mut h = crate::scenario::Harness::new();
         h.app.home.open = false;
         h.app.session = solidcraft_engine::Session::new(doc);
-        h.app.ui.show_origin = false;
+        h.app.set_origin_shown(false);
         h
     }
 
@@ -1210,10 +1242,56 @@ mod tests {
             h.app.start("parameters.change");
             h.frames(6);
             for id in ["fav", "user", "Box1", "Box2"] {
+                if id.starts_with("Box") {
+                    // The bounded card no longer shows every group at once. Bring each
+                    // model table into view before checking its horizontal layout.
+                    h.app.params.as_mut().unwrap().filter = id.into();
+                    h.frames(6);
+                }
                 let viewport = crate::scenario::rect_of(&format!("dialog:table:{id}:viewport")).unwrap();
                 let content = crate::scenario::count_of(&format!("dialog:table:{id}:content_width")).unwrap();
                 assert!(content <= f64::from(viewport.width().ceil()), "{id} on {screen_width} screen: {content} outside {viewport:?}");
             }
+        }
+    }
+
+    /// #5078: a long list scrolls in a bounded card; moving the card does not stretch it
+    /// down to the bottom of the app. A short viewport still keeps the actions visible.
+    #[test]
+    fn a_long_parameter_list_keeps_its_height_when_moved() {
+        for layout in ["floating", "docked"] {
+            let mut h = crate::scenario::Harness::new();
+            h.app.home.open = false;
+            h.call("ui.set", json!({"layout": layout}));
+            h.call("ui.resize", json!({"width": 1600, "height": 1400}));
+            for i in 0..60 {
+                h.app.run("parameters.add", json!({"name": format!("p{i:02}"), "expression": "10 mm"})).unwrap();
+            }
+            h.step(&json!({"start": "parameters.change"})).unwrap();
+            h.frames(6);
+            let bounds = || crate::scenario::rect_of("dialog:header").unwrap().union(crate::scenario::rect_of("dialog:footer").unwrap());
+            let before = bounds();
+            let title = crate::scenario::handle_at("dialog:title").unwrap();
+            h.step(&json!({"drag": [{"handle": "dialog:title"}, [title.x - 90.0, title.y + 120.0]]})).unwrap();
+            h.frames(6);
+            let moved = bounds();
+            assert!((moved.top() - before.top() - 120.0).abs() < 2.0, "{layout}: the header moved: {before:?} -> {moved:?}");
+            assert!((moved.height() - before.height()).abs() < 2.0, "{layout}: moving must preserve height: {before:?} -> {moved:?}");
+            assert!(moved.bottom() < 1300.0, "{layout}: a long list must leave room below the card: {moved:?}");
+
+            let viewport = crate::scenario::rect_of("dialog:body:viewport").unwrap();
+            h.call("ui.scroll", json!({"x": viewport.center().x, "y": viewport.center().y, "delta": -100_000}));
+            h.frames(40);
+            let last = crate::scenario::handle_at("param:p59").unwrap();
+            assert!(crate::scenario::rect_of("dialog:body:viewport").unwrap().contains(last), "{layout}: the last parameter remains reachable");
+            assert!((bounds().height() - moved.height()).abs() < 2.0, "{layout}: scrolling must preserve height");
+
+            h.call("ui.resize", json!({"width": 1600, "height": 600}));
+            h.frames(6);
+            let small = bounds();
+            assert!(small.bottom() <= 600.0, "{layout}: the actions must remain on screen: {small:?}");
+            assert!(small.contains(crate::scenario::handle_at("dialog:ok").unwrap()));
+            assert!(crate::scenario::rect_of("dialog:body:viewport").unwrap().height() > 0.0);
         }
     }
 }

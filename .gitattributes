@@ -1,3 +1,6 @@
 # Icon review approvals hash the canonical SVG bytes, including line endings.
 assets/icons/ui/design/svg/** text eol=lf
 assets/icons/ui/design/palette.toml text eol=lf
+# Preserve canonical source receipts and the runtime icon-discovery snapshot.
+.gitattributes text eol=lf
+/assets/icons/ui/design/requested_icons.txt text eol=lf

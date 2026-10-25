@@ -72,6 +72,7 @@ pub(crate) struct Panel<'a> {
     side: crate::frame::Side,
     frame: egui::Frame,
     width: f32,
+    body_rows: Option<f32>,
     ok: &'a str,
     cancel: &'a str,
     reset_scroll: bool,
@@ -100,6 +101,20 @@ pub(crate) enum Part {
 }
 
 impl<'a> Panel<'a> {
+    /// Pinned inline actions inside an existing feature/card surface. This is not
+    /// a second window or painted card: the parent owns the chrome. Tokens:
+    /// control_height, space_24/8; bounded row count preserves finite geometry.
+    pub(crate) fn pinned_footer<R>(ui: &mut Ui, key: &'static str, rows: usize, add: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<R> {
+        let t = Tokens::get();
+        // This band is content inside the enclosing card, not a second adaptive card.
+        let host = super::Container::new(ui.ctx(), super::Surface::Viewport);
+        host.edge(key, super::Edge::Bottom)
+            .exact_size(t.control_height * rows.clamp(1, 8) as f32 + t.space_24 + t.space_8)
+            .resizable(false)
+            .frame(host.edge_frame(egui::Color32::TRANSPARENT))
+            .show(ui, add)
+    }
+
     /// Shared floating card surface for panels, windows and modal confirmations.
     pub(super) fn card_frame(ctx: &egui::Context) -> egui::Frame {
         let t = Tokens::get();
@@ -120,7 +135,19 @@ impl<'a> Panel<'a> {
     }
 
     pub(crate) fn new(title: &'a str, id: egui::Id, anchor: egui::Pos2, viewport: egui::Rect, side: crate::frame::Side, frame: egui::Frame) -> Self {
-        Self { title, id, anchor, viewport, side, frame, width: Tokens::get().form_card_width, ok: "OK", cancel: "Cancel", reset_scroll: false }
+        Self {
+            title,
+            id,
+            anchor,
+            viewport,
+            side,
+            frame,
+            width: Tokens::get().form_card_width,
+            body_rows: None,
+            ok: "OK",
+            cancel: "Cancel",
+            reset_scroll: false,
+        }
     }
 
     /// A newly opened manager starts at its first section. Later frames retain user scrolling.
@@ -144,6 +171,15 @@ impl<'a> Panel<'a> {
     /// Table surface width derives from the same card-width token and remains viewport bounded.
     pub(crate) fn wide(self) -> Self {
         self.width(Tokens::get().form_card_width * 3.0)
+    }
+
+    /// Cap a manager's scrolling body independently of its position, in control rows.
+    /// Short viewports still take precedence so the header and actions remain reachable.
+    pub(crate) fn body_rows(mut self, rows: f32) -> Self {
+        if rows.is_finite() {
+            self.body_rows = Some(rows.clamp(1.0, 32.0));
+        }
+        self
     }
 
     /// The painted anchor also drives dragging, including the shell's edge clearance.
@@ -262,6 +298,7 @@ impl<'a> Panel<'a> {
                 - self.frame.stroke.width;
             let footer_height = t.form_footer_height;
             let fields_height = (bottom - ui.cursor().top() - footer_height - ui.spacing().item_spacing.y).max(0.0);
+            let fields_height = self.body_rows.map_or(fields_height, |rows| fields_height.min(rows * t.control_height + t.space_12 * 2.0));
             let fields_rect = egui::Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), fields_height));
             let state = if collapsed.as_deref().copied().unwrap_or(false) {
                 scenario::publish_count("dialog:body:content_height", 0.0);

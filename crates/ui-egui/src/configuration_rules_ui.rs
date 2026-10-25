@@ -16,7 +16,8 @@ pub struct Editor {
     pub(super) adding_row: bool,
     pub(super) focus_new_row: bool,
     pub(super) drafts: std::collections::BTreeMap<(String, String), String>,
-    pub(super) table: Option<(u64, Value)>,
+    /// The configuration table at a design revision: the command's answer and its shown cells.
+    pub(super) table: Option<std::sync::Arc<(u64, Value, super::Table)>>,
 }
 impl Default for Editor {
     fn default() -> Self {

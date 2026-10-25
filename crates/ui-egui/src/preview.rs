@@ -31,12 +31,14 @@ pub struct Colors {
     pub new_body: [u8; 4],
     pub removed: [u8; 4],
     pub edge: [u8; 4],
+    /// Whether a moved component's old place is drawn as a ghost (Drive Joints' Show ghost).
+    pub ghost: bool,
 }
 
 impl Colors {
     pub fn from_tokens(t: &Tokens) -> Colors {
         let c = |c: egui::Color32| c.to_srgba_unmultiplied();
-        Colors { body: c(t.body), added: c(t.preview_add), new_body: c(t.preview_new), removed: c(t.preview_cut), edge: c(t.body_edge) }
+        Colors { body: c(t.body), added: c(t.preview_add), new_body: c(t.preview_new), removed: c(t.preview_cut), edge: c(t.body_edge), ghost: true }
     }
 
     fn for_tool(t: &Tokens, tab: &str, active: bool) -> Colors {
@@ -111,6 +113,7 @@ pub struct PreviewState {
     /// The radius splines the previewed fillet tapered its edges with.
     pub tapered: Vec<(Vec3, solidcraft_engine::kernel::Taper)>,
     straight: crate::extrude_preview::StraightPreview,
+    moving: crate::move_preview::MovePreview,
     /// PreviewReselect: Primary held - hide the preview and restore replaced bodies for picks.
     pub rolled_back: bool,
 }
@@ -133,6 +136,7 @@ impl PreviewState {
 
     fn clear(&mut self) {
         self.straight.clear();
+        self.moving.clear();
         self.running = None;
         self.running_tool = false;
         self.running_stream_key = None;
@@ -318,7 +322,10 @@ pub fn update(app: &mut SolveApp, ctx: &egui::Context) {
             return;
         }
     };
-    let colors = Colors::for_tool(&Tokens::get(), &app.ui.tab, app.tool.is_some() || app.dialog.is_some());
+    let mut colors = Colors::for_tool(&Tokens::get(), &app.ui.tab, app.tool.is_some() || app.dialog.is_some());
+    if app.dialog.as_ref().is_some_and(|d| matches!(d.kind, crate::dialogs::Kind::Assembly(crate::dialogs_assembly::Asm::Drive { .. }))) {
+        colors.ghost = app.preferences.drive_joints_ghost;
+    }
     let key = job_key(&cmds, app.session.revision, colors);
     let stream_key = stream_key(&cmds, app.session.revision, colors);
     let tool = as_new_body(&cmds).is_some();
@@ -328,8 +335,13 @@ pub fn update(app: &mut SolveApp, ctx: &egui::Context) {
         pv.started = crate::now_ms();
         pv.running_stream_key = stream_key;
         let mut straight = std::mem::take(&mut app.preview.straight);
-        let job = straight.compute(app, &cmds, colors);
+        let mut job = straight.compute(app, &cmds, colors);
         app.preview.straight = straight;
+        if job.is_none() {
+            let mut moving = std::mem::take(&mut app.preview.moving);
+            job = moving.compute(app, &cmds, colors);
+            app.preview.moving = moving;
+        }
         if let Some(job) = job {
             app.preview.apply(key, job);
             app.preview.busy = false;
@@ -854,7 +866,7 @@ mod tests {
     }
 
     fn colors() -> Colors {
-        Colors { body: [1, 1, 1, 255], added: [2, 2, 2, 255], new_body: [4, 4, 4, 255], removed: [3, 3, 3, 100], edge: [0, 0, 0, 255] }
+        Colors { body: [1, 1, 1, 255], added: [2, 2, 2, 255], new_body: [4, 4, 4, 255], removed: [3, 3, 3, 100], edge: [0, 0, 0, 255], ghost: true }
     }
 
     #[test]

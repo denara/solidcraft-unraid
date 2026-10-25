@@ -186,8 +186,14 @@ no LTO, and debug assertions off (truck has debug-only assertions that reject va
 builds several times faster than `--release`. If a test fails only in a plain debug build, say so
 in the PR. `cargo xtask test` builds the tests with it and then runs every test binary at once
 (`cargo test` runs them one after another); arguments after `--` go to each binary, e.g.
-`cargo xtask test -- shell`. Tests run beside each other on a busy machine, so a test must not
-depend on wall-clock timing.
+`cargo xtask test -- shell`. Set `SOLIDCRAFT_TEST_JOBS` to a positive integer to opt into a
+shared bound on top-level test/side commands for `cargo xtask test` and `cargo xtask ci`.
+For example, `SOLIDCRAFT_TEST_JOBS=2` allows two commands at once; the sequential wasm/doc
+worker consumes one of those slots. Every binary and side check still runs after failures.
+Without the variable the existing concurrency is unchanged. `RUST_TEST_THREADS`,
+`ACTION_MATRIX_JOBS` and Cargo's build-job setting remain independent caller overrides;
+this limit does not choose their values or change test filters, timeouts or baselines.
+Tests run beside each other on a busy machine, so a test must not depend on wall-clock timing.
 
 **Ready pull requests test what they touch.** CI maps changed files to workspace packages and
 runs Clippy, the test build and tests for those and their dependents. The
@@ -340,6 +346,10 @@ Much of SolidCraft so far was written by AI coding agents (Claude) working in pa
 owning one area, with a human setting direction and reporting bugs. Their working notes are in
 [AGENTS.md](AGENTS.md). Human contributors are just as welcome. Use whatever tools you like, as
 long as the change meets the rules above.
+
+Two quick checks run on every pull request (`.github/workflows/pr-checks.yml`, not required): it
+fails when a lower-numbered open PR by someone else already closes the same issue (the label
+`not-a-duplicate` skips it), or when the description lacks the `Changes a default: no` / `Changes a default: yes — <what>, old behaviour kept behind preference <name>` line (docs-only and bot PRs are exempt).
 
 ## Labels and triage
 

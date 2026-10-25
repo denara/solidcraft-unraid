@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod appearance;
+pub mod appearance_pack;
 mod assembly;
 mod body_transfer;
 mod body_transfer_sheet;
@@ -42,17 +43,26 @@ mod name_lookup;
 mod names;
 pub mod naming;
 mod params;
+pub mod persistent_name;
 pub mod physical_material;
 mod piece_names;
+pub mod pipe_thread_catalog;
 mod points;
 mod profile_refs;
 pub mod progress;
+mod thread_catalog;
+pub use thread_catalog::{TappedThread, TappedThreadFamily, parse_tapped_thread, tapped_thread_sizes};
 mod walk;
 pub use profile_refs::{capture_profile_selection, profile_fallback_notes, profile_selection_indices, profile_selection_indices_lenient};
 pub mod plastic;
 pub mod project;
 mod project3d;
+pub mod render_aging;
+pub mod render_job;
+pub mod render_optics;
+pub mod render_resources;
 pub mod render_settings;
+pub mod render_surface;
 pub use project3d::iso_grid;
 pub mod sheet;
 
@@ -91,6 +101,8 @@ pub enum DocError {
 
 pub type Result<T> = std::result::Result<T, DocError>;
 
+#[cfg(test)]
+mod coil_tests;
 #[cfg(test)]
 mod feature_walk_tests;
 #[cfg(test)]

@@ -282,6 +282,7 @@ pub fn study_params(s: &Session, name: &str, study: Option<&str>, steps: &str, t
 }
 
 /// The configurations table: columns and rows (name, value per column).
+#[derive(Debug)]
 pub struct Table {
     pub columns: Vec<String>,
     pub rows: Vec<(String, Vec<String>)>,
