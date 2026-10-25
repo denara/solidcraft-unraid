@@ -65,12 +65,52 @@ and screenshots stay under ignored `target/upstream-ac53fc1e-20261025/`.
 New saves require a newer reader: back up server files and separate browser
 designs before updating, and keep the previous image/pre-update files for
 rollback. The canonical Unraid XML and original app icon match the catalog;
-its permanent product Overview is unchanged. Image publication, archive checksum,
-local runtime refresh and final catalog comparison are recorded after their
-checks. No Unraid installation or nginx/DNS change is performed.
+its permanent product Overview is unchanged. Publication, archive and local
+runtime results follow below. No Unraid installation or nginx/DNS change is
+performed.
 
 A pre-push fetch observed 20 later upstream commits through `bbc3aa43`; they are
 deferred to the next fixed-snapshot update. The validated target remains `ac53fc1e`.
+
+Publication passed [container workflow 40181250565](https://github.com/denara/solidcraft-unraid/actions/runs/40181250565)
+from validated merge/source `c15fa4a460ff1830f7ae5bb3364e59c2ced939bf`. Its fresh image passed MCP modelling,
+PNG/STEP export, authentication/origin/path checks, independent sessions, restart
+persistence, Workspace revisions/push/handoffs, project binding, read-only
+observation, deletion/ZIP streaming, remembered-login restarts and logging/privacy
+before publication. Public Linux amd64 tags are
+`ghcr.io/denara/solidcraft-unraid:latest` and immutable
+`sha-c15fa4a460ff1830f7ae5bb3364e59c2ced939bf`. Anonymous pulls with an empty client configuration and an
+anonymous registry manifest confirm source labels, architecture, equal image
+identities and digest `sha256:faa676bb8a46453b9f323a82e70e0dbeb0047358e041a949142db0d58d94be56`.
+
+Archive: `target/solidcraft-unraid-upstream-ac53fc1e-c15fa4a4.tar`, 172590592 bytes,
+tagged `solvecraft-unraid:upstream-ac53fc1e-c15fa4a4`.
+SHA256: `ee9270131a5abe44d9be6f999c7101b3ed634c1931126d27eb3789ea276bba19`.
+
+A private data/configuration backup passed archive integrity checks before the
+local runtime was refreshed to the immutable public image. Health, authenticated
+SDK modelling/PNG, read-only reopening of the public 24000 mm3 fixture with
+unchanged bytes, browser-cookie login/logout, metadata, push and web assets pass.
+The data volume, token, origins, port, identity and resource/security settings
+remain unchanged. The sole local test container `solvecraft-solvecraft-1` is
+healthy at 0.22.0, `http://localhost:8781/`. The previous 0.21.0 image is retained
+as `solvecraft-unraid:rollback-before-upstream-ac53fc1e-20261025`.
+8 inactive build/check containers and the unused candidate were removed after
+label/image/workspace-mount/activity checks and diagnostic preservation. All
+volumes, reusable build images, caches, private backups and the rollback image
+remain; no global prune was used.
+
+Post-publication comparison confirms catalog main `98f194ce87ad4dcab8892a6a51d8bd5b40744050`
+already has byte-identical canonical XML and the original app icon. No catalog
+commit or new CA submission/agreement is needed. The final upstream fetch still
+points to `bbc3aa43`, 20 commits beyond this fixed snapshot; these remain
+for the next validated update.
+
+To install on Unraid, save active work, back up server files and independent
+browser designs, update the existing container while retaining its data/token/
+settings and reload the browser. Keep pre-update files for rollback: the previous
+build cannot open newly saved format-36 designs. This task did not install on
+Unraid or change nginx/DNS.
 
 ## 2026-10-24: upstream 0.21.0 with preserved workspace and scoped MCP aliases
 
