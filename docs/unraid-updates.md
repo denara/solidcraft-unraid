@@ -79,7 +79,56 @@ Local proof scripts, images and detailed evidence remain in ignored
 `target/upstream-f006eefd-20261026/`. The canonical Unraid Overview lists only our
 permanent additions and retains upstream authorship, the original icon and the
 unofficial integration notice. Publication digest/archive, local runtime replacement
-and catalog synchronization are recorded after the matching workflow succeeds.
+and catalog synchronization are recorded below.
+
+### Publication and final verification
+
+The exact source merge `92a1ea576e62f6501dcd9c6e012dc51f21423bfd` passed
+[SolidCraft Unraid container run 40315015413](https://github.com/denara/solidcraft-unraid/actions/runs/40315015413).
+The fresh public image passed modelling, session separation, file/origin/revision
+security, logging, persisted reopen, Workspace/live/observer, deletion/ZIP, the new
+manual-project/upload/MCP-continuation test and remembered-login restart checks
+before registry push. Public Linux amd64 tags are `ghcr.io/denara/solidcraft-unraid:latest`
+and `sha-92a1ea576e62f6501dcd9c6e012dc51f21423bfd`. Digest:
+`sha256:32cd578658ea3b38dbfa2b3ee2278dd0cde64c8e9653bd3475e38ca7cad301ab`. Both tags pulled anonymously with an empty Docker configuration;
+the anonymous registry manifest and source labels matched.
+
+Archive: `target/solidcraft-unraid-upstream-f006eefd-92a1ea57.tar` (175120384 bytes), tagged
+`solvecraft-unraid:upstream-f006eefd-92a1ea57`. SHA256:
+`c6baa3cd04469ba9ea6d5469e92ef47a78a72b2c8e232c919e298702b2c8eca7`.
+
+The existing local development/test runtime is healthy at 0.23.0 on that immutable
+public source image. Fresh private data/configuration backups passed gzip/tar
+integrity verification; the actual previous image is retained as
+`solvecraft-unraid:rollback-before-upstream-f006eefd-20261026`. Data volume, MCP token,
+complete environment, user, port/origin settings and security/resource limits remain
+unchanged. Only the ignored image selector was advanced. Authenticated SDK discovery,
+modelling/PNG, read-only reopen/measurement of the known public 24000 mm3 source,
+unchanged source bytes, browser-cookie login/logout, properties, SSE and web/client
+assets passed after replacement. No real design was overwritten. No rollback was needed.
+
+After those checks, 20 owned idle build/check/browser/candidate containers were removed,
+with label/image/mount/activity verification and diagnostics retained under the ignored
+task directory. The auxiliary capacity filesystem was explicitly verified as its own
+32 MiB tmpfs, not a named user-data volume. One healthy local test runtime remains.
+No volumes, unrelated resources, reusable toolchain/build images, caches, private
+backups or rollback image were removed; no global prune was used.
+
+The canonical template was synchronized after image publication to catalog main
+`ffa25fd39fbca2c4d5da2c868d5d0eed7b371925`. Only `templates/solidcraft.xml` changed, listing our permanent
+project/upload/capacity additions. XML/privacy checks passed. The original icon
+(blob `1a61ebc1aee9454338e8cab216f0af7a9fb269fc`), profile, license and provenance stayed unchanged.
+No new portal submission or policy acceptance was performed. Repository metadata
+publication is separate from the catalog's own refresh or moderation.
+
+The final upstream fetch observed `8108646e2c0393d5eb27019f455c8231f3498579`, 17 commits after
+the selected snapshot. Those changes remain for the next fixed-snapshot update;
+today's validated baseline stays `f006eefd`. To install this image on Unraid, save
+active work, retain pre-update server and separate browser-design backups, update
+the existing container with its data/token/settings preserved, and reload the browser.
+Older builds cannot read newly saved format38 designs. No Unraid installation,
+nginx/DNS change, application release, release branch or Git release tag was made.
+The one-off project/upload/footer request is complete; subsequent updates preserve it.
 
 ## 2026-10-25: upstream 0.22.0 with scoped renderer sources and preserved integrations
 
