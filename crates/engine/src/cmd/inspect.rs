@@ -8,12 +8,15 @@ use crate::params::{bad, bool_, str_, string_list};
 use crate::{EngineError, Result, Session};
 
 pub static COMMANDS: &[CommandSpec] = &[
+    CommandSpec::new("inspect.colored_components", "Enable Component Colors", colored_components)
+        .at("SOLID", "INSPECT").icon("colored_components").noundo()
+        .params("enabled?: bool (omitted: toggle); temporary component colours, without changing appearances"),
     CommandSpec::new("inspect.measure", "Measure", measure)
         .at("SOLID", "INSPECT")
         .icon("measure")
         .key("I")
         .noundo()
-        .params("bodies?: [names] (default all); or items: [1-2 selections] (face/edge: type, body, point; index optional) → length/area/volume; diameter, radius, circumference or arc_length/angle_deg of circles, arcs and cylinders; slot sizes; min (distance_mm, from, to), max, center_distance (centre to centre, or from an axis) and angle"),
+        .params("bodies?: [names] (default all) → closed per body; volume_mm3, center_of_mass, density_g_cm3 and mass_g only for closed, consistently oriented bodies; area, bbox and counts for all; total.open_bodies_skipped counts bodies excluded from volume/mass totals; or items: [1-2 selections] (face/edge: type, body, point; index optional) → length/area/volume; diameter, radius, circumference or arc_length/angle_deg of circles, arcs and cylinders; slot sizes; min (distance_mm, from, to), max, center_distance (centre to centre, or from an axis) and angle"),
     CommandSpec::new("document.inspect", "Inspect Design", inspect).icon("inspect").noundo().params("measure?: bool (include body measurements)"),
     CommandSpec::new("sketch.inspect", "Inspect Sketch", sketch_inspect).icon("inspect").noundo().params("sketch?: id|name (default active)"),
     CommandSpec::new("model.edges", "List Edges", model_edges).icon("inspect").noundo().params("body: name"),
@@ -44,7 +47,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .doc_only()
         .params("→ built-in and design-owned materials (user: true, look, optional physical_card/physical_validation/density_comparison). Read-only; candidate engineering records do not certify sources or supply a solver"),
     CommandSpec::new("engine.commands", "List Commands", commands).icon("list").noundo(),
-    CommandSpec::new("engine.describe", "Describe Command", crate::checked!("engine.describe", DESCRIBE_CONTRACT, describe))
+    CommandSpec::new("engine.describe", "Describe Command", crate::checked!("engine.describe", describe))
         .icon("list")
         .noundo()
         .doc_only()
@@ -53,20 +56,33 @@ pub static COMMANDS: &[CommandSpec] = &[
         .params("command: a command id. Returns {id, label, params, input, output} (and param_warnings in the warn parameter-check mode): the command's parameter documentation and, once the command has a typed contract, the JSON Schemas (2020-12) of its parameters and of a successful result (null otherwise). Read-only."),
 ];
 
+/// Does `body` enclose a volume? A B-rep body does when every shell is closed and consistently
+/// oriented (not a surface body), a mesh body when every triangle side is shared by exactly two
+/// triangles. Only that is asked: other findings of a full validity check (faces that don't
+/// mesh, tolerance gaps of an imported solid) don't take a closed body's volume away, and the
+/// check stays cheap for designs with many bodies.
+pub(crate) fn encloses_volume(body: &solidcraft_kernel::Body) -> bool {
+    if body.is_mesh() { body.is_closed_mesh() } else { !body.is_surface() }
+}
+
 pub fn measure_json(b: &solidcraft_doc::ModelBody) -> Value {
     match b.measure() {
-        Ok(m) => json!({
-            "name": b.name,
-            "volume_mm3": m.volume,
-            "area_mm2": m.area,
-            "center_of_mass": m.centroid,
-            "bbox": {"min": m.bbox.min, "max": m.bbox.max},
-            "faces": m.merged.faces,
-            "edges": m.merged.edges,
-            "vertices": m.merged.vertices,
-            "face_types": m.merged.face_types,
-            "kernel": {"faces": m.faces, "edges": m.edges, "vertices": m.vertices, "shells": m.shells},
-        }),
+        Ok(m) => {
+            let closed = encloses_volume(&b.body);
+            json!({
+                "name": b.name,
+                "closed": closed,
+                "volume_mm3": closed.then_some(m.volume),
+                "area_mm2": m.area,
+                "center_of_mass": closed.then_some(m.centroid),
+                "bbox": {"min": m.bbox.min, "max": m.bbox.max},
+                "faces": m.merged.faces,
+                "edges": m.merged.edges,
+                "vertices": m.merged.vertices,
+                "face_types": m.merged.face_types,
+                "kernel": {"faces": m.faces, "edges": m.edges, "vertices": m.vertices, "shells": m.shells},
+            })
+        }
         Err(e) => json!({"name": b.name, "error": e.to_string()}),
     }
 }
@@ -112,12 +128,13 @@ fn measure(s: &mut Session, p: &Value) -> Result<Value> {
             // and the area (both faces minus the holes, plus the bores).
             let open = sh.perforated_area();
             if open > 0.0 {
-                let v = b["volume_mm3"].as_f64().unwrap_or(0.0);
-                let nv = v - open * sh.t;
-                if let Some(m) = b["mass_g"].as_f64().filter(|_| v > 0.0) {
-                    b["mass_g"] = json!(m * nv / v);
+                if let Some(v) = b["volume_mm3"].as_f64() {
+                    let nv = v - open * sh.t;
+                    if let Some(m) = b["mass_g"].as_f64().filter(|_| v > 0.0) {
+                        b["mass_g"] = json!(m * nv / v);
+                    }
+                    b["volume_mm3"] = json!(nv);
                 }
-                b["volume_mm3"] = json!(nv);
                 let bores: f64 = sh
                     .perforations
                     .iter()
@@ -127,6 +144,7 @@ fn measure(s: &mut Session, p: &Value) -> Result<Value> {
             }
         }
     }
+    let skipped = bodies.iter().filter(|b| b["closed"] == false).count();
     let tv: f64 = bodies.iter().filter_map(|b| b["volume_mm3"].as_f64()).sum();
     let ta: f64 = bodies.iter().filter_map(|b| b["area_mm2"].as_f64()).sum();
     let tf: u64 = bodies.iter().filter_map(|b| b["faces"].as_u64()).sum();
@@ -134,7 +152,7 @@ fn measure(s: &mut Session, p: &Value) -> Result<Value> {
     let tvx: u64 = bodies.iter().filter_map(|b| b["vertices"].as_u64()).sum();
     let tm: f64 = bodies.iter().filter_map(|b| b["mass_g"].as_f64()).sum();
     Ok(
-        json!({"body_count": bodies.len(), "bodies": bodies, "total": {"volume_mm3": tv, "area_mm2": ta, "mass_g": tm, "faces": tf, "edges": te, "vertices": tvx}}),
+        json!({"body_count": bodies.len(), "bodies": bodies, "total": {"open_bodies_skipped": skipped, "volume_mm3": tv, "area_mm2": ta, "mass_g": tm, "faces": tf, "edges": te, "vertices": tvx}}),
     )
 }
 
@@ -708,4 +726,17 @@ fn material_list(s: &mut Session, _p: &Value) -> Result<Value> {
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(json!({"materials": built_in.chain(user).collect::<Vec<_>>()}))
+}
+
+fn colored_components(s: &mut Session, p: &Value) -> Result<Value> {
+    if p.get("enabled").is_some_and(|v| !v.is_boolean()) {
+        return Err(bad("inspect.colored_components", "enabled must be a boolean"));
+    }
+    let enabled = bool_(p, "enabled").unwrap_or(s.colored_components.is_none());
+    if enabled && s.colored_components.is_none() {
+        s.colored_components = Some(());
+    } else if !enabled {
+        s.colored_components = None;
+    }
+    Ok(json!({"enabled": enabled}))
 }

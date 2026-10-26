@@ -16,7 +16,7 @@ new uses of it anywhere else. Public docs/web/Flatpak deployments use project Pa
 
 ## Container prototype baseline
 The first Unraid prototype used upstream commit `af536a7`. The current validated
-container baseline is `ac53fc1e6fab85a50bdc410178cc75133183393f`.
+container baseline is `f006eefd6e2987ec14c8ab596ad39fe11e53be41`.
 Keep later upstream CAD/UI feature updates separate from this deployment addition;
 advance the baseline only as a separate, validated update. See [update records](docs/unraid-updates.md).
 
@@ -46,8 +46,14 @@ file/origin, persistence and web checks pass. Keep `latest` on a passing build a
 commit-specific tags. Verify anonymous pulls before claiming public availability.
 This is container packaging, not an upstream application release or an Unraid deployment.
 
-The container's `/workspace` dashboard is independent of browser CAD. Its only write
-action is explicitly confirmed deletion of individual files or real folders. Preserve
+The container's `/workspace` dashboard is independent of browser CAD. Its write actions are explicitly confirmed deletion of individual files or real folders,
+explicit project creation and user-selected uploads into real projects. Replacements
+require per-file strong revisions and an explicit overwrite choice. The optional
+"Für alle Dateien übernehmen" applies only to conflicts in the current batch/target;
+it never bypasses revised files or active project/transfer locks. Keep upload staging
+private, bounded and atomic, accept only validated data formats, and preserve cookie-only
+authentication. Run `packaging/unraid/workspace-upload-test.ps1` when changing these paths.
+The footer reports cached capacity of the shared-data volume, without exposing paths. Preserve
 cookie/CSRF/Origin checks, owner-bound expiring confirmations, strong revision checks,
 active-project protection and the shared HTTP/MCP file gate. Never delete by virtual
 group or delete test data outside an isolated disposable volume. Folder ZIPs stream
@@ -117,7 +123,7 @@ template metadata to `denara/unraid-templates` after the combined image passes p
 3. Follow the autonomous operation protocol (`plan/execution-plan.md` Â§6). Don't stop to ask
    unless it lists the decision as the owner's.
 
-`plan/` is gitignored (local only).
+Maintainers may keep local notes in `plan/` (gitignored); nothing in this file depends on them.
 
 ## Never crash
 People trust SolidCraft with their designs; a crash loses their work. **This outranks feature work.**
@@ -169,7 +175,10 @@ People trust SolidCraft with their designs; a crash loses their work. **This out
 - **Everything is a command.** User-visible behaviour = a command in `crates/engine/src/cmd/*`
   (`CommandSpec`: id = our own dotted, lower-case id `<area>.<thing>[.<variant>]` such as
   `solid.extrude` or `sketch.rectangle.two_point`, never another product's command id; label;
-  toolbar tab and panel; icon; shortcut; params doc; `enabled`; JSON `run`) + tests. The toolbar,
+  toolbar tab and panel; icon; shortcut; params doc; `enabled`; JSON `run`) + input and output
+  schemas (a contract and a reply type in `crates/engine/src/schema/`, registered with
+  `checked!`, `.contract` and `.output`; a command should have them, and a test warns
+  without them (it will become required); `schema/unconverted.txt` only shrinks; how: docs/book/src/dev/schemas.md) + tests. The toolbar,
   dialogs, sketch tools, palette, scripts, CLI and control channel all reach the same commands.
 - **Programmatic calls never open dialogs.** `engine.execute` runs the JSON form; only toolbar
   clicks (`ui.start`) start interactive tools and dialogs, which then run commands.
@@ -313,3 +322,7 @@ as explicit transforms do, to preserve repeated periodic seam edges without gene
 ## Lists many changes add to
 Keep message catalogs sorted (cargo xtask lists --fix), module lines in their sorted group,
 the language list English first then by id, and design-format additions as one new pending file.
+
+Upstream list conventions also apply: new upstream catalog strings use per-change
+assets/locales/pending files and attribution additions use attribution/pending files.
+The fork regenerates shipped licences itself because its gateway is not built by upstream CI.

@@ -182,7 +182,7 @@ pub(super) fn rows(app: &mut SolveApp, ctx: &egui::Context, d: &mut Dialog, ui: 
     if let Some(key) = manage_hint {
         ui_kit::text(ui, tr(key), ui_kit::Text::Hint("manage"));
     }
-    placement_row(d, ui);
+    placement_row(d, ui, &app.session);
     if matches!(&d.kind, Kind::Hole { opts, .. } if !opts.multiple) {
         // Each reference edge with its distance (#37).
         enter |= crate::hole_refs::input_rows(d, ui, &app.session);
@@ -318,7 +318,7 @@ pub(super) fn rows(app: &mut SolveApp, ctx: &egui::Context, d: &mut Dialog, ui: 
                     if st != old {
                         set_object(&mut d.inputs, &mut d.active, FROM_OBJECT, st == 2);
                         if st == 1 && start.is_empty() {
-                            *start = "5 mm".into();
+                            *start = length_default(&app.session, "5");
                         }
                         if st == 0 {
                             start.clear();
@@ -384,7 +384,7 @@ pub(super) fn rows(app: &mut SolveApp, ctx: &egui::Context, d: &mut Dialog, ui: 
                         }
                         if rtype == 2 {
                             form_row(ui, "End Radius", |ui| {
-                                enter |= extra_field(ui, &mut d.extra, "radius2", "1 mm");
+                                enter |= extra_field(ui, &mut d.extra, "radius2", &length_default(&app.session, "1"));
                             });
                             // Which end of the first edge takes the start radius.
                             form_row(ui, "Swap Ends", |ui| {
@@ -607,6 +607,7 @@ fn coil_rows(ui: &mut egui::Ui, extra: &mut serde_json::Map<String, Value>) -> b
 
 fn additional_rows(app: &mut SolveApp, d: &mut Dialog, ui: &mut egui::Ui) -> bool {
     let mut enter = false;
+    let through_point = offset_through_point(d).is_some();
     match &mut d.kind {
         Kind::Revolve { angle, operation, .. } => {
             let cur = usize::from(to_object_on(&d.inputs));
@@ -670,7 +671,7 @@ fn additional_rows(app: &mut SolveApp, d: &mut Dialog, ui: &mut egui::Ui) -> boo
                 d.extra.insert("combine".into(), json!(op == 1));
             });
         }
-        Kind::OffsetPlane { offset } => {
+        Kind::OffsetPlane { offset } if !through_point => {
             enter |= expr_row(ui, "Distance", offset);
         }
         Kind::AnglePlane { angle } => {
@@ -736,9 +737,10 @@ fn additional_rows(app: &mut SolveApp, d: &mut Dialog, ui: &mut egui::Ui) -> boo
             enter |= quantity_row(ui, &app.session.doc, "Quantity", count);
             enter |= expr_row(ui, "Spacing", spacing);
         }
-        Kind::Pipe { diameter, wall } => {
+        Kind::Pipe { diameter, wall, operation } => {
             enter |= expr_row(ui, "Diameter", diameter);
             enter |= hint_row(ui, "Wall", wall, tr("solid"));
+            choice_row(ui, "Operation", "pp_op", operation, &OP_LABELS);
         }
         Kind::Stock { margin } => {
             enter |= expr_row(ui, "Margin", margin);
@@ -759,7 +761,7 @@ fn additional_rows(app: &mut SolveApp, d: &mut Dialog, ui: &mut egui::Ui) -> boo
                 d.extra.insert("modeled".into(), json!(modeled));
             }
             if full != was_full {
-                *length = if full { String::new() } else { "10 mm".into() };
+                *length = if full { String::new() } else { length_default(&app.session, "10") };
             }
             enter |= submitted;
             if reset {

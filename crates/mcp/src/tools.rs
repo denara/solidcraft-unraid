@@ -75,7 +75,7 @@ pub fn tool_definitions() -> Vec<Value> {
         tool(
             "describe_command",
             "Describe a command",
-            "One command's parameter docs and, for commands with a typed contract (solid.box, solid.extrude and engine.describe so far), the \
+            "One command's parameter docs and, for commands with a typed contract (every new command, and more of the older ones as they are converted), the \
              JSON Schemas (2020-12) of its parameters (`input`) and of a successful result (`output`); null for the others.",
             obj(json!({"id": string("Command id, e.g. \"solid.extrude\"")}), &["id"]),
             Effect::ReadOnly,
@@ -318,7 +318,7 @@ pub fn tool_definitions() -> Vec<Value> {
             "Save the design",
             "Save the design to `path` or its current file. The default is a design container; a .json path selects plain JSON. Set format to container or json to override the path.",
             obj(
-                json!({"path": string("Path to save to (default: the current file)"), "format": {"type": "string", "enum": ["container", "json"], "description": "Design encoding (default: JSON for .json, container otherwise)"}}),
+                json!({"path": string("Path to save to (default: the current file)"), "format": {"type": "string", "enum": ["container", "json"], "description": "Design encoding (default: JSON for .json, container otherwise)"}, "overwrite": {"type":"boolean", "description":"Explicitly replace the current file after an external change; HTTP strong revision preconditions still apply"}}),
                 &[],
             ),
             Effect::Files,
@@ -561,7 +561,7 @@ fn dispatch(b: &mut dyn Backend, name: &str, a: &Map<String, Value>) -> Result<V
         "redo" => exec(b, "edit.redo", json!({})),
         "new_design" => exec(b, "file.new", pick(a, &["name"])),
         "open" => exec(b, "doc.open", pick(a, &["path", "up", "names"])),
-        "save" => exec(b, "file.save", pick(a, &["path", "format"])),
+        "save" => exec(b, "file.save", pick(a, &["path", "format", "overwrite"])),
         other => Err(format!("unknown tool `{other}`")),
     }
 }
@@ -633,7 +633,7 @@ fn batch_step(step: &Value) -> Result<(String, Value, Option<String>), String> {
         "undo" => mapped("edit.undo", json!({})),
         "redo" => mapped("edit.redo", json!({})),
         "export" => mapped("file.export", pick(a, &["path", "format", "bodies", "mesh_prefix", "effort", "velocity"])),
-        "save" => mapped("file.save", pick(a, &["path", "format"])),
+        "save" => mapped("file.save", pick(a, &["path", "format", "overwrite"])),
         "open" => mapped("doc.open", pick(a, &["path", "up", "names"])),
         "new_design" => mapped("file.new", pick(a, &["name"])),
         "crash_reports" => match a.get("id") {

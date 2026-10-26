@@ -492,3 +492,53 @@ fn new_names_take_the_first_free_number() {
     let next = sketch(&mut doc);
     assert_eq!(name(&doc, next), names[0], "the first freed number is taken again");
 }
+
+#[test]
+fn empty_boolean_targets_name_overlapping_component() {
+    for (operation, offset) in [(Operation::Cut, 0.0), (Operation::Intersect, 0.0), (Operation::Cut, 40.0)] {
+        let (mut doc, sketch) = plate_doc();
+        let imported = doc.add_component(Some("Imported STEP"), 0).unwrap();
+        let part = doc.add_component(Some("Part1"), 0).unwrap();
+        doc.features.last_mut().unwrap().component = imported;
+        doc.feature_mut(sketch).unwrap().component = imported;
+        doc.occurrences.iter_mut().find(|o| o.component == imported).unwrap().transform[2][3] = offset;
+        let mut kind = doc.features.last().unwrap().kind.clone();
+        if let FeatureKind::Extrude { operation: op, .. } = &mut kind {
+            *op = operation;
+        }
+        let cut = doc.add_feature(kind, None).unwrap();
+        doc.feature_mut(cut).unwrap().component = part;
+        let mut model = Model::new();
+        model.evaluate(&doc);
+        let error = model.result(cut).unwrap().error.as_deref().unwrap();
+        assert!(error.contains("component 'Part1'"), "offset {offset}: {error}");
+        assert!(error.contains("'Body1' in component 'Imported STEP'"), "offset {offset}: {error}");
+        assert!(error.contains("activate that component or pick the body as a target"), "offset {offset}: {error}");
+        assert_eq!(model.state().bodies.len(), 1);
+        assert!(rel(measure(&model.state().bodies[0].body).unwrap().volume, 24000.0) < 1e-9);
+    }
+}
+
+#[test]
+fn empty_boolean_targets_without_overlap_keep_plain_message() {
+    for operation in [Operation::Cut, Operation::Intersect] {
+        let (mut doc, _) = plate_doc();
+        let part = doc.add_component(Some("Part1"), 0).unwrap();
+        let cut = doc
+            .add_feature(
+                FeatureKind::Box {
+                    corner: point_expr(Vec3::new(100.0, 100.0, 100.0)),
+                    length: "1".into(),
+                    width: "1".into(),
+                    height: "1".into(),
+                    operation,
+                },
+                None,
+            )
+            .unwrap();
+        doc.feature_mut(cut).unwrap().component = part;
+        let mut model = Model::new();
+        model.evaluate(&doc);
+        assert_eq!(model.result(cut).unwrap().error.as_deref(), Some("there is no body to cut or intersect"));
+    }
+}

@@ -500,8 +500,9 @@ fn input_picker(files: &Rc<Files>, intent: Intent) {
     let Ok(input) = doc.create_element("input").map(|e| e.unchecked_into::<web_sys::HtmlInputElement>()) else { return };
     input.set_type("file");
     // Everything the browser build imports, from the format registry: cadmpeg is pure Rust, so
-    // FreeCAD and Rhino files are part of it.
-    let accept = solidcraft_engine::io::formats::open_extensions(true).iter().map(|e| format!(".{e}")).collect::<Vec<_>>().join(",");
+    // FreeCAD and Rhino files are part of it; plus the DXF and SVG drawings Open and Insert take.
+    let accept =
+        solidcraft_engine::io::formats::open_extensions(true).iter().chain(&["dxf", "svg"]).map(|e| format!(".{e}")).collect::<Vec<_>>().join(",");
     input.set_accept(&accept);
     // Attached (hidden) while it is open: some browsers ignore a click on a detached input.
     let _ = input.set_attribute("style", "display:none");
@@ -525,6 +526,67 @@ fn input_picker(files: &Rc<Files>, intent: Intent) {
     });
     input.set_onchange(Some(on_change.unchecked_ref()));
     input.click();
+}
+
+/// Ask for one file of these types (`extensions`, e.g. `["dxf"]`) with a plain file input, the
+/// dialog every browser has. The answer is the file's path in the engine's files (under
+/// [`UPLOAD`], as for a file picked in the disk dialog), so the command that asked runs on it;
+/// `None` when the dialog was closed or the file could not be read.
+pub fn pick_upload(files: &Rc<Files>, extensions: &[&str]) -> impl std::future::Future<Output = Option<String>> + use<> {
+    // Shown now, in the click: a file dialog needs the user's gesture.
+    let chosen = choose_file(&disk::accept_list(extensions));
+    let limit = disk::upload_limit(extensions);
+    let files = files.clone();
+    async move {
+        let read = async {
+            let value = JsFuture::from(chosen?).await.map_err(err)?;
+            // Closing the dialog answers no file: nothing to say.
+            let Ok(file) = value.dyn_into::<web_sys::File>() else { return Ok(None) };
+            let name = file.name();
+            if limit.is_some_and(|max| !file.size().is_finite() || file.size() > max as f64) {
+                return Err(format!("{name}: the file is too large"));
+            }
+            let bytes = blob_bytes(&file).await.map_err(|e| format!("{name}: {e}"))?;
+            let path = format!("{UPLOAD}{name}");
+            vfs::insert(&path, bytes);
+            Ok(Some(path))
+        };
+        match read.await {
+            Ok(path) => path,
+            Err(e) => {
+                files.say(format!("open: {e}"), true);
+                None
+            }
+        }
+    }
+}
+
+/// Show a hidden `<input type=file>` offering `accept` (call in the click). The promise answers
+/// the picked `File`, or `null` when the dialog is closed (the input's `cancel` event).
+fn choose_file(accept: &str) -> Result<js_sys::Promise, String> {
+    let doc = web_sys::window().and_then(|w| w.document()).ok_or("this page can't show a file dialog")?;
+    let input = doc.create_element("input").map_err(err)?.dyn_into::<web_sys::HtmlInputElement>().map_err(|_| "no file input".to_string())?;
+    input.set_type("file");
+    input.set_accept(accept);
+    // Attached (hidden) while it is open: some browsers ignore a click on a detached input.
+    input.set_attribute("style", "display:none").map_err(err)?;
+    doc.body().ok_or("this page has no body")?.append_child(&input).map_err(err)?;
+    let promise = js_sys::Promise::new(&mut |resolve: Function, _reject: Function| {
+        // One answer for a pick or a cancel; read from the event, so it does not keep the input.
+        let done = Closure::once_into_js(move |event: web_sys::Event| {
+            let file = event.target().and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok()).and_then(|input| {
+                input.set_onchange(None);
+                input.set_oncancel(None);
+                input.remove();
+                input.files().and_then(|list| list.get(0))
+            });
+            let _ = resolve.call1(&JsValue::UNDEFINED, &file.map_or(JsValue::NULL, JsValue::from));
+        });
+        input.set_onchange(Some(done.unchecked_ref()));
+        input.set_oncancel(Some(done.unchecked_ref()));
+    });
+    input.click();
+    Ok(promise)
 }
 
 /// Read files dropped on the page.

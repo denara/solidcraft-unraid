@@ -15,6 +15,7 @@ pub use body_transfer::{valid_transfer_matrix, validate_body_transfer};
 pub mod canvas;
 mod clipboard;
 pub use clipboard::{clone_expression, remap_topology};
+pub mod component_color;
 mod component_removal;
 pub use component_removal::RemovedTree;
 pub mod config;
@@ -65,6 +66,7 @@ pub mod render_settings;
 pub mod render_surface;
 pub use project3d::iso_grid;
 pub mod sheet;
+pub mod text_params;
 
 pub use assembly::{
     IDENTITY, MAX_PLACEMENT_DEPTH, MAX_PLACEMENTS, Mat, Occurrence, apply_point, apply_vector, is_identity, map_point_expr, mat_inverse, mat_mul,

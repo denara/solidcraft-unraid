@@ -44,6 +44,52 @@ fn act(app: &mut SolveApp, t: &Target, label: &str) {
     context_menu::run_item(app, &item, pos2(0.0, 0.0));
 }
 
+#[test]
+fn linked_component_opens_its_part_in_a_tab_and_reports_a_missing_source() {
+    let mut h = crate::scenario::Harness::new();
+    let part = h.dir.join("part.solidcraft");
+    let assembly = h.dir.join("assembly.solidcraft");
+    let mut source = Session::default();
+    source.execute("solid.box", &json!({"length": 10, "width": 20, "height": 30})).unwrap();
+    source.execute("file.save", &json!({"path": part})).unwrap();
+    let inserted = h.app.run("component.insert_design", json!({"path": part})).unwrap();
+    let component = inserted["component"].as_u64().unwrap();
+    let occurrence = inserted["occurrence"].as_u64().unwrap();
+    let other_part = h.dir.join("other-part.solidcraft");
+    let mut other_source = Session::default();
+    other_source.execute("solid.box", &json!({"length": 5, "width": 5, "height": 5})).unwrap();
+    other_source.execute("file.save", &json!({"path": other_part})).unwrap();
+    let other = h.app.run("component.insert_design", json!({"path": other_part})).unwrap();
+    let other_component = other["component"].as_u64().unwrap();
+    h.app.run("file.save", json!({"path": assembly})).unwrap();
+
+    h.app.tree.picked_components = vec![component, other_component];
+    let linked = Target::Component { id: component };
+    let row = context_menu::items(&h.app, &linked);
+    assert!(row.iter().any(|item| item.label == "Open Linked Design"));
+    let placed = context_menu::items(&h.app, &Target::Occurrence { path: vec![occurrence] });
+    assert!(placed.iter().any(|item| item.label == "Open Linked Design"));
+    assert!(!context_menu::items(&h.app, &Target::Component { id: 0 }).iter().any(|item| item.label == "Open Linked Design"));
+
+    act(&mut h.app, &linked, "Open Linked Design");
+    for _ in 0..600 {
+        if h.app.session.path.as_deref() == part.to_str() {
+            break;
+        }
+        h.frame();
+    }
+    assert_eq!(h.app.session.path.as_deref(), part.to_str());
+    assert_eq!(h.app.docs.count(), 2);
+    crate::documents::switch(&mut h.app, 0);
+    assert_eq!(h.app.session.path.as_deref(), assembly.to_str());
+
+    std::fs::remove_file(&part).unwrap();
+    act(&mut h.app, &linked, "Open Linked Design");
+    assert_eq!(h.app.docs.count(), 2);
+    assert_eq!(h.app.session.path.as_deref(), assembly.to_str());
+    assert!(h.app.status.as_ref().is_some_and(|(message, _, error)| *error && message.contains("Linked design not found")));
+}
+
 fn body(app: &SolveApp) -> String {
     app.session.model.state().bodies[0].name.clone()
 }
@@ -152,12 +198,43 @@ fn right_click_on_a_selected_face_keeps_the_multi_selection() {
     )
     .unwrap();
     app.viewport.hover = Some(Hit::Face { body: b.clone(), index: 0, point: Vec3::new(9.0, 9.0, 9.0) });
-    context_menu::open(&mut app, pos2(400.0, 300.0));
+    context_menu::open(&mut app, pos2(400.0, 300.0), Default::default());
     assert_eq!(app.session.selection.len(), 2, "the right-click keeps the faces it is about: {:?}", app.session.selection);
     // A face outside the selection is still picked, so its menu is about the face under the cursor.
     app.viewport.hover = Some(Hit::Face { body: b, index: 2, point: Vec3::new(9.0, 9.0, 9.0) });
-    context_menu::open(&mut app, pos2(400.0, 300.0));
+    context_menu::open(&mut app, pos2(400.0, 300.0), Default::default());
     assert_eq!(app.session.selection.len(), 1, "a face outside the selection is picked: {:?}", app.session.selection);
+}
+
+/// A right-click on a face of a selected body keeps the whole selection: the body is what is
+/// selected, so the menu is about the bodies and the face under the cursor does not replace them
+/// (#5849).
+#[test]
+fn right_click_on_a_face_of_a_selected_body_keeps_the_bodies() {
+    let mut app = sample_app();
+    let first = body(&app);
+    app.run("solid.box", json!({"length": 5, "width": 5, "height": 5, "corner": [200, 0, 0]})).unwrap();
+    let second = app.session.model.state().bodies.iter().map(|b| b.name.clone()).find(|n| *n != first).expect("a second body");
+    let both = vec![solidcraft_engine::Sel::Body { name: first.clone() }, solidcraft_engine::Sel::Body { name: second.clone() }];
+    app.run("select.set", json!({"items": [{"type": "body", "name": first}, {"type": "body", "name": second}]})).unwrap();
+    // A face of the first body: both bodies stay selected, and the menu stays the bodies' menu.
+    app.viewport.hover = Some(Hit::Face { body: first.clone(), index: 0, point: Vec3::new(9.0, 9.0, 9.0) });
+    context_menu::open(&mut app, pos2(400.0, 300.0), Default::default());
+    assert_eq!(app.session.selection, both, "the right-click keeps the bodies it is about");
+    assert!(!context_menu::items(&app, &Target::Viewport).iter().any(|i| i.label == "Create Sketch"), "the bodies' menu, not the face menu");
+    // An edge and a vertex of a selected body count the same way.
+    app.viewport.hover = Some(Hit::Edge { body: first.clone(), index: 0, mid: Vec3::new(9.0, 9.0, 9.0) });
+    context_menu::open(&mut app, pos2(400.0, 300.0), Default::default());
+    assert_eq!(app.session.selection, both, "an edge of a selected body keeps the bodies");
+    // A face of a body outside the selection is still picked, so the menu is about that face.
+    app.run("select.set", json!({"items": [{"type": "body", "name": first}]})).unwrap();
+    app.viewport.hover = Some(Hit::Face { body: second, index: 0, point: Vec3::new(9.0, 9.0, 9.0) });
+    context_menu::open(&mut app, pos2(400.0, 300.0), Default::default());
+    assert!(
+        matches!(app.session.selection.as_slice(), [solidcraft_engine::Sel::Face { .. }]),
+        "a face of an unselected body is picked: {:?}",
+        app.session.selection
+    );
 }
 
 #[test]
@@ -336,6 +413,24 @@ fn move_shortcut_respects_grounding_and_keeps_body_selection_as_a_body_move() {
     let dialog = app.dialog.as_ref().expect("body Move opens");
     assert!(matches!(dialog.kind, crate::dialogs::Kind::Move { .. }));
     assert_eq!(dialog.inputs[0].items, vec![solidcraft_engine::Sel::Body { name: "Body1".into() }]);
+}
+
+#[test]
+fn component_and_occurrence_menus_cycle_shared_identification_color() {
+    let mut app = SolveApp::new(Session::default(), Services::default());
+    let id = app.run("component.create", json!({"name":"Part"})).unwrap()["component"].as_u64().unwrap();
+    let original = app.session.doc.component_identification_color(id);
+    assert!(app.session.colored_components.is_none());
+    act(&mut app, &Target::Component { id }, "Cycle Component Color");
+    let next = app.session.doc.component_identification_color(id);
+    assert_ne!(original, next);
+    assert!(app.session.colored_components.is_some());
+    assert!(app.dialog.is_none());
+    let occurrence = app.session.doc.occurrence_of(id).unwrap().id;
+    act(&mut app, &Target::Occurrence { path: vec![occurrence] }, "Cycle Component Color");
+    assert_ne!(app.session.doc.component_identification_color(id), next);
+    app.run("edit.undo", json!({})).unwrap();
+    assert_eq!(app.session.doc.component_identification_color(id), next);
 }
 
 #[test]
@@ -933,7 +1028,7 @@ fn right_click_on_a_plane_offers_a_sketch_on_it() {
         let menu = h.call("ui.menu", json!({}))["result"].clone();
         let items = menu["items"].as_array().unwrap();
         let labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).filter(|l| !l.is_empty()).collect();
-        assert_eq!(labels[..3], ["Select Other…", "Create Sketch", "Pan"], "{plane}: {labels:?}");
+        assert_eq!(labels[..4], ["Select Other…", "Create Sketch", "Look At", "Pan"], "{plane}: {labels:?}");
         let sketch = items.iter().find(|i| i["label"] == "Create Sketch").unwrap();
         assert_eq!(sketch["params"], json!({"plane": plane}));
         assert!(h.app.session.selection.is_empty(), "the right-click leaves the plane unselected");

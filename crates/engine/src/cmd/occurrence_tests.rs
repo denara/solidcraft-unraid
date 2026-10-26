@@ -620,6 +620,37 @@ fn compact_component_list_counts_and_skips_identity_transforms() {
     assert_eq!(block(&run(&mut s, "component.list", json!({"compact": true, "bodies": true})))["bodies"], json!(["Cube"]));
 }
 
+/// Each component lists only what it holds, in timeline order: its bodies, features and
+/// sketches, its own occurrences and the occurrences inside it, through nested components.
+#[test]
+fn component_list_gives_each_component_only_its_own_contents() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 5, "width": 5, "height": 5, "name": "Base", "body_name": "Base"}));
+    let (arm, arm_first) = created(&mut s, "Arm");
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Arm sketch"}));
+    run(&mut s, "solid.box", json!({"corner": [0, 20, 0], "length": 2, "width": 2, "height": 2, "name": "Lug", "body_name": "Lug"}));
+    let pin = run(&mut s, "component.create", json!({"name": "Pin", "parent": arm, "parent_path": [arm_first]}));
+    let (pin, pin_first) = (pin["component"].as_u64().unwrap(), pin["occurrence"].as_u64().unwrap());
+    run(&mut s, "solid.box", json!({"corner": [0, 40, 0], "length": 1, "width": 1, "height": 1, "name": "Shank", "body_name": "Shank"}));
+    run(&mut s, "solid.box", json!({"corner": [0, 50, 0], "length": 1, "width": 1, "height": 1, "name": "Head", "body_name": "Head"}));
+    run(&mut s, "component.activate", json!({"component": "root"}));
+    let arm_second = run(&mut s, "occurrence.copy", json!({"component": arm, "translate": [30, 0, 0]}))["occurrence"].as_u64().unwrap();
+    let list = run(&mut s, "component.list", json!({}));
+    let of = |id: u64| list["components"].as_array().unwrap().iter().find(|c| c["id"] == id).unwrap().clone();
+    let ids = |v: &Value| v.as_array().unwrap().iter().map(|o| o["id"].as_u64().unwrap()).collect::<Vec<_>>();
+    let (root, arm_node, pin_node) = (of(0), of(arm), of(pin));
+    assert_eq!((&root["bodies"], &root["features"], &root["sketches"]), (&json!(["Base"]), &json!(["Base"]), &json!([])), "{root}");
+    assert_eq!(ids(&root["children"]), vec![arm_first, arm_second], "{root}");
+    assert_eq!(
+        (&arm_node["bodies"], &arm_node["features"], &arm_node["sketches"]),
+        (&json!(["Lug"]), &json!(["Lug"]), &json!(["Arm sketch"])),
+        "{arm_node}"
+    );
+    assert_eq!((ids(&arm_node["occurrences"]), ids(&arm_node["children"])), (vec![arm_first, arm_second], vec![pin_first]), "{arm_node}");
+    assert_eq!((&pin_node["bodies"], &pin_node["features"]), (&json!(["Shank", "Head"]), &json!(["Shank", "Head"])), "{pin_node}");
+    assert_eq!((ids(&pin_node["occurrences"]), ids(&pin_node["children"])), (vec![pin_first], vec![]), "{pin_node}");
+}
+
 /// A script's 3x4 placement matrix (rotation rows, then the translation column) moves an
 /// occurrence exactly as the same turn and move given as an axis, an angle and a translation.
 #[test]

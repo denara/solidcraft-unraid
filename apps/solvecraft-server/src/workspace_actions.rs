@@ -57,12 +57,12 @@ fn overlaps(a: &str, b: &str) -> bool {
 pub(crate) fn check_transfers(transfers: &Transfers, name: &str) -> Result<(), &'static str> {
     let active = transfers.lock().map_err(|_| "Dateizugriff vorübergehend nicht verfügbar.")?;
     if active.values().any(|path| overlaps(path, name)) {
-        return Err("Datei oder Ordner wird gerade als ZIP heruntergeladen. Bitte nach dem Download erneut versuchen.");
+        return Err("Datei oder Ordner wird gerade übertragen (ZIP/Upload). Bitte danach erneut versuchen.");
     }
     Ok(())
 }
 
-async fn check_sessions(state: &AppState, name: &str) -> Result<(), &'static str> {
+pub(crate) async fn check_sessions(state: &AppState, name: &str) -> Result<(), &'static str> {
     for entry in state.sessions.lock().await.values() {
         let model = entry.model.lock().map_err(|_| "Sitzungsstatus nicht verfügbar.")?;
         if model.project.as_deref().is_some_and(|project| overlaps(project, name))
@@ -168,7 +168,10 @@ pub(crate) async fn delete(State(state): State<Arc<AppState>>, headers: HeaderMa
     })
     .await
     {
-        Ok(Ok(())) => crate::workspace::protect((StatusCode::SEE_OTHER, [(header::LOCATION, "/workspace")]).into_response()),
+        Ok(Ok(())) => {
+            state.browser.uploads.storage.invalidate();
+            crate::workspace::protect((StatusCode::SEE_OTHER, [(header::LOCATION, "/workspace")]).into_response())
+        }
         Ok(Err(error)) => failure(StatusCode::CONFLICT, error),
         Err(_) => failure(StatusCode::SERVICE_UNAVAILABLE, "Löschen nicht verfügbar. Bitte Übersicht prüfen."),
     }

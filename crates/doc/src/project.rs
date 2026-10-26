@@ -688,7 +688,11 @@ fn refresh_links_in(
                 }
                 sk.set_link_source(&l.id, r.source);
                 let _ = sk.set_link_wires(&l.id, &r.wires);
+                // Words built from text parameters change shape when the parameters do: that
+                // rebuild is the text following them, not a reference that changed under it.
+                let words_follow = matches!(&l.source, LinkSource::Text { exprs, .. } if exprs.text.is_some());
                 match sk.update_link(&l.id, &r.geom) {
+                    Ok(true) if words_follow => {}
                     Ok(true) => warn.push(format!("projected {} changed shape and was rebuilt", l.source.describe())),
                     Ok(false) if r.moved => warn.push(format!("projected {} was re-found on the nearest geometry", l.source.describe())),
                     Ok(false) => {}

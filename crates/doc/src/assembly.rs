@@ -146,6 +146,10 @@ fn map_plane_ref(m: &Mat, p: &mut PlaneRef) {
             *at = apply_point(m, *at);
         }
         PlaneRef::Offset { base, .. } | PlaneRef::Flipped { base, .. } => map_plane_ref(m, base),
+        PlaneRef::ThroughPoint { base, point } => {
+            map_plane_ref(m, base);
+            map_geo_ref(m, point);
+        }
         PlaneRef::AtAngle { base, axis_origin, axis_dir, .. } => {
             map_plane_ref(m, base);
             *axis_origin = apply_point(m, *axis_origin);
@@ -223,6 +227,22 @@ impl FeatureKind {
     }
 }
 
+/// [`Document::component_transform`] with each component's first occurrence found by `first`
+/// (an index, where many transforms are wanted at once).
+pub(crate) fn transform_through<'a>(component: u64, first: impl Fn(u64) -> Option<&'a Occurrence>) -> Mat {
+    let mut m = IDENTITY;
+    let mut c = component;
+    for _ in 0..1000 {
+        if c == 0 {
+            break;
+        }
+        let Some(o) = first(c) else { break };
+        m = mat_mul(&o.transform, &m);
+        c = o.parent;
+    }
+    m
+}
+
 impl Document {
     /// The first occurrence of a component (its placement for authoring).
     pub fn occurrence_of(&self, component: u64) -> Option<&crate::Occurrence> {
@@ -231,17 +251,7 @@ impl Document {
 
     /// World transform of a component's frame (through its first occurrence and its parents').
     pub fn component_transform(&self, component: u64) -> Mat {
-        let mut m = IDENTITY;
-        let mut c = component;
-        for _ in 0..1000 {
-            if c == 0 {
-                break;
-            }
-            let Some(o) = self.occurrence_of(c) else { break };
-            m = mat_mul(&o.transform, &m);
-            c = o.parent;
-        }
-        m
+        transform_through(component, |c| self.occurrence_of(c))
     }
 
     /// One placement: the component the occurrence `path` from the root leads to (the root for

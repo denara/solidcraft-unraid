@@ -341,6 +341,51 @@ fn drawing_onto_a_curve_keeps_the_point_on_it() {
     assert!((st.dist(cc) - 8.0).abs() < 1e-7, "{st:?} {cc:?}");
 }
 
+#[test]
+fn drawing_at_a_curve_crossing_keeps_the_point_on_both() {
+    let mut s = new_sketch();
+    let a = ids(&run(&mut s, "sketch.circle.center", json!({"center": [0, 0], "radius": 10}))["curves"])[0].clone();
+    let b = ids(&run(&mut s, "sketch.circle.center", json!({"center": [10, 0], "radius": 10}))["curves"])[0].clone();
+    let hi = [5.0, 5.0 * 3.0f64.sqrt()];
+    let r = run(&mut s, "sketch.line", json!({"points": [format!("x:{a}+{b}:{},{}", hi[0], hi[1]), [40, 10]], "infer": false, "connect": false}));
+    let n = ids(&r["curves"])[0].clone();
+    let sk = sketch(&s);
+    let st = sk.resolve_point(&format!("{n}.start")).and_then(|i| sk.point(i)).unwrap();
+    assert!(st.dist(Vec2::new(hi[0], hi[1])) < 1e-6, "{st:?}");
+    let start = sk.resolve_point(&format!("{n}.start")).unwrap();
+    let ia = sk.curve_index(&a).unwrap();
+    let ib = sk.curve_index(&b).unwrap();
+    let on = |c: usize| {
+        sk.constraints.iter().any(|k| matches!(k.kind, crate::sketch::ConstraintKind::PointOnCurve { p, c: curve } if p == start && curve == c))
+    };
+    assert!(on(ia) && on(ib), "{:?}", sk.constraints);
+    run(&mut s, "sketch.dimension", json!({"entities": [a], "value": 12}));
+    let sk = sketch(&s);
+    let st = sk.resolve_point(&format!("{n}.start")).and_then(|i| sk.point(i)).unwrap();
+    assert!(sk.shape(ia).expect("circle a").dist(st) < 1e-5, "on the resized circle: {st:?}");
+    assert!(sk.shape(ib).expect("circle b").dist(st) < 1e-5, "still on the other circle: {st:?}");
+    assert!(st.y > 0.0, "the upper crossing: {st:?}");
+}
+
+#[test]
+fn drawing_at_a_curve_crossing_refuses_hostile_arguments() {
+    let mut s = new_sketch();
+    let a = ids(&run(&mut s, "sketch.line", json!({"points": [[0, 0], [10, 0]], "infer": false}))["curves"])[0].clone();
+    let b = ids(&run(&mut s, "sketch.line", json!({"points": [[0, 10], [10, 10]], "infer": false}))["curves"])[0].clone();
+    for p in [
+        json!({"points": ["x:", [1, 1]]}),
+        json!({"points": [format!("x:{a}:1,1"), [1, 1]]}),
+        json!({"points": [format!("x:{a}+{a}:5,0"), [1, 1]]}),
+        json!({"points": [format!("x:{a}+{b}:nan,0"), [1, 1]]}),
+        json!({"points": [format!("x:{a}+{b}:1,2,3"), [1, 1]]}),
+        json!({"points": ["x:missing+also:0,0", [1, 1]]}),
+        json!({"points": [format!("x:{a}+{b}:5,5"), [1, 1]]}),
+        json!({"points": [format!("x:{}+{b}:0,0", "z".repeat(200)), [1, 1]]}),
+    ] {
+        assert!(s.execute("sketch.line", &p).is_err(), "{p}");
+    }
+}
+
 /// A faucet spout path: a vertical riser, a horizontal top and an outlet sloping down, joined
 /// by fillets. The riser points up and the outlet down-left, so their directions are 150° apart
 /// while the lines meet at 30°.
@@ -1202,6 +1247,49 @@ fn equal_over_a_list_of_curves_makes_them_all_equal_in_one_step() {
     }
 }
 
+fn offset_lines(vertical: bool) -> Session {
+    let mut s = new_sketch();
+    let points = if vertical { json!([[0, 0], [0, 40]]) } else { json!([[0, 0], [40, 0]]) };
+    run(&mut s, "sketch.line", json!({"points": points, "ids": ["base"], "infer": false}));
+    run(&mut s, "sketch.constraint.fix", json!({"entity": "base"}));
+    let points = if vertical { json!([[10, 43], [10, 48]]) } else { json!([[43, 10], [48, 10]]) };
+    run(&mut s, "sketch.line", json!({"points": points, "ids": ["slider"], "infer": false, "connect": false}));
+    run(&mut s, "sketch.constraint.horizontal_vertical", json!({"line": "slider", "mode": if vertical { "vertical" } else { "horizontal" }}));
+    run(&mut s, "sketch.dimension", json!({"entities": ["slider"], "value": 5}));
+    run(
+        &mut s,
+        "sketch.dimension",
+        json!({"entities": ["base.end", "slider.start"], "type": if vertical { "horizontal" } else { "vertical" }, "value": 10}),
+    );
+    assert_eq!(run(&mut s, "sketch.inspect", json!({}))["dof"], 1);
+    s
+}
+
+#[test]
+fn component_dimensions_beside_a_perpendicular_dimension_solve() {
+    use solidcraft_sketch::ConstraintKind;
+    for vertical in [false, true] {
+        for ty in if vertical { ["vertical", "distance_y"] } else { ["horizontal", "distance_x"] } {
+            for value in [0.0, 0.5, 1.0] {
+                let mut s = offset_lines(vertical);
+                let out = run(&mut s, "sketch.dimension", json!({"entities": ["base.end", "slider.start"], "type": ty, "value": value}));
+                assert_eq!(out["sketch"]["dof"], 0, "{ty}, {value}: {out}");
+                let sk = sketch(&s);
+                let k = &sk.constraints.last().unwrap().kind;
+                assert!(
+                    if vertical { matches!(k, ConstraintKind::DistanceY { .. }) } else { matches!(k, ConstraintKind::DistanceX { .. }) },
+                    "{k:?}"
+                );
+                let a = sk.point(sk.resolve_point("base.end").unwrap()).unwrap();
+                let b = sk.point(sk.resolve_point("slider.start").unwrap()).unwrap();
+                let d = b - a;
+                assert!((if vertical { d.y } else { d.x }.abs() - value).abs() < 1e-6, "{d:?}");
+                assert!((if vertical { d.x } else { d.y }.abs() - 10.0).abs() < 1e-6, "{d:?}");
+            }
+        }
+    }
+}
+
 #[test]
 fn equal_over_a_list_refuses_bad_lists_and_conflicts_without_changing_the_sketch() {
     let mut s = four_circles();
@@ -1240,4 +1328,40 @@ fn midpoint_moves_the_point_whichever_is_picked_first() {
     run(&mut s, "sketch.constraint.fix", json!({"entities":["p"],"fixed":true}));
     run(&mut s, "sketch.constraint.midpoint", json!({"a":"p","b":"l1"}));
     assert!(line_midpoint(&sketch(&s), "l1").dist(Vec2::new(5.0, 5.0)) < 1e-6);
+}
+
+#[test]
+fn conflicting_component_dimension_is_still_refused() {
+    let mut s = offset_lines(false);
+    let before = serde_json::to_value(sketch(&s)).unwrap();
+    let error =
+        s.execute("sketch.dimension", &json!({"entities": ["base.end", "slider.start"], "type": "vertical", "value": 11})).unwrap_err().to_string();
+    assert!(error.contains("would over-constrain the sketch (conflicts with"), "{error}");
+    assert_eq!(serde_json::to_value(sketch(&s)).unwrap(), before);
+}
+
+/// #754: an arc and one of its end points, in either order, dimension the arc's length (the
+/// pair was refused). A line's end that meets the arc's end counts too; another point does not.
+#[test]
+fn an_arc_and_its_end_point_dimension_the_arc_length() {
+    let arc_length = |s: &Session, a: &str| {
+        let sk = sketch(s);
+        match sk.segs(sk.curve_index(a).unwrap())[0] {
+            solidcraft_geom::Seg2::Arc { radius, sweep, .. } => radius * sweep.abs(),
+            _ => f64::NAN,
+        }
+    };
+    for (entities, value) in [(json!(["a1", "a1.end"]), 20.0), (json!(["a1.start", "a1"]), 18.0), (json!(["a1", "l1.start"]), 25.0)] {
+        let mut s = new_sketch();
+        run(&mut s, "sketch.arc.center_point", json!({"center": [0, 0], "start": [10, 0], "end": [0, 10], "id": "a1"}));
+        run(&mut s, "sketch.line", json!({"points": [[0, 10], [-15, 10]], "ids": ["l1"]}));
+        let r = run(&mut s, "sketch.dimension", json!({"entities": entities, "value": value}));
+        assert_eq!(r["type"], "ArcLengthDimension", "{entities}: {r}");
+        assert!((arc_length(&s, "a1") - value).abs() < 1e-6, "{entities}: {}", arc_length(&s, "a1"));
+    }
+    let mut s = new_sketch();
+    run(&mut s, "sketch.arc.center_point", json!({"center": [0, 0], "start": [10, 0], "end": [0, 10], "id": "a1"}));
+    run(&mut s, "sketch.point", json!({"point": [20, 20], "id": "p9"}));
+    let e = s.execute("sketch.dimension", &json!({"entities": ["a1", "p9"]})).map(|v| v["type"].clone());
+    assert!(!matches!(e, Ok(ref t) if t == "ArcLengthDimension"), "a point off the arc's ends is not an arc length: {e:?}");
 }

@@ -26,6 +26,9 @@ enum K {
     Make,
     /// A direction: turned with the command's frame.
     Dir,
+    /// A point the command's bodies move about: into the frame of those bodies (the command's
+    /// frame, as its directions are).
+    Moved,
     /// An arbitrary axis object in the authoring frame: {origin, dir}.
     Axis,
     /// A plane object (`{face}`, `{origin, normal}`, `{origin, x_dir, y_dir}`) or a plane name.
@@ -61,7 +64,10 @@ fn table(id: &str) -> &'static [(&'static str, K)] {
         "solid.draft" => &[("faces", Picks), ("neutral", Plane), ("pull", Dir), ("body", Body)],
         "solid.press_pull" => &[("face", Pick), ("edges", Picks)],
         "solid.replace_face" => &[("faces", Picks), ("target_face", Pick), ("target", Plane), ("body", Body)],
-        "solid.align" => &[("from", Pick), ("from_face", Pick), ("to", Pick), ("to_face", Pick), ("bodies", Body)],
+        // Align finds its picks where they are shown and takes both ends into the moved bodies'
+        // frame itself: a pick mapped into the frame of the body under it would put the two ends
+        // in different frames when they lie on separately placed components.
+        "solid.align" => &[("bodies", Body)],
         // A mirror keeps the placement its bodies were picked at (`cmd::features::placed_bodies`);
         // its plane is in the active component, where the copies go.
         "solid.mirror" => &[("plane", HerePlane)],
@@ -73,6 +79,7 @@ fn table(id: &str) -> &'static [(&'static str, K)] {
         "sheet.convert" => &[("face", Pick), ("bends", Picks), ("body", Body)],
         "sheet.flange" | "sheet.hem" => &[("edges", Picks), ("body", Body)],
         "sheet.fold" => &[("points", Picks), ("fixed", Pick), ("body", Body)],
+        "sheet.path_flange" => &[("edge", Pick), ("body", Body)],
         "sheet.perforate" => &[("body", Body)],
         "sketch.create" | "sketch.redefine" => &[("plane", HerePlane)],
         "canvas.decal" => &[("face", Here)],
@@ -83,7 +90,7 @@ fn table(id: &str) -> &'static [(&'static str, K)] {
         "inspect.curvature_comb" | "inspect.minimum_radius" | "inspect.isocurve" => &[("edges", Picks), ("faces", Picks)],
         "parts.insert" | "parts.fastener" => &[("at", Pick), ("point", Make), ("direction", Dir)],
         "appearance.assign" => &[("faces", Picks), ("bodies", Body), ("body", Body)],
-        "solid.move" => &[("bodies", Body), ("translate", Dir), ("axis", Dir), ("origin", Make)],
+        "solid.move" => &[("bodies", Body), ("translate", Dir), ("axis", Dir), ("origin", Moved)],
         "solid.combine" => &[("target", Body), ("tools", Body)],
         "solid.remove" | "solid.bounding_solid" | "material.assign" => &[("bodies", Body)],
         _ => &[],
@@ -369,6 +376,11 @@ pub fn to_local(s: &Session, id: &str, params: &Value) -> Option<Value> {
         out["targets"] = targets;
         return Some(out);
     }
+    // Several placements of one part moved together are moved as placements, in the world
+    // (`placements_moved`): their names and vectors stay as given.
+    if id == "solid.move" && placements_moved(s, params).is_some() {
+        return None;
+    }
     if id == "timeline.redefine" {
         let cmd = params.get("command")?.as_str()?;
         let key = params.get("feature").and_then(|v| v.as_str().map(str::to_string).or_else(|| v.as_u64().map(|id| id.to_string())))?;
@@ -405,6 +417,14 @@ pub fn to_local(s: &Session, id: &str, params: &Value) -> Option<Value> {
                 }
             }
         }
+        // Edit Feature passes a primitive's placement through as saved (it can hold
+        // expressions), as `timeline.inspect` reports it: mapping it again would move a
+        // primitive in a moved component (#2926).
+        for (key, saved) in primitive_placement(&feature.kind, cmd) {
+            if params.get("params").and_then(|p| p.get(key)).is_some_and(|given| same_coordinates(given, &saved)) {
+                inner[key] = saved;
+            }
+        }
         let mut out = params.clone();
         out["params"] = inner;
         return Some(out);
@@ -430,7 +450,19 @@ pub fn to_local(s: &Session, id: &str, params: &Value) -> Option<Value> {
         command_frames.active = frame;
         command_frames.sketch = frame;
     }
-    let mut m = Mapper { s, f: command_frames, first: None, changed: false, here: false };
+    // A move has no picks: its vector, axis and pivot are in the world and turn with the frame
+    // of the bodies it moves (an imported part stood upright moved up goes up, not along its
+    // own frame's z). A turn with no pivot is about the world origin.
+    let first = (id == "solid.move")
+        .then(|| obj.get("bodies").and_then(Value::as_array)?.first()?.as_str())
+        .flatten()
+        .and_then(|b| command_frames.bodies(s).iter().find(|(world, own, _)| world == b || own == b).map(|(.., m)| *m));
+    let mut obj = obj.clone();
+    if first.is_some() && obj.contains_key("axis") && !obj.contains_key("origin") {
+        obj.insert("origin".into(), serde_json::json!([0.0, 0.0, 0.0]));
+    }
+    let obj = &obj;
+    let mut m = Mapper { s, f: command_frames, first, changed: false, here: false };
     let body = obj.get("body").or_else(|| obj.get("face_body")).and_then(Value::as_str).map(str::to_string);
     let mut out: Map<String, Value> = obj.clone();
     // Picks first: their frame turns the directions.
@@ -446,6 +478,10 @@ pub fn to_local(s: &Session, id: &str, params: &Value) -> Option<Value> {
                 Picks => m.picks(v, body.as_deref()),
                 Make => m.make(v),
                 Dir => m.dir(v),
+                Moved => {
+                    let frame = m.first.unwrap_or(m.f.active);
+                    vec3(v).and_then(|p| m.local_point(&frame, p))
+                }
                 Axis => {
                     if let Some(axis) = v.as_object() {
                         let mut axis = axis.clone();
@@ -488,6 +524,95 @@ pub fn to_local(s: &Session, id: &str, params: &Value) -> Option<Value> {
     m.changed.then_some(Value::Object(out))
 }
 
+/// A primitive's saved placement inputs, in its component's frame, for redefining it with `cmd`.
+fn primitive_placement(kind: &solidcraft_doc::FeatureKind, cmd: &str) -> Vec<(&'static str, Value)> {
+    use solidcraft_doc::FeatureKind as Feature;
+    let point = |p: &solidcraft_doc::PointExpr| {
+        Value::Array(
+            p.iter()
+                .map(|e| e.as_str().trim().parse::<f64>().ok().filter(|x| x.is_finite()).map_or_else(|| Value::from(e.as_str()), Value::from))
+                .collect(),
+        )
+    };
+    match (kind, cmd) {
+        (Feature::Box { corner, .. }, "solid.box") => vec![("corner", point(corner))],
+        (Feature::Sphere { center, .. }, "solid.sphere") | (Feature::Torus { center, .. }, "solid.torus") => vec![("center", point(center))],
+        (Feature::Cylinder { base, axis, .. }, "solid.cylinder") | (Feature::Coil { base, axis, .. }, "solid.coil") => {
+            vec![("base", point(base)), ("axis", pt(axis.0))]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Do two coordinate lists hold the same values (`0` and `0.0` and `"0"` alike, expressions
+/// by their text)?
+fn same_coordinates(a: &Value, b: &Value) -> bool {
+    let number = |v: &Value| v.as_f64().or_else(|| v.as_str().and_then(|s| s.trim().parse::<f64>().ok()));
+    match (a.as_array(), b.as_array()) {
+        (Some(a), Some(b)) => {
+            a.len() == b.len()
+                && a.iter().zip(b).all(|(x, y)| match (number(x), number(y)) {
+                    (Some(x), Some(y)) => x == y,
+                    _ => x.as_str().map(str::trim).is_some_and(|x| Some(x) == y.as_str().map(str::trim)),
+                })
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 #[path = "frames_tests.rs"]
 mod tests;
+
+/// What a `solid.move` of the placed model moves as placements (#4768). A part placed more than
+/// once (an imported assembly's screws or fan corners) is one body: moving it once per placement
+/// listed moved it that many times, each placement turning the move its own way, so the copies
+/// flew apart. When `bodies` name one part through two or more placements, each listed body's
+/// placement is moved instead, in the world, as `occurrence.move` moves it. A placement held by
+/// a rigid group (an imported assembly) moves with the outermost placement that holds it, and one
+/// inside another placement being moved is not moved again. Bodies of the root component, which
+/// have no placement, are moved as bodies (`bodies`). `None`: an ordinary move of bodies (no part
+/// named through two placements, or a copy).
+pub(crate) struct PlacementMove {
+    /// Occurrence paths (root first) to move.
+    pub paths: Vec<Vec<u64>>,
+    /// Root-component bodies listed, moved as bodies.
+    pub bodies: Vec<String>,
+}
+
+pub(crate) fn placements_moved(s: &Session, params: &Value) -> Option<PlacementMove> {
+    if params.get("copy").and_then(Value::as_bool) == Some(true) || !placed(s) {
+        return None;
+    }
+    let names: Vec<&str> = params.get("bodies")?.as_array()?.iter().filter_map(Value::as_str).collect();
+    let st = s.model.state();
+    let doc = s.placed_document();
+    let frames = doc.body_frames_with_source(&st);
+    let listed: Vec<&(String, String, u64, Vec<u64>, Mat)> = names.iter().filter_map(|n| frames.iter().find(|f| f.0 == *n)).collect();
+    // One part (a component's body) named through two different placements.
+    let repeated = listed.iter().enumerate().any(|(i, a)| listed[..i].iter().any(|b| b.1 == a.1 && b.2 == a.2 && b.3 != a.3));
+    if !repeated {
+        return None;
+    }
+    let mut paths: Vec<Vec<u64>> = Vec::new();
+    let mut bodies = Vec::new();
+    for (world, _, _, path, _) in listed {
+        if path.is_empty() {
+            bodies.push(world.clone());
+            continue;
+        }
+        // Up through the rigid groups that hold it (as `occurrence.move` asks for).
+        let mut k = path.len();
+        while k > 1 && path.get(k - 1).is_some_and(|o| s.held_by_rigid_group(*o).is_some()) {
+            k -= 1;
+        }
+        let target = path[..k].to_vec();
+        if !paths.contains(&target) {
+            paths.push(target);
+        }
+    }
+    // A placement inside another one being moved goes with it.
+    let all = paths.clone();
+    paths.retain(|p| !all.iter().any(|q| q.len() < p.len() && p.starts_with(q)));
+    Some(PlacementMove { paths, bodies })
+}

@@ -1144,6 +1144,7 @@ fn rigid(m: &crate::Mat) -> bool {
 
 /// Feature input names and component occurrences, which format 1 files may predate.
 fn normalise(d: &mut Document) -> Result<()> {
+    d.normalise_component_color_indices()?;
     d.name_all_feature_inputs();
     let missing: Vec<(u64, u64)> =
         d.components.iter().filter(|c| !d.occurrences.iter().any(|o| o.component == c.id)).map(|c| (c.id, c.parent)).collect();
@@ -1419,6 +1420,7 @@ mod tests {
             body: None,
             corner_relief_shape: shape.map(Into::into),
             corner_relief: size.map(Into::into),
+            height_from: None,
         };
         let saved = |document: &Document| -> Value { serde_json::from_str(&document.to_json()).unwrap() };
         // A flange that follows the rule saves neither key, and a design of format 23 opens as it was.

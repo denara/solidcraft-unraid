@@ -14,6 +14,8 @@ Additional features provided by this Unraid integration:[br]
 - Container packaging and Unraid template with persistent server files and resource/security limits.[br]
 - Authenticated HTTP MCP gateway for local AI clients, with independent CAD sessions, bounded capacity and mandatory project selection into fixed real project folders; existing files remain in place.[br]
 - Protected live file and session dashboard at /workspace: server-push updates, collapsed project folders and virtual groups for legacy root files, saved model details, PNG thumbnails, original icons, search, filters and downloads; selected projects, opened files, unsaved changes and new drafts.[br]
+- Manual real-project creation and multi-file uploads with file picker or drag and drop, explicit per-batch overwrite/skip decisions, validated CAD/reference formats, atomic publication and protected active projects.[br]
+- Small authenticated storage-capacity indicator for the persistent file volume.[br]
 - Explicitly confirmed deletion of individual files and real folders, with revision checks and protection for active MCP projects; virtual legacy groups are never bulk-deleted.[br]
 - Server-streamed ZIP64 downloads of real folders and subfolders, including empty folders and Unicode names, with bounded memory and conflict/abort handling.[br]
 - Read-only live model previews for active MCP sessions, including unsaved sketches and solids; bounded shared pictures in memory, calculation status and explicit session-end handling.[br]
@@ -21,7 +23,7 @@ Additional features provided by this Unraid integration:[br]
 - Shared-file revision checks to reject stale saves and accidental overwrites by parallel clients.[br]
 - Operational logs for authentication and session allocation/release, with Unraid category colors, icons and the token file location.[br]
 - Independent hosting of the upstream browser CAD app, with a protected shortcut to open saved models as independent browser copies; browser edits are not automatically written back to server files or MCP sessions.[br][br]
-Linux amd64 only. Experimental software: latest contains the newest container build that passed modelling, persistence and web checks. Server designs and exports persist under /data/files. The dashboard uses the existing MCP token; it does not edit models.[br][br]
+Linux amd64 only. Experimental software: latest contains the newest container build that passed modelling, persistence and web checks. Server designs and exports persist under /data/files. The dashboard uses the existing MCP token and organizes server files; CAD modelling remains in independent sessions.[br][br]
 This is not an official upstream distribution. Unraid® is a registered trademark of Lime Technology, Inc. This application is not affiliated with, endorsed, or sponsored by Lime Technology, Inc.</Overview>
   <Category>Productivity: Tools:Utilities</Category>
   <Beta>true</Beta>

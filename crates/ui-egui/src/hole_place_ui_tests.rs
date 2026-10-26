@@ -133,6 +133,8 @@ fn a_pick_on_a_round_edge_goes_to_its_centre() {
         *cb_diameter = "16 mm".into();
         *cb_depth = "3 mm".into();
     }
+    // Changing the type adds fields; draw them before sending Enter to the focused editor.
+    h.frames(3);
     h.step(&json!({"key": "Enter"})).unwrap();
     assert!(h.app.dialog.is_none(), "{:?}", h.app.dialog.as_ref().map(|d| &d.error));
     let (id, position) = last_hole(&h);

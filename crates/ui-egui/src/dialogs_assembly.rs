@@ -139,14 +139,14 @@ pub struct JointForm {
 }
 
 impl JointForm {
-    fn new(as_built: bool) -> JointForm {
+    fn new(as_built: bool, doc: &solidcraft_engine::doc::Document) -> JointForm {
         JointForm {
             as_built,
             editing: None,
             kind: 0,
             flip: false,
             angle: "0 deg".into(),
-            offset: ["0 mm".into(), "0 mm".into(), "0 mm".into()],
+            offset: std::array::from_fn(|_| crate::length_input::default(doc, "0")),
             limits: Vec::new(),
             animate: false,
             phase: 0.0,
@@ -154,17 +154,21 @@ impl JointForm {
         }
     }
 
-    fn joint_kind(&self) -> JointKind {
+    pub(crate) fn joint_kind(&self) -> JointKind {
         TYPES.get(self.kind).and_then(|t| JointKind::parse(t)).unwrap_or(JointKind::Rigid)
     }
 
     /// Limits rows sized to the joint's values.
-    fn fit_limits(&mut self) {
+    fn fit_limits(&mut self, doc: &solidcraft_engine::doc::Document) {
         let k = self.joint_kind();
         let n = k.dofs().len();
         while self.limits.len() < n {
             let i = self.limits.len();
-            self.limits.push(if k.is_angle(i) { (false, "-90 deg".into(), "90 deg".into()) } else { (false, "0 mm".into(), "20 mm".into()) });
+            self.limits.push(if k.is_angle(i) {
+                (false, "-90 deg".into(), "90 deg".into())
+            } else {
+                (false, crate::length_input::default(doc, "0"), crate::length_input::default(doc, "20"))
+            });
         }
         self.limits.truncate(n);
     }
@@ -203,12 +207,13 @@ pub fn start(app: &SolveApp, id: &str) -> Option<(Kind, Vec<SelInput>)> {
     let (asm, inputs) = match id {
         "component.create" => (Asm::NewComponent { name: String::new(), activate: true }, vec![SelInput::new("Bodies (optional)", BODIES, true)]),
         "joint.create" => (
-            Asm::Joint(Box::new(JointForm::new(false))),
+            Asm::Joint(Box::new(JointForm::new(false, &app.session.doc))),
             vec![SelInput::new("Component 1", SNAPS, false), SelInput::new("Component 2", SNAPS, false)],
         ),
-        "joint.as_built" => {
-            (Asm::Joint(Box::new(JointForm::new(true))), vec![SelInput::new("Components", BODIES, true), SelInput::new("Position", SNAPS, false)])
-        }
+        "joint.as_built" => (
+            Asm::Joint(Box::new(JointForm::new(true, &app.session.doc))),
+            vec![SelInput::new("Components", BODIES, true), SelInput::new("Position", SNAPS, false)],
+        ),
         "joint.origin" => (Asm::JointOrigin { name: String::new(), hover: None }, vec![SelInput::new("Snap", SNAPS, false)]),
         "joint.rigid_group" => (Asm::RigidGroup, vec![SelInput::new("Components", BODIES, true)]),
         "joint.drive" => {
@@ -293,7 +298,7 @@ fn current_values(s: &Session, index: usize) -> Vec<String> {
     (0..j.kind.dofs().len())
         .map(|i| {
             let v = j.values.get(i).copied().unwrap_or(0.0);
-            if j.kind.is_angle(i) { num(v.to_degrees(), "deg") } else { num(v, "mm") }
+            if j.kind.is_angle(i) { num(v.to_degrees(), "deg") } else { crate::length_input::model(&s.doc, v) }
         })
         .collect()
 }
@@ -306,18 +311,18 @@ pub(crate) fn num(v: f64, unit: &str) -> String {
 /// The Edit Joint dialog for a joint (by id).
 pub fn edit_joint(app: &SolveApp, id: u64) -> Option<Dialog> {
     let j = app.session.doc.assembly.joints.iter().find(|j| j.id == id)?;
-    let mut f = JointForm::new(false);
+    let mut f = JointForm::new(false, &app.session.doc);
     f.editing = Some(id);
     f.kind = TYPES.iter().position(|t| JointKind::parse(t) == Some(j.kind)).unwrap_or(0);
     f.flip = j.flip;
     // An offset or angle typed as an expression shows (and is sent back) as that expression, so
     // the joint keeps following its parameters.
     f.angle = j.exprs.angle.clone().unwrap_or_else(|| num(j.angle.to_degrees(), "deg"));
-    f.offset[2] = j.exprs.offset.clone().unwrap_or_else(|| num(j.offset, "mm"));
-    f.fit_limits();
+    f.offset[2] = j.exprs.offset.clone().unwrap_or_else(|| crate::length_input::model(&app.session.doc, j.offset));
+    f.fit_limits(&app.session.doc);
     for (i, l) in f.limits.iter_mut().enumerate() {
         if let Some(Some((lo, hi))) = j.limits.get(i) {
-            let fmt = |v: f64| if j.kind.is_angle(i) { num(v.to_degrees(), "deg") } else { num(v, "mm") };
+            let fmt = |v: f64| if j.kind.is_angle(i) { num(v.to_degrees(), "deg") } else { crate::length_input::model(&app.session.doc, v) };
             *l = (true, fmt(*lo), fmt(*hi));
         }
     }
@@ -482,18 +487,27 @@ pub fn snap_of(s: &Session, sel: &Sel) -> Option<SnapPt> {
                     let faces = m.edge_faces.get(*index).cloned().unwrap_or_default();
                     let out = faces.iter().filter_map(|f| face_normal_near(&m, *f, *point)).fold(Vec3::ZERO, |a, x| a + x);
                     let z = if out.dot(n) < 0.0 { -n } else { n };
-                    (body, SnapPt { at: c, z, kind: SnapKind::CircleCenter, param: json!({"point": pt(c), "z": pt(z)}) })
+                    // Its round end, kept by name so it follows the hole or boss as the part
+                    // changes (a point where it has none).
+                    (body, SnapPt { at: c, z, kind: SnapKind::CircleCenter, param: json!({"circle": pt(c), "z": pt(z)}) })
                 }
                 None => {
                     let mid = polyline_mid(e);
                     let z = straight_edge_axis(e)
                         .or_else(|| m.edge_faces.get(*index).and_then(|fs| fs.first()).and_then(|f| face_normal_near(&m, *f, mid)))
                         .unwrap_or(Vec3::Z);
-                    (body, SnapPt { at: mid, z, kind: SnapKind::EdgeMid, param: json!({"point": pt(mid), "z": pt(z)}) })
+                    // Its middle, kept by the edge's name.
+                    (body, SnapPt { at: mid, z, kind: SnapKind::EdgeMid, param: json!({"edge": pt(mid), "z": pt(z)}) })
                 }
             }
         }
-        Sel::Vertex { body, point } => (body, SnapPt { at: *point, z: Vec3::Z, kind: SnapKind::Vertex, param: json!({"point": pt(*point)}) }),
+        Sel::Vertex { body, point } => {
+            // The corner of the edges meeting there, kept by their names, z along the part's +Z
+            // as a point's is.
+            let z = occurrence_of_body(s, body)
+                .map_or(Vec3::Z, |o| solidcraft_engine::doc::apply_vector(&solidcraft_engine::doc::joints::occurrence_world(&s.doc, o), Vec3::Z));
+            (body, SnapPt { at: *point, z: Vec3::Z, kind: SnapKind::Vertex, param: json!({"edge": pt(*point), "corner": pt(*point), "z": pt(z)}) })
+        }
         _ => return None,
     };
     if let (Some(occ), Value::Object(m)) = (occurrence_of_body(s, body), &mut snap.param) {
@@ -548,7 +562,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Asm, inputs: &mut [Se
                 ui.label("");
             });
             choice_row(ui, "Type", "jt_type", &mut f.kind, &TYPE_LABELS);
-            f.fit_limits();
+            f.fit_limits(&app.session.doc);
             if !f.as_built {
                 enter |= expr_row(ui, "Angle", &mut f.angle);
                 crate::ui_kit::section(ui, "joint_position", "Position", false, |ui| {
@@ -647,7 +661,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Asm, inputs: &mut [Se
                     None if angle => (-std::f64::consts::PI, std::f64::consts::PI),
                     None => (-100.0, 100.0),
                 };
-                let cur = s.doc.eval(v, unit_kind).ok().filter(|x| x.is_finite()).unwrap_or(0.0);
+                let cur = crate::length_input::eval(&s.doc, v, unit_kind).ok().filter(|x| x.is_finite()).unwrap_or(0.0);
                 let (mut shown, scale) = if angle { (cur.to_degrees(), 1f64.to_degrees()) } else { (cur, 1.0) };
                 ui.vertical(|ui| {
                     let r = crate::ui_kit::slider(
@@ -658,13 +672,16 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Asm, inputs: &mut [Se
                     );
                     crate::scenario::publish_handle(&format!("drive_slider:{i}"), r.rect.center());
                     if r.changed() {
-                        *v = if angle { format!("{shown:.1} deg") } else { format!("{shown:.2} mm") };
+                        *v = if angle { format!("{shown:.1} deg") } else { crate::length_input::model(&s.doc, shown) };
                     }
                 });
                 // The slider's range: the joint's limits, or the default span when it has none.
                 let limited = j.limits.get(i).copied().flatten().is_some();
                 let fmt = |x: f64| {
-                    let (x, unit) = if angle { (x.to_degrees(), "°") } else { (x, " mm") };
+                    if !angle {
+                        return crate::prefs::show_mm(app, x, 1);
+                    }
+                    let (x, unit) = (x.to_degrees(), "°");
                     if x.fract().abs() < 1e-6 { format!("{x:.0}{unit}") } else { format!("{x:.1}{unit}") }
                 };
                 ui.vertical(|ui| {
@@ -902,7 +919,7 @@ pub fn commands(app: &SolveApp, k: &Asm, inputs: &[SelInput]) -> Result<Vec<(Str
         sel_items(inputs, i).first().and_then(|x| snap_of(s, x)).ok_or_else(|| format!("select {what} first"))
     };
     let eval = |e: &str, kind: ValueKind| -> Result<f64, String> {
-        if e.trim().is_empty() { Ok(0.0) } else { s.doc.eval(e, kind).map_err(|e| e.to_string()) }
+        if e.trim().is_empty() { Ok(0.0) } else { crate::length_input::eval(&s.doc, e, kind).map_err(|e| e.to_string()) }
     };
     let cmd = |id: &str, p: Value| vec![(id.to_string(), p)];
     Ok(match k {
@@ -965,9 +982,16 @@ pub fn commands(app: &SolveApp, k: &Asm, inputs: &[SelInput]) -> Result<Vec<(Str
             cmd("joint.origin", p)
         }
         Asm::RigidGroup => {
-            let occs = occurrences(s, sel_items(inputs, 0));
+            let items = sel_items(inputs, 0);
+            let occs = occurrences(s, items);
             if occs.len() < 2 {
-                return Err("select two or more components".into());
+                if occs.len() == 1 && items.len() > 1 && items.iter().all(|x| matches!(x, Sel::Body { .. })) {
+                    return Err(crate::i18n::format(
+                        "joint.rigid_group_one_component",
+                        &[("count", &items.len().to_string()), ("command", crate::i18n::tr("cmd.component_from_bodies"))],
+                    ));
+                }
+                return Err(crate::i18n::tr("joint.rigid_group_select_components").into());
             }
             cmd("joint.rigid_group", json!({ "occurrences": occs }))
         }
@@ -1011,7 +1035,9 @@ pub fn animate(app: &SolveApp, k: &Asm, cmds: &mut Vec<(String, Value)>) {
             let limited = f.limits.get(i).filter(|l| l.0);
             let angle = kind.is_angle(i);
             let vk = if angle { ValueKind::Angle } else { ValueKind::Length };
-            match limited.and_then(|(_, lo, hi)| Some((app.session.doc.eval(lo, vk).ok()?, app.session.doc.eval(hi, vk).ok()?))) {
+            match limited.and_then(|(_, lo, hi)| {
+                Some((crate::length_input::eval(&app.session.doc, lo, vk).ok()?, crate::length_input::eval(&app.session.doc, hi, vk).ok()?))
+            }) {
                 // Back and forth between the limits.
                 Some((lo, hi)) => {
                     let v = lo + (hi - lo) * (0.5 - 0.5 * (f.phase * tau).cos());

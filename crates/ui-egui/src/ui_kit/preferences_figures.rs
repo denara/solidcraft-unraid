@@ -143,7 +143,7 @@ pub(crate) fn paint_orientation(p: &Painter, rect: Rect, y_up: bool) {
     face(&p, ground, t.form_dim.gamma_multiply(0.035));
     p.add(Shape::closed_line(ground.to_vec(), Stroke::new(c.width(0.8), t.form_dim.gamma_multiply(0.20))));
     for (x, y, index, label) in orientation_axes(y_up) {
-        let colour = t.triad.get(index).copied().unwrap_or(t.form_ink);
+        let colour = t.axes().get(index).copied().unwrap_or(t.form_ink);
         let end = c.at(x, y);
         // A halo keeps every shaft distinct from the subtle ground and the other axes.
         p.line_segment([centre, end], Stroke::new(c.width(4.2), t.viewport_top));

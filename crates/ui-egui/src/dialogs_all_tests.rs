@@ -93,7 +93,7 @@ fn representative(h: &Harness, command: &str) -> Dialog {
         } else if input.accept & crate::selection::SKETCH_LINES != 0 {
             vec![Sel::ExternalSketchCurve { sketch: s.world_state().sketches.last().unwrap().feature, id: path.clone() }]
         } else if input.accept & CURVES != 0 || command == "sheet.fold" && index == 0 {
-            vec![Sel::SketchCurve { id: path.clone() }]
+            vec![Sel::SketchCurve { id: path.clone(), sketch: None }]
         } else if input.accept & AXES != 0 {
             // The Revolve fixture's profile is in XY; its preview needs an axis in that plane.
             let axis = if command == "solid.revolve" { "Y" } else { "Z" };
@@ -327,7 +327,7 @@ form_case!(boundary_fill, "solid.boundary_fill", ["Cells", "Operation"]);
 form_case!(align, "solid.align", ["From Snap", "To Snap"]);
 form_case!(remove, "solid.remove", []);
 form_case!(path_pattern, "solid.pattern.path", ["Type", "Object Type", "Quantity", "Spacing"]);
-form_case!(pipe, "solid.pipe", ["Diameter", "Wall"]);
+form_case!(pipe, "solid.pipe", ["Diameter", "Wall", "Operation"]);
 form_case!(stock, "solid.bounding_solid", ["Margin"]);
 form_case!(frame_member, "frame.member", ["All Lines", "Anchor", "Angle", "Mirror", "Name"]);
 form_case!(thread, "solid.thread", ["Profile", "Size", "Pitch", "Designation"]);
@@ -353,6 +353,7 @@ form_case!(surface_trim, "surface.trim", []);
 form_case!(surface_untrim, "surface.untrim", ["Holes"]);
 form_case!(split_face, "solid.split_face", []);
 form_case!(flange, "sheet.flange", ["Type", "Rule"]);
+form_case!(path_flange, "sheet.path_flange", ["Bend Radius"]);
 form_case!(hem, "sheet.hem", ["Type", "Length", "ui.sheet_gap"]);
 form_case!(fold, "sheet.fold", ["Bend Line Position", "Angle", "Bend Radius"]);
 form_case!(unfold, "sheet.unfold", []);
@@ -575,4 +576,62 @@ fn coil_from_a_profile_hides_the_primitive_section() {
     assert!(p.get("section_size").is_none(), "{p}");
     assert!(p.get("revolutions").is_some() && p.get("pitch").is_some(), "{p}");
     assert!(p.get("operation").is_some(), "{p}");
+}
+
+fn extrude_focus_fixture() -> Harness {
+    let mut h = Harness::new();
+    h.app.home.open = false;
+    h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+    h.app.run("sketch.rectangle.two_point", json!({"p0":[0,0],"p1":[50,30]})).unwrap();
+    h.app.run("sketch.finish", json!({})).unwrap();
+    h.call("ui.view", json!({"view":"top"}));
+    h.call("ui.view", json!({"view":"fit"}));
+    h.step(&json!({"start":"solid.extrude"})).unwrap();
+    h.frames(8);
+    h
+}
+
+#[test]
+fn viewport_profile_click_returns_extrude_value_focus() {
+    let mut h = extrude_focus_fixture();
+    h.step(&json!({"click":{"world":[15,10,0]}})).unwrap();
+    h.step(&json!({"text":"30"})).unwrap();
+    assert!(matches!(&h.app.dialog.as_ref().unwrap().kind, Kind::Extrude { distance, .. } if distance == "30"));
+    // Clicking an already selected profile removes it; pick it again before building.
+    h.step(&json!({"click":{"world":[15,10,0]}})).unwrap();
+    h.step(&json!({"text":"30"})).unwrap();
+    h.step(&json!({"key":"Enter"})).unwrap();
+    h.settle();
+    assert!(h.app.dialog.is_none());
+    let bounds = h.app.session.world_state().bodies.first().unwrap().mesh().bounds();
+    assert!((bounds.max.z - bounds.min.z - 30.0).abs() < 1e-7);
+}
+
+#[test]
+fn viewport_empty_click_falls_back_to_first_numeric_dialog_field() {
+    let mut h = extrude_focus_fixture();
+    if let Some(id) = h.ctx.memory(|m| m.focused()) {
+        h.ctx.memory_mut(|m| m.surrender_focus(id));
+    }
+    h.frames(2);
+    let viewport = h.app.viewport.rect.unwrap();
+    h.step(&json!({"click":[viewport.left()+80.0, viewport.bottom()-80.0]})).unwrap();
+    h.step(&json!({"text":"30"})).unwrap();
+    assert!(matches!(&h.app.dialog.as_ref().unwrap().kind, Kind::Extrude { distance, .. } if distance == "30"));
+}
+
+#[test]
+fn viewport_click_preserves_active_secondary_dialog_value() {
+    let mut h = extrude_focus_fixture();
+    if let Kind::Extrude { direction, .. } = &mut h.app.dialog.as_mut().unwrap().kind {
+        *direction = crate::dialogs::TWO_SIDES;
+    }
+    h.frames(3);
+    crate::test_support::click(&mut h, "dialog:Distance 2");
+    h.step(&json!({"key":"A","cmd":true})).unwrap();
+    h.step(&json!({"text":"7"})).unwrap();
+    assert!(matches!(&h.app.dialog.as_ref().unwrap().kind, Kind::Extrude { distance2, .. } if distance2 == "7"));
+    h.step(&json!({"click":{"world":[15,10,0]}})).unwrap();
+    h.step(&json!({"text":"30"})).unwrap();
+    assert!(matches!(&h.app.dialog.as_ref().unwrap().kind, Kind::Extrude { distance, distance2, .. } if distance == "10 mm" && distance2 == "30"));
 }

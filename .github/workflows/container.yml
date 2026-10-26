@@ -117,6 +117,9 @@ jobs:
       - name: Verify confirmed deletion and bounded ZIP streaming
         shell: pwsh
         run: ./packaging/unraid/workspace-actions-test.ps1 -Token disposable-container-proof-token-only -ContainerName proof
+      - name: Verify manual projects and bounded browser uploads
+        shell: pwsh
+        run: ./packaging/unraid/workspace-upload-test.ps1 -Token disposable-container-proof-token-only
       - name: Verify remembered browser logins across isolated restarts
         shell: pwsh
         run: ./packaging/unraid/workspace-login-test.ps1 -Token disposable-container-proof-token-only -ContainerName proof
@@ -131,6 +134,7 @@ jobs:
             target/unraid-observer-proof/
             target/unraid-workspace-live-proof/
             target/unraid-workspace-actions-proof/proof.json
+            target/unraid-workspace-upload-proof/
           retention-days: 30
       - name: Authenticate to the container registry
         if: github.event_name == 'push' && github.repository == 'denara/solidcraft-unraid'

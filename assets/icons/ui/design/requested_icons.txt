@@ -57,6 +57,8 @@ circle_tt	false
 circle_ttt	false
 close	false
 coil	false
+colored_components	false
+colored_components_off	false
 combine	false
 compare	false
 component	false
@@ -148,6 +150,7 @@ origin	false
 pan	false
 params	false
 paste	false
+path_flange	false
 pattern_circ	false
 pattern_path	false
 pattern_rect	false
@@ -244,6 +247,7 @@ status_error	false
 status_recovery	false
 style	false
 suppress	false
+surface	false
 surface_blend	false
 surface_boundary	false
 surface_extend	false

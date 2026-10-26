@@ -18,10 +18,10 @@ fn picked(h: &Harness, command: &str) -> Dialog {
         d.inputs[0].items = vec![if matches!(k, Mod::Corner { .. }) {
             Sel::SketchPoint { id: sk.points.iter().find(|p| p.id != "origin").unwrap().id.clone() }
         } else {
-            Sel::SketchCurve { id: sk.curves[0].id.clone() }
+            Sel::SketchCurve { id: sk.curves[0].id.clone(), sketch: None }
         }];
         if matches!(k, Mod::Mirror) {
-            d.inputs[1].items = vec![Sel::SketchCurve { id: sk.curves[3].id.clone() }];
+            d.inputs[1].items = vec![Sel::SketchCurve { id: sk.curves[3].id.clone(), sketch: None }];
         }
         if matches!(k, Mod::PatternCirc { .. }) {
             d.inputs[1].items = vec![Sel::SketchPoint { id: "origin".into() }];
@@ -133,11 +133,11 @@ fn picked_list_removes_one_item_and_field_still_activates_input() {
     let mut h = fixture();
     let mut d = picked(&h, "sketch.scale");
     let second = h.app.session.doc.sketch(1).unwrap().curves[1].id.clone();
-    d.inputs[0].items.push(Sel::SketchCurve { id: second.clone() });
+    d.inputs[0].items.push(Sel::SketchCurve { id: second.clone(), sketch: None });
     h.app.dialog = Some(d);
     h.frames(4);
     h.step(&json!({"click":{"handle":"dialog:list:Entities:0:remove"}})).unwrap();
-    assert_eq!(h.app.dialog.as_ref().unwrap().inputs[0].items, vec![Sel::SketchCurve { id: second }]);
+    assert_eq!(h.app.dialog.as_ref().unwrap().inputs[0].items, vec![Sel::SketchCurve { id: second, sketch: None }]);
     h.step(&json!({"click":{"handle":"dialog:Base point"}})).unwrap();
     assert_eq!(h.app.dialog.as_ref().unwrap().active, 1);
 }
@@ -164,7 +164,7 @@ fn panel_dimension_preserves_expression_and_command_and_ok_closes() {
 fn text_and_text_move_cards_preserve_parameters_and_cancel_live_edits() {
     let mut h = fixture();
     let out = h.app.run("sketch.text", json!({"text":"II","at":[50,20],"height":8})).unwrap();
-    h.app.session.selection = vec![Sel::SketchCurve { id: out["curves"][0].as_str().unwrap().into() }];
+    h.app.session.selection = vec![Sel::SketchCurve { id: out["curves"][0].as_str().unwrap().into(), sketch: None }];
     h.app.start("sketch.edit_text");
     h.frames(4);
     card(&h);
@@ -175,7 +175,7 @@ fn text_and_text_move_cards_preserve_parameters_and_cancel_live_edits() {
     h.step(&json!({"text":"Changed"})).unwrap();
     h.step(&json!({"click":{"handle":"dialog:cancel"}})).unwrap();
     assert_eq!(h.app.session.doc.to_json(), before);
-    h.app.session.selection = vec![Sel::SketchCurve { id: out["curves"][0].as_str().unwrap().into() }];
+    h.app.session.selection = vec![Sel::SketchCurve { id: out["curves"][0].as_str().unwrap().into(), sketch: None }];
     h.app.start("sketch.move");
     h.frames(4);
     card(&h);
@@ -228,7 +228,7 @@ fn circular_pattern_quantity_arrows_step_the_count_within_its_limits_and_keep_pa
     assert_eq!(count(&h), "6");
     h.step(&json!({"click":{"handle":"dialog:Quantity up"}})).unwrap();
     assert_eq!(count(&h), "7");
-    assert_eq!((sent(&h), previewed(&h)), (json!(7), json!(7)), "the preview follows the arrow as it follows typing");
+    assert_eq!((sent(&h), previewed(&h)), (json!("7"), json!("7")), "the preview follows the arrow as it follows typing");
     h.step(&json!({"click":{"handle":"dialog:Quantity down"}})).unwrap();
     h.step(&json!({"click":{"handle":"dialog:Quantity down"}})).unwrap();
     assert_eq!(count(&h), "5");
@@ -280,4 +280,44 @@ fn rectangular_pattern_quantity_arrows_keep_both_directions_within_the_copy_limi
     assert_eq!(counts(&h), ("250".into(), "2".into()));
     h.step(&json!({"click":{"handle":"dialog:Quantity down"}})).unwrap();
     assert_eq!(counts(&h), ("249".into(), "2".into()));
+}
+
+#[test]
+fn sketch_pattern_dialog_preserves_expression_text_when_applying_and_editing() {
+    let mut h = fixture();
+    h.app.run("parameters.add", json!({"name":"pitch","expression":"30","unit":"mm"})).unwrap();
+    for command in ["sketch.pattern.rectangular", "sketch.pattern.circular"] {
+        let mut d = picked(&h, command);
+        match &mut d.kind {
+            Kind::SketchModify(Mod::PatternRect { count, spacing, .. }) => {
+                *count = "1 + 2".into();
+                *spacing = "pitch".into();
+            }
+            Kind::SketchModify(Mod::PatternCirc { count, angle, .. }) => {
+                *count = "1 + 2".into();
+                *angle = "45 deg + 45 deg".into();
+            }
+            _ => panic!("expected a sketch pattern dialog"),
+        }
+        let cmds = apply_commands(&h.app, &d).unwrap();
+        assert_eq!(cmds[0].1["count"], "1 + 2");
+        let (key, expression) = if command.ends_with("rectangular") { ("spacing", "pitch") } else { ("angle", "45 deg + 45 deg") };
+        assert_eq!(cmds[0].1[key], expression);
+        let result = h.app.run(command, cmds[0].1.clone()).unwrap();
+        if command.ends_with("rectangular") {
+            h.app.run("parameters.change", json!({"name":"pitch","expression":"40"})).unwrap();
+        }
+        assert!(crate::sketch_modify_ui::edit_pattern(&mut h.app, result["pattern"].as_str().unwrap()));
+        match &h.app.dialog.as_ref().unwrap().kind {
+            Kind::SketchModify(Mod::PatternRect { count, spacing, .. }) => {
+                assert_eq!(count, "1 + 2");
+                assert_eq!(spacing, expression);
+            }
+            Kind::SketchModify(Mod::PatternCirc { count, angle, .. }) => {
+                assert_eq!(count, "1 + 2");
+                assert_eq!(angle, expression);
+            }
+            _ => panic!("expected a sketch pattern dialog"),
+        }
+    }
 }

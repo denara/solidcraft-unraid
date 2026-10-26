@@ -1472,6 +1472,8 @@ fn skills_name_only_real_tools_and_commands() {
         include_str!("../../../skills/solidcraft-checking/reference/porting.md"),
         include_str!("../../../skills/solidcraft-mechanisms/SKILL.md"),
         include_str!("../../../skills/solidcraft-mechanisms/reference.md"),
+        include_str!("../../../skills/solidcraft-reporting/SKILL.md"),
+        include_str!("../../../skills/solidcraft-reporting/reference/report-template.md"),
     ];
     let mut s = server();
     let tools: Vec<String> = tool_definitions().iter().filter_map(|t| t["name"].as_str()).map(str::to_owned).collect();
@@ -2177,4 +2179,74 @@ fn describe_command_and_strict_parameter_checking() {
     assert!(text.contains("unknown key `operaton`; did you mean `operation`?"), "{text}");
     let m = tool(&mut s, "measure", json!({}));
     assert_eq!(m["body_count"], json!(0), "{m}");
+}
+
+/// Plain `mcp` with no app running: the session is headless, says so on every result, and bridges
+/// to the app once one runs, but only while it holds no work of its own.
+#[test]
+fn auto_session_bridges_to_a_late_app_only_while_empty() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    // A port nothing listens on: the bridge exists, its calls say the app is not running.
+    let port = Rc::new(Cell::new(None::<u16>));
+    let seen = port.clone();
+    let mut s = Server::new(Box::new(crate::Auto::new(Headless::default(), Box::new(move || seen.get()), None)));
+    let text = |r: &Value| r["result"]["content"].as_array().unwrap().iter().filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("\n");
+
+    let r = raw_tool(&mut s, "list_commands", json!({}));
+    assert!(text(&r).contains("headless session because the SolidCraft app was not found"), "{r}");
+    let init = call(&mut s, 1, "initialize", json!({}));
+    assert!(init["result"]["instructions"].as_str().unwrap().contains("was not running when this server started"));
+
+    // The app appears while the session is empty: the next call goes to it.
+    port.set(Some(1));
+    let r = raw_tool(&mut s, "inspect_design", json!({}));
+    assert!(!text(&r).contains("headless session because"), "{r}");
+    assert!(s.backend().has_ui());
+    assert!(s.backend().describe().contains("connected to the SolidCraft app"));
+
+    // With work in the headless session, the app showing up changes nothing.
+    port.set(None);
+    let mut s = Server::new(Box::new(crate::Auto::new(
+        Headless::default(),
+        Box::new({
+            let p = port.clone();
+            move || p.get()
+        }),
+        None,
+    )));
+    let r = raw_tool(&mut s, "execute", json!({"command": "solid.box", "params": {"length": 10, "width": 10, "height": 10}}));
+    assert_ne!(r["result"]["isError"], json!(true), "{r}");
+    port.set(Some(1));
+    let r = raw_tool(&mut s, "inspect_design", json!({}));
+    assert!(text(&r).contains("headless session because the SolidCraft app was not found"), "{r}");
+    assert!(!s.backend().has_ui());
+}
+
+/// A server with no `Auto` backend (`--headless`, `--in`) adds no notice.
+#[test]
+fn plain_headless_adds_no_notice() {
+    let mut s = server();
+    let r = raw_tool(&mut s, "list_commands", json!({}));
+    assert_eq!(r["result"]["content"].as_array().unwrap().len(), 1);
+}
+
+/// The upstream explicit external-change override reaches the engine through both save aliases.
+#[test]
+fn save_disk_change_confirmation_survives_direct_and_batch_tool_aliases() {
+    let mut s = server();
+    let dir = std::env::temp_dir().join(format!("solidcraft-mcp-save-confirm-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("public.solidcraft").to_string_lossy().to_string();
+    tool(&mut s, "execute", json!({"command":"solid.box","params":{"length":2,"width":3,"height":4}}));
+    tool(&mut s, "save", json!({"path":path}));
+    std::fs::write(&path, b"external change").unwrap();
+    assert_eq!(raw_tool(&mut s, "save", json!({}))["result"]["isError"], true);
+    tool(&mut s, "save", json!({"overwrite":true}));
+    std::fs::write(&path, b"another external change").unwrap();
+    tool(&mut s, "batch", json!({"commands":[{"command":"save","params":{"overwrite":true}}]}));
+    tool(&mut s, "new_design", json!({}));
+    tool(&mut s, "open", json!({"path":path}));
+    assert!((volume(&mut s) - 24.).abs() < 0.001);
+    std::fs::remove_dir_all(dir).unwrap();
 }

@@ -5,6 +5,8 @@
 
 #[cfg(target_arch = "wasm32")]
 mod observer;
+#[cfg(target_arch = "wasm32")]
+mod uploads;
 
 #[cfg(target_arch = "wasm32")]
 mod browser {
@@ -232,6 +234,7 @@ mod browser {
         if document.get_element_by_id("workspace-live").is_none() {
             return Ok(());
         }
+        crate::uploads::install(&document)?;
         install_details(&document)?;
         install_preview_fallback(&document)?;
         crate::observer::install(&document)?;
@@ -301,6 +304,7 @@ mod browser {
             let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) else { return };
             if let Some(html) = value.get("html").and_then(serde_json::Value::as_str) {
                 apply(html);
+                crate::uploads::refresh(&value["directories"]);
                 status("connected", "Live verbunden · Änderungen erscheinen automatisch");
             }
         });

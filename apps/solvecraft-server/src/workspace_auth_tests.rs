@@ -16,6 +16,9 @@ mod media_tests;
 #[path = "workspace_actions_tests.rs"]
 mod actions_tests;
 
+#[path = "workspace_upload_tests.rs"]
+mod upload_tests;
+
 use super::*;
 use axum::body::{Body, to_bytes};
 use axum::http::Request;
@@ -101,6 +104,12 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.directory);
+        let staged = &self.state.browser.uploads.staging;
+        if staged.parent() == self.directory.parent()
+            && staged.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(".workspace-upload-solidcraft-workspace-auth-"))
+        {
+            let _ = std::fs::remove_dir_all(staged);
+        }
     }
 }
 

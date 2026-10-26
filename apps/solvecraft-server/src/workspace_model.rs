@@ -83,7 +83,9 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
     }
     fn imports_as_new(path: &str) -> bool {
         Path::new(path).extension().and_then(|ext| ext.to_str()).is_some_and(|ext| {
-            ["step", "stp", "igs", "iges", "fcstd", "3dm", "3mf", "stl", "obj", "glb", "gltf"].iter().any(|import| ext.eq_ignore_ascii_case(import))
+            ["step", "stp", "igs", "iges", "fcstd", "3dm", "3mf", "stl", "obj", "glb", "gltf", "dxf", "svg"]
+                .iter()
+                .any(|import| ext.eq_ignore_ascii_case(import))
         })
     }
     fn command(root: &Path, id: &str, args: &Value, current: &mut Option<String>, out: &mut Vec<FileOperation>) -> Result<(), String> {
@@ -223,6 +225,15 @@ pub fn check_revisions(root: &Path, status: &ModelStatus, ops: &[FileOperation],
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upstream_drawing_open_does_not_plan_an_implicit_native_save_over_the_source() {
+        let root = std::env::temp_dir();
+        for path in ["Project/template.svg", "Project/template.dxf"] {
+            let message = batch(json!([{"command":"doc.open","params":{"path":path}},{"command":"file.save","params":{}}]));
+            assert_eq!(operations(&root, &message, None).unwrap(), vec![FileOperation::Open(path.into())]);
+        }
+    }
 
     #[test]
     fn same_size_replacement_conflicts_and_new_names_remain_available() {

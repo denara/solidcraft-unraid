@@ -81,7 +81,7 @@ mod tests {
 
     #[test]
     fn every_help_message_is_for_a_documented_command() {
-        let english = help_keys(include_str!("../../../assets/locales/en.json"));
+        let english = help_keys(include_str!(concat!(env!("OUT_DIR"), "/locales/en.json")));
         let wanted: BTreeSet<String> = DOCUMENTED.iter().map(|id| format!("help.{id}")).collect();
         assert_eq!(english, wanted);
         for key in &english {
@@ -92,8 +92,8 @@ mod tests {
 
     #[test]
     fn the_help_texts_are_written_in_every_complete_language() {
-        let english = catalog(include_str!("../../../assets/locales/en.json"));
-        for source in [include_str!("../../../assets/locales/ja.json"), include_str!("../../../assets/locales/zh.json")] {
+        let english = catalog(include_str!(concat!(env!("OUT_DIR"), "/locales/en.json")));
+        for source in [include_str!(concat!(env!("OUT_DIR"), "/locales/ja.json")), include_str!(concat!(env!("OUT_DIR"), "/locales/zh.json"))] {
             let other = catalog(source);
             for (key, text) in english.iter().filter(|(k, _)| k.starts_with("help.")) {
                 let translated = other.get(key).unwrap_or_else(|| panic!("{key} missing"));

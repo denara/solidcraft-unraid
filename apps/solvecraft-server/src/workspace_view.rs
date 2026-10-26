@@ -60,6 +60,8 @@ fn icon(source: &str) -> String {
 }
 
 const CSS: &str = r#"
+.uploadtools [hidden]{display:none!important}.uploadtools{margin:0 0 24px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 16px}.uploadtools>summary{cursor:pointer;font-size:12px;color:var(--blue);font-weight:600}.uploadbody{padding-top:14px}.uploadrow{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px}.uploadrow label{font-size:12px;color:var(--dim)}.uploadrow .search{flex:1}.uploadtarget{width:100%;font-size:12px;color:var(--dim)}.dropzone{border:1px dashed #557b72;border-radius:8px;padding:20px;text-align:center;background:#172b26;font-size:13px}.dropzone.dragover{border:2px solid var(--green);padding:19px;background:#203f33}.dropzone label{display:block;margin:12px auto 0;max-width:460px}.dropzone input{max-width:100%;font-size:12px}.uploadnote{font-size:11px;color:var(--dim);margin-top:10px}.uploadstatus{font-size:12px;margin:12px 0}.uploadresults{font-size:12px;max-height:180px;overflow:auto;padding-left:22px}.uploadresults li{overflow-wrap:anywhere;margin:5px 0}.uploadresults .failed{color:#ffaeae}.uploadresults .done{color:var(--green)}.uploadprogress{width:100%;height:6px;accent-color:var(--green)}.folderactions button.action{background:none;border:0;padding:0;font:inherit;font-size:11px;cursor:pointer}.overwritebody{padding:20px}.overwritebody p{margin-bottom:14px;overflow-wrap:anywhere}.overwritechoices{display:flex;gap:12px;flex-wrap:wrap;margin-top:20px}.overwriteall{font-size:13px;display:flex;gap:8px;align-items:center}footer{flex-wrap:wrap;gap:8px 20px}.storage{font-variant-numeric:tabular-nums}
+
 .folderactions{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:14px;padding:6px 20px;border-top:1px solid var(--line);color:var(--dim);font-size:11px;line-height:1.4}.folderactions>span{margin-right:auto;overflow-wrap:anywhere;min-width:0}.folderactions a{white-space:nowrap}.danger{color:#ffaeae}.deletewarning{border:1px solid #805052;background:#332125;padding:16px;border-radius:8px;margin:20px 0}.deleteform{display:flex;gap:16px;align-items:center;flex-wrap:wrap}.deleteform .primary{background:#a13e48;color:white}.deleteform label{width:100%}
 
 :root{color-scheme:dark;--bg:#10151b;--panel:#171e26;--raised:#1e2731;--line:#2b3541;--text:#ecf1f5;--dim:#9eafbf;--green:#6cddb4;--amber:#f1c36b;--blue:#9bc8fa}
@@ -382,8 +384,9 @@ fn project_files(html: &mut String, files: &[Value], directories: &[Value]) {
         };
         let _ = write!(
             html,
-            "<details class=\"project\" data-project=\"{}\"><summary>{}<div><div class=\"projectname\">{}</div><div class=\"projectmeta\">{basis}</div></div><span class=\"projectcount\">{} Datei{}</span></summary>",
+            "<details class=\"project\" data-project=\"{}\" data-upload-project=\"{}\"><summary>{}<div><div class=\"projectname\">{}</div><div class=\"projectmeta\">{basis}</div></div><span class=\"projectcount\">{} Datei{}</span></summary>",
             escape(&id),
+            if text(project, "basis") == "directory" { escape(name) } else { String::new() },
             icon(ICON_FOLDER),
             escape(name),
             files.len(),
@@ -415,7 +418,9 @@ fn project_files(html: &mut String, files: &[Value], directories: &[Value]) {
 /// do not interrupt typing, close a properties popup or reset keyboard focus.
 pub fn page(snapshot: &Value, query: &str, kind: &str) -> String {
     let mut html = start("Dateien &amp; Sitzungen", Some(text(snapshot, "csrf")));
-    html.push_str("<div class=\"heading\"><div><div class=\"eyebrow\">Dein CAD-Arbeitsbereich</div><h1>Was liegt vor. Was entsteht gerade.</h1><p>Gespeicherte Modelle, Exporte und die aktuellen MCP-Sitzungen an einem Ort.</p></div><a class=\"primary\" href=\"/\">Browser-CAD öffnen ↗</a></div><div id=\"workspace-status\" class=\"livebar\" data-state=\"connecting\" role=\"status\" aria-live=\"polite\"><span class=\"dot\" aria-hidden=\"true\"></span><span id=\"workspace-status-text\">Live-Verbindung wird hergestellt …</span><a href=\"\" aria-label=\"Arbeitsbereich mit denselben Filtern aktualisieren\">Jetzt aktualisieren ↻</a></div><section class=\"filters\" aria-label=\"Dateien filtern\"><form class=\"toolbar\" method=\"get\" action=\"/workspace\">");
+    html.push_str("<div class=\"heading\"><div><div class=\"eyebrow\">Dein CAD-Arbeitsbereich</div><h1>Was liegt vor. Was entsteht gerade.</h1><p>Gespeicherte Modelle, Exporte und die aktuellen MCP-Sitzungen an einem Ort.</p></div><a class=\"primary\" href=\"/\">Browser-CAD öffnen ↗</a></div><div id=\"workspace-status\" class=\"livebar\" data-state=\"connecting\" role=\"status\" aria-live=\"polite\"><span class=\"dot\" aria-hidden=\"true\"></span><span id=\"workspace-status-text\">Live-Verbindung wird hergestellt …</span><a href=\"\" aria-label=\"Arbeitsbereich mit denselben Filtern aktualisieren\">Jetzt aktualisieren ↻</a></div>");
+    html.push_str(&upload_controls(snapshot));
+    html.push_str("<section class=\"filters\" aria-label=\"Dateien filtern\"><form class=\"toolbar\" method=\"get\" action=\"/workspace\">");
     let _ = write!(
         html,
         "<input class=\"search\" type=\"search\" name=\"q\" value=\"{}\" placeholder=\"Dateiname suchen …\" aria-label=\"Dateiname suchen\" maxlength=\"256\"><select class=\"filter\" name=\"kind\" aria-label=\"Dateityp\">",
@@ -543,7 +548,11 @@ pub fn fragment(snapshot: &Value, query: &str, kind: &str) -> String {
     let directories = entries(snapshot, "directories")
         .iter()
         .filter(|directory| {
-            !filtered || directory.as_str().is_some_and(|name| files.iter().any(|file| text(file, "name").starts_with(&format!("{name}/"))))
+            !filtered
+                || directory.as_str().is_some_and(|name| {
+                    (kind.is_empty() || kind == "all") && name.to_lowercase().contains(&query.to_lowercase())
+                        || files.iter().any(|file| text(file, "name").starts_with(&format!("{name}/")))
+                })
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -596,6 +605,8 @@ pub fn fragment(snapshot: &Value, query: &str, kind: &str) -> String {
         html.push_str("<div class=\"empty\"><strong>Alle Sitzungen frei</strong>Sobald sich ein MCP-Client verbindet, erscheint seine Sitzung hier automatisch.</div>");
     }
     html.push_str("</div><div class=\"unsaved\">Ungespeicherte Änderungen gehen beim Sitzungsende oder Container-Neustart verloren.</div></aside></div><div class=\"bottom\"><section class=\"panel explain\"><h3>Was bedeutet „in Bearbeitung“?</h3><p>Eine Sitzung enthält bestätigte Änderungen, die noch nicht in einer Datei gespeichert sind. „Geöffnet“ bedeutet nur, dass eine Sitzung eine Datei geladen hat. „Führt aus“ beschreibt eine gerade laufende Anfrage. Ein unbekannter Änderungsstatus zählt nicht als bestätigte Bearbeitung.</p><div class=\"legend\"><span><span class=\"dot amber\" aria-hidden=\"true\"></span> Ungespeichert / führt aus</span><span><span class=\"dot blue\" aria-hidden=\"true\"></span> Neuer Entwurf</span><span><span class=\"dot\" aria-hidden=\"true\"></span> Sitzungsplatz belegt</span></div></section><section class=\"panel explain\"><h3>Browser-CAD bleibt unabhängig</h3><p>Diese Übersicht zeigt Dateien und Sitzungen des MCP-Dienstes. Deine Browsermodelle leben weiterhin im Browser. „Bearbeiten“ öffnet eine Kopie des gespeicherten Modells in einem neuen CAD-Tab. Alternativ kannst du Dateien herunterladen und selbst importieren.</p><div class=\"small\">Dateien nur mit Bestätigung löschen · Sitzungen werden hier nicht beendet</div></section></div><footer><span>SolidCraft · Inoffizielle Unraid-Integration</span><span>Gespeicherte Dateistände · Zeiten in UTC</span></footer>");
+    let storage = escape(text(snapshot.get("storage").unwrap_or(&Value::Null), "label"));
+    html = html.replace("</footer>", &format!("<span class=\"storage\">{storage}</span></footer>"));
     html
 }
 
@@ -605,6 +616,9 @@ fn delete_link(html: &mut String, name: &str) {
 }
 
 fn folder_actions(html: &mut String, name: &str) {
+    if name.split('/').next().is_some_and(|p| crate::projects::validate(p).is_ok()) {
+        let _ = write!(html, "<button class=\"action\" type=\"button\" data-upload-target=\"{}\">Hochladen ↑</button>", escape(name));
+    }
     let url = download_url(name).replacen("/workspace/files/", "/workspace/archive/", 1);
     // The server attaches successful archives. Forcing `download` here also saves
     // HTML errors (expired login, origin rejection, manifest conflicts) as .htm.
@@ -639,6 +653,19 @@ pub(crate) fn delete_confirmation(path: &str, csrf: &str, ticket: &str, manifest
         escape(ticket),
         escape(path)
     );
+    html
+}
+
+fn upload_controls(snapshot: &Value) -> String {
+    let mut html = String::from(
+        "<details class=\"uploadtools\" id=\"upload-panel\"><summary>Projekt anlegen · Dateien hochladen</summary><div class=\"uploadbody\"><form id=\"project-create\" class=\"uploadrow\"><label for=\"project-name\">Neues Projekt</label><input id=\"project-name\" class=\"search\" maxlength=\"96\" required placeholder=\"Projektname\"><button class=\"secondary\" type=\"submit\" id=\"project-create-button\">Projekt anlegen</button></form><div class=\"uploadrow\"><label for=\"upload-project\">Upload-Ziel</label><select id=\"upload-project\" class=\"filter\"><option value=\"\">Projekt auswählen …</option>",
+    );
+    for path in entries(snapshot, "directories").iter().filter_map(Value::as_str).take(256) {
+        if path.split('/').next().is_some_and(|p| crate::projects::validate(p).is_ok()) {
+            let _ = write!(html, "<option value=\"{}\">{}</option>", escape(path), escape(path));
+        }
+    }
+    html.push_str("</select></div><div id=\"upload-dropzone\" class=\"dropzone\"><div id=\"upload-target\">Bitte zuerst einen echten Projektordner auswählen.</div><div>Dateien hierher ziehen – auch mehrere gleichzeitig</div><label>Dateien auswählen<input id=\"upload-files\" type=\"file\" multiple accept=\".solidcraft,.solvecraft,.json,.step,.stp,.igs,.iges,.stl,.3mf,.obj,.glb,.gltf,.dxf,.svg,.png,.jpg,.jpeg\"></label></div><p class=\"uploadnote\">SolidCraft-Modelle/Design-JSON, STEP, IGES, STL, 3MF, selbstenthaltendes OBJ/glTF/GLB, DXF/SVG und PNG/JPEG-Schablonen. Maximal 16 MiB je Datei, 100 Dateien / 128 MiB je Upload. Bilder: 8 MiB / 4096 × 4096 Pixel; SVG: 1 MiB. Dateien werden gespeichert, nicht automatisch als CAD geöffnet oder ausgeführt.</p><div id=\"upload-status\" class=\"uploadstatus\" role=\"status\" aria-live=\"polite\"></div><progress id=\"upload-progress\" class=\"uploadprogress\" hidden></progress><button id=\"upload-cancel\" type=\"button\" class=\"secondary\" hidden>Upload abbrechen</button><ul id=\"upload-results\" class=\"uploadresults\"></ul><noscript><p class=\"uploadnote\">Projektanlage und Upload benötigen den Browser-Client. Die Dateiliste und Downloads bleiben verfügbar.</p></noscript></div></details><dialog id=\"upload-overwrite\" class=\"filedialog\" aria-labelledby=\"overwrite-title\"><div class=\"dialoghead\"><h2 id=\"overwrite-title\">Datei überschreiben?</h2></div><div class=\"overwritebody\"><p id=\"overwrite-name\"></p><p>Am Ziel ist diese Datei bereits vorhanden. Überschreiben ersetzt den vorhandenen Inhalt.</p><label class=\"overwriteall\"><input id=\"overwrite-all\" type=\"checkbox\"> Für alle Dateien übernehmen</label><div class=\"overwritechoices\"><button id=\"overwrite-yes\" type=\"button\" class=\"primary\">Überschreiben</button><button id=\"overwrite-skip\" type=\"button\" class=\"secondary\">Überspringen</button><button id=\"overwrite-cancel\" type=\"button\" class=\"secondary\">Abbrechen</button></div></div></dialog>");
     html
 }
 

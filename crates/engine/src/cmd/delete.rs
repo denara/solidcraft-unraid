@@ -88,7 +88,7 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
             Sel::Occurrence { path } => {
                 selected_occurrences.push(s.occurrence_placement(path)?.occurrence.to_string());
             }
-            Sel::SketchCurve { id } | Sel::SketchPoint { id } | Sel::SketchConstraint { id } => entities.push(id.clone()),
+            Sel::SketchCurve { id, .. } | Sel::SketchPoint { id } | Sel::SketchConstraint { id } => entities.push(id.clone()),
             Sel::Feature { id } => {
                 if s.doc.feature(*id).is_none() {
                     return Err(bad(cmd, format!("no feature {id}")));
@@ -104,6 +104,10 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
                 _ => skip("the origin axes can't be deleted".into()),
             },
             Sel::SketchMidpoint { .. } => skip("a midpoint belongs to its sketch edge".into()),
+            Sel::ConstructionPoint { name } => match s.doc.find_feature(name) {
+                Some(f) if matches!(f.kind, FeatureKind::ConstructionPoint { .. }) => features.push(f.id),
+                _ => skip(format!("no construction point named \"{name}\"")),
+            },
             Sel::Body { name } => bodies.push(name.clone()),
             Sel::Face { body, point, .. } => match faces.iter_mut().find(|(b, _)| b == body) {
                 Some((_, ps)) => ps.push(*point),

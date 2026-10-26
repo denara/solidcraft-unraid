@@ -39,11 +39,18 @@ pub struct BrowserAuth {
     pub(crate) live: crate::workspace_live::Live,
     pub(crate) media: crate::workspace_media::Media,
     pub(crate) actions: crate::workspace_actions::Actions,
+    pub(crate) uploads: crate::workspace_upload::Uploads,
 }
 
 impl BrowserAuth {
     pub fn new(config: &crate::config::Config) -> Self {
-        Self { inner: Mutex::new(remember::load(config)), live: Default::default(), media: Default::default(), actions: Default::default() }
+        Self {
+            inner: Mutex::new(remember::load(config)),
+            live: Default::default(),
+            media: Default::default(),
+            actions: Default::default(),
+            uploads: crate::workspace_upload::Uploads::new(config),
+        }
     }
 }
 
@@ -54,6 +61,10 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/workspace/login", get(login_page).post(login))
         .route("/workspace/logout", post(logout))
         .route("/workspace/api", get(api))
+        .route("/workspace/projects", post(crate::workspace_upload::create_project).layer(DefaultBodyLimit::max(4096)))
+        .route("/workspace/uploads/cancel", post(crate::workspace_upload::cancel).layer(DefaultBodyLimit::max(4096)))
+        .route("/workspace/uploads/prepare", post(crate::workspace_upload::prepare).layer(DefaultBodyLimit::max(65536)))
+        .route("/workspace/upload", axum::routing::put(crate::workspace_upload::upload))
         .route("/workspace/delete/{*name}", get(crate::workspace_actions::preview))
         .route("/workspace/delete", post(crate::workspace_actions::delete).layer(DefaultBodyLimit::max(4096)))
         .route("/workspace/archive/{*name}", get(crate::workspace_actions::download))
@@ -334,7 +345,7 @@ pub async fn snapshot(state: &AppState) -> Result<Value, String> {
         };
     }
     Ok(
-        json!({"directories":listing.directories,"files":files,"sessions":sessions,"slots_total":state.config.max_sessions,"slots_used":state.slots_used(),"truncated":listing.truncated}),
+        json!({"storage":state.browser.uploads.storage.snapshot(&state.config.files),"upload_limits":crate::workspace_upload::Uploads::limits(),"directories":listing.directories,"files":files,"sessions":sessions,"slots_total":state.config.max_sessions,"slots_used":state.slots_used(),"truncated":listing.truncated}),
     )
 }
 

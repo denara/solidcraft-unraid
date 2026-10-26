@@ -18,7 +18,7 @@ use solidcraft_geom::{Seg2, Vec2};
 
 use crate::decompose::Budget;
 use crate::linalg::{Mat, determined_vars, solve as lin_solve};
-use crate::model::{ConstraintKind, CurveKind, Sketch};
+use crate::model::{ConstraintKind, CurveKind, Sketch, TwoCircles};
 #[cfg(feature = "solver-profiling")]
 use crate::profiling::{self, Decision, Phase, StopReason};
 use crate::union_find::{find, union};
@@ -366,6 +366,19 @@ impl State<'_> {
         let d = line_dist(cc, a, b).abs();
         if inside { r - d } else { d - r }
     }
+    /// What a point-to-circle distance measures: the gap from point `p` to the edge of circle
+    /// or arc `c`, or (`inside`) how far within the edge the point lies.
+    fn point_circle_gap(&self, p: usize, c: usize, inside: bool) -> f64 {
+        let (cc, r) = self.round(c);
+        let d = self.p(p).dist(cc);
+        if inside { r - d } else { d - r }
+    }
+    /// What a distance between two circles or arcs measures, as they lie (`circles`).
+    fn circle_circle_gap(&self, a: usize, b: usize, circles: TwoCircles) -> f64 {
+        let (ca, ra) = self.round(a);
+        let (cb, rb) = self.round(b);
+        circles.gap(ca.dist(cb), ra, rb)
+    }
     fn slot_length(&self, a: usize, b: usize) -> f64 {
         let (ca, ra) = self.round(a);
         let (cb, rb) = self.round(b);
@@ -559,14 +572,28 @@ fn residuals(s: &State, k: &ConstraintKind, out: &mut Vec<f64>) {
             out.push((qq - pp).dot(dir) / len);
         }
         Fix { .. } => {}
+        // A distance within convergence tolerance of zero means coincidence: two
+        // component rows keep both directions constrained even when the points meet.
+        Distance { p, q, value } if value.abs() <= TOL => {
+            let d = s.p(p) - s.p(q);
+            out.extend([d.x, d.y]);
+        }
         Distance { p, q, value } => out.push(s.p(p).dist(s.p(q)) - value),
+        // At zero the signed component has the same solutions as its magnitude, but keeps
+        // a nonzero derivative when the points line up for freedom and redundancy analysis.
+        DistanceX { p, q, value: 0.0 } => out.push(s.p(q).x - s.p(p).x),
+        DistanceY { p, q, value: 0.0 } => out.push(s.p(q).y - s.p(p).y),
         DistanceX { p, q, value } => out.push((s.p(q).x - s.p(p).x).abs() - value),
         DistanceY { p, q, value } => out.push((s.p(q).y - s.p(p).y).abs() - value),
         PointLineDistance { p, l, value } => {
             let (a, b) = s.line(l);
-            out.push(line_dist(s.p(p), a, b).abs() - value);
+            let d = line_dist(s.p(p), a, b);
+            // At zero this is point-on-line; the signed distance retains its slope.
+            out.push(if value.abs() <= TOL { d } else { d.abs() - value });
         }
         LineCircleDistance { l, c, value, inside } => out.push(s.line_circle_gap(l, c, inside) - value),
+        PointCircleDistance { p, c, value, inside } => out.push(s.point_circle_gap(p, c, inside) - value),
+        CircleCircleDistance { a, b, value, circles } => out.push(s.circle_circle_gap(a, b, circles) - value),
         Length { l, value } => {
             let (a, b) = s.line(l);
             out.push(a.dist(b) - value);
@@ -630,6 +657,8 @@ fn measure(s: &State, k: &ConstraintKind) -> Option<f64> {
             line_dist(s.p(p), a, b).abs()
         }
         LineCircleDistance { l, c, inside, .. } => s.line_circle_gap(l, c, inside),
+        PointCircleDistance { p, c, inside, .. } => s.point_circle_gap(p, c, inside),
+        CircleCircleDistance { a, b, circles, .. } => s.circle_circle_gap(a, b, circles),
         Length { l, .. } => {
             let (a, b) = s.line(l);
             a.dist(b)
@@ -752,7 +781,72 @@ pub(crate) fn touch_point(sk: &Sketch, k: &ConstraintKind, on_curve: &[(usize, u
         return Some(*p);
     }
     let on = |p: usize, c: usize| on_curve.binary_search(&(p, c)).is_ok();
-    ea.iter().find(|p| on(**p, b)).or_else(|| eb.iter().find(|p| on(**p, a))).copied()
+    if let Some(p) = ea.iter().find(|p| on(**p, b)).or_else(|| eb.iter().find(|p| on(**p, a))) {
+        return Some(*p);
+    }
+    contact_through_coincident(sk, a, b, &ea, &eb, on_curve)
+}
+
+/// Whether curve `c` is a straight line.
+fn is_straight(sk: &Sketch, c: usize) -> bool {
+    matches!(sk.curves.get(c).map(|c| &c.kind), Some(CurveKind::Line { .. }))
+}
+
+/// A touch point the two curves reach through `Coincident` constraints, when they share no point
+/// and no end of one is a point-on-curve of the other: a point lying on `a` (an end of it, or a
+/// point-on-curve of it) tied by a chain of `Coincident` constraints to a point lying on `b`
+/// (the chain may be empty: a free point on both curves). That covers two ends tied together, a
+/// line end tied to a free point that is on the circle, and a free point on both curves.
+/// Free-form curves count only their ends. Without this the tangency falls back to the
+/// touch-free form (distance from the centre equals the radius), whose Jacobian is
+/// rank-deficient at the solution: the touch point is a double root of it, so it converges to
+/// only sqrt(residual) of tangent and drops rank (see the `coincident_tangent_*` tests). The
+/// point returned is the one lying on the round curve (for a free-form curve, its end), so the
+/// radius to it is read from the curve it belongs to.
+fn contact_through_coincident(sk: &Sketch, a: usize, b: usize, ea: &[usize], eb: &[usize], on_curve: &[(usize, usize)]) -> Option<usize> {
+    let n = sk.points.len();
+    let free = |c: usize| sk.curves.get(c).is_some_and(|c| c.kind.is_freeform());
+    // Points lying on a curve: its ends, and (unless free-form) the points constrained onto it.
+    let lying = |c: usize, ends: &[usize]| -> Vec<usize> {
+        let mut v: Vec<usize> = ends.to_vec();
+        if !free(c) {
+            v.extend(on_curve.iter().filter(|(_, cc)| *cc == c).map(|(p, _)| *p));
+            // The midpoint of a line lies on it.
+            v.extend(sk.constraints.iter().filter(|k| !k.driven).filter_map(|k| match k.kind {
+                ConstraintKind::Midpoint { p, l } if l == c => Some(p),
+                _ => None,
+            }));
+        }
+        v.retain(|p| *p < n);
+        v
+    };
+    let (on_a, on_b) = (lying(a, ea), lying(b, eb));
+    if on_a.is_empty() || on_b.is_empty() {
+        return None;
+    }
+    let mut parent: Vec<usize> = (0..n).collect();
+    for c in sk.constraints.iter().filter(|c| !c.driven) {
+        if let ConstraintKind::Coincident { p, q } = c.kind
+            && p != q
+            && p < n
+            && q < n
+        {
+            union(&mut parent, p, q);
+        }
+    }
+    for &p in &on_a {
+        let root = find(&mut parent, p);
+        if let Some(&q) = on_b.iter().find(|q| find(&mut parent, **q) == root) {
+            return Some(if free(a) {
+                p
+            } else if free(b) || is_straight(sk, a) {
+                q
+            } else {
+                p
+            });
+        }
+    }
+    None
 }
 
 /// Variables a block depends on, and whether it reads a point that is a constant of the solve.
@@ -838,6 +932,8 @@ fn block_refs(sk: &Sketch, b: &Block) -> Vec<Ref> {
             PointOnCurve { p, c } => vec![P(p), C(c)],
             Midpoint { p, l } | PointLineDistance { p, l, .. } | LinearDiameter { p, l, .. } => vec![P(p), L(l)],
             LineCircleDistance { l, c, .. } => vec![L(l), R(c)],
+            PointCircleDistance { p, c, .. } => vec![P(p), R(c)],
+            CircleCircleDistance { a, b, .. } => vec![R(a), R(b)],
             Horizontal { l } | Vertical { l } | Length { l, .. } | LineAngle { l, .. } => vec![L(l)],
             // Another kind reads a constant value, whatever its points: as good as any.
             ArcSweep { c, .. } | Radius { c, .. } | Diameter { c, .. } | ArcLength { c, .. } => vec![C(c)],
@@ -854,6 +950,45 @@ fn block_refs(sk: &Sketch, b: &Block) -> Vec<Ref> {
             ConstraintKind::Tangent { a, b } => [P(*p)].into_iter().chain(tangent(a, b)).collect(),
             _ => vec![P(*p)],
         },
+    }
+}
+
+/// A positive distance edited from zero needs an opening direction: central differences
+/// of its magnitude cancel at coincidence. Use a unit radial subgradient there, or the
+/// signed line normal. Once separated, ordinary central differences apply again.
+fn distance_opening_slope(s: &State, b: &Block, v: usize) -> Option<f64> {
+    let point = |p: usize, gradient: Vec2| match s.lay.pvar.get(p).copied().flatten() {
+        Some(first) if v == first => gradient.x,
+        Some(first) if v == first + 1 => gradient.y,
+        _ => 0.0,
+    };
+    match b {
+        Block::User(_, ConstraintKind::Distance { p, q, value }) if *value > TOL => {
+            let d = s.p(*q) - s.p(*p);
+            if d.len() > TOL {
+                return None;
+            }
+            // Unequal nonzero components avoid symmetry with axes and 45-degree guides.
+            let direction = d.normalized().unwrap_or(Vec2::new(0.6, 0.8));
+            Some(point(*q, direction) - point(*p, direction))
+        }
+        Block::User(_, ConstraintKind::PointLineDistance { p, l, value }) if *value > TOL => {
+            let (a, b) = s.line(*l);
+            let signed = line_dist(s.p(*p), a, b);
+            if signed.abs() > TOL {
+                return None;
+            }
+            let Some(CurveKind::Line { a: ai, b: bi }) = s.sk.curves.get(*l).map(|c| &c.kind) else { return None };
+            let d = b - a;
+            let length = d.len();
+            if length <= 1e-12 {
+                return None;
+            }
+            let normal = d.perp() * (if signed < 0.0 { -1.0 } else { 1.0 } / length);
+            let along = (s.p(*p) - a).dot(d) / (length * length);
+            Some(point(*p, normal) + point(*ai, normal * (along - 1.0)) - point(*bi, normal * along))
+        }
+        _ => None,
     }
 }
 
@@ -890,6 +1025,7 @@ fn system(sk: &Sketch, lay: &Layout, blocks: &[(Block, Vec<usize>)], x: &mut [f6
         let rows = plus.len();
         for &v in vars {
             let Some(x0) = x.get(v).copied() else { continue };
+            let opening = distance_opening_slope(&State { sk, lay, x }, b, v);
             let h = 1e-7 * x0.abs().max(1.0);
             if let Some(xv) = x.get_mut(v) {
                 *xv = x0 + h;
@@ -906,7 +1042,7 @@ fn system(sk: &Sketch, lay: &Layout, blocks: &[(Block, Vec<usize>)], x: &mut [f6
             }
             for k in 0..rows {
                 let d = (plus.get(k).copied().unwrap_or(0.0) - minus.get(k).copied().unwrap_or(0.0)) / (2.0 * h);
-                j.set(row + k, v, d);
+                j.set(row + k, v, if k == 0 { opening.unwrap_or(d) } else { d });
             }
         }
         row += rows;
@@ -941,6 +1077,7 @@ fn local_system(
         for &v in vars {
             let Some(c) = col.get(v).copied().filter(|c| *c < ncols) else { continue };
             let Some(x0) = x.get(v).copied() else { continue };
+            let opening = distance_opening_slope(&State { sk, lay, x }, b, v);
             let h = 1e-7 * x0.abs().max(1.0);
             if let Some(xv) = x.get_mut(v) {
                 *xv = x0 + h;
@@ -957,7 +1094,7 @@ fn local_system(
             }
             for k in 0..rows {
                 let d = (plus.get(k).copied().unwrap_or(0.0) - minus.get(k).copied().unwrap_or(0.0)) / (2.0 * h);
-                j.set(row + k, c, d);
+                j.set(row + k, c, if k == 0 { opening.unwrap_or(d) } else { d });
             }
         }
         row += rows;
@@ -2395,6 +2532,11 @@ fn solve_inner(
     let mut det = vec![false; lay.n];
     let mut rank = 0;
     let mut redundant: Vec<String> = Vec::new();
+    let mut degenerate = false;
+    // Tangents whose touch-free form is violated (or whose round curve collapsed): named in
+    // `failing` only when the sketch failed anyway, so a sketch inside the acceptance tolerance
+    // is never `Solved` with a constraint in `failing`.
+    let mut named: Vec<String> = Vec::new();
     // A component too large to solve is a failure, not an allocation.
     let too_large = comps.iter().filter(|(_, vars, bis)| !bis.is_empty() && oversized(vars)).map(|(_, vars, _)| vars.len()).max();
     if too_large.is_some() {
@@ -2422,6 +2564,26 @@ fn solve_inner(
         }
         let (r, _, owner) = system(sk, &lay, &sub, &mut x, false);
         check(&r, &owner, &sub, &mut failing);
+        // A tangency read at its touch point can hold there while the curves are not tangent (the
+        // touch point is not on the line, or not on the round curve): that failure is named by the
+        // constraint that ties the point, and the tangent is named as well when the touch-free
+        // form (distance from the centre equals the radius) is violated. A tangent whose round
+        // curve has collapsed to a point holds trivially and is a degenerate answer: it fails.
+        let now = State { sk, lay: &lay, x: &x };
+        for (b, _) in &sub {
+            let (Block::User(ci, k) | Block::TangentAt(ci, k, _)) = b else { continue };
+            let ConstraintKind::Tangent { a: ta, b: tb } = **k else { continue };
+            let Some(c) = sk.constraints.get(*ci) else { continue };
+            let mut touch_free = Vec::new();
+            if matches!(b, Block::TangentAt(..)) {
+                residuals(&now, k, &mut touch_free);
+            }
+            let collapsed = [ta, tb].iter().any(|&cv| !now.is_line(cv) && !now.is_freeform(cv) && now.radius_of(cv) < ACCEPT);
+            if (collapsed || touch_free.iter().any(|v| !(v.abs() < ACCEPT))) && !named.contains(&c.id) {
+                named.push(c.id.clone());
+            }
+            degenerate |= collapsed;
+        }
         if analysis == Analysis::StatusOnly {
             continue;
         }
@@ -2472,6 +2634,9 @@ fn solve_inner(
     if !consts.is_empty() {
         let (r, _, owner) = system(sk, &lay, &consts, &mut x, false);
         check(&r, &owner, &consts, &mut failing);
+    }
+    if degenerate {
+        max_residual = max_residual.max(1.0);
     }
     // Weld the whole connected closure graph, preserving every immutable node.
     // Validate the actual prospective geometry before accepting a numerical solve.
@@ -2528,6 +2693,13 @@ fn solve_inner(
         None
     };
     let status = if max_residual < ACCEPT { SolveStatus::Solved } else { SolveStatus::Failed };
+    if status == SolveStatus::Failed {
+        for id in named {
+            if !failing.contains(&id) {
+                failing.push(id);
+            }
+        }
+    }
     for id in &folded {
         if !failing.contains(id) {
             failing.push(id.clone());

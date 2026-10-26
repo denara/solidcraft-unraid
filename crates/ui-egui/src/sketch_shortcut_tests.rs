@@ -139,7 +139,7 @@ fn a_second_escape_stays_in_the_sketch() {
     press(&mut h, "Escape");
     assert_eq!(h.app.session.active_sketch, sketch, "a second Escape stays in the sketch");
     h.app.run("sketch.line", json!({"points":[[0,0],[10,0]]})).unwrap();
-    h.app.session.selection = vec![Sel::SketchCurve { id: "l1".into() }];
+    h.app.session.selection = vec![Sel::SketchCurve { id: "l1".into(), sketch: None }];
     pause(&mut h);
     press(&mut h, "Escape");
     assert!(h.app.session.selection.is_empty(), "Escape still clears a selection");
@@ -184,7 +184,7 @@ fn move_key_keeps_sketch_mode_behavior_and_honors_a_sketch_move_binding() {
     h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
     h.app.run("sketch.line", json!({"points":[[0,0],[10,0]]})).unwrap();
     let sketch = h.app.session.active_sketch;
-    let selection = vec![Sel::SketchCurve { id: "l1".into() }];
+    let selection = vec![Sel::SketchCurve { id: "l1".into(), sketch: None }];
     h.app.session.selection = selection.clone();
 
     press(&mut h, "M");
@@ -214,6 +214,28 @@ fn a_tools_shortcut_pressed_again_restarts_it_by_default() {
     assert_eq!(tool(&h), Some("sketch.rectangle.two_point"));
     press(&mut h, "R");
     assert_eq!(tool(&h), Some("sketch.rectangle.two_point"), "the same mode again");
+}
+
+/// A variant with a key of its own doesn't take over its family's key: with G bound to the
+/// centre rectangle, G then Escape then R starts the corner rectangle R is bound to. A variant
+/// without a key still comes back on R (#4308).
+#[test]
+fn a_variant_with_its_own_key_leaves_the_family_key_alone() {
+    let mut h = Harness::new();
+    h.app.run("sketch.create", json!({"plane": "XY"})).unwrap();
+    h.settle();
+    crate::keymap::bind(&mut h.app, "sketch.rectangle.center", "G", true).unwrap();
+    press(&mut h, "G");
+    assert_eq!(tool(&h), Some("sketch.rectangle.center"));
+    press(&mut h, "Escape");
+    press(&mut h, "R");
+    assert_eq!(tool(&h), Some("sketch.rectangle.two_point"), "R starts what it is bound to");
+    press(&mut h, "Escape");
+    h.app.start("sketch.rectangle.three_point");
+    h.settle();
+    press(&mut h, "Escape");
+    press(&mut h, "R");
+    assert_eq!(tool(&h), Some("sketch.rectangle.three_point"), "a variant without a key comes back on R");
 }
 
 /// #2459: with Preferences › Sketch asking for it, a tool's shortcut pressed again before the

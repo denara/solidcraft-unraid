@@ -54,6 +54,92 @@ impl Test {
 pub struct State {
     pub add: Option<AddState>,
     pub tests: std::collections::HashMap<String, Test>,
+    #[cfg(not(target_arch = "wasm32"))]
+    capabilities: std::collections::HashMap<(String, String), Option<bool>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    checking: Option<CapabilityCheck>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct CapabilityCheck {
+    key: (String, String),
+    rx: std::sync::mpsc::Receiver<Option<bool>>,
+}
+
+/// Poll one bounded background probe at a time. Failures are cached too.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn poll_capabilities(app: &mut SolveApp, ctx: &egui::Context) {
+    use std::sync::mpsc::TryRecvError;
+    let state = &mut app.agent_chat.settings;
+    if let Some(check) = &state.checking {
+        let result = match check.rx.try_recv() {
+            Ok(value) => Some(value),
+            Err(TryRecvError::Disconnected) => Some(None),
+            Err(TryRecvError::Empty) => None,
+        };
+        if let Some(value) = result {
+            if state.capabilities.len() >= 128 {
+                state.capabilities.clear();
+            }
+            state.capabilities.insert(check.key.clone(), value);
+            state.checking = None;
+        }
+    }
+    if state.checking.is_some() {
+        return;
+    }
+    let Some((key, known)) = capability_selection(app) else { return };
+    if app.agent_chat.settings.capabilities.contains_key(&key) {
+        return;
+    }
+    let Some(http) = app.services.agent_http.clone() else { return };
+    if app.agent_chat.settings.capabilities.len() >= 128 {
+        app.agent_chat.settings.capabilities.clear();
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let query = key.clone();
+    let wake = ctx.clone();
+    if std::thread::Builder::new()
+        .name("model-capabilities".into())
+        .spawn(move || {
+            let _ = tx.send(discover::ollama_tools(&http, &query.0, &query.1, known));
+            wake.request_repaint();
+        })
+        .is_ok()
+    {
+        app.agent_chat.settings.checking = Some(CapabilityCheck { key, rx });
+    } else {
+        app.agent_chat.settings.capabilities.insert(key, None);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn capability_selection(app: &SolveApp) -> Option<((String, String), bool)> {
+    let entry = agents::current(app)?;
+    if entry.kind != Kind::Api {
+        return None;
+    }
+    let model = if app.agent_chat.backend.is_none() || app.agent_chat.model.is_empty() { entry.model } else { app.agent_chat.model.clone() };
+    if model.is_empty() || model.len() > 4096 || entry.base_url.len() > 4096 {
+        return None;
+    }
+    let known = app.preferences.agents.iter().any(|a| a.id == entry.id && (a.ollama || a.name.eq_ignore_ascii_case("Ollama")));
+    Some(((entry.base_url, model), known))
+}
+
+/// The same advisory text is used by the panel and the control channel.
+pub(super) fn model_warning(app: &SolveApp) -> Option<String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some((key, _)) = capability_selection(app) {
+        return capability_warning(&key.1, app.agent_chat.settings.capabilities.get(&key).copied().flatten());
+    }
+    let _ = app;
+    None
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn capability_warning(model: &str, tools: Option<bool>) -> Option<String> {
+    (tools == Some(false)).then(|| trf("ui.agent_chat_model_no_tools", &[("model", model)]))
 }
 
 /// Open the Add agent dialog.
@@ -154,6 +240,9 @@ pub fn page(app: &mut SolveApp, ui: &mut egui::Ui) {
             let response = ui_kit::checkbox(ui, tr("ai.prefs.allow_control"), &mut app.preferences.agent_control)
                 .on_hover_text(tr("ai.prefs.allow_control_note"));
             crate::scenario::publish_handle("prefs:agent_control", response.rect.center());
+            let response = ui_kit::checkbox(ui, tr("ai.prefs.connect_apps"), &mut app.preferences.connect_ai_apps)
+                .on_hover_text(tr("ai.prefs.connect_apps_note"));
+            crate::scenario::publish_handle("prefs:connect_ai_apps", response.rect.center());
         }
         if cfg!(target_arch = "wasm32") {
             ui_kit::text(ui, tr("ui.agent_chat_desktop_only"), ui_kit::Text::Hint("desktop"));
@@ -248,7 +337,14 @@ fn panel_section(app: &mut SolveApp, ui: &mut egui::Ui) {
                 }
             });
             ui_kit::row(ui, tr("ui.agent_chat_turn_limit"), |ui| {
-                ui_kit::settings_number(ui, &mut app.preferences.agent_chat_turn_limit, 1..=200, 1.0).on_hover_text(tr("ai.prefs.turn_limit_hint"));
+                let p = &mut app.preferences;
+                let mut unlimited = p.agent_chat_turn_limit == 0;
+                if ui_kit::checkbox(ui, tr("ui.agent_chat_turn_unlimited"), &mut unlimited).changed() {
+                    p.agent_chat_turn_limit = if unlimited { 0 } else { gate::SEEDED_TURN_LIMIT };
+                }
+                if !unlimited {
+                    ui_kit::settings_number(ui, &mut p.agent_chat_turn_limit, 1..=200, 1.0).on_hover_text(tr("ai.prefs.turn_limit_hint"));
+                }
             });
         });
         ui_kit::text(ui, tr("ai.prefs.privacy_note"), ui_kit::Text::Hint("privacy"));
@@ -635,6 +731,7 @@ fn add_agent(app: &mut SolveApp) -> Result<(), String> {
         }
         AddKind::Api => {
             c.kind = s.protocol.kind();
+            c.ollama = s.protocol == Protocol::OpenAi && s.preset == 0;
             c.base_url = agents::normalize_url(&s.base_url)?;
             c.model = s.model.trim().to_string();
             c.request_timeout_s = s.request_timeout_s.clamp(agents::MIN_REQUEST_TIMEOUT_S, agents::MAX_REQUEST_TIMEOUT_S);
@@ -665,6 +762,61 @@ mod card_tests {
     use super::*;
     use crate::scenario::{self, Harness};
     use serde_json::json;
+
+    #[test]
+    fn cached_model_warning_follows_endpoint_model_and_agent_selection() {
+        let mut h = Harness::new();
+        h.app.agent_chat.detection = Some(Default::default());
+        h.app.preferences.agents.push(AgentConfig {
+            id: "local".into(),
+            kind: Kind::Api,
+            base_url: "http://localhost:11434/v1".into(),
+            model: "chat:4b".into(),
+            ..Default::default()
+        });
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use std::time::{Duration, Instant};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let ui_thread = std::thread::current().id();
+        h.app.services.agent_http = Some(Arc::new(move |request| {
+            assert_ne!(std::thread::current().id(), ui_thread);
+            count.fetch_add(1, Ordering::SeqCst);
+            Ok((200, if request.method == "GET" { br#"{"version":"0.0"}"#.to_vec() } else { br#"{"capabilities":["completion"]}"#.to_vec() }))
+        }));
+        poll_capabilities(&mut h.app, &h.ctx);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while h.app.agent_chat.settings.checking.is_some() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+            poll_capabilities(&mut h.app, &h.ctx);
+        }
+        assert!(h.app.agent_chat.settings.checking.is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        poll_capabilities(&mut h.app, &h.ctx);
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "cached selections do not probe again");
+        assert_eq!(status(&h.app)["modelWarning"], capability_warning("chat:4b", Some(false)).unwrap());
+        h.app.preferences.agents[0].model = "tools:8b".into();
+        assert!(status(&h.app)["modelWarning"].is_null());
+        h.app.preferences.agents[0].model = "chat:4b".into();
+        h.app.preferences.agents[0].base_url = "http://localhost:1234/v1".into();
+        assert!(status(&h.app)["modelWarning"].is_null());
+        h.app.preferences.agents[0].base_url = "http://localhost:11434/v1".into();
+        h.app.preferences.agents[0].kind = Kind::Acp;
+        assert!(status(&h.app)["modelWarning"].is_null());
+    }
+
+    #[test]
+    fn model_warning_only_for_explicitly_missing_tools() {
+        assert_eq!(
+            capability_warning("local:4b", Some(false)).as_deref(),
+            Some("local:4b can't use SolidCraft's tools, so it can only chat. Pick a model with tool support.")
+        );
+        assert_eq!(capability_warning("local:4b", Some(true)), None);
+        assert_eq!(capability_warning("local:4b", None), None);
+    }
 
     #[test]
     fn add_agent_card_retains_kind_handles_draft_and_validation() {

@@ -529,3 +529,20 @@ fn the_version_links_to_its_release_notes() {
     // Anything that is not a version never ends up in a URL.
     assert_eq!(release_notes_url("0.1/../../x", true), "https://github.com/tangency-labs/solidcraft/releases");
 }
+
+#[test]
+fn web_preferences_explain_reload_without_update_controls() {
+    let mut h = crate::scenario::Harness::new();
+    h.app.updater.kind = Some(InstallKind::Web);
+    let mut texts = Vec::new();
+    for _ in 0..2 {
+        let mut output = h.ctx.run_ui(egui::RawInput::default(), |ui| prefs_rows(&mut h.app, ui));
+        output.textures_delta.clear();
+        texts =
+            output.shapes.iter().filter_map(|s| if let egui::Shape::Text(t) = &s.shape { Some(t.galley.text().to_string()) } else { None }).collect();
+    }
+    assert!(!texts.iter().any(|t| t.contains("development build")), "{texts:?}");
+    assert!(!texts.iter().any(|t| t == crate::i18n::tr("update.check_automatically")), "{texts:?}");
+    assert!(!texts.iter().any(|t| t == crate::i18n::tr("update.check_now")), "{texts:?}");
+    assert!(texts.iter().any(|t| t == crate::i18n::tr("update.prefs_web")), "{texts:?}");
+}

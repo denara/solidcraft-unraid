@@ -11,7 +11,7 @@ build it, how the code is laid out, the few rules that aren't negotiable, and wh
 needed most.
 
 Before choosing a task, check the [command inventory](docs/features.md) and
-[roadmap](ROADMAP.md) for implemented capabilities and current priorities.
+[roadmap](docs/roadmap-detail.md) for implemented capabilities and current priorities.
 
 Questions, ideas or want to say what you're working on? Join the [Discord](https://discord.gg/FtU4NQNVDH).
 
@@ -130,7 +130,9 @@ The [architecture page](docs/architecture.md) has the layer table. The short ver
    - Every call into truck goes through `solidcraft_kernel::guard`.
    - Every crash fix comes with a regression test.
 5. **Everything is a command, with a test.** A new feature means a `CommandSpec` in
-   `crates/engine/src/cmd/`, engine tests that measure the result (volume, area,
+   `crates/engine/src/cmd/` with input and output schemas (see
+   [Adding a command](docs/book/src/dev/commands.md#adding-a-command); a test warns about a
+   command without them, and will fail it once required), engine tests that measure the result (volume, area,
    face/edge/vertex counts against a value you can derive), and for UI work a scenario (below).
 6. **One set of camera controls.** Every page or canvas that shows a view (the modelling
    viewport, the Render preview, and any new page such as a flat pattern or drawing) calls
@@ -274,12 +276,18 @@ and a fresh CI run:
   and the Lists workflow) fails on an unsorted catalog or an id that appears twice.
 - **`mod` lines**: one per line, in the sorted group they belong to (`cargo fmt` keeps each group
   sorted). Add a new module into the existing group, not as a new group at the end.
+- **Commands without schemas** (`crates/engine/src/schema/unconverted.txt`): sorted, one id per
+  line, and it only shrinks. Converting a command removes its line; a new command is never added
+  to it.
 - **Languages** (`crates/ui-egui/src/i18n.rs`): one per line, English first, then by id (a test
   checks it).
 - **Generated files**: `THIRD-PARTY-LICENSES.txt` and `docs/features.md` are rewritten on `main`
   after each merge by the Generated files workflow (`cargo xtask licences`, `cargo xtask
   features`). Don't regenerate or edit them in a pull request.
 - **Design format**: one file per change, never an edit to a shared number (above).
+- **New UI strings and attribution rows**: one new file per change, `assets/locales/pending/<slug>.json`
+  and `attribution/pending/<slug>.md`, instead of editing the catalogs or the ATTRIBUTION.md table;
+  `cargo xtask fold-pending` folds them on `main` (see the README in each folder).
 
 ## Sending a change
 
@@ -387,7 +395,7 @@ In order of how much they'd help users:
 2. **Boolean robustness.** A random-design fuzzer currently gets about half of its designs
    through without a kernel error. Each failing seed is a reproducible bug.
 3. **Drawings, CAM and mesh tools.** These are out of scope for now (see
-   [ROADMAP.md](ROADMAP.md)), but anyone who wants to own one is welcome.
+   [ROADMAP.md](docs/roadmap-detail.md)), but anyone who wants to own one is welcome.
 
 ## Updating the generated feature list
 

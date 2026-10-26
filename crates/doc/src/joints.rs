@@ -75,6 +75,10 @@ pub enum Snap {
         face: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         corner: Option<String>,
+        /// The frame's z when it isn't the face's normal (an edge or a corner picked as it is,
+        /// not on a face): the point still follows the edge, found by name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        axis: Option<EdgeAxis>,
     },
     /// A point, z along `z` (default +Z) and x toward `x` laid square to z (default: one chosen
     /// from z alone).
@@ -85,6 +89,25 @@ pub enum Snap {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         x: Option<Vec3>,
     },
+}
+
+/// The z of an edge origin that isn't its face's normal (component coordinates); its x follows
+/// from z alone, as a point origin's does.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeAxis {
+    /// Along a straight edge, the way this points: a hinge on the edge turns about it as it moves.
+    Along(Vec3),
+    /// This direction.
+    Fixed(Vec3),
+}
+
+impl EdgeAxis {
+    pub fn dir(self) -> Vec3 {
+        match self {
+            EdgeAxis::Along(d) | EdgeAxis::Fixed(d) => d,
+        }
+    }
 }
 
 /// What sets a joint origin's x axis (its turn about z): a direction, or a face found by its
@@ -179,7 +202,7 @@ impl Snap {
             Snap::Frame { origin, z, x } => origin.is_finite() && z.is_finite() && x.is_none_or(|x| x.is_finite()),
             Snap::FaceCenter { pick, x, .. } | Snap::CircleCenter { pick, x, .. } => pick.is_finite() && x_ok(x),
             Snap::Point { point, z, x } => point.is_finite() && z.is_none_or(|z| z.is_finite()) && x.is_none_or(|x| x.is_finite()),
-            Snap::Edge { pick, .. } => pick.is_finite(),
+            Snap::Edge { pick, axis, .. } => pick.is_finite() && axis.is_none_or(|a| a.dir().is_finite()),
         }
     }
 }
@@ -2015,19 +2038,37 @@ impl Document {
     /// Apply a solution: occurrence transforms (in their parents) for the occurrences it places,
     /// and the values of the joints that moved to close loops. Returns true when something moved.
     pub fn apply_joint_solution(&mut self, sol: &Solution) -> bool {
+        // Joints and occurrences are indexed once (the first of each id, as a search finds):
+        // searching them for each of a large design's thousands of values and occurrences took
+        // 20 ms on every change to the design.
+        let mut joint_at = std::collections::HashMap::new();
+        for (i, j) in self.assembly.joints.iter().enumerate() {
+            joint_at.entry(j.id).or_insert(i);
+        }
         let mut changed = false;
         for (id, q) in &sol.values {
-            if let Some(j) = self.assembly.joints.iter_mut().find(|j| j.id == *id) {
+            if let Some(j) = joint_at.get(id).and_then(|&i| self.assembly.joints.get_mut(i)) {
                 j.values.clone_from(q);
                 changed = true;
             }
         }
         let parents: BTreeMap<u64, u64> = self.occurrences.iter().map(|o| (o.id, o.parent)).collect();
+        let (mut occurrence_at, mut first_of) = (std::collections::HashMap::new(), std::collections::HashMap::new());
+        for (i, o) in self.occurrences.iter().enumerate() {
+            occurrence_at.entry(o.id).or_insert(i);
+            first_of.entry(o.component).or_insert(i);
+        }
         for (occ, world) in &sol.world {
             let parent = parents.get(occ).copied().unwrap_or(0);
-            let pw = if parent == 0 { IDENTITY } else { self.component_transform(parent) };
+            // Through the transforms as this loop has left them, as `component_transform` reads.
+            let occurrences = &self.occurrences;
+            let pw = if parent == 0 {
+                IDENTITY
+            } else {
+                crate::assembly::transform_through(parent, |c| first_of.get(&c).and_then(|&i| occurrences.get(i)))
+            };
             let Some(local) = mat_inverse(&pw).map(|inv| mat_mul(&inv, world)) else { continue };
-            if let Some(o) = self.occurrences.iter_mut().find(|o| o.id == *occ) {
+            if let Some(o) = occurrence_at.get(occ).and_then(|&i| self.occurrences.get_mut(i)) {
                 let (dt, da) = mismatch(&o.transform, &local);
                 if dt > 1e-9 || da > 1e-10 {
                     o.transform = local;
@@ -2061,7 +2102,7 @@ pub mod cam;
 
 #[path = "joints_edge.rs"]
 mod edge;
-pub use edge::edge_snap;
+pub use edge::{edge_axis, edge_snap};
 
 #[path = "joints_reach.rs"]
 mod reach;
@@ -2392,5 +2433,34 @@ mod tests {
         assert!((a - 1e-9).abs() < 1e-15, "{a}");
         let (_, a) = mismatch(&rot_z(3.0), &IDENTITY);
         assert!((a - 3.0).abs() < 1e-12, "{a}");
+    }
+
+    /// Applying a solution stores each occurrence in its parent's frame as the loop has left it:
+    /// a component the same solution moves is read moved, through its first occurrence. Joint
+    /// values land on their joints; a value for a missing joint is skipped.
+    #[test]
+    fn a_solution_places_occurrences_in_their_moved_parents() {
+        let occurrence =
+            |id, component, parent| crate::Occurrence { id, component, parent, name: format!("O{id}"), transform: IDENTITY, grounded: false };
+        // Component 1 sits at the root twice (its first occurrence is the frame its children sit
+        // in), component 2 inside 1 and component 3 inside 2.
+        let mut doc = Document {
+            assembly: chain(2, 0.0),
+            occurrences: vec![occurrence(10, 1, 0), occurrence(11, 1, 0), occurrence(20, 2, 1), occurrence(30, 3, 2)],
+            ..Document::default()
+        };
+        let w10 = mat_mul(&shift(3.0, 4.0, 5.0), &rot_y(0.3));
+        let w20 = mat_mul(&shift(-1.0, 2.0, 0.5), &rot_x(-0.2));
+        let w30 = mat_mul(&shift(0.0, 7.0, 1.0), &rot_y(1.1));
+        let world = BTreeMap::from([(10, w10), (20, w20), (30, w30)]);
+        let sol = Solution { world: world.clone(), values: BTreeMap::from([(2, vec![0.75]), (99, vec![1.0])]), ..Solution::default() };
+        assert!(doc.apply_joint_solution(&sol));
+        for (component, w) in [(1, w10), (2, w20), (3, w30)] {
+            assert!(close(&doc.component_transform(component), &w), "component {component}");
+        }
+        assert!(close(&doc.occurrences[1].transform, &IDENTITY), "only the occurrence the solution names moves");
+        let values: Vec<_> = doc.assembly.joints.iter().map(|j| j.values.clone()).collect();
+        assert_eq!(values, vec![vec![0.0], vec![0.75]]);
+        assert!(!doc.apply_joint_solution(&Solution { world, ..Solution::default() }), "applied twice, nothing moves");
     }
 }

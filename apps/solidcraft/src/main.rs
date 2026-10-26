@@ -78,6 +78,10 @@ impl eframe::App for App {
                 // A DMG install has no installer step: put solidcraft-cli on PATH, quietly.
                 #[cfg(target_os = "macos")]
                 std::thread::spawn(solidcraft_ui_egui::cli_link::install_on_launch);
+                // Automation runs (a control port was asked for) leave the user's AI apps alone.
+                if !self.take_focus_unwanted {
+                    solidcraft_ui_egui::ai_connect::begin(&mut self.solve);
+                }
                 if let Some(dir) = self.starting.take() {
                     startup::started(&dir);
                 }
@@ -110,6 +114,8 @@ impl eframe::App for App {
         if let Some(menu) = &mut self.native_menu {
             menu.raw_input_hook(&mut self.solve, ctx, raw);
         }
+        #[cfg(target_os = "macos")]
+        macos_fullscreen_content(ctx, raw);
         // Before the app's own hook, which adds the control channel's events.
         #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
         self.space_mouse.raw_input_hook(self.solve.preferences.space_mouse_enabled, raw);
@@ -119,7 +125,7 @@ impl eframe::App for App {
         self.solve.raw_input_hook(raw);
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.solve.ui(ui);
+        content_ui(&mut self.solve, ui);
     }
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string(solidcraft_ui_egui::prefs::STORAGE_KEY, self.solve.prefs());
@@ -135,6 +141,7 @@ impl eframe::App for App {
             log::warn!("a picture was still being drawn as the app closed");
         }
         solidcraft_ui_egui::recovery_ui::close(&mut self.solve);
+        solidcraft_ui_egui::open_elsewhere::close(&mut self.solve);
         solidcraft_engine::crash::end_session();
         if let Some(lost_at) = self.gpu.as_ref().and_then(|g| g.lost_at) {
             device_lost::restart(self.gpu.as_ref().is_some_and(|g| g.restart_on_software), lost_at);
@@ -200,6 +207,37 @@ fn case_variants(exts: &[&str]) -> Vec<String> {
     all
 }
 
+/// egui's root Ui spans the whole viewport, including native safe areas. Lay out the app
+/// inside the unobscured rectangle so its application bar can receive native pointer input.
+fn content_ui(app: &mut SolveApp, ui: &mut egui::Ui) {
+    let content = ui.ctx().content_rect();
+    let above = egui::Rect::from_min_max(ui.max_rect().min, egui::pos2(ui.max_rect().right(), content.top()));
+    ui.painter().rect_filled(above, 0.0, solidcraft_ui_egui::theme::Tokens::get().app_bar);
+    ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| app.ui(ui));
+}
+
+/// A transparent macOS title bar still intercepts clicks at the top in fullscreen (#3643).
+/// `contentLayoutRect` reports the whole content view once that bar auto-hides, so reserve
+/// the native titled-window height even then. AppKit supplies the height in logical points;
+/// egui's UI zoom is separate from the display's Retina scale.
+#[cfg(target_os = "macos")]
+fn macos_fullscreen_content(ctx: &egui::Context, raw: &mut egui::RawInput) {
+    let Some(mtm) = objc2::MainThreadMarker::new() else { return };
+    let frame = objc2_app_kit::NSWindow::frameRectForContentRect_styleMask(Default::default(), objc2_app_kit::NSWindowStyleMask::Titled, mtm);
+    fullscreen_content_insets(raw, frame.size.height as f32, ctx.zoom_factor());
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn fullscreen_content_insets(raw: &mut egui::RawInput, title_height: f32, zoom: f32) {
+    let fullscreen = raw.viewports.get(&raw.viewport_id).and_then(|v| v.fullscreen).unwrap_or(false);
+    let mut insets = raw.safe_area_insets.unwrap_or_default();
+    if fullscreen && title_height.is_finite() && title_height > 0.0 && zoom.is_finite() && zoom > 0.0 {
+        insets.0.top = insets.0.top.max(title_height / zoom);
+    }
+    // Explicitly reset on leaving fullscreen: None would retain the preceding frame's inset.
+    raw.safe_area_insets = Some(insets);
+}
+
 fn services(cc: &eframe::CreationContext<'_>) -> Services {
     let parent = rfd::AsyncFileDialog::new().set_parent(cc);
     let open_parent = parent.clone();
@@ -214,7 +252,9 @@ fn services(cc: &eframe::CreationContext<'_>) -> Services {
                 dialog = dialog.add_filter(label, &case_variants(first));
             }
             // The groups come from the format registry, so a new format joins this dialog by itself.
-            dialog = dialog.add_filter("Designs, CAD files and meshes", &case_variants(&io::formats::open_extensions(true)));
+            let mut everything = io::formats::open_extensions(true);
+            everything.extend(["dxf", "svg"]);
+            dialog = dialog.add_filter(solidcraft_ui_egui::i18n::tr("file.open.drawing_filter"), &case_variants(&everything));
             for (label, exts) in io::formats::import_filters(true) {
                 dialog = dialog.add_filter(label, &case_variants(&exts));
             }
@@ -257,6 +297,7 @@ fn services(cc: &eframe::CreationContext<'_>) -> Services {
             let future = dialog.save_file();
             Box::pin(async move { future.await.map(|p| p.path().to_string_lossy().into_owned()) })
         })),
+        graphics_adapters: Vec::new(),
         graphics_path: graphics_path().map(|p| p.to_string_lossy().to_string()),
         window_system: window_system_now(),
         http_get: Some(std::sync::Arc::new(http_get)),
@@ -497,13 +538,22 @@ fn scene_samples(backend: eframe::wgpu::Backend, samples: u32, supported: &[u32]
     }
 }
 
-/// Anti-aliasing samples from Preferences (4 when unset).
-fn msaa() -> u16 {
+/// Keep the default until the installed renderer's startup check proves a fallback is needed.
+fn scene_msaa_request(saved: Option<u16>) -> u16 {
+    saved.unwrap_or(MSAA)
+}
+
+/// Query the scene's colour/depth intersection, rather than the depthless window's counts.
+fn scene_sample_choices(depth_bits: u8, stencil_bits: u8, query: impl FnOnce(Option<eframe::wgpu::TextureFormat>) -> Vec<u32>) -> Vec<u32> {
+    query(eframe::egui_wgpu::depth_format_from_bits(depth_bits, stencil_bits))
+}
+
+/// An explicitly saved anti-aliasing choice, absent until Graphics changes it.
+fn msaa() -> Option<u16> {
     graphics()
         .and_then(|v| v.get("msaa").and_then(serde_json::Value::as_u64))
         .and_then(|m| u16::try_from(m).ok())
         .filter(|m| [1, 2, 4, 8].contains(m))
-        .unwrap_or(MSAA)
 }
 
 /// Windows and Linux: no OS title bar; the application bar is the title bar
@@ -519,7 +569,8 @@ const FLOAT_DEPTH_BITS: u8 = 32;
 const STENCIL_BITS: u8 = 8;
 const MSAA: u16 = 4;
 
-fn app_viewport() -> Result<egui::ViewportBuilder, eframe::Error> {
+/// `custom_titlebar`: no OS decorations, the application bar is the title bar.
+fn app_viewport(custom_titlebar: bool) -> Result<egui::ViewportBuilder, eframe::Error> {
     // Let macOS use the bundle's layered icon; eframe's default bitmap would replace it.
     #[cfg(target_os = "macos")]
     let icon = egui::IconData::default();
@@ -532,7 +583,7 @@ fn app_viewport() -> Result<egui::ViewportBuilder, eframe::Error> {
         .with_inner_size([1600.0, 1000.0])
         .with_min_inner_size([960.0, 600.0])
         .with_drag_and_drop(true)
-        .with_decorations(!CUSTOM_TITLEBAR)
+        .with_decorations(!custom_titlebar)
         .with_fullsize_content_view(true)
         .with_titlebar_shown(false)
         .with_title_shown(false)
@@ -606,7 +657,7 @@ fn main() -> eframe::Result {
     if safe_mode {
         notes.push("Safe mode: default settings (yours are kept for the next normal start), no recovery offer, software rendering.".into());
     }
-    let samples = if safe_mode { MSAA } else { msaa() };
+    let saved_samples = if safe_mode { None } else { msaa() };
     let wgpu_options = wgpu_options(cpu_renderer, if safe_mode { None } else { backend_preference() }.as_deref());
     let depth_bits = if !safe_mode && startup::float_depth_everywhere(&wgpu_options) { FLOAT_DEPTH_BITS } else { DEPTH_BITS };
     // Crashes leave a report in the crash folder (solidcraft_engine::crash, docs/crash-reports.md).
@@ -622,10 +673,16 @@ fn main() -> eframe::Result {
         .unwrap_or_default();
     // A crash in native code (a graphics driver) says where it happened: the exception and the
     // module on Windows, and on every system the startup step the app was in.
+    // Windows with only OpenGL to start: the system title bar instead of ours (#2063).
+    let started = match &wgpu_options.wgpu_setup {
+        eframe::egui_wgpu::WgpuSetup::CreateNew(setup) => setup.instance_descriptor.backends,
+        _ => eframe::wgpu::Backends::all(),
+    };
+    let custom_titlebar = CUSTOM_TITLEBAR && !startup::system_title_bar(cfg!(target_os = "windows"), started);
     eframe::egui_wgpu::set_startup_hook(startup_step);
     solidcraft_engine::crash::phase("window");
     let options = eframe::NativeOptions {
-        viewport: app_viewport()?,
+        viewport: app_viewport(custom_titlebar)?,
         // The window's pass (egui's) has no depth and one sample: the viewport draws its scene
         // offscreen with its own depth and MSAA, then blits it, so the UI pass pays for neither.
         depth_buffer: 0,
@@ -686,11 +743,11 @@ fn main() -> eframe::Result {
             mark("fonts");
             let mut app = SolveApp::new(Session::default(), services(cc));
             app.apply_off_thread = Some(solidcraft_ui_egui::dialogs::APPLY_AT_ONCE);
-            app.custom_titlebar = CUSTOM_TITLEBAR;
+            app.custom_titlebar = custom_titlebar;
             #[cfg(target_os = "windows")]
             {
                 app.native_resize_border = false;
-                if CUSTOM_TITLEBAR && !app.native_resize_border {
+                if custom_titlebar && !app.native_resize_border {
                     eprintln!("SolidCraft window: no native resize border; egui edge zones instead");
                 }
             }
@@ -705,17 +762,35 @@ fn main() -> eframe::Result {
                 restart_on_software: device_lost::restart_on_software(after_loss, cpu_renderer),
                 lost_at: None,
             });
+            if !safe_mode {
+                app.preferences.graphics_adapter =
+                    graphics().and_then(|v| v.get("adapter").and_then(serde_json::Value::as_str).map(str::to_string)).unwrap_or_default();
+            }
             if let Some(rs) = &cc.wgpu_render_state {
-                let scene_samples = scene_samples(rs.adapter.get_info().backend, u32::from(samples), &rs.msaa_supported);
+                app.services.graphics_adapters = rs
+                    .available_adapters
+                    .iter()
+                    .map(|adapter| {
+                        let info = adapter.get_info();
+                        (info.name.clone(), format!("{} ({:?}, {:?})", info.name, info.device_type, info.backend))
+                    })
+                    .collect();
+                let info = rs.adapter.get_info();
+                let samples = scene_msaa_request(saved_samples);
+                let supported = scene_sample_choices(depth_bits, STENCIL_BITS, |depth| {
+                    eframe::egui_wgpu::supported_msaa_samples(&rs.adapter, &rs.device, rs.target_format, depth)
+                });
+                let scene_samples = scene_samples(info.backend, u32::from(samples), &supported);
                 eprintln!("SolidCraft graphics: {:?}, MSAA {scene_samples}x (requested {}x)", rs.adapter.get_info().backend, samples);
                 solidcraft_engine::crash::phase("viewport pipelines (shader compile)");
-                app.set_wgpu_split(rs, depth_bits, STENCIL_BITS, scene_samples);
+                let scene_samples = app.set_wgpu_split(rs, depth_bits, STENCIL_BITS, scene_samples);
+                app.msaa_supported = supported;
+                app.preferences.msaa = u32::from(samples);
                 solidcraft_ui_egui::gpu::install_picture_renderer(rs);
                 // The graphics driver is loaded now; it may have put its own exception filter
                 // in front of ours.
-                // A saved anti-aliasing the device can't do: back to the default, with a notice.
+                // Reflect a confirmed probe fallback or an unsupported saved count in Graphics.
                 solidcraft_ui_egui::prefs::check_msaa(&mut app, u32::from(samples));
-                let info = rs.adapter.get_info();
                 solidcraft_engine::crash::set_environment(&format!(
                     "Renderer: {:?} {} ({}), MSAA {scene_samples}x",
                     info.backend, info.name, info.driver
@@ -740,6 +815,7 @@ fn main() -> eframe::Result {
                 app.session.mark_saved();
                 app.session.undo.clear();
             }
+            solidcraft_ui_egui::open_elsewhere::start(&mut app);
             for f in &files {
                 app.open_path_async(f);
             }
@@ -827,9 +903,9 @@ fn wgpu_options(cpu: bool, preference: Option<&str>) -> eframe::egui_wgpu::WgpuC
         let intel_mac = cfg!(all(target_os = "macos", target_arch = "x86_64"));
         let indirect = std::env::var(startup::INDIRECT_VALIDATION_ENV).ok();
         setup.instance_descriptor.flags = startup::window_instance_flags(setup.instance_descriptor.flags, intel_mac, indirect.as_deref());
-        if cpu {
-            setup.native_adapter_selector = Some(std::sync::Arc::new(startup::pick_cpu_adapter));
-        }
+        let environment = std::env::var("WGPU_ADAPTER_NAME").ok();
+        let adapter = graphics().and_then(|v| v.get("adapter").and_then(serde_json::Value::as_str).map(str::to_string));
+        startup::configure_adapter(setup, cpu, environment, adapter);
         // A float depth buffer with a stencil, wherever the adapter has it (see `FLOAT_DEPTH_BITS`).
         let base = setup.device_descriptor.clone();
         setup.device_descriptor = std::sync::Arc::new(move |adapter| {
@@ -947,11 +1023,11 @@ mod backend_tests {
 }
 
 #[cfg(test)]
-mod icon_tests {
+mod viewport_tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_preserves_the_bundle_icon_instead_of_setting_a_runtime_bitmap() {
-        let viewport = super::app_viewport().expect("viewport");
+        let viewport = super::app_viewport(super::CUSTOM_TITLEBAR).expect("viewport");
         assert_eq!(viewport.icon.as_deref(), Some(&eframe::egui::IconData::default()));
         assert_eq!(viewport.app_id.as_deref(), Some(super::APP_ID));
     }
@@ -959,11 +1035,88 @@ mod icon_tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn desktop_viewport_supplies_the_original_mark_to_the_window() {
-        let viewport = super::app_viewport().expect("viewport");
+        let viewport = super::app_viewport(super::CUSTOM_TITLEBAR).expect("viewport");
         let icon = viewport.icon.expect("running window must have an icon");
         assert_eq!((icon.width, icon.height), (64, 64));
         assert_eq!(icon.rgba, super::app_icon::rgba(64).expect("original mark"));
         assert_eq!(viewport.app_id.as_deref(), Some(super::APP_ID));
+    }
+
+    #[test]
+    fn fullscreen_bar_clears_native_chrome_and_undo_redo_keep_working() {
+        use egui::{Event, PointerButton, Pos2, RawInput, Rect, ViewportId, vec2};
+        use serde_json::json;
+        use solidcraft_ui_egui::scenario::handle_at;
+
+        // AppKit points are independent of Retina scale and of the user's UI zoom.
+        for (zoom, retina) in [(1.0, 1.0), (1.0, 2.0), (1.5, 2.0), (2.0, 2.0)] {
+            let ctx = egui::Context::default();
+            solidcraft_ui_egui::fonts::setup_bundled_fonts(&ctx);
+            ctx.set_zoom_factor(zoom);
+            let mut app = super::SolveApp::new(super::Session::default(), Default::default());
+            app.integrated_titlebar = true;
+            for (command, params) in [
+                ("sketch.create", json!({"plane":"XY"})),
+                ("sketch.rectangle.two_point", json!({"p0":[0,0],"p1":[40,30]})),
+                ("sketch.finish", json!({})),
+                ("solid.extrude", json!({"distance":15})),
+            ] {
+                app.run(command, params).unwrap();
+            }
+            let mut time = 0.0;
+            let mut frame = |app: &mut super::SolveApp, fullscreen, events| {
+                time += 0.05;
+                let mut raw = RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1600.0, 1000.0))),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                };
+                let viewport = raw.viewports.get_mut(&ViewportId::ROOT).unwrap();
+                viewport.fullscreen = Some(fullscreen);
+                viewport.native_pixels_per_point = Some(retina);
+                super::fullscreen_content_insets(&mut raw, 32.0, zoom);
+                let _ = ctx.run_ui(raw, |ui| super::content_ui(app, ui));
+            };
+            // Enter, leave, and enter again: no stale inset when returning to a normal window.
+            for fullscreen in [false, true, false, true] {
+                frame(&mut app, fullscreen, vec![]);
+                frame(&mut app, fullscreen, vec![]);
+                let top = if fullscreen { 32.0 / zoom } else { 0.0 };
+                for name in ["appbar:file", "appbar:undo", "appbar:redo", "appbar:help"] {
+                    let at = handle_at(name).unwrap();
+                    assert!((at.y - top - 17.0).abs() < 0.1, "{name}: {at:?}, fullscreen={fullscreen}, zoom={zoom}");
+                }
+                for (handle, bodies) in [("appbar:undo", 0), ("appbar:redo", 1)] {
+                    let at = handle_at(handle).unwrap();
+                    frame(&mut app, fullscreen, vec![Event::PointerMoved(at)]);
+                    for pressed in [true, false] {
+                        frame(
+                            &mut app,
+                            fullscreen,
+                            vec![Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Default::default() }],
+                        );
+                    }
+                    assert_eq!(app.session.model.state().bodies.len(), bodies, "{handle}, fullscreen={fullscreen}, zoom={zoom}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fullscreen_inset_preserves_existing_safe_areas_and_resets_on_exit() {
+        use egui::epaint::MarginF32;
+        use egui::{RawInput, SafeAreaInsets, ViewportId};
+        let mut raw = RawInput::default();
+        raw.viewports.get_mut(&ViewportId::ROOT).unwrap().fullscreen = Some(true);
+        raw.safe_area_insets = Some(SafeAreaInsets(MarginF32 { top: 40.0, left: 5.0, right: 6.0, bottom: 7.0 }));
+        super::fullscreen_content_insets(&mut raw, 32.0, 2.0);
+        assert_eq!(raw.safe_area_insets.unwrap().0, MarginF32 { top: 40.0, left: 5.0, right: 6.0, bottom: 7.0 });
+
+        raw.viewports.get_mut(&ViewportId::ROOT).unwrap().fullscreen = Some(false);
+        raw.safe_area_insets = None;
+        super::fullscreen_content_insets(&mut raw, 32.0, 1.0);
+        assert_eq!(raw.safe_area_insets, Some(SafeAreaInsets::default()));
     }
 }
 
@@ -999,6 +1152,34 @@ mod msaa_tests {
             for backend in [Backend::Vulkan, Backend::Dx12, Backend::Metal] {
                 assert_eq!(eframe::egui_wgpu::effective_msaa_samples(backend, requested), requested);
             }
+        }
+    }
+
+    #[test]
+    fn scene_sample_choices_include_the_scene_depth_format() {
+        use eframe::wgpu::TextureFormat;
+        for (bits, expected) in [(24, TextureFormat::Depth24PlusStencil8), (32, TextureFormat::Depth32FloatStencil8)] {
+            // A synthetic colour target supports 8x, but the scene depth supports only 1x/4x.
+            let supported = super::scene_sample_choices(bits, 8, |depth| match depth {
+                Some(format) if format == expected => vec![1, 4],
+                None => vec![1, 4, 8],
+                other => panic!("unexpected scene depth: {other:?}"),
+            });
+            assert_eq!(supported, [1, 4]);
+            assert_eq!(super::scene_samples(eframe::wgpu::Backend::Dx12, 8, &supported), 4);
+        }
+    }
+
+    #[test]
+    fn scene_msaa_keeps_four_samples_by_default_and_explicit_choices() {
+        use eframe::wgpu::Backend;
+        let default = super::scene_msaa_request(None);
+        assert_eq!(default, 4);
+        for backend in [Backend::Dx12, Backend::Vulkan, Backend::Metal] {
+            assert_eq!(super::scene_samples(backend, u32::from(default), &[1, 4]), 4);
+        }
+        for saved in [1, 2, 4, 8] {
+            assert_eq!(super::scene_msaa_request(Some(saved)), saved);
         }
     }
 

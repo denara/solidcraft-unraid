@@ -19,7 +19,7 @@ const BOX_CONTRACT: TypedContract<BoxParams> = TypedContract::new();
 const EXTRUDE_CONTRACT: TypedContract<ExtrudeParams> = TypedContract::new();
 
 pub static COMMANDS: &[CommandSpec] = &[
-    CommandSpec::new("solid.extrude", "Extrude", crate::checked!("solid.extrude", EXTRUDE_CONTRACT, extrude))
+    CommandSpec::new("solid.extrude", "Extrude", crate::checked!("solid.extrude", extrude))
         .at("SOLID", "CREATE")
         .icon("extrude")
         .key("E")
@@ -35,7 +35,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .icon("sweep")
         .params("sketch: profile sketch; profiles?; path_sketch: sketch; path: [curve ids in order]; orientation?: perpendicular (default: square to the path, turning with it) | parallel (as drawn: the profile moves without turning; the path must keep crossing its plane) | [x,y,z] (square to the path, its turn about the path fixed by this direction); twist?: angle expr (the profile turns this much about the path over its length; within 4 turns); scale?: expr (the profile's scale at the end, linear along the path; 0.01…100); rails?: [{sketch?: sketch (default path_sketch), curves: [curve ids in order]}] (guide rails, one or two, each meeting every plane square to the path once along it, from the end nearest the path's start: one rail turns the profile so its point where the rail starts stays on the rail and scales it with the rail's distance from the path; two rails carry it between them, its points where they start staying on both; rails take the default orientation, no twist and no scale, and a path without sharp corners); rail_fit?: scale (default: the profile grows and shrinks evenly) | stretch (only across to the rail, between the rails); operation?, targets?, name?, body_name?"),
     CommandSpec::new("solid.loft", "Loft", loft).at("SOLID", "CREATE").icon("loft").params("sections: [{sketch, profiles?} | {sketch, point: id} (an apex)] (2…50, in order; matching hole counts, no holes at an apex); rails?: [{sketch, curves: [ids in order]}] (one or two guide rails from the first section to the last, through every section's outline: the loft follows them between the sections; not with sections that have holes); rail_fit?: scale|stretch (default scale: with one rail the sections grow evenly with the rail's distance from their middle, with two with the distance between the rails; stretch: only that way); operation?, targets?, name?, body_name?"),
-    CommandSpec::new("solid.box", "Box", crate::checked!("solid.box", BOX_CONTRACT, prim_box))
+    CommandSpec::new("solid.box", "Box", crate::checked!("solid.box", prim_box))
         .at("SOLID", "CREATE")
         .icon("box")
         .contract(&BOX_CONTRACT)
@@ -104,7 +104,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("construct.plane.offset", "Offset Plane", plane_offset)
         .at("SOLID", "CONSTRUCT")
         .icon("plane")
-        .params("base: XY|XZ|YZ|plane name, or a planar face {face: [x,y,z], body?, index?, path?}; offset: expr; name?"),
+        .params("base: XY|XZ|YZ|plane name, or a planar face {face: [x,y,z], body?, index?, path?}; offset: expr, or through: a point ref (vertex, sketch point, construction point) the plane goes through, parallel to base; name?"),
     CommandSpec::new("construct.plane.at_angle", "Plane at Angle", plane_angle)
         .at("SOLID", "CONSTRUCT")
         .icon("plane_angle")
@@ -1481,6 +1481,57 @@ fn combine(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn move_bodies(s: &mut Session, p: &Value) -> Result<Value> {
+    if let Some(plan) = crate::frames::placements_moved(s, p) {
+        return move_placements(s, p, plan);
+    }
+    move_body_feature(s, p)
+}
+
+/// A move of several placements of one part (`frames::placements_moved`, #4768): each placement
+/// moved in the world by the move's translation and turn (about the world origin, as the Move
+/// feature turns bodies), and the root component's bodies listed moved as bodies, in one step.
+fn move_placements(s: &mut Session, p: &Value, plan: crate::frames::PlacementMove) -> Result<Value> {
+    let cmd = "solid.move";
+    let length = |v: &Value| -> Result<f64> {
+        match v {
+            Value::Number(n) => n.as_f64().ok_or_else(|| bad(cmd, "translate entries must be numbers or expressions")),
+            Value::String(e) => s.doc.eval(e, Kind::Length).map_err(|e| bad(cmd, format!("translate: {e}"))),
+            _ => Err(bad(cmd, "translate entries must be numbers or expressions")),
+        }
+    };
+    let translate = match p.get("translate") {
+        Some(Value::Array(a)) if a.len() == 3 => a.iter().map(length).collect::<Result<Vec<f64>>>()?,
+        None => vec![0.0; 3],
+        _ => return Err(bad(cmd, "`translate` must be [x, y, z]")),
+    };
+    let angle = match expr(p, "angle") {
+        Some(a) => Some(s.doc.eval(&a, Kind::Angle).map_err(|e| bad(cmd, format!("angle: {e}")))?),
+        None => None,
+    };
+    let spec = super::find_command("occurrence.move").ok_or_else(|| EngineError::UnknownCommand("occurrence.move".into()))?;
+    let mut moved = Vec::new();
+    for path in &plan.paths {
+        let Some(&occurrence) = path.last() else { continue };
+        let mut q = json!({"occurrence": occurrence, "path": path, "space": "world", "translate": translate});
+        if let Some(axis) = p.get("axis") {
+            q["axis"] = axis.clone();
+        }
+        if let Some(angle) = angle {
+            q["angle"] = json!(angle);
+        }
+        spec.run_nested(s, &q)?;
+        moved.push(occurrence);
+    }
+    let mut out = json!({"placements": moved});
+    if !plan.bodies.is_empty() {
+        let mut rest = p.clone();
+        rest["bodies"] = json!(plan.bodies);
+        out["bodies"] = move_body_feature(s, &rest)?;
+    }
+    Ok(out)
+}
+
+fn move_body_feature(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "solid.move";
     let bodies = string_list(p, "bodies");
     if bodies.is_empty() {
@@ -1811,19 +1862,35 @@ pub(super) fn plane_param(s: &Session, v: Option<&Value>, cmd: &str) -> Result<s
 }
 
 fn plane_offset(s: &mut Session, p: &Value) -> Result<Value> {
+    use solidcraft_doc::PlaneRef;
     let cmd = "construct.plane.offset";
-    let d = req_expr(cmd, p, "offset")?;
-    check_expr(s, &d, Kind::Length, cmd, "offset")?;
+    // Through a point, or at a distance along the base's normal.
+    let through = match p.get("through").filter(|t| !t.is_null()) {
+        Some(_) if p.get("offset").is_some_and(|o| !o.is_null()) => return Err(bad(cmd, "give `offset` or `through`, not both")),
+        Some(t) => Some(super::construct::geo(s, Some(t), cmd, "through")?),
+        None => None,
+    };
+    let distance = match &through {
+        Some(_) => Default::default(),
+        None => {
+            let d = req_expr(cmd, p, "offset")?;
+            check_expr(s, &d, Kind::Length, cmd, "offset")?;
+            d
+        }
+    };
+    let offset = move |base: PlaneRef| match through {
+        Some(point) => PlaneRef::ThroughPoint { base: Box::new(base), point: Box::new(point) },
+        None => PlaneRef::Offset { base: Box::new(base), distance },
+    };
     // A planar body face: attached exactly, as a sketch on that face is, so the plane follows it.
     if let Some(face) = p.get("base").filter(|b| b.get("face").is_some()) {
         let base = super::sketch::face::capture(s, face, cmd)?;
         super::sketch::face::capture_positions(s, &base)?;
-        let kind = FeatureKind::ConstructionPlane { plane: solidcraft_doc::PlaneRef::Offset { base: Box::new(base), distance: d } };
         // The capture is already in the authoring frame.
-        return add_feature_in(s, p, kind, false);
+        return add_feature_in(s, p, FeatureKind::ConstructionPlane { plane: offset(base) }, false);
     }
     let base = plane_param(s, p.get("base"), cmd)?;
-    add_feature(s, p, FeatureKind::ConstructionPlane { plane: solidcraft_doc::PlaneRef::Offset { base: Box::new(base), distance: d } })
+    add_feature(s, p, FeatureKind::ConstructionPlane { plane: offset(base) })
 }
 
 fn plane_angle(s: &mut Session, p: &Value) -> Result<Value> {
@@ -2111,6 +2178,14 @@ fn hole(s: &mut Session, p: &Value) -> Result<Value> {
         (_, Some(x)) => x,
         (None, None) => return Err(bad(cmd, "`position` must be [x, y, z], numbers or length expressions (or give `sketch` and `points`)")),
     };
+    // A hole starts on a face: a point off every face (past a body's edge) would drill a hole
+    // nobody picked, and cutting across an edge that way is slow.
+    if points.is_none() && !super::face::on_a_face(s, position) {
+        return Err(bad(
+            cmd,
+            format!("`position` [{}, {}, {}] is not on a face of a body; pick a point on the face to drill", position.x, position.y, position.z),
+        ));
+    }
     let direction = match (p.get("direction").and_then(vec3), &points) {
         (None, Some((sp, _, d))) if !sp.single => *d,
         (d, _) => match d {

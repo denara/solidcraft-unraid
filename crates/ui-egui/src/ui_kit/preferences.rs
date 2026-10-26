@@ -100,7 +100,6 @@ pub(crate) fn settings_pair<R>(ui: &mut Ui, controls: impl FnOnce(&mut Ui) -> R,
 
 /// A horizontally scrollable, draggable tile rail with its import action pinned outside it.
 /// The hidden scrollbar never reserves vertical space; a vertical wheel also moves the rail.
-/// An end with more tiles past it shows a chevron that scrolls a page that way (#6161).
 pub(crate) fn theme_rail(ui: &mut Ui, tiles: impl FnOnce(&mut Ui), import: impl FnOnce(&mut Ui)) {
     let t = Tokens::get();
     let action_width = t.form_label_width + t.space_24 + t.space_6;
@@ -109,7 +108,9 @@ pub(crate) fn theme_rail(ui: &mut Ui, tiles: impl FnOnce(&mut Ui), import: impl 
         ui.spacing_mut().item_spacing.x = t.space_8;
         ui.allocate_ui_with_layout(vec2(rail_width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
             ui.style_mut().always_scroll_the_only_direction = true;
-            let out = egui::ScrollArea::horizontal()
+            // This rail paints its own fully opaque, page-coloured edge cues.
+            ui.spacing_mut().scroll.fade.strength = 0.0;
+            let mut rail = egui::ScrollArea::horizontal()
                 .id_salt("settings_theme_rail")
                 .max_width(rail_width)
                 .auto_shrink([false, true])
@@ -121,43 +122,74 @@ pub(crate) fn theme_rail(ui: &mut Ui, tiles: impl FnOnce(&mut Ui), import: impl 
                         tiles(ui);
                     });
                 });
-            rail_arrows(ui, out.id, out.state, out.inner_rect, out.content_size);
+            let max_offset = (rail.content_size.x - rail.inner_rect.width()).max(0.0);
+            let (left, right) = theme_rail_cues(rail.state.offset.x, max_offset);
+            let arrow_size = t.control_height.min(rail.inner_rect.width() / 2.0);
+            for (visible, direction, label) in [(left, -1.0, "Scroll left"), (right, 1.0, "Scroll right")] {
+                if !visible || arrow_size <= 0.0 {
+                    continue;
+                }
+                // The horizontal host starts with zero requested height; use the measured
+                // cards' height rather than the scroll area's initial viewport height.
+                let rail_rect = Rect::from_min_size(rail.inner_rect.min, vec2(rail.inner_rect.width(), rail.content_size.y));
+                theme_rail_fade(ui, rail_rect, direction);
+                let center = pos2(
+                    if direction < 0.0 { rail.inner_rect.left() + arrow_size / 2.0 } else { rail.inner_rect.right() - arrow_size / 2.0 },
+                    rail.inner_rect.top() + rail.content_size.y / 2.0,
+                );
+                let rect = Rect::from_center_size(center, vec2(arrow_size, t.control_height));
+                if theme_rail_arrow(ui, rect, direction, label).clicked() {
+                    rail.state.offset.x = (rail.state.offset.x + direction * (action_width + t.space_8)).clamp(0.0, max_offset);
+                    rail.state.store(ui.ctx(), rail.id);
+                    ui.ctx().request_repaint();
+                }
+            }
         });
         ui.allocate_ui_with_layout(vec2(action_width, 0.0), egui::Layout::top_down(egui::Align::Min), import);
     });
 }
 
-/// The theme rail's chevrons: one at each end with tiles past it, over the tiles there.
-fn rail_arrows(ui: &mut Ui, id: egui::Id, mut state: egui::scroll_area::State, view: Rect, content: egui::Vec2) {
+/// Ignore subpixel rounding at either end so cues do not flicker on a fully visible rail.
+pub(super) fn theme_rail_cues(offset: f32, max_offset: f32) -> (bool, bool) {
+    (offset > 0.5, max_offset - offset > 0.5)
+}
+
+/// Preferences pages inherit the Window card's opaque dialog_body surface.
+/// Paint after the cards and before the arrows so the outer edge fully conceals content.
+fn theme_rail_fade(ui: &Ui, rail: Rect, direction: f32) {
     let t = Tokens::get();
-    let room = (content.x - view.width()).max(0.0);
-    // Halfway down the tiles (the area itself may report less height than they take).
-    let middle = view.top() + content.y.max(view.height()) / 2.0;
-    let size = t.control_height;
-    for (more, next) in [(state.offset.x > 0.5, false), (state.offset.x < room - 0.5, true)] {
-        if !more {
-            continue;
-        }
-        let x = if next { view.right() - size / 2.0 } else { view.left() + size / 2.0 };
-        let r = Rect::from_center_size(pos2(x, middle), vec2(size, size));
-        let label = crate::i18n::tr_label(if next { "More themes" } else { "Previous themes" });
-        let response = ui.interact(r, id.with(("rail_arrow", next)), Sense::click());
-        ui.painter().rect_filled(r, t.control_radius, if response.hovered() { t.hover } else { t.control_fill });
-        ui.painter().rect_stroke(r, t.control_radius, Stroke::new(1.0, t.control_border), egui::StrokeKind::Inside);
-        let icon = r.shrink(t.form_icon_inset);
-        if next {
-            crate::icons::paint_ink(ui.painter(), icon, "chevron_right", t.form_ink);
-        } else {
-            crate::icons::paint_ink_mirrored(ui.painter(), icon, "chevron_right", t.form_ink);
-        }
-        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label));
-        scenario::publish_target(if next { "theme_rail:next" } else { "theme_rail:previous" }, r);
-        if response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(label).clicked() {
-            let page = (view.width() * 0.8).max(size);
-            state.offset.x = (state.offset.x + if next { page } else { -page }).clamp(0.0, room);
-            state.store(ui.ctx(), id);
-        }
+    let width = (t.space_24 * 2.0 + t.space_8).min(rail.width() / 2.0);
+    let outer = if direction < 0.0 { rail.left() } else { rail.right() };
+    let inner = outer - direction * width;
+    let mut mesh = egui::Mesh::default();
+    for (x, color) in [(outer, t.dialog_body), (inner, Color32::TRANSPARENT)] {
+        mesh.colored_vertex(pos2(x, rail.top()), color);
+        mesh.colored_vertex(pos2(x, rail.bottom()), color);
     }
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(2, 1, 3);
+    ui.painter().with_clip_rect(ui.clip_rect().intersect(rail)).add(mesh);
+}
+
+pub(super) fn theme_rail_arrow(ui: &mut Ui, rect: Rect, direction: f32, label: &str) -> Response {
+    let t = Tokens::get();
+    let response = ui.interact(rect, ui.make_persistent_id(("theme_rail_arrow", label)), Sense::click());
+    if response.hovered() {
+        ui.painter().circle_filled(rect.center(), rect.width().min(rect.height()) / 2.0, t.hover);
+    }
+    let ink = if response.hovered() { t.form_ink } else { t.form_ink.gamma_multiply(0.65) };
+    let icon = Rect::from_center_size(rect.center(), vec2(t.space_16, t.space_16));
+    if direction < 0.0 {
+        crate::icons::paint_ink_mirrored(ui.painter(), icon, "chevron_right", ink);
+    } else {
+        crate::icons::paint_ink(ui.painter(), icon, "chevron_right", ink);
+    }
+    if response.has_focus() {
+        ui.painter().rect_stroke(rect, t.control_radius, Stroke::new(t.space_2, t.form_primary), egui::StrokeKind::Inside);
+    }
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), crate::i18n::tr_label(label)));
+    scenario::publish_target(&format!("prefs:theme_rail:{label}"), rect);
+    response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(crate::i18n::tr_label(label))
 }
 
 /// Dashed import tile matches the swatch tiles, while remaining permanently visible.
@@ -638,8 +670,8 @@ pub(crate) fn colour_vision_sample(ui: &mut egui::Ui, t: &Tokens) {
                 // X along and Y up from one corner, as the view triad draws them.
                 p.rect_filled(cell, t.radius_sm, t.viewport_top);
                 let o = cell.left_bottom() + egui::vec2(t.space_12, -(t.space_4 + t.space_3));
-                p.line_segment([o, egui::pos2(cell.right() - t.space_10, o.y)], line(t.triad[0]));
-                p.line_segment([o, egui::pos2(o.x, cell.top() + t.space_6)], line(t.triad[1]));
+                p.line_segment([o, egui::pos2(cell.right() - t.space_10, o.y)], line(t.axis_x));
+                p.line_segment([o, egui::pos2(o.x, cell.top() + t.space_6)], line(t.axis_y));
             }
             3 => {
                 // Dashed, as the flat pattern draws them.

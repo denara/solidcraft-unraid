@@ -129,6 +129,48 @@ pub fn pick_cpu_adapter(adapters: &[eframe::wgpu::Adapter], surface: Option<&efr
         })
 }
 
+/// Adapter properties used to choose a card without opening a device.
+#[derive(Clone, Debug)]
+pub struct AdapterChoice {
+    pub name: String,
+    pub compatible: bool,
+}
+
+/// Choose only surface-compatible adapters. Names saved in preferences are exact; the
+/// environment override follows wgpu's case-insensitive substring convention.
+/// No match leaves selection to the normal wgpu request.
+pub fn choose_adapter(adapters: &[AdapterChoice], environment: Option<&str>, preference: Option<&str>) -> Option<usize> {
+    // wgpu's environment helper panics on a missing name; an override must remain recoverable.
+    let compatible = || adapters.iter().enumerate().filter(|(_, a)| a.compatible);
+    if let Some(name) = environment.filter(|s| !s.is_empty()) {
+        let name = name.to_lowercase();
+        if let Some((index, _)) = compatible().find(|(_, a)| a.name.to_lowercase().contains(&name)) {
+            return Some(index);
+        }
+    }
+    if let Some(name) = preference.filter(|s| !s.is_empty())
+        && let Some((index, _)) = compatible().find(|(_, a)| a.name == name)
+    {
+        return Some(index);
+    }
+    None
+}
+
+/// Leave Automatic on wgpu's normal request path; named choices may defer to it too.
+pub fn configure_adapter(setup: &mut eframe::egui_wgpu::WgpuSetupCreateNew, cpu: bool, environment: Option<String>, preference: Option<String>) {
+    if cpu {
+        setup.native_adapter_selector = Some(std::sync::Arc::new(|adapters, surface| pick_cpu_adapter(adapters, surface).map(Some)));
+    } else if environment.as_deref().is_some_and(|s| !s.is_empty()) || preference.as_deref().is_some_and(|s| !s.is_empty()) {
+        setup.native_adapter_selector = Some(std::sync::Arc::new(move |adapters, surface| {
+            let choices: Vec<_> = adapters
+                .iter()
+                .map(|a| AdapterChoice { name: a.get_info().name, compatible: surface.is_none_or(|s| a.is_surface_supported(s)) })
+                .collect();
+            Ok(choose_adapter(&choices, environment.as_deref(), preference.as_deref()).and_then(|i| adapters.get(i)).cloned())
+        }));
+    }
+}
+
 /// `WGPU_BACKEND`: when set, wgpu picks the backends from it and the order below is not used.
 pub const WGPU_BACKEND_ENV: &str = "WGPU_BACKEND";
 
@@ -220,6 +262,17 @@ pub fn window_instance_flags(flags: eframe::wgpu::InstanceFlags, intel_mac: bool
     if intel_mac && env.map(str::trim).is_none_or(str::is_empty) { flags - eframe::wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL } else { flags }
 }
 
+/// Windows with OpenGL: the window keeps the system title bar (#2063). The window without OS
+/// decorations keeps its caption style while having no frame, and some OpenGL drivers (older
+/// Intel HD/UHD) then show the picture a caption's height lower than the window, so it no longer
+/// lines up with the pointer. Direct3D 12 and Vulkan draw it in place and keep the application bar
+/// as the title bar. `backends` are the ones wgpu starts: OpenGL alone is decided before the
+/// window opens.
+pub fn system_title_bar(windows: bool, backends: eframe::wgpu::Backends) -> bool {
+    use eframe::wgpu::Backends;
+    windows && backends.contains(Backends::GL) && !backends.intersects(Backends::DX12 | Backends::VULKAN)
+}
+
 /// The message shown when no window could be opened at all.
 pub fn no_window_message(error: &str, settings: Option<&Path>) -> String {
     let folder = settings.map(|d| d.display().to_string()).unwrap_or_else(|| "the SolidCraft settings folder".into());
@@ -237,6 +290,48 @@ pub fn no_window_message(error: &str, settings: Option<&Path>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cards() -> Vec<AdapterChoice> {
+        ["Integrated", "Discrete small", "Discrete large"].into_iter().map(|name| AdapterChoice { name: name.into(), compatible: true }).collect()
+    }
+
+    #[test]
+    fn adapter_names_environment_override_and_missing_card_fallback() {
+        let cards = cards();
+        assert_eq!(choose_adapter(&cards, None, Some("Discrete small")), Some(1));
+        assert_eq!(choose_adapter(&cards, Some("LARGE"), Some("Discrete small")), Some(2));
+        assert_eq!(choose_adapter(&cards, None, Some("removed")), None);
+        assert_eq!(choose_adapter(&cards, Some("missing"), Some("Discrete small")), Some(1));
+        assert_eq!(choose_adapter(&cards, Some(""), Some("Discrete small")), Some(1));
+        assert_eq!(choose_adapter(&cards, None, Some("Discrete")), None, "saved names are exact");
+    }
+
+    #[test]
+    fn automatic_adapter_leaves_selection_to_wgpu() {
+        let mut cards = cards();
+        assert_eq!(choose_adapter(&cards, None, None), None);
+        assert_eq!(choose_adapter(&cards, Some(""), Some("")), None);
+        cards[2].compatible = false;
+        assert_eq!(choose_adapter(&cards, Some("large"), Some("Discrete large")), None);
+        assert_eq!(choose_adapter(&cards, Some("small"), None), Some(1));
+        assert_eq!(choose_adapter(&[], None, None), None);
+    }
+
+    #[test]
+    fn automatic_adapter_preserves_the_previous_request_configuration() {
+        use eframe::egui_wgpu::WgpuSetupCreateNew;
+        let previous = WgpuSetupCreateNew::without_display_handle();
+        for preference in [None, Some(String::new())] {
+            let mut setup = WgpuSetupCreateNew::without_display_handle();
+            configure_adapter(&mut setup, false, None, preference);
+            assert!(setup.native_adapter_selector.is_none(), "Automatic must use the normal wgpu request");
+            assert_eq!(setup.power_preference, previous.power_preference);
+            assert_eq!(setup.instance_descriptor.backends, previous.instance_descriptor.backends);
+        }
+        let mut setup = WgpuSetupCreateNew::without_display_handle();
+        configure_adapter(&mut setup, false, Some("missing".into()), Some("removed".into()));
+        assert!(setup.native_adapter_selector.unwrap()(&[], None).unwrap().is_none(), "missing names must use the normal request too");
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("solidcraft-startup-{name}-{}", std::process::id()));
@@ -345,6 +440,18 @@ mod tests {
         // `auto` and blanks are the default order.
         assert_eq!(choose_backends(true, false, false, Some(" auto "), probe(&[Backends::DX12])), Some(Backends::DX12));
         assert_eq!(choose_backends(true, false, false, Some(""), probe(&[Backends::GL])), Some(Backends::GL));
+    }
+
+    #[test]
+    fn only_opengl_on_windows_gets_the_system_title_bar() {
+        use eframe::wgpu::Backends;
+        assert!(system_title_bar(true, Backends::GL));
+        for b in [Backends::DX12, Backends::VULKAN, Backends::DX12 | Backends::GL, Backends::VULKAN | Backends::GL, Backends::all()] {
+            assert!(!system_title_bar(true, b), "{b:?}");
+        }
+        for b in [Backends::GL, Backends::VULKAN, Backends::METAL] {
+            assert!(!system_title_bar(false, b), "{b:?}");
+        }
     }
 
     #[test]

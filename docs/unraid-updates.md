@@ -1,5 +1,86 @@
 # Validated container updates
 
+## 2026-10-26: upstream 0.23.0, manual projects and bounded browser uploads
+
+Selected one fixed upstream snapshot, `f006eefd6e2987ec14c8ab596ad39fe11e53be41`,
+127 commits after validated `ac53fc1e`. The sole integration branch
+`codex/unraid-mcp-web` started synchronized and clean at `13a16c09`; fetched fork
+main remains an ancestor. For SolidCraft features and upstream changes refer to
+[the original project](https://github.com/tangency-labs/solidcraft). This is an
+unofficial container integration update, not an upstream release or Unraid install.
+
+The merge preserves the HTTP gateway, independent browser CAD, quiet headless
+workers, project binding, cookie/Bearer separation, remembered logins, file revisions,
+server-push inventory, PNG thumbnails, independent browser copies, read-only live
+observation, deletion, bounded ZIP64 streaming and all published layouts. Keep the
+fork's native unsafe-bridge omissions. Linked-file metadata uses browser VFS while
+retaining network confinement. Observer snapshots keep isolated caches and never inherit
+render-job hosts; the new component-color choice is copied without sharing mutable state.
+New DXF/SVG opening is treated as an unsaved drawing, never an implicit native save
+over the source. The upstream disk-change override is carried through direct and
+batched `save` aliases while shared strong revision preconditions remain authoritative.
+Two equivalent upstream UI expressions were adjusted for the pinned Clippy version.
+
+Own additional functionality:
+
+- Explicit manual creation of real projects, including visible empty folders discoverable
+  through MCP, using the existing project naming and identity rules.
+- Multi-file picker and drag/drop into an explicitly selected real project/subfolder;
+  fixed batch targets, progress/results and cancellation. Virtual groups are not targets.
+- Overwrite, skip and cancel decisions for existing names, including identical bytes.
+  **Für alle Dateien übernehmen** is off by default and applies only to remaining
+  conflicts in that batch/target. Every file retains its own captured strong revision;
+  changed or active/leased files are never covered by blanket consent.
+- Validated native/design JSON, STEP/IGES, STL/3MF, self-contained OBJ/glTF/GLB,
+  textual DXF/passive SVG and PNG/JPEG templates. External glTF/OBJ companions,
+  programs/scripts/HTML and generic archives are rejected. Upload does not execute CAD.
+- Bounded private streaming/staging, atomic publication, owner-bound expiring tickets,
+  shared HTTP/MCP/ZIP/delete gates and cleanup on abort or failure.
+- Small authenticated footer capacity indicator for the actual shared-data filesystem,
+  safe Rust statistics, MiB/GiB/TiB, 15-second cache and explicit unavailable state.
+
+Limits and format decisions are documented in `docs/unraid.md`. Actual enabled
+importers were exercised with original analytic/public-safe data: fourteen native,
+exchange, drawing and image examples uploaded and then opened/imported through a
+real MCP SDK client. PNG and JPEG became reference canvases. Embedded glTF/GLB
+worked without companion fetches. The real browser created a project, dropped multiple
+files, handled a single prompt for multiple overwrites, skip-all, fresh-batch reset,
+explicit cancel, a concurrent revision change, invalid content and a forced selection
+change. Live folder state and the joined search/status surface survived. Its uploaded
+24000 mm3 design was discovered and analysed by MCP, continued under a new filename
+(24024 mm3), and the source bytes remained unchanged. Actual screenshots were viewed;
+this caught and corrected the idle cancel button's CSS visibility.
+
+Validation includes targeted upstream kernel/sketch/doc/IO/engine/UI/render/MCP tests,
+CLI setup/quiet/headless tests, gateway/upload/auth/path/lease/abort regressions,
+Clippy for all native workspace targets and the Wasm client, 13-crate Wasm compatibility,
+licenses/assets/icons/layers/lists/UI containers, software-GL capture and stand-up
+integration tests, actual browser API and offline/update behavior. The browser API
+harness now finishes its asynchronous UI DXF download before replacing that document
+through unrelated API commands; both export and linked-design checks still run.
+No blanket rerun of the whole repository test suite was performed.
+
+The isolated labelled candidate used a fresh disposable volume. Existing smoke,
+project, Workspace, live, observer, log/privacy, deletion/ZIP and remembered-login/
+restart scripts passed. `workspace-upload-test.ps1` is included before public registry
+publication. The final CSS-only candidate also passed persisted reopen, upload/MCP
+continuation and real browser regression checks. A separate hard-limited 32 MiB tmpfs
+proved the footer reads the data filesystem, updates after upload/deletion and reports
+ENOSPC without altering existing bytes or exposing a partial upload; only its private
+ownership marker remained after cleanup. Unavailable capacity is covered separately.
+No host filesystem was filled and no real user file was deleted or overwritten.
+
+Native format36 and legacy format13 sources reopened without changing their bytes;
+measurements (24000 mm3), parameters, split-face names/centroids and STEP output were
+preserved. New native and embedded-HDR round trips use format38 with verified ZIP CRCs.
+Keep pre-update server and separate browser-design backups for rollback.
+
+Local proof scripts, images and detailed evidence remain in ignored
+`target/upstream-f006eefd-20261026/`. The canonical Unraid Overview lists only our
+permanent additions and retains upstream authorship, the original icon and the
+unofficial integration notice. Publication digest/archive, local runtime replacement
+and catalog synchronization are recorded after the matching workflow succeeds.
+
 ## 2026-10-25: upstream 0.22.0 with scoped renderer sources and preserved integrations
 
 Selected exactly one upstream snapshot, `ac53fc1e6fab85a50bdc410178cc75133183393f`,

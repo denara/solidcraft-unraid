@@ -32,7 +32,7 @@ const DEFAULT_MODEL_H: f64 = 600.0;
 
 /// How far past the section plane a face point may lie and still count as kept (the renderer
 /// clips at `n·p <= n·o`; this is the same hairline `clip_segment` allows).
-const SECTION_EPS: f64 = 1e-6;
+pub(crate) const SECTION_EPS: f64 = 1e-6;
 
 /// Crossings one body may contribute before the section-cap walk gives up on it.
 const MAX_CROSSINGS: usize = 64;
@@ -307,6 +307,26 @@ fn section_cap(
     if !(t_cap > 0.0) || t_cap >= first_kept.unwrap_or(f64::INFINITY) {
         return None;
     }
+    let body = body_cut_at(app, st, bounds, input.o, input.d, t_cap, include_ghosted, replaced, active_bodies)?;
+    Some((t_cap, body, sn))
+}
+
+/// The body the ray `o + d·t` is inside of at `t_cap` (where it crosses the section plane): an
+/// odd number of mesh crossings before it. The walk re-raycasts each body past every crossing
+/// it finds, bounded per body. The viewport's picker asks the same, so a cut cap hides what lies
+/// behind it there too.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn body_cut_at(
+    app: &SolveApp,
+    st: &solidcraft_engine::doc::ModelState,
+    bounds: &[(String, solidcraft_engine::geom::Aabb3)],
+    o: Vec3,
+    d: Vec3,
+    t_cap: f64,
+    include_ghosted: bool,
+    replaced: &[String],
+    active_bodies: &Option<Vec<String>>,
+) -> Option<String> {
     let walk_eps = 1e-6 * (1.0 + crate::viewport::scene_radius(app));
     for (i, b) in st.bodies.iter().enumerate() {
         if !app.session.body_visible(&b.name) || replaced.contains(&b.name) {
@@ -317,7 +337,7 @@ fn section_cap(
         }
         if let Some((_, bb)) = bounds.get(i) {
             let pad = bb.diagonal() * 1e-6 + 1e-9;
-            match crate::viewport::ray_box(input.o, input.d, bb, pad) {
+            match crate::viewport::ray_box(o, d, bb, pad) {
                 None => continue,
                 Some(t0) if t0 > t_cap => continue,
                 _ => {}
@@ -326,7 +346,7 @@ fn section_cap(
         let (m, place) = b.mesh_in_place();
         let index = app.viewport.pick_index.of(&m);
         let (mut t, mut crossings) = (0.0f64, 0usize);
-        while let Some((lo, ld)) = crate::viewport::local_ray(&place, input.o + input.d * t, input.d) {
+        while let Some((lo, ld)) = crate::viewport::local_ray(&place, o + d * t, d) {
             let Some((dt, _)) = crate::pick_index::raycast(index.as_deref(), &m, lo, ld) else { break };
             let tt = t + dt;
             if tt >= t_cap - SECTION_EPS {
@@ -339,7 +359,7 @@ fn section_cap(
             }
         }
         if crossings % 2 == 1 {
-            return Some((t_cap, b.name.clone(), sn));
+            return Some(b.name.clone());
         }
     }
     None

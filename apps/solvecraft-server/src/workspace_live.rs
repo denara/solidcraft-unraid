@@ -266,7 +266,7 @@ fn frame(update: &Update, query: &str, kind: &str) -> Option<String> {
                         && (kind.is_empty() || kind == "all" || file.get("kind").and_then(Value::as_str) == Some(kind))
                 });
             }
-            json!({ "html": crate::workspace_view::fragment(&snapshot, query, kind) })
+            json!({ "html": crate::workspace_view::fragment(&snapshot, query, kind), "directories":snapshot["directories"] })
         }
     };
     Some(format!("event: workspace\ndata: {data}\n\n"))

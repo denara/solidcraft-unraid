@@ -113,7 +113,8 @@ fn stored(design: Option<&str>, file: &Path) -> String {
 fn resolve(design: Option<&str>, link: &str) -> PathBuf {
     let p = Path::new(link);
     match base_dir(design) {
-        Some(d) if p.is_relative() => d.join(p),
+        // Browser storage keys do not let the OS resolve `..` for us.
+        Some(d) if p.is_relative() => absolute(&d.join(p)),
         _ => p.to_path_buf(),
     }
 }
@@ -266,13 +267,16 @@ fn update_links(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let links: Vec<(u64, DesignLink)> = s.doc.links.iter().filter(|(c, _)| only.is_none_or(|o| o == **c)).map(|(c, l)| (*c, l.clone())).collect();
     let (mut updated, mut unchanged, mut warnings) = (Vec::new(), Vec::new(), Vec::new());
-    for (comp, link) in links {
+    let count = links.len();
+    for (index, (comp, link)) in links.into_iter().enumerate() {
         let cname = s.doc.components.iter().find(|c| c.id == comp).map(|c| c.name.clone());
         let Some(cname) = cname else {
             // The component was deleted: the link goes with it.
             s.doc_mut().links.remove(&comp);
             continue;
         };
+        // A window running this off its thread names the design being read again (#5329).
+        solidcraft_doc::progress::item(Some((&cname, index, count)));
         let Some(FeatureKind::Import { step: old, .. }) = s.doc.feature(link.feature).filter(|f| f.component == comp).map(|f| &f.kind) else {
             return Err(bad(
                 cmd,
@@ -312,6 +316,7 @@ fn update_links(s: &mut Session, p: &Value) -> Result<Value> {
         }
         if changed { updated.push(cname) } else { unchanged.push(cname) }
     }
+    solidcraft_doc::progress::item(None);
     s.refresh();
     if let Some(e) = s.doc.links.values().find_map(|l| s.model.result(l.feature).and_then(|r| r.error.clone())) {
         return Err(EngineError::Other(e));
@@ -414,7 +419,9 @@ fn list_links(s: &mut Session, _p: &Value) -> Result<Value> {
         .map(|(c, l)| {
             let file = resolve(s.path.as_deref(), &l.path);
             let name = s.doc.components.iter().find(|x| x.id == *c).map(|x| x.name.clone());
-            json!({"component": c, "name": name, "path": l.path, "file": file.display().to_string(), "found": network_link_path(&file).is_ok() && file.is_file()})
+            let permitted = network_link_path(&file).is_ok();
+            let file = file.to_string_lossy();
+            json!({"component": c, "name": name, "path": l.path, "file": file, "found": permitted && solidcraft_io::vfs::is_file(&file)})
         })
         .collect();
     Ok(json!({"links": links}))
@@ -432,7 +439,7 @@ mod tests {
         let design = root.join("assembly").join("case.solidcraft");
         let design = design.to_string_lossy().into_owned();
         assert_eq!(stored(Some(&design), &part), "../parts/plate.solidcraft");
-        assert_eq!(absolute(&resolve(Some(&design), "../parts/plate.solidcraft")), part);
+        assert_eq!(resolve(Some(&design), "../parts/plate.solidcraft"), part);
         // A design path given relative to the working folder works the same.
         assert_eq!(stored(Some("case.solidcraft"), &absolute(Path::new("parts/plate.solidcraft"))), "parts/plate.solidcraft");
         // Before the design has a file the path is kept whole; saving it makes it relative.
@@ -642,6 +649,39 @@ mod tests {
         assert_eq!(list["errors"][0]["name"], "PinInHole", "{list}");
         assert!(list["joints"][0]["frame_a"].is_null(), "{list}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two arms jointed top face to bottom face, both occurrences of one linked arm design: when
+    /// the arm is made thicker, its holes moved or it is made longer, Update Links brings the
+    /// change in and every joint type re-solves onto the moved faces, edges and corners, as it
+    /// does inside one design (`jointed_arms_stay_together_as_the_arm_changes`).
+    #[test]
+    fn jointed_linked_arms_stay_together_through_update_links() {
+        use crate::cmd::joints::face_tests::{ARM_EDITS, ARM_FORMS, arm_pairs, arm_part, arm_size, arms_apart, joint_arms};
+        let dir = std::env::temp_dir().join(format!("solidcraft-link-arms-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("arm.solidcraft");
+        let mut apart = Vec::new();
+        for form in ARM_FORMS {
+            let mut part = Session::default();
+            arm_part(&mut part);
+            run(&mut part, "file.save", json!({"path": path}));
+            let mut s = Session::default();
+            let first = run(&mut s, "component.insert_design", json!({"path": path, "name": "Arm"}))["occurrence"].as_u64().unwrap();
+            let pairs = arm_pairs(&mut s, first);
+            joint_arms(&mut s, form, &pairs);
+            apart.extend(arms_apart(&mut s, "as made", form, &pairs, arm_size(&[])));
+            for (i, (name, value)) in ARM_EDITS.into_iter().enumerate() {
+                run(&mut part, "parameters.change", json!({"name": name, "expression": format!("{value} mm")}));
+                run(&mut part, "file.save", json!({}));
+                let update = run(&mut s, "component.update_links", json!({}));
+                assert_eq!(update["updated"], json!(["Arm"]), "{form} {name}: {update}");
+                assert_eq!(update["warnings"], json!([]), "{form} {name}: {update}");
+                apart.extend(arms_apart(&mut s, &format!("{name} = {value}"), form, &pairs, arm_size(&ARM_EDITS[..=i])));
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(apart.is_empty(), "{} joints apart:\n{}", apart.len(), apart.join("\n"));
     }
 
     /// A joint made on a link that kept no face names (an older design) names the faces by their

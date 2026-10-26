@@ -152,7 +152,7 @@ pub fn to(app: &mut SolveApp, proj: &Proj, p: Pos2) {
     let Some(Kind::Extrude { distance, direction, .. }) = app.dialog.as_mut().map(|d| &mut d.kind) else { return };
     // A reversed extrude measures its distance against the normal.
     let sign = if matches!(*direction, 1 | crate::dialogs::TWO_SIDES_REVERSED) { -1.0 } else { 1.0 };
-    *distance = crate::canvas::format_len(travelled * sign);
+    *distance = crate::canvas::format_len(&app.session.doc, travelled * sign);
 }
 
 /// The button is up: the window stays open for the user to adjust and confirm.
@@ -170,7 +170,7 @@ pub fn tick(app: &mut SolveApp) {
 /// The step of the last pull, for the value box next to the distance.
 pub fn step_note(app: &SolveApp) -> Option<String> {
     let step = app.viewport.drag_extrude.last_step?;
-    Some(format!("Step {}", crate::canvas::format_len(step)))
+    Some(format!("Step {}", crate::canvas::format_len(&app.session.doc, step)))
 }
 
 /// The ladder of steps beside the pointer while pulling: the one in use between its neighbours.
@@ -182,7 +182,7 @@ pub fn show(app: &SolveApp, painter: &egui::Painter) {
     let galley = |i: usize, current: bool| {
         let size = if current { t.font_body * 1.25 } else { t.font_body };
         let color = if current { t.accent } else { t.text_dim };
-        let text = STEPS.get(i).map(|s| crate::canvas::format_len(*s)).unwrap_or_default();
+        let text = STEPS.get(i).map(|s| crate::canvas::format_len(&app.session.doc, *s)).unwrap_or_default();
         painter.layout_no_wrap(text, egui::FontId::proportional(size), color)
     };
     let cells: Vec<_> = (now.saturating_sub(2)..=(now + 2).min(STEPS.len() - 1)).map(|i| (galley(i, i == now), i == now)).collect();

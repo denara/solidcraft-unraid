@@ -15,7 +15,7 @@ The fork is hosted at [denara/solidcraft-unraid](https://github.com/denara/solid
 The public Unraid template names a new container `SolidCraft`; the existing local Compose service,
 image tags, command names, data format and environment variables retain compatibility.
 The first prototype used upstream commit `af536a7`. The current validated snapshot is
-`ac53fc1e6fab85a50bdc410178cc75133183393f`. See [update records](unraid-updates.md) for checks,
+`f006eefd6e2987ec14c8ab596ad39fe11e53be41`. See [update records](unraid-updates.md) for checks,
 the transferable image archive and installation instructions for this update.
 
 For future requested updates, use the repository skill
@@ -485,7 +485,7 @@ Linked components may read and refresh designs only under /data/files, including
 stored in uploaded documents. The gateway supplies a per-subprocess link root; resolved
 paths and parent folders are checked again by the engine, with symlinks refused. Desktop
 linked components retain their normal behavior when no network link root is supplied.
-This snapshot writes format 36. Validated native format-35 files and legacy format-13 designs open without modifying their source files; parameters, measurements and named split faces are preserved. Keep pre-update server and separate browser-design backups; older builds cannot read newly saved designs.
+This snapshot writes format 38. Validated native format-36 files and legacy format-13 designs open without modifying their source files; parameters, measurements and named split faces are preserved. Keep pre-update server and separate browser-design backups; older builds cannot read newly saved designs.
 
 The HTTP gateway launches native MCP with --headless, an explicit /data/files scope and --quiet. Desktop discovery never attaches a network session to a desktop app. Batch tool aliases are normalized before path/project/revision checks. The component.extract file output and component.replace_with_link source path use the same confinement and shared file gate as other file commands. This keeps upstream file confinement active without logging private per-session paths. Browser build URLs are relative, matching upstream's offline/update support; Web and HTTP MCP remain independent.
 
@@ -535,3 +535,72 @@ login, origin and filesystem protections remain enforced.
 Use `packaging/unraid/workspace-actions-test.ps1` only against a labelled disposable
 candidate container and fresh test volume. Existing model previews and independent
 browser CAD remain read-only with respect to server models.
+
+
+## Manual projects and browser uploads
+
+Use **Projekt anlegen / Dateien hochladen** on `/workspace` to create a real project,
+select its folder (or an existing real subfolder), then choose several files or drop
+those files into the visible drop zone. The folder action **Hochladen** selects its
+explicit target; dropping on a real project group selects that project. Empty projects
+appear in the dashboard and MCP `project_list`. An agent selects the same project with
+`project_select`, lists files, opens/imports the source and saves the continuation under
+a new name. Uploading does not execute commands or open CAD automatically.
+
+The batch target is fixed at its start. Existing names always require Overwrite, Skip
+or Cancel, including byte-identical files. **Für alle Dateien übernehmen** starts
+unchecked and applies only to later conflicts of this batch and target. It resets for
+the next batch. Each file keeps its own captured strong revision; a revision change
+requires a new selection and confirmation. Active MCP projects/sources, writes, ZIP
+leases and deletes remain protected. Cancelling stops unfinished transfers; the result
+list identifies files already published. No existing files are moved or renamed.
+
+The initial browser upload policy follows the enabled container importers:
+
+| Kind | Accepted files | Intended use |
+| --- | --- | --- |
+| Native design | `.solidcraft`, legacy `.solvecraft`, design `.json` | Directly editable after opening; JSON must contain a design format and features, not a command script. |
+| Exchange model | `.step`/`.stp`, `.igs`/`.iges`, `.stl`, `.3mf`, `.obj`, `.glb`/`.gltf` | Explicit CAD import/open; STEP/IGES carry boundary geometry, mesh formats remain mesh imports. |
+| Drawing | `.dxf`, `.svg` | Insert into a sketch or open as a new drawing design. DXF must be textual; SVG must be passive and self-contained. |
+| Image template | `.png`, `.jpg`/`.jpeg` | Reference image via the sketch canvas commands; not editable solid geometry. |
+
+External glTF resources and OBJ `mtllib` references are deliberately rejected by this
+first UI policy. Use embedded glTF/GLB or a self-contained OBJ. There are no automatic
+network fetches, archive extraction or script execution. MTL/BIN companions, arbitrary
+JSON, HTML, programs, scripts, general ZIPs, PDF, font/environment assets and other CAD
+formats are not accepted by the browser uploader. Native design and 3MF ZIP containers
+are distinct from general archives and receive bounded envelope checks. These checks
+recognize data safely; detailed CAD validity is evaluated only when explicitly imported.
+SVG is never embedded as active HTML. Existing MCP import capabilities are unchanged.
+
+Limits: 16 MiB per file, 100 files / 128 MiB per batch, two simultaneous uploads and
+two preflight scans; 32 outstanding batches globally, four per browser login, ten-minute
+expiry. Each stream has a 120-second body deadline. Images are limited to 8 MiB and
+4096 × 4096 pixels, SVG to 1 MiB / 20,000 XML nodes. CAD containers allow 512 entries,
+128 MiB declared unpacked data, 64 MiB per entry and 8 MiB native JSON metadata.
+Use a proxy request-body limit of at least 16 MiB for `/workspace/upload`; a batch uses
+separate file requests. Existing proxy settings are not modified automatically.
+
+Names use the existing visible/reserved-name rules (96 UTF-8 bytes); preflight scans
+at most 4096 sibling entries. Private staging and final files must be on the same
+filesystem for atomic publication.
+
+Upload requests use cookie-only login plus Origin and CSRF checks. Private staging is
+in a marked sibling directory of the configured shared files (outside the visible tree),
+with at most two 16 MiB parts. One gateway owns each data volume. On restart only its
+recognized marked UUID parts are removed; unrelated entries are never cleaned. Data is
+streamed to a private part, validated, then atomically published with the shared file gate
+and a fresh strong revision check. Matching path leases cover reception/validation;
+other projects continue independently. External direct-share writers do not participate
+in gateway locks and must avoid concurrent edits, as for other file operations.
+
+The footer shows available/total capacity of the shared file filesystem as seen by the
+container user, in MiB/GiB/TiB, rounded to MiB. It uses safe Rust filesystem statistics, not a
+file-tree scan or browser disk values. The server caches it for 15 seconds and invalidates
+the cache after upload/create/delete. Failure displays **Speicherplatz nicht verfügbar**;
+no private host or mount path is returned. Full-storage failures preserve existing bytes
+and remove only this upload's private staging file.
+
+Run `packaging/unraid/workspace-upload-test.ps1` only against a disposable candidate.
+The dashboard's explicit create/upload/delete actions do not change the independent
+browser CAD copies or the read-only live session observer.
