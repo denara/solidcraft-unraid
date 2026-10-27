@@ -364,7 +364,15 @@ fn component_menu_activates_grounds_and_pastes() {
     act(&mut app, &t, "Ground");
     assert!(app.session.doc.occurrence_of(c).unwrap().grounded);
     assert!(!find(&context_menu::items(&app, &t), "Move/Copy").enabled, "grounded");
-    act(&mut app, &t, "Paste New");
+    // Paste New pastes an independent copy of the copied component into another one (here the
+    // design): it is off until a component is copied, and never into itself.
+    let placement = Target::Occurrence { path: app.session.doc.first_path(c) };
+    app.session.selection = vec![solidcraft_engine::Sel::Occurrence { path: app.session.doc.first_path(c) }];
+    act(&mut app, &placement, "Copy");
+    assert_eq!(app.copied_placements.len(), 1, "{:?}", app.status);
+    let design = Target::Component { id: 0 };
+    assert!(find(&context_menu::items(&app, &design), "Paste New").enabled);
+    act(&mut app, &design, "Paste New");
     assert_eq!(app.session.doc.components.len(), 2);
 }
 
@@ -1314,6 +1322,48 @@ fn appearance_submenu_swatches_apply_to_the_clicked_body_and_keep_library_action
 }
 
 #[test]
+fn appearance_parent_click_opens_editor_after_hovering_quick_choices() {
+    use crate::scenario::{Harness, rect_of};
+    let mut h = Harness::new();
+    h.app = sample_app();
+    let name = body(&h.app);
+    h.frames(3);
+    context_menu::open_for(&mut h.app, pos2(400.0, 180.0), Target::Body { name: name.clone() });
+    h.frames(2);
+    h.step(&json!({"move":[10, 10]})).unwrap();
+    h.step(&json!({"move":{"handle":"menu:ui.appearance"}})).unwrap();
+    h.frames(2);
+    assert!(rect_of("menu:appearance.assign:Aluminum - Satin").is_some(), "hover opens quick choices");
+    assert!(h.app.dialog.is_none(), "hover must not open the editor");
+    h.step(&json!({"click":{"handle":"menu:ui.appearance"}})).unwrap();
+    assert!(h.app.viewport.context_menu.is_none(), "activation closes the context menu");
+    let dialog = h.app.dialog.as_ref().expect("parent click opens the full editor");
+    assert!(matches!(dialog.kind, crate::dialogs::Kind::Appearance(_)));
+    assert_eq!(dialog.inputs[0].items, vec![solidcraft_engine::Sel::Body { name }]);
+}
+
+#[test]
+fn appearance_hovered_quick_choice_applies_without_opening_editor() {
+    use crate::scenario::Harness;
+    let mut h = Harness::new();
+    h.app = sample_app();
+    let name = body(&h.app);
+    let rows = context_menu::items(&h.app, &Target::Body { name: name.clone() });
+    let appearance = find(&rows, "Appearance");
+    let swatch = appearance.children.iter().find(|row| row.swatch.is_some()).unwrap();
+    h.frames(3);
+    context_menu::open_for(&mut h.app, pos2(400.0, 180.0), Target::Body { name: name.clone() });
+    h.frames(2);
+    h.step(&json!({"move":[10, 10]})).unwrap();
+    h.step(&json!({"move":{"handle":"menu:ui.appearance"}})).unwrap();
+    h.frames(2);
+    h.step(&json!({"click":{"handle":format!("menu:{}:{}", swatch.id, swatch.label)}})).unwrap();
+    assert_eq!(h.app.session.doc.appearances.bodies[&name].color, swatch.swatch.unwrap());
+    assert!(h.app.dialog.is_none(), "quick choice applies directly");
+    assert!(h.app.viewport.context_menu.is_none());
+}
+
+#[test]
 fn appearance_submenu_keyboard_opens_beside_parent_and_left_returns_to_it() {
     use crate::scenario::{Harness, rect_of};
     let mut h = Harness::new();
@@ -1335,6 +1385,38 @@ fn appearance_submenu_keyboard_opens_beside_parent_and_left_returns_to_it() {
     assert!(rect_of("menu:appearance.assign:Aluminum - Satin").is_none(), "Left closes the submenu");
     h.step(&json!({"key":"Escape"})).unwrap();
     assert!(h.app.viewport.context_menu.is_none());
+}
+
+/// The Appearance flyout opened by hovering its row closes once the pointer moves to another
+/// row of the same menu (#6657).
+#[test]
+fn appearance_submenu_closes_when_the_pointer_moves_to_another_row() {
+    use crate::scenario::{Harness, rect_of};
+    let mut h = Harness::new();
+    h.app = sample_app();
+    h.frames(3);
+    let target = Target::Body { name: body(&h.app) };
+    let rows = context_menu::items(&h.app, &target);
+    context_menu::open_for(&mut h.app, pos2(400.0, 180.0), target);
+    h.frames(2);
+    let flyout = "menu:appearance.assign:Aluminum - Satin";
+    h.step(&json!({"move":[10, 10]})).unwrap();
+    h.step(&json!({"move":{"handle":"menu:ui.appearance"}})).unwrap();
+    h.frames(2);
+    assert!(rect_of(flyout).is_some(), "hovering Appearance opens its flyout");
+    let other = rows.iter().find(|i| i.enabled && i.children.is_empty()).unwrap();
+    h.step(&json!({"move":{"handle":format!("menu:{}", other.id)}})).unwrap();
+    h.frames(2);
+    assert!(rect_of(flyout).is_some(), "passing over {} on the way keeps the flyout for a moment", other.label);
+    h.frames(30);
+    assert!(rect_of(flyout).is_none(), "resting on {} closes the Appearance flyout", other.label);
+    assert!(h.app.viewport.context_menu.is_some(), "the menu itself stays open");
+    h.step(&json!({"move":{"handle":"menu:ui.appearance"}})).unwrap();
+    h.frames(2);
+    assert!(rect_of(flyout).is_some(), "hovering Appearance again reopens it");
+    h.step(&json!({"key":"Escape"})).unwrap();
+    assert!(h.app.viewport.context_menu.is_none());
+    assert!(h.app.dialog.is_none(), "closing the flyout runs nothing");
 }
 
 #[test]

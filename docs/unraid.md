@@ -15,7 +15,7 @@ The fork is hosted at [denara/solidcraft-unraid](https://github.com/denara/solid
 The public Unraid template names a new container `SolidCraft`; the existing local Compose service,
 image tags, command names, data format and environment variables retain compatibility.
 The first prototype used upstream commit `af536a7`. The current validated snapshot is
-`f006eefd6e2987ec14c8ab596ad39fe11e53be41`. See [update records](unraid-updates.md) for checks,
+`514b0c84f9eb7655e3cdc986f0d44d4cd3416f4c`. See [update records](unraid-updates.md) for checks,
 the transferable image archive and installation instructions for this update.
 
 For future requested updates, use the repository skill
@@ -325,6 +325,11 @@ Until every output target can be checked, the network gateway declines multi-fil
 exports, per-body DXF exports to files and PNG animation frame directories. Use an
 ordinary export or GIF animation instead; per-body DXF returned as text without a file
 path remains available. These restrictions concern the gateway, not desktop CAD.
+Desktop/cloud slicer delivery (`file.send_to_slicer`, `file.open_in_easyprint` and
+`file.save_mesh` with a slicer) is also refused before execution: its derived per-user
+outputs or program/cloud handoff do not belong to the network project boundary.
+Project-relative mesh exports remain available; the independent browser CAD retains
+its own explicit upstream workflows.
 
 ## Install the locally built image on Unraid
 
@@ -485,7 +490,7 @@ Linked components may read and refresh designs only under /data/files, including
 stored in uploaded documents. The gateway supplies a per-subprocess link root; resolved
 paths and parent folders are checked again by the engine, with symlinks refused. Desktop
 linked components retain their normal behavior when no network link root is supplied.
-This snapshot writes format 38. Validated native format-36 files and legacy format-13 designs open without modifying their source files; parameters, measurements and named split faces are preserved. Keep pre-update server and separate browser-design backups; older builds cannot read newly saved designs.
+This upstream 0.24.0 snapshot includes pending format additions and writes format 40. Validated native format-38 files and legacy format-13 designs open without modifying their source files; parameters, measurements and named split faces are preserved. Keep pre-update server and separate browser-design backups; older builds cannot read newly saved designs.
 
 The HTTP gateway launches native MCP with --headless, an explicit /data/files scope and --quiet. Desktop discovery never attaches a network session to a desktop app. Batch tool aliases are normalized before path/project/revision checks. The component.extract file output and component.replace_with_link source path use the same confinement and shared file gate as other file commands. This keeps upstream file confinement active without logging private per-session paths. Browser build URLs are relative, matching upstream's offline/update support; Web and HTTP MCP remain independent.
 

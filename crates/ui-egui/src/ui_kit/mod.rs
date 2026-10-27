@@ -48,8 +48,8 @@ pub(crate) use history::*;
 pub(crate) use layout::*;
 pub(crate) use menu::{Menu, MenuItem, rename_menu, workspace_menu};
 pub(crate) use metrics::{ContentWidth, header_height, row_height, table_row_height};
-pub use panel::Window;
 pub(crate) use panel::{ComputeStatus, FeatureOptions, Panel, Part, WindowPage, panel_header_hover};
+pub use panel::{DialogButtons, Window};
 #[cfg(test)]
 pub(crate) use panel::{collapsible_header, header};
 pub(crate) use preferences::*;

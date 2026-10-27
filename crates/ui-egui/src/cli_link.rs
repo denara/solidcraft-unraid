@@ -156,7 +156,10 @@ mod tests {
         assert_eq!(plan(&Slot::Other, cli), Plan::Skip);
     }
 
+    // `link_in` only makes links on Unix, and the test makes its own with `std::os::unix`.
+    #[cfg(unix)]
     #[test]
+    #[cfg(unix)]
     fn links_only_where_it_may() {
         let d = std::env::temp_dir().join(format!("solidcraft-cli-link-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);

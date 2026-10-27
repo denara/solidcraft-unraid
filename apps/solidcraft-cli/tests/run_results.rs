@@ -22,6 +22,19 @@ impl Scratch {
         std::fs::write(&path, json!({"commands": [{"command": "solid.box", "params": {"length": 2, "width": 3, "height": 4}}]}).to_string()).unwrap();
         path
     }
+
+    fn saving_script(&self) -> (PathBuf, PathBuf) {
+        let path = self.0.join("saving.json");
+        let saved = self.0.join("script-ran.solidcraft");
+        std::fs::write(
+            &path,
+            json!({"commands": [{"command": "solid.box", "params": {"length": 2, "width": 3, "height": 4}},
+                {"command": "file.save_as", "params": {"path": saved}}]})
+            .to_string(),
+        )
+        .unwrap();
+        (path, saved)
+    }
 }
 
 impl Drop for Scratch {
@@ -41,6 +54,92 @@ fn json_output(output: Output) -> Value {
 
 fn body_count(path: &Path) -> Value {
     json_output(cli().arg("eval").arg(path).output().unwrap())["body_count"].clone()
+}
+
+#[test]
+fn run_rejects_invalid_options_before_script_execution_or_output_writes() {
+    let dir = Scratch::new();
+    let (script, script_saved) = dir.saving_script();
+    let cases = [
+        (&["--out"][..], "--out needs a value"),
+        (&["--save"][..], "--save needs a value"),
+        (&["--in"][..], "--in needs a value"),
+        (&["--out", "--quiet"][..], "--out needs a value"),
+        (&["--ouut", "part.step"][..], "doesn't take --ouut"),
+        (&["--unknown"][..], "doesn't take --unknown"),
+    ];
+    for existing in [false, true] {
+        let saved = dir.0.join(format!("{existing}.solidcraft"));
+        let exported = dir.0.join(format!("{existing}.step"));
+        let report = dir.0.join(format!("{existing}.json"));
+        let outputs = [&saved, &exported, &report];
+        if existing {
+            for path in outputs {
+                std::fs::write(path, b"existing output").unwrap();
+            }
+        }
+        for (extra, message) in cases {
+            let output = cli()
+                .arg("run")
+                .arg(&script)
+                .arg("--save")
+                .arg(&saved)
+                .arg("--out")
+                .arg(&exported)
+                .arg("--json-out")
+                .arg(&report)
+                .args(extra)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(1), "{extra:?}");
+            assert!(String::from_utf8_lossy(&output.stderr).contains(message), "{extra:?}: {}", String::from_utf8_lossy(&output.stderr));
+            assert!(output.stdout.is_empty());
+            assert!(!script_saved.exists(), "invalid arguments must be rejected before the script runs");
+            for path in outputs {
+                if existing {
+                    assert_eq!(std::fs::read(path).unwrap(), b"existing output");
+                } else {
+                    assert!(!path.exists());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn eval_and_inspect_reject_invalid_options_before_script_execution_or_reporting() {
+    let dir = Scratch::new();
+    let (script, script_saved) = dir.saving_script();
+    let cases = [
+        (&["--in"][..], "--in needs a value"),
+        (&["--in", "--quiet"][..], "--in needs a value"),
+        (&["--out", "part.step"][..], "doesn't take --out"),
+        (&["--unknown"][..], "doesn't take --unknown"),
+    ];
+    for command in ["eval", "inspect"] {
+        for existing in [false, true] {
+            let report = dir.0.join(format!("{command}-{existing}.json"));
+            if existing {
+                std::fs::write(&report, b"existing report").unwrap();
+            }
+            for (extra, message) in cases {
+                let output = cli().arg(command).arg(&script).arg("--json-out").arg(&report).args(extra).output().unwrap();
+                assert_eq!(output.status.code(), Some(1), "{command} {extra:?}");
+                assert!(
+                    String::from_utf8_lossy(&output.stderr).contains(message),
+                    "{command} {extra:?}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(output.stdout.is_empty());
+                assert!(!script_saved.exists(), "invalid arguments must be rejected before the script runs");
+                if existing {
+                    assert_eq!(std::fs::read(&report).unwrap(), b"existing report");
+                } else {
+                    assert!(!report.exists());
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -166,6 +265,110 @@ fn results_with_base_design_and_quiet_still_report_and_save() {
     assert_eq!(result.as_array().unwrap().len(), 1);
     assert_eq!(body_count(&saved), 2);
     assert_eq!(body_count(&base), 1);
+}
+
+/// `eval` and its alias must measure the script applied to the input design, rather than
+/// silently reporting the input alone (#6861).
+#[test]
+fn eval_runs_its_script_on_the_in_design() {
+    let dir = Scratch::new();
+    let base = dir.0.join("base.solidcraft");
+    let script = dir.0.join("add.json");
+    json_output(cli().arg("run").arg(dir.script()).arg("--save").arg(&base).output().unwrap());
+    let original = std::fs::read(&base).unwrap();
+    std::fs::write(
+        &script,
+        json!({"commands": [{"command": "solid.box", "params": {"length": 5, "width": 3, "height": 4, "corner": [10, 0, 0]}}]}).to_string(),
+    )
+    .unwrap();
+    for command in ["eval", "inspect"] {
+        // Both existing one-input forms still measure just the original body.
+        for input in [&base, &dir.script()] {
+            for named_input in [false, true] {
+                let mut c = cli();
+                c.arg(command);
+                if named_input {
+                    c.arg("--in");
+                }
+                let measured = json_output(c.arg(input).output().unwrap());
+                assert_eq!(measured["body_count"], 1);
+                assert!((measured["total"]["volume_mm3"].as_f64().unwrap() - 24.0).abs() < 1e-6);
+            }
+        }
+        for input_first in [false, true] {
+            for to_file in [false, true] {
+                let mut c = cli();
+                c.arg(command);
+                if input_first {
+                    c.arg("--in").arg(&base).arg(&script);
+                } else {
+                    c.arg(&script).arg("--in").arg(&base);
+                }
+                let report = dir.0.join("measurement.json");
+                if to_file {
+                    c.arg("--json-out").arg(&report);
+                }
+                let output = c.output().unwrap();
+                let measured = if to_file {
+                    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+                    assert!(output.stdout.is_empty());
+                    serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap()
+                } else {
+                    json_output(output)
+                };
+                assert_eq!(measured["body_count"], 2, "{command}, input_first={input_first}, to_file={to_file}");
+                assert!((measured["total"]["volume_mm3"].as_f64().unwrap() - 84.0).abs() < 1e-6);
+                assert_eq!(measured["timeline"].as_array().unwrap().len(), 2, "the script runs exactly once");
+                assert_eq!(std::fs::read(&base).unwrap(), original, "evaluation never saves its changes to the input");
+            }
+        }
+    }
+}
+
+#[test]
+fn eval_propagates_script_errors_before_writing_a_report() {
+    let dir = Scratch::new();
+    let base = dir.script();
+    let script = dir.0.join("bad.json");
+    for command in ["eval", "inspect"] {
+        for contents in ["{", r#"{"commands":[{"command":"missing.command","params":{}}]}"#] {
+            std::fs::write(&script, contents).unwrap();
+            let report = dir.0.join("report.json");
+            let output = cli().arg(command).arg(&script).arg("--in").arg(&base).arg("--json-out").arg(&report).output().unwrap();
+            assert_eq!(output.status.code(), Some(1));
+            assert!(!output.stderr.is_empty());
+            assert!(output.stdout.is_empty());
+            assert!(!report.exists());
+        }
+    }
+}
+
+#[test]
+fn eval_rejects_unknown_options_and_missing_input_values_before_writing_a_report() {
+    let dir = Scratch::new();
+    let script = dir.script();
+    let report = dir.0.join("report.json");
+    for command in ["eval", "inspect"] {
+        for (options, message) in [(&["--frobnicate", "1"][..], "doesn't take --frobnicate"), (&["--in"][..], "--in needs a value")] {
+            for options_first in [false, true] {
+                std::fs::write(&report, b"previous report").unwrap();
+                let mut c = cli();
+                c.arg(command);
+                if options_first {
+                    c.args(options).arg("--json-out").arg(&report).arg(&script);
+                } else {
+                    c.arg(&script).args(options).arg("--json-out").arg(&report);
+                }
+                // A following option also proves that --in cannot consume a flag as its value.
+                let output = c.output().unwrap();
+                assert_eq!(output.status.code(), Some(1), "{command}, {options:?}");
+                let error = String::from_utf8_lossy(&output.stderr);
+                assert!(error.contains(message), "{command}: {error}");
+                assert!(output.stdout.is_empty());
+                assert_eq!(std::fs::read(&report).unwrap(), b"previous report");
+            }
+        }
+    }
 }
 
 #[test]

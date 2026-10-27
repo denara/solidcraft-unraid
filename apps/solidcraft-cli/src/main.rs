@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! solidcraft-cli run <script.json|design.solidcraft|part.step|mesh.3mf> [--in design|part.step|mesh.3mf] [--out FILE]... [--save FILE] [--quiet] [--results] [--timings] [--profile] [--json-out FILE] [--allow-errors]
-//! solidcraft-cli eval <script.json|design.solidcraft|part.step> [--json-out FILE] (alias: inspect) measurements as JSON
+//! solidcraft-cli eval <script.json|design.solidcraft|part.step> [--in design.solidcraft|part.step] [--json-out FILE] (alias: inspect) measurements as JSON
 //! solidcraft-cli script <design.solidcraft> [--out script.json]     the design's history as a command script
 //! solidcraft-cli bench-open <design.solidcraft | part.step> [--parse-only] [--save OUT.solidcraft] [--display LEVEL [--edit NAME EXPR]] [--ops script.json] loading timings as JSON lines
 //! solidcraft-cli bench-agent [--scale F] [--save F] [--script-out F] a ~1,300-body design built command by command, timed
@@ -58,7 +58,7 @@ struct Command {
 /// `run`'s lines in the usage.
 const USAGE_RUN: &str = "  solidcraft-cli run <script.json|design.solidcraft|part.step> [--in design.solidcraft|part.step] [--out FILE]... [--save FILE] [--quiet] [--results] [--timings] [--profile] [--json-out FILE] [--allow-errors]\n  solidcraft-cli run --in <design.solidcraft|part.step> [--out FILE]...\n      (a timeline feature that fails fails the run and nothing is written; --allow-errors writes anyway)\n      (--timings prints {timings: [{index, command, ms}], total_ms} for a script, with --results its results too;\n       --profile adds each command's profile: {boolean_ms, tessellate_ms, other_ms}, the kernel's share)\n";
 /// `eval`'s lines in the usage.
-const USAGE_EVAL: &str = "  solidcraft-cli eval <script.json|design.solidcraft|part.step> [--json-out FILE]     (alias: inspect; or --in FILE)\n      (--json-out FILE writes the JSON that run (with --results, else the measurement) and eval print to FILE instead of stdout,\n       as plain UTF-8: a shell's > can re-encode it, e.g. Windows PowerShell adds a byte-order mark)\n";
+const USAGE_EVAL: &str = "  solidcraft-cli eval <script.json|design.solidcraft|part.step> [--in design.solidcraft|part.step] [--json-out FILE]     (alias: inspect)\n  solidcraft-cli eval --in <script.json|design.solidcraft|part.step> [--json-out FILE]\n      (with both inputs, runs the positional script on --in before measuring; does not automatically save the modified design)\n      (--json-out FILE writes the JSON that run (with --results, else the measurement) and eval print to FILE instead of stdout,\n       as plain UTF-8: a shell's > can re-encode it, e.g. Windows PowerShell adds a byte-order mark)\n";
 /// `script`'s lines in the usage.
 const USAGE_SCRIPT: &str = "  solidcraft-cli script <design.solidcraft|script.json> [--out script.json]\n      (the design's history as a command script that eval and run replay)\n";
 /// `bench-open`'s lines in the usage.
@@ -262,8 +262,7 @@ fn load_checked(path: &str, check: solidcraft_engine::schema::ParamCheck) -> Res
     let bytes = solidcraft_engine::io::vfs::read(path, solidcraft_engine::io::MAX_DESIGN_BYTES).map_err(|e| format!("{path}: {e}"))?;
     if solidcraft_engine::io::is_design_container(&bytes) {
         let doc = solidcraft_engine::io::read_design(&bytes).map_err(|e| format!("{path}: {e}"))?;
-        let mut session = Session::new(doc);
-        session.path = Some(path.to_owned());
+        let mut session = Session::opened_at(doc, None, Some(path));
         session.param_check = check;
         return Ok(session);
     }
@@ -340,6 +339,7 @@ fn print_json(v: &Value, file: Option<&str>) -> Result<(), String> {
 fn cmd_run(args: &[String]) -> Result<(), String> {
     install_renderer();
     let json_out = json_out(args)?;
+    known_args("run", args, &["--in", "--out", "--save", "--json-out"], &["--quiet", "--results", "--timings", "--profile", "--allow-errors"], true)?;
     let base = flag(args, "--in");
     let path = positional(args);
     if path.is_none() && base.is_none() {
@@ -392,7 +392,7 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// The session `run` and `snapshot` start from: `--in` (a design or STEP file) with the
+/// The session `run`, `eval` and `snapshot` start from: `--in` (a design or STEP file) with the
 /// positional script run on top of it, or either one alone.
 fn open(base: Option<&str>, path: Option<&String>) -> Result<Session, String> {
     match (base, path) {
@@ -444,8 +444,8 @@ fn timeline_ok(s: &Session) -> Result<(), String> {
 
 fn cmd_eval(args: &[String]) -> Result<(), String> {
     let json_out = json_out(args)?;
-    let path = flag(args, "--in").or_else(|| positional(args).map(String::as_str)).ok_or_else(usage)?;
-    let mut s = load(path)?;
+    known_args("eval", args, &["--in", "--json-out"], &[], true)?;
+    let mut s = open(flag(args, "--in"), positional(args))?;
     let m = s.execute("inspect.measure", &json!({})).map_err(|e| e.to_string())?;
     let d = s.execute("document.inspect", &json!({})).map_err(|e| e.to_string())?;
     let out = json!({
@@ -845,7 +845,7 @@ pub(crate) fn cmd_bench_open(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     let t = std::time::Instant::now();
-    let s = Session::opened(doc, saved.as_ref());
+    let s = Session::opened_at(doc, saved.as_ref(), (!step).then_some(path.as_str()));
     drop(read);
     // Taken from the file: nothing evaluated (SOLIDCRAFT_NO_MODEL_CACHE evaluates anyway), or
     // only the features whose state a thinned file left out.

@@ -45,6 +45,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("browser.visibility", "Show/Hide", visibility).icon("eye").params(
         "visible: bool; items?: [sketch id or name | body name | construction name | joint name | O|X|Y|Z|XY|XZ|YZ]; \
          or joints?: [joint id or name] (their glyphs; they still constrain and move parts); \
+         or features?: [feature id or name] (the bodies they made; path?: [occurrence ids] for only that placement's); \
          or folder?: bodies|sketches|construction|origin|joints|all (all of it; showing also shows its browser folders and groups, and `all` takes in the occurrence hides too); \
          or tree_folders?: [browser folder or group key: c0/bodies, o:4/sketches, c0/g7, c0/joints, c0/canvases] (the folder or group itself: its items keep their own state); \
          or paths?: [[occurrence ids]] (exact placements and descendants), isolate?: bool (requires paths and visible:true). Saved with the design and undone like any other change (the camera is not)",
@@ -314,6 +315,12 @@ fn visibility(s: &mut Session, p: &Value) -> Result<Value> {
         return Ok(json!({"visible":visible,"changed":paths.len(),"visibility":s.visibility}));
     }
     let items: Vec<Shown> = match (str_(p, "folder"), p.get("items")) {
+        _ if p.get("features").is_some() => {
+            if ["items", "folder", "joints"].iter().any(|k| p.get(*k).is_some()) {
+                return Err(bad(cmd, "give `features`, `items`, `folder` or `joints`, not several"));
+            }
+            feature_items(s, p, cmd)?
+        }
         _ if p.get("joints").is_some() => {
             if p.get("items").is_some() || p.get("folder").is_some() {
                 return Err(bad(cmd, "give `joints`, `items` or `folder`, not several"));
@@ -367,7 +374,10 @@ fn visibility(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let v = &mut s.visibility;
     match str_(p, "folder") {
-        Some("bodies" | "all") if visible => v.hidden_occurrences.clear(),
+        Some("bodies" | "all") if visible => {
+            v.hidden_bodies.clear();
+            v.hidden_occurrences.clear();
+        }
         // Showing a whole folder shows the folder too.
         Some("origin") if visible => v.origin_hidden = Some(false),
         _ => {}
@@ -567,6 +577,44 @@ fn collapse_all(s: &mut Session, p: &Value) -> Result<Value> {
     fold_tree(s, p, false, "browser.collapse_all")
 }
 
+/// `features` (and `path`) of `browser.visibility`: the bodies those features made (#5099).
+fn feature_items(s: &Session, p: &Value, cmd: &str) -> Result<Vec<Shown>> {
+    let keys = keys(p, "features", cmd)?;
+    if keys.is_empty() {
+        return Err(bad(cmd, "`features` must list feature ids or names"));
+    }
+    let mut ids = Vec::with_capacity(keys.len());
+    let mut component = None;
+    for k in &keys {
+        let f = s.doc.find_feature(k).ok_or_else(|| bad(cmd, format!("no feature `{k}`")))?;
+        if matches!(f.kind, FeatureKind::Sketch { .. }) {
+            return Err(bad(cmd, format!("`{k}` is a sketch: give it in `items`")));
+        }
+        ids.push(f.id);
+        component = Some(f.component);
+    }
+    let path = match p.get("path") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let path = v
+                .as_array()
+                .filter(|a| a.len() <= 64)
+                .and_then(|a| a.iter().map(Value::as_u64).collect::<Option<Vec<_>>>())
+                .ok_or_else(|| bad(cmd, "`path` must list at most 64 occurrence ids"))?;
+            let placement = s.doc.placements().into_iter().find(|(_, at, _)| *at == path).ok_or_else(|| bad(cmd, "no placement at `path`"))?;
+            if ids.iter().any(|id| s.doc.feature(*id).is_some_and(|f| f.component != placement.0)) {
+                return Err(bad(cmd, "`path` must be a placement of the features' component"));
+            }
+            Some((component.unwrap_or(placement.0), path))
+        }
+    };
+    let bodies = s.feature_bodies(&ids, path.as_ref().map(|(c, at)| (*c, at.as_slice())));
+    if bodies.is_empty() {
+        return Err(bad(cmd, "those features made no bodies that are in the design now (a feature that changes bodies shows and hides with them)"));
+    }
+    Ok(bodies.into_iter().map(Shown::Body).collect())
+}
+
 fn document_units(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "document.units";
     let u = str_(p, "units").ok_or_else(|| bad(cmd, "`units` is required"))?;
@@ -760,6 +808,7 @@ fn rename_body(s: &mut Session, p: &Value) -> Result<Value> {
     if name == old {
         return Ok(json!({"body": old, "name": name}));
     }
+    let previous = s.doc.clone();
     let st = s.model.state();
     let b = st.body(&old).ok_or_else(|| bad(cmd, format!("no body `{old}`")))?;
     if st.body(name).is_some() {
@@ -819,7 +868,7 @@ fn rename_body(s: &mut Session, p: &Value) -> Result<Value> {
                 *names = pins;
                 f.body_names.clear();
             } else {
-                f.body_names.clone_from(made);
+                f.pin_body_names(made);
             }
         }
     }
@@ -828,15 +877,18 @@ fn rename_body(s: &mut Session, p: &Value) -> Result<Value> {
         *names = pins;
         f.body_names.clear();
     } else {
-        while f.body_names.len() < siblings.len().max(k + 1) {
-            let i = f.body_names.len();
-            f.body_names.push(siblings.get(i).cloned().unwrap_or_default());
+        // An Import keeps its names by the file's body index, its skipped bodies' too (#2175).
+        let slots = f.body_name_slots(siblings.len().max(k + 1));
+        if let Some(end) = slots.last().map(|s| s + 1).filter(|end| f.body_names.len() < *end) {
+            f.body_names.resize(end, String::new());
         }
-        for (slot, current) in f.body_names.iter_mut().zip(&siblings) {
-            slot.clone_from(current);
+        for (slot, current) in slots.iter().zip(&siblings) {
+            if let Some(stored) = f.body_names.get_mut(*slot) {
+                stored.clone_from(current);
+            }
         }
-        if let Some(slot) = f.body_names.get_mut(k) {
-            *slot = name.to_string();
+        if let Some(stored) = slots.get(k).and_then(|slot| f.body_names.get_mut(*slot)) {
+            *stored = name.to_string();
         }
     }
     // Later features refer to bodies by name.
@@ -875,10 +927,10 @@ fn rename_body(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad(cmd, e));
     }
     d.rename_body_keys(&old, name);
-    let v = &mut s.visibility;
-    for b in v.hidden_bodies.iter_mut().chain(v.locked_bodies.iter_mut()).filter(|b| **b == old) {
+    for b in s.visibility.locked_bodies.iter_mut().filter(|b| **b == old) {
         *b = name.to_string();
     }
+    s.remember_body_rename(&previous, &old, name);
     Ok(json!({"body": old, "name": name}))
 }
 
@@ -1006,6 +1058,88 @@ mod tests {
 
     fn names(s: &Session) -> Vec<String> {
         s.model.state().bodies.iter().map(|b| b.name.clone()).collect()
+    }
+
+    #[test]
+    fn body_rename_preserves_plastic_rules_and_current_visibility_through_history() {
+        let mut s = Session::default();
+        run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10, "body_name": "Plate"}));
+        run(&mut s, "plastic.manage_rules", json!({"name": "Housing", "draft": "3 deg"}));
+        run(&mut s, "plastic.assign_rule", json!({"bodies": ["Plate"], "rule": "Housing"}));
+        run(&mut s, "browser.visibility", json!({"items": ["Plate"], "visible": false}));
+        run(&mut s, "body.rename", json!({"body": "Plate", "name": "Base"}));
+        assert_eq!(run(&mut s, "plastic.rules", json!({}))["assigned"], json!({"Base": "Housing"}));
+        assert!(!s.body_visible("Base"));
+        run(&mut s, "edit.undo", json!({}));
+        assert_eq!(run(&mut s, "plastic.rules", json!({}))["assigned"], json!({"Plate": "Housing"}));
+        assert!(!s.body_visible("Plate"), "undo must keep the body hidden");
+        run(&mut s, "edit.redo", json!({}));
+        assert!(!s.body_visible("Base"));
+        // Showing a body is its own undo step; the rename keeps the correct hidden name on
+        // either side of that step, and neither operation loses the assigned rule.
+        run(&mut s, "browser.visibility", json!({"items": ["Base"], "visible": true}));
+        run(&mut s, "edit.undo", json!({}));
+        assert_eq!(names(&s), ["Base"]);
+        assert!(!s.body_visible("Base"));
+        run(&mut s, "edit.undo", json!({}));
+        assert_eq!(names(&s), ["Plate"]);
+        assert!(!s.body_visible("Plate"));
+        run(&mut s, "edit.redo", json!({}));
+        assert!(!s.body_visible("Base"));
+        run(&mut s, "edit.redo", json!({}));
+        assert!(s.body_visible("Base"));
+        run(&mut s, "browser.visibility", json!({"items": ["Base"], "visible": false}));
+        let mut saved = (*s.doc).clone();
+        saved.visibility = s.visibility.clone();
+        let reopened = Session::new(serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap());
+        assert_eq!(reopened.doc.plastic.assigned.get("Base").map(String::as_str), Some("Housing"));
+        assert!(!reopened.body_visible("Base"));
+    }
+
+    #[test]
+    fn body_rename_undo_keeps_hidden_bodies_with_downstream_users_hidden() {
+        let mut s = Session::default();
+        run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10, "body_name": "Peg"}));
+        run(&mut s, "solid.move", json!({"bodies": ["Peg"], "translate": [0, 0, 5]}));
+        run(&mut s, "browser.visibility", json!({"items": ["Peg"], "visible": false}));
+        run(&mut s, "body.rename", json!({"body": "Peg", "name": "Stud"}));
+        run(&mut s, "edit.undo", json!({}));
+        assert!(!s.body_visible("Peg"));
+        assert_eq!(s.visibility.hidden_bodies, ["Peg"]);
+        run(&mut s, "edit.redo", json!({}));
+        assert!(!s.body_visible("Stud"));
+    }
+
+    #[test]
+    fn show_all_bodies_clears_stale_hidden_names() {
+        for folder in ["bodies", "all"] {
+            let mut s = Session::default();
+            s.visibility.hidden_bodies.push("Old body name".into());
+            run(&mut s, "browser.visibility", json!({"folder": folder, "visible": true}));
+            assert!(s.visibility.hidden_bodies.is_empty(), "{folder}");
+        }
+    }
+
+    #[test]
+    fn computed_body_rename_keeps_the_latest_visibility_and_undo_mapping() {
+        let mut s = Session::default();
+        run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10, "body_name": "Peg"}));
+        run(&mut s, "solid.move", json!({"bodies": ["Peg"], "translate": [0, 0, 5]}));
+        let mut computed = s.scratch();
+        run(&mut computed, "body.rename", json!({"body": "Peg", "name": "Stud"}));
+        // The user hides the body while the rename is being evaluated.
+        run(&mut s, "browser.visibility", json!({"items": ["Peg"], "visible": false}));
+        s.accept_computed(computed);
+        assert!(!s.body_visible("Stud"));
+        assert_eq!(s.visibility.hidden_bodies, ["Stud"]);
+        run(&mut s, "edit.undo", json!({}));
+        assert!(!s.body_visible("Peg"));
+        run(&mut s, "edit.undo", json!({}));
+        assert!(s.body_visible("Peg"), "the concurrent hide remains its own undo step");
+        run(&mut s, "edit.redo", json!({}));
+        assert!(!s.body_visible("Peg"));
+        run(&mut s, "edit.redo", json!({}));
+        assert!(!s.body_visible("Stud"));
     }
 
     #[test]
@@ -1206,8 +1340,9 @@ mod tests {
         assert!(["Body1", "Body2", "Body3", "Body4", "Body5"].iter().all(|n| before.contains(&n.to_string())), "{before:?}");
         run(&mut s, "solid.combine", json!({"target": "Body3", "tools": ["Body5"], "operation": "join", "name": "Joined"}));
         // Renaming a body that already has a name of its own stores nothing elsewhere.
+        let stored = s.doc.find_feature("P2").unwrap().body_names.clone();
         run(&mut s, "body.rename", json!({"body": "Second", "name": "Row"}));
-        assert!(s.doc.find_feature("P2").unwrap().body_names.is_empty());
+        assert_eq!(s.doc.find_feature("P2").unwrap().body_names, stored);
         run(&mut s, "body.rename", json!({"body": "Body1", "name": "FirstCopyA"}));
         run(&mut s, "body.rename", json!({"body": "Body2", "name": "FirstCopyB"}));
         assert!(
@@ -1831,5 +1966,39 @@ mod tests {
             assert!(s.execute(cmd, &p).is_err(), "{cmd} {p}");
         }
         assert!(s.execute("browser.expand_all", &json!({})).is_ok());
+    }
+
+    /// #5099: a feature's bodies show and hide by the feature, in every placement or one.
+    #[test]
+    fn a_feature_shows_and_hides_the_bodies_it_made() {
+        let mut s = Session::default();
+        run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10}));
+        run(&mut s, "solid.sphere", json!({"diameter": 4, "center": [30, 0, 0]}));
+        // A join makes no body of its own.
+        run(&mut s, "solid.box", json!({"length": 2, "width": 2, "height": 20, "operation": "join"}));
+        let hide = |s: &mut Session, p: Value| run(s, "browser.visibility", p)["visibility"]["hidden_bodies"].clone();
+        assert_eq!(hide(&mut s, json!({"visible": false, "features": ["Sphere1"]})), json!(["Body2"]));
+        assert_eq!(hide(&mut s, json!({"visible": true, "features": ["Sphere1"]})), json!([]));
+        for (p, why) in [
+            (json!({"visible": false, "features": ["Box2"]}), "made no bodies"),
+            (json!({"visible": false, "features": ["Nope"]}), "no feature"),
+            (json!({"visible": false, "features": ["Box1"], "items": ["Body2"]}), "not several"),
+        ] {
+            let e = s.execute("browser.visibility", &p).expect_err("refused").to_string();
+            assert!(e.contains(why), "{p}: {e}");
+        }
+
+        // A component placed twice: every instance's body, or one placement's.
+        let first = run(&mut s, "component.create", json!({"name": "Part", "grounded": false}))["occurrence"].as_u64().unwrap();
+        run(&mut s, "solid.box", json!({"length": 5, "width": 5, "height": 5, "corner": [0, 40, 0]}));
+        let second = run(&mut s, "occurrence.copy", json!({"occurrence": first}))["occurrence"].as_u64().unwrap();
+        let all = hide(&mut s, json!({"visible": false, "features": ["Box3"]}));
+        assert_eq!(all.as_array().unwrap().len(), 2, "{all}");
+        hide(&mut s, json!({"visible": true, "features": ["Box3"]}));
+        let one = hide(&mut s, json!({"visible": false, "features": ["Box3"], "path": [second]}));
+        assert_eq!(one.as_array().unwrap().len(), 1, "{one}");
+        assert!(all.as_array().unwrap().contains(&one[0]) && one[0] != all[0], "the copy's body: {one} of {all}");
+        let e = s.execute("browser.visibility", &json!({"visible": false, "features": ["Sphere1"], "path": [first]})).expect_err("other component");
+        assert!(e.to_string().contains("component"), "{e}");
     }
 }

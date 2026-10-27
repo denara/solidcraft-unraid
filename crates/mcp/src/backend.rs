@@ -34,6 +34,11 @@ pub trait Backend {
     fn notice(&self) -> Option<String> {
         None
     }
+    /// How this side's session checks commands' typed contracts (`--param-check`), when this
+    /// process holds it. A running app checks its own (`engine.batch`), so `Remote` says off.
+    fn param_check(&self) -> solidcraft_engine::schema::ParamCheck {
+        solidcraft_engine::schema::ParamCheck::Off
+    }
 }
 
 /// Longest reply line accepted from the app.
@@ -608,6 +613,9 @@ impl Backend for Headless {
     fn in_process(&self) -> bool {
         true
     }
+    fn param_check(&self) -> solidcraft_engine::schema::ParamCheck {
+        self.session.param_check
+    }
 }
 
 #[cfg(test)]
@@ -677,6 +685,12 @@ impl Backend for Auto {
     }
     fn in_process(&self) -> bool {
         self.remote.is_none()
+    }
+    fn param_check(&self) -> solidcraft_engine::schema::ParamCheck {
+        match (&self.remote, &self.headless) {
+            (None, Some(h)) => h.param_check(),
+            _ => solidcraft_engine::schema::ParamCheck::Off,
+        }
     }
     fn notice(&self) -> Option<String> {
         self.headless.as_ref().map(|_| {

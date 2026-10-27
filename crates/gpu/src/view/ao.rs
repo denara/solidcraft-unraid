@@ -116,7 +116,7 @@ impl Resources {
         &mut self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
-        uniform: &wgpu::BindGroup,
+        binds: [&wgpu::BindGroup; 2],
         radius: f32,
         size_px: [f32; 2],
         reversed: bool,
@@ -152,8 +152,8 @@ impl Resources {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_bind_group(0, uniform, &[]);
-        for batch in batches {
+        for (batch, bind) in batches.into_iter().zip(binds) {
+            pass.set_bind_group(0, bind, &[]);
             pass.set_pipeline(&self.pipeline);
             if let Some(tris) = &batch.tris {
                 for (buffer, count) in &tris.parts {
@@ -161,15 +161,21 @@ impl Resources {
                     pass.draw(0..*count, 0..1);
                 }
             }
+            // The depth prepass is left out of the performance overlay's counts, as before.
+            let uncounted = super::Tally::default();
+            // The blocks' opaque triangles, for the same depth.
+            for key in &batch.block_order {
+                if let Some(block) = batch.blocks.get(key) {
+                    block.draw(&mut pass, super::TriClass::Opaque, &uncounted);
+                }
+            }
             pass.set_pipeline(&self.planned_pipeline);
-            for draw in &batch.planned {
+            for draw in batch.planned.iter().filter(|d| d.class == super::TriClass::Opaque) {
                 pass.set_vertex_buffer(0, draw.mesh.vertices.slice(..));
                 pass.set_vertex_buffer(1, draw.colors.slice(..));
                 pass.set_index_buffer(draw.mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..draw.mesh.index_count, 0, 0..1);
             }
-            // The depth prepass is left out of the performance overlay's counts, as before.
-            let uncounted = super::Tally::default();
             for draw in batch.instanced.iter().filter(|d| d.look == super::InstanceLook::Opaque) {
                 draw.draw(&mut pass, &self.instanced_pipeline, &self.instanced_flat_pipeline, &uncounted);
             }

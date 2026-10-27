@@ -1,8 +1,10 @@
 # Contributing to SolidCraft
 
+Agents: start from the router in [AGENTS.md](AGENTS.md), which points to a short skill in [`skills/`](skills/README.md) for each kind of work. This page stays the full human guide.
+
 SolidCraft is an open-source parametric 3D CAD app written in pure Rust.
 You sketch on a plane, constrain the sketch, turn profiles into solids, and
-change a parameter to watch the timeline rebuild. It runs as a desktop app (Windows, Linux), in
+change a parameter to watch the timeline rebuild. It runs as a desktop app (Windows, macOS, Linux), in
 the browser (wasm + WebGPU/WebGL2), headless from a CLI, and as an MCP server that AI agents can
 model with.
 
@@ -192,9 +194,11 @@ in the PR. `cargo xtask test` builds the tests with it and then runs every test 
 shared bound on top-level test/side commands for `cargo xtask test` and `cargo xtask ci`.
 For example, `SOLIDCRAFT_TEST_JOBS=2` allows two commands at once; the sequential wasm/doc
 worker consumes one of those slots. Every binary and side check still runs after failures.
-Without the variable the existing concurrency is unchanged. `RUST_TEST_THREADS`,
-`ACTION_MATRIX_JOBS` and Cargo's build-job setting remain independent caller overrides;
-this limit does not choose their values or change test filters, timeouts or baselines.
+Without the variable the existing concurrency is unchanged. With it set, each test binary
+inherits `RUST_TEST_THREADS` and `ACTION_MATRIX_JOBS` of `max(1, cpus / jobs)` — the machine's
+parallelism shared between the binaries in flight — unless you set either one explicitly;
+explicit caller overrides always win. Cargo's build-job setting remains an independent caller
+override; this limit does not change test filters, timeouts or baselines.
 Tests run beside each other on a busy machine, so a test must not depend on wall-clock timing.
 
 **Ready pull requests test what they touch.** CI maps changed files to workspace packages and
@@ -349,6 +353,28 @@ branch. Revalidate if synchronization brought code changes, and push without for
 Report the upstream/PR state you checked,
 any conflicts resolved and validation results. While a task remains active, follow an open
 PR through its status changes; at handoff, clearly identify anything still awaiting merge.
+
+For contributions to the original upstream project only:
+
+To show a picture without committing it, attach the media to the PR (it goes to the PR's own
+attachment storage and renders inline in the comment). A gist is the better home for a log or
+another text file, and you link it; a gist does not render a picture inline. The review artifacts
+stay out of the diff that way, and nothing has to be pushed to a branch of its own.
+
+Attaching works in the browser for anyone who can comment: drag the file into a comment on the
+pull request. A command-line agent without a browser session usually cannot attach a file (the
+upload needs write access to this repository). Say so in the pull request, and the person running
+the agent or a maintainer can attach it.
+
+Keep an eye on your PR's status, but don't push to it only to catch up with `main` (no merge of
+`main`, no Update branch button, no rebase for that alone): every push restarts the whole CI
+run for everyone waiting behind it, and `main`'s own run catches what lands in between. When you
+push a change anyway, or GitHub reports a conflict, rebase onto the latest `main` (push your
+branch with `--force-with-lease`) or merge `main` in once, and resolve conflicts without losing
+others' changes. Don't re-run CI on an unchanged commit either: a real failure fails again.
+Re-run only a job that runner trouble cancelled, with "Re-run failed jobs". While a task remains
+active, follow an open PR through its status changes; at handoff, clearly identify anything
+still awaiting merge.
 
 Much of SolidCraft so far was written by AI coding agents (Claude) working in parallel, each
 owning one area, with a human setting direction and reporting bugs. Their working notes are in

@@ -3,8 +3,15 @@
 #[path = "file_thumbnail.rs"]
 mod thumbnail;
 
+#[path = "file_easyprint.rs"]
+mod easyprint;
+
 #[path = "file_import.rs"]
 pub(crate) mod import;
+
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "file_send.rs"]
+mod send;
 
 use serde_json::{Value, json};
 use solidcraft_doc::Document;
@@ -36,6 +43,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .params("path? (default: current file); format?: container|json (default: json for .json, otherwise container); compression?: fast|compact (default: fast); cache?: bool (the evaluated model, so the design opens without rebuilding; default: true); preview?: bool (saved display meshes, default: false); overwrite?: bool (replace the design's file even though another program or computer changed it since it was opened or saved; without it that save is refused)"),
     CommandSpec::new("file.save_as", "Save As", save_as)
         .icon("save")
+        .key("Ctrl+Shift+S")
         .noundo()
         .params("path; format?: container|json (default: json for .json, otherwise container); compression?: fast|compact (default: fast); cache?: bool (the evaluated model, so the design opens without rebuilding; default: true); preview?: bool (saved display meshes, default: false); overwrite?: bool (as file.save, when `path` is the design's own file)"),
     CommandSpec::new("doc.recovery_list", "Recoverable Designs", recovery_list).icon("restore")
@@ -53,10 +61,20 @@ pub static COMMANDS: &[CommandSpec] = &[
         .at("INSERT", "FILES")
         .icon("mesh_export")
         .noundo()
-        .params("path; format?: stl|3mf|3mf-tagged (default from the extension, else stl; 3mf-tagged: docs/formats/3mf-face-tags.md); bodies?: [names] (default: all); ascii?: bool (STL); slicer?: id, name or program path from file.slicers (open the saved file there); quality?: standard|fine|finest (STL, OBJ and 3MF: how closely the mesh follows curved faces, a chord tolerance of 2e-4, 5e-5 or 1e-5 of each body's size; default standard)"),
+        .params("path; format?: stl|3mf|3mf-tagged (default from the extension, else stl; 3mf-tagged: docs/formats/3mf-face-tags.md); bodies?: [names] (default: all); ascii?: bool (STL); slicer?: id or name from file.slicers, the program path it lists, or a program the user added under Custom… (send the saved file there, through the same steps as file.send_to_slicer: a slicer that has to be started first is waited for; may be deprecated later in favour of file.send_to_slicer or a Send to App workflow, kept for scripts); single_instance?: bool (default true; see file.send_to_slicer); quality?: standard|fine|finest (STL, OBJ and 3MF: how closely the mesh follows curved faces, a chord tolerance of 2e-4, 5e-5 or 1e-5 of each body's size; default standard)"),
+    CommandSpec::new("file.send_to_slicer", "Send to Slicer", send_to_slicer)
+        .enabled(starts_programs)
+        .at("INSERT", "FILES")
+        .icon("mesh_export")
+        .noundo()
+        .params("slicer: id or name from file.slicers, or a program the user added under Custom…; bodies?: [names] (default: the selected bodies); wait?: block|return|no (default block: a slicer that drops a file at a cold start is started alone and the call waits up to 10 s for it to be ready, then sends; return: start it and answer {starting}; no: send now); single_instance?: bool (default true: PrusaSlicer, SuperSlicer and Cura load the file in the window that is open); format?: 3mf|stl|3mf-tagged (default 3mf, in millimetres; STL if that can't be written) → saves the bodies in this user's slicer folder and opens the file in the slicer. The file name stays the same for the same design and bodies, so sending again replaces it (use the slicer's Reload from disk)"),
+    CommandSpec::new("file.open_in_easyprint", "Open with EasyPrint", easyprint::open_in_easyprint)
+        .icon("mesh_export")
+        .noundo()
+        .params("consent: bool (required: true only once the user has agreed to upload the model to Printables' servers; it stays there for 30 minutes and opening it needs a Printables sign-in); bodies?: [names] (default: the selected bodies); format?: 3mf|stl (default 3mf, in millimetres) → uploads the bodies to EasyPrint, Printables' slicer in the browser, and opens it in the browser. 100 MB at most. Works in the desktop app and the browser build; the CLI has no way to upload yet"),
     CommandSpec::new("file.slicers", "Installed Slicers", slicers).icon("export")
         .noundo()
-        .params("→ the slicers found on this machine: [{id, name, icon?}]; pass an id or name as file.save_mesh's `slicer`"),
+        .params("→ the slicers found on this machine: [{id, name, program, icon?}]; pass an id, a name or the program path as file.send_to_slicer's or file.save_mesh's `slicer`"),
 ];
 
 fn new_doc(s: &mut Session, p: &Value) -> Result<Value> {
@@ -304,8 +322,7 @@ fn open(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(stem) = default_name_for(&doc.name, path) {
         doc.name = stem;
     }
-    s.replace_design(Session::opened(doc, saved.as_ref()));
-    s.path = Some(path.to_string());
+    s.replace_design(Session::opened_at(doc, saved.as_ref(), Some(path)));
     s.disk = disk;
     s.read_only = read_only;
     let errors = s.model.results.iter().filter(|r| r.error.is_some()).count();
@@ -402,16 +419,7 @@ fn write_file(s: &mut Session, path: &str, format: &str, compression: &str, prev
         "compact" => solidcraft_io::DesignCompression::Compact,
         _ => return Err(bad("file.save", "compression must be fast or compact")),
     };
-    // Linked designs are kept relative to the folder the design is saved in.
-    let links = super::component_link::rebased(&s.doc, s.path.as_deref(), path);
-    let old_links = (links != s.doc.links).then(|| std::mem::replace(&mut s.doc_mut().links, links));
-    let r = write_bytes(s, path, format, compression, preview, cache);
-    if r.is_err()
-        && let Some(old) = old_links
-    {
-        s.doc_mut().links = old;
-    }
-    r
+    write_bytes(s, path, format, compression, preview, cache)
 }
 
 fn write_bytes(
@@ -423,8 +431,8 @@ fn write_bytes(
     cache: bool,
 ) -> Result<Value> {
     let bytes = match format {
-        "container" => s.design_container(compression, preview, cache)?,
-        "json" => solidcraft_io::write_design(&s.design()),
+        "container" => s.design_container_at(Some(path), compression, preview, cache)?,
+        "json" => solidcraft_io::write_design(&s.design_at(Some(path))),
         _ => return Err(bad("file.save", "format must be container or json")),
     };
     // Atomic, keeping the version being replaced as `<file>.bak`.
@@ -437,17 +445,38 @@ fn write_bytes(
 }
 
 impl Session {
+    /// Open a design with its file location, resolving component links before history keeps
+    /// them. Absolute in-memory targets survive Save As, undo, redo and recovery unchanged.
+    pub fn opened_at(mut doc: Document, saved: Option<&solidcraft_doc::SavedModel>, path: Option<&str>) -> Self {
+        super::component_link::resolve_design_links(&mut doc, path);
+        let mut session = Self::opened(doc, saved);
+        session.path = path.map(str::to_owned);
+        session
+    }
+
+    /// Prepare only the file's copy with relative paths; saving never rewrites live history.
+    pub(crate) fn design_at(&self, path: Option<&str>) -> std::borrow::Cow<'_, Document> {
+        let mut design = std::borrow::Cow::Borrowed(&*self.doc);
+        if let Some(path) = path {
+            let links = super::design_link::rebased(&self.doc, self.path.as_deref(), path);
+            if links != self.doc.links {
+                design.to_mut().links = links;
+            }
+        }
+        if !self.visibility.is_empty() {
+            design.to_mut().visibility = self.visibility.clone();
+        }
+        design
+    }
+
     /// Take up a save that ran on `done`, a [`Session::scratch`] copy of this session that
     /// `file.save` or `file.save_as` ran on (on another thread, so the window keeps drawing)
-    /// while this one did not change: the name and link paths the save gave the design, its
+    /// while this one did not change: the name the save gave the design, its
     /// file, and its saved state, as running the command here would have left them.
     pub fn adopt_save(&mut self, done: &Session) {
         if done.doc.name != self.doc.name {
             let (from, to) = (self.doc.name.clone(), done.doc.name.clone());
             rename_design(self, &from, &to);
-        }
-        if done.doc.links != self.doc.links {
-            self.doc_mut().links.clone_from(&done.doc.links);
         }
         self.path.clone_from(&done.path);
         self.disk = done.disk;
@@ -467,7 +496,17 @@ impl Session {
     /// Container bytes for desktop and browser saves. Only already evaluated bodies
     /// and warm meshes are eligible; saving never forces evaluation or tessellation.
     pub fn design_container(&self, compression: solidcraft_io::DesignCompression, preview: bool, cache: bool) -> solidcraft_io::Result<Vec<u8>> {
-        let design = self.design();
+        self.design_container_at(self.path.as_deref(), compression, preview, cache)
+    }
+
+    fn design_container_at(
+        &self,
+        path: Option<&str>,
+        compression: solidcraft_io::DesignCompression,
+        preview: bool,
+        cache: bool,
+    ) -> solidcraft_io::Result<Vec<u8>> {
+        let design = self.design_at(path);
         let geometry = cache.then(|| saved_geometry(self, &design)).flatten();
         let preview = preview.then(|| saved_preview(self)).flatten();
         let thumbnail = cache.then(|| thumbnail::saved(self)).flatten();
@@ -659,28 +698,81 @@ fn save_mesh(s: &mut Session, p: &Value) -> Result<Value> {
         Some("3mf-tagged") => Format::ThreeMfTagged,
         Some(other) => return Err(bad(cmd, format!("unknown mesh format `{other}` (stl, 3mf, 3mf-tagged)"))),
     };
-    let slicer = match str_(p, "slicer") {
-        None => None,
-        Some(spec) => Some(
-            crate::slicers::resolve(spec).ok_or_else(|| bad(cmd, format!("no slicer `{spec}` (see file.slicers, or give the path of a program)")))?,
-        ),
-    };
+    // `slicer` sends the saved file to a program, through the same pipeline as `file.send_to_slicer`
+    // (a slicer that needs starting is waited for, `single_instance` applies). It is kept for scripts
+    // and may be deprecated later in favour of `file.send_to_slicer` or a Send to App workflow; that is
+    // a possibility, not a plan.
     let quality = mesh_quality(p, cmd)?;
-    let mut out = export_to(s, path, format, &string_list(p, "bodies"), quality)?;
-    if let (Some(slicer), Some(obj)) = (slicer, out.as_object_mut()) {
-        // The file is saved either way; a slicer that won't start is reported, not fatal.
-        match slicer.open(path) {
-            Ok(()) => obj.insert("slicer".into(), json!(slicer.name)),
-            Err(e) => obj.insert("slicer_error".into(), json!(e)),
-        };
+    if let Some(spec) = str_(p, "slicer") {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = spec;
+            return Err(bad(cmd, "a slicer can't be started from the browser"));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        return send::send(
+            s,
+            send::Send {
+                cmd,
+                kind: crate::slicers::TargetKind::Slicer,
+                spec,
+                bodies: string_list(p, "bodies"),
+                format,
+                quality,
+                dest: send::Dest::Path(path),
+                single_instance: bool_(p, "single_instance").unwrap_or(true),
+                wait: send::Wait::Block,
+            },
+        );
     }
-    Ok(out)
+    export_to(s, path, format, &string_list(p, "bodies"), quality)
+}
+
+/// The browser build can't start a program.
+fn starts_programs(_: &Session) -> std::result::Result<(), String> {
+    if cfg!(target_arch = "wasm32") { Err("a slicer can't be started from the browser".into()) } else { Ok(()) }
+}
+
+/// Save the bodies to this user's slicer folder and start the slicer with the file. The file
+/// name stays the same for the same design and bodies, so sending again replaces it.
+fn send_to_slicer(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "file.send_to_slicer";
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (s, p);
+        Err(bad(cmd, "a slicer can't be started from the browser"))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let format = match str_(p, "format").map(str::to_ascii_lowercase).as_deref() {
+            None | Some("3mf") => Format::ThreeMf,
+            Some("stl") => Format::StlBinary,
+            Some("3mf-tagged") => Format::ThreeMfTagged,
+            Some(other) => return Err(bad(cmd, format!("unknown mesh format `{other}` (stl, 3mf, 3mf-tagged)"))),
+        };
+        let spec = str_(p, "slicer").ok_or_else(|| bad(cmd, "give `slicer` (see file.slicers)"))?;
+        let wait = send::Wait::parse(str_(p, "wait")).ok_or_else(|| bad(cmd, "`wait` is block, return or no"))?;
+        send::send(
+            s,
+            send::Send {
+                cmd,
+                kind: crate::slicers::TargetKind::Slicer,
+                spec,
+                bodies: string_list(p, "bodies"),
+                format,
+                quality: Default::default(),
+                dest: send::Dest::Folder,
+                single_instance: bool_(p, "single_instance").unwrap_or(true),
+                wait,
+            },
+        )
+    }
 }
 
 fn slicers(_: &mut Session, _: &Value) -> Result<Value> {
     let list: Vec<Value> = crate::slicers::detect()
         .iter()
-        .map(|d| json!({"id": d.id, "name": d.name, "icon": d.icon.as_ref().map(|i| i.path().to_string_lossy().into_owned())}))
+        .map(|d| json!({"id": d.id, "name": d.name, "program": d.command.first(), "icon": d.icon.as_ref().map(|i| i.path().to_string_lossy().into_owned())}))
         .collect();
     Ok(json!({ "slicers": list }))
 }
@@ -708,8 +800,7 @@ fn recover(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(stem) = entry.path.as_deref().and_then(|path| default_name_for(&doc.name, path)) {
         doc.name = stem;
     }
-    s.replace_design(Session::new(doc));
-    s.path = entry.path.clone();
+    s.replace_design(Session::opened_at(doc, None, entry.path.as_deref()));
     s.mark_unsaved();
     if bool_(p, "discard").unwrap_or(false) {
         crate::recovery::remove(&dir, id)?;

@@ -184,11 +184,10 @@ fn a_sketch_on_a_fixed_plane_costs_the_same_in_a_large_placed_design() {
     let plane = doc.add_feature(FeatureKind::ConstructionPlane { plane: PlaneRef::Origin { name: "XZ".into() } }, Some("Datum")).unwrap();
     assert_eq!(counted(|| model.evaluate(&doc)), Counts::default(), "construction plane");
     assert!(model.result(plane).unwrap().error.is_none());
-    let datum = doc.feature(plane).unwrap().name.clone();
     let planes = [
         PlaneRef::Origin { name: "XY".into() },
         PlaneRef::Offset { base: Box::new(PlaneRef::Origin { name: "YZ".into() }), distance: "5 mm".into() },
-        PlaneRef::Construction { name: datum.into() },
+        PlaneRef::Construction { feature: plane.into() },
     ];
     for (k, plane) in planes.into_iter().enumerate() {
         let id = doc.add_feature(line_sketch(plane, Vec2::new(10.0, 1.0 + k as f64)), None).unwrap();

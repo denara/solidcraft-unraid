@@ -18,10 +18,12 @@
 - [Troubleshooting: SolidCraft won't start](guide/troubleshooting.md)
 - [Driving SolidCraft with an AI agent (MCP)](guide/mcp.md)
 - [Agent chat](guide/agent-chat.md)
+- [Local models with the Assistant](guide/local-models.md)
 
 # Developer guide
 
 - [Contributing](dev/contributing.md)
+- [Command guides and community resources](dev/command-guides.md)
 - [Architecture](dev/architecture.md)
 - [UI kit](dev/ui-kit.md)
 - [Extensible library proposal](dev/libraries.md)

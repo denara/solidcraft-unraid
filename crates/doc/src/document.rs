@@ -5,7 +5,7 @@ use solidcraft_sketch::Sketch;
 
 use crate::construct::{AxisDef, GeoRef, PointDef};
 use crate::expr::{self, Expr, Kind};
-use crate::names::{BodyName, FeatureName, SketchId};
+use crate::names::{BodyName, FeatureId, FeatureName, SketchId};
 use crate::points::{Dir, FacePick, Position};
 use crate::{DocError, Result};
 
@@ -14,6 +14,21 @@ pub const MAX_PARAMS: usize = 10_000;
 /// Largest feature id a replayed feature may keep (`Document::insert_feature`): exact in JSON
 /// numbers, and far from overflowing the next id.
 pub const MAX_FEATURE_ID: u64 = 1 << 52;
+
+/// Screw direction independent of the cylinder's placement and the picked end.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, solidcraft_derive::Walk)]
+#[serde(rename_all = "lowercase")]
+pub enum ThreadHandedness {
+    #[default]
+    Right,
+    Left,
+}
+
+impl ThreadHandedness {
+    pub fn is_right(&self) -> bool {
+        *self == Self::Right
+    }
+}
 
 /// A named parameter. User parameters are created by the user; model parameters (`d1`, `d2`…)
 /// are created by dimensions and features.
@@ -57,10 +72,19 @@ pub enum PlaneRef {
     /// Another plane moved along its normal until it goes through a point (a vertex, sketch
     /// point or construction point), so it follows the point.
     ThroughPoint { base: Box<PlaneRef>, point: Box<GeoRef> },
-    /// Another plane rotated about a line (in world coordinates) by an angle expression.
-    AtAngle { base: Box<PlaneRef>, axis_origin: Vec3, axis_dir: Vec3, angle: Expr },
-    /// A construction plane feature (by name).
-    Construction { name: FeatureName },
+    /// Another plane rotated about a line (in world coordinates) by an angle expression. With
+    /// `line`, an edge or round face of the model ([`crate::construct::model_axis`]), the line is
+    /// found there on each evaluation and `axis_origin`/`axis_dir` are where it was when picked.
+    AtAngle {
+        base: Box<PlaneRef>,
+        axis_origin: Vec3,
+        axis_dir: Vec3,
+        angle: Expr,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        line: Option<Box<GeoRef>>,
+    },
+    /// A construction plane feature (by id).
+    Construction { feature: FeatureId },
     /// `base` seen from its other side: the normal reversed by a half turn about the base's
     /// own x axis (y reversed), or about its y axis (x reversed) when `about_y`. A sketch
     /// started from behind a plane faces the viewer this way.
@@ -98,11 +122,34 @@ pub enum PlaneRef {
 
 /// Complete source curves of an outer boundary and each of its holes. Unlike a
 /// span multiset, this identity is independent of adaptive spline subdivision.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+///
+/// A loop is a set of curves: `outer` is kept sorted, and `holes` sorted by their own ids, as
+/// the sketch's profiles produce them. Any start and either direction of the same loop is
+/// accepted and made canonical on load, so a design written by hand or by another writer still
+/// opens (#6499).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct WholeProfileBoundary {
     pub outer: Vec<String>,
     pub holes: Vec<Vec<String>>,
+}
+
+impl<'de> Deserialize<'de> for WholeProfileBoundary {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        /// The written form, before the loop order is dropped.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Written {
+            outer: Vec<String>,
+            holes: Vec<Vec<String>>,
+        }
+        let Written { mut outer, mut holes } = Written::deserialize(deserializer)?;
+        outer.sort();
+        for hole in &mut holes {
+            hole.sort();
+        }
+        holes.sort();
+        Ok(Self { outer, holes })
+    }
 }
 
 /// Which closed profiles of a sketch a feature uses.
@@ -371,6 +418,9 @@ pub enum AxisRef {
     World { axis: String },
     /// Any line in the sketch plane, in world coordinates.
     Line { origin: Position, dir: Dir },
+    /// An edge or round face of the model (a straight or circular edge, a cylinder, cone or
+    /// torus face), found again on each evaluation: [`crate::construct::model_axis`].
+    Model { geo: GeoRef },
     /// A construction axis feature, by name, where it is when the revolve is evaluated.
     Construction { name: FeatureName },
 }
@@ -664,6 +714,23 @@ pub enum FeatureKind {
         #[serde(default)]
         operation: Operation,
     },
+    /// A cone or a truncated cone (#5641): the base circle's centre `base`, its `radius`, the
+    /// radius of the top circle `height` along `axis` (`top_radius`, 0 for a full cone).
+    Cone {
+        #[serde(with = "point_expr")]
+        #[walk(placement)]
+        base: PointExpr,
+        #[serde(default = "z_axis")]
+        axis: Dir,
+        #[walk(length = "Radius")]
+        radius: Expr,
+        #[walk(length = "Top radius")]
+        top_radius: Expr,
+        #[walk(length = "Height")]
+        height: Expr,
+        #[serde(default)]
+        operation: Operation,
+    },
     Combine {
         target: BodyName,
         tools: Vec<BodyName>,
@@ -672,16 +739,18 @@ pub enum FeatureKind {
         keep_tools: bool,
     },
     /// Copies of other features' results, or of bodies (rectangular, circular or along a path).
+    /// The copied features are named by id (#1134).
     Pattern {
-        features: Vec<FeatureName>,
+        features: Vec<FeatureId>,
         pattern: PatternKind,
         /// Copy these bodies (as new bodies) instead of replaying features.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         bodies: Vec<BodyName>,
     },
-    /// Mirror copies of other features' results in a plane.
+    /// Mirror copies of other features' results in a plane. The copied features are named by
+    /// id (#1134).
     Mirror {
-        features: Vec<FeatureName>,
+        features: Vec<FeatureId>,
         plane: PlaneRef,
         /// Mirror these bodies instead of replaying features.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -729,6 +798,9 @@ pub enum FeatureKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[walk(length = "Thread depth")]
         thread_depth: Option<Expr>,
+        /// Screw direction of the cosmetic thread; older holes are right-handed.
+        #[serde(default, skip_serializing_if = "ThreadHandedness::is_right")]
+        handedness: ThreadHandedness,
         /// To Object: drill down to the face (or point) here instead of `depth`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         to: Option<FacePick>,
@@ -751,6 +823,8 @@ pub enum FeatureKind {
         length: Option<Expr>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         modeled: bool,
+        #[serde(default, skip_serializing_if = "ThreadHandedness::is_right")]
+        handedness: ThreadHandedness,
     },
     /// Ruled loft through profiles of several sketches, in order.
     Loft {
@@ -1273,6 +1347,14 @@ pub enum FeatureKind {
         /// The catch's height along the arm.
         #[walk(length = "Catch length")]
         catch_length: Expr,
+        /// The base extends this far below the face (none: the arm starts at the face).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[walk(length = "Base height")]
+        base_height: Option<Expr>,
+        /// Make the snap fit its own body instead of joining the target, so it can be
+        /// patterned or moved on its own.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        new_body: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         body: Option<BodyName>,
     },
@@ -2121,6 +2203,11 @@ pub enum PatternKind {
         alignment: solidcraft_sketch::PatternAlignment,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         reversed: bool,
+        /// The edge or round face of the model the copies turn about, found again on each
+        /// evaluation ([`crate::construct::model_axis`]); `origin` and `axis` are where it was
+        /// when picked.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        axis_ref: Option<GeoRef>,
         /// A construction axis the copies turn about, by name, followed when it moves;
         /// `origin` and `axis` are where it was when the pattern was made.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2245,6 +2332,7 @@ impl FeatureKind {
             FeatureKind::Cylinder { .. } => "CylinderFeature",
             FeatureKind::Sphere { .. } => "SphereFeature",
             FeatureKind::Torus { .. } => "TorusFeature",
+            FeatureKind::Cone { .. } => "ConeFeature",
             FeatureKind::Combine { .. } => "CombineFeature",
             FeatureKind::Pattern { pattern: PatternKind::Rectangular { .. }, .. } => "RectangularPatternFeature",
             FeatureKind::Pattern { pattern: PatternKind::Path { .. }, .. } => "PathPatternFeature",
@@ -2327,6 +2415,7 @@ impl FeatureKind {
             FeatureKind::Cylinder { .. } => "Cylinder",
             FeatureKind::Sphere { .. } => "Sphere",
             FeatureKind::Torus { .. } => "Torus",
+            FeatureKind::Cone { .. } => "Cone",
             FeatureKind::Combine { .. } => "Combine",
             FeatureKind::Pattern { pattern: PatternKind::Rectangular { .. }, .. } => "RectangularPattern",
             FeatureKind::Pattern { pattern: PatternKind::Path { .. }, .. } => "PathPattern",
@@ -2456,6 +2545,33 @@ pub struct Feature {
     pub kind: FeatureKind,
 }
 
+impl Feature {
+    /// Where in `body_names` the names of the first `count` bodies the feature builds are kept,
+    /// in the order it builds them. The same index for most features. An Import keeps its names
+    /// by the file's body index, and builds no body for the file bodies it skips, so its built
+    /// bodies pass their slots by (#2175).
+    pub fn body_name_slots(&self, count: usize) -> Vec<usize> {
+        let skip: std::collections::HashSet<u64> = match &self.kind {
+            FeatureKind::Import { skip, .. } => skip.iter().copied().collect(),
+            _ => Default::default(),
+        };
+        (0..count.saturating_add(skip.len())).filter(|k| !skip.contains(&(*k as u64))).take(count).collect()
+    }
+
+    /// Keep `made`, the names the feature's bodies have now (in the order it builds them), as
+    /// its stored names, so they stay as they are whatever comes and goes before it. An Import's
+    /// skipped file bodies keep the names stored for them.
+    pub fn pin_body_names(&mut self, made: &[String]) {
+        let slots = self.body_name_slots(made.len());
+        self.body_names.resize(slots.last().map_or(0, |s| s + 1), String::new());
+        for (slot, name) in slots.iter().zip(made) {
+            if let Some(stored) = self.body_names.get_mut(*slot) {
+                stored.clone_from(name);
+            }
+        }
+    }
+}
+
 fn inside_str() -> String {
     "inside".into()
 }
@@ -2503,6 +2619,11 @@ pub struct DesignLink {
     pub path: String,
     /// The Import feature holding the linked design's bodies.
     pub feature: u64,
+}
+
+/// A name the design's counter hands out (`Body1`).
+pub fn is_counted_body_name(name: &str) -> bool {
+    name.strip_prefix("Body").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) && n.parse::<usize>().is_ok())
 }
 
 /// The document.
@@ -2834,18 +2955,24 @@ impl Document {
     }
 
     /// Rename body `old` to `new` where the design keeps things by body name outside its
-    /// features: materials, appearances, configuration columns, offsets, components and the
+    /// features: materials, appearances, plastic rules, configuration columns, offsets, components and the
     /// browser's groups and order. (The features are the rename command's to change.)
     ///
     /// A name the design numbered (`Body1`) is not used again after the rename: the design's
     /// counter starts over at every evaluation, so without this a design that is evaluated
-    /// again hands the freed name to the next body (#4957).
+    /// again hands the freed name to the next body (#4957). Every counted name is reserved as
+    /// soon as a body has it (`Session::pin_body_names`), so this only matters for a design
+    /// that has not been through a command since then. `new` may be a reserved name: a rename
+    /// is deliberate, and the body then has what the design keeps under it.
     pub fn rename_body_keys(&mut self, old: &str, new: &str) {
-        if old.strip_prefix("Body").and_then(|n| n.parse::<usize>().ok()).is_some() {
+        if is_counted_body_name(old) {
             self.reserved_body_names.insert(old.to_string());
         }
         if let Some(m) = self.materials.remove(old) {
             self.materials.insert(new.to_string(), m);
+        }
+        if let Some(rule) = self.plastic.assigned.remove(old) {
+            self.plastic.assigned.insert(new.to_string(), rule);
         }
         if let Some(c) = self.appearances.bodies.remove(old) {
             self.appearances.bodies.insert(new.to_string(), c);
@@ -2899,8 +3026,10 @@ impl Document {
                 continue;
             }
             let now = made(a.id);
+            // The stored slot of each body built now (an Import's pass its skipped bodies by).
+            let at: std::collections::HashMap<usize, &String> = b.body_name_slots(now.len()).into_iter().zip(&now).collect();
             for (k, name) in b.body_names.iter().enumerate() {
-                let current = now.get(k);
+                let current = at.get(&k).copied();
                 // Slots the rename left alone, and the ones it set to the names they have now.
                 if a.body_names.get(k) == Some(name) || name.trim().is_empty() || current == Some(name) {
                     continue;
@@ -2949,20 +3078,41 @@ impl Document {
         *self == normalized
     }
 
-    /// Only components' part properties (metadata and free properties) changed: nothing to
+    /// Only part properties changed (the fields `with_part_properties_of` names): nothing to
     /// evaluate. The same whole-Document proof as [`Document::differs_only_in_render`].
     pub fn differs_only_in_part_properties(&self, previous: &Document) -> bool {
-        if self.components.len() != previous.components.len()
-            || self.components.iter().zip(&previous.components).any(|(a, b)| a.id != b.id)
-            || self.components == previous.components
-        {
+        previous.with_part_properties_of(self).is_some_and(|normalized| normalized == *self)
+    }
+
+    /// This design with `other`'s part properties, or `None` when they are this design's
+    /// already (then nothing is copied). The part properties are the fields that change no
+    /// geometry: the design's metadata, and each component's metadata and free properties. A
+    /// field that joins them is compared and copied here, and nowhere else.
+    fn with_part_properties_of(&self, other: &Document) -> Option<Document> {
+        let same = self.metadata == other.metadata
+            && self.components.iter().zip(&other.components).all(|(c, o)| c.metadata == o.metadata && c.properties == o.properties);
+        if same {
+            return None;
+        }
+        let mut out = self.clone();
+        out.metadata.clone_from(&other.metadata);
+        // Paired by position: if the components themselves differ, so do the designs.
+        for (c, o) in out.components.iter_mut().zip(&other.components) {
+            c.metadata.clone_from(&o.metadata);
+            c.properties.clone_from(&o.properties);
+        }
+        Some(out)
+    }
+
+    /// Only appearances (body, face and component looks) changed: evaluation never reads them, so
+    /// the model and its placed world stay valid. The same whole-Document proof as
+    /// [`Document::differs_only_in_render`].
+    pub fn differs_only_in_appearance(&self, previous: &Document) -> bool {
+        if self.appearances == previous.appearances {
             return false;
         }
         let mut normalized = previous.clone();
-        for (n, c) in normalized.components.iter_mut().zip(&self.components) {
-            n.metadata = c.metadata.clone();
-            n.properties = c.properties.clone();
-        }
+        normalized.appearances = self.appearances.clone();
         *self == normalized
     }
 
@@ -3192,6 +3342,17 @@ impl Document {
             return Some(f);
         }
         self.features.iter().find(|f| f.name.eq_ignore_ascii_case(r))
+    }
+
+    /// The feature a pattern or mirror seed names, resolved the way `replay()` resolved seed
+    /// names before seeds were keyed by id (#1134): an exact name match on a feature that is
+    /// not a sketch or a construction plane wins — a sketch and its extrude often share a
+    /// name, and the feature that makes geometry is the one to copy — else [`find_feature`].
+    pub fn seed_feature(&self, name: &str) -> Option<&Feature> {
+        self.features
+            .iter()
+            .find(|x| x.name == name && !matches!(x.kind, FeatureKind::Sketch { .. } | FeatureKind::ConstructionPlane { .. }))
+            .or_else(|| self.find_feature(name))
     }
 
     fn unique_name(&self, base: &str) -> String {
@@ -3612,25 +3773,37 @@ impl Document {
                 let b = self.resolve_plane_in(vals, base, depth + 1, st)?;
                 Ok(b.offset(Self::eval_in(vals, distance, Kind::Length)?))
             }
-            PlaneRef::AtAngle { base, axis_origin, axis_dir, angle } => {
+            PlaneRef::AtAngle { base, axis_origin, axis_dir, angle, line } => {
                 let b = self.resolve_plane_in(vals, base, depth + 1, st)?;
                 let a = Self::eval_in(vals, angle, Kind::Angle)?;
+                let (axis_origin, axis_dir) = match line {
+                    Some(g) => {
+                        let st = st.ok_or_else(|| DocError::Invalid("this plane is built from the model: evaluate first".into()))?;
+                        crate::construct::model_axis(st, g)?
+                    }
+                    None => (*axis_origin, *axis_dir),
+                };
                 let d = axis_dir.normalized().ok_or_else(|| DocError::Invalid("rotation axis".into()))?;
                 let rot = |v: Vec3| v * a.cos() + d.cross(v) * a.sin() + d * (d.dot(v) * (1.0 - a.cos()));
-                let o = *axis_origin + rot(b.origin - *axis_origin);
+                let o = axis_origin + rot(b.origin - axis_origin);
                 Plane::new(o, rot(b.x), rot(b.y)).ok_or_else(|| DocError::Invalid("degenerate plane".into()))
             }
             PlaneRef::Flipped { base, about_y } => Ok(self.resolve_plane_in(vals, base, depth + 1, st)?.flipped(*about_y)),
-            PlaneRef::Construction { name } => {
+            PlaneRef::Construction { feature } => {
                 // Evaluated already: as it came out.
-                if let Some(c) = st.and_then(|st| st.construct.iter().find(|c| &c.name == name))
+                if let Some(c) = st.and_then(|st| st.construct.iter().find(|c| c.feature == feature.0))
                     && let crate::construct::ConstructGeom::Plane(pl) = &c.geom
                 {
                     return Ok(*pl);
                 }
-                match self.find_feature(name).map(|f| &f.kind) {
+                match self.feature(feature.0).map(|f| &f.kind) {
                     Some(FeatureKind::ConstructionPlane { plane }) => self.resolve_plane_in(vals, plane, depth + 1, st),
-                    _ => Err(DocError::Unknown(format!("construction plane `{name}`"))),
+                    // A name that could not be resolved when an older design opened keeps id 0,
+                    // which no feature has (#1134): the reference dangles, as it always did.
+                    _ => {
+                        let shown = self.feature(feature.0).map(|f| f.name.clone()).unwrap_or_else(|| feature.to_string());
+                        Err(DocError::Unknown(format!("construction plane `{shown}`")))
+                    }
                 }
             }
             PlaneRef::Midplane { .. }

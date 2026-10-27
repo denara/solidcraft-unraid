@@ -217,6 +217,68 @@ fn find_group(app: &SolveApp, id: u64) -> Option<&solidcraft_engine::doc::Browse
     app.session.doc.browser_groups.iter().find(|g| g.id == id)
 }
 
+/// World bodies of a component picked in the tree. The root is the whole design; a nested
+/// component is its own placement, including bodies inside it.
+pub(crate) fn bodies_of_component(app: &SolveApp, id: u64) -> Vec<String> {
+    let present: Vec<String> = app.session.world_state().bodies.iter().map(|b| b.name.clone()).collect();
+    let mut names = if id == 0 {
+        present.clone()
+    } else {
+        let mut names = Vec::new();
+        let path = app.session.doc.first_path(id);
+        if !path.is_empty()
+            && let Ok(more) = app.session.occurrence_bodies(&path, true)
+        {
+            names.extend(more);
+        }
+        names.extend(crate::context_menu::component_bodies(app, id));
+        names
+    };
+    names.retain(|n| present.contains(n) && !app.session.body_removed_later(n));
+    let mut kept = Vec::new();
+    for name in names {
+        if !kept.contains(&name) {
+            kept.push(name);
+        }
+    }
+    kept
+}
+
+/// How a browser click changes a dialog input that takes bodies.
+enum Take {
+    /// A second click on the same set removes it.
+    Toggle,
+    /// A Shift range only adds.
+    Add,
+}
+
+/// Put these bodies into the open dialog's active input, the same way as clicking each one
+/// ([`pick_from_browser`]). Returns false when that input does not take bodies, so the click
+/// keeps its ordinary meaning. A Shift range only adds; a group or component toggles.
+fn offer_bodies(app: &mut SolveApp, names: &[String], take: Take) -> bool {
+    if !dialog_takes_body(app) {
+        return false;
+    }
+    let world = app.session.world_state();
+    let picked: Vec<Sel> =
+        names.iter().filter(|n| world.body(n).is_some() && !app.session.body_removed_later(n)).map(|n| Sel::Body { name: n.clone() }).collect();
+    if picked.is_empty() {
+        return false;
+    }
+    let Some(mut d) = app.dialog.take() else { return false };
+    for body in picked {
+        if d.active_input().is_none_or(|i| i.accept & crate::selection::BODIES == 0) {
+            break;
+        }
+        if matches!(take, Take::Add) && d.active_input().is_some_and(|i| i.items.contains(&body)) {
+            continue;
+        }
+        d.pick(&app.session, body);
+    }
+    app.dialog = Some(d);
+    true
+}
+
 /// The bodies in a group (none for sketch and plane groups).
 pub fn group_bodies(app: &SolveApp, id: u64) -> Vec<String> {
     let st = app.session.world_state();
@@ -230,16 +292,36 @@ pub fn group_name(app: &SolveApp, id: u64) -> Option<String> {
     find_group(app, id).map(|g| g.name.clone())
 }
 
+/// The placement a folder's scope key names: `c0` the design, `o:<ids>` a placement's path.
+fn scope_path(scope: &str) -> Vec<u64> {
+    scope.strip_prefix("o:").map(|ids| ids.split('/').filter_map(|id| id.parse().ok()).collect()).unwrap_or_default()
+}
+
+/// Paste on a Bodies or Sketches folder or group: copied (or cut) bodies, or copied sketches and
+/// features, go into its component (that placement), and into the group.
+fn paste_item(app: &SolveApp, component: u64, scope: &str, folder: &str, group: Option<u64>) -> Item {
+    let mut item = Item::action("ui.paste", "Paste", "paste")
+        .key("Ctrl+V")
+        .with(json!({ "component": component, "path": scope_path(scope), "group": group, "folder": folder }));
+    item.enabled = if folder == "sketches" { crate::edit_clipboard::pasting_features(app) } else { crate::edit_clipboard::pasting_bodies(app) };
+    item
+}
+
 /// The menu of a group row.
 pub fn group_items(app: &SolveApp, id: u64, scope: &str) -> Vec<Item> {
     let Some(g) = find_group(app, id) else { return Vec::new() };
-    let mut v = vec![
+    let mut v = Vec::new();
+    // Paste beside Rename, as the clipboard sits beside Delete and Rename in every menu.
+    if g.folder == "bodies" || g.folder == "sketches" {
+        v.push(paste_item(app, g.component, scope, &g.folder, Some(id)));
+    }
+    v.extend([
         Item::action("ui.rename", "Rename", "rename").with(json!({ "group": id })),
         Item::action("ui.ungroup", "Ungroup", "folder").with(json!({ "group": id })),
         Item::sep(),
         // The group itself: its items keep their own state.
         Item::action("ui.folderVisible", "Show/Hide", "eye").key("V").with(json!({ "key": format!("{scope}/g{id}") })),
-    ];
+    ]);
     if g.folder == "bodies" {
         v.push(Item::action("ui.isolate", "Isolate", "body").with(json!({ "bodies": group_bodies(app, id) })));
     }
@@ -253,7 +335,11 @@ pub fn folder_items(app: &SolveApp, component: u64, folder: &str, scope: &str) -
     let mut v = Vec::new();
     if folder == "bodies" {
         let bodies: Vec<String> = all.iter().map(|e| e.key.clone()).collect();
+        v.push(paste_item(app, component, scope, folder, None));
         v.push(Item::action("component.from_bodies", "Create Components from Bodies", "component").with(json!({ "bodies": bodies })));
+    }
+    if folder == "sketches" {
+        v.push(paste_item(app, component, scope, folder, None));
     }
     v.push(
         Item::action("ui.newGroup", if folder == "sketches" { "New Sketch Group" } else { "New Group" }, "folder")
@@ -367,6 +453,8 @@ pub(crate) struct Row<'a> {
     pub(crate) radio: Option<bool>,
     /// Trailing badges: "lock", "pin".
     pub(crate) badges: &'a [&'a str],
+    /// A button at the row's right end: (icon, tooltip label), e.g. a feature's profile sketch.
+    pub(crate) action: Option<(&'a str, &'a str)>,
     /// Lit by the selection or the 3D view's pointer: the item's own row, or a row leading to it.
     pub(crate) mark: Mark,
 }
@@ -392,6 +480,8 @@ pub(crate) struct RowResp {
     pub(crate) fold: bool,
     pub(crate) eye: bool,
     pub(crate) radio: bool,
+    /// The row's [`Row::action`] button was clicked.
+    pub(crate) action: bool,
     pub(crate) hovered: bool,
     /// The row's response (drag and drop).
     pub(crate) resp: Option<egui::Response>,
@@ -438,8 +528,30 @@ pub(crate) fn draw_row(ui: &mut egui::Ui, id: egui::Id, row: &Row) -> RowResp {
     let fold_r = Rect::from_min_max(pos2(x - 4.0, r.top()), pos2(x + 15.0, r.bottom()));
     let eye_r = Rect::from_center_size(pos2(x + 14.0 + 8.0, cy), vec2(19.0, r.height()));
     let radio_r = Rect::from_center_size(pos2(x + 32.0 + 6.0, cy), vec2(15.0, r.height()));
+    // The label follows the fold arrow, eye, radio and icon (drawn below in that order). It is
+    // laid out first, so the action button can sit right after the name and read as the row's.
+    let label_x = x + 14.0 + 18.0 + if row.radio.is_some() { 15.0 } else { 0.0 } + if row.icon.is_empty() { 0.0 } else { 21.0 };
+    let col =
+        if row.selected { crate::theme::TabAccent::current(ui.ctx()).ink } else { row.color.unwrap_or(if row.dim { t.text_dim } else { t.text }) };
+    let label_display = if row.name { crate::i18n::tr_name(row.label) } else { crate::i18n::tr_dyn(row.label) };
+    let font = if row.selected { crate::fonts::semibold(t.font_label) } else { FontId::proportional(t.font_label) };
+    // The label stops before the action, the badges and the card's edge; a longer name ends in
+    // an ellipsis and its full text is in the tooltip.
+    let badges_width = row.badges.len() as f32 * 15.0;
+    let action_width = if row.action.is_some() { 22.0 } else { 0.0 };
+    let room = (r.right() - 4.0 - badges_width - action_width - label_x).max(0.0);
+    let mut job = egui::text::LayoutJob::simple(label_display.to_string(), font, col, room);
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    job.wrap.overflow_character = Some('\u{2026}');
+    let galley = ui.painter().layout_job(job);
+    let lw = galley.size().x;
+    let elided = galley.elided;
+    let action_r = Rect::from_min_size(pos2(label_x + lw + 2.0, r.top()), vec2(20.0, r.height()));
     let at = |p: Pos2| -> u8 {
-        if row.fold.is_some() && fold_r.contains(p) {
+        if row.action.is_some() && action_r.contains(p) {
+            4
+        } else if row.fold.is_some() && fold_r.contains(p) {
             1
         } else if row.eye.is_some() && eye_r.contains(p) {
             2
@@ -486,34 +598,29 @@ pub(crate) fn draw_row(ui: &mut egui::Ui, id: egui::Id, row: &Row) -> RowResp {
         icons::paint_icon(ui.painter(), ir, row.icon, if row.dim { DIM_ICON_OPACITY } else { 1.0 });
         x += 21.0;
     }
-    let col =
-        if row.selected { crate::theme::TabAccent::current(ui.ctx()).ink } else { row.color.unwrap_or(if row.dim { t.text_dim } else { t.text }) };
-    let label_display = if row.name { crate::i18n::tr_name(row.label) } else { crate::i18n::tr_dyn(row.label) };
-    let font = if row.selected { crate::fonts::semibold(t.font_label) } else { FontId::proportional(t.font_label) };
-    // The label stops before the badges and the card's edge; a longer name ends in an ellipsis
-    // and its full text is in the tooltip.
-    let badges_width = row.badges.len() as f32 * 15.0;
-    let room = (r.right() - 4.0 - badges_width - x).max(0.0);
-    let mut job = egui::text::LayoutJob::simple(label_display.to_string(), font, col, room);
-    job.wrap.max_rows = 1;
-    job.wrap.break_anywhere = true;
-    job.wrap.overflow_character = Some('\u{2026}');
-    let galley = ui.painter().layout_job(job);
-    let lw = galley.size().x;
-    let elided = galley.elided;
     crate::scenario::publish_rect(&format!("row_label:{}", row.label), Rect::from_min_size(pos2(x, cy - galley.size().y / 2.0), galley.size()));
     ui.painter().with_clip_rect(ui.painter().clip_rect().intersect(r)).galley(pos2(x, cy - galley.size().y / 2.0), galley, col);
-    let mut bx = (x + lw + 6.0).min(r.right() - 16.0);
+    let mut bx = (x + lw + 6.0 + action_width).min(r.right() - 16.0);
     for b in row.badges {
         let br = Rect::from_center_size(pos2(bx + 6.0, cy), vec2(12.0, 12.0));
         badge(ui.painter(), br, b, t.text_dim);
         bx += 15.0;
+    }
+    if let Some((icon, _)) = row.action {
+        if hover_on == 4 {
+            ui.painter().rect_filled(action_r.shrink2(vec2(1.0, 3.0)), t.radius_sm.saturating_sub(1), t.hover);
+        }
+        let ir = Rect::from_center_size(action_r.center(), vec2(14.0, 14.0));
+        icons::paint_icon(ui.painter(), ir, icon, if hover_on == 4 { 1.0 } else { 0.6 });
+        out.action = resp.clicked() && click_on == 4;
+        crate::scenario::publish_handle(&format!("action:{}", row.label), action_r.center());
     }
     crate::scenario::publish_handle(&format!("row:{}", row.label), r.center());
     let tip = match hover_on {
         1 => Some(if row.fold == Some(true) { crate::i18n::tr("ui.collapse") } else { crate::i18n::tr("ui.expand") }),
         2 => Some(if row.eye == Some(true) { crate::i18n::tr("ui.hide") } else { crate::i18n::tr("ui.show") }),
         3 => Some(if row.radio == Some(true) { crate::i18n::tr("ui.active_component") } else { crate::i18n::tr("ui.activate") }),
+        4 => row.action.map(|(_, tip)| crate::i18n::tr_label(tip)),
         _ => None,
     };
     let resp = match tip {
@@ -540,6 +647,18 @@ fn click_select(app: &mut SolveApp, ui: &egui::Ui, key: String, sel: Option<Sel>
         let order = app.tree.order.get(..app.tree.order_len).unwrap_or(&[]);
         let items = shift_range(&app.tree.order_prev, a, &key).or_else(|| shift_range(order, a, &key));
         if let Some(items) = items {
+            // Move/Copy (and any open command whose active input takes bodies) gets every body
+            // in the range. Otherwise the range is an ordinary selection.
+            let names: Vec<String> = items
+                .iter()
+                .filter_map(|s| match s {
+                    Sel::Body { name } => Some(name.clone()),
+                    _ => None,
+                })
+                .collect();
+            if offer_bodies(app, &names, Take::Add) {
+                return;
+            }
             let _ = app.run("select.set", json!({ "items": items, "add": mods.command || mods.ctrl }));
             return;
         }
@@ -689,7 +808,10 @@ impl Lit {
     fn of(app: &mut SolveApp) -> Lit {
         use crate::viewport::Hit;
         let mut selected = std::collections::HashSet::new();
-        for s in &app.session.selection {
+        // Bodies chosen in an open dialog light up even when the click was in the 3D view,
+        // which does not rewrite the browser selection.
+        let dialog_picks = app.dialog.as_ref().map(|d| d.items()).unwrap_or_default();
+        for s in app.session.selection.iter().chain(&dialog_picks) {
             selected.insert(match s {
                 Sel::Body { name } | Sel::Face { body: name, .. } | Sel::Edge { body: name, .. } | Sel::Vertex { body: name, .. } => {
                     Thing::Body(name.clone())
@@ -809,7 +931,7 @@ const MAX_BROWSER_WIDTH: f32 = 620.0;
 /// How wide a grip the sidebar's right edge offers, counted inwards from the edge.
 const BROWSER_RAIL: f32 = 6.0;
 /// How opaque the floating browser's card is; the workspace shows through the rest.
-const BROWSER_FLOAT_ALPHA: f32 = 0.4;
+pub(crate) const BROWSER_FLOAT_ALPHA: f32 = 0.4;
 
 pub(crate) fn browser_width(remembered: f32) -> f32 {
     if remembered.is_finite() { remembered.clamp(MIN_BROWSER_WIDTH, MAX_BROWSER_WIDTH) } else { crate::prefs::DEFAULT_BROWSER_WIDTH }
@@ -1185,16 +1307,19 @@ fn component_rows_inner(
             app.session.visibility.hidden_bodies.retain(|b| !bodies.contains(b));
         }
     }
-    if r.clicked {
-        let ctrl = ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
-        if !ctrl {
-            app.tree.picked_components.clear();
-            let _ = app.run("select.clear", json!({}));
-        }
-        if app.tree.picked_components.contains(&id) {
-            app.tree.picked_components.retain(|c| *c != id);
-        } else {
-            app.tree.picked_components.push(id);
+    if r.clicked && !r.double {
+        let names = bodies_of_component(app, id);
+        if !offer_bodies(app, &names, Take::Toggle) {
+            let ctrl = ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
+            if !ctrl {
+                app.tree.picked_components.clear();
+                let _ = app.run("select.clear", json!({}));
+            }
+            if app.tree.picked_components.contains(&id) {
+                app.tree.picked_components.retain(|c| *c != id);
+            } else {
+                app.tree.picked_components.push(id);
+            }
         }
     }
     if r.double {
@@ -1252,6 +1377,12 @@ fn occurrence_key(path: &[u64]) -> String {
     key
 }
 
+/// Show a placement's row closed: a pasted (or moved) component arrives folded, whatever a row
+/// at that path showed before.
+pub(crate) fn close_placement(app: &mut SolveApp, path: &[u64]) {
+    app.tree.collapsed.insert(occurrence_key(path));
+}
+
 /// A placement, rather than a component definition: repeated child IDs remain distinct
 /// because their complete paths are the selection and row identity.
 fn occurrence_rows(app: &mut SolveApp, ui: &mut egui::Ui, path: &[u64], depth: usize, acts: &mut Actions, cache: &mut cache::Cache) {
@@ -1295,7 +1426,8 @@ fn occurrence_rows_inner(
             label: &placement.label,
             name: true,
             selected,
-            dim: faded || !visible,
+            // A cut component is faded until Paste moves it.
+            dim: faded || !visible || app.cut_placements.iter().any(|p| p.as_slice() == path),
             radio: Some(active),
             badges,
             mark: acts.lit.placement(&app.session.doc, path, placement.component),
@@ -1331,8 +1463,11 @@ fn occurrence_rows_inner(
     if r.double && app.session.doc.parts.contains_key(&placement.component) {
         crate::dialogs_part_size::open(app, placement.component);
     }
-    if r.clicked {
-        click_select(app, ui, key.clone(), Some(Sel::Occurrence { path: path.to_vec() }));
+    if r.clicked && !r.double {
+        let names = app.session.occurrence_bodies(path, true).unwrap_or_default();
+        if !offer_bodies(app, &names, Take::Toggle) {
+            click_select(app, ui, key.clone(), Some(Sel::Occurrence { path: path.to_vec() }));
+        }
     }
     if r.hovered {
         let bodies = placement.hover_bodies.get_or_insert_with(|| app.session.occurrence_bodies(path, true).unwrap_or_default());
@@ -1743,6 +1878,7 @@ pub fn canvas_items(app: &SolveApp, id: u64) -> Vec<Item> {
     vec![
         Item::action("ui.editCanvas", "Edit Canvas", "canvas").with(json!({ "canvas": id })),
         Item::action("ui.calibrateCanvas", "Calibrate", "measure").with(json!({ "canvas": id })),
+        Item::action("canvas.to_sketch", "Canvas to Sketch", "canvas").with(json!({ "canvas": id })),
         Item::sep(),
         Item::action("ui.delete", "Delete", "delete").with(json!({ "canvases": [id] })),
         Item::action("ui.rename", "Rename", "rename").with(json!({ "canvas": id })),
@@ -1779,9 +1915,10 @@ impl CanvasPanel {
     }
 }
 
-/// Does the open dialog's active input take bodies (Combine's target and tools, #4452)? Then a
-/// body clicked in the Browser goes there, as a click on it in the view does, rather than
-/// replacing the selection: overlapping bodies are often only told apart in the Browser.
+/// Does the open dialog's active input take bodies (Combine's target and tools, #4452;
+/// Move/Copy's bodies, #4771)? Then a body clicked in the Browser goes there, as a click
+/// on it in the view does, rather than replacing the selection: overlapping bodies are
+/// often only told apart in the Browser.
 fn dialog_takes_body(app: &SolveApp) -> bool {
     app.dialog.as_ref().and_then(|d| d.active_input()).is_some_and(|i| i.accept & crate::selection::BODIES != 0)
 }
@@ -2073,8 +2210,15 @@ fn folder_rows_at(
             ..Default::default()
         },
     );
-    if r.fold || r.clicked {
+    if r.fold {
         toggle(app, key, true);
+    } else if r.clicked {
+        // The Bodies label is the whole set while a command is asking for bodies. The arrow
+        // still folds it. With no such command, the label folds, as it always has.
+        let names: Vec<String> = data.entries().flat_map(|e| e.bodies.clone()).collect();
+        if !offer_bodies(app, &names, Take::Toggle) {
+            toggle(app, key, true);
+        }
     }
     if r.eye {
         toggle_folder(app, key);
@@ -2121,8 +2265,13 @@ fn folder_rows_at(
                 ..Default::default()
             },
         );
-        if r.fold || r.clicked {
+        if r.fold {
             toggle(app, gkey, true);
+        } else if r.clicked {
+            let names: Vec<String> = items.iter().flat_map(|e| e.bodies.clone()).collect();
+            if !offer_bodies(app, &names, Take::Toggle) {
+                toggle(app, gkey, true);
+            }
         }
         if r.eye {
             toggle_folder(app, gkey);
@@ -2227,7 +2376,8 @@ fn entry_row(
             label: &e.label,
             name: true,
             selected,
-            dim: !visible || parent_hidden,
+            // A cut body is faded until Paste moves it.
+            dim: !e.visible || parent_hidden || (folder == "bodies" && app.cut_bodies.contains(&e.key)),
             color: e.color,
             badges,
             mark,
@@ -2257,8 +2407,14 @@ fn entry_row(
             app.edit_sketch(id);
         }
     } else if r.clicked {
-        if folder == "construction" || (folder == "bodies" && app.dialog.is_some()) {
+        let shift = ui.input(|i| i.modifiers.shift);
+        // A body row with a dialog open is a pick, as Combine does (#4452), unless Shift is
+        // asking for the rows between this one and the anchor.
+        if folder == "construction" || (folder == "bodies" && !shift && app.dialog.is_some()) {
             if let Some(s) = e.sel.clone() {
+                if matches!(s, Sel::Body { .. }) {
+                    app.tree.anchor = Some(e.row_key.clone());
+                }
                 pick_from_browser(app, s);
             }
         } else {
@@ -2446,14 +2602,17 @@ pub(crate) fn occurrence_triad(app: &mut SolveApp, ui: &mut egui::Ui, painter: &
 }
 
 /// Dimensions of finished sketches whose dimensions are shown (Show Dimensions), drawn over the
-/// viewport like the sketch being edited draws its own (`crate::dim_view`), but not editable.
+/// viewport like the sketch being edited draws its own (`crate::dim_view`). A double-click on a
+/// value edits it in place without editing the sketch (`crate::dim_view::model_double_click`).
 pub fn dims_overlay(app: &SolveApp, ctx: &egui::Context) {
     use solidcraft_engine::geom::Vec2;
     use solidcraft_engine::sketch::{DimFrame, chain_centres, default_text, dim_frame, dim_layout_reaching, dim_reach};
+    crate::dim_view::set_model_drawn(Vec::new());
     let Some(rect) = app.viewport.rect else { return };
     if app.session.visibility.shown_dimensions.is_empty() {
         return;
     }
+    let mut drawn = Vec::new();
     let tk = Tokens::get();
     let proj = crate::viewport::projection(app, rect);
     let painter = ctx.layer_painter(egui::LayerId::background()).with_clip_rect(rect);
@@ -2506,8 +2665,12 @@ pub fn dims_overlay(app: &SolveApp, ctx: &egui::Context) {
             let r = Rect::from_center_size(tc, size);
             painter.rect_filled(r, tk.radius_sm / 2, tk.viewport_top.gamma_multiply(0.85));
             painter.galley(r.min + vec2(3.0, 1.0), galley, col);
+            if rect.contains(tc) {
+                drawn.push(crate::dim_view::ModelDim { sketch: *id, id: c.id.clone(), param: c.param.clone(), text: r });
+            }
         }
     }
+    crate::dim_view::set_model_drawn(drawn);
 }
 
 /// Keep browser panels beside the browser and below the ribbon, including the floating shell.

@@ -25,6 +25,8 @@ pub struct DocSlot {
     pub(crate) big_operation: bool,
     cam: Camera,
     pre_sketch_marker: Option<Option<usize>>,
+    pub(crate) pending_feature_edit: Option<crate::feature_edit::PendingFeatureEdit>,
+    pre_sketch_cam: Option<crate::PreSketchView>,
     view: DocView,
     occurrence_move: Option<crate::browser::OccMove>,
     agent_chat: crate::agent_chat::AgentChat,
@@ -35,6 +37,12 @@ pub struct DocSlot {
 #[derive(Clone, Debug, Default)]
 struct DocView {
     render: crate::render_workspace::ViewState,
+    /// Bodies and components copied or cut in this design: their names and paths mean nothing
+    /// in another one (copied features stay with the session the same way).
+    copied_bodies: Vec<String>,
+    copied_placements: Vec<Vec<u64>>,
+    cut_bodies: Vec<String>,
+    cut_placements: Vec<Vec<u64>>,
 }
 
 impl DocSlot {
@@ -45,6 +53,8 @@ impl DocSlot {
             big_operation: false,
             cam: Camera::default(),
             pre_sketch_marker: None,
+            pending_feature_edit: None,
+            pre_sketch_cam: None,
             view: DocView::default(),
             occurrence_move: None,
             agent_chat: Default::default(),
@@ -88,7 +98,13 @@ impl Documents {
 }
 
 fn take_view(app: &mut SolveApp) -> DocView {
-    DocView { render: std::mem::take(&mut app.render_workspace.view) }
+    DocView {
+        render: std::mem::take(&mut app.render_workspace.view),
+        copied_bodies: std::mem::take(&mut app.copied_bodies),
+        copied_placements: std::mem::take(&mut app.copied_placements),
+        cut_bodies: std::mem::take(&mut app.cut_bodies),
+        cut_placements: std::mem::take(&mut app.cut_placements),
+    }
 }
 
 fn put_view(app: &mut SolveApp, v: DocView) {
@@ -96,6 +112,10 @@ fn put_view(app: &mut SolveApp, v: DocView) {
     crate::render_workspace::invalidate_images(app);
     crate::render_workspace::invalidate_scene(app);
     crate::render_workspace::sync_backend(app);
+    app.copied_bodies = v.copied_bodies;
+    app.copied_placements = v.copied_placements;
+    app.cut_bodies = v.cut_bodies;
+    app.cut_placements = v.cut_placements;
 }
 
 /// Put `slot` into the app and return what was there.
@@ -126,6 +146,8 @@ fn swap_in(app: &mut SolveApp, mut slot: DocSlot) -> DocSlot {
         big_operation: std::mem::replace(&mut app.big_operation, slot.big_operation),
         cam: std::mem::replace(&mut app.cam, slot.cam),
         pre_sketch_marker: std::mem::replace(&mut app.pre_sketch_marker, slot.pre_sketch_marker),
+        pending_feature_edit: std::mem::replace(&mut app.pending_feature_edit, slot.pending_feature_edit),
+        pre_sketch_cam: std::mem::replace(&mut app.pre_sketch_cam, slot.pre_sketch_cam),
         view: take_view(app),
         occurrence_move: std::mem::replace(&mut app.tree.occurrence_move, slot.occurrence_move),
         agent_chat: slot.agent_chat,
@@ -137,7 +159,11 @@ fn swap_in(app: &mut SolveApp, mut slot: DocSlot) -> DocSlot {
     // Preferences the session holds go with the user, not the tab (#680).
     app.session.auto_project = out.session.auto_project;
     // Views cache by revision: the incoming design must not look unchanged.
+    let before = app.session.revision;
     app.session.invalidate_view(out_rev);
+    if let Some(pending) = &mut app.pending_feature_edit {
+        pending.view_changed(before, app.session.revision);
+    }
     app.ui.ribbon_context = None;
     app.ui.tab = "MODEL".into();
     crate::workspace::sync_context(app);
@@ -186,6 +212,49 @@ pub fn switch(app: &mut SolveApp, i: usize) {
         *s = Some(out);
     }
     app.docs.active = i;
+}
+
+/// Select an already-open saved design without reloading or framing it. Identity is derived
+/// from the current session path so Save As immediately changes which file the tab owns.
+pub(crate) fn reuse_path(app: &mut SolveApp, path: &str) -> Result<bool, String> {
+    solidcraft_engine::io::vfs::check(path).map_err(|e| e.to_string())?;
+    // Imports create unsaved designs, rather than owning their source file.
+    if solidcraft_engine::io::is_step_path(path) || solidcraft_engine::io::is_mesh_path(path) {
+        return Ok(false);
+    }
+    let matches = |s: &Session| s.path.as_deref().is_some_and(|p| same_path(p, path));
+    let index = if matches(&app.session) {
+        Some(app.docs.active)
+    } else {
+        app.docs.slots.iter().position(|s| s.as_ref().is_some_and(|s| matches(&s.session)))
+    };
+    let Some(index) = index else { return Ok(false) };
+    if app.file_picker_busy() {
+        return Err("finish choosing a file before switching designs".into());
+    }
+    switch(app, index);
+    Ok(true)
+}
+
+fn same_path(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // canonicalize resolves symlinks and Windows long names/case using the filesystem.
+        // Never lowercase: Windows can also host case-sensitive directories.
+        if let (Ok(a), Ok(b)) = (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+            return a == b;
+        }
+        // A deleted file can still select its live editing session. Path equality also
+        // accepts redundant separators and `.` without guessing how symlinks resolve `..`.
+        if let (Ok(a), Ok(b)) = (std::path::absolute(a), std::path::absolute(b)) {
+            return a == b;
+        }
+    }
+    // Browser VFS keys are exact strings, independent of the host's path conventions.
+    false
 }
 
 /// Open `session` in a new tab after the active one and switch to it (`fit`: frame its model).
@@ -408,6 +477,12 @@ fn quit_step(app: &mut SolveApp) {
             }
             app.docs.quitting = None;
             app.quit_requested = true;
+            // The next launch reopens the designs saved to a file (#5542).
+            let sessions: Vec<&solidcraft_engine::Session> = match app.docs.slots.is_empty() {
+                true => vec![&app.session],
+                false => app.docs.slots.iter().map(|s| s.as_ref().map_or(&app.session, |d| &d.session)).collect(),
+            };
+            app.preferences.open_designs = sessions.into_iter().filter_map(|s| s.path.clone()).collect();
         }
     }
 }
@@ -452,6 +527,15 @@ fn tab_paths(app: &SolveApp) -> Vec<Option<String>> {
 fn tab_tooltip(name: &str, path: Option<&str>, cut: bool) -> String {
     let place = path.map_or_else(|| crate::i18n::tr_label("Not saved yet").to_string(), crate::home::friendly_path);
     if cut { format!("{name}\n{place}") } else { place }
+}
+
+/// The designs a launch with no file to open reopens: those open at the last quit that still
+/// exist, when Preferences › General asks for it (#5542).
+pub fn designs_to_reopen(app: &SolveApp) -> Vec<String> {
+    if !app.preferences.reopen_designs {
+        return Vec::new();
+    }
+    app.preferences.open_designs.iter().filter(|p| std::path::Path::new(p.as_str()).is_file()).take(MAX_OPEN).cloned().collect()
 }
 
 /// The control channel's `ui.documents`: list, `new`, `switch`, `close` (by index; `force`
@@ -939,6 +1023,104 @@ pub(crate) fn saved_for_close(app: &mut SolveApp) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reopening_saved_design_preserves_dirty_session_and_view() {
+        let mut a = super::SolveApp::new(solidcraft_engine::Session::default(), Default::default());
+        let path = std::env::temp_dir().join(format!("solidcraft-reopen-{}.solidcraft", std::process::id()));
+        let path = path.to_string_lossy().into_owned();
+        a.session.execute("file.save", &serde_json::json!({"path": path})).unwrap();
+        a.session.execute("solid.box", &serde_json::json!({"length": 10, "width": 12, "height": 14})).unwrap();
+        a.session.selection = vec![solidcraft_engine::Sel::Body { name: "Body1".into() }];
+        a.cam.distance = 123.0;
+        a.session.visibility.hidden_profiles = vec![7];
+        let doc = a.session.doc.clone();
+        let undo = a.session.undo.len();
+        let cam = a.cam;
+        a.open_path(&path);
+        assert_eq!(a.docs.count(), 1);
+        assert!(std::sync::Arc::ptr_eq(&doc, &a.session.doc));
+        assert!(a.session.is_dirty());
+        assert_eq!(a.session.undo.len(), undo);
+        assert_eq!(a.cam, cam);
+        assert_eq!(a.session.selection.len(), 1);
+        assert_eq!(a.session.visibility.hidden_profiles, vec![7]);
+        super::new_tab(&mut a);
+        a.open_path(&path);
+        assert_eq!(a.docs.count(), 2);
+        assert_eq!(a.docs.active, 0);
+        assert!(std::sync::Arc::ptr_eq(&doc, &a.session.doc));
+        assert_eq!(a.cam, cam);
+        assert_eq!(a.session.selection.len(), 1);
+        assert_eq!(a.session.visibility.hidden_profiles, vec![7]);
+        assert_eq!(a.session.undo.len(), undo);
+        assert!(a.session.is_dirty());
+        std::fs::remove_file(&path).unwrap();
+        a.open_path(&path);
+        assert_eq!(a.docs.count(), 2);
+        assert!(std::sync::Arc::ptr_eq(&doc, &a.session.doc));
+    }
+
+    #[test]
+    fn reuse_tracks_save_as_missing_files_and_full_capacity() {
+        let mut a = app();
+        a.session.path = Some("original.solidcraft".into());
+        let original = a.session.doc.clone();
+        // Save As updates the live path; lookup must not retain the old identity.
+        a.session.path = Some("renamed.solidcraft".into());
+        assert!(!reuse_path(&mut a, "original.solidcraft").unwrap());
+        for _ in 1..MAX_OPEN {
+            new_tab(&mut a);
+        }
+        assert_eq!(a.docs.count(), MAX_OPEN);
+        assert!(reuse_path(&mut a, "renamed.solidcraft").unwrap());
+        assert_eq!(a.docs.active, 0);
+        assert!(std::sync::Arc::ptr_eq(&original, &a.session.doc));
+        assert!(!reuse_path(&mut a, "elsewhere/renamed.solidcraft").unwrap());
+        assert_eq!(a.docs.count(), MAX_OPEN);
+        a.home.open = true;
+        assert!(reuse_path(&mut a, "renamed.solidcraft").unwrap());
+        assert!(!a.home.open);
+    }
+
+    #[test]
+    fn reuse_does_not_claim_a_switch_while_a_picker_is_open() {
+        let mut a = app();
+        a.session.path = Some("picker.solidcraft".into());
+        new_tab(&mut a);
+        a.services.pick_open = Some(Box::new(|_| Box::pin(std::future::pending())));
+        a.pick_open(|_, _| {});
+        assert!(a.file_picker_busy());
+        assert!(reuse_path(&mut a, "picker.solidcraft").is_err());
+        assert_eq!(a.docs.active, 1);
+        assert_eq!(a.docs.count(), 2);
+    }
+
+    #[test]
+    fn saved_path_identity_uses_the_filesystem_without_folding_case() {
+        let dir = std::env::temp_dir().join(format!("solidcraft-tab-paths-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("other")).unwrap();
+        let path = dir.join("design.solidcraft");
+        std::fs::write(&path, b"identity test").unwrap();
+        let text = |p: &std::path::Path| p.to_string_lossy().into_owned();
+        assert!(same_path(&text(&path), &text(&dir.join("other/../design.solidcraft"))));
+        assert!(!same_path(&text(&path), &text(&dir.join("other/design.solidcraft"))));
+        #[cfg(windows)]
+        assert!(same_path(&text(&path), &text(&dir.join("DESIGN.solidcraft"))));
+        #[cfg(unix)]
+        {
+            let link = dir.join("alias.solidcraft");
+            std::os::unix::fs::symlink(&path, &link).unwrap();
+            assert!(same_path(&text(&path), &text(&link)));
+            std::fs::write(dir.join("DESIGN.solidcraft"), b"distinct").unwrap();
+            if std::fs::read(&path).unwrap() != b"distinct" {
+                assert!(!same_path(&text(&path), &text(&dir.join("DESIGN.solidcraft"))));
+            }
+        }
+        std::fs::remove_file(&path).unwrap();
+        assert!(same_path(&text(&path), &text(&dir.join("./design.solidcraft"))));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     use super::*;
     use crate::Services;
     use egui::Color32;
@@ -951,9 +1133,11 @@ mod tests {
         assert_eq!(tab_tooltip("a-long-name", Some("/srv/a-long-name.solidcraft"), true), "a-long-name\n/srv/a-long-name.solidcraft");
         assert_eq!(tab_tooltip("Untitled", None, false), "Not saved yet");
         assert_eq!(tab_tooltip("Untitled", None, true), "Untitled\nNot saved yet");
-        if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
-            let path = std::path::Path::new(&home).join("Designs").join("bracket.solidcraft");
-            assert_eq!(tab_tooltip("bracket", path.to_str(), false), "~/Designs/bracket.solidcraft");
+        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).filter(|h| !h.is_empty()) {
+            // The abbreviation keeps the relative path's native separators after `~/`.
+            let relative = std::path::Path::new("Designs").join("bracket.solidcraft");
+            let path = std::path::Path::new(&home).join(&relative);
+            assert_eq!(tab_tooltip("bracket", path.to_str(), false), format!("~/{}", relative.display()));
         }
     }
 
@@ -1240,7 +1424,15 @@ mod tests {
         assert_eq!(a.docs.closing, None);
         assert!(a.quit_requested, "every design answered: quit");
         assert!(!any_dirty(&a), "Don't Save discards: nothing is kept for recovery");
+        // The next launch reopens the saved design; the never-saved one has no file (#5542).
+        let path = file.to_string_lossy().to_string();
+        assert_eq!(a.preferences.open_designs, vec![path.clone()]);
+        assert_eq!(designs_to_reopen(&a), vec![path]);
+        a.preferences.reopen_designs = false;
+        assert!(designs_to_reopen(&a).is_empty(), "turned off in Preferences");
+        a.preferences.reopen_designs = true;
         let _ = std::fs::remove_file(&file);
+        assert!(designs_to_reopen(&a).is_empty(), "a file that is gone is skipped");
     }
 
     /// Cancel, Esc's answer, or a Save that saves nothing (a never-saved design whose Save As

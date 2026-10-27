@@ -789,6 +789,42 @@ fn press_pull_then_curved_face_offsets_it() {
     assert!(matches!(app.dialog.as_ref().unwrap().kind, Kind::Extrude { .. }));
 }
 
+/// Press Pull on a fillet's round face reopens the fillet to change its radius, as the
+/// command does, rather than an Offset Face that refuses it (#1932): picked first, or picked
+/// with Press Pull already open.
+#[test]
+fn fillet_face_then_press_pull_edits_its_fillet() {
+    let script = json!([
+        {"command": "solid.box", "params": {"length": 40, "width": 30, "height": 20}},
+        {"command": "solid.fillet", "params": {"edges": [[20, 0, 20], [40, 15, 20], [20, 30, 20], [0, 15, 20]], "radius": 3}}
+    ]);
+    // On the front round: its axis runs along X at y 3, z 17.
+    let p = Vec3::new(20.0, 3.0 - 3.0 * std::f64::consts::FRAC_1_SQRT_2, 17.0 + 3.0 * std::f64::consts::FRAC_1_SQRT_2);
+    let round = |app: &SolveApp| {
+        let names = solidcraft_engine::doc::naming::face_names_at(&app.session.model.state(), &[p]);
+        assert!(names[0].contains("blend"), "{names:?}");
+        let st = app.session.model.state();
+        let b = st.body("Body1").unwrap();
+        let index = solidcraft_engine::doc::naming::face_names(b).iter().position(|n| *n == names[0]).unwrap();
+        Sel::Face { body: "Body1".into(), index, point: p }
+    };
+    let mut app = app_with(script.clone());
+    let fillet = app.session.doc.features.last().unwrap().id;
+    let sel = round(&app);
+    let d = start(&mut app, vec![sel], "solid.press_pull");
+    assert!(matches!(&d.kind, Kind::Fillet { radius, chamfer: false, .. } if radius.starts_with('3')), "{:?}", d.kind);
+    assert_eq!(d.editing.map(|e| e.0), Some(fillet));
+
+    let mut app = app_with(script);
+    app.start("solid.press_pull");
+    let sel = round(&app);
+    let index = if let Sel::Face { index, .. } = &sel { *index } else { 0 };
+    crate::viewport::dialog_pick(&mut app, &crate::viewport::Hit::Face { body: "Body1".into(), index, point: p }, sel);
+    let d = app.dialog.clone().unwrap();
+    assert!(matches!(d.kind, Kind::Fillet { .. }), "{:?}", d.kind);
+    assert_eq!(d.editing.map(|e| e.0), Some(fillet));
+}
+
 #[test]
 fn faces_then_shell_and_face_then_hole() {
     let mut app = boxed();
@@ -1246,6 +1282,58 @@ fn thread_size_suggestion_can_be_cleared_and_edited_in_the_dialog() {
     h.app.dialog.as_mut().unwrap().pick(&h.app.session, pick);
     h.frames(2);
     assert_eq!(apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap()[0].1["designation"], "M8");
+}
+
+#[test]
+fn thread_handedness_choices_create_edit_and_restore_the_saved_direction() {
+    use solidcraft_engine::doc::{FeatureKind, ThreadHandedness};
+    let mut h = crate::scenario::Harness::new();
+    h.app.run("solid.cylinder", json!({"radius":3,"height":6})).unwrap();
+    h.app.session.selection = vec![thread_face(&h.app, "Body1")];
+    h.step(&json!({"start":"solid.thread"})).unwrap();
+    h.frames(2);
+    assert!(matches!(&h.app.dialog.as_ref().unwrap().kind, crate::dialogs::Kind::Thread { handedness: ThreadHandedness::Right, .. }));
+    h.step(&json!({"click":{"handle":"dialog:thread.direction"}})).unwrap();
+    h.step(&json!({"click":{"handle":"dialog:thread.direction:thread.left_hand"}})).unwrap();
+    let command = crate::dialogs::apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap();
+    assert_eq!(command[0].1["handedness"], "left");
+    h.step(&json!({"widget":"OK"})).unwrap();
+    let id = h.app.session.doc.features.last().unwrap().id;
+    h.call("ui.editFeature", json!({"feature":id}));
+    h.frames(2);
+    assert!(matches!(&h.app.dialog.as_ref().unwrap().kind, crate::dialogs::Kind::Thread { handedness: ThreadHandedness::Left, .. }));
+    h.step(&json!({"click":{"handle":"dialog:thread.direction"}})).unwrap();
+    h.step(&json!({"click":{"handle":"dialog:thread.direction:thread.right_hand"}})).unwrap();
+    h.step(&json!({"widget":"OK"})).unwrap();
+    assert!(matches!(&h.app.session.doc.feature(id).unwrap().kind, FeatureKind::Thread { handedness: ThreadHandedness::Right, .. }));
+    assert_eq!(h.app.session.model.state().threads[0].handedness, ThreadHandedness::Right);
+}
+
+#[test]
+fn thread_handedness_tapped_hole_edit_retains_and_changes_direction() {
+    use solidcraft_engine::doc::{FeatureKind, ThreadHandedness};
+    let mut h = crate::scenario::Harness::new();
+    h.app.run("solid.box", json!({"length":20,"width":20,"height":10})).unwrap();
+    let id =
+        h.app.run("solid.hole", json!({"position":[10,10,10],"thread":"M6","depth":6,"thread_depth":"3 mm","handedness":"left"})).unwrap()["feature"]
+            .as_u64()
+            .unwrap();
+    h.call("ui.editFeature", json!({"feature":id}));
+    h.frames(2);
+    assert!(
+        matches!(&h.app.dialog.as_ref().unwrap().kind, crate::dialogs::Kind::Hole { opts, .. } if opts.handedness == ThreadHandedness::Left && !opts.thread_full_depth && opts.thread_depth == "3 mm")
+    );
+    h.step(&json!({"click":{"handle":"dialog:thread.direction"}})).unwrap();
+    h.step(&json!({"click":{"handle":"dialog:thread.direction:thread.right_hand"}})).unwrap();
+    let command = crate::dialogs::apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap();
+    assert_eq!(command[0].0, "timeline.redefine");
+    assert_eq!(command[0].1["command"], "solid.hole");
+    assert_eq!(command[0].1["params"]["thread_depth"], "3 mm", "editing direction must retain the independent thread depth");
+    h.step(&json!({"widget":"OK"})).unwrap();
+    assert!(matches!(&h.app.session.doc.feature(id).unwrap().kind, FeatureKind::Hole { handedness: ThreadHandedness::Right, .. }));
+    let state = h.app.session.model.state();
+    assert_eq!(state.threads[0].handedness, ThreadHandedness::Right);
+    assert!((state.threads[0].end - state.threads[0].start - 3.0).abs() < 1e-8);
 }
 
 #[test]
@@ -1746,6 +1834,68 @@ fn surface_sweep_dialog_takes_curves_and_a_path() {
 }
 
 #[test]
+fn profile_picks_keep_multiple_sketches_only_for_lofts() {
+    let mut app = app_with(json!([
+        {"command":"sketch.create","params":{"plane":"XY"}},
+        {"command":"sketch.circle.center","params":{"center":[0,0],"radius":10}},
+        {"command":"sketch.finish","params":{}},
+        {"command":"sketch.create","params":{"plane":{"origin":[0,0,25],"x_dir":[1,0,0],"y_dir":[0,1,0]}}},
+        {"command":"sketch.circle.center","params":{"center":[0,0],"radius":10}},
+        {"command":"sketch.finish","params":{}}
+    ]));
+    let first = Sel::Profile { sketch: app.session.doc.features[0].id, index: 0 };
+    let second = Sel::Profile { sketch: app.session.doc.features[1].id, index: 0 };
+    for command in ["solid.loft", "surface.loft", "solid.extrude", "surface.extrude", "solid.revolve", "surface.revolve"] {
+        let mut d = start(&mut app, vec![], command);
+        d.pick(&app.session, first.clone());
+        d.pick(&app.session, second.clone());
+        if command.ends_with("loft") {
+            assert_eq!(d.inputs[0].items, vec![first.clone(), second.clone()], "{command}");
+            d.pick(&app.session, first.clone());
+            assert_eq!(d.inputs[0].items, vec![second.clone()], "a second click removes only the picked section");
+            d.pick(&app.session, first.clone());
+            assert_eq!(d.inputs[0].items, vec![second.clone(), first.clone()], "sections retain their new pick order");
+        } else {
+            assert_eq!(d.inputs[0].items, vec![second.clone()], "{command} still takes profiles from one sketch");
+        }
+    }
+}
+
+#[test]
+fn surface_loft_keeps_sections_picked_in_different_sketches() {
+    let mut h = crate::scenario::Harness::new();
+    let mut sketches = Vec::new();
+    for z in [0, 25] {
+        let sk = h.app.run("sketch.create", json!({"plane":{"origin":[0,0,z],"x_dir":[1,0,0],"y_dir":[0,1,0]}})).unwrap()["sketch"].as_u64().unwrap();
+        sketches.push(sk);
+        h.app.run("sketch.circle.center", json!({"center":[0,0],"radius":10})).unwrap();
+        h.app.run("sketch.finish", json!({})).unwrap();
+    }
+    h.app.set_origin_shown(false);
+    h.call("ui.camera", json!({"target":[0,0,12.5],"yaw":-0.6,"pitch":0.5,"distance":100}));
+    h.step(&json!({"start":"surface.loft"})).unwrap();
+    h.step(&json!({"click":{"world":[0,0,0]}})).unwrap();
+    assert_eq!(h.app.dialog.as_ref().unwrap().inputs[0].items, vec![Sel::Profile { sketch: sketches[0], index: 0 }]);
+    h.step(&json!({"click":{"world":[0,0,25]}})).unwrap();
+    let d = h.app.dialog.as_ref().unwrap();
+    let picks = vec![Sel::Profile { sketch: sketches[0], index: 0 }, Sel::Profile { sketch: sketches[1], index: 0 }];
+    assert_eq!(d.inputs[0].items, picks, "the second sketch must not replace the first loft section (#6400)");
+    let commands = apply_commands(&h.app, d).unwrap();
+    assert_eq!(commands[0].0, "surface.loft");
+    assert_eq!(commands[0].1["sections"], json!([{"sketch":sketches[0],"profiles":[0]}, {"sketch":sketches[1],"profiles":[0]}]));
+    h.step(&json!({"key":"Enter"})).unwrap();
+    assert!(h.app.dialog.is_none(), "{:?}", h.app.dialog);
+    let state = h.app.session.model.state();
+    let body = state.bodies.last().unwrap();
+    assert!(body.body.is_surface());
+    let area = body.mesh().measure().area;
+    assert!((area - 2.0 * std::f64::consts::PI * 10.0 * 25.0).abs() < 1.0, "{area}");
+    let feature = h.app.session.doc.features.last().unwrap().id;
+    let reopened = crate::dialogs::for_feature(&h.app, feature, None).unwrap();
+    assert_eq!(reopened.inputs[0].items, picks, "Edit Feature keeps both sections in pick order");
+}
+
+#[test]
 fn surface_loft_dialog_makes_a_section_per_sketch() {
     // A line in each of two sketches 5 apart: two sections, a 10 × 5 strip; Edit Feature brings
     // the curves back.
@@ -2040,6 +2190,21 @@ fn a_box_stands_out_of_a_face_that_faces_down_an_axis() {
     let (p, c) = primitive_on(&mut app, vec![side], "solid.cylinder", |_| {});
     assert_eq!(p["axis"], json!([-1.0, 0.0, 0.0]), "{p}");
     assert!(near(c, Vec3::new(-10.0, 12.0, 8.0)), "{c:?}");
+}
+
+/// A cone (#5641) stands on the picked face like the cylinder: its base on the face, its axis
+/// out of it. The default is a full cone, whose centroid is a quarter of its height up.
+#[test]
+fn a_cone_stands_on_the_picked_face() {
+    let mut app = boxed();
+    let top = picked(&app, Vec3::new(20.0, 15.0, 20.0), Vec3::new(8.0, 10.0, 20.0));
+    let (p, c) = primitive_on(&mut app, vec![top], "solid.cone", |_| {});
+    assert_eq!((&p["base"], &p["axis"]), (&json!([8.0, 10.0, 20.0]), &json!([0.0, 0.0, 1.0])), "{p}");
+    assert!(near(c, Vec3::new(8.0, 10.0, 25.0)), "{c:?}");
+    let side = picked(&app, Vec3::new(0.0, 15.0, 10.0), Vec3::new(0.0, 12.0, 8.0));
+    let (p, c) = primitive_on(&mut app, vec![side], "solid.cone", |_| {});
+    assert_eq!(p["axis"], json!([-1.0, 0.0, 0.0]), "{p}");
+    assert!(near(c, Vec3::new(-5.0, 12.0, 8.0)), "{c:?}");
 }
 
 #[test]

@@ -86,7 +86,11 @@ if (-not $Reopen) {
     $null = Invoke-Tool 'open' @{path = 'hostile-linked-proof.json'}
     $taskLinkProbeBody = @{jsonrpc = '2.0'; id = 998; method = 'tools/call'; params = @{name = 'execute'; arguments = @{command = 'component.update_links'}}} | ConvertTo-Json -Depth 10 -Compress
     $taskLinkRejected = Invoke-RestMethod "$BaseUrl/mcp" -Method Post -ContentType 'application/json' -Headers $taskHeaders -Body $taskLinkProbeBody
-    if (-not $taskLinkRejected.result.isError -or $taskLinkRejected.result.content.text -notmatch 'linked designs must stay inside') { throw 'Stored links can escape the files directory on refresh' }
+    $taskLinkRefusal = $taskLinkRejected.result.content.text -join "`n"
+    if (-not $taskLinkRejected.result.isError -or $taskLinkRefusal -notmatch 'linked designs must stay inside|outside the folders this agent may use') {
+        throw 'Stored links did not receive the expected file-access refusal on refresh'
+    }
+    if ($taskLinkRefusal.Contains($Token)) { throw 'Stored-link refusal disclosed file contents' }
     $null = Invoke-Tool 'open' @{path = 'linked-proof.json'}
     $null = Invoke-Tool 'execute' @{command = 'component.update_links'}
     $taskRefreshed = Read-ToolJson (Invoke-Tool 'measure')

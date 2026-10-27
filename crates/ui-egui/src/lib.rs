@@ -13,6 +13,7 @@ pub mod access;
 pub mod agent_chat;
 pub mod agent_cursor;
 pub mod ai_connect;
+pub mod bidi;
 pub mod bom_panel;
 pub mod browser;
 pub mod browser_canvas;
@@ -38,6 +39,7 @@ pub mod dialogs_assembly;
 pub mod dialogs_coupling;
 pub mod dialogs_frame;
 mod dialogs_hole;
+pub mod dialogs_insert_drawing;
 pub mod dialogs_library;
 pub mod dialogs_motion;
 pub mod dialogs_move;
@@ -56,7 +58,9 @@ mod dimension_create_ui_tests;
 pub mod documents;
 pub mod drag_extrude;
 pub mod drag_snap;
+pub mod easyprint_ui;
 pub mod edit_clipboard;
+mod feature_edit;
 #[cfg(test)]
 mod font_literals_tests;
 pub mod fonts;
@@ -65,6 +69,7 @@ pub mod frame_rate;
 pub mod gizmo;
 pub mod gpu;
 pub mod help;
+pub(crate) mod history_rows;
 #[cfg(test)]
 mod hole_direction_ui_tests;
 pub(crate) mod hole_place;
@@ -72,6 +77,7 @@ pub(crate) mod hole_place;
 mod hole_place_ui_tests;
 #[cfg(test)]
 mod hole_placement_ui_tests;
+pub mod hole_presets;
 pub(crate) mod hole_refs;
 #[cfg(test)]
 mod hole_refs_ui_tests;
@@ -86,6 +92,7 @@ mod i18n_ui_tests;
 pub mod icon_svg;
 pub mod icons;
 pub mod inference;
+pub mod insert_handles;
 pub mod install;
 pub mod issue_report;
 pub mod joint_drag;
@@ -107,6 +114,7 @@ mod measurement_ui_tests;
 mod menu_tests;
 pub(crate) mod mesh_lod;
 pub mod messages;
+pub(crate) mod motion;
 pub mod occurrence_drag;
 #[cfg(test)]
 mod pattern_arrow_tests;
@@ -176,10 +184,12 @@ mod fillet_spline_handle_tests;
 pub mod mouse_gesture;
 pub(crate) mod navigation;
 pub use navigation::WebWheelGestures;
+pub mod network_prompt;
 pub mod open_elsewhere;
 pub(crate) mod open_meshing;
 pub mod params_dialog;
 pub(crate) mod pick_index;
+pub(crate) mod place_gizmo;
 pub(crate) mod plugins;
 pub mod prefs;
 pub mod prefs_notice;
@@ -195,11 +205,14 @@ pub mod render_workspace;
 mod revolve_edit_tests;
 #[cfg(test)]
 mod revolve_manipulator_tests;
+#[cfg(test)]
+mod round_pick_tests;
 mod rule_editor;
 #[cfg(test)]
 mod rule_editor_tests;
 pub mod save_job;
 pub mod scenario;
+pub(crate) mod scene_palette;
 pub mod select_other;
 pub mod selection;
 pub mod shell;
@@ -236,6 +249,7 @@ pub(crate) mod sketch_text;
 mod sketch_text_handles;
 mod sketch_text_move;
 pub mod sketch_tools;
+mod sketch_transform_ui;
 pub mod smart_extrude;
 #[cfg(test)]
 mod smart_extrude_ui_tests;
@@ -264,6 +278,7 @@ pub mod ui_kit;
 mod ui_kit_guard_tests;
 pub mod update;
 mod value_step;
+mod view_confirm;
 pub mod view_pick;
 pub mod viewport;
 mod viewport_layout;
@@ -277,6 +292,11 @@ use solidcraft_engine::Session;
 use solidcraft_engine::render::{Camera, CameraAnim, StandardView};
 
 pub use control::{ControlRequest, ControlResponse};
+
+/// How close (radians) the camera must be to a standard axis view for the #2682 mode
+/// (`auto_ortho_faces`) to snap the projection to orthographic. One degree: exact axis views
+/// and Shift-snapped orbits land inside it, free orbiting does not linger in it.
+pub const ORTHO_FACE_TOLERANCE: f64 = 1.0_f64.to_radians();
 
 /// UI state that automation can read and set (`ui.set`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -296,7 +316,11 @@ pub struct UiState {
     pub show_browser: bool,
     pub show_timeline: bool,
     pub show_grid: bool,
+    pub show_navigation_bar: bool,
     pub perspective: bool,
+    /// Perspective while orbiting, orthographic when the camera faces a standard axis view
+    /// (#2682). Off by default; when on it decides the projection instead of `perspective`.
+    pub auto_ortho_faces: bool,
     pub palette_open: bool,
     /// Dark theme (the default); a preference kept between runs.
     pub dark: bool,
@@ -327,7 +351,9 @@ impl Default for UiState {
             show_browser: true,
             show_timeline: true,
             show_grid: true,
+            show_navigation_bar: true,
             perspective: false,
+            auto_ortho_faces: false,
             palette_open: false,
             dark: true,
             pick_off: Vec::new(),
@@ -382,6 +408,17 @@ pub struct Services {
     pub agent_http: Option<agent_chat::backend::HttpFn>,
     /// The system keychain, for API agents' keys; None: keys can't be stored.
     pub secrets: Option<std::sync::Arc<dyn agent_chat::backend::Secrets>>,
+    /// Upload a model to EasyPrint (Printables' slicer in the browser) and answer with the address
+    /// to open (`easyprint_ui`); None: this host can't, and the menu doesn't offer it.
+    pub easyprint_upload: Option<easyprint_ui::Upload>,
+}
+
+/// The view before a sketch opened and the view that faced the sketch then (#7038).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreSketchView {
+    pub sketch: u64,
+    pub before: Camera,
+    pub facing: Camera,
 }
 
 pub struct SolveApp {
@@ -398,8 +435,15 @@ pub struct SolveApp {
     /// The history marker before Edit Sketch rolled the timeline to the sketch; Finish Sketch
     /// restores it.
     pub pre_sketch_marker: Option<Option<usize>>,
+    /// The views around opening the open sketch. Leaving it goes back to the earlier one as the
+    /// "When a sketch ends" preference says (#7038).
+    pub pre_sketch_cam: Option<PreSketchView>,
     pub services: Services,
     file_picker: Option<file_picker::Pending>,
+    /// A slicer started alone and waited for before the file is sent (Send to Slicer).
+    pub(crate) slicer_wait: Option<dialogs_save_mesh::SlicerWait>,
+    /// Open with EasyPrint: the upload in flight and the question before the first one.
+    pub(crate) easyprint: easyprint_ui::State,
     /// A Save or Save As being written on a worker (see [`save_job`]).
     saving: Option<save_job::Saving>,
     pub viewport: viewport::ViewportState,
@@ -447,10 +491,15 @@ pub struct SolveApp {
     pub preview: preview::PreviewState,
     /// OK pressed on a feature that takes a while: its evaluation runs off the window thread.
     pub applying: Option<dialogs::Applying>,
+    pub(crate) editing_state: Option<dialogs::EditingState>,
+    pub(crate) pending_feature_edit: Option<feature_edit::PendingFeatureEdit>,
     /// A command recomputing the history (the marker moved, undo) computing off the window
     /// thread, and those asked for meanwhile ([`deferred`]).
     pub deferred: Option<deferred::Deferred>,
     pub deferred_queue: Vec<(String, Value)>,
+    /// A feature started from a sketch while the marker rolls back, and that sketch: it starts
+    /// once the marker is back.
+    pub start_after_roll: Option<(String, u64)>,
     /// A delete's check of what it takes with it or breaks, computing off the window thread
     /// ([`deferred::DeleteCheck`], #2678).
     pub delete_check: Option<deferred::DeleteCheck>,
@@ -462,6 +511,18 @@ pub struct SolveApp {
     pub(crate) apply_gate: Option<std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>>,
     /// The last command started interactively (id, label), for Repeat.
     pub last_command: Option<(String, String)>,
+    /// Bodies copied with Copy (by name), pasted into the active component by Paste.
+    pub copied_bodies: Vec<String>,
+    /// Text a copy left for the system clipboard, written on the next frame (so a paste event
+    /// follows: the window system sends one only while the clipboard holds text).
+    pub(crate) clipboard_text: Option<String>,
+    /// Component placements copied with Copy (by path): Paste places new instances of them in
+    /// the active component, Paste New (Ctrl+Shift+V) independent copies.
+    pub copied_placements: Vec<Vec<u64>>,
+    /// Bodies cut with Cut (by name): they stay until Paste moves them into a component.
+    pub cut_bodies: Vec<String>,
+    /// Component placements cut with Cut (by path): they stay until Paste moves them.
+    pub cut_placements: Vec<Vec<u64>>,
     /// Esc was already acted on this frame (by the shortcuts), so later handlers skip it.
     pub esc_handled: bool,
     /// When Esc was last pressed (input time): a second press soon after finishes the sketch.
@@ -478,6 +539,8 @@ pub struct SolveApp {
     pub lock_prompts: Vec<open_elsewhere::LockPrompt>,
     /// A Save waiting for "the file changed on disk" to be answered.
     pub disk_prompt: bool,
+    /// Update Links or Open Linked Design waiting for a network server to be allowed.
+    pub network_prompt: Option<network_prompt::NetworkPrompt>,
     /// Designs left by crashed apps, offered for recovery.
     pub recoverable: Vec<solidcraft_engine::recovery::Entry>,
     /// The bodies of a just-opened Y-up file, offered to be stood up (`stand_up`).
@@ -490,6 +553,8 @@ pub struct SolveApp {
     pub msaa_supported: Vec<u32>,
     /// The startup check selected 1x; Graphics explains the workaround.
     pub msaa_compatibility: bool,
+    /// Startup fallback diagnostic, also shown in Graphics preferences.
+    pub graphics_fallback: Option<String>,
     /// Settings put back at start because they kept SolidCraft from starting, one line each,
     /// shown until dismissed (`prefs::show_reset_notice`).
     pub settings_reset: Vec<prefs::SettingReset>,
@@ -580,7 +645,9 @@ impl SolveApp {
         }
         let mut render_workspace = render_workspace::State::default();
         render_workspace.image_host = image_host;
-        SolveApp {
+        #[cfg(not(target_arch = "wasm32"))]
+        solidcraft_engine::slicer_files::clean_old();
+        let mut app = SolveApp {
             session,
             ui: UiState::default(),
             shell: Default::default(),
@@ -588,8 +655,11 @@ impl SolveApp {
             cam_anim: None,
             now: 0.0,
             pre_sketch_marker: None,
+            pre_sketch_cam: None,
             services,
             file_picker: None,
+            slicer_wait: None,
+            easyprint: Default::default(),
             saving: None,
             viewport: viewport::ViewportState::default(),
             render_workspace,
@@ -617,13 +687,21 @@ impl SolveApp {
             slicer_menu: dialogs_save_mesh::SlicerMenu::default(),
             preview: preview::PreviewState::default(),
             applying: None,
+            editing_state: None,
+            pending_feature_edit: None,
             deferred: None,
             deferred_queue: Vec::new(),
+            start_after_roll: None,
             delete_check: None,
             apply_off_thread: None,
             #[cfg(test)]
             apply_gate: None,
             last_command: None,
+            copied_bodies: Vec::new(),
+            clipboard_text: None,
+            copied_placements: Vec::new(),
+            cut_bodies: Vec::new(),
+            cut_placements: Vec::new(),
             esc_handled: false,
             last_escape: None,
             status: None,
@@ -633,12 +711,14 @@ impl SolveApp {
             locks: None,
             lock_prompts: Vec::new(),
             disk_prompt: false,
+            network_prompt: None,
             recoverable: Vec::new(),
             stand_up: None,
             stand_up_occurrence: None,
             stand_up_reason: false,
             msaa_supported: Vec::new(),
             msaa_compatibility: false,
+            graphics_fallback: None,
             settings_reset: Vec::new(),
             big_operation: false,
             autosave_minutes: 5.0,
@@ -677,7 +757,9 @@ impl SolveApp {
             applied_fonts_language: "en".into(),
             applied_ui_font: String::new(),
             applied_system_fonts: false,
-        }
+        };
+        easyprint_ui::install(&mut app);
+        app
     }
 
     /// Translate text using the active language preference.
@@ -699,6 +781,7 @@ impl SolveApp {
             depth: egui_wgpu::depth_format_from_bits(depth_bits, stencil_bits),
             samples: samples.max(1),
             tess: false,
+            oit: false,
         };
         self.set_wgpu_targets(rs, target, target);
     }
@@ -713,8 +796,9 @@ impl SolveApp {
             depth: egui_wgpu::depth_format_from_bits(depth_bits, stencil_bits),
             samples: samples.max(1),
             tess: false,
+            oit: false,
         };
-        let window = crate::gpu::GpuTarget { format: rs.target_format, depth: None, samples: 1, tess: false };
+        let window = crate::gpu::GpuTarget { format: rs.target_format, depth: None, samples: 1, tess: false, oit: false };
         self.set_wgpu_targets(rs, scene, window);
         self.viewport.gpu.map_or(samples, |g| g.samples)
     }
@@ -773,7 +857,9 @@ impl SolveApp {
         json!({
             "dark": self.ui.dark,
             "grid": self.ui.show_grid,
+            "navigation_bar": self.ui.show_navigation_bar,
             "perspective": self.ui.perspective,
+            "auto_ortho_faces": self.ui.auto_ortho_faces,
             "pick_bodies": self.ui.pick_bodies,
             "auto_project": self.session.auto_project,
             "visual_style": self.ui.visual_style,
@@ -808,8 +894,14 @@ impl SolveApp {
         if let Some(g) = flag("grid") {
             self.ui.show_grid = g;
         }
+        if let Some(visible) = flag("navigation_bar") {
+            self.ui.show_navigation_bar = visible;
+        }
         if let Some(p) = flag("perspective") {
             self.ui.perspective = p;
+        }
+        if let Some(a) = flag("auto_ortho_faces") {
+            self.ui.auto_ortho_faces = a;
         }
         if let Some(b) = flag("pick_bodies") {
             self.ui.pick_bodies = b;
@@ -854,6 +946,8 @@ impl SolveApp {
             self.ui.layout = p.layout;
             self.preferences = p;
         }
+        // Before a design given at start opens: its paths follow the network preferences.
+        prefs::apply_network(&self.preferences);
         // Saved before the theme was a preference: the Dark/Light flag says which.
         if v.get("preferences").and_then(|p| p.get("theme")).is_none() {
             self.preferences.theme = if self.ui.dark { "dark" } else { "light" }.into();
@@ -876,10 +970,45 @@ impl SolveApp {
         if self.file_load.busy() || self.file_picker.is_some() || self.saving.is_some() {
             return Err("a file operation is in progress".into());
         }
+        // Commands may start only detected slicers and the programs the user added under Custom….
+        if matches!(id, "file.save_mesh" | "file.send_to_slicer") {
+            solidcraft_engine::slicers::set_chosen_programs(&self.preferences.custom_slicers);
+        }
         let t0 = now_ms();
         let r = self.session.execute(id, &params).map_err(|e| e.to_string());
         self.big_operation |= now_ms() - t0 >= recovery_ui::BIG_OPERATION_MS;
+        self.command_completed(id, r)
+    }
+
+    /// Host effects shared by directly executed and already evaluated commands.
+    pub(crate) fn command_completed(&mut self, id: &str, r: Result<Value, String>) -> Result<Value, String> {
         if let Ok(v) = &r {
+            match id {
+                "view.fit" | "view.home" => self.frame_view(id == "view.home"),
+                "view.tool" => {
+                    self.viewport.nav = match v.get("tool").and_then(Value::as_str) {
+                        Some("orbit") => Some(viewport::NavMode::Orbit),
+                        Some("pan") => Some(viewport::NavMode::Pan),
+                        Some("zoom") => Some(viewport::NavMode::Zoom),
+                        _ => None,
+                    };
+                }
+                "view.spin" => {
+                    self.cancel_view_animation();
+                    self.viewport.spin = v.get("on").and_then(Value::as_bool).unwrap_or(!self.viewport.spin);
+                }
+                "view.visual_style" => {
+                    if let Some(index) = v.get("index").and_then(Value::as_u64).and_then(|n| u8::try_from(n).ok()) {
+                        self.ui.visual_style = index;
+                    }
+                }
+                "view.grid" => self.ui.show_grid = v.get("on").and_then(Value::as_bool).unwrap_or(!self.ui.show_grid),
+                "view.ground_shadow" => self.ui.ground_shadow = v.get("on").and_then(Value::as_bool).unwrap_or(!self.ui.ground_shadow),
+                "view.navigation_bar" => {
+                    self.ui.show_navigation_bar = v.get("visible").and_then(Value::as_bool).unwrap_or(!self.ui.show_navigation_bar)
+                }
+                _ => {}
+            }
             if id == "view.layout" {
                 let layout =
                     if v.get("mode").and_then(Value::as_str) == Some("compact") { shell::LayoutMode::Docked } else { shell::LayoutMode::Floating };
@@ -913,6 +1042,11 @@ impl SolveApp {
                 if let Some(collapsed) = v.get("collapsed").and_then(Value::as_bool) {
                     self.preferences.timeline_collapsed = collapsed;
                 }
+            }
+            if id == "view.perspective"
+                && let Some(perspective) = v.get("enabled").and_then(Value::as_bool)
+            {
+                self.ui.perspective = perspective;
             }
             if matches!(id, "view.ambient_occlusion" | "view.graphics_preset") {
                 self.preferences.ambient_occlusion = v.get("enabled").and_then(Value::as_bool).unwrap_or(false);
@@ -972,6 +1106,9 @@ impl SolveApp {
                     // The old document is already replaced: discard its editor without
                     // applying cancellation hooks (such as restoring its timeline marker).
                     self.dialog = None;
+                    self.applying = None;
+                    self.editing_state = None;
+                    self.pending_feature_edit = None;
                     self.tool = None;
                     self.preview.reset();
                     self.cam = Camera::default();
@@ -1063,8 +1200,9 @@ impl SolveApp {
             return;
         }
         workspace::select_command_tab(self, id);
-        // Move a selected assembly placement the same way as its Browser menu, retaining
-        // the exact instance path and the grounding/rigid-group restrictions.
+        // One selected placement moves as a component, the same way as its Browser menu,
+        // retaining the exact instance path and the grounding/rigid-group restrictions.
+        // A selected body, or a component picked in the tree, opens Move/Copy on those bodies.
         if id == "solid.move"
             && let [solidcraft_engine::Sel::Occurrence { path }] = self.session.selection.as_slice()
         {
@@ -1084,6 +1222,10 @@ impl SolveApp {
             return;
         }
         // A display toggle leaves the current modelling tool and camera in place.
+        if matches!(id, "view.fit" | "view.home" | "view.spin" | "view.grid" | "view.ground_shadow" | "view.navigation_bar") {
+            let _ = self.run(id, json!({}));
+            return;
+        }
         if id == "view.layout" {
             let mode = if self.ui.layout == shell::LayoutMode::Floating { "compact" } else { "floating" };
             let _ = self.run(id, json!({"mode":mode}));
@@ -1095,6 +1237,15 @@ impl SolveApp {
         }
         if id == "view.ambient_occlusion" {
             let _ = self.run(id, json!({"enabled": !self.preferences.ambient_occlusion}));
+            return;
+        }
+        // Send to Slicer always asks which slicer (the dialog pre-selects the last one).
+        if matches!(id, "file.send_to_slicer" | "file.open_in_easyprint") && !dialogs_save_mesh::available(self) {
+            self.set_status(self.tr("ui.send_to_slicer_unavailable").to_string(), true);
+            return;
+        }
+        if id == "view.perspective" {
+            let _ = self.run(id, json!({"enabled": !self.ui.perspective}));
             return;
         }
         // Another command ends Edit Text (its dialog is not a feature edit to keep).
@@ -1116,14 +1267,24 @@ impl SolveApp {
         dim_view::cancel();
         self.tool = None;
         self.home.open = false;
+        if dialogs_sheet::start_export(self, id) {
+            return;
+        }
+        // The picked drawing is placed (position and scale, previewed) before OK adds it.
         if let Some(ext) = id.strip_prefix("sketch.insert_").filter(|e| matches!(*e, "dxf" | "svg")) {
-            self.pick_open_command(id, json!({}), &[ext]);
+            let command = id.to_string();
+            self.pick_open_for(&[ext], move |app, path| {
+                if let Some(path) = path {
+                    dialogs_insert_drawing::open(app, &command, path);
+                }
+            });
             return;
         }
         if id == "component.update_links" && !self.session.doc.links.is_empty() {
             // Reading the linked designs again takes a while in a large assembly: off the window
-            // thread, the overlay naming the one being read (#5329).
-            let _ = file_load::begin_request(self, file_load::Request::new("", file_load::Kind::UpdateLinks));
+            // thread, the overlay naming the one being read (#5329). A link on a network server
+            // not allowed yet asks first.
+            network_prompt::update_links(self);
             return;
         }
         if id == "component.insert_design" {
@@ -1132,7 +1293,10 @@ impl SolveApp {
             self.pick_open(|app, path| {
                 let Some(path) = path else { return };
                 if solidcraft_engine::io::is_design_path(&path) {
-                    if app.run("component.insert_design", json!({ "path": path })).is_ok() {
+                    // Picked in the file dialog: its server is the user's choice.
+                    let hosts: Vec<String> = solidcraft_engine::io::vfs::network_host(&path).into_iter().collect();
+                    let inserted = solidcraft_engine::io::vfs::allowing_hosts(&hosts, || app.run("component.insert_design", json!({ "path": path })));
+                    if inserted.is_ok() {
                         app.fit_view();
                     }
                 } else {
@@ -1188,17 +1352,28 @@ impl SolveApp {
             self.cancel_sketch();
             return;
         }
-        // Press Pull: edges get a fillet, curved faces an offset, planar faces and profiles an extrude.
+        // Press Pull: edges get a fillet, a fillet's round face reopens its fillet (its size
+        // changes, as `solid.press_pull` does: #1932), other curved faces an offset, planar faces
+        // and profiles an extrude.
         if id == "solid.press_pull" {
-            let sel = &self.session.selection;
-            let edges = sel.iter().any(|s| matches!(s, solidcraft_engine::Sel::Edge { .. }));
-            let curved = sel.iter().any(
-                |s| matches!(s, solidcraft_engine::Sel::Face { body, index, .. } if dialogs::planar_face(&self.session, body, *index).is_none()),
-            );
-            if edges {
+            if let Some(pending) = &mut self.pending_feature_edit {
+                pending.then_start(id);
+                return;
+            }
+            if self.session.selection.iter().any(|s| matches!(s, solidcraft_engine::Sel::Edge { .. })) {
                 return self.start("solid.fillet");
             }
-            if curved {
+            let sel = &self.session.selection;
+            let curved = sel.iter().find_map(|s| match s {
+                solidcraft_engine::Sel::Face { body, index, .. } if dialogs::planar_face(&self.session, body, *index).is_none() => {
+                    Some((body, *index))
+                }
+                _ => None,
+            });
+            if let Some((body, index)) = curved {
+                if let Some(blend) = dialogs::blend_feature(&self.session, body, index) {
+                    return self.edit_feature(blend);
+                }
                 return self.start("solid.offset_face");
             }
             let empty = sel.is_empty();
@@ -1212,8 +1387,31 @@ impl SolveApp {
             }
             return;
         }
+        let interactive = self.interactive(id);
+        if interactive && let Some(pending) = &mut self.pending_feature_edit {
+            pending.then_start(id);
+            return;
+        }
+        // Cancel before finishing a sketch or waiting for its history marker.
+        if interactive && (self.editing_state.is_some() || self.applying.is_some()) {
+            dialogs::cancel(self);
+        }
+        let finished_sketch = self.session.active_sketch.filter(|_| ends_sketch(id) && self.interactive(id));
+        if finished_sketch.is_some() {
+            self.finish_sketch();
+            // A feature committed before the marker is back would go in where the sketch was.
+            if self.deferred.is_some() {
+                self.start_after_roll = finished_sketch.map(|sketch| (id.to_string(), sketch));
+                return;
+            }
+        }
+        self.start_interactive(id, finished_sketch);
+    }
+
+    /// The rest of [`SolveApp::start`], once any sketch `id` ends is finished.
+    pub(crate) fn start_interactive(&mut self, id: &str, finished_sketch: Option<u64>) {
         if let Some(spec) = solidcraft_engine::find_command(id)
-            && (tools::Tool::for_command(id).is_some() || dialogs::Dialog::for_command(self, id).is_some())
+            && self.interactive(id)
             && id != "sketch.create"
         {
             self.last_command = Some((spec.id.to_string(), spec.label.to_string()));
@@ -1275,7 +1473,10 @@ impl SolveApp {
             self.set_status(tools::hint(id), false);
             return;
         }
-        if let Some(d) = dialogs::Dialog::for_command(self, id) {
+        if let Some(mut d) = dialogs::Dialog::for_command(self, id) {
+            if let Some(sketch) = finished_sketch {
+                d.take_sketch_profile(&self.session, sketch);
+            }
             // The pre-selection now belongs to the dialog's inputs.
             if d.wants_picks() && !self.session.selection.is_empty() {
                 let _ = self.session.execute("select.clear", &json!({}));
@@ -1291,10 +1492,16 @@ impl SolveApp {
         let _ = self.run(id, json!({}));
     }
 
+    /// Does starting `id` open a tool or a dialog?
+    fn interactive(&self, id: &str) -> bool {
+        tools::Tool::for_command(id).is_some() || dialogs::Dialog::for_command(self, id).is_some()
+    }
+
     /// Edit a feature: sketches open in sketch mode; other features roll the
     /// timeline back to just before themselves and reopen their dialog, filled in.
     pub fn edit_feature(&mut self, id: u64) {
         use solidcraft_engine::doc::FeatureKind;
+        dialogs::cancel(self);
         let Some(f) = self.session.doc.feature(id) else { return };
         if matches!(f.kind, FeatureKind::Sketch { .. }) {
             self.edit_sketch(id);
@@ -1303,14 +1510,28 @@ impl SolveApp {
         let Some(idx) = self.session.doc.feature_index(id) else { return };
         let marker = self.finish_sketch_for_edit();
         self.tool = None;
+        if self.session.doc.marker != marker {
+            self.prepare_feature_edit(id, idx, marker);
+            return;
+        }
+        let original = self.session.scratch();
         if dialogs::roll_marker(self, Some(idx)).is_err() {
             return;
         }
+        self.open_feature_edit(id, marker, original);
+    }
+
+    fn open_feature_edit(&mut self, id: u64, marker: Option<usize>, original: Session) {
+        self.editing_state = Some(dialogs::EditingState { source: self.session.scratch(), original });
         match dialogs::for_feature(self, id, marker) {
-            Some(d) => self.dialog = Some(d),
+            Some(d) => {
+                if !d.previews() {
+                    self.editing_state = None;
+                }
+                self.dialog = Some(d);
+            }
             None => {
-                let _ = dialogs::roll_marker(self, marker);
-                // No dialog for this feature: open the search box with the command to edit it.
+                dialogs::restore_editing(self, marker);
                 self.sbox.text = format!("timeline.edit {{\"feature\": {id}, \"set\": {{}}}}");
                 self.ui.palette_open = true;
             }
@@ -1334,6 +1555,7 @@ impl SolveApp {
         }
         let Some(idx) = self.session.doc.feature_index(id) else { return };
         let marker = self.finish_sketch_for_edit();
+        let before = self.settled_cam();
         self.tool = None;
         self.dialog = None;
         let rolled = self.session.doc.marker != Some(idx + 1) && self.run("timeline.roll_to", json!({ "position": idx + 1 })).is_ok();
@@ -1344,13 +1566,29 @@ impl SolveApp {
             return;
         }
         self.pre_sketch_marker = (rolled || marker != self.session.doc.marker).then_some(marker);
+        self.look_at_opened_sketch(before);
+    }
+
+    /// Turn the view to face the sketch just opened, and remember the view from `before` it and
+    /// the one facing it for when the sketch ends (#7038).
+    pub(crate) fn look_at_opened_sketch(&mut self, before: Camera) {
         dialogs::look_at_sketch(self);
+        self.pre_sketch_cam = self.session.active_sketch.map(|sketch| PreSketchView { sketch, before, facing: self.settled_cam() });
+    }
+
+    /// Where the camera is going: the end of the running camera animation, else where it is.
+    pub(crate) fn settled_cam(&self) -> Camera {
+        self.cam_anim.map_or(self.cam, |a| a.to)
     }
 
     /// Pass the original marker to the next editor. Restoring it between editors could finish
     /// in the background after the next rollback, moving the marker out from under that edit.
     fn finish_sketch_for_edit(&mut self) -> Option<usize> {
-        let marker = self.pre_sketch_marker.take().unwrap_or(self.session.doc.marker);
+        let marker = self
+            .pending_feature_edit
+            .take()
+            .map(|pending| pending.marker)
+            .unwrap_or_else(|| self.pre_sketch_marker.take().unwrap_or(self.session.doc.marker));
         if self.session.active_sketch.is_some() {
             self.finish_sketch();
         }
@@ -1358,7 +1596,8 @@ impl SolveApp {
     }
 
     /// Finish the active sketch: stop editing and restore the history marker Edit Sketch moved.
-    /// The camera stays where it is, however the sketch is left.
+    /// The camera goes where the "When a sketch ends" preference says (#7038); by default it
+    /// stays where it is, however the sketch is left.
     pub fn finish_sketch(&mut self) {
         self.leave_sketch("sketch.finish");
     }
@@ -1376,11 +1615,18 @@ impl SolveApp {
         }
         dim_view::cancel();
         self.tool = None;
+        let open = self.session.active_sketch;
         if self.run(command, json!({})).is_err() && command != "sketch.finish" {
             return;
         }
         if let Some(marker) = self.pre_sketch_marker.take() {
             self.restore_marker(marker);
+        }
+        // Only the views saved when this sketch opened: one opened another way saved none.
+        if let Some(view) = self.pre_sketch_cam.take().filter(|v| Some(v.sketch) == open)
+            && let Some(to) = self.preferences.sketch_exit_view.view_after(view.before, view.facing, self.settled_cam())
+        {
+            self.animate_to(to);
         }
     }
 
@@ -1432,9 +1678,16 @@ impl SolveApp {
     }
 
     /// Is the view drawn in perspective? The perspective preference, except while a sketch is
-    /// open: a sketch is drawn and measured on its plane, so the view is parallel (no foreshortening).
+    /// open (always orthographic) or when the #2682 mode is on: then the view is orthographic
+    /// exactly when the camera faces a standard axis view, and perspective otherwise.
     pub fn perspective_view(&self) -> bool {
-        self.ui.perspective && self.session.active_sketch.is_none()
+        if self.session.active_sketch.is_some() {
+            return false;
+        }
+        if self.ui.auto_ortho_faces {
+            return self.cam.aligned_standard_view(ORTHO_FACE_TOLERANCE).is_none();
+        }
+        self.ui.perspective
     }
 
     pub fn set_status(&mut self, s: impl Into<String>, error: bool) {
@@ -1445,6 +1698,14 @@ impl SolveApp {
     }
 
     pub fn open_path(&mut self, path: &str) {
+        match documents::reuse_path(self, path) {
+            Ok(true) => return,
+            Err(e) => {
+                self.set_status(e, true);
+                return;
+            }
+            Ok(false) => {}
+        }
         self.home.open = false;
         documents::prepare_open(self);
         if let Ok(r) = self.run("doc.open", json!({ "path": path })) {
@@ -1607,17 +1868,29 @@ impl SolveApp {
 
     /// Animated view changes for the axis view and navigation bar.
     pub fn animate_view(&mut self, v: &str) {
-        if render_workspace::result_active(self) && matches!(v, "fit" | "home") {
+        if matches!(v, "fit" | "home") {
+            let _ = self.run(if v == "fit" { "view.fit" } else { "view.home" }, json!({}));
+        } else if let Some(view) = StandardView::parse(v) {
+            self.pending_fit = None;
+            let mut to = self.cam;
+            to.set_view(view);
+            self.animate_to(to);
+        }
+    }
+
+    /// Apply view.fit / view.home to the active canvas, retaining each canvas's framing policy.
+    fn frame_view(&mut self, home: bool) {
+        if render_workspace::result_active(self) {
             render_workspace::fit_result(self);
             return;
         }
         // The flat pattern is a 2D view: Fit and Home frame it, and the Design camera stays put.
-        if dialogs_sheet::flat_active(self) && matches!(v, "fit" | "home") {
+        if dialogs_sheet::flat_active(self) {
             self.flat_view.fitted = false;
             return;
         }
-        if render_workspace::active(self) && matches!(v, "fit" | "home") {
-            if v == "home" {
+        if render_workspace::active(self) {
+            if home {
                 self.cam.set_view(StandardView::Iso);
             }
             self.fit_view();
@@ -1625,27 +1898,22 @@ impl SolveApp {
         }
         self.pending_fit = None;
         let mut to = self.cam;
-        match v {
+        if home {
+            to.set_view(StandardView::Iso);
+            self.pending_fit = Some((to, viewport::view_bounds(self), true));
+            to = self.fitted(to);
+        } else {
             // With something selected, Fit frames the selection.
-            "fit" => match viewport::selection_bounds(self) {
-                Some(b) => {
-                    self.pending_fit = Some((to, b, true));
-                    to = self.fitted_bounds(to, &b);
+            match viewport::selection_bounds(self) {
+                Some(bounds) => {
+                    self.pending_fit = Some((to, bounds, true));
+                    to = self.fitted_bounds(to, &bounds);
                 }
                 None => {
                     self.pending_fit = Some((to, viewport::view_bounds(self), true));
                     to = self.fitted(to);
                 }
-            },
-            "home" => {
-                to.set_view(StandardView::Iso);
-                self.pending_fit = Some((to, viewport::view_bounds(self), true));
-                to = self.fitted(to);
             }
-            v => match StandardView::parse(v) {
-                Some(sv) => to.set_view(sv),
-                None => return,
-            },
         }
         let request = self.pending_fit.take();
         self.animate_to(to);
@@ -1704,6 +1972,8 @@ impl SolveApp {
     pub fn logic(&mut self, ctx: &egui::Context) {
         frame_watch::begin(self);
         file_picker::tick(self, ctx);
+        dialogs_save_mesh::tick_wait(self, ctx);
+        easyprint_ui::tick(self, ctx);
         render_workspace::sync_backend(self);
         render_workspace::tick(self, ctx);
         file_load::tick(self, ctx);
@@ -1764,6 +2034,7 @@ impl SolveApp {
                 }
             }
         }
+        control::publish_design(self, &control::DESIGN_WATCH);
     }
 
     /// Inject synthetic events (one pointer event per frame).
@@ -1846,6 +2117,7 @@ impl SolveApp {
         if self.file_picker_busy() {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
         }
+        control::publish_design(self, &control::DESIGN_WATCH);
         self.frame_ms = now_ms() - t0;
         frame_watch::end(self);
     }
@@ -1858,7 +2130,9 @@ impl SolveApp {
             self.ui.show_timeline = true;
         }
         self.ui.layout.publish(ui.ctx());
+        self.preferences.dialog_buttons.publish(ui.ctx());
         scenario::clear_handles();
+        self.poll_feature_edit(ui.ctx());
         self.poll_deferred(ui.ctx());
         self.poll_delete_check(ui.ctx());
         if !self.embedded {
@@ -1869,6 +2143,7 @@ impl SolveApp {
         open_meshing::show(self, ui.ctx());
         documents::prompt(self, ui.ctx());
         open_elsewhere::show(self, ui.ctx());
+        network_prompt::show(self, ui.ctx());
         update::show(self, ui.ctx());
         install::show(self, ui.ctx());
         // Settings › AI's Add agent dialog: Settings opens over Home too (#3483).
@@ -1976,6 +2251,8 @@ impl SolveApp {
                     self.show_workspace(ui);
                 }
             });
+        // Before the dialog: a click on the view's OK or Cancel is for this frame's dialog.
+        view_confirm::show(self, ui.ctx());
         dialogs::show(self, ui.ctx());
         issue_report::CadInput::block(self, ui, report_input);
         sketch_palette::show(self, ui.ctx());
@@ -1990,6 +2267,7 @@ impl SolveApp {
         context_menu::show(self, ui.ctx());
         mouse_gesture::show(self, ui.ctx());
         delete::show(self, ui.ctx());
+        easyprint_ui::show(self, ui.ctx());
         linked_source::show_copies(self, ui.ctx());
         shortcut_box::show(self, ui.ctx());
         prefs::show(self, ui.ctx());
@@ -2196,3 +2474,12 @@ pub fn now_ms() -> f64 {
 mod picker_test_support;
 #[cfg(test)]
 mod test_support;
+
+/// Toolbar panels whose commands build features from the model; they finish an open sketch first.
+/// Construct, Inspect and Insert keep the sketch open.
+const SKETCH_ENDING_PANELS: [&str; 3] = ["CREATE", "MODIFY", "ASSEMBLE"];
+const SKETCH_TAB: &str = "SKETCH";
+
+fn ends_sketch(id: &str) -> bool {
+    solidcraft_engine::find_command(id).is_some_and(|c| c.tab != SKETCH_TAB && SKETCH_ENDING_PANELS.contains(&c.panel) && c.id != "sketch.create")
+}

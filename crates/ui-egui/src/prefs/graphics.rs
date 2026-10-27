@@ -4,6 +4,9 @@ use super::*;
 pub(super) fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
     let t = crate::theme::Tokens::get();
     ui_kit::settings_heading(ui, app.tr("prefs.graphics"), app.tr("prefs.graphics_note"));
+    if let Some(note) = &app.graphics_fallback {
+        ui_kit::text(ui, note, ui_kit::Text::Hint("graphics_fallback"));
+    }
     if app.services.graphics_path.is_some() {
         ui_kit::settings_section(ui, "graphics_card", app.tr("prefs.graphics_card"), |ui| {
             let adapters = &app.services.graphics_adapters;

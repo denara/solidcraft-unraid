@@ -76,7 +76,7 @@ impl Capturer {
         let samples =
             if samples > 1 && flags(FORMAT).sample_count_supported(samples) && flags(depth).sample_count_supported(samples) { samples } else { 1 };
         let scopes = error_scopes(&device);
-        let renderer = Renderer::new(&device, GpuTarget { format: FORMAT, depth: Some(depth), samples, tess: false }, None);
+        let renderer = Renderer::new(&device, GpuTarget { format: FORMAT, depth: Some(depth), samples, tess: false, oit: false }, None);
         let background = background_pipeline(&device, samples, depth);
         caught(scopes).map_or(Ok(()), |e| Err(GpuError::Pipeline(e)))?;
         let max_side = device.limits().max_texture_dimension_2d.min(MAX_SIDE);
@@ -417,7 +417,7 @@ pub fn scene_geometry(scene: &Scene) -> GpuScene {
         let faces: HashMap<u32, Rgb> = m.face_colors.iter().copied().collect();
         let mesh = &m.mesh;
         for (ti, t) in mesh.triangles.iter().enumerate() {
-            let col = c4(mesh.tri_face.get(ti).and_then(|f| faces.get(f)).copied().unwrap_or(m.color));
+            let col = sc.color(c4(mesh.tri_face.get(ti).and_then(|f| faces.get(f)).copied().unwrap_or(m.color)));
             let [Some(a), Some(b), Some(c)] = t.map(|k| mesh.positions.get(k as usize).copied()) else { continue };
             let flat = (b - a).cross(c - a).normalized().unwrap_or(Vec3::Z);
             for (k, p) in t.iter().zip([a, b, c]) {
@@ -430,15 +430,17 @@ pub fn scene_geometry(scene: &Scene) -> GpuScene {
             }
         }
     }
-    let c4 = |c: Rgb| [c.0, c.1, c.2, 255];
+    let alpha = |a: f32| (a.clamp(0.0, 1.0) * 255.0).round() as u8;
     for l in &scene.grid {
+        let col = sc.color([l.color.0, l.color.1, l.color.2, alpha(l.alpha)]);
         for w in l.points.windows(2) {
-            sc.under_line(w[0].to_f32(), w[1].to_f32(), c4(l.color), l.width as f32);
+            sc.under_line(w[0].to_f32(), w[1].to_f32(), col, l.width as f32);
         }
     }
     for l in &scene.lines {
+        let col = sc.color([l.color.0, l.color.1, l.color.2, alpha(l.alpha)]);
         for w in l.points.windows(2) {
-            sc.line(w[0].to_f32(), w[1].to_f32(), c4(l.color), l.width as f32, l.on_top);
+            sc.line(w[0].to_f32(), w[1].to_f32(), col, l.width as f32, l.on_top);
         }
     }
     sc
@@ -567,9 +569,10 @@ mod tests {
         })
     }
 
-    /// The alpha of a triangle `scene_geometry` wrote (the last byte of its first vertex).
-    fn alpha(bytes: &[u8]) -> Option<u8> {
-        bytes.get(TRI_SIZE - 1).copied()
+    /// The colour of a triangle `scene_geometry` wrote (its first vertex's palette entry).
+    fn color(scene: &GpuScene, bytes: &[u8]) -> Option<[u8; 4]> {
+        let index = bytes.get(TRI_SIZE - 4..TRI_SIZE)?.try_into().ok().map(u32::from_le_bytes)?;
+        scene.palette.get(crate::view::PaletteIndex(index))
     }
 
     /// A body the design draws see-through goes into the scene's glass, at its own alpha, and
@@ -582,17 +585,19 @@ mod tests {
 
         let solid = geometry(1.0);
         assert_eq!((solid.tris.len(), solid.glass.len()), (3 * TRI_SIZE, 0));
-        assert_eq!(alpha(&solid.tris), Some(255), "a solid body is drawn opaque");
+        assert_eq!(color(&solid, &solid.tris), Some([200, 30, 30, 255]), "a solid body is drawn opaque");
 
         let glass = geometry(0.3);
         assert_eq!((glass.tris.len(), glass.glass.len()), (0, 3 * TRI_SIZE), "a see-through body is glass, not a solid triangle");
-        assert_eq!(alpha(&glass.glass), Some(77), "0.3 of 255");
+        assert_eq!(color(&glass, &glass.glass).map(|c| c[3]), Some(77), "0.3 of 255");
 
         // The threshold and the floor are the viewport's: an appearance a hair under 1 stays
         // solid, and opacity 0 still leaves a trace rather than vanishing.
         let almost = geometry(0.9995);
         assert_eq!((almost.tris.len(), almost.glass.len()), (3 * TRI_SIZE, 0), "an appearance a hair under 1 is still solid");
-        assert_eq!(alpha(&geometry(0.0).glass), Some(13), "0.05 of 255");
+        assert_eq!(color(&almost, &almost.tris).map(|c| c[3]), Some(255));
+        let trace = geometry(0.0);
+        assert_eq!(color(&trace, &trace.glass).map(|c| c[3]), Some(13), "0.05 of 255");
     }
 
     /// A face with a colour of its own is drawn in that colour, and takes its body's opacity:
@@ -602,7 +607,6 @@ mod tests {
         let mesh = SceneMesh { mesh: sheet(), color: Rgb(200, 30, 30), face_colors: vec![(0, Rgb(0, 255, 0))], opacity: 0.5 };
         let sc = scene_geometry(&Scene { meshes: vec![mesh], ..Default::default() });
         assert_eq!(sc.tris.len(), 0);
-        let first = sc.glass.get(TRI_SIZE - 4..TRI_SIZE);
-        assert_eq!(first, Some(&[0, 255, 0, 128][..]), "the face's own colour at the body's alpha");
+        assert_eq!(color(&sc, &sc.glass), Some([0, 255, 0, 128]), "the face's own colour at the body's alpha");
     }
 }

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 pub use solidcraft_engine::doc::display_units::{format_length, length_number, length_precision, unit_scale};
 use solidcraft_engine::geom::Vec3;
+use solidcraft_engine::render::Camera;
 
 /// The key the apps keep the preferences under in eframe's storage.
 pub const STORAGE_KEY: &str = "solidcraft.prefs";
@@ -318,6 +319,19 @@ impl NavigatorStyle {
     }
 }
 
+/// How the History at the left lists sketches (Preferences: "Sketches", #6489). The timeline
+/// along the bottom always keeps the creation order.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistorySketches {
+    /// Every sketch is a row of its own, in creation order (how it always was). Also what a
+    /// value this version doesn't know reads as (`lenient`).
+    #[default]
+    InOrder,
+    /// A sketch a feature is built from is listed one level in, under that feature.
+    UnderFeature,
+}
+
 /// What an orbit turns around (Preferences: "Orbit around").
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -329,6 +343,53 @@ pub enum OrbitAround {
     ViewCentre,
     /// The model point under the cursor when the drag began.
     Cursor,
+}
+
+/// Where the view goes when a sketch ends (Preferences: "When a sketch ends", #7038).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SketchExitView {
+    /// Back to the view from before the sketch opened.
+    Previous,
+    /// The view stays where it is (the default since #4909).
+    #[default]
+    Keep,
+    /// Back to the view from before the sketch, unless the sketch view was turned: a view only
+    /// panned or zoomed goes back, a turned one stays.
+    UnlessRotated,
+}
+
+impl SketchExitView {
+    pub const ALL: [Self; 3] = [Self::Previous, Self::Keep, Self::UnlessRotated];
+
+    /// The message id of the choice's label.
+    pub fn label_id(self) -> &'static str {
+        match self {
+            Self::Previous => "prefs.sketch_exit_view.previous",
+            Self::Keep => "prefs.sketch_exit_view.keep",
+            Self::UnlessRotated => "prefs.sketch_exit_view.unless_rotated",
+        }
+    }
+
+    /// The view to turn to when a sketch ends with the camera at `now`, or `None` to leave it.
+    /// `before` is the view from before the sketch opened and `facing` the one it turned to then.
+    /// Going back keeps `now`'s projection, so a perspective switch made in the sketch stays.
+    pub fn view_after(self, before: Camera, facing: Camera, now: Camera) -> Option<Camera> {
+        let back = Camera { fov: now.fov, ..before };
+        match self {
+            Self::Previous => Some(back),
+            Self::Keep => None,
+            Self::UnlessRotated => same_orientation(facing, now).then_some(back),
+        }
+    }
+}
+
+/// Whether two cameras look the same way: pans and zooms move a camera without turning it.
+/// Half a degree absorbs rounding in the animation that turned the view to face the sketch.
+fn same_orientation(a: Camera, b: Camera) -> bool {
+    let near = 0.5_f64.to_radians().cos();
+    let ((ar, au, ab), (br, bu, bb)) = (a.basis(), b.basis());
+    ar.dot(br) > near && au.dot(bu) > near && ab.dot(bb) > near
 }
 
 /// Which program reads the 3D mouse on Linux when both spacenavd and the device itself (hidraw)
@@ -508,6 +569,12 @@ preference_settings! {
     /// the page would otherwise bring the offer back for every device.
     #[serde(deserialize_with = "devices_that_read")]
     space_mouse_offered: std::collections::BTreeSet<String> = Default::default();
+    /// A device's own app on this computer moves the view (the navigation bridge, docs/3d-mouse.md):
+    /// the desktop app connects to it on `nav_bridge_port`. Off unless asked for, so the app
+    /// doesn't connect to whatever else listens on that port.
+    nav_bridge_enabled: bool = false, PAGE_NAVIGATION;
+    /// The loopback port the device app listens on (0: none).
+    nav_bridge_port: u16 = 8765, PAGE_NAVIGATION;
     /// Anti-aliasing samples (applies on restart).
     msaa: u32 = 4, PAGE_GRAPHICS;
     /// Linux: the window system the app opens with at its next start (#3083): `auto` (XWayland
@@ -547,6 +614,10 @@ preference_settings! {
     /// Up/Down and the wheel over a focused value field step its plain number (`value_step`,
     /// #2320). Off by default: the keys move the text cursor and the wheel scrolls, as before.
     step_values: bool = false, PAGE_DESIGN => check_id("ui.step_values");
+    /// Reopen the saved designs that were open when the app was last closed (#5542).
+    reopen_designs: bool = true, PAGE_GENERAL;
+    /// Those designs' files, in tab order, as the last quit left them.
+    open_designs: Vec<String> = Vec::new(), PAGE_GENERAL;
     /// `dark`, `light` or `system` (follow the operating system), or a theme file's id: a
     /// built-in one (`gruvbox-dark`, …) or one of `custom_themes` (#2255).
     theme: String = "dark".into(), PAGE_INTERFACE;
@@ -561,11 +632,16 @@ preference_settings! {
     layout: crate::shell::LayoutMode = Default::default(), PAGE_INTERFACE;
     /// Show command names beneath ribbon icons, independently of workspace layout.
     ribbon_labels: bool = true, PAGE_INTERFACE;
+    /// Where a dialog's OK and Cancel sit: under its inputs (the default) or in its title row (#6708).
+    dialog_buttons: crate::ui_kit::DialogButtons = Default::default(), PAGE_INTERFACE;
     /// Interface scale (1 = 100 %).
     ui_scale: f32 = 1.0, PAGE_INTERFACE, accept(0.5..=2.5);
     /// Interface font: an installed font family (or a font file), or empty for the built-in one
     /// (#1290). Menus, dialogs and labels use it; glyphs it lacks fall back as before.
     ui_font: String = String::new(), PAGE_INTERFACE;
+    /// While a dialog or a sketch is open, OK and Cancel in the view's top right corner, with the
+    /// axis view moved down below them (#6709). Off by default.
+    view_confirm_corner: bool = false, PAGE_INTERFACE => check_id("prefs.view_confirm_corner");
     /// Put the feature history to the left of the browser instead of below the viewport.
     timeline_left: bool = false, PAGE_INTERFACE;
     /// Measured outer width; the contents react to this width without a names mode.
@@ -576,6 +652,8 @@ preference_settings! {
     timeline_collapsed: bool = false, PAGE_INTERFACE;
     /// Whether the browser beside the vertical history is collapsed to its rail.
     timeline_left_browser_collapsed: bool = false, PAGE_INTERFACE;
+    /// Whether the History at the left lists a sketch under the feature built from it.
+    history_sketches: HistorySketches = HistorySketches::default(), PAGE_INTERFACE;
     /// Width of the browser sidebar, which
     /// the user drags wider or narrower at its right edge.
     browser_width: f32 = DEFAULT_BROWSER_WIDTH, PAGE_INTERFACE;
@@ -609,6 +687,16 @@ preference_settings! {
     hole_moves: bool = false, PAGE_DESIGN => check("Move holes by clicking or dragging");
     /// The browser's Origin folder starts hidden in designs that don't keep its eye themselves.
     hide_origin: bool = false, PAGE_DESIGN => check_tr("ui.hide_origin_by_default");
+    /// Handles on the preview of a feature placed on a face (Rest, Boss, Snap Fit): a marker that
+    /// drags it across the model and a ring that turns it. Off by default: the feature is then placed
+    /// by its click only, as before, and its Position input takes faces only.
+    placement_handles: bool = false, PAGE_DESIGN => check("Placement handles", "Handles on the preview of a Rest, Boss or Snap Fit: drag the marker to move it across the model, turn it by its ring");
+    /// The files a design names (linked designs, font files) may be on any network location, for
+    /// organisations that keep their designs on file servers. Off (the default): only on the
+    /// servers in `network_hosts`, or one the user allows when asked (`network_prompt`).
+    network_locations: bool = false, PAGE_DESIGN => check_tr("prefs.network_locations");
+    /// The servers the files a design names may be on ("Always allow this server").
+    network_hosts: Vec<String> = Vec::new(), PAGE_DESIGN;
     /// What a middle-button double-click in the view does: `home`, `fit` or `off`.
     middle_double_click: String = "home".into(), PAGE_NAVIGATION;
     /// Colour vision mode (#778): `off`, `protan`, `deutan` or `tritan`.
@@ -617,20 +705,31 @@ preference_settings! {
     check_updates: bool = true, 0;
     /// When the last update check ran, and the versions skipped or put off (`update::Memo`).
     update: crate::update::Memo = crate::update::Memo::default();
-    /// Save as mesh: the last format (`stl` or `3mf`), whether it was sent to a slicer, which one
-    /// (an installed slicer's id or a program path), and the programs the user added (newest first).
     /// The variant last started in each split tool family (Rectangle, Circle, Arc, Slot, Polygon, Line,
     /// Spline): the family's button and shortcut start it again (`sketch_families`).
     sketch_variants: crate::sketch_families::Choices = crate::sketch_families::Choices::default();
+    /// Personal Hole parameter combinations, shared by every design in this profile.
+    /// No page reset discards this user-authored library.
+    hole_presets: crate::hole_presets::Library = crate::hole_presets::Library::default();
+    /// Save as mesh: the last format (`stl` or `3mf`). Older versions also kept a "send to slicer"
+    /// choice here (`save_mesh_send`, `save_mesh_slicer`); a settings file that still has them loads,
+    /// and they are ignored.
     save_mesh_format: String = "stl".into();
     /// Hidden edges in the current-view DXF export (false: omit, true: dashed).
     view_dxf_dashed: bool = false;
     /// Model-space chord tolerance for current-view DXF curves, in millimetres.
     view_dxf_tolerance: f64 = 0.01;
-    save_mesh_send: bool = false;
-    save_mesh_slicer: String = String::new();
+    /// Send to Slicer: the last slicer used (an installed slicer's id or a program path).
+    send_slicer: String = String::new();
+    /// Slicers that can load a file into the window that is already open do so (default on).
+    slicer_single_instance: bool = true, 0;
+    /// The line about sending again replacing the slicer's file has been shown.
+    slicer_resend_hint_seen: bool = false;
+    /// The user has agreed to Open with EasyPrint uploading a model to Printables' servers.
+    easyprint_consent: bool = false;
     /// Save as mesh: the last quality (`standard`, `fine` or `finest`, #4747).
     save_mesh_quality: String = "standard".into();
+    /// The programs the user added to the slicer list, newest first.
     custom_slicers: Vec<String> = Vec::new();
     /// AI features (docs/agent-chat.md): the master switch. Off: no AI button, shortcut, menu
     /// entry or panel, and nothing is looked for or started.
@@ -680,6 +779,8 @@ preference_settings! {
     /// A sketch tool's shortcut pressed again before the first point steps to the tool's next
     /// creation mode (#2459). Off (the default): the key starts the tool again, as it always has.
     shortcut_cycles_modes: bool = false, PAGE_SKETCH;
+    /// Where the view goes when a sketch ends (#7038). Keep (the default) leaves it as it is.
+    sketch_exit_view: SketchExitView = SketchExitView::default(), PAGE_SKETCH;
     /// When true: Shift+click adds without removing; Primary toggles.
     /// When false (default): Shift and Primary both toggle.
     selection_shift_add_only: bool = false, PAGE_SKETCH;
@@ -748,6 +849,7 @@ struct Snapshot {
     dark: bool,
     layout: crate::shell::LayoutMode,
     grid: bool,
+    navigation_bar: bool,
     shadow: bool,
     perspective: bool,
     style: u8,
@@ -765,6 +867,7 @@ impl Snapshot {
             dark: app.ui.dark,
             layout: app.ui.layout,
             grid: app.ui.show_grid,
+            navigation_bar: app.ui.show_navigation_bar,
             shadow: app.ui.ground_shadow,
             perspective: app.ui.perspective,
             style: app.ui.visual_style,
@@ -788,6 +891,7 @@ impl Snapshot {
         app.ui.dark = self.dark;
         app.ui.layout = self.layout;
         app.ui.show_grid = self.grid;
+        app.ui.show_navigation_bar = self.navigation_bar;
         app.ui.ground_shadow = self.shadow;
         app.ui.perspective = self.perspective;
         app.ui.visual_style = self.style;
@@ -966,6 +1070,7 @@ fn defaults(app: &mut SolveApp, page: usize) {
         PAGE_INTERFACE => {
             app.ui.dark = true;
             app.ui.layout = app.preferences.layout;
+            app.ui.show_navigation_bar = true;
         }
         PAGE_AI => app.ui.agent_cursor = Default::default(),
         PAGE_NAVIGATION | PAGE_DESIGN => {}
@@ -990,6 +1095,7 @@ fn defaults(app: &mut SolveApp, page: usize) {
 /// Settings that follow the preferences every frame: the theme when it follows the system, and
 /// the interface scale.
 pub fn apply(app: &mut SolveApp, ctx: &egui::Context) {
+    apply_network(&app.preferences);
     // The viewport's display quality (an unknown saved value draws at Normal).
     solidcraft_engine::doc::display_quality::set_current(
         solidcraft_engine::doc::display_quality::DisplayQuality::parse(&app.preferences.display_quality).unwrap_or_default(),
@@ -1032,6 +1138,14 @@ pub fn apply(app: &mut SolveApp, ctx: &egui::Context) {
     if z.is_finite() && !ctx.input(|i| i.pointer.any_down()) && (ctx.zoom_factor() - z).abs() > 1e-3 {
         ctx.set_zoom_factor(z);
     }
+}
+
+/// The network locations the files a design names may be on follow the preferences.
+pub fn apply_network(p: &Prefs) {
+    solidcraft_engine::io::vfs::set_network_policy(solidcraft_engine::io::vfs::NetworkPolicy {
+        allow_all: p.network_locations,
+        hosts: p.network_hosts.clone(),
+    });
 }
 
 /// A new, empty design takes the preferred units (not an undo step, not a change to save).
@@ -1530,6 +1644,9 @@ fn space_mouse_rows(app: &mut SolveApp, ui: &mut egui::Ui) {
             }
         }
     });
+    // A device whose own app drives the view instead (the navigation bridge).
+    ui_kit::divider(ui, "nav_bridge");
+    navigation::nav_bridge(app, ui);
     // The rarely needed settings sit behind one disclosure, closed until the reader opens it.
     ui_kit::section(ui, "space_mouse_advanced", crate::i18n::tr_label("Advanced"), false, |ui| {
         ui_kit::settings_form(ui, FORM_LABEL_WIDTH, |ui| {
@@ -3286,11 +3403,14 @@ mod tests {
             ("ui_font", json!("test font"), PAGE_INTERFACE),
             ("layout", json!("compact"), PAGE_INTERFACE),
             ("ribbon_labels", json!(false), PAGE_INTERFACE),
+            ("dialog_buttons", json!("top"), PAGE_INTERFACE),
             ("timeline_left", json!(true), PAGE_INTERFACE),
             ("timeline_under_browser", json!(true), PAGE_INTERFACE),
+            ("history_sketches", json!("under_feature"), PAGE_INTERFACE),
             ("browser_float", json!(true), PAGE_INTERFACE),
             ("color_vision", json!("protan"), PAGE_INTERFACE),
             ("viewport_theme", json!("light"), PAGE_INTERFACE),
+            ("view_confirm_corner", json!(true), PAGE_INTERFACE),
             ("nav", json!("blender"), PAGE_NAVIGATION),
             ("look_at_anim", json!(false), PAGE_NAVIGATION),
             ("selection_shift_add_only", json!(true), PAGE_SKETCH),
@@ -3332,6 +3452,68 @@ mod tests {
         defaults(&mut app, PAGE_SKETCH);
         assert!(!app.ui.pick_bodies);
         assert!(app.session.auto_project);
+    }
+
+    fn hole_preset_row(name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "name": name, "style": "counterbore", "extent": "distance",
+            "diameter": "shaft_diameter + 0.2 mm", "depth": "0.5 in",
+            "cb_diameter": "10 mm", "cb_depth": "3 mm", "cs_diameter": "10 mm",
+            "cs_angle": "90 deg", "tip_angle": "118 deg", "tapped": true, "thread": "M5"
+        })
+    }
+
+    #[test]
+    fn hole_presets_corrupt_rows_and_limits_do_not_discard_other_preferences() {
+        use serde_json::json;
+        let good = hole_preset_row("Workshop");
+        let mut oversized = hole_preset_row("Too long");
+        oversized["diameter"] = json!("x".repeat(513));
+        let mut duplicate = good.clone();
+        duplicate["name"] = json!("WORKSHOP");
+        let p = super::lenient(&json!({"length_decimals":4,"hole_presets":[null,good,oversized,duplicate,{"name":"incomplete"}]}));
+        assert_eq!(p.length_decimals, 4);
+        let rows = serde_json::to_value(&p.hole_presets).unwrap();
+        assert_eq!(rows.as_array().unwrap().len(), 1);
+        assert_eq!(rows[0]["name"], "Workshop");
+        assert_eq!(rows[0]["diameter"], "shaft_diameter + 0.2 mm");
+        assert_eq!(rows[0]["depth"], "0.5 in");
+        let corrupt = super::lenient(&json!({"length_decimals":3,"hole_presets":{"unexpected":true}}));
+        assert_eq!(corrupt.length_decimals, 3);
+        assert_eq!(serde_json::to_value(corrupt.hole_presets).unwrap(), json!([]));
+        let many: Vec<_> = (0..100).map(|i| hole_preset_row(&format!("Preset {i}"))).collect();
+        let capped = super::lenient(&json!({"hole_presets":many}));
+        assert_eq!(serde_json::to_value(capped.hole_presets).unwrap().as_array().unwrap().len(), 64);
+    }
+
+    #[test]
+    fn hole_presets_survive_application_preferences_roundtrip_and_page_resets() {
+        use serde_json::json;
+        let mut app = crate::SolveApp::new(solidcraft_engine::Session::default(), crate::Services::default());
+        let mut row = hole_preset_row("Fixture");
+        row["thread_options"] = json!({"handedness":"left","full_length":false,"depth":"4 mm"});
+        super::set(&mut app, &json!({"hole_presets":[row]})).unwrap();
+        let expected = serde_json::to_value(&app.preferences.hole_presets).unwrap();
+        assert_eq!(expected[0]["thread_options"]["handedness"], "left");
+        for page in 0..super::PAGES.len() {
+            super::reset_preferences(&mut app.preferences, page);
+        }
+        assert_eq!(serde_json::to_value(&app.preferences.hole_presets).unwrap(), expected);
+        let saved = app.prefs();
+        let mut other = crate::SolveApp::new(solidcraft_engine::Session::default(), crate::Services::default());
+        other.load_prefs(&saved);
+        assert_eq!(serde_json::to_value(&other.preferences.hole_presets).unwrap(), expected);
+        assert!(other.session.doc.features.is_empty());
+    }
+
+    #[test]
+    fn hole_presets_keep_unknown_thread_options_for_safe_future_recall() {
+        use serde_json::json;
+        let mut row = hole_preset_row("Newer version");
+        row["thread_options"] = json!({"starts":2});
+        let p = super::lenient(&json!({"hole_presets":[row]}));
+        let saved = serde_json::to_value(p.hole_presets).unwrap();
+        assert_eq!(saved[0]["thread_options"]["starts"], 2, "unknown thread semantics must not silently become the defaults");
     }
 
     /// The interface font (#1290): a font that can be read, or empty for the built-in one; saved
@@ -3815,6 +3997,70 @@ mod tests {
         h.call("ui.click", json!({"x":axis.x,"y":axis.y}));
         assert!(h.app.cam.back().dist(Vec3::Y) < 1e-6, "original axes retain click-again reversal");
         assert_eq!(h.app.session.doc.to_json(), design);
+    }
+
+    #[test]
+    fn history_sketches_defaults_in_order_and_follows_preferences_transactions() {
+        let old: Prefs = serde_json::from_value(json!({"timeline_left": true})).unwrap();
+        assert_eq!(old.history_sketches, HistorySketches::InOrder, "designs and settings from before keep the creation order");
+        assert_eq!(lenient(&json!({"history_sketches": "sideways"})).history_sketches, HistorySketches::InOrder);
+        let mut h = crate::scenario::Harness::new();
+        h.call("ui.prefs", json!({"timeline_left": true, "timeline_under_browser": true}));
+        let design = h.app.session.doc.to_json();
+        h.call("ui.prefs", json!({"open": "Interface"}));
+        let row = h.app.tr("prefs.history_sketches").to_string();
+        let under = h.app.tr("prefs.history_sketches_under_feature").to_string();
+        let handle = format!("dialog:{row}:{under}");
+        super::reveal_preference(&mut h, &handle);
+        let at = crate::scenario::handle_at(&handle).unwrap();
+        h.call("ui.click", json!({"x": at.x, "y": at.y}));
+        assert_eq!(h.app.preferences.history_sketches, HistorySketches::UnderFeature);
+        assert_eq!(h.app.session.doc.to_json(), design, "the preference changes only the History");
+        h.call("ui.prefs", json!({"button": "cancel"}));
+        assert_eq!(h.app.preferences.history_sketches, HistorySketches::InOrder);
+
+        let reply = h.call("ui.prefs", json!({"history_sketches": "under_feature"}));
+        assert_eq!(reply["result"]["history_sketches"], "under_feature");
+        let mut restored = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
+        restored.load_prefs(&h.app.prefs());
+        assert_eq!(restored.preferences.history_sketches, HistorySketches::UnderFeature);
+        let before = h.app.preferences.clone();
+        assert!(control(&mut h.app, &json!({"history_sketches": "sideways"})).is_err());
+        assert_eq!(h.app.preferences, before, "an unknown value changes nothing");
+        h.call("ui.prefs", json!({"open": "Interface"}));
+        h.call("ui.prefs", json!({"button": "defaults"}));
+        assert_eq!(h.app.preferences.history_sketches, HistorySketches::InOrder);
+        h.call("ui.prefs", json!({"button": "cancel"}));
+        assert_eq!(h.app.preferences.history_sketches, HistorySketches::UnderFeature);
+    }
+
+    #[test]
+    fn dialog_buttons_default_bottom_and_follow_preferences_transactions() {
+        use crate::ui_kit::DialogButtons;
+        let old: Prefs = serde_json::from_value(json!({"ribbon_labels": false})).unwrap();
+        assert_eq!(old.dialog_buttons, DialogButtons::Bottom, "settings from before keep the footer");
+        assert_eq!(lenient(&json!({"dialog_buttons": "sideways"})).dialog_buttons, DialogButtons::Bottom);
+        let mut h = crate::scenario::Harness::new();
+        h.call("ui.prefs", json!({"open": "Interface"}));
+        super::reveal_preference(&mut h, "prefs:dialog_buttons:top");
+        h.step(&json!({"click": {"handle": "prefs:dialog_buttons:top"}})).unwrap();
+        assert_eq!(h.app.preferences.dialog_buttons, DialogButtons::Top);
+        h.call("ui.prefs", json!({"button": "cancel"}));
+        assert_eq!(h.app.preferences.dialog_buttons, DialogButtons::Bottom);
+
+        let reply = h.call("ui.prefs", json!({"dialog_buttons": "top"}));
+        assert_eq!(reply["result"]["dialog_buttons"], "top");
+        let mut restored = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
+        restored.load_prefs(&h.app.prefs());
+        assert_eq!(restored.preferences.dialog_buttons, DialogButtons::Top);
+        let before = h.app.preferences.clone();
+        assert!(control(&mut h.app, &json!({"dialog_buttons": "sideways"})).is_err());
+        assert_eq!(h.app.preferences, before, "an unknown value changes nothing");
+        h.call("ui.prefs", json!({"open": "Interface"}));
+        h.call("ui.prefs", json!({"button": "defaults"}));
+        assert_eq!(h.app.preferences.dialog_buttons, DialogButtons::Bottom);
+        h.call("ui.prefs", json!({"button": "cancel"}));
+        assert_eq!(h.app.preferences.dialog_buttons, DialogButtons::Top);
     }
 
     #[test]

@@ -1,5 +1,63 @@
 # Validated container updates
 
+## 2026-10-27: fixed upstream 0.24.0 snapshot, format 40 and preserved integration
+
+Selected `514b0c84f9eb7655e3cdc986f0d44d4cd3416f4c` once, 185 commits after
+validated `f006eefd`. The sole branch `codex/unraid-mcp-web` started clean and
+synchronized at `dbe75ddb`; fetched fork main remains an ancestor. For SolidCraft
+features/changes refer to [the original project](https://github.com/tangency-labs/solidcraft).
+This is unofficial container integration, not an application release or Unraid install.
+
+All published integration features remain: independent browser CAD and HTTP MCP,
+headless/quiet workers, immutable real-project binding, revisions and file gates,
+cookie-only Workspace/remembered logins, live inventory and read-only model observation,
+thumbnails/browser copies, deletion, bounded ZIP64 streaming, manual projects,
+multi-file drag/drop uploads with batch conflict choices and the storage footer.
+The canonical Unraid Overview and original icon are unchanged; no catalog commit is needed.
+
+Merge adjustments preserve the fork's unsafe native-bridge omissions (including the
+new upstream macOS signal handler), VFS/link confinement and isolated observer caches.
+New lazy measurement/surface caches and the EasyPrint host are not shared with an
+observer; ordinary scratch computations retain their upstream hosts/renames. Desktop
+or cloud slicer delivery is refused by gateway preflight before derived writes or
+program launch; project mesh export still works. Link paths pass the upstream
+remote/device/scope policy before root canonicalisation, then the existing no-symlink
+confinement. Smoke tests require either explicit confinement or scope-denial diagnostics
+and no credential disclosure. Upstream's new short AGENTS router is retained, with
+all prior mandatory fork rules preserved in `docs/unraid-agent-rules.md`. Skill/front
+matter and source-inspection checks handle a Windows CRLF checkout. The generated
+shipped licenses were regenerated, retaining gateway coverage.
+
+Local proofs use a new labelled candidate, fresh disposable volume, loopback port,
+disposable credential and original/public analytic examples. The complete container
+smoke/restart, project, Workspace, logging/privacy, observer, live, deletion/streaming
+ZIP, remembered-login and upload tests pass. Real browser tests cover multi-file drop,
+fixed targets, overwrite/skip/cancel and apply-all reset, stale revisions, live folder
+state, joined layout, footer and independent native-design handoff. Actual screenshots
+were inspected. Software-GL capture/stand-up integration and browser API/offline/update
+checks pass, including the serialized asynchronous DXF download.
+
+Native formats 13 and 38 open without changing source bytes; format-40 saves preserve
+parameters, 24000 mm3 volume, named split faces and STEP export. A real MCP SDK client
+also checks aliases, source/extract/output confinement, strong revisions, embedded HDR
+native roundtrip, session separation and CPU rendering. A new closed cone roundtrip
+measures 314.1019886 mm3 against analytic 100*pi (relative error 0.0183%, within the
+upstream 0.2% numerical tolerance); saved/reopened measurement is unchanged. Native
+container CRCs pass. Snapshot format 40 includes upstream pending cone and feature-id
+references beyond the folded 0.24.0 release format; older builds cannot read new saves.
+
+Relevant doc/IO/engine/MCP/UI/render/GPU/sketch and CLI regressions, 142 gateway tests,
+native all-target Clippy, 13-crate Wasm compatibility and browser/client lint checks,
+fmt, licenses/assets/icons/layers/lists/containers/skills gates are used. There is no
+blanket rerun of the whole repository suite. The unchanged whole-registry hostile scan
+was stopped as broader than needed; command-specific bounds and gateway protections
+remain covered. Early source-inspection false positives caused by CRLF and the changed
+permission diagnostic were corrected; no failing behavior test was waived.
+
+Publication, immutable digest/archive and local runtime preservation are recorded after
+the exact source workflow passes. Unraid installation remains a manual owner step.
+
+
 ## 2026-10-26: upstream 0.23.0, manual projects and bounded browser uploads
 
 Selected one fixed upstream snapshot, `f006eefd6e2987ec14c8ab596ad39fe11e53be41`,

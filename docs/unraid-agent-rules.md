@@ -1,0 +1,332 @@
+# Mandatory fork integration rules
+
+Read these rules before modifying this fork; they take precedence over upstream contribution/release defaults.
+
+# SolidCraft â€” instructions for agents
+
+SolidCraft is a clean-room, open-source, pure-Rust parametric 3D CAD application:
+sketches with a constraint solver, a parametric timeline of features, a B-rep
+kernel, and a desktop UI that agents can drive. Projects published by
+[storytold](https://github.com/storytold) can serve as references for implementation conventions.
+Any code adapted from other projects (MIT OR Apache-2.0) is noted in ATTRIBUTION.md.
+
+## Product name
+SolidCraft everywhere: crates `solidcraft-*`, binaries `solidcraft` and `solidcraft-cli`,
+`.solidcraft` designs, the `solidcraft/N` format tag, `SOLIDCRAFT_*` environment variables,
+settings and recovery folders, the MCP server name, docs, CI and packaging. Container gateway, environment variables, volume paths and compatibility aliases retain their existing SolveCraft names. The upstream old name
+survives only in the explicit compatibility shims listed in `docs/compatibility.md`; don't add
+new uses of it anywhere else. Public docs/web/Flatpak deployments use project Pages
+`/solidcraft/`; do not add permanent old-name Pages aliases.
+
+## Container prototype baseline
+The first Unraid prototype used upstream commit `af536a7`. The current validated
+container baseline is `514b0c84f9eb7655e3cdc986f0d44d4cd3416f4c`.
+Keep later upstream CAD/UI feature updates separate from this deployment addition;
+advance the baseline only as a separate, validated update. See [update records](../docs/unraid-updates.md).
+
+## Requested upstream updates
+For an explicit upstream update, use
+[update-solvecraft-unraid](../.agents/skills/update-solvecraft-unraid/SKILL.md).
+Select one target upstream commit at the start and finish validation against that snapshot;
+report later upstream movement separately. A requested and validated update may advance
+the recorded prototype baseline. The sole working branch for this fork is
+`codex/unraid-mcp-web`, for both manual and scheduled updates. Synchronize that branch
+with its origin counterpart and merge the selected upstream snapshot directly into it.
+Do not create separate update branches. The fork's `main` is not the deployment branch.
+Build and test on the development computer. Keep web and MCP sessions independent,
+preserve persistent designs and the existing MCP token, and leave private deployment values
+in ignored local configuration. Preparing an update does not itself install it on Unraid
+or publish an application release; follow the user's actual requested scope.
+After a successful update, retain one local development/test container on the newest
+validated image and remove obsolete project build/check/candidate containers. Preserve
+the local runtime's data volume and MCP token, useful build images/caches and a rollback
+image. Check ownership and current activity before removal; do not prune unrelated Docker
+resources or delete data volumes. This authorizes refreshing the local test container,
+not installing on Unraid. See the update skill for verification and cleanup details.
+Public container distribution is authorized through the tested container workflow to
+`ghcr.io/denara/solidcraft-unraid`, with Community Applications metadata in
+`denara/unraid-templates`. Publish only after the image's modelling, authentication,
+file/origin, persistence and web checks pass. Keep `latest` on a passing build and retain
+commit-specific tags. Verify anonymous pulls before claiming public availability.
+This is container packaging, not an upstream application release or an Unraid deployment.
+
+The container's `/workspace` dashboard is independent of browser CAD. Its write actions are explicitly confirmed deletion of individual files or real folders,
+explicit project creation and user-selected uploads into real projects. Replacements
+require per-file strong revisions and an explicit overwrite choice. The optional
+"Für alle Dateien übernehmen" applies only to conflicts in the current batch/target;
+it never bypasses revised files or active project/transfer locks. Keep upload staging
+private, bounded and atomic, accept only validated data formats, and preserve cookie-only
+authentication. Run `packaging/unraid/workspace-upload-test.ps1` when changing these paths.
+The footer reports cached capacity of the shared-data volume, without exposing paths. Preserve
+cookie/CSRF/Origin checks, owner-bound expiring confirmations, strong revision checks,
+active-project protection and the shared HTTP/MCP file gate. Never delete by virtual
+group or delete test data outside an isolated disposable volume. Folder ZIPs stream
+server-side with bounded buffers, ZIP64, capped manifests and path leases that reject
+conflicting writes without holding the global gate for the download. Aborted, changed
+or unauthorized streams must fail and release all resources. ZIPs use the unfiltered
+workspace file set, excluding hidden, backup and temporary entries without reading
+their contents; disclose this policy and the exclusion count. Count excluded entries
+towards manifest limits and preserve link/path checks. Deletion manifests stay complete
+and strict; never reuse the filtered archive manifest for confirmation or deletion. Run
+`packaging/unraid/workspace-actions-test.ps1` when changing these paths.
+Preserve its cookie-only browser authentication, Bearer-only MCP/files authentication,
+authoritative per-session metadata and shared HTTP/MCP file-revision checks. When an
+upstream update adds file-writing commands, review their entire output set against
+`workspace_model` and path confinement before enabling them through the gateway.
+Normalize MCP batch tool aliases before project/path/revision preflight and launch gateway
+workers explicitly with `--headless`; desktop discovery must never attach a network session
+to a running desktop app. New `component.extract` destinations and
+`component.replace_with_link` source paths retain file confinement and shared revision gates.
+Nested renderer file sources remain project-relative and share the HTTP/MCP read gate.
+Observer snapshots never inherit render-job hosts; ordinary scratch rendering retains them.
+Run `packaging/unraid/workspace-test.ps1` against an isolated candidate along with
+the existing modelling, persistence, logging and browser checks.
+
+Preserve workspace server-push updates, virtual project groups and bounded read-only
+design metadata. The small browser client is Rust/Wasm; generated bindings and its
+module bootstrap are infrastructure, not a second application implementation.
+Remembered browser sessions use hashed opaque identifiers in a private store outside
+the shared files; never retain the MCP token in browser storage. Test logout/expiry,
+restart persistence and cookie/Bearer separation. Run `workspace-live-test.ps1` against
+the isolated candidate when changing the dashboard or gateway.
+Preserve validated PNG thumbnails and cookie-bound, expiring one-use native-design
+handoffs to independent browser copies. Never overwrite browser files, send the MCP
+token to browser storage, or silently write browser edits back into server files.
+
+HTTP MCP sessions must select one immutable real project folder with `project_select`
+before CAD tools. Preserve project-relative CAD paths, workspace-relative revision
+keys/downloads and explicit read-only source opening via `open(from_workspace:true)`.
+Never silently move legacy root files or permit an implicit save outside the selected
+project. Keep real project folders authoritative and use virtual grouping only for
+legacy root files. Run `packaging/unraid/project-test.ps1` on the isolated candidate
+when changing gateway path handling or project binding. Initial dashboard groups are
+collapsed; live updates retain the user's current folder choices.
+
+Preserve the workspace's read-only live session observer: cookie-only SSE/images,
+independent opaque observer handles, background snapshot preparation/rendering and
+bounded shared image caches. Observation must not write files, change the agent's
+camera/document/history or create observer-induced MCP busy errors. Preserve isolated
+cold display caches, render priority/budgets, image-body authorization/leases and
+logout/expiry/session-end invalidation. Contact-mesh caches are isolated in observation
+snapshots; ordinary scratch previews keep sharing their cache. Run `packaging/unraid/observer-test.ps1`
+against the isolated candidate when changing the worker, observation or gateway.
+
+Requested upstream updates merge one selected upstream snapshot and retain all published
+integration features in the combined image. Preserve the canonical Unraid template's
+Overview as a product description, not a dated changelog: link to upstream for SolidCraft
+features/changes and list only this fork's additional integration features as bullet points.
+Keep the original authorship and unofficial-integration notice explicit. Synchronize changed
+template metadata to `denara/unraid-templates` after the combined image passes publication.
+
+
+## Start every session here
+1. Read `plan/STATUS.md` (current milestone, next task), then the task in `plan/execution-plan.md`
+   and the relevant `plan/architecture.md` section.
+2. Kernel and library decisions: `plan/adr/0001-geometry-kernel.md` (what we may depend on, what
+   is rejected for licence reasons).
+3. Follow the autonomous operation protocol (`plan/execution-plan.md` Â§6). Don't stop to ask
+   unless it lists the decision as the owner's.
+
+Maintainers may keep local notes in `plan/` (gitignored); nothing in this file depends on them.
+
+## Never crash
+People trust SolidCraft with their designs; a crash loses their work. **This outranks feature work.**
+- **No panics in non-test code:** no `unwrap()`, `expect()`, `panic!`, `unreachable!`, `todo!`,
+  `unimplemented!`; no `unsafe` (`unsafe_code = "forbid"`).
+- **Errors are `Result<T, E>`** through the crate's error type and `?`. An unfinished feature
+  returns an error ("not supported yet: â€¦"); it never panics.
+- **Input-derived numbers are hostile** (command parameters, design files, control-channel
+  input): `get()` not `[i]`, finite checks, caps on sizes and loop counts.
+- **Third-party kernel calls are guarded:** everything that calls `truck` goes through
+  `solidcraft_kernel::guard`, which turns a panic into `KernelError::Internal`.
+- **Last-resort guard:** `Session::execute` runs every command under `catch_unwind`; an escaped
+  panic restores the design and reports `EngineError::Internal`.
+- **Crash reports:** the desktop app writes every panic and every unclean exit to a local crash folder,
+  with the design and the commands that reproduce it (`solidcraft_engine::crash`, docs/crash-reports.md).
+  When someone says the app crashed, look there first: `solidcraft-cli crashes`, `crashes show <id>`,
+  `crashes replay <id>` (or the `diagnostics.crash_reports` command / MCP `crash_reports` tool).
+- **Prove it:** every crash fix lands with a regression test (see `hostile_params_never_panic`); a
+  crash report's `design.solidcraft` + `replay.json` is the test's starting point.
+- **Where tests go:** a regression test goes into the existing test file for its area (booleans, blends,
+  shell, sweep, STEP, namingâ€¦), never a new file named after the bug (#3226).
+- Every production crate root carries
+  `#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]`.
+
+## Non-negotiables
+- **Private deployment configuration stays local.** Commit only generic example hostnames,
+  addresses and filesystem paths. Actual deployment values, credentials and private designs stay
+  in ignored local configuration or target; exclude them from container build contexts.
+- **Independent.** SolidCraft is independent. Behaviour is designed from public documentation,
+  general CAD conventions and user feedback. Reference tests use analytic values and open-source
+  tools. Never copy another product's code, icons, artwork, help text, tooltips, templates or
+  materials. File formats come from public specifications.
+- **No commercial CAD products.** Agents must not drive, script, automate or extract data from
+  commercial CAD products (Fusion, SolidWorks, Onshape, â€¦) for this project: no test data,
+  measurements, command lists, ids or files produced with them.
+- **Never read, copy or link GPL/LGPL/AGPL code**: OpenCASCADE, FreeCAD (incl. planegcs),
+  SolveSpace, CadQuery/OCP, LibreCAD, QCAD â€” don't even read their sources. (`tools/freecad-oracle/`
+  runs FreeCAD as a separate program through its public scripting API to compute reference values;
+  nothing from FreeCAD is linked, vendored or shipped.) The sketch solver and the blend
+  operations are our own.
+- **Assets â€” absolutely essential.** SolidCraft contains **no iconography, images, fonts or
+  artwork from commercial CAD products â€” ever.** Command icons are the original SVG masters in
+  `assets/icons/ui/design/svg/`, compiled through `crates/ui-egui/src/icon_svg.rs`.
+  **Before any icon, icon assignment or media edit, read `assets/AGENTS.md`,
+  `assets/icons/ui/AGENTS.md` and `assets/icons/ui/STYLE_GUIDE.md`.** Use the canonical
+  bases and named finished references there; never invent a parallel icon style. Any file asset must be original or openly licensed and **must have a row in ATTRIBUTION.md**
+  (`cargo xtask assets` enforces it). Screenshots of commercial CAD software are never committed.
+  Breaking this rule is the most serious mistake you can make in this repo.
+- **Everything is a command.** User-visible behaviour = a command in `crates/engine/src/cmd/*`
+  (`CommandSpec`: id = our own dotted, lower-case id `<area>.<thing>[.<variant>]` such as
+  `solid.extrude` or `sketch.rectangle.two_point`, never another product's command id; label;
+  toolbar tab and panel; icon; shortcut; params doc; `enabled`; JSON `run`) + input and output
+  schemas (a contract and a reply type in `crates/engine/src/schema/`, registered with
+  `checked!`, `.contract` and `.output`; a command should have them, and a test warns
+  without them (it will become required); `schema/unconverted.txt` only shrinks; how: docs/book/src/dev/schemas.md) + tests. The toolbar,
+  dialogs, sketch tools, palette, scripts, CLI and control channel all reach the same commands.
+- **Programmatic calls never open dialogs.** `engine.execute` runs the JSON form; only toolbar
+  clicks (`ui.start`) start interactive tools and dialogs, which then run commands.
+- **Layering** is enforced by `cargo xtask layers`: L0 `geom` â†’ L1 `sketch`, `kernel`, `render`
+  â†’ L2 `doc` â†’ L3 `io` â†’ L4 `engine` â†’ L5 `ui-egui` â†’ apps. Nothing below L5 depends on
+  egui/eframe/winit/wgpu/rfd. **The UI crate is swappable.** Only `crates/kernel` may use `truck`.
+- **The UI is thin**: panels read engine state and act through `app.run(id, params)` /
+  `app.start(id)`. Colours come from `theme::Tokens`.
+- **One outer UI container**: all panels, floating sheets, menus, overlays and platform UI
+  windows use `ui_kit::Container` (directly or through `Panel`, `Window`, `Confirm`, `Menu`).
+  Declare the semantic `Surface`; workspace panels use its shared layout policy and chrome.
+  System/report windows use `ui_kit::Window`; its low-level host builder is kit-private.
+  Do not construct raw egui hosts, outer popup/window frames or shadows in feature modules.
+  `cargo xtask ui-containers` recursively checks source/examples in all current and future crates
+  and apps. It runs in the fast repository CI job and `cargo xtask ci`, with no caller allowances.
+  See `docs/ui-container-audit.md` for the inventory and legitimate content/native exceptions.
+- **One set of camera controls**: every page or canvas with a camera (viewport, Render
+  preview, future flat pattern or drawing pages) calls `navigation::handle` with its `NavCaps`
+  (orbit off for flat 2D pages). New canvases must use `navigation::handle`; never hand-roll
+  camera input (a test rejects it).
+- **Application code is Rust only.** Units are millimetres and radians internally; Z is up.
+  Local asset authoring, lint and review tools use Python 3.11+ as documented in
+  `assets/AGENTS.md`; Python is not an application runtime dependency. The application exception is
+  JavaScript the browser requires: the service worker `apps/solidcraft-web/sw.js` (browsers only
+  run service workers as JavaScript) and the small inline scripts in `apps/solidcraft-web/index.html`.
+  Keep them minimal; `cargo xtask web-offline-test` covers the service worker.
+- **Quality gates** before every commit: `cargo xtask ci` (fmt, clippy -D warnings, tests,
+  assets, layers). Commit after every feature arc that builds.
+- **Publishing in this fork**: `origin` is github.com/denara/solidcraft-unraid;
+  `upstream` is github.com/bherbruck/solidcraft. Publish deployment work only on
+  `codex/unraid-mcp-web`. Fetch origin before pushing and incorporate changes from
+  `origin/codex/unraid-mcp-web` by fast-forward or merge, preserving published history.
+  Compare origin/main separately and merge genuine new changes when needed; do not
+  run `git pull --rebase origin main` on this integration branch. Revalidate if integration
+  changes the tested result. Never force-push. Never commit `plan/`, build dirs (`target*/`) or anything
+  produced by Fusion (oracle STEP/STL/PNG); check `git ls-files` before pushing.
+- **Never break wasm**: everything below the apps must build for `wasm32-unknown-unknown`
+  (`cargo xtask wasm`, part of `cargo xtask ci`).
+
+## Showing and following through on changes
+
+- Help reviewers see what is broken or changed. For observable CAD, UI or model behavior,
+  issues and PRs must include actual descriptive screenshots or a short recording from a
+  small reproduction. This includes kernel, geometry, assembly and backend changes whose
+  effects can be shown in the app. Coding agents should run the app and capture this evidence
+  themselves; do not ask a human for evidence the agent can produce. Show the actual failure
+  or result, preferably before and after, with brief reproduction steps, expected/actual
+  behavior and annotations that point out the relevant detail.
+- Flowcharts and Mermaid diagrams cannot substitute for screenshots or recordings of visible
+  behavior. Use diagrams for architectural reasoning when actual screenshots cannot illustrate
+  the point. Changes with no useful observable behavior do not need screenshot or video evidence.
+- Use a small public-safe example and check for private designs, paths, account details or
+  other sensitive content before sharing. Attach media to the issue/PR or link to an accessible
+  recording; do not commit generated screenshots or videos just to provide review evidence.
+- Throughout the work and before handoff, check current upstream commits and the relevant
+  PR's merge status. Keep your branch current with upstream merges, resolve conflicts without
+  discarding others' work, and re-run validation when integration changes the result. Use the fork-specific fetch/merge workflow above before pushing; never force-push. Report the checked
+  upstream/PR state, any conflicts resolved and the validation performed. If a PR remains open,
+  keep monitoring it while the task is active and make its pending status clear at handoff;
+  do not claim it merged without checking.
+
+## Upstream contribution checks
+The following contribution/claim rules apply to upstream pull requests, not this fork's
+fixed-snapshot container updates. The single-branch fork workflow above takes precedence.
+
+### Before you start: look at what is already open
+- Work with an authenticated GitHub CLI (`gh auth status`) and `git`; the checks below need both.
+- Pull the whole list, not one search: `gh pr list -R tangency-labs/solidcraft --state open --limit 500`
+  (drafts included) and `gh issue list -R tangency-labs/solidcraft --state open --limit 500`. Look for
+  work on the same issue, the same feature under another number, and PRs that change the files
+  you are about to change (`gh pr list ... --json number,title,files`).
+- If someone already has it, comment on their PR or issue instead of opening a second one. Two
+  PRs for one change can't both land, and one of them is wasted work and CI.
+
+- Keep the `Changes a default:` line in the PR description filled in, and don't open a second PR for
+  an issue a lower-numbered open PR already closes; `pr-checks.yml` fails both (CONTRIBUTING.md, "Sending a change").
+
+## Claim = a draft PR
+- Before working on issue #N, check nobody has it: `gh pr list -R tangency-labs/solidcraft --state open --search "#N"`.
+- If none, branch from the latest `origin/main`, `git commit --allow-empty -m "claim: #N"`, push,
+  and open a **draft** PR titled `<summary> (#N)` right away. **The lowest-numbered open PR for an
+  issue wins**; if yours lost, close it. Opening the PR is the claim: the bot assigns you and
+  labels the issue `in progress` (or says on your PR who holds it). Reference `#N` in the PR title
+  so the bot can find it. Don't claim by editing files; comment `/claim` on the issue only to stake
+  a claim before you have a branch.
+- Push work in progress at least daily. A draft with no pushes for 72 hours may be taken over:
+  comment on it first, then open your own claim (you may start from its branch).
+  This takeover policy is separate from the bot's automatic cleanup deadlines in CONTRIBUTING.md.
+- On a shared build machine, check the load before a big build (`cut -d' ' -f1 /proc/loadavg`)
+  and wait while it is over 24; build with `nice`.
+
+## Design file format
+A change that saves something new in a design adds ONE file, `crates/doc/src/format/pending/<name>.rs`
+(a `//!` note, and `pub fn step` if older designs must be rewritten). Never edit `FORMAT`,
+`JSON_STEPS`, the history in `format.rs`, another change's file or a `v<N>/` folder: the build
+works out the number (the next one while anything is pending), and the release folds pending
+changes into `v<N>/` with `scripts/fold-format-pending.sh`. See CONTRIBUTING.md.
+
+## Application releases
+Development pushes are not application releases. Follow `docs/releasing.md` when asked to
+prepare or ship a release: choose the version from the actual changes, update Cargo.toml and
+Cargo.lock, pass the quality gates, advance `release` without force-pushing, and verify the
+resulting draft and its artifacts. When shipping is authorized, publish that verified draft
+and confirm its tag and downstream deployment. Do not auto-release every push to `main`, infer
+version bumps solely from commit prefixes, overwrite published versions, or push release tags
+before the draft is verified.
+
+## Running and looking at the app
+- `cargo run --release -p solidcraft -- --sample --control PORT` (sample design + control channel).
+  Pick a free port. Without a display, run it under `Xvfb :99` with `DISPLAY=:99`.
+- Drive it with JSON lines on `127.0.0.1:PORT` (see `docs/control-protocol.md`). The first
+  request on a connection carries the launch's token as `"token"`: read it from
+  `~/.local/share/solidcraft/control/PORT.token`, or start the app with
+  `SOLIDCRAFT_CONTROL_TOKEN=$(openssl rand -hex 32)` and send that.
+  - `{"id":1,"method":"engine.execute","params":{"command":"solid.extrude","params":{"distance":20}}}`
+  - `{"id":2,"method":"ui.start","params":{"command":"sketch.create"}}` then `ui.click {x, y}`
+  - `{"id":3,"method":"ui.screenshot","params":{"path":"/tmp/shot.png"}}` then read the PNG.
+- **For UI work, look at the result** (screenshot, read the PNG). Without a window use
+  `ui.render` or `solidcraft-cli snapshot`.
+- Headless: `solidcraft-cli run script.json --out part.step`, `solidcraft-cli eval design.solidcraft`,
+  `solidcraft-cli snapshot script.json --out shot.png`, `solidcraft-cli commands`.
+- Reference tests: `cargo xtask oracle` replays `tests/oracle/*/recipe.json` and compares with
+  each case's `expected.json` (analytic or FreeCAD values; writes `docs/oracle.md`). Expected
+  values never come from a commercial CAD product.
+- Build with `CARGO_TARGET_DIR=<repo>/target`. Windows: `cargo xwin build --release --target x86_64-pc-windows-msvc -p solidcraft`.
+
+## Roadmap
+`ROADMAP.md` (committed) tracks status, milestones and estimates. Update it whenever a
+milestone task lands. `cargo xtask features` regenerates `docs/features.md` (SolidCraft's
+commands by area, from the registry) when commands are added or renamed.
+
+The container integration omits upstream's macOS Finder, 3Dconnexion driver FFI, macOS native-crash signals and Windows native-crash/resize-border/work-area/HID-discovery unsafe bridges; command-line
+file opening and all Linux/container behavior are preserved. The driver compatibility API reports Unsupported without starting a thread; shared pure-Rust HID handling is retained. CAD and UI logic remain Rust.
+The upstream JavaScript service worker is browser infrastructure, independent of HTTP MCP.
+
+Design-format additions follow upstream's per-change files under crates/doc/src/format/pending/.
+The fork regenerates shipped licences after integration so its HTTP gateway remains covered.
+STEP worker placements use the existing bounded topology copier (`ops::placed_topology`),
+as explicit transforms do, to preserve repeated periodic seam edges without generic-builder panics.
+
+## Lists many changes add to
+Keep message catalogs sorted (cargo xtask lists --fix), module lines in their sorted group,
+the language list English first then by id, and design-format additions as one new pending file.
+
+Upstream list conventions also apply: new upstream catalog strings use per-change
+assets/locales/pending files and attribution additions use attribution/pending files.
+The fork regenerates shipped licences itself because its gateway is not built by upstream CI.

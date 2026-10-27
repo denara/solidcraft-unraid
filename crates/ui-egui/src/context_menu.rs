@@ -202,6 +202,9 @@ pub struct MenuState {
     pub key_row: Option<usize>,
     submenu: Option<usize>,
     submenu_key: Option<usize>,
+    /// When the pointer came to rest on another row while a flyout was open (it closes the
+    /// flyout after [`SUBMENU_CLOSE_DELAY`]).
+    submenu_leave: Option<f64>,
     /// The radial ring is shown (viewport menus).
     pub radial: bool,
     /// The right button is held through the menu: releasing over a direction picks it.
@@ -262,6 +265,9 @@ const DIRS: usize = 8;
 /// Half axes of the ring of radial items.
 const RX: f32 = crate::ui_kit::RADIAL_RADIUS;
 const RY: f32 = crate::ui_kit::RADIAL_RADIUS;
+/// Seconds the pointer rests on another row before an open flyout closes: a path to the flyout
+/// that crosses a neighbouring row keeps it open.
+const SUBMENU_CLOSE_DELAY: f64 = 0.3;
 
 // ---------------------------------------------------------------------------------------------
 // What the menus offer
@@ -354,17 +360,7 @@ pub fn items(app: &SolveApp, target: &Target) -> Vec<Item> {
         Target::Viewport => viewport_items(app),
         Target::Body { name } => body_items(app, std::slice::from_ref(name), true),
         Target::Sketch { id } => sketch_items(app, *id),
-        Target::Feature { id } => vec![
-            act("ui.editFeature", "Edit Feature", "edit").with(json!({"feature":id})).on(app.session.doc.feature(*id).is_some()),
-            act("ui.rename", "Rename", "rename").with(json!({"feature":id})).on(app.session.doc.feature(*id).is_some()),
-            act("ui.delete", "Delete", "delete").key("Del").with(json!({"items": [{"type": "feature", "id": id}]})).on(app
-                .session
-                .doc
-                .feature(*id)
-                .is_some()),
-            Item::sep(),
-            act("ui.findTimeline", "Find in Timeline", "rollback").with(json!({"feature":id})).on(app.session.doc.feature(*id).is_some()),
-        ],
+        Target::Feature { id } => feature_items(app, *id),
         Target::Plane { id } => plane_items(app, *id),
         Target::OriginPlane { name } => origin_plane_items(app, name),
         Target::Component { id } => component_items(app, *id),
@@ -474,6 +470,27 @@ fn feature_and_sketch(app: &SolveApp, f: Option<u64>) -> (Option<u64>, Option<u6
         .and_then(|f| serde_json::to_value(&f.kind).ok())
         .and_then(|v| v.get("sketch").and_then(Value::as_u64).or_else(|| v.as_object()?.values().find_map(|x| x.get("sketch")?.as_u64())));
     (f, sketch)
+}
+
+/// A browser feature row's menu: the timeline's feature actions, so the browser alone is enough
+/// to edit, suppress and roll back.
+fn feature_items(app: &SolveApp, id: u64) -> Vec<Item> {
+    let feature = app.session.doc.feature(id);
+    let exists = feature.is_some();
+    let sketch = feature.and_then(|f| crate::timeline::TimelineKind::of(&f.kind).profile_sketch());
+    let suppressed = feature.is_some_and(|f| f.suppressed);
+    vec![
+        act("ui.editFeature", "Edit Feature", "edit").with(json!({"feature":id})).on(exists),
+        act("ui.editSketch", "Edit Profile Sketch", "sketch").with(json!({"sketch": sketch.map(|s| s.0)})).on(sketch.is_some()),
+        act("ui.rename", "Rename", "rename").with(json!({"feature":id})).on(exists),
+        act("timeline.suppress", if suppressed { "Unsuppress" } else { "Suppress" }, "suppress")
+            .with(json!({"feature":id, "suppressed": !suppressed}))
+            .on(exists),
+        act("timeline.roll_to", "Roll Back Here", "rollback").with(json!({"feature":id})).on(exists),
+        act("ui.delete", "Delete", "delete").key("Del").with(json!({"items": [{"type": "feature", "id": id}]})).on(exists),
+        Item::sep(),
+        act("ui.findTimeline", "Find in Timeline", "rollback").with(json!({"feature":id})).on(exists),
+    ]
 }
 
 /// The canvas menus put Repeat on
@@ -626,8 +643,13 @@ fn body_items(app: &SolveApp, bodies: &[String], browser: bool) -> Vec<Item> {
         act("ui.properties", "Properties", "measure").with(json!({ "bodies": names })),
         Item::sep(),
         act("ui.saveMesh", "Save As Mesh", "export").with(json!({ "bodies": names })),
+        act("ui.sendToSlicer", "Send to Slicer", "export").with(json!({ "bodies": names })).on(crate::dialogs_save_mesh::available(app)),
         act("ui.export", "Export…", "export").with(json!({ "bodies": names })),
         Item::sep(),
+        // The clipboard beside Delete, Remove and Rename, as in every menu.
+        act("ui.cut", "Cut", "cut").key("Ctrl+X").on(crate::edit_clipboard::can_cut(app)),
+        act("ui.copy", "Copy", "copy").key("Ctrl+C").on(crate::edit_clipboard::something_to_copy(app)),
+        act("ui.paste", "Paste", "paste").key("Ctrl+V").on(crate::edit_clipboard::can_paste(app)),
         act("ui.delete", "Delete", "delete").key("Del").with(json!({ "items": items })).on(!locked),
         cmd(app, "solid.remove", "Remove").with(json!({ "bodies": names })).on(!locked),
         act("ui.rename", "Rename", "rename").with(json!({ "body": bodies.first() })).on(one),
@@ -663,6 +685,8 @@ fn sketch_items(app: &SolveApp, id: u64) -> Vec<Item> {
         act("ui.redefineSketch", "Redefine Sketch Plane", "plane").with(json!({ "sketch": id })),
         act("ui.exportDxf", "Export DXF…", "export").with(json!({ "sketch": id })),
         Item::sep(),
+        act("ui.copy", "Copy", "copy").key("Ctrl+C").on(crate::edit_clipboard::something_to_copy(app)),
+        act("ui.paste", "Paste", "paste").key("Ctrl+V").on(crate::edit_clipboard::can_paste(app)),
         act("ui.delete", "Delete", "delete").key("Del").with(json!({ "items": [{"type": "feature", "id": id}] })),
         act("ui.rename", "Rename", "rename").with(json!({ "feature": id })),
         Item::sep(),
@@ -763,11 +787,8 @@ fn occurrence_items(app: &SolveApp, path: &[u64]) -> Vec<Item> {
                 }
             }
             "occurrence.copy" => item.params = Some(json!({"occurrence": placement.occurrence, "translate": [10,10,0]})),
+            "ui.paste" | "ui.pasteNew" => item.params = Some(json!({"component": placement.component, "path": path})),
             "component.create" => item.params = Some(json!({"parent": placement.component, "parent_path": path})),
-            "component.paste_new" => {
-                item.label = "Paste New (Own Features)".into();
-                item.params = Some(json!({"component":placement.component,"occurrence":placement.occurrence,"path":path,"translate":[10,10,0]}));
-            }
             "ui.rename" => item.label = "Rename Component".into(),
             "ui.appearance" => item.label = "Component Appearance".into(),
             "ui.material" => item.label = "Component Physical Material".into(),
@@ -781,7 +802,7 @@ fn occurrence_items(app: &SolveApp, path: &[u64]) -> Vec<Item> {
                 item.id = "ui.isolateOccurrence".into();
                 item.params = Some(json!({"path": path}));
             }
-            "ui.export" | "ui.saveMesh" => item.params = Some(json!({"bodies": bodies})),
+            "ui.export" | "ui.saveMesh" | "ui.sendToSlicer" => item.params = Some(json!({"bodies": bodies})),
             "browser.expand_all" | "browser.collapse_all" => item.params = Some(json!({"path": path})),
             _ => {}
         }
@@ -809,6 +830,11 @@ fn component_items(app: &SolveApp, id: u64) -> Vec<Item> {
     let bodies = component_bodies(app, id);
     let hidden = !bodies.is_empty() && bodies.iter().all(|b| app.session.visibility.hidden_bodies.contains(b));
     let names = json!(bodies);
+    // The clipboard: Copy takes the selection (the row right-clicked); Paste puts what was copied
+    // inside this component (never a component inside itself or what it holds); Paste New pastes
+    // copied components as independent copies.
+    let into = json!({ "component": id, "path": app.session.doc.first_path(id) });
+    let pastes_here = crate::edit_clipboard::can_paste_into(app, id);
     let mut v = Vec::new();
     if doc.parts.contains_key(&id) {
         v.push(cmd(app, "parts.resize", "Edit").with(json!({"component":id})));
@@ -840,8 +866,6 @@ fn component_items(app: &SolveApp, id: u64) -> Vec<Item> {
     }
     v.push(cmd(app, "component.create", "New Component").with(json!({ "parent": id })));
     if id == 0 {
-        v.push(act("ui.copyDesign", "Copy", "copy").key("Ctrl+C"));
-        v.push(act("ui.paste", "Paste", "paste").key("Ctrl+V").on(crate::edit_clipboard::can_paste(app)));
         v.push(cmd(app, "component.from_bodies", "Create Components from Bodies").with(json!({ "bodies": names })).on(!bodies.is_empty()));
     }
     v.push(Item::sep());
@@ -867,10 +891,28 @@ fn component_items(app: &SolveApp, id: u64) -> Vec<Item> {
     v.push(Item::sep());
     v.push(act("ui.export", "Export…", "export").with(json!({ "bodies": names })).on(!bodies.is_empty()));
     v.push(act("ui.saveMesh", "Save As Mesh", "export").with(json!({ "bodies": names })).on(!bodies.is_empty()));
+    v.push(
+        act("ui.sendToSlicer", "Send to Slicer", "export")
+            .with(json!({ "bodies": names }))
+            .on(!bodies.is_empty() && crate::dialogs_save_mesh::available(app)),
+    );
     v.push(Item::sep());
+    // The clipboard, then Delete and Rename, in the same place for the design and its components
+    // (the design is copied as a saved design to link, and is neither cut nor deleted).
+    if id == 0 {
+        v.push(act("ui.copyDesign", "Copy", "copy").key("Ctrl+C"));
+    } else {
+        v.push(act("ui.cut", "Cut", "cut").key("Ctrl+X").on(crate::edit_clipboard::can_cut(app)));
+        v.push(act("ui.copy", "Copy", "copy").key("Ctrl+C").on(crate::edit_clipboard::something_to_copy(app)));
+    }
+    v.push(act("ui.paste", "Paste", "paste").key("Ctrl+V").with(into.clone()).on(pastes_here));
+    v.push(
+        act("ui.pasteNew", "Paste New", "paste")
+            .key("Ctrl+Shift+V")
+            .with(into.clone())
+            .on(pastes_here && crate::edit_clipboard::pasting_components(app)),
+    );
     if id != 0 {
-        v.push(cmd(app, "occurrence.copy", "Paste (Instance)").with(json!({ "component": id, "translate": [10, 10, 0] })));
-        v.push(cmd(app, "component.paste_new", "Paste New").with(json!({ "component": id, "translate": [10, 10, 0] })));
         v.push(act("ui.delete", "Delete", "delete").key("Del").with(json!({ "occurrences": [occ.map(|o| o.id)] })).on(occ.is_some()));
     }
     v.push(act("ui.rename", "Rename", "rename").with(json!({ "component": id })));
@@ -980,9 +1022,7 @@ fn sketch_entity_items(app: &SolveApp) -> Vec<Item> {
         v.extend(explode_text(app));
     }
     v.push(cmd(app, "sketch.move", "Move/Copy").key("M"));
-    v.push(act("ui.cut", "Cut", "cut").key("Ctrl+X"));
-    v.push(act("ui.copy", "Copy", "copy").key("Ctrl+C"));
-    v.push(act("ui.paste", "Paste", "paste").key("Ctrl+V").on(app.session.sketch_clipboard.is_some()));
+    v.push(cmd(app, "sketch.transform", "Transform").key("G"));
     if !curves.is_empty() {
         v.push(cmd(app, "sketch.construction", "Normal / Construction").with(json!({ "curves": curves })));
     }
@@ -1004,6 +1044,10 @@ fn sketch_entity_items(app: &SolveApp) -> Vec<Item> {
         v.push(cmd(app, "sketch.offset.break", "Break Offset Association").with(json!({"curve":curves[0]})));
     }
     v.push(act("ui.fix", "Fix/Unfix", "c_fix").with(json!({ "entities": ents })));
+    // The clipboard beside Delete, as in every menu.
+    v.push(act("ui.cut", "Cut", "cut").key("Ctrl+X"));
+    v.push(act("ui.copy", "Copy", "copy").key("Ctrl+C"));
+    v.push(act("ui.paste", "Paste", "paste").key("Ctrl+V").on(app.session.sketch_clipboard.is_some()));
     v.push(act("ui.delete", "Delete", "delete").key("Del"));
     v.push(cmd(app, "sketch.dimension", "Sketch Dimension").with(json!({ "entities": ents })).on(ents.len() <= 2));
     let mut c = Vec::new();
@@ -1020,6 +1064,17 @@ fn sketch_entity_items(app: &SolveApp) -> Vec<Item> {
         c.push(cmd(app, "sketch.constraint.coincident", "Coincident").with(json!({ "a": picked[0], "b": picked[1] })));
         if l == 1 {
             c.push(cmd(app, "sketch.constraint.midpoint", "MidPoint").with(json!({ "point": points[0], "line": lines[0] })));
+            // #617: the point can also be aligned with the line (a circle's centre with a square's edge).
+            if let Some(align) = crate::tools::point_line_points(&ss.sketch, &json!(points[0]), &lines[0]) {
+                c.push(
+                    act("ui.horizontalConstraint", "Horizontal Constraint", "c_hv")
+                        .with(json!({"points": align, "mode": "horizontal", "if_redundant": "refuse"})),
+                );
+                c.push(
+                    act("ui.verticalConstraint", "Vertical Constraint", "c_hv")
+                        .with(json!({"points": align, "mode": "vertical", "if_redundant": "refuse"})),
+                );
+            }
         }
     }
     if l == 2 && n == 2 {
@@ -1114,7 +1169,21 @@ pub fn run_item(app: &mut SolveApp, item: &Item, at: Pos2) {
         "ui.copy" => drop(crate::edit_clipboard::copy(app)),
         "ui.copyDesign" => drop(crate::edit_clipboard::copy_design(app)),
         "ui.cut" => drop(crate::edit_clipboard::cut(app)),
-        "ui.paste" => drop(crate::edit_clipboard::paste(app, Some(at))),
+        "ui.paste" | "ui.pasteNew" => {
+            // A component's menu pastes into it (that placement); the others into the active one.
+            let into = id_of(&p, "component").map(|c| {
+                let path = p.get("path").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_u64).collect());
+                (c, path.unwrap_or_else(|| app.session.doc.first_path(c)))
+            });
+            match id_of(&p, "group") {
+                // A Bodies group's menu: into the group too.
+                Some(group) => {
+                    let folder = p.get("folder").and_then(Value::as_str).unwrap_or("bodies");
+                    let _ = crate::edit_clipboard::paste_into_group(app, Some(at), into, Some(group), folder);
+                }
+                None => drop(crate::edit_clipboard::paste_into(app, Some(at), item.id == "ui.pasteNew", into)),
+            }
+        }
         "ui.editSketchPattern" => {
             if let Some(id) = p.get("pattern").and_then(Value::as_str) {
                 crate::sketch_modify_ui::edit_pattern(app, id);
@@ -1287,15 +1356,8 @@ pub fn run_item(app: &mut SolveApp, item: &Item, at: Pos2) {
                 app.set_status("This component is no longer linked to a design", true);
                 return;
             };
-            let Some(file) = link["file"].as_str() else {
-                app.set_status("The linked design has no file path", true);
-                return;
-            };
-            if link["found"] != true {
-                app.set_status(format!("Linked design not found: {file}"), true);
-                return;
-            }
-            app.open_path_async(file);
+            // A link on a network server not allowed yet asks first.
+            crate::network_prompt::open_linked(app, link);
         }
         "ui.moveOccurrence" => {
             if let Some(o) = id_of(&p, "occurrence") {
@@ -1401,10 +1463,10 @@ pub fn run_item(app: &mut SolveApp, item: &Item, at: Pos2) {
             let _ = app.run("select.set", json!({ "items": items }));
             app.start("material.assign");
         }
-        "ui.saveMesh" => {
+        "ui.saveMesh" | "ui.sendToSlicer" => {
             let items: Vec<Value> = bodies.iter().map(|b| json!({"type": "body", "name": b})).collect();
             let _ = app.run("select.set", json!({ "items": items }));
-            app.start("file.save_mesh");
+            app.start(if item.id == "ui.saveMesh" { "file.save_mesh" } else { "file.send_to_slicer" });
         }
         "ui.exportDxf" => {
             if let Some(id) = id_of(&p, "sketch") {
@@ -1454,6 +1516,8 @@ pub fn run_item(app: &mut SolveApp, item: &Item, at: Pos2) {
                 app.start("sketch.create");
             }
         }
+        // They recompute the history from the changed feature on: off the frame, as the timeline does.
+        "timeline.suppress" | "timeline.roll_to" if item.params.is_some() => drop(app.run_heavy(&item.id, p)),
         id if item.params.is_some() => {
             let _ = app.run(id, p);
         }
@@ -1678,6 +1742,7 @@ pub fn open_for(app: &mut SolveApp, at: Pos2, target: Target) {
     app.menu.key_row = None;
     app.menu.submenu = None;
     app.menu.submenu_key = None;
+    app.menu.submenu_leave = None;
     app.menu.radial = target == Target::Viewport && app.preferences.radial_context_menu;
     app.menu.target = target;
     app.menu.flick = false;
@@ -1937,6 +2002,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
         app.menu.submenu_key = None;
     }
     let mut submenu_row = None;
+    let mut other_row = false;
     let key_row = app.menu.key_row;
     let resp = Container::new(ctx, Surface::Popup)
         .area(egui::Id::new("sc_context_menu"))
@@ -1949,13 +2015,20 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
             } else {
                 menu_frame(ui, |ui| {
                     for (k, item) in list.iter().enumerate() {
-                        if item.children.is_empty() {
-                            if let Some(p) = list_row_lit(ui, item, key_row == Some(k)) {
-                                picked = Some(p);
+                        if item.is_sep() || item.is_heading() {
+                            let _ = list_row_lit(ui, item, false);
+                        } else if item.children.is_empty() {
+                            let row = kit_item(item, key_row == Some(k)).show(ui);
+                            if row.clicked() && item.enabled {
+                                picked = Some(item.clone());
                             }
+                            other_row |= row.hovered();
                         } else {
                             let row = kit_item(item, key_row == Some(k) || app.menu.submenu == Some(k)).show(ui);
-                            if item.enabled && ((row.hovered() && ctx.input(|i| i.pointer.delta() != Vec2::ZERO)) || row.clicked()) {
+                            // Appearance keeps its direct editor action as well as hover shortcuts.
+                            if item.enabled && row.clicked() && item.id == "ui.appearance" {
+                                picked = Some(item.clone());
+                            } else if item.enabled && ((row.hovered() && ctx.input(|i| i.pointer.delta() != Vec2::ZERO)) || row.clicked()) {
                                 if app.menu.submenu != Some(k) {
                                     app.menu.submenu_key = None;
                                 }
@@ -1970,6 +2043,25 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
             }
         });
     inside |= resp.response.contains_pointer() || resp.response.rect.contains(pointer.unwrap_or(Pos2::ZERO));
+
+    // A flyout closes once the pointer moves on to another row of its menu and rests there
+    // (#6657). A pointer that is still (the flyout opened with the keys) leaves it open.
+    let moved = ctx.input(|i| i.pointer.delta() != Vec2::ZERO);
+    if app.menu.submenu.is_some() && other_row && (moved || app.menu.submenu_leave.is_some()) {
+        let now = ctx.input(|i| i.time);
+        let since = *app.menu.submenu_leave.get_or_insert(now);
+        let left = SUBMENU_CLOSE_DELAY - (now - since);
+        if left <= 0.0 || !left.is_finite() {
+            app.menu.submenu = None;
+            app.menu.submenu_key = None;
+            app.menu.submenu_leave = None;
+            submenu_row = None;
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(left));
+        }
+    } else {
+        app.menu.submenu_leave = None;
+    }
 
     if let Some((k, row)) = submenu_row
         && let Some(parent) = list.get(k)

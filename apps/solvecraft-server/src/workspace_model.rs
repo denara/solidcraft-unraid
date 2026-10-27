@@ -89,6 +89,11 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
         })
     }
     fn command(root: &Path, id: &str, args: &Value, current: &mut Option<String>, out: &mut Vec<FileOperation>) -> Result<(), String> {
+        if matches!(id, "file.send_to_slicer" | "file.open_in_easyprint")
+            || (id == "file.save_mesh" && args.get("slicer").is_some_and(|v| !v.is_null()))
+        {
+            return Err("desktop/cloud slicer delivery is not supported through the network gateway; export a project-relative mesh instead".into());
+        }
         match id {
             "file.new" => *current = None,
             "component.insert_design" | "component.relink" | "component.update_links" | "component.replace_with_link" => {
@@ -225,6 +230,23 @@ pub fn check_revisions(root: &Path, status: &ModelStatus, ops: &[FileOperation],
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_slicer_routes_are_rejected_before_derived_writes_or_launches() {
+        let root = std::path::Path::new("/data/files");
+        for (id, params) in [
+            ("file.send_to_slicer", json!({"slicer":"custom","bodies":["Box"]})),
+            ("file.open_in_easyprint", json!({"consent":true,"bodies":["Box"]})),
+            ("file.save_mesh", json!({"path":"Public/mesh.3mf","slicer":"custom"})),
+        ] {
+            let execute = json!({"params":{"name":"execute","arguments":{"command":id,"params":params}}});
+            let batch = batch(json!([{"command":id,"params":params}]));
+            assert!(operations(root, &execute, None).unwrap_err().contains("slicer delivery"));
+            assert!(operations(root, &batch, None).unwrap_err().contains("slicer delivery"));
+        }
+        let normal = batch(json!([{"command":"file.save_mesh","params":{"path":"Public/mesh.3mf"}}]));
+        assert_eq!(operations(root, &normal, None).unwrap(), vec![FileOperation::Write("Public/mesh.3mf".into())]);
+    }
 
     #[test]
     fn upstream_drawing_open_does_not_plan_an_implicit_native_save_over_the_source() {

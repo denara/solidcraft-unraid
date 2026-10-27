@@ -65,6 +65,12 @@ pub fn start(
     Err(Error::Unsupported)
 }
 
+/// Disconnects from the driver; call it as the app ends. The driver keeps a client registered
+/// after its process is gone, and while it does, a client registered later gets nothing until
+/// the device is unplugged and plugged in again. Does nothing when no client was started, and on
+/// other platforms.
+pub fn stop() {}
+
 #[cfg(test)]
 mod tests {
     #[test]

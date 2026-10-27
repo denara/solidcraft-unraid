@@ -1725,6 +1725,7 @@ fn confirm_radial_and_history_rows_keep_multitone_artwork() {
                             suppressed: false,
                             error: false,
                             warning: false,
+                            reference: false,
                             accent: crate::theme::TabAccent::for_tab(&Tokens::get(), "MODEL"),
                         }
                         .paint(

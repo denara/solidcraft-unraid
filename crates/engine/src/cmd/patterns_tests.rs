@@ -170,6 +170,55 @@ fn feature_circular_center_flip_uses_partial_arc_endpoints_and_full_circle_spaci
     }
 }
 
+/// A pattern made with the timeline rolled back to the start comes before the box it copies and
+/// replays the box from its definition. A change of the box's parameter reaches the copies as it
+/// reaches the box: the pattern's result was kept (its copies the old length) because nothing
+/// before it in the timeline had changed.
+#[test]
+fn a_pattern_before_the_feature_it_copies_follows_that_features_parameter() {
+    let mut s = Session::default();
+    run(&mut s, "parameters.add", json!({"name": "w", "expression": "18 mm"}));
+    run(&mut s, "solid.box", json!({"length": "w", "width": 10, "height": 10}));
+    run(&mut s, "timeline.rollback", json!({"position": 0}));
+    run(&mut s, "solid.pattern.rectangular", json!({"features": ["Box1"], "dir1": [1, 0, 0], "count1": 2, "spacing1": 30}));
+    let lengths = |st: &solidcraft_doc::ModelState| {
+        st.bodies.iter().map(|b| (b.name.clone(), b.body.outline_bounds())).map(|(n, bb)| (n, bb.max.x - bb.min.x)).collect::<Vec<_>>()
+    };
+    let fresh = |s: &Session| {
+        let mut m = solidcraft_doc::Model::new();
+        m.no_cache = true;
+        m.evaluate(&s.doc);
+        lengths(&m.state())
+    };
+    for step in [json!({"name": "w", "expression": "21 mm"}), json!({"name": "w", "expression": "25 mm"})] {
+        run(&mut s, "parameters.change", step);
+        assert_eq!(lengths(&s.model.state()), fresh(&s), "rolled back");
+        run(&mut s, "timeline.rollback", json!({}));
+        assert_eq!(lengths(&s.model.state()), fresh(&s), "rolled forward");
+        run(&mut s, "timeline.rollback", json!({"position": 1}));
+    }
+    run(&mut s, "timeline.rollback", json!({}));
+    let got = lengths(&s.model.state());
+    assert!(got.len() == 2 && got.iter().all(|(_, l)| (l - 25.0).abs() < 1e-9), "the box and its copy, 25 mm: {got:?}");
+}
+
+/// A pattern whose source was deleted copies nothing. A feature made later under the freed name
+/// is found by that name, after the pattern in the timeline: the model is what a fresh evaluation
+/// makes of the design, where the pattern's empty result had been kept.
+#[test]
+fn a_pattern_finds_a_later_feature_that_takes_its_deleted_sources_name() {
+    let mut s = Session::default();
+    run(&mut s, "solid.cylinder", json!({"radius": 2, "height": 15, "axis": "Y", "base": [-16, 6, -5]}));
+    run(&mut s, "solid.pattern.rectangular", json!({"features": ["Cylinder1"], "dir1": [1, 0, 0], "count1": 2, "spacing1": 19}));
+    run(&mut s, "timeline.delete", json!({"feature": "Cylinder1"}));
+    run(&mut s, "solid.cylinder", json!({"radius": 5, "height": 19, "base": [-3, -7, -1]}));
+    let bodies = |st: &solidcraft_doc::ModelState| st.bodies.iter().map(|b| (b.name.clone(), b.body.outline_bounds().min.x)).collect::<Vec<_>>();
+    let mut fresh = solidcraft_doc::Model::new();
+    fresh.no_cache = true;
+    fresh.evaluate(&s.doc);
+    assert_eq!(bodies(&s.model.state()), bodies(&fresh.state()));
+}
+
 #[test]
 fn feature_pattern_rejects_malformed_alignment_and_flip_atomically() {
     let mut s = feature_pattern_plate();
@@ -387,23 +436,42 @@ fn patterns_of_a_blind_hole_drill_every_copy() {
     assert!((c - 2.0 * one).abs() < 1e-3 * one, "{c} vs 2 × {one}");
 }
 
-/// Feature patterns and mirrors reference features by name; a rename follows (#401).
+/// Feature patterns and mirrors reference features by id (#1134): a rename leaves the
+/// references alone, and they keep pointing at the same feature (#401).
 #[test]
-fn renaming_a_source_feature_follows_pattern_and_mirror_references() {
+fn renaming_a_source_feature_leaves_pattern_and_mirror_references_alone() {
     let mut s = plate_with_hole();
     run(&mut s, "construct.plane.offset", json!({"base": "YZ", "offset": 0, "name": "Mirror plane"}));
     run(&mut s, "solid.pattern.rectangular", json!({"features": ["Hole1"], "dir1": [1, 0, 0], "count1": 2, "spacing1": 20, "name": "Copies"}));
     run(&mut s, "solid.mirror", json!({"features": ["Hole1"], "plane": "Mirror plane", "name": "Mirrored"}));
+    let hole = s.doc.find_feature("Hole1").unwrap().id;
+    let mirror_plane = s.doc.find_feature("Mirror plane").unwrap().id;
     let renamed = run(&mut s, "timeline.rename", json!({"feature": "Hole1", "name": "Single hole"}));
     assert_eq!(renamed["name"], "Single hole", "{renamed}");
     run(&mut s, "timeline.rename", json!({"feature": "Mirror plane", "name": "Renamed plane"}));
     for feature in ["Copies", "Mirrored"] {
         let inspected = run(&mut s, "timeline.inspect", json!({"feature": feature}));
         assert!(inspected["error"].is_null(), "{feature}: {inspected}");
-        assert_eq!(inspected["definition"]["features"], json!(["Single hole"]), "{inspected}");
+        assert_eq!(inspected["definition"]["features"], json!([hole]), "{inspected}");
     }
     let inspected = run(&mut s, "timeline.inspect", json!({"feature": "Mirrored"}));
-    assert_eq!(inspected["definition"]["plane"]["name"], "Renamed plane", "{inspected}");
+    assert_eq!(inspected["definition"]["plane"], json!({"type": "construction", "feature": mirror_plane}), "{inspected}");
+}
+
+/// timeline.edit keeps accepting seed and plane names as input: they resolve to ids (#1134).
+#[test]
+fn editing_a_pattern_by_seed_name_resolves_it_to_the_id() {
+    let mut s = plate_with_hole();
+    run(&mut s, "solid.pattern.rectangular", json!({"features": ["Hole1"], "dir1": [1, 0, 0], "count1": 2, "spacing1": 20, "name": "Copies"}));
+    run(&mut s, "timeline.rename", json!({"feature": "Hole1", "name": "Single hole"}));
+    run(&mut s, "timeline.edit", json!({"feature": "Copies", "set": {"features": ["Single hole"]}}));
+    let inspected = run(&mut s, "timeline.inspect", json!({"feature": "Copies"}));
+    assert!(inspected["error"].is_null(), "{inspected}");
+    let hole = s.doc.find_feature("Single hole").unwrap().id;
+    assert_eq!(inspected["definition"]["features"], json!([hole]), "{inspected}");
+    // A name that finds no feature is refused, as the commands that take names refuse it.
+    let e = s.execute("timeline.edit", &json!({"feature": "Copies", "set": {"features": ["Nope"]}})).unwrap_err().to_string();
+    assert!(e.contains("Nope"), "{e}");
 }
 
 /// A plate with a `count1` × `count2` feature pattern of one through-hole cut: its volume and how
@@ -802,6 +870,31 @@ fn patterns_and_mirrors_of_patterns_and_mirrors() {
         let want = before - added as f64 * hole;
         assert!(rel(after, want) < 1e-5, "{what}: {after} mm³, {added} more holes than {before} = {want}");
     }
+}
+
+/// A gear's tooth extruded To Object up to the disc's top, patterned 6 times: after the disc is
+/// made twice as thick, every copy reaches the new top like the tooth itself, so the whole part
+/// doubles (#2121). The copies kept the 5 mm height of the face where it was picked.
+#[test]
+fn copies_of_a_to_object_extrude_follow_the_moved_face() {
+    let mut s = Session::default();
+    for (id, p) in [
+        ("sketch.create", json!({"plane":"XY","name":"Disc"})),
+        ("sketch.circle.center", json!({"center":[0,0],"radius":20})),
+        ("sketch.finish", json!({})),
+        ("solid.extrude", json!({"distance":5})),
+        ("sketch.create", json!({"plane":"XY","name":"Tooth"})),
+        ("sketch.rectangle.two_point", json!({"p0":[18,-2],"p1":[24,2]})),
+        ("sketch.finish", json!({})),
+        ("solid.extrude", json!({"sketch":"Tooth","profiles":[0],"to":[0,0,5],"operation":"join"})),
+        ("solid.pattern.circular", json!({"features":["Extrude2"],"axis":"Z","count":6,"angle":"360 deg"})),
+    ] {
+        run(&mut s, id, p);
+    }
+    let thin = volume(&mut s);
+    run(&mut s, "timeline.edit", json!({"feature":"Extrude1","set":{"extent.distance":"10 mm"}}));
+    let thick = volume(&mut s);
+    assert!(rel(thick, 2.0 * thin) < 1e-6, "5 mm: {thin} mm³, 10 mm: {thick} mm³ (expected {})", 2.0 * thin);
 }
 
 /// A disc with an off-centre hole whose top and bottom edges are chamfered.

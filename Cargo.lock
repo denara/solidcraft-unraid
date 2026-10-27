@@ -4377,7 +4377,7 @@ dependencies = [
 
 [[package]]
 name = "solidcraft"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "block2 0.6.2",
  "eframe",
@@ -4397,6 +4397,7 @@ dependencies = [
  "rfd",
  "ron",
  "rustls",
+ "serde",
  "serde_json",
  "solidcraft-3dx-client",
  "solidcraft-engine",
@@ -4409,11 +4410,11 @@ dependencies = [
 
 [[package]]
 name = "solidcraft-3dx-client"
-version = "0.23.0"
+version = "0.24.0"
 
 [[package]]
 name = "solidcraft-cli"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "image",
  "log",
@@ -4425,7 +4426,7 @@ dependencies = [
 
 [[package]]
 name = "solidcraft-derive"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4434,7 +4435,7 @@ dependencies = [
 
 [[package]]
 name = "solidcraft-doc"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "log",
  "serde",
@@ -4451,8 +4452,9 @@ dependencies = [
 
 [[package]]
 name = "solidcraft-engine"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
+ "image",
  "log",
  "schemars",
  "serde",
@@ -4471,7 +4473,7 @@ dependencies = [
 
 [[package]]
 name = "solidcraft-geom"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -4480,7 +4482,7 @@ dependencies = [
 
 [[package]]
 name = "solidcraft-gpu"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "image",
  "log",
@@ -4500,7 +4502,7 @@ dependencies = [
 
 [[package]]
 name = "solidcraft-io"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "cadmpeg-core",
  "cadmpeg-ir",
@@ -4524,7 +4526,7 @@ dependencies = [
 
 [[package]]
 name = "solidcraft-kernel"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "log",
  "proptest",
@@ -4544,7 +4546,7 @@ dependencies = [
 
 [[package]]
 name = "solidcraft-mcp"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "serde_json",
  "solidcraft-engine",
@@ -4553,7 +4555,7 @@ dependencies = [
 
 [[package]]
 name = "solidcraft-render"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "image",
  "moxcms",
@@ -4567,7 +4569,7 @@ dependencies = [
 
 [[package]]
 name = "solidcraft-sketch"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -4578,14 +4580,14 @@ dependencies = [
 
 [[package]]
 name = "solidcraft-space-mouse"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "solidcraft-ui-egui"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "arboard",
  "egui",
@@ -4607,6 +4609,7 @@ dependencies = [
  "tiny-skia",
  "toml",
  "ttf-parser",
+ "unicode-bidi",
  "web-time",
  "winreg",
  "zip",
@@ -4614,12 +4617,13 @@ dependencies = [
 
 [[package]]
 name = "solidcraft-web"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "eframe",
  "egui",
  "js-sys",
  "log",
+ "percent-encoding",
  "serde_json",
  "solidcraft-engine",
  "solidcraft-ui-egui",
@@ -4631,7 +4635,7 @@ dependencies = [
 
 [[package]]
 name = "solidcraft-workspace"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "futures-channel",
  "js-sys",
@@ -4643,7 +4647,7 @@ dependencies = [
 
 [[package]]
 name = "solvecraft-server"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "axum",
  "chrono",
@@ -5242,6 +5246,12 @@ name = "unicase"
 version = "2.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "357cc3acc6a036009fd6c973ed009037c732d60d0b4f6c673e9041497482a28f"
+
+[[package]]
+name = "unicode-bidi"
+version = "0.3.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c1cb5db39152898a79168971543b1cb5020dff7fe43c8dc468b0885f5e29df5"
 
 [[package]]
 name = "unicode-general-category"
@@ -6281,12 +6291,15 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "proc-macro2",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "syn 2.0.119",
+ "toml",
+ "zip",
 ]
 
 [[package]]

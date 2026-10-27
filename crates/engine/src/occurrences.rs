@@ -60,6 +60,52 @@ pub(crate) struct RemovedLaterCache {
 }
 
 impl Session {
+    /// Hidden names follow the same body and exact occurrence path through a rename. Undo
+    /// history restores visibility separately. Never parse display labels:
+    /// ambiguous labels and names containing slashes use the document's canonical naming.
+    pub(crate) fn remap_hidden_bodies(
+        &mut self,
+        previous: &solidcraft_doc::Document,
+        state: &solidcraft_doc::ModelState,
+        rename: Option<(&str, &str)>,
+    ) {
+        if self.visibility.hidden_bodies.is_empty() {
+            return;
+        }
+        if rename.is_none() {
+            if previous.occurrences == self.doc.occurrences {
+                return;
+            }
+            let old_names: std::collections::BTreeMap<_, _> = previous.occurrences.iter().map(|o| (o.id, &o.name)).collect();
+            if !self.doc.occurrences.iter().any(|o| old_names.get(&o.id).is_some_and(|name| **name != o.name)) {
+                return;
+            }
+        }
+        let mut renamed = state.clone();
+        if let Some((old, new)) = rename {
+            for body in renamed.bodies.iter_mut().filter(|body| body.name == old) {
+                body.name = new.to_string();
+            }
+        }
+        let hidden: std::collections::BTreeSet<_> = self.visibility.hidden_bodies.iter().map(String::as_str).collect();
+        let mut names = std::collections::BTreeMap::new();
+        let (before, after) = (solidcraft_doc::WorldNames::new(previous, state), solidcraft_doc::WorldNames::new(&self.doc, &renamed));
+        for (component, path, _) in previous.placements() {
+            for body in state.bodies.iter().filter(|body| previous.model_body_component(body) == component) {
+                let old = before.name(&body.name, component, &path);
+                if hidden.contains(old.as_str()) {
+                    let source = rename.filter(|(old, _)| *old == body.name).map_or(body.name.as_str(), |(_, new)| new);
+                    names.insert(old, after.name(source, component, &path));
+                }
+            }
+        }
+        for hidden in &mut self.visibility.hidden_bodies {
+            if let Some(new) = names.get(hidden) {
+                hidden.clone_from(new);
+            }
+        }
+    }
+
     /// Visibility keeps construction names, while undo history keeps feature ids. Follow the
     /// same axis or point into the new document on rename, undo and redo (#4419).
     pub(crate) fn follow_axis_point_renames(&mut self, previous: &solidcraft_doc::Document) {
@@ -124,11 +170,12 @@ impl Session {
         }
         let leaf = self.doc.occurrences.iter().find(|o| Some(&o.id) == path.last()).ok_or_else(|| invalid("occurrence path has no leaf"))?;
         let state = self.model.state();
+        let names = solidcraft_doc::WorldNames::new(&self.doc, &state);
         let bodies = state
             .bodies
             .iter()
             .filter(|b| self.doc.model_body_component(b) == component)
-            .map(|b| OccurrenceBody { source: b.name.clone(), world: self.doc.world_body_name(&state, &b.name, component, path) })
+            .map(|b| OccurrenceBody { source: b.name.clone(), world: names.name(&b.name, component, path) })
             .collect();
         Ok(OccurrencePlacement {
             occurrence: leaf.id,
@@ -206,6 +253,30 @@ impl Session {
             }
         }
         Ok(out)
+    }
+
+    /// The world names of the bodies `features` made (#5099), in every placement of their
+    /// component, or only in `placement` (a component and the path of one of its placements).
+    pub fn feature_bodies(&self, features: &[u64], placement: Option<(u64, &[u64])>) -> Vec<String> {
+        let state = self.model.state();
+        let made: Vec<_> = state.bodies.iter().filter(|b| features.contains(&b.feature)).collect();
+        if made.is_empty() {
+            return Vec::new();
+        }
+        let placements = match placement {
+            Some((component, path)) => vec![(component, path.to_vec())],
+            None => self.doc.placements().into_iter().map(|(component, path, _)| (component, path)).collect(),
+        };
+        let mut out = Vec::new();
+        for (component, path) in &placements {
+            for b in made.iter().filter(|b| self.doc.model_body_component(b) == *component) {
+                let name = self.doc.world_body_name(&state, &b.name, *component, path);
+                if !out.contains(&name) {
+                    out.push(name);
+                }
+            }
+        }
+        out
     }
 
     /// Selected authoring placement, or the compatible first-placement frame.
@@ -348,12 +419,13 @@ impl Session {
     fn bodies_hidden_by_parents(&self) -> std::collections::BTreeSet<String> {
         let st = self.model.state();
         let mut out = std::collections::BTreeSet::new();
+        let names = solidcraft_doc::WorldNames::new(&self.doc, &st);
         for (component, path, _) in self.doc.placements() {
             let placement_hidden = !path.is_empty() && !self.occurrence_visible(&path);
             let scope = Self::folder_scope(&path);
             for b in st.bodies.iter().filter(|b| self.doc.model_body_component(b) == component) {
                 if placement_hidden || self.item_folder_hidden(&scope, component, "bodies", &b.name) {
-                    out.insert(self.doc.world_body_name(&st, &b.name, component, &path));
+                    out.insert(names.name(&b.name, component, &path));
                 }
             }
         }
