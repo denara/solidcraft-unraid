@@ -41,7 +41,7 @@ Native formats 13 and 38 open without changing source bytes; format-40 saves pre
 parameters, 24000 mm3 volume, named split faces and STEP export. A real MCP SDK client
 also checks aliases, source/extract/output confinement, strong revisions, embedded HDR
 native roundtrip, session separation and CPU rendering. A new closed cone roundtrip
-measures 314.1019886 mm3 against analytic 100*pi (relative error 0.0183%, within the
+measures 314.1019886 mm3 against analytic 100*pi (relative error 0.0182%, within the
 upstream 0.2% numerical tolerance); saved/reopened measurement is unchanged. Native
 container CRCs pass. Snapshot format 40 includes upstream pending cone and feature-id
 references beyond the folded 0.24.0 release format; older builds cannot read new saves.
@@ -54,8 +54,29 @@ was stopped as broader than needed; command-specific bounds and gateway protecti
 remain covered. Early source-inspection false positives caused by CRLF and the changed
 permission diagnostic were corrected; no failing behavior test was waived.
 
-Publication, immutable digest/archive and local runtime preservation are recorded after
-the exact source workflow passes. Unraid installation remains a manual owner step.
+Publication verified: [89497cd6](https://github.com/denara/solidcraft-unraid/commit/89497cd6ce04a17e295043102a956eeee695e68c)
+passed [the exact container workflow](https://github.com/denara/solidcraft-unraid/actions/runs/40480408495). The immutable tag
+`ghcr.io/denara/solidcraft-unraid:sha-89497cd6ce04a17e295043102a956eeee695e68c` and `latest` were pulled anonymously, with source/architecture
+and direct anonymous registry-manifest verification. Public digest:
+`sha256:99886289475d22cfe27235a07a466294155e1202b8aaebeb31dee602e449401d`.
+
+Export: `target/solidcraft-unraid-upstream-514b0c84-89497cd6.tar` (176830464 bytes), own image tag `solvecraft-unraid:upstream-514b0c84-89497cd6`;
+SHA256 `90ea90d21d66ec5bd5b7c8262e64e08b49bb9dd9c95b266c88a3a2ba54909f07`. The archive was checked again before this record.
+
+The idle local development runtime `solvecraft-solvecraft-1` now uses the verified public
+image and is healthy at the existing loopback endpoint. Its data volume, MCP token,
+user, ports, origins, full environment and security/resource limits are unchanged.
+A private pre-swap backup passed gzip/tar integrity and the actual previous image is
+retained for rollback. Post-swap checks passed authenticated SDK MCP, an unchanged
+public 24000 mm3 fixture opened read-only, ephemeral modelling/PNG, browser cookie
+login, protected metadata/SSE and both browser asset sets. No saved design was overwritten.
+Only then were 10 owned unused build/check/candidate containers removed,
+after label/image/mount/activity checks; diagnostics, both proof volumes, real data,
+private backup, toolchain/cache volumes and rollback image remain. One local runtime remains.
+
+The final fetch found `9cba66c14d38d17504d0c3efb9e04194435743b7` (5 later commits),
+reserved for the next fixed snapshot. Fork main still adds no new changes. No catalog
+metadata was changed. Unraid installation remains the owner's manual container-update step.
 
 
 ## 2026-10-26: upstream 0.23.0, manual projects and bounded browser uploads
