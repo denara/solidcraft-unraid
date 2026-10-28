@@ -112,7 +112,7 @@ impl Default for View {
 
 fn refresh(app: &mut SolveApp, view: &mut View) -> Result<(), String> {
     let reply = app.run("render.library.list", json!({"kind":view.kind,"query":view.query,"offset":view.offset,"limit":48,"availability":if view.kind=="physical_profiles" {"all"} else {&view.availability}}))?;
-    view.entries = reply["items"].as_array().cloned().ok_or_else(|| "invalid render-library response".to_string())?;
+    view.entries = reply["items"].as_array().cloned().ok_or_else(|| crate::i18n::tr("render.error_library_reply").to_string())?;
     view.total = reply["total"].as_u64().and_then(|n| usize::try_from(n).ok()).unwrap_or(0);
     view.next = reply["next_offset"].as_u64().and_then(|n| usize::try_from(n).ok());
     view.loaded = true;
@@ -480,7 +480,11 @@ pub(super) fn inspect(app: &mut SolveApp, ui: &mut egui::Ui) {
             }
             if let Some(omitted) = detail["projection"]["omitted"].as_array() {
                 for item in omitted {
-                    ui.small(format!("{}: {}", app.tr("render.library_omitted"), item.as_str().unwrap_or("unknown")));
+                    ui.small(format!(
+                        "{}: {}",
+                        app.tr("render.library_omitted"),
+                        item.as_str().unwrap_or(crate::i18n::tr("render.property_unknown"))
+                    ));
                 }
             }
         }
@@ -516,7 +520,7 @@ fn source_preview(app: &mut SolveApp, ui: &mut egui::Ui, view: &mut View, id: &s
             let reply = app.run("render.library.preview", json!({"id":id}))?;
             let bytes: Vec<u8> = serde_json::from_value(reply["bytes"].clone()).map_err(|e| e.to_string())?;
             if bytes.len() > 2 * 1024 * 1024 {
-                return Err("source preview exceeds its byte envelope".into());
+                return Err(crate::i18n::tr("render.error_source_preview").into());
             }
             let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), image::ImageFormat::Png);
             let mut limits = image::Limits::default();
@@ -804,13 +808,19 @@ fn physical_controls(app: &mut SolveApp, ui: &mut egui::Ui, view: &mut View, id:
     ui.small(resource["reference_state"].as_str().unwrap_or(""));
     if let Some(properties) = resource["properties"].as_array() {
         for (index, property) in properties.iter().enumerate() {
-            let name = property["quantity"].as_str().unwrap_or("property");
+            let name = property["quantity"].as_str().unwrap_or(crate::i18n::tr("render.property_fallback"));
             let title = format!("{}: {} {}", name, property["value"], property["unit"].as_str().unwrap_or(""));
             ui_kit::section(ui, ("physical_property", id, index), &title, false, |ui| {
-                ui.small(format!("Source: {} - {}", property["source_id"].as_str().unwrap_or(""), property["source_locator"].as_str().unwrap_or("")));
-                ui.small(format!("Qualifier: {}", property["qualifier"].as_str().unwrap_or("unknown")));
-                ui.small(format!("Conditions: {}", property["conditions"]));
-                ui.small(format!("Uncertainty: {}", property["uncertainty"]));
+                ui.small(crate::i18n::format(
+                    "render.property_source",
+                    &[("id", property["source_id"].as_str().unwrap_or("")), ("locator", property["source_locator"].as_str().unwrap_or(""))],
+                ));
+                ui.small(crate::i18n::format(
+                    "render.property_qualifier",
+                    &[("value", property["qualifier"].as_str().unwrap_or(crate::i18n::tr("render.property_unknown")))],
+                ));
+                ui.small(crate::i18n::format("render.property_conditions", &[("value", &property["conditions"].to_string())]));
+                ui.small(crate::i18n::format("render.property_uncertainty", &[("value", &property["uncertainty"].to_string())]));
                 ui.small(property["note"].as_str().unwrap_or(""));
             });
         }

@@ -40,7 +40,7 @@ All of these read the same folder:
 
 **Reproduce:** `solidcraft-cli crashes replay <id>` opens the report's design, runs its
 commands, and reports whether the same internal error happens again (same place and message).
-Without the CLI, run `solidcraft-cli run <report>/replay.json --in <report>/design.solidcraft`.
+Without the CLI, run `solidcraft-cli run <report>/replay.json --in <report>/design.sc`.
 A fixed crash turns into a regression test with the same two files.
 
 **Check that reporting works:** with `SOLIDCRAFT_CRASH_TEST=1` set for the app, the command
@@ -87,7 +87,7 @@ A folder `crashes/<YYYYMMDD-HHMMSS>-<signature>/`:
       The process still ends with the signal, so macOS also writes its own crash report, with every
       thread's stack: `~/Library/Logs/DiagnosticReports/solidcraft-<date>.ips` (Console ▸ Crash
       Reports), whose `pid` is the one in `native`.
-- `design.solidcraft`: the design the replay starts from
+- `design.sc`: the design the replay starts from
 - `replay.json`: `{"commands": [{command, params}, …]}`
 - `minidump.dmp` (Windows, native crashes; on macOS, see the system's own report above): the threads' stacks and the loaded modules at the
   crash, for WinDbg or Visual Studio. It holds stack memory only, not the design, but it stays

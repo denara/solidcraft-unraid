@@ -574,6 +574,70 @@ fn v(x: f64, y: f64) -> solidcraft_geom::Vec2 {
     solidcraft_geom::Vec2::new(x, y)
 }
 
+/// The corners of the polygon drawn by `out`, in order, and its support circle's centre and radius.
+fn polygon_shape(s: &Session, out: &Value) -> (Vec<solidcraft_geom::Vec2>, solidcraft_geom::Vec2, f64) {
+    use solidcraft_sketch::CurveKind;
+    let sk = sketch(s);
+    let corners = out["curves"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| match &sk.curves[sk.curve_index(id.as_str().unwrap()).unwrap()].kind {
+            CurveKind::Line { a, .. } => sk.point(*a).unwrap(),
+            other => panic!("a side is a line: {other:?}"),
+        })
+        .collect();
+    let support = &sk.curves[sk.curve_index(out["support_circle"].as_str().unwrap()).unwrap()].kind;
+    let CurveKind::Circle { c, r } = support else { panic!("support circle: {support:?}") };
+    (corners, sk.point(*c).unwrap(), *r)
+}
+
+/// A regular polygon: corners equally far from `c`, sides equally long.
+fn assert_regular(corners: &[solidcraft_geom::Vec2], c: solidcraft_geom::Vec2, what: &str) {
+    let n = corners.len();
+    let reach: Vec<f64> = corners.iter().map(|q| q.dist(c)).collect();
+    let sides: Vec<f64> = (0..n).map(|i| corners[i].dist(corners[(i + 1) % n])).collect();
+    let even = |xs: &[f64]| xs.iter().all(|x| (x - xs[0]).abs() < 1e-6);
+    assert!(even(&reach) && even(&sides), "{what}: corners {reach:?}, sides {sides:?}");
+}
+
+/// #7395: a circumscribed polygon had equal sides tangent to its circle only, which leaves every
+/// other corner free (dof 9 for a hexagon); dragging its centre or a corner pulled it out of
+/// shape. It is held regular now, as an inscribed one: dof 4 (centre, size, turn), and a drag
+/// moves or turns it without deforming it.
+#[test]
+fn dragging_a_circumscribed_polygon_keeps_it_regular() {
+    for sides in [4, 5, 6] {
+        for drag_corner in [false, true] {
+            let mut s = new_sketch();
+            let out = run(&mut s, "sketch.polygon.circumscribed", json!({"center": [50, 50], "radius": 10, "sides": sides}));
+            assert_eq!(out["sketch"]["dof"], 4, "{sides} sides: centre, size and turn only: {}", out["sketch"]);
+            let (corners, c, r) = polygon_shape(&s, &out);
+            assert_regular(&corners, c, "as drawn");
+            assert!((r - 10.0).abs() < 1e-9);
+            let support = out["support_circle"].as_str().unwrap();
+            if drag_corner {
+                let from = corners[0];
+                let to = from + v(3.0, -4.0);
+                drag(&mut s, &format!("{}.start", out["curves"][0].as_str().unwrap()), [from.x, from.y], [to.x, to.y]);
+            } else {
+                drag(&mut s, &format!("{support}.center"), [50.0, 50.0], [70.0, 60.0]);
+            }
+            run(&mut s, "sketch.drag_end", json!({}));
+            let (corners, c, r) = polygon_shape(&s, &out);
+            let what = format!("{sides} sides, dragged by its {}", if drag_corner { "corner" } else { "centre" });
+            assert_regular(&corners, c, &what);
+            let apothem = corners[0].dist(corners[1]) / (2.0 * (std::f64::consts::PI / sides as f64).tan());
+            assert!((apothem - r).abs() < 1e-6, "{what}: the sides touch the support circle (apothem {apothem}, radius {r})");
+            // A drag may change a free size by a hair (an inscribed polygon's too); the polygon
+            // went from radius 10 to 8.02.
+            if !drag_corner {
+                assert!((r - 10.0).abs() < 1e-2 && c.dist(v(70.0, 60.0)) < 1e-6, "{what}: moved whole, radius {r}, centre {c:?}");
+            }
+        }
+    }
+}
+
 #[test]
 fn dragging_a_line_slides_it_and_an_end_keeps_the_other_end() {
     let mut s = new_sketch();

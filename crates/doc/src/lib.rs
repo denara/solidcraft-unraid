@@ -73,7 +73,6 @@ pub use assembly::{
     mat_mul, rigid,
 };
 pub use document::*;
-pub use eval::KeptResults;
 pub use eval::{
     EdgeRef, FeatureResult, Model, ModelBody, ModelState, PlacedBodies, RevolveExtent, SavedModel, SolvedSketch, ThreadInfo, curve_pick_error,
     edge_names_for, edge_refs, face_point_names, face_point_state, hole_direction_at, import_body_names, map_wire, metric_thread_sizes,
@@ -81,6 +80,7 @@ pub use eval::{
     sketch_line_plane, state_in_frame, state_in_frame_at, suggested_thread, tangent_face_chain, through_all_distance, world_state,
     world_state_reusing,
 };
+pub use eval::{EvalCache, KeptResults};
 pub use expr::Expr;
 pub use names::{BodyName, FeatureId, FeatureName, SketchId, copy_name};
 pub use params::{ParamRow, ParamUser, cycles};

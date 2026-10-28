@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::io::{Cursor, Read};
 use std::path::Path;
 pub(crate) const EXTENSIONS: &[&str] =
-    &["solidcraft", "solvecraft", "json", "step", "stp", "igs", "iges", "stl", "3mf", "obj", "glb", "gltf", "dxf", "svg", "png", "jpg", "jpeg"];
+    &["sc", "solidcraft", "solvecraft", "json", "step", "stp", "igs", "iges", "stl", "3mf", "obj", "glb", "gltf", "dxf", "svg", "png", "jpg", "jpeg"];
 pub(crate) fn extension(name: &str) -> Result<String, &'static str> {
     let ext = Path::new(name).extension().and_then(|s| s.to_str()).unwrap_or_default().to_ascii_lowercase();
     if EXTENSIONS.contains(&ext.as_str()) { Ok(ext) } else { Err("Dateityp nicht unterstützt. Erlaubte Formate stehen im Upload-Bereich.") }
@@ -97,7 +97,7 @@ pub(crate) fn validate(name: &str, bytes: &[u8]) -> Result<(), &'static str> {
         return Err("Leere Dateien werden nicht hochgeladen.");
     }
     match ext.as_str() {
-        "solidcraft" | "solvecraft" => {
+        "sc" | "solidcraft" | "solvecraft" => {
             if bytes.starts_with(b"PK\x03\x04") {
                 container(bytes, true)
             } else {

@@ -78,3 +78,37 @@ fn cancelled_import_stops_and_leaves_the_design_alone() {
     assert!(done < total, "stopped part way ({done} of {total})");
     let _ = std::fs::remove_file(path);
 }
+
+/// A preview cancelled while it imports again (#7167) keeps no "cancelled" result: the scratch
+/// session shares the evaluation cache with the design, which then evaluates the same inputs and
+/// imports in full.
+#[test]
+fn a_cancelled_preview_import_leaves_no_failure_in_the_shared_cache() {
+    let path = step_file("preview", 300);
+    let mut s = Session::default();
+    s.execute("solid.box", &json!({"length": 10, "width": 10, "height": 10, "body_name": "first"})).unwrap();
+    s.execute("file.insert_step", &json!({"path": path})).unwrap();
+    let import = s.doc.features.iter().position(|f| matches!(f.kind, FeatureKind::Import { .. })).unwrap();
+    // A new length for the box: the import after it is evaluated again on new inputs.
+    let redefine =
+        json!({"feature": s.doc.features[0].id, "command": "solid.box", "params": {"length": 20, "width": 10, "height": 10, "body_name": "first"}});
+    let mut scratch = s.scratch();
+    let progress = Arc::new(Progress::default());
+    let canceller = {
+        let progress = progress.clone();
+        std::thread::spawn(move || {
+            while progress.work().is_none() {
+                std::thread::yield_now();
+            }
+            progress.cancel();
+        })
+    };
+    let _ = solidcraft_doc::progress::watch(progress.clone(), || scratch.execute("timeline.redefine", &redefine));
+    canceller.join().unwrap();
+    let (_, done, total) = progress.work().unwrap();
+    assert!(done < total, "the preview's import stopped part way ({done} of {total})");
+    s.execute("timeline.redefine", &redefine).unwrap();
+    let result = &s.model.results[import];
+    assert!(result.error.is_none() && !result.skipped, "the design imports in full: {:?}", result.error);
+    let _ = std::fs::remove_file(path);
+}

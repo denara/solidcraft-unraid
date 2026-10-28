@@ -21,6 +21,7 @@ use crate::SolveApp;
 use crate::dialogs::{Kind, form_row};
 use crate::selection::{BODIES, SelInput};
 use crate::theme::Tokens;
+use solidcraft_engine::Sel;
 
 /// The formats, as shown and as `file.save_mesh` names them.
 /// (label, `format` parameter, file extension).
@@ -302,8 +303,25 @@ fn paint_icon(ui: &egui::Ui, rect: egui::Rect, tex: Option<egui::TextureId>, nam
     }
 }
 
+/// Every body of the design, in model order; with `visible`, only the bodies the viewport shows.
+pub(crate) fn body_picks(app: &SolveApp, visible: bool) -> Vec<Sel> {
+    let st = app.session.world_state();
+    let shown = |name: &str| !visible || app.session.body_visible(name);
+    st.bodies.iter().filter(|b| shown(&b.name)).map(|b| Sel::Body { name: b.name.clone() }).collect()
+}
+
 /// The rows after the Bodies input; true when Enter was pressed in a field.
-pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut SaveMesh) -> bool {
+pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut SaveMesh, inputs: &mut [SelInput]) -> bool {
+    // One row each: the two side by side do not fit the dialog's width.
+    for (label, visible) in [("Add all bodies", false), ("Add visible bodies", true)] {
+        form_row(ui, "", |ui| {
+            if crate::ui_kit::button(ui, crate::i18n::tr_label(label), crate::ui_kit::Button::Small).clicked()
+                && let Some(input) = inputs.first_mut()
+            {
+                input.items = body_picks(app, visible);
+            }
+        });
+    }
     if !k.open {
         choice_row(ui, "Format", "sm_format", &mut k.format, &FORMATS.map(|f| f.0));
         choice_row(ui, "Quality", "sm_quality", &mut k.quality, &QUALITIES.map(|q| q.0));

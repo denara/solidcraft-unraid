@@ -145,7 +145,7 @@ fn eval_and_inspect_reject_invalid_options_before_script_execution_or_reporting(
 #[test]
 fn cli_loads_both_design_encodings_by_contents() {
     let dir = Scratch::new();
-    for extension in ["solidcraft", "solvecraft", "json"] {
+    for extension in ["sc", "solidcraft", "solvecraft", "json"] {
         let saved = dir.0.join(format!("box.{extension}"));
         json_output(cli().arg("run").arg(dir.script()).arg("--save").arg(&saved).output().unwrap());
         let bytes = std::fs::read(&saved).unwrap();
@@ -412,6 +412,11 @@ fn legacy_extension_and_format_tag_still_open() {
     assert_eq!(body_count(&resaved), 2);
     let reopened = solidcraft_engine::io::read_design(&std::fs::read(&resaved).unwrap()).unwrap();
     assert!(reopened.to_json().contains("\"solidcraft/"));
+    // `.solidcraft` (before `.sc`) opens as `--in` and as the design to evaluate; `.sc` too.
+    let current = dir.0.join("current.sc");
+    json_output(cli().args(["run", "--in"]).arg(&resaved).arg(dir.script()).arg("--save").arg(&current).output().unwrap());
+    assert_eq!(body_count(&current), 3);
+    assert!(solidcraft_engine::io::is_design_container(&std::fs::read(&current).unwrap()), "a .sc file is a design container");
 }
 
 /// `snapshot` starts from `--in` as `run` does (its script runs on that design), and refuses an

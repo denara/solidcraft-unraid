@@ -1,5 +1,32 @@
 //! Interface settings composition, using shared controls and previews.
 use super::*;
+
+/// Origin plane names: each choice shows the three names it gives (`XY / XZ / YZ`), with a note
+/// that only the names shown change.
+fn origin_plane_names(app: &mut SolveApp, ui: &mut egui::Ui) {
+    ui_kit::settings_section(ui, "origin_plane_names", app.tr("prefs.origin_plane_names"), |ui| {
+        let choices: Vec<String> =
+            OriginPlaneNames::ALL.iter().map(|names| OriginPlaneNames::PLANES.map(|plane| names.label(plane)).join(" / ")).collect();
+        let options: Vec<&str> = choices.iter().map(String::as_str).collect();
+        let mut selected = OriginPlaneNames::ALL.iter().position(|names| *names == app.preferences.origin_plane_names).unwrap_or(0);
+        if ui_kit::settings_segments(ui, app.tr("prefs.origin_plane_names"), &mut selected, &options)
+            && let Some(names) = OriginPlaneNames::ALL.get(selected)
+        {
+            app.preferences.origin_plane_names = *names;
+        }
+        // Handles that don't depend on the language, by the choice's saved value.
+        for (choice, key) in choices.iter().zip(["xyz", "top_front_right"]) {
+            if let Some(at) = crate::scenario::handle_at(&format!("dialog:{}:{choice}", app.tr("prefs.origin_plane_names"))) {
+                crate::scenario::publish_handle(&format!("prefs:origin_plane_names:{key}"), at);
+            }
+        }
+        let top = OriginPlaneNames::TopFrontRight;
+        let note =
+            crate::i18n::format("prefs.origin_plane_names_note", &[("top", top.label("XY")), ("front", top.label("XZ")), ("right", top.label("YZ"))]);
+        ui_kit::text(ui, &note, ui_kit::Text::Hint("origin_plane_names"));
+    });
+}
+
 pub(super) fn interface(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
     ui_kit::settings_heading(ui, app.tr("prefs.interface"), app.tr("prefs.interface_note"));
     ui_kit::settings_section(ui, "theme", app.tr("ui.theme"), |ui| {
@@ -18,6 +45,10 @@ pub(super) fn interface(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
                     app.preferences.viewport_theme = *view;
                 }
             });
+            // A theme file another tool writes, reloaded when it changes (#7573).
+            if FOLLOW_AVAILABLE {
+                follow_row(app, ui);
+            }
         });
     });
     ui_kit::settings_section(ui, "layout", app.tr("prefs.layout"), |ui| {
@@ -95,6 +126,15 @@ pub(super) fn interface(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
                             }
                         });
                     });
+                    // Only the history on the left or under the browser has room for these rows.
+                    ui_kit::row(ui, "", |ui| {
+                        ui.add_enabled_ui(app.preferences.timeline_left, |ui| {
+                            let check = ui_kit::checkbox(ui, app.tr("prefs.history_origin_bodies"), &mut app.preferences.timeline_origin_bodies)
+                                .on_hover_text(app.tr("prefs.history_origin_bodies_note"))
+                                .on_disabled_hover_text(app.tr("prefs.history_origin_bodies_note"));
+                            crate::scenario::publish_target("prefs:history_origin_bodies", check.rect);
+                        });
+                    });
                     ui_kit::row(ui, app.tr("prefs.browser"), |ui| {
                         ui.add_enabled_ui(app.ui.layout == crate::shell::LayoutMode::Floating, |ui| {
                             let mut selected = usize::from(app.preferences.browser_float);
@@ -103,10 +143,31 @@ pub(super) fn interface(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
                             }
                         });
                     });
+                    // Where command dialogs open (#6707).
+                    ui_kit::row(ui, app.tr("prefs.dialogs"), |ui| {
+                        use crate::dialog_column::DialogPlace;
+                        let mut selected = usize::from(app.preferences.dialog_place == DialogPlace::LeftColumn);
+                        let options = [app.tr("prefs.dialogs_edge"), app.tr("prefs.dialogs_left_column")];
+                        let segments = ui.scope(|ui| ui_kit::segmented(ui, &mut selected, &options, Default::default()));
+                        segments.response.on_hover_text(app.tr("prefs.dialogs_note"));
+                        if segments.inner {
+                            app.preferences.dialog_place = if selected == 1 { DialogPlace::LeftColumn } else { DialogPlace::Edge };
+                        }
+                    });
                     // Where a dialog's and a sketch's OK and Cancel also sit (#6709).
                     ui_kit::row(ui, "", |ui| {
                         let check = setting::view_confirm_corner(app, ui).on_hover_text(app.tr("prefs.view_confirm_corner_note"));
                         crate::scenario::publish_target("prefs:view_confirm_corner", check.rect);
+                    });
+                    ui_kit::row(ui, app.tr("prefs.bodies_folders"), |ui| {
+                        let modes = BodiesFolders::ALL;
+                        let labels: Vec<_> = modes.iter().map(|m| app.tr(m.label_id())).collect();
+                        let mut selected = modes.iter().position(|m| *m == app.preferences.browser_bodies_folders).unwrap_or(0);
+                        if ui_kit::segmented(ui, &mut selected, &labels, ui_kit::Segments { proportional: true, compact: true, ..Default::default() })
+                            && let Some(mode) = modes.get(selected)
+                        {
+                            app.preferences.browser_bodies_folders = *mode;
+                        }
                     });
                     ui_kit::text(ui, app.tr("prefs.layout_note"), ui_kit::Text::Hint("layout"));
                     ui_kit::text(ui, app.tr("prefs.history_sketches_note"), ui_kit::Text::Hint("history_sketches"));
@@ -121,6 +182,8 @@ pub(super) fn interface(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
             ui_kit::layout_preview,
         );
     });
+    origin_plane_names(app, ui);
+    super::navbar::show(app, ui);
     ui_kit::settings_section(ui, "scale", app.tr("prefs.scale_text"), |ui| {
         ui_kit::settings_pair(
             ui,
@@ -192,6 +255,9 @@ pub(super) fn interface(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
             }
             ui_kit::status_palette_sample(ui, app.preferences.color_vision);
         });
+        // What the modes recolour, in the mode being chosen (#7152): the status chips above keep
+        // their colours in every mode.
+        ui_kit::colour_vision_sample(ui, &crate::theme::Tokens::get_in(app.preferences.color_vision));
         if app.preferences.color_vision != mode {
             ui.ctx().request_repaint();
         }

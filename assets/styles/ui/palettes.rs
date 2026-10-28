@@ -8,6 +8,15 @@ const fn icon_primary(rgb: [u8; 3]) -> Color32 {
 impl Tokens {
     pub const fn light() -> Tokens {
         Tokens {
+            nav_hover: Color32::from_rgb(233, 237, 242),
+            nav_press: Color32::from_rgb(220, 226, 234),
+            nav_dim: Color32::from_rgb(136, 149, 167),
+            nav_viewport: Color32::from_rgb(238, 241, 245),
+            nav_tip: Color32::from_rgb(27, 36, 48),
+            nav_tip_ink: Color32::from_rgb(255, 255, 255),
+            nav_tip_key_border: Color32::from_rgba_unmultiplied_const(128, 140, 160, 153),
+            nav_field: Color32::from_rgb(255, 255, 255),
+
             borders: crate::theme::Borders::LEGACY,
             icon_palette: None,
             file_dim: Color32::from_rgb(58, 70, 86),
@@ -73,6 +82,7 @@ impl Tokens {
             form_ink: Color32::from_rgb(27, 36, 48),
             form_dim: Color32::from_rgb(74, 88, 104),
             form_primary: Color32::from_rgb(35, 110, 173),
+            form_primary_fill: Color32::from_rgb(35, 110, 173),
             form_error: Color32::from_rgb(161, 52, 44),
             form_error_fill: Color32::from_rgb(252, 239, 237),
             form_success: Color32::from_rgb(39, 107, 44),
@@ -313,6 +323,14 @@ impl Tokens {
         t.render_ink = Color32::from_rgb(224, 116, 174);
         t.render_soft = Color32::from_rgb(64, 35, 54);
         t.tab_on_fill_dark = Color32::BLACK;
+        t.nav_hover = Color32::from_rgb(58, 65, 80);
+        t.nav_press = Color32::from_rgb(70, 78, 96);
+        t.nav_dim = Color32::from_rgb(124, 135, 154);
+        t.nav_viewport = Color32::from_rgb(38, 43, 53);
+        t.nav_tip = Color32::from_rgb(238, 241, 245);
+        t.nav_tip_ink = Color32::from_rgb(27, 36, 48);
+        t.nav_tip_key_border = Color32::from_rgba_unmultiplied_const(128, 140, 160, 153);
+        t.nav_field = Color32::from_rgb(47, 52, 62);
         t.dialog_body = Color32::from_rgb(39, 43, 52);
         t.dialog_footer = Color32::from_rgb(47, 52, 62);
         t.dialog_rule = Color32::from_rgb(53, 59, 71);
@@ -363,6 +381,7 @@ impl Tokens {
         t.form_ink = t.text;
         t.form_dim = Color32::from_rgb(180, 187, 200);
         t.form_primary = t.accent;
+        t.form_primary_fill = t.form_primary;
         t.form_error = t.error;
         t.form_error_fill = t.timeline_item_error;
         t.form_success = Color32::from_rgb(143, 219, 154);

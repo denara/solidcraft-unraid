@@ -63,7 +63,7 @@ try {
  if((Post '/workspace/uploads/prepare' @{project=$project;files=@(@{name='blocked.svg';size=3})}).StatusCode -ne 409){throw 'Active project accepted upload'}
  End
  [byte[]]$svg=[Text.Encoding]::UTF8.GetBytes('<svg xmlns="http://www.w3.org/2000/svg" width="20mm" height="10mm" viewBox="0 0 20 10"><path d="M0 0L20 0L20 10L0 10Z"/></svg>')
- $files=@(@{name='uploaded.solidcraft';size=$nativeBytes.Length},@{name='Schablone-ü.svg';size=$svg.Length})
+ $files=@(@{name='uploaded.sc';size=$nativeBytes.Length},@{name='Schablone-ü.svg';size=$svg.Length})
  $batch=Prepare $files
  if((Put $batch 0 $nativeBytes).StatusCode -ne 200 -or (Put $batch 1 $svg).StatusCode -ne 200){throw 'Multiple UI uploads failed'}
  $batch=Prepare $files
@@ -78,14 +78,14 @@ try {
  }
  Init
  $null=Tool project_select @{name=$project}
- $inventory=ToolJson (Tool workspace_list_files @{path="$project/uploaded.solidcraft"})
+ $inventory=ToolJson (Tool workspace_list_files @{path="$project/uploaded.sc"})
  if($inventory.files.Count -ne 1){throw 'MCP cannot discover uploaded file'}
- $null=Tool open @{path='uploaded.solidcraft'}
+ $null=Tool open @{path='uploaded.sc'}
  $measure=ToolJson (Tool measure)
  if([Math]::Abs([double]$measure.total.volume_mm3-6000) -gt 0.001){throw 'Unexpected analytic volume'}
  $null=Tool execute @{command='solid.box';params=@{length=5;width=5;height=5;corner=@(30,0,0)}}
- $null=Tool save @{path='continued.solidcraft'}
- $after=Invoke-WebRequest "$BaseUrl/files/$project/uploaded.solidcraft" -Headers @{Authorization="Bearer $Token"}
+ $null=Tool save @{path='continued.sc'}
+ $after=Invoke-WebRequest "$BaseUrl/files/$project/uploaded.sc" -Headers @{Authorization="Bearer $Token"}
  if([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($after.RawContentStream.ToArray())) -ne $nativeHash){throw 'Original upload bytes changed'}
  End
  $page=Invoke-WebRequest "$BaseUrl/workspace" -WebSession $browser

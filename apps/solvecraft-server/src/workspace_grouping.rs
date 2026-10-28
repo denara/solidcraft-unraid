@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 pub(super) fn format(name: &str) -> String {
     let extension = Path::new(name).extension().and_then(|part| part.to_str()).unwrap_or_default();
     match extension.to_ascii_lowercase().as_str() {
-        "solidcraft" | "solvecraft" => "SolidCraft".into(),
+        "sc" | "solidcraft" | "solvecraft" => "SolidCraft".into(),
         "stp" | "step" => "STEP".into(),
         "jpeg" | "jpg" => "JPEG".into(),
         "" => "File".into(),

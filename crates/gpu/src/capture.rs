@@ -16,7 +16,7 @@ use solidcraft_render::{AnalysisMode, Camera, Rgb, SECTION_CAP, Scene};
 use wgpu::util::DeviceExt;
 
 use crate::view::{AccessMap, Frame, GpuScene, GpuTarget, Renderer, analysis_colors, analysis_uniform};
-use crate::{GpuError, Result, popped};
+use crate::{GpuError, Result, caught, error_scopes};
 
 /// The colour format pictures are drawn in: sRGB bytes as they are, like the viewport's usual
 /// (non-sRGB) target.
@@ -194,10 +194,11 @@ impl Capturer {
             _ => None,
         };
         let mut frame = frame(scene, cam, [width, height], state.key, access);
-        if let Some(h) = highlight {
-            frame.hl_key = state.key;
-            frame.hl_slot = Arc::new(Mutex::new(Some(h)));
-        }
+        // Always a highlight scene of the picture's own, empty without one: the renderer keeps
+        // its last highlight scene while the slot is empty (as the viewport does until the next
+        // is built), so the previous picture's highlight would show in this one.
+        frame.hl_key = state.key;
+        frame.hl_slot = Arc::new(Mutex::new(Some(highlight.unwrap_or_default())));
         let (device, queue) = (&self.device, &self.queue);
         let scopes = error_scopes(device);
         let size = wgpu::Extent3d { width, height, depth_or_array_layers: 1 };
@@ -457,22 +458,6 @@ fn watch_lost(device: &wgpu::Device) -> Arc<AtomicBool> {
         seen.store(true, Ordering::Release);
     });
     lost
-}
-
-/// Error scopes catching what a picture's GPU work may raise (popped by [`caught`]).
-fn error_scopes(device: &wgpu::Device) -> [wgpu::ErrorScopeGuard; 3] {
-    [wgpu::ErrorFilter::OutOfMemory, wgpu::ErrorFilter::Internal, wgpu::ErrorFilter::Validation].map(|f| device.push_error_scope(f))
-}
-
-/// The first error the scopes caught.
-fn caught(scopes: [wgpu::ErrorScopeGuard; 3]) -> Option<String> {
-    let mut failed = None;
-    for scope in scopes.into_iter().rev() {
-        if let Some(e) = popped(scope.pop()) {
-            failed.get_or_insert(e.to_string());
-        }
-    }
-    failed
 }
 
 /// The background gradient: the viewport's top colour at the top, its bottom one at the bottom,

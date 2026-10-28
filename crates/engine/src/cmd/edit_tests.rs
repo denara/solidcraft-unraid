@@ -40,6 +40,45 @@ fn roll_to_takes_a_number_or_end_and_refuses_anything_else() {
     }
 }
 
+/// #7077: Repeat Last Command is a command (its key can change, command search finds it), but
+/// only the app has a tool to start, so a script's call is refused and changes nothing.
+#[test]
+fn repeat_is_refused_outside_the_app_and_changes_nothing() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10}));
+    let (doc, undo) = (s.doc.to_json(), s.undo.len());
+    let e = s.execute("edit.repeat", &json!({})).unwrap_err().to_string();
+    assert!(e.contains("in the app"), "{e}");
+    assert_eq!((s.doc.to_json(), s.undo.len()), (doc, undo));
+    let spec = crate::find_command("edit.repeat").unwrap();
+    assert_eq!((spec.shortcut, spec.tab, spec.undoable), (Some("Shift+R"), "", false));
+}
+
+#[test]
+fn creating_after_deleting_future_features_keeps_the_new_feature_active() {
+    let mut s = Session::default();
+    for (name, corner, size) in [("Base", [0, 0, 0], 10), ("Later1", [20, 0, 0], 2), ("Later2", [40, 0, 0], 3)] {
+        run(&mut s, "solid.box", json!({"name": name, "corner": corner, "length": size, "width": size, "height": size, "operation": "new"}));
+    }
+
+    run(&mut s, "timeline.roll_to", json!({"position": 1}));
+    run(&mut s, "solid.box", json!({"name": "Inserted", "corner": [60, 0, 0], "length": 4, "width": 4, "height": 4, "operation": "new"}));
+    assert_eq!(s.doc.features.iter().map(|feature| feature.name.as_str()).collect::<Vec<_>>(), ["Base", "Inserted", "Later1", "Later2"]);
+    assert_eq!(s.doc.marker, Some(2), "with later features, the new feature is inserted at the cursor");
+
+    run(&mut s, "timeline.delete", json!({"features": ["Later1", "Later2"]}));
+    assert_eq!(s.doc.features.len(), 2);
+    assert_eq!(s.doc.marker, Some(2), "the cursor is at the end after deleting all later features");
+
+    run(&mut s, "solid.box", json!({"name": "Appended", "corner": [80, 0, 0], "length": 5, "width": 5, "height": 5, "operation": "new"}));
+
+    assert_eq!(s.doc.features.iter().map(|feature| feature.name.as_str()).collect::<Vec<_>>(), ["Base", "Inserted", "Appended"]);
+    assert_eq!(s.doc.marker, Some(3), "the new feature advances the cursor to the end");
+    assert_eq!(s.model.state().bodies.len(), 3, "the appended feature is evaluated, not left in the future");
+    let volume = run(&mut s, "inspect.measure", json!({}))["total"]["volume_mm3"].as_f64().unwrap();
+    assert!((volume - 1189.0).abs() < 1e-6, "{volume}");
+}
+
 #[test]
 fn g2_fillet_survives_edit_undo_and_reopen() {
     use solidcraft_doc::{Document, FeatureKind, FilletStyle};
@@ -142,6 +181,24 @@ fn redefining_a_blend_replaces_persistent_edge_selection_and_survives_resize() {
     let expected = 60.0 * 30.0 * 25.0 - (4.0 - std::f64::consts::PI) * 30.0;
     assert!((volume - expected).abs() < expected * 1e-4, "{volume} != {expected}");
     assert!(s.model.result(old.id).unwrap().warning.is_none());
+}
+
+/// A redefine computes the features after the edited one once: its trial's results are kept
+/// for the session's own evaluation, though the cache holds only the last state (a large
+/// design's).
+#[test]
+fn redefining_computes_the_later_features_once() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 20, "width": 10, "height": 5, "name": "Base"}));
+    for x in [30, 40, 50] {
+        run(&mut s, "solid.box", json!({"length": 5, "width": 5, "height": 5, "corner": [x, 0, 0]}));
+    }
+    *s.model.cache.lock().unwrap() = solidcraft_doc::EvalCache::with_budget(1);
+    let reply =
+        run(&mut s, "timeline.redefine", json!({"feature": "Base", "command": "solid.box", "params": {"length": 25, "width": 10, "height": 5}}));
+    assert_eq!(reply["recomputed"], 0, "{reply}");
+    let volume = run(&mut s, "inspect.measure", json!({}))["total"]["volume_mm3"].as_f64().unwrap();
+    assert!((volume - (25.0 * 10.0 * 5.0 + 3.0 * 125.0)).abs() < 1e-6, "{volume}");
 }
 
 #[test]
@@ -660,6 +717,108 @@ fn timeline_folders_can_nest_and_reject_cycles() {
     assert_eq!(reopened.timeline_groups, s.doc.timeline_groups);
     run(&mut s, "timeline.ungroup", json!({"group": root}));
     assert_eq!(s.doc.timeline_groups.iter().find(|group| group.id == child).unwrap().parent, None, "deleting a folder promotes its children");
+}
+
+/// Four separate boxes, `First`…`Fourth`, for the timeline folder tests.
+fn four_boxes() -> Session {
+    let mut s = Session::default();
+    for (i, name) in ["First", "Second", "Third", "Fourth"].into_iter().enumerate() {
+        let corner = [20 * i, 0, 0];
+        run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10, "corner": corner, "operation": "new_body", "name": name}));
+    }
+    s
+}
+
+fn feature_names(s: &Session) -> Vec<String> {
+    s.doc.features.iter().map(|feature| feature.name.clone()).collect()
+}
+
+/// `timeline.delete {groups}` deletes a folder with its features and nested folders in one undo
+/// step; other folders and features stay, and `timeline.ungroup` still keeps the features (#7219).
+#[test]
+fn timeline_delete_takes_a_folder_with_its_features_and_nested_folders() {
+    let mut s = four_boxes();
+    let outer = run(&mut s, "timeline.group", json!({"name": "Outer", "features": ["Second"]}))["group"].as_u64().unwrap();
+    let inner = run(&mut s, "timeline.group", json!({"name": "Inner", "features": ["Third"], "parent": outer}))["group"].as_u64().unwrap();
+    let keep = run(&mut s, "timeline.group", json!({"name": "Keep", "features": ["Fourth"]}))["group"].as_u64().unwrap();
+    let before = s.doc.clone();
+
+    let out = run(&mut s, "timeline.delete", json!({"groups": [outer]}));
+    assert_eq!(feature_names(&s), ["First", "Fourth"]);
+    assert_eq!(out["groups"], json!([outer, inner]), "{out}");
+    assert_eq!(s.doc.timeline_groups.iter().map(|group| group.id).collect::<Vec<_>>(), [keep], "the nested folder goes too");
+    assert_eq!(s.model.state().bodies.len(), 2);
+    let reopened = solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap();
+    assert_eq!(reopened.timeline_groups, s.doc.timeline_groups);
+
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!(s.doc.features, before.features, "one undo step brings the features back");
+    assert_eq!(s.doc.timeline_groups, before.timeline_groups, "and the folders, nested as they were");
+    run(&mut s, "edit.redo", json!({}));
+    assert_eq!(feature_names(&s), ["First", "Fourth"]);
+    run(&mut s, "edit.undo", json!({}));
+
+    // A folder and a feature outside it in one delete; an empty folder goes on its own.
+    run(&mut s, "timeline.delete", json!({"groups": [inner], "features": ["First"]}));
+    assert_eq!(feature_names(&s), ["Second", "Fourth"]);
+    assert_eq!(s.doc.timeline_groups.iter().map(|group| group.name.as_str()).collect::<Vec<_>>(), ["Outer", "Keep"]);
+    let empty = run(&mut s, "timeline.group", json!({"name": "Empty"}))["group"].as_u64().unwrap();
+    assert_eq!(run(&mut s, "timeline.delete", json!({"groups": [empty]}))["deleted"], json!([]));
+    assert!(!s.doc.timeline_groups.iter().any(|group| group.id == empty));
+
+    let before = s.doc.clone();
+    for bad in [json!({"groups": [999_999]}), json!({"groups": ["Outer"]}), json!({"groups": 3}), json!({"groups": []})] {
+        assert!(s.execute("timeline.delete", &bad).is_err(), "{bad}");
+        assert_eq!(s.doc, before, "{bad}: a refused delete changes nothing");
+    }
+}
+
+/// `timeline.suppress {groups}` suppresses every feature of a folder and its nested folders in
+/// one undo step, toggles like several features do, and works with the marker inside the
+/// folder (#7219).
+#[test]
+fn timeline_suppress_takes_a_folder_with_its_nested_folders() {
+    let mut s = four_boxes();
+    let outer = run(&mut s, "timeline.group", json!({"name": "Outer", "features": ["Second"]}))["group"].as_u64().unwrap();
+    run(&mut s, "timeline.group", json!({"name": "Inner", "features": ["Third"], "parent": outer}));
+    let suppressed = |s: &Session| s.doc.features.iter().filter(|feature| feature.suppressed).map(|feature| feature.name.clone()).collect::<Vec<_>>();
+
+    let out = run(&mut s, "timeline.suppress", json!({"groups": [outer]}));
+    assert_eq!(out["suppressed"], true);
+    assert_eq!(out["groups"], json!([outer]));
+    assert_eq!(suppressed(&s), ["Second", "Third"]);
+    assert_eq!(s.model.state().bodies.len(), 2);
+    let reopened = solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap();
+    assert_eq!(reopened.features, s.doc.features);
+    run(&mut s, "edit.undo", json!({}));
+    assert!(suppressed(&s).is_empty(), "one undo step");
+    run(&mut s, "edit.redo", json!({}));
+    assert_eq!(suppressed(&s), ["Second", "Third"]);
+
+    // Toggle: all suppressed, so all come back; with one of them active, all are suppressed.
+    run(&mut s, "timeline.suppress", json!({"groups": [outer]}));
+    assert!(suppressed(&s).is_empty());
+    run(&mut s, "timeline.suppress", json!({"feature": "Third"}));
+    run(&mut s, "timeline.suppress", json!({"groups": [outer]}));
+    assert_eq!(suppressed(&s), ["Second", "Third"]);
+    run(&mut s, "timeline.suppress", json!({"groups": [outer], "suppressed": false, "features": ["Fourth"]}));
+    assert!(suppressed(&s).is_empty(), "an explicit state, with a feature outside the folder as well");
+
+    // The marker between the folder's features: the folder is suppressed all the same, and the
+    // marker stays where it was.
+    run(&mut s, "timeline.roll_to", json!({"feature": "Second"}));
+    assert_eq!(s.doc.marker, Some(2));
+    run(&mut s, "timeline.suppress", json!({"groups": [outer], "suppressed": true}));
+    assert_eq!(suppressed(&s), ["Second", "Third"]);
+    assert_eq!(s.doc.marker, Some(2));
+    assert_eq!(s.model.state().bodies.len(), 1, "only First is before the marker and not suppressed");
+
+    let empty = run(&mut s, "timeline.group", json!({"name": "Empty"}))["group"].as_u64().unwrap();
+    let before = s.doc.clone();
+    for bad in [json!({"groups": [empty]}), json!({"groups": [999_999]}), json!({"groups": [outer], "suppressed": "yes"})] {
+        assert!(s.execute("timeline.suppress", &bad).is_err(), "{bad}");
+        assert_eq!(s.doc, before, "{bad}: a refused suppress changes nothing");
+    }
 }
 
 /// A field the feature's definition doesn't have is refused with the fields it does have,

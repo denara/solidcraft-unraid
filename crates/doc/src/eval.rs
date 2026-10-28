@@ -2,6 +2,8 @@
 
 #[path = "placed_mesh.rs"]
 mod placed_mesh;
+#[path = "placement_reuse.rs"]
+mod placement_reuse;
 
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
@@ -1070,6 +1072,21 @@ const CACHE_ENTRIES: usize = 4096;
 const CACHE_BYTES: usize = 64 << 20;
 
 impl EvalCache {
+    /// A cache that keeps `bytes` of results (always at least the last one): a small budget
+    /// stands in for a design whose states are large.
+    pub fn with_budget(bytes: usize) -> Self {
+        EvalCache { budget: bytes, ..EvalCache::default() }
+    }
+
+    /// Results stored.
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
     fn get(&mut self, key: u64) -> Option<CachedEval> {
         let r = self.map.get(&key).cloned();
         if r.is_some() {
@@ -1311,6 +1328,10 @@ pub struct Model {
     primed: Option<(u64, Arc<std::collections::HashMap<u64, FeatureResult>>)>,
     /// Shared with copies of this evaluator; states hold only a weak reference.
     frame_bodies: Arc<std::sync::Mutex<FrameBodies>>,
+    /// Inputs proven to describe placement-independent geometry, and the state they produced.
+    placement_inputs: Option<placement_reuse::Inputs>,
+    /// All evaluated features use supported local inputs; computed with the existing owner index.
+    placement_local: bool,
 }
 
 /// Parameters a feature uses directly (inputs, sketch dimensions and the expressions of a
@@ -2031,6 +2052,7 @@ impl Model {
     pub fn adopt_solved_sketches(&mut self, doc: &mut Document) -> usize {
         let solved: Vec<SolvedSketch> = self.edited_sketches(doc).cloned().collect();
         let Some(first) = solved.iter().filter_map(|s| doc.features.iter().position(|f| f.id == s.feature)).min() else { return 0 };
+        self.placement_inputs = None;
         for s in &solved {
             if let Ok(stored) = doc.sketch_mut(s.feature) {
                 adopt_solution(stored, &s.sketch);
@@ -2118,6 +2140,8 @@ impl Model {
 
     /// Re-evaluate the document, reusing results up to the first changed feature.
     pub fn evaluate(&mut self, doc: &Document) {
+        self.placement_inputs = None;
+        self.placement_local = true;
         let (vals, perr) = evaluation_values(doc);
         self.param_errors = perr;
         self.frame_bodies.lock().unwrap_or_else(|e| e.into_inner()).next_generation();
@@ -2145,6 +2169,7 @@ impl Model {
         }
         let watched = crate::progress::begin(doc.features.len());
         for (i, f) in doc.features.iter().enumerate() {
+            self.placement_local = self.placement_local && placement_reuse::local_geometry(f, &feature_component);
             let rolled_back = i >= marker;
             // Retain at most one active result per rolled-back feature, even across several
             // marker moves. Build the map anew so deleted features release their states too.
@@ -2330,7 +2355,7 @@ impl Model {
                 }
                 Err(e) => Some(e.to_string().trim_start_matches("the operation failed: ").to_string()),
             };
-            if !self.no_cache {
+            if !self.no_cache && !watched.cancelled() {
                 let e = CachedEval {
                     error: error.clone(),
                     warning: warning.clone(),
@@ -2361,6 +2386,7 @@ impl Model {
                 state: state.clone(),
             });
         }
+        self.placement_local = self.placement_local && out.iter().all(|r| !r.skipped && !r.stale && !r.unkept && r.error.is_none());
         self.results = out;
         self.last_recomputed = recomputed;
         self.recomputed += recomputed;
@@ -2373,35 +2399,44 @@ impl Model {
     /// design after the rename, which changed nothing but names, so every result keeps its
     /// geometry and meshes and only the body's name (and the names worked out from it) changes.
     /// Later features that change the body (a pattern, a chamfer, a join) keep their results
-    /// too (#2467): a feature's geometry doesn't depend on its bodies' names.
+    /// too (#2467): a feature's geometry doesn't depend on its bodies' names. A body no later
+    /// feature changes is followed even when other bodies are numbered after it (`X (2)`, the
+    /// solids of a STEP file that share a label): `body.rename` keeps their names.
     /// False, leaving the model as it was, when the rename can't be followed that way and the
     /// design must be evaluated: the model isn't the design's, a body of that name comes and goes
-    /// or isn't the same body throughout, a later body's name is worked out from it (`X (2)`), a
-    /// message quotes it, or it is sheet metal, threaded, or named in a later feature's face
-    /// references.
+    /// or isn't the same body throughout, a later body's name is worked out from a body later
+    /// features change, a message quotes it, or it is sheet metal, threaded, or named in a later
+    /// feature's face references.
     pub fn rename_body(&mut self, doc: &Document, old: &str, new: &str) -> bool {
         if self.results.len() != doc.features.len() || self.results.iter().zip(&doc.features).any(|(r, f)| r.id != f.id || r.stale) {
             return false;
         }
         let Some(at) = self.results.iter().position(|r| r.state.body(old).is_some()) else { return false };
-        let Some(feature) = self.results.get(at).and_then(|r| r.state.body(old)).map(|b| b.feature) else { return false };
-        // One body from the feature that made it until it is gone (joined into another), and no
-        // other body's name comes from its name.
+        let Some((feature, made)) = self.results.get(at).and_then(|r| r.state.body(old)).map(|b| (b.feature, Arc::as_ptr(&b.mesh))) else {
+            return false;
+        };
+        // Untouched from the feature that made it to the end: `body.rename` keeps the names of
+        // its siblings and of later bodies named after it (`X (2)`, the solids of a STEP file
+        // with one label), so evaluating the renamed design gives the same names.
+        let untouched = self.results.iter().skip(at).all(|r| r.state.body(old).is_some_and(|b| Arc::as_ptr(&b.mesh) == made));
+        // Or one body from the feature that made it until it is gone (joined into another), and
+        // no other body's name comes from its name.
         let held: Vec<bool> = self.results.iter().skip(at).map(|r| r.state.body(old).is_some()).collect();
         let one_run = held.iter().skip_while(|h| **h).all(|h| !*h);
         let derived = format!("{old} (");
-        let same_body = self
-            .results
-            .iter()
-            .skip(at)
-            .all(|r| r.state.bodies.iter().all(|b| if b.name == old { b.feature == feature } else { !b.name.starts_with(&derived) }));
+        let same_body = || {
+            self.results
+                .iter()
+                .skip(at)
+                .all(|r| r.state.bodies.iter().all(|b| if b.name == old { b.feature == feature } else { !b.name.starts_with(&derived) }))
+        };
         let quoted = self.results.iter().skip(at).any(|r| [&r.error, &r.warning].into_iter().flatten().any(|m| m.contains(old)));
         let named_elsewhere = self
             .results
             .iter()
             .any(|r| r.state.body(new).is_some() || r.state.sheets.iter().any(|x| x.body == old) || r.state.threads.iter().any(|t| t.body == old));
         let faces_named = doc.features.iter().skip(at + 1).any(|f| f.face_names.iter().any(|n| n.contains(old)));
-        if !one_run || !same_body || quoted || named_elsewhere || faces_named {
+        if !(untouched || (one_run && same_body())) || quoted || named_elsewhere || faces_named {
             return false;
         }
         // States shared between results stay shared.
@@ -2473,6 +2508,7 @@ impl Model {
     /// Set every result's fingerprint to `doc`'s, so the next evaluation reuses every result
     /// (after a change that builds nothing differently).
     pub fn refingerprint(&mut self, doc: &Document) {
+        self.placement_inputs = None;
         let (vals, _) = evaluation_values(doc);
         let marker = doc.marker.unwrap_or(usize::MAX);
         self.step_digests = StepDigests::of(doc, &self.step_digests);
@@ -2969,9 +3005,11 @@ fn apply_traced_with(
         v
     };
     // Bodies that take part besides the feature's own targets: the body a Join extrude runs to
-    // joins with the tool (#6424).
+    // joins with the tool (#6424), when it is in the feature's own component. A body of another
+    // component (the shell a connector's boss runs up to) joins only when the feature names it:
+    // an extent's end face never pulls a part across a component boundary.
     for name in extra {
-        if let Some(i) = state.bodies.iter().position(|b| &b.name == name)
+        if let Some(i) = state.bodies.iter().position(|b| &b.name == name && b.component == f.component)
             && !target_idx.contains(&i)
         {
             target_idx.push(i);
@@ -4453,17 +4491,24 @@ fn single_hole_position(
     Ok(ss.plane.to_world(p.pos))
 }
 
-/// A hole's reference edges (#37); none for any other feature.
+/// A hole's (#37) or a cylinder's (#6380) reference edges; none for any other feature.
 fn hole_references(f: &Feature) -> &[crate::HoleReference] {
     match &f.kind {
-        FeatureKind::Hole { references, .. } => references,
+        FeatureKind::Hole { references, .. } | FeatureKind::Cylinder { references, .. } => references,
         _ => &[],
     }
 }
 
-/// Where a Single hole with reference edges (#37) is drilled: at its distances from the edges'
-/// lines, in the plane of the face at `at` (on the surface), the edges found by their names, else
-/// their points. A hole without reference edges stays at `at`.
+/// Where a cylinder stands: its base, or with reference edges (#6380) at their distances in the
+/// plane of the flat face at its base, square to its axis.
+fn cylinder_base(vals: &BTreeMap<String, Value>, st: &ModelState, f: &Feature, base: &crate::PointExpr, axis: Vec3) -> Result<Vec3> {
+    let at = point(vals, base)?;
+    with_references(vals, st, f, at, -axis)
+}
+
+/// Where a Single hole (or a cylinder) with reference edges (#37) is placed: at its distances
+/// from the edges' lines, in the plane of the face at `at` (on the surface), the edges found by
+/// their names, else their points. A feature without reference edges stays at `at`.
 fn with_references(vals: &BTreeMap<String, Value>, st: &ModelState, f: &Feature, at: Vec3, dir: Vec3) -> Result<Vec3> {
     let references = hole_references(f);
     if references.is_empty() {
@@ -5770,7 +5815,7 @@ fn feature_tools_with_constructor(
             Ok(vec![crate::lineage::box_tool(kernel::box_solid(corner, corner + s)?)])
         }
         FeatureKind::Cylinder { base, axis, radius, height, .. } => Ok(vec![crate::lineage::cylinder_tool(kernel::cylinder(
-            point(vals, base)?,
+            cylinder_base(vals, st, f, base, axis.0)?,
             axis.0,
             val(vals, radius, Kind::Length)?,
             val(vals, height, Kind::Length)?,
@@ -7510,14 +7555,37 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
                 return replay(doc, vals, f, st, features, &mats, warning);
             }
             // Bodies: each copy is a new body named after its source.
+            let here = doc.component_transform(f.component);
             let mut output = 0;
             for n in bodies {
                 let mb = st.body(n).cloned().ok_or_else(|| DocError::Unknown(format!("body `{n}`")))?;
+                // A body of another component is held in that component's frame, the pattern's
+                // transforms in this feature's: each copy is moved as the pattern moves it in the
+                // world and kept beside its source, in its component (#4763). Taken as they were,
+                // the copies landed where the source sits before its component is placed.
+                let owner = (mb.component != f.component).then(|| {
+                    let frame = doc.component_transform(mb.component);
+                    let singular = || DocError::Invalid(format!("the component holding `{n}` has a singular placement"));
+                    Ok::<_, DocError>((frame, crate::mat_inverse(&frame).ok_or_else(singular)?, crate::mat_inverse(&here).ok_or_else(singular)?))
+                });
+                let owner = owner.transpose()?;
                 for (k, m) in mats.iter().enumerate() {
-                    let copy = moved_copy(&mb, kernel::transform_matrix(&mb.body, *m)?, k + 1);
+                    let local = match &owner {
+                        Some((frame, frame_inv, here_inv)) => {
+                            crate::mat_mul(&crate::mat_mul(frame_inv, &here), &crate::mat_mul(&crate::mat_mul(m, here_inv), frame))
+                        }
+                        None => *m,
+                    };
+                    let copy = moved_copy(&mb, kernel::transform_matrix(&mb.body, local)?, k + 1);
                     let name = pattern_copy_name(st, f, output, &mb.name);
-                    copy_sheet(st, &mb.name, &name, m);
-                    st.bodies.push(ModelBody::traced_new(name, copy, f.id));
+                    copy_sheet(st, &mb.name, &name, &local);
+                    let mut body = ModelBody::traced_new(name, copy, f.id);
+                    if owner.is_some() {
+                        // Kept in that component as a moved body is (and through later features).
+                        body.component = mb.component;
+                        body.transferred = true;
+                    }
+                    st.bodies.push(body);
                     output += 1;
                 }
             }
@@ -7649,8 +7717,9 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
             }
             apply_traced(doc, st, f, tools, *operation, &[])
         }
-        FeatureKind::Cylinder { base, axis, radius, height, operation } => {
-            let (base, radius, height) = (point(vals, base)?, val(vals, radius, Kind::Length)?, val(vals, height, Kind::Length)?);
+        FeatureKind::Cylinder { base, axis, radius, height, operation, .. } => {
+            let base = cylinder_base(vals, st, f, base, axis.0)?;
+            let (radius, height) = (val(vals, radius, Kind::Length)?, val(vals, height, Kind::Length)?);
             let b = kernel::cylinder(base, axis.0, radius, height)?;
             let b = if matches!(operation, Operation::NewBody | Operation::Join) { b.with_cylinder_certificate(f.id)? } else { b };
             let prism = more::PrimitivePrism::Cylinder { base, axis: axis.0, radius, height };
@@ -8271,26 +8340,39 @@ impl PlacedBodies {
 /// Bodies [`state_in_frame_at`] moved into a feature's frame, by source body and matrix: a
 /// sketch on a face of a turned component is evaluated in that component's frame, and without
 /// this every edit of it moved (and so meshed again) every body placed differently from it.
-/// Held by the [`Model`] across evaluations; each `evaluate` starts a new generation, and an
-/// entry neither it nor the evaluation before it used is dropped, so the cache holds only the
-/// placements in use.
+/// Held by the [`Model`] across evaluations; each `evaluate` that moves a body starts a new
+/// generation, and an entry neither it nor the last such evaluation before it used is dropped,
+/// so the cache holds only the placements in use. An evaluation that moves nothing (every
+/// result reused, or taken from the cache: an undo, the refreshes a command makes after its
+/// edit) leaves the generations alone: counting it, two of them in a row dropped every moved
+/// body, and the next edit of the sketch moved and meshed them all again.
 #[derive(Debug, Default)]
 pub(crate) struct FrameBodies {
     now: PlacedBodies,
     before: PlacedBodies,
+    /// An evaluation began and has not used the cache yet: its first use starts the generation.
+    pending: bool,
 }
 
 impl FrameBodies {
     /// At most this many bodies are kept per generation.
     const CAP: usize = 4096;
 
+    /// An evaluation begins; its generation starts when it first moves a body.
     pub(crate) fn next_generation(&mut self) {
-        self.before = std::mem::take(&mut self.now);
+        self.pending = true;
+    }
+
+    fn begin(&mut self) {
+        if std::mem::take(&mut self.pending) {
+            self.before = std::mem::take(&mut self.now);
+        }
     }
 
     /// The moved body for `b` under `m`, when a call in this or the previous generation moved
     /// the same body by the same matrix.
     fn reused(&mut self, b: &ModelBody, m: &crate::Mat) -> Option<ModelBody> {
+        self.begin();
         if let Some(placed) = self.now.reused(b, m) {
             return Some(placed.clone());
         }
@@ -8305,6 +8387,7 @@ impl FrameBodies {
     }
 
     fn keep(&mut self, b: &ModelBody, m: &crate::Mat, moved: &ModelBody) {
+        self.begin();
         if self.now.by_source.len() < Self::CAP {
             self.now.by_source.insert(placed_key(b, m), (b.clone(), moved.clone()));
         }

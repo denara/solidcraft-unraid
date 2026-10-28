@@ -289,7 +289,7 @@ fn preview_url(name: &str) -> String {
 }
 
 fn edit_link(html: &mut String, file: &Value, class: &str, label: &str) {
-    if text(file, "kind") == "model" && text(file, "name").to_ascii_lowercase().ends_with(".solidcraft") {
+    if text(file, "kind") == "model" && crate::workspace_files::native_model(text(file, "name")) {
         let url = download_url(text(file, "name")).replacen("/workspace/files/", "/workspace/open/", 1);
         let _ = write!(
             html,
@@ -665,7 +665,7 @@ fn upload_controls(snapshot: &Value) -> String {
             let _ = write!(html, "<option value=\"{}\">{}</option>", escape(path), escape(path));
         }
     }
-    html.push_str("</select></div><div id=\"upload-dropzone\" class=\"dropzone\"><div id=\"upload-target\">Bitte zuerst einen echten Projektordner auswählen.</div><div>Dateien hierher ziehen – auch mehrere gleichzeitig</div><label>Dateien auswählen<input id=\"upload-files\" type=\"file\" multiple accept=\".solidcraft,.solvecraft,.json,.step,.stp,.igs,.iges,.stl,.3mf,.obj,.glb,.gltf,.dxf,.svg,.png,.jpg,.jpeg\"></label></div><p class=\"uploadnote\">SolidCraft-Modelle/Design-JSON, STEP, IGES, STL, 3MF, selbstenthaltendes OBJ/glTF/GLB, DXF/SVG und PNG/JPEG-Schablonen. Maximal 16 MiB je Datei, 100 Dateien / 128 MiB je Upload. Bilder: 8 MiB / 4096 × 4096 Pixel; SVG: 1 MiB. Dateien werden gespeichert, nicht automatisch als CAD geöffnet oder ausgeführt.</p><div id=\"upload-status\" class=\"uploadstatus\" role=\"status\" aria-live=\"polite\"></div><progress id=\"upload-progress\" class=\"uploadprogress\" hidden></progress><button id=\"upload-cancel\" type=\"button\" class=\"secondary\" hidden>Upload abbrechen</button><ul id=\"upload-results\" class=\"uploadresults\"></ul><noscript><p class=\"uploadnote\">Projektanlage und Upload benötigen den Browser-Client. Die Dateiliste und Downloads bleiben verfügbar.</p></noscript></div></details><dialog id=\"upload-overwrite\" class=\"filedialog\" aria-labelledby=\"overwrite-title\"><div class=\"dialoghead\"><h2 id=\"overwrite-title\">Datei überschreiben?</h2></div><div class=\"overwritebody\"><p id=\"overwrite-name\"></p><p>Am Ziel ist diese Datei bereits vorhanden. Überschreiben ersetzt den vorhandenen Inhalt.</p><label class=\"overwriteall\"><input id=\"overwrite-all\" type=\"checkbox\"> Für alle Dateien übernehmen</label><div class=\"overwritechoices\"><button id=\"overwrite-yes\" type=\"button\" class=\"primary\">Überschreiben</button><button id=\"overwrite-skip\" type=\"button\" class=\"secondary\">Überspringen</button><button id=\"overwrite-cancel\" type=\"button\" class=\"secondary\">Abbrechen</button></div></div></dialog>");
+    html.push_str("</select></div><div id=\"upload-dropzone\" class=\"dropzone\"><div id=\"upload-target\">Bitte zuerst einen echten Projektordner auswählen.</div><div>Dateien hierher ziehen – auch mehrere gleichzeitig</div><label>Dateien auswählen<input id=\"upload-files\" type=\"file\" multiple accept=\".sc,.solidcraft,.solvecraft,.json,.step,.stp,.igs,.iges,.stl,.3mf,.obj,.glb,.gltf,.dxf,.svg,.png,.jpg,.jpeg\"></label></div><p class=\"uploadnote\">SolidCraft-Modelle/Design-JSON, STEP, IGES, STL, 3MF, selbstenthaltendes OBJ/glTF/GLB, DXF/SVG und PNG/JPEG-Schablonen. Maximal 16 MiB je Datei, 100 Dateien / 128 MiB je Upload. Bilder: 8 MiB / 4096 × 4096 Pixel; SVG: 1 MiB. Dateien werden gespeichert, nicht automatisch als CAD geöffnet oder ausgeführt.</p><div id=\"upload-status\" class=\"uploadstatus\" role=\"status\" aria-live=\"polite\"></div><progress id=\"upload-progress\" class=\"uploadprogress\" hidden></progress><button id=\"upload-cancel\" type=\"button\" class=\"secondary\" hidden>Upload abbrechen</button><ul id=\"upload-results\" class=\"uploadresults\"></ul><noscript><p class=\"uploadnote\">Projektanlage und Upload benötigen den Browser-Client. Die Dateiliste und Downloads bleiben verfügbar.</p></noscript></div></details><dialog id=\"upload-overwrite\" class=\"filedialog\" aria-labelledby=\"overwrite-title\"><div class=\"dialoghead\"><h2 id=\"overwrite-title\">Datei überschreiben?</h2></div><div class=\"overwritebody\"><p id=\"overwrite-name\"></p><p>Am Ziel ist diese Datei bereits vorhanden. Überschreiben ersetzt den vorhandenen Inhalt.</p><label class=\"overwriteall\"><input id=\"overwrite-all\" type=\"checkbox\"> Für alle Dateien übernehmen</label><div class=\"overwritechoices\"><button id=\"overwrite-yes\" type=\"button\" class=\"primary\">Überschreiben</button><button id=\"overwrite-skip\" type=\"button\" class=\"secondary\">Überspringen</button><button id=\"overwrite-cancel\" type=\"button\" class=\"secondary\">Abbrechen</button></div></div></dialog>");
     html
 }
 
@@ -918,6 +918,10 @@ mod tests {
             file_row(&mut row, &file);
             assert!(!row.contains("/workspace/open/"));
             assert!(!details(&file).contains("/workspace/open/"));
+        }
+        for extension in ["sc", "solidcraft", "solvecraft"] {
+            let native = json!({"name":format!("part.{extension}"),"kind":"model"});
+            assert!(details(&native).contains(&format!("/workspace/open/part.{extension}")));
         }
         let dashboard = fragment(&json!({}), "", "all");
         assert!(dashboard.contains("class=\"panel file-explorer\""));

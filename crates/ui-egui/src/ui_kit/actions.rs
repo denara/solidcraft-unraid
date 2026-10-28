@@ -31,14 +31,27 @@ pub(crate) fn icon_button_at(ui: &mut Ui, rect: egui::Rect, icon: &str, label: &
 
 /// Quiet secondary action: a small, muted glyph with the normal full-size hit target.
 pub(crate) fn quiet_icon_button_at(ui: &mut Ui, rect: egui::Rect, icon: &str, label: &str) -> Response {
-    icon_button_presentation(ui, rect, icon, label, None, true)
+    icon_button_presentation(ui, rect, icon, label, None, true, false)
+}
+
+/// Directional counterpart of an existing master, with the same hit target and accessibility.
+pub(crate) fn mirrored_icon_button_at(ui: &mut Ui, rect: egui::Rect, icon: &str, label: &str) -> Response {
+    icon_button_presentation(ui, rect, icon, label, None, false, true)
 }
 
 pub(super) fn icon_button_colored(ui: &mut Ui, rect: egui::Rect, icon: &str, label: &str, ink: Option<egui::Color32>) -> Response {
-    icon_button_presentation(ui, rect, icon, label, ink, false)
+    icon_button_presentation(ui, rect, icon, label, ink, false, false)
 }
 
-fn icon_button_presentation(ui: &mut Ui, rect: egui::Rect, icon: &str, label: &str, ink: Option<egui::Color32>, quiet: bool) -> Response {
+fn icon_button_presentation(
+    ui: &mut Ui,
+    rect: egui::Rect,
+    icon: &str,
+    label: &str,
+    ink: Option<egui::Color32>,
+    quiet: bool,
+    mirrored: bool,
+) -> Response {
     let t = Tokens::get();
     let response = ui.interact(rect, ui.make_persistent_id(("icon_button", icon, label)), egui::Sense::click());
     if response.clicked() {
@@ -47,7 +60,8 @@ fn icon_button_presentation(ui: &mut Ui, rect: egui::Rect, icon: &str, label: &s
     if response.hovered() {
         ui.painter().rect_filled(rect, t.control_radius, t.hover);
     }
-    crate::icons::paint_ink(
+    let paint = if mirrored { crate::icons::paint_ink_mirrored } else { crate::icons::paint_ink };
+    paint(
         ui.painter(),
         if quiet { egui::Rect::from_center_size(rect.center(), vec2(t.space_12, t.space_12)) } else { rect.shrink(t.form_icon_inset) },
         icon,
@@ -195,7 +209,7 @@ impl ActionLook {
         } else if danger {
             t.form_error
         } else {
-            t.form_primary
+            t.form_primary_fill
         };
         let primary_ink = if t.borders.bevel.is_some() && !danger {
             t.form_ink
@@ -409,8 +423,8 @@ fn button_widget(label: egui::WidgetText, options: Button) -> egui::Button<'stat
     match options {
         Button::Small => egui::Button::new(label).small(),
         Button::Primary => {
-            let ink = if crate::theme::contrast_ratio(t.on_accent, t.form_primary) >= 4.5 { t.on_accent } else { t.tab_on_fill_dark };
-            egui::Button::new(label.color(ink)).fill(t.form_primary)
+            let ink = if crate::theme::contrast_ratio(t.on_accent, t.form_primary_fill) >= 4.5 { t.on_accent } else { t.tab_on_fill_dark };
+            egui::Button::new(label.color(ink)).fill(t.form_primary_fill)
         }
         Button::Ghost => egui::Button::new(label).frame(false),
         Button::SmallSelected => {
@@ -423,6 +437,9 @@ fn button_widget(label: egui::WidgetText, options: Button) -> egui::Button<'stat
 pub fn button(ui: &mut Ui, label: impl Into<egui::WidgetText>, options: Button) -> Response {
     let label = label.into();
     let key = label.text().to_owned();
+    if crate::prefs_search::suppress_chrome(ui) && !crate::prefs_search::texts_hit(ui, &[&key]) {
+        return crate::prefs_search::hidden_response(ui);
+    }
     let response = match options {
         Button::Enabled(enabled) => ui.add_enabled_ui(enabled, |ui| ui.add(button_widget(crate::i18n::tr_label(&key).into(), options))).inner,
         _ => ui.add(button_widget(label, options)),
@@ -480,7 +497,7 @@ pub(crate) fn wide_primary_button(ui: &mut Ui, label: &str) -> Response {
         .inner_margin(egui::Margin::symmetric(t.space_10 as i8, t.space_6 as i8))
         .show(ui, |ui| {
             let button = egui::Button::new(crate::fonts::RichTextExt::bold_face(text))
-                .fill(if bevel { t.control_fill } else { t.form_primary })
+                .fill(if bevel { t.control_fill } else { t.form_primary_fill })
                 .stroke(egui::Stroke::NONE)
                 .corner_radius(t.control_radius);
             ui.add_sized(vec2(dimension(ui.available_width()), t.form_button_height), button)
@@ -549,37 +566,90 @@ pub(crate) fn compact_button(ui: &mut Ui, glyph: &str, tooltip: &str, enabled: b
 
 /// Secondary action with an existing icon, optionally using the danger ink. Keeps button handles.
 pub(crate) fn icon_label_button(ui: &mut Ui, label: &str, icon: &str, enabled: bool, danger: bool) -> Response {
+    icon_label_presentation(ui, crate::i18n::tr_label(label), Some(icon), enabled, false, danger, false)
+}
+
+/// Compact stage actions share the icon-label button's frame, typography and hit target.
+pub(super) fn icon_label_width(ui: &Ui, label: &str, icon: Option<&str>, primary: bool) -> f32 {
     let t = Tokens::get();
-    let label = crate::i18n::tr_label(label);
-    let text_width = ui.painter().layout_no_wrap(label.to_string(), egui::FontId::proportional(t.font_label), t.form_ink).size().x;
+    let font = if primary { crate::fonts::semibold(t.font_button) } else { egui::FontId::proportional(t.font_label) };
+    ui.painter().layout_no_wrap(label.into(), font, t.form_ink).size().x.ceil()
+        + 2.0
+            * if primary {
+                t.space_16
+            } else if icon.is_some() {
+                t.space_10
+            } else {
+                t.space_12
+            }
+        + if icon.is_some() { t.space_14 + t.space_6 } else { 0.0 }
+}
+
+pub(super) fn icon_label_action(ui: &mut Ui, label: &str, icon: Option<&str>, enabled: bool, primary: bool) -> Response {
+    icon_label_presentation(ui, label, icon, enabled, primary, false, false)
+}
+
+pub(crate) fn compact_icon_label_button(ui: &mut Ui, label: &str, icon: &str, enabled: bool) -> Response {
+    icon_label_presentation(ui, label, Some(icon), enabled, false, false, true)
+}
+
+fn icon_label_presentation(ui: &mut Ui, label: &str, icon: Option<&str>, enabled: bool, primary: bool, danger: bool, dense: bool) -> Response {
+    let t = Tokens::get();
+    let width = icon_label_width(ui, label, icon, primary);
     let response = ui
         .add_enabled_ui(enabled, |ui| {
             let (rect, response) =
-                ui.allocate_exact_size(vec2(text_width + t.space_10 * 2.0 + t.space_14 + t.space_6, t.control_height), egui::Sense::click());
-            let ink = if danger { t.form_error } else { t.form_ink };
+                ui.allocate_exact_size(vec2(width, if dense { t.control_height - t.space_2 } else { t.control_height }), egui::Sense::click());
+            let ink = if danger {
+                t.form_error
+            } else if primary {
+                t.on_accent
+            } else {
+                t.form_ink
+            };
             ui.painter().rect(
                 rect,
                 t.control_radius,
-                if response.hovered() { t.hover } else { t.control_fill },
-                t.control_border_stroke(t.control_border),
+                if primary {
+                    t.form_primary
+                } else if response.hovered() {
+                    t.hover
+                } else {
+                    t.control_fill
+                },
+                if primary { egui::Stroke::NONE } else { t.control_border_stroke(t.control_border) },
                 egui::StrokeKind::Inside,
             );
-            let icon_rect =
-                egui::Rect::from_center_size(egui::pos2(rect.left() + t.space_10 + t.space_14 / 2.0, rect.center().y), vec2(t.space_14, t.space_14));
-            crate::icons::paint_ink(ui.painter(), icon_rect, icon, ink);
+            let mut left = rect.left()
+                + if primary {
+                    t.space_16
+                } else if icon.is_some() {
+                    t.space_10
+                } else {
+                    t.space_12
+                };
+            if let Some(icon) = icon {
+                crate::icons::paint_ink(
+                    ui.painter(),
+                    egui::Rect::from_center_size(egui::pos2(left + t.space_14 / 2.0, rect.center().y), vec2(t.space_14, t.space_14)),
+                    icon,
+                    ink,
+                );
+                left += t.space_14 + t.space_6;
+            }
             super::text::paint_text(
                 ui,
-                egui::Rect::from_min_max(egui::pos2(icon_rect.right() + t.space_6, rect.top()), rect.max),
+                egui::Rect::from_min_max(egui::pos2(left, rect.top()), rect.max),
                 label,
-                egui::FontId::proportional(t.font_label),
+                if primary { crate::fonts::semibold(t.font_button) } else { egui::FontId::proportional(t.font_label) },
                 ink,
                 false,
             );
             response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label));
+            pointer_on_hover(ui, &response);
             response
         })
         .inner;
-    pointer_on_hover(ui, &response);
     let key = format!("dialog:button:{}:{label}", super::layout::label(ui));
     scenario::publish_handle(&key, response.rect.center());
     scenario::publish_rect(&key, response.rect);

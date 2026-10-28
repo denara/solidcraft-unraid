@@ -71,8 +71,8 @@ impl Default for Glass {
 }
 impl Glass {
     pub(super) fn recipe(id: &str) -> Result<Self, String> {
-        let preset = appearance_pack::find(id).ok_or_else(|| "unknown glass recipe".to_string())?;
-        let Recipe::Glass(recipe) = preset.recipe else { return Err("the selected recipe is not physical glass".into()) };
+        let preset = appearance_pack::find(id).ok_or_else(|| crate::i18n::tr("render.error_glass_recipe").to_string())?;
+        let Recipe::Glass(recipe) = preset.recipe else { return Err(crate::i18n::tr("render.error_physical_glass").into()) };
         recipe.validate().map_err(|e| e.to_string())?;
         let (boundary, thickness) = match recipe.boundary {
             GlassBoundary::Thin { thickness_mm } => (Boundary::Thin, thickness_mm),
@@ -180,9 +180,9 @@ pub(super) struct View {
 
 pub(super) fn read_targets(app: &mut SolveApp) -> Result<Vec<Target>, String> {
     let reply = app.run("render.scene", json!({}))?;
-    let values = reply.get("bodies").and_then(Value::as_array).ok_or_else(|| "missing render scene bodies".to_string())?;
+    let values = reply.get("bodies").and_then(Value::as_array).ok_or_else(|| crate::i18n::tr("render.error_scene_bodies").to_string())?;
     if values.len() > solidcraft_engine::render::job::MAX_GPU_PATH_BODIES {
-        return Err("render scene exceeds its body limit".into());
+        return Err(crate::i18n::tr("render.error_scene_body_limit").into());
     }
     let targets: Vec<Target> = serde_json::from_value(Value::Array(values.clone())).map_err(|e| e.to_string())?;
     if targets.iter().any(|t| {
@@ -191,7 +191,7 @@ pub(super) fn read_targets(app: &mut SolveApp) -> Result<Vec<Target>, String> {
             || t.name.len() > 1024
             || t.name.chars().any(char::is_control)
     }) {
-        return Err("invalid render scene identity".into());
+        return Err(crate::i18n::tr("render.error_scene_identity").into());
     }
     Ok(targets)
 }
@@ -600,7 +600,8 @@ pub(super) fn install_library_surface(app: &mut SolveApp, id: &str, target: Targ
     }
     let existing = app.render_workspace.view.materials.bindings.iter().position(|b| b.target == target);
     if let Some(index) = existing {
-        let binding = app.render_workspace.view.materials.bindings.get(index).ok_or_else(|| "missing material binding".to_string())?;
+        let binding =
+            app.render_workspace.view.materials.bindings.get(index).ok_or_else(|| crate::i18n::tr("render.error_material_binding").to_string())?;
         if !binding.current(app) {
             return Err(app.tr("render.material_revalidate_needed").into());
         }
@@ -614,7 +615,7 @@ pub(super) fn install_library_surface(app: &mut SolveApp, id: &str, target: Targ
         app.run("render.library.surface.prepare", json!({"id":id,"body_index":target.ordinal,"body_name":target.name,"plane":plane,"scale":scale}))?;
     let texture = &reply["texture"];
     let frame: PlanarFrame = serde_json::from_value(texture["frame"].clone()).map_err(|e| e.to_string())?;
-    let path = |key: &str| texture[key].as_str().map(str::to_string).ok_or_else(|| "invalid authored surface reply".to_string());
+    let path = |key: &str| texture[key].as_str().map(str::to_string).ok_or_else(|| crate::i18n::tr("render.error_surface_reply").to_string());
     let maps = Maps {
         color: path("base_color_srgb")?,
         normal: path("normal_opengl")?,
@@ -626,7 +627,13 @@ pub(super) fn install_library_surface(app: &mut SolveApp, id: &str, target: Targ
         flip_v: true,
     };
     let mut binding = if let Some(index) = existing {
-        app.render_workspace.view.materials.bindings.get(index).cloned().ok_or_else(|| "missing material binding".to_string())?
+        app.render_workspace
+            .view
+            .materials
+            .bindings
+            .get(index)
+            .cloned()
+            .ok_or_else(|| crate::i18n::tr("render.error_material_binding").to_string())?
     } else {
         Binding::new(target, app)
     };
@@ -635,10 +642,10 @@ pub(super) fn install_library_surface(app: &mut SolveApp, id: &str, target: Targ
     binding.enabled = true;
     let view = &mut app.render_workspace.view.materials;
     if let Some(index) = existing {
-        *view.bindings.get_mut(index).ok_or_else(|| "missing material binding".to_string())? = binding;
+        *view.bindings.get_mut(index).ok_or_else(|| crate::i18n::tr("render.error_material_binding").to_string())? = binding;
         view.selected = Some(index);
     } else {
-        view.bindings.try_reserve(1).map_err(|_| "could not reserve material binding".to_string())?;
+        view.bindings.try_reserve(1).map_err(|_| crate::i18n::tr("render.error_binding_allocation").to_string())?;
         view.bindings.push(binding);
         view.selected = Some(view.bindings.len() - 1);
     }

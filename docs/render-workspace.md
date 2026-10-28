@@ -14,6 +14,48 @@ The current integrated GPU renderer shows a separate product scene. Return to De
 restores its camera, projection preference and existing viewport drawing policy.
 The live product preview remains independent of the selected image method.
 
+## Stage bar and floating docks
+
+Render has no ribbon. A shared 88 pt two-row stage bar sits 8 pt to the right of
+the 104 × 88 pt workspace card, with matching top and bottom edges. The icon sits
+above the Render label and Workspace caption. The header is 36 pt; the remaining
+52 pt contains the tools, centred vertically below a 1 pt divider. Numbered **Look**, **Light**, **Frame** and **Output** chips
+run `view.render_stage {stage: look|light|frame|output}`. The selection belongs to the
+open document tab's view state; it is not saved in the design. Opening a stage never
+applies or saves settings or starts an image job. It focuses the existing Inspector
+page, while every Inspector page and registered Render command remains reachable.
+The headless command validates and echoes the request without changing the document.
+
+Render, Cancel and the shared command search (S) occupy the top row. The Pick control's
+icon-text Body/Face/Component segments, Paint/Pick Up actions and direct-light
+preview information chip occupy Look's second row with 8 pt side padding. Changing the
+light coordinate frame remains disabled with its reason in this checkout. Frame
+uses the existing explicit camera command for projection; Output shows the current
+size/format and directs edits to the Output Inspector. No completion ticks are inferred.
+
+The Browser and Inspector float in both shell layouts, share top and bottom edges,
+and clear the bar and Shots strip by 8 pt. Their default outer widths are 266 pt and 305 pt, with the shared resize bounds.
+The 48 pt Shots strip has an 8 pt gap from the docks. The 110 pt compass uses the
+free canvas beside the Inspector and the navigation bar keeps its shared navigation handler. Narrow
+rows scroll horizontally; docks shrink together or disappear if no usable space
+remains. The Shots strip's independent `view.shots_strip` preference is unchanged.
+The current model/library Browser can reveal model bodies for Look; scene-specific
+Lights, Shots and Output expansion awaits the scene Browser change.
+
+`view.render_focus {on: true}` hides the Browser, Inspector and Shots strip and
+releases their canvas reservations. Tab toggles focus while Render is active and
+no text field has focus; the **Exit focus** chip sits at the Browser's remembered
+side below the stage bar. The workspace card, stage bar, compass and view bar
+remain available. Focus belongs to the window, is never saved in a design or
+preferences, and retains the docks' sides, widths and folded state.
+
+Below 1100 pt, or with `view.layout {mode: compact}`, the docks use their shared
+minimum width without overwriting the remembered width. Below 800 pt the Browser
+folds into a chip. Its floating card opens through
+`view.render_browser {open: true}` and closes through **Fold Browser**; it shields
+navigation beneath the card without reserving a canvas column. Neither command
+edits or evaluates the design, moves the camera or creates an undo step.
+
 ## Image methods and controls
 
 **CPU raster** produces the existing preview PNG with approximate transparency.
@@ -120,9 +162,8 @@ resolved sRGB colours, opacity and face appearance overrides. Face indices are t
 existing mesh-to-B-rep mapping, resolved through document appearance references;
 they are not new persistent names or triangle-derived face identities.
 
-There are no grid/axis/edge lines, sketches, construction objects, selection or hover
-colours, section cuts, analysis shading, active-component fading, canvases or decals
-in this initial product policy. Browser visibility still controls which bodies appear.
+There are no grid/axis/edge lines, sketches, construction objects, section cuts,
+analysis shading, active-component fading, canvases or decals in the product scene. Browser visibility still controls which bodies appear.
 The existing Design viewport and CPU snapshot routes keep their current policies.
 
 Extraction refuses a stale live-drag model. The explicit model-reading `render.scene {}`
@@ -209,7 +250,7 @@ distance, yaw, pitch, roll, FOV and up axis as view state. It neither edits the 
 nor settles a stale model. The UI honours its up axis in Render; the Design camera
 is restored when returning. The camera moves exactly as in Design: the navigation preset,
 Orbit around, zoom to the cursor, the SpaceMouse, the middle double-click, F6 and the axis
-view or navigation cube all work (nothing is picked or selected here), and
+view or navigation cube all work and
 **Fit Product** frames visible product bodies without including sketches or selection.
 
 Preview drafts do not make the document dirty until saved. Unknown backend preferences
@@ -301,3 +342,22 @@ locale before falling back to English. Adding an untranslated Render alias no
 longer hides existing Library, Appearance or Checkpoint translations. Contextual
 Render labels still use their own stable IDs rather than borrowing a different
 feature's meaning.
+
+## Picking in the product view
+
+The Look stage bar's second-row **Pick** control selects Body, Face or Component granularity,
+using Design’s selection filter state through the `select.filter` command. Component
+picks use the Browser’s exact occurrence path, including nested and repeated
+placements; a body at the design root retains its body identity. Face picks use the
+existing mesh-to-B-rep mapping and connected-surface selection rules.
+
+Hover highlights the target; clicking selects it. Clicking empty space clears the
+selection. Shift and Ctrl/Cmd follow Design’s add/toggle behavior and the Shift
+add-only preference. Browser row selections and product picks share the same
+selection commands and state, retained across Design/Render switches. Picking works
+with the Shots strip shown or hidden. Render picking never starts a geometry edit.
+
+Selection and hover use Design’s highlight drawing and theme tokens in a separate
+GPU overlay on the live product view. The product scene and its upload stay unchanged.
+CPU image jobs, exported PNGs, retained images and the Render Result canvas never
+contain this overlay; the Pick control is disabled on the result canvas.

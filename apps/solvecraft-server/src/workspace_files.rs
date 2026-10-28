@@ -53,9 +53,16 @@ pub(crate) fn excluded_component(name: &str) -> bool {
     name.starts_with('.') || name.ends_with('~') || [".tmp", ".part", ".upload", ".bak"].iter().any(|suffix| lower.ends_with(*suffix))
 }
 
+/// Current native design extension and explicit older-format filename aliases.
+pub(crate) fn native_model(name: &str) -> bool {
+    matches!(Path::new(name).extension().and_then(|p| p.to_str()).map(str::to_ascii_lowercase).as_deref(), Some("sc" | "solidcraft" | "solvecraft"))
+}
+
 fn kind(name: &str) -> &'static str {
+    if native_model(name) {
+        return "model";
+    }
     match Path::new(name).extension().and_then(|part| part.to_str()).map(str::to_ascii_lowercase).as_deref() {
-        Some("solidcraft" | "solvecraft") => "model",
         Some("step" | "stp" | "stl" | "3mf" | "obj" | "png" | "gif" | "svg" | "dxf" | "glb" | "gltf" | "pdf") => "export",
         _ => "other",
     }
@@ -250,6 +257,22 @@ mod tests {
         assert!(listing.files[0]["modified_at"].as_str().is_some_and(|time| time.ends_with('Z')));
         assert_eq!(listing.files[0]["opened_by"], json!([]));
         assert_eq!(listing.files[0]["dirty"], Value::Null);
+    }
+
+    #[test]
+    fn current_and_legacy_native_designs_share_model_details_and_revision_protection() {
+        let root = Fixture::new();
+        for name in ["Current.sc", "Older.solidcraft", "Legacy.solvecraft"] {
+            fs::write(root.0.join(name), br#"{"format":"solidcraft/41","name":"Public","features":[]}"#).unwrap();
+        }
+        let files = list(&root.0).unwrap().files;
+        assert_eq!(files.len(), 3);
+        for file in files {
+            assert_eq!(file["kind"], "model");
+            let name = file["name"].as_str().unwrap();
+            assert!(revision(&root.0, name).unwrap().is_some());
+            assert_eq!(file["format"], "SolidCraft");
+        }
     }
 
     #[test]

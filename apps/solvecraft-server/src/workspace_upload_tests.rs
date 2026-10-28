@@ -211,6 +211,11 @@ async fn symbolic_projects_and_destinations_cannot_escape() {
 fn data_only_formats_reject_active_content_wrong_signatures_and_external_companions() {
     use crate::workspace_upload::formats::validate;
     assert!(validate("a.svg", SVG).is_ok());
+    for name in ["a.sc", "a.SC", "a.solidcraft", "a.solvecraft"] {
+        assert!(validate(name, br#"{"format":"solidcraft/41","features":[]}"#).is_ok());
+        assert!(validate(name, b"println(1); system(\"exec\")").is_err());
+        assert!(validate(name, br#"{"commands":[{"command":"file.new"}]}"#).is_err());
+    }
     for (name, bytes) in [
         ("a.svg", b"<svg><script>alert(1)</script></svg>".as_slice()),
         ("a.png", SVG),

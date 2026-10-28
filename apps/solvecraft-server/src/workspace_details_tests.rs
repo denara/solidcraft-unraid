@@ -101,7 +101,7 @@ async fn detail_route_renders_escaped_whitelisted_metadata_and_preserves_saved_f
 #[tokio::test]
 async fn detail_route_reads_public_native_json_fixture_and_preserves_unknown_file_downloads() {
     let fixture = Fixture::new();
-    std::fs::write(fixture.directory.join("pi-case.solidcraft"), include_bytes!("../../../tests/action_matrix/designs/pi-case.solidcraft")).unwrap();
+    std::fs::write(fixture.directory.join("pi-case.solidcraft"), include_bytes!("../../../tests/action_matrix/designs/pi-case.sc")).unwrap();
     let cookie = fixture.login().await;
     let response = fixture.app().oneshot(request("/workspace/details/pi-case.solidcraft", Some(&cookie), false)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);

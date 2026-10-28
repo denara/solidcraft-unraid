@@ -37,7 +37,7 @@ mod features;
 mod features_more;
 pub(crate) use face::{FaceRefForm, face_ref_form};
 pub(crate) use features::profiles as feature_profiles;
-pub(crate) use features::{EdgeRefForm, edge_ref_form, sketch_key};
+pub(crate) use features::{EdgeRefForm, axis_dir_form, edge_ref_form, sketch_key};
 pub use features::{auto_operation, extrude_reach};
 pub use sketch_import::drawing_import_command;
 pub use sketch_modify::{extend_arc_preview, extend_preview, trim_piece};
@@ -71,6 +71,7 @@ mod parameter_sweep;
 mod parameters;
 mod plastic;
 mod render;
+mod render_ui;
 #[cfg(test)]
 mod script_tests;
 mod sheet;
@@ -320,6 +321,7 @@ pub fn command_specs() -> Vec<&'static CommandSpec> {
     v.extend(view_dxf::COMMANDS.iter());
     v.extend(diagnostics::COMMANDS.iter());
     v.extend(render::COMMANDS.iter());
+    v.extend(render_ui::COMMANDS.iter());
     v
 }
 

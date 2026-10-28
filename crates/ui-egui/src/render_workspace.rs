@@ -112,12 +112,12 @@ impl PathHost {
         // Dropping the handle detaches: neither startup nor shutdown joins a driver
         // that may spend minutes compiling or warming up its pipelines.
         *self = match std::thread::Builder::new().name("gpu-path-setup".into()).spawn(move || {
-            let result =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(create)).unwrap_or_else(|_| Err("GPU path tracer setup panicked".into()));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(create))
+                .unwrap_or_else(|_| Err(crate::i18n::tr("render.error_setup_panicked").into()));
             let _ = tx.send(result);
         }) {
             Ok(_) => Self::Preparing(rx, std::time::Instant::now()),
-            Err(e) => Self::failed(format!("could not start setup worker: {e}")),
+            Err(e) => Self::failed(crate::i18n::format("render.error_setup_worker", &[("error", &e.to_string())])),
         };
     }
 
@@ -134,7 +134,7 @@ impl PathHost {
             Ok(Ok(host)) => Self::Ready(host),
             Ok(Err(error)) => Self::failed(error),
             Err(std::sync::mpsc::TryRecvError::Empty) => return None,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => Self::failed("setup worker stopped without returning a host".into()),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Self::failed(crate::i18n::tr("render.error_setup_stopped").into()),
         };
         matches!(self, Self::Ready(_)).then_some(took)
     }
@@ -204,10 +204,47 @@ fn setup_progress(ui: &mut egui::Ui, app: &SolveApp, started: std::time::Instant
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Stage {
+    #[default]
+    Look,
+    Light,
+    Frame,
+    Output,
+}
+impl Stage {
+    pub(crate) const ALL: [Self; 4] = [Self::Look, Self::Light, Self::Frame, Self::Output];
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            Self::Look => "look",
+            Self::Light => "light",
+            Self::Frame => "frame",
+            Self::Output => "output",
+        }
+    }
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Look => "render.stage_look",
+            Self::Light => "render.stage_light",
+            Self::Frame => "render.stage_frame",
+            Self::Output => "render.stage_output",
+        }
+    }
+    fn page(self) -> inspector::Page {
+        match self {
+            Self::Look => inspector::Page::Appearance,
+            Self::Light => inspector::Page::Lighting,
+            Self::Frame => inspector::Page::Camera,
+            Self::Output => inspector::Page::Output,
+        }
+    }
+}
+
 /// Small per-document editor state; GPU uploads and host capabilities stay outside tabs.
 #[derive(Clone, Debug)]
 pub struct ViewState {
     pub name: String,
+    pub(crate) stage: Stage,
     draft: RenderSetup,
     dirty: bool,
     clean_setup: Option<RenderSetup>,
@@ -262,6 +299,7 @@ impl Default for ViewState {
     fn default() -> Self {
         Self {
             name: "Studio".into(),
+            stage: Stage::Look,
             draft: RenderSetup::default(),
             dirty: false,
             clean_setup: None,
@@ -336,7 +374,7 @@ impl State {
 }
 
 pub fn active(app: &SolveApp) -> bool {
-    app.ui.tab == "RENDER"
+    crate::workspace::render_tab(&app.ui.tab)
 }
 
 pub(crate) fn result_active(app: &SolveApp) -> bool {
@@ -358,7 +396,7 @@ pub(crate) fn inspect_state(app: &SolveApp) -> serde_json::Value {
         ImageMethod::GpuRaytrace => "gpu_path",
     };
     json!({
-        "active": active(app), "setup": view.name, "draft_dirty": view.dirty,
+        "active": active(app), "stage": view.stage.key(), "setup": view.name, "draft_dirty": view.dirty,
         "method": method, "job": view.job, "completed": view.completed,
         "showing_result": view.result, "export_format": if view.studio.export_exr {"exr"} else {"png"},
     })
@@ -366,14 +404,14 @@ pub(crate) fn inspect_state(app: &SolveApp) -> serde_json::Value {
 
 pub fn host_executor(max_dimension: u32, depth: bool, samples: u32) -> Result<ExecutorDescriptor, String> {
     if !matches!(samples, 1 | 2 | 4 | 8 | 16) {
-        return Err("unsupported GPU sample count".into());
+        return Err(crate::i18n::tr("render.error_gpu_samples").into());
     }
     Ok(ExecutorDescriptor {
         id: ExecutorId::new("gpu-viewport").map_err(|e| e.to_string())?,
         availability: if depth && max_dimension > 0 {
             Availability::Available
         } else {
-            Availability::Unavailable { reason: "product preview requires an installed device with a depth buffer".into() }
+            Availability::Unavailable { reason: crate::i18n::tr("render.error_preview_device").into() }
         },
         profiles: vec![RenderProfile {
             mode: RenderMode::Preview,
@@ -437,6 +475,7 @@ pub fn tick(app: &mut SolveApp, ctx: &egui::Context) {
 }
 
 pub fn reset_document(app: &mut SolveApp) {
+    crate::render_ui::reset_shell(app);
     app.ui.ribbon_context = None;
     let host = app.render_workspace.host.clone();
     let image_host = app.render_workspace.image_host.clone();
@@ -472,15 +511,16 @@ pub fn invalidate_scene(app: &mut SolveApp) {
 pub fn enter(app: &mut SolveApp, render: bool) -> Result<(), String> {
     if render {
         if app.session.active_sketch.is_some() || app.tool.is_some() || app.dialog.is_some() || app.file_load.busy() {
-            return Err("finish the current modelling operation before entering Render".into());
+            return Err(crate::i18n::tr("render.error_finish_operation").into());
         }
         app.run("render.scene", json!({}))?;
         if !active(app) {
             app.render_workspace.design_camera = Some((app.cam, app.ui.perspective));
             app.ui.tab = "RENDER".into();
+            select_stage(app, app.render_workspace.view.stage.key());
             let scene = solidcraft_engine::product_scene::extract(&app.session).map_err(|e| e.to_string())?;
             if !scene.bounds.is_empty() {
-                app.cam.fit(&scene.bounds);
+                app.fit_bounds(scene.bounds);
             }
         }
         setups::refresh_dirty(app);
@@ -496,12 +536,57 @@ pub fn enter(app: &mut SolveApp, render: bool) -> Result<(), String> {
             app.ui.perspective = perspective;
         }
         app.ui.tab = "MODEL".into();
+        crate::render_ui::reset_shell(app);
     }
-    app.cancel_view_animation();
+    app.viewport.hover = None;
+    app.cam_anim = None;
+    if !render {
+        app.pending_fit = None;
+    }
     Ok(())
 }
 
+/// Stage navigation is transient per-document state. It never applies a resource or starts a job.
+pub(crate) fn select_stage(app: &mut SolveApp, key: &str) {
+    let stage = match key {
+        "look" => Stage::Look,
+        "light" => Stage::Light,
+        "frame" => Stage::Frame,
+        "output" => Stage::Output,
+        _ => return,
+    };
+    app.render_workspace.view.stage = stage;
+    app.render_workspace.view.inspector.page = stage.page();
+    // The current Browser has model folders only. Reveal Objects for Look; scene-specific
+    // Lights/Shots/Output expansion belongs to the scene Browser implementation.
+    if stage == Stage::Look {
+        app.tree.collapsed.remove("c0");
+        app.tree.collapsed.remove("c0/bodies");
+    }
+}
+
+pub(crate) fn switch_shot(app: &mut SolveApp, name: String) {
+    inspector::switch_shot(app, name);
+}
+pub(crate) fn stage_projection(app: &mut SolveApp, perspective: bool) -> Result<(), String> {
+    let mut camera = app.cam;
+    camera.fov = if perspective { 0.6 } else { 0.0 };
+    inspector::apply_camera_draft(app, camera)
+}
+
+pub(crate) fn output_summary(app: &SolveApp) -> (String, &'static str) {
+    let view = &app.render_workspace.view;
+    (format!("{} × {}", view.draft.width, view.draft.height), if view.studio.export_exr { "EXR" } else { "PNG" })
+}
+
+pub(crate) fn job_ready(app: &SolveApp, id: &str) -> Result<(), String> {
+    ribbon::action_ready(app, id)
+}
+
 pub fn panel(app: &mut SolveApp, ui: &mut egui::Ui) {
+    if crate::render_ui::focused(app) {
+        return;
+    }
     inspector::panel(app, ui);
 }
 
@@ -721,7 +806,7 @@ fn image_edit_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
             if crate::ui_kit::button(ui, app.tr("render.result_fit"), crate::ui_kit::Button::Normal).clicked() {
                 fit_result(app);
             }
-            if crate::ui_kit::button(ui, "100%", crate::ui_kit::Button::Enabled(!reduced_display(app)))
+            if crate::ui_kit::button(ui, crate::i18n::tr("render.result_actual_size"), crate::ui_kit::Button::Enabled(!reduced_display(app)))
                 .on_hover_text(app.tr("render.result_actual_help"))
                 .clicked()
             {
@@ -824,7 +909,7 @@ fn job_controls(app: &mut SolveApp, ui: &mut egui::Ui, compact: bool) {
     if let Some(job) = app.render_workspace.view.job {
         match app.session.execute("render.status", &json!({"job":job})) {
             Ok(status) => {
-                let phase = status["progress"]["phase"].as_str().unwrap_or("unknown");
+                let phase = status["progress"]["phase"].as_str().unwrap_or(crate::i18n::tr("render.property_unknown"));
                 busy = matches!(phase, "queued" | "preparing" | "running" | "encoding" | "cancelling");
                 if phase == "completed" {
                     app.render_workspace.view.completed = Some(job);
@@ -969,7 +1054,7 @@ fn cache_completed_image(app: &mut SolveApp, ctx: &egui::Context) {
         app.render_workspace.image_info = None;
         let result = (|| -> Result<egui::TextureHandle, String> {
             let handle = app.session.render_job_handle(job).map_err(|e| e.to_string())?;
-            let frame = handle.frame().map_err(|e| e.to_string())?.ok_or("render has no completed image")?;
+            let frame = handle.frame().map_err(|e| e.to_string())?.ok_or(crate::i18n::tr("render.error_no_completed_image"))?;
             let captured = handle.status().map_err(|e| e.to_string())?;
             let budget = if frame.info.executor.as_str() == "gpu-path" {
                 solidcraft_engine::render::job::GPU_PATH_LIMITS
@@ -1010,12 +1095,12 @@ fn cache_preview_frame(app: &mut SolveApp, ctx: &egui::Context, info: &PreviewIn
     }
     let result = (|| -> Result<egui::TextureHandle, String> {
         if info.frame_sequence == 0 || !(1..=4096).contains(&info.samples_per_pixel) {
-            return Err("invalid provisional render identity or sample count".into());
+            return Err(crate::i18n::tr("render.error_provisional_identity").into());
         }
         let handle = app.session.render_job_handle(info.frame.job).map_err(|e| e.to_string())?;
         let captured = handle.status().map_err(|e| e.to_string())?;
         if (info.frame.width, info.frame.height) != (captured.request.width, captured.request.height) {
-            return Err("checkpoint dimensions differ from the captured request".into());
+            return Err(crate::i18n::tr("render.error_checkpoint_dimensions").into());
         }
         let options = solidcraft_engine::render::job::CpuProgressiveOptions { samples_per_pixel: info.samples_per_pixel, seed: 0 };
         options.validate_image_with_budget(info.frame.width, info.frame.height, captured.request.cpu_budget()).map_err(|error| error.to_string())?;
@@ -1082,12 +1167,15 @@ fn captured_image_limits(request: &solidcraft_engine::render::job::ImageRequest)
 /// full resolution. Avoid asking a viewport device for an unsupported texture.
 fn display_dimensions(width: u32, height: u32, max_texture_side: usize) -> Result<(u32, u32), String> {
     if width == 0 || height == 0 || max_texture_side == 0 {
-        return Err("invalid image display dimensions".into());
+        return Err(crate::i18n::tr("render.error_display_dimensions").into());
     }
     let max_side = max_texture_side.min(8192) as u64;
     let display = RenderLimits { max_dimension: max_side, max_pixels: 16_777_216, max_scratch_bytes: 512 * 1024 * 1024 };
-    let (w, h) = display.fit(u64::from(width), u64::from(height), None).ok_or("image display cannot fit this device")?;
-    Ok((u32::try_from(w).map_err(|_| "display width overflow")?, u32::try_from(h).map_err(|_| "display height overflow")?))
+    let (w, h) = display.fit(u64::from(width), u64::from(height), None).ok_or(crate::i18n::tr("render.error_display_fit"))?;
+    Ok((
+        u32::try_from(w).map_err(|_| crate::i18n::tr("render.error_display_width"))?,
+        u32::try_from(h).map_err(|_| crate::i18n::tr("render.error_display_height"))?,
+    ))
 }
 
 #[cfg(test)]
@@ -1098,18 +1186,18 @@ fn decode_image(png: &[u8], width: u32, height: u32) -> Result<egui::ColorImage,
 fn decode_render_image(png: &[u8], width: u32, height: u32, budget: RenderLimits, max_texture_side: usize) -> Result<egui::ColorImage, String> {
     let size = (u64::from(width), u64::from(height));
     if budget.fit(size.0, size.1, None) != Some(size) {
-        return Err("render image exceeds its captured resource profile".into());
+        return Err(crate::i18n::tr("render.error_image_profile").into());
     }
     let display_size = display_dimensions(width, height, max_texture_side)?;
     let mut reader = image::ImageReader::with_format(std::io::Cursor::new(png), image::ImageFormat::Png);
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(width);
     limits.max_image_height = Some(height);
-    limits.max_alloc = Some(size.0.checked_mul(size.1).and_then(|n| n.checked_mul(16)).ok_or("image decode budget overflow")?);
+    limits.max_alloc = Some(size.0.checked_mul(size.1).and_then(|n| n.checked_mul(16)).ok_or(crate::i18n::tr("render.error_decode_budget"))?);
     reader.limits(limits);
     let image = reader.decode().map_err(|e| e.to_string())?.to_rgba8();
     if image.dimensions() != (width, height) {
-        return Err("render image dimensions do not match its job".into());
+        return Err(crate::i18n::tr("render.error_image_dimensions").into());
     }
     let image = if display_size != (width, height) {
         image::imageops::resize(&image, display_size.0, display_size.1, image::imageops::FilterType::Triangle)
@@ -1239,7 +1327,7 @@ fn show_result(app: &mut SolveApp, ui: &mut egui::Ui) {
     }
     let response = ui.allocate_rect(rect, Sense::click_and_drag());
     app.viewport.rect = Some(rect);
-    crate::viewport::refresh_layout(app, ui.ctx().pixels_per_point());
+    crate::viewport::refresh_layout(app, ui.ctx());
     let size = [info.width, info.height];
     let scale = app.render_workspace.view.result_scale;
     if scale != ResultScale::Free {
@@ -1276,7 +1364,7 @@ fn show_result(app: &mut SolveApp, ui: &mut egui::Ui) {
         if let Some(display) = displayed_image(app)
             && let Ok(texture) = display.image
         {
-            painter.image(texture.id(), image_rect, egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
+            painter.image(texture.id(), image_rect, egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), Tokens::get().file_image_tint);
         }
         painter.rect_stroke(image_rect, 0.0, egui::Stroke::new(1.0, t.border), egui::StrokeKind::Outside);
     }
@@ -1288,6 +1376,7 @@ fn show_result(app: &mut SolveApp, ui: &mut egui::Ui) {
     );
     painter.rect_filled(badge, t.control_radius, t.panel);
     painter.galley(badge.min + egui::vec2(t.space_8, t.space_8 * 0.5), label, t.text);
+    crate::navigation_bar_view::show(app, ui, rect);
 }
 
 impl State {
@@ -1307,7 +1396,7 @@ impl State {
                             Err(_) => false,
                         };
                         if !uploaded {
-                            let error = "product preview upload slot unavailable".to_string();
+                            let error = crate::i18n::tr("render.error_upload_slot").to_string();
                             self.scene = None;
                             self.key = None;
                             self.preview_upload_bytes = None;
@@ -1342,8 +1431,13 @@ impl State {
 /// on the user-selected background (which may have the opposite theme contrast).
 fn preview_error(app: &mut SolveApp, ui: &mut egui::Ui, rect: egui::Rect, error: &str) {
     let t = Tokens::get();
-    let bounded = rect.shrink(t.space_12);
+    let bounded = crate::shell::workspace_content(app, crate::shell::panel_bounds(app, rect)).shrink(t.space_12);
+    // At tiny window sizes the shell may leave no room for the shared error card.
+    if !bounded.is_finite() || bounded.width() < t.control_height + 2.0 * t.space_8 || bounded.height() < t.control_height + 2.0 * t.space_8 {
+        return;
+    }
     ui.scope_builder(egui::UiBuilder::new().max_rect(bounded), |ui| {
+        ui.set_clip_rect(ui.clip_rect().intersect(bounded));
         ui.set_max_width(bounded.width().min(t.form_card_width * 2.0));
         crate::ui_kit::Panel::feature_frame(ui.ctx(), crate::shell::LayoutMode::Floating, crate::frame::Side::Left).inner_margin(t.space_8).show(
             ui,
@@ -1367,7 +1461,7 @@ fn export_image(app: &mut SolveApp, job: solidcraft_engine::render::job::JobId, 
     app.pick_save("render.png", &["png"], move |app, path| {
         let Some(path) = path else { return };
         if !Arc::ptr_eq(&origin, &app.session.doc) {
-            app.set_status("The render export document changed while choosing its destination", true);
+            app.set_status(crate::i18n::tr("render.error_export_document"), true);
             return;
         }
         let _ = app.run("render.export", json!({"job":job,"path":path,"overwrite":overwrite}));
@@ -1382,7 +1476,7 @@ fn export_linear_image(app: &mut SolveApp, job: solidcraft_engine::render::job::
             return;
         };
         if !Arc::ptr_eq(&origin, &app.session.doc) {
-            app.set_status("The render export document changed while choosing its destination", true);
+            app.set_status(crate::i18n::tr("render.error_export_document"), true);
             return;
         }
         let _ = app.run("render.export", json!({"job":job,"path":path,"overwrite":overwrite,"format":"exr"}));
@@ -1399,11 +1493,11 @@ struct PreviewUploadPlan {
 }
 impl PreviewUploadPlan {
     fn bytes(self) -> Result<usize, String> {
-        self.pbr.checked_add(self.tris).and_then(|n| n.checked_add(self.glass)).ok_or_else(|| "product geometry size overflow".into())
+        self.pbr.checked_add(self.tris).and_then(|n| n.checked_add(self.glass)).ok_or_else(|| crate::i18n::tr("render.error_geometry_size").into())
     }
     fn add(&mut self, pbr: bool, glass: bool, triangles: usize, limit: usize) -> Result<(), String> {
         let stride = if pbr { crate::gpu::PBR_SIZE } else { crate::gpu::TRI_SIZE };
-        let bytes = triangles.checked_mul(3).and_then(|n| n.checked_mul(stride)).ok_or("product geometry size overflow")?;
+        let bytes = triangles.checked_mul(3).and_then(|n| n.checked_mul(stride)).ok_or(crate::i18n::tr("render.error_geometry_size"))?;
         let count = if pbr {
             &mut self.pbr
         } else if glass {
@@ -1411,9 +1505,9 @@ impl PreviewUploadPlan {
         } else {
             &mut self.tris
         };
-        *count = count.checked_add(bytes).ok_or("product geometry size overflow")?;
+        *count = count.checked_add(bytes).ok_or(crate::i18n::tr("render.error_geometry_size"))?;
         if self.bytes()? > limit {
-            return Err(format!("product preview exceeds its {} MiB vertex payload envelope; geometry was not simplified", limit / (1024 * 1024)));
+            return Err(crate::i18n::format("render.error_vertex_envelope", &[("limit", &(limit / (1024 * 1024)).to_string())]));
         }
         Ok(())
     }
@@ -1421,26 +1515,26 @@ impl PreviewUploadPlan {
 
 fn preview_upload_plan(scene: &ProductScene, limit: usize) -> Result<PreviewUploadPlan, String> {
     if scene.meshes.len() > solidcraft_engine::render::job::MAX_CPU_BODIES {
-        return Err("product preview exceeds its captured-body bound".into());
+        return Err(crate::i18n::tr("render.error_body_bound").into());
     }
     let mut plan = PreviewUploadPlan::default();
     for body in &scene.meshes {
-        plan.source_triangles = plan.source_triangles.checked_add(body.mesh.triangles.len()).ok_or("product triangle count overflow")?;
+        plan.source_triangles = plan.source_triangles.checked_add(body.mesh.triangles.len()).ok_or(crate::i18n::tr("render.error_triangle_count"))?;
         if plan.source_triangles > solidcraft_engine::render::job::MAX_CPU_TRIANGLES {
-            return Err("product preview exceeds its eight-million-triangle source bound".into());
+            return Err(crate::i18n::tr("render.error_triangle_bound").into());
         }
         if body.faces.len() > 262_144 {
-            return Err("product preview exceeds the face-appearance admission cap".into());
+            return Err(crate::i18n::tr("render.error_face_cap").into());
         }
         if !body.opacity.is_finite()
             || !(0.0..=1.0).contains(&body.opacity)
             || body.faces.iter().any(|face| !face.opacity.is_finite() || !(0.0..=1.0).contains(&face.opacity))
         {
-            return Err("invalid product appearance opacity".into());
+            return Err(crate::i18n::tr("render.error_opacity").into());
         }
         let looks: std::collections::BTreeMap<_, _> = body.faces.iter().map(|face| (face.face, face)).collect();
         if looks.len() != body.faces.len() {
-            return Err("duplicate product face appearance".into());
+            return Err(crate::i18n::tr("render.error_duplicate_face").into());
         }
         for index in 0..body.mesh.triangles.len() {
             let face = body.mesh.tri_face.get(index).and_then(|id| looks.get(id));
@@ -1448,7 +1542,7 @@ fn preview_upload_plan(scene: &ProductScene, limit: usize) -> Result<PreviewUplo
                 (face.opacity, face.surface.is_some() && face.transmission.is_none())
             });
             if pbr && opacity != 1.0 {
-                return Err("opaque PBR requires opacity 1".into());
+                return Err(crate::i18n::tr("render.error_pbr_opacity").into());
             }
             if opacity > 0.0 {
                 plan.add(pbr, opacity < 0.999, 1, limit)?;
@@ -1466,17 +1560,17 @@ pub fn gpu_scene(scene: &ProductScene) -> Result<(u64, GpuScene), String> {
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     let mut gpu = GpuScene::default();
     for (buffer, bytes) in [(&mut gpu.pbr, plan.pbr), (&mut gpu.tris, plan.tris), (&mut gpu.glass, plan.glass)] {
-        buffer.try_reserve_exact(bytes).map_err(|_| "product preview vertex allocation failed".to_string())?;
+        buffer.try_reserve_exact(bytes).map_err(|_| crate::i18n::tr("render.error_vertex_allocation").to_string())?;
     }
     for body in &scene.meshes {
         if body.faces.len() > 262_144 {
-            return Err("product preview exceeds the face-appearance admission cap".into());
+            return Err(crate::i18n::tr("render.error_face_cap").into());
         }
         if !body.opacity.is_finite()
             || !(0.0..=1.0).contains(&body.opacity)
             || body.faces.iter().any(|f| !f.opacity.is_finite() || !(0.0..=1.0).contains(&f.opacity))
         {
-            return Err("invalid product appearance opacity".into());
+            return Err(crate::i18n::tr("render.error_opacity").into());
         }
         (Arc::as_ptr(&body.mesh) as usize).hash(&mut hash);
         body.name.hash(&mut hash);
@@ -1498,7 +1592,7 @@ pub fn gpu_scene(scene: &ProductScene) -> Result<(u64, GpuScene), String> {
                 (l.color, l.opacity, l.surface.filter(|_| l.transmission.is_none()))
             });
             if surface.is_some() && opacity != 1.0 {
-                return Err("opaque PBR requires opacity 1".into());
+                return Err(crate::i18n::tr("render.error_pbr_opacity").into());
             }
             if opacity <= 0.0 {
                 continue;
@@ -1509,13 +1603,13 @@ pub fn gpu_scene(scene: &ProductScene) -> Result<(u64, GpuScene), String> {
                 let n = if surface.is_some() { solidcraft_engine::render::surface::unit_direction(n).ok()? } else { n }.to_f32();
                 p.into_iter().chain(n).all(f32::is_finite).then_some((p, n))
             });
-            let [Some(a), Some(b), Some(c)] = vertices else { return Err("invalid product triangle".into()) };
+            let [Some(a), Some(b), Some(c)] = vertices else { return Err(crate::i18n::tr("render.error_product_triangle").into()) };
             let rgba = [color[0], color[1], color[2], (opacity * 255.0).round() as u8];
             let index = gpu.color(rgba);
             for (p, n) in [a, b, c] {
                 if let Some(surface) = surface {
                     if n.iter().all(|v| *v == 0.0) {
-                        return Err("PBR requires nonzero surface normals".into());
+                        return Err(crate::i18n::tr("render.error_surface_normals").into());
                     }
                     gpu.pbr_tri(p, n, surface);
                 } else if opacity < 0.999 {
@@ -1527,7 +1621,7 @@ pub fn gpu_scene(scene: &ProductScene) -> Result<(u64, GpuScene), String> {
         }
     }
     if (gpu.pbr.len(), gpu.tris.len(), gpu.glass.len()) != (plan.pbr, plan.tris, plan.glass) {
-        return Err("product preview packing differs from its admitted vertex payload".into());
+        return Err(crate::i18n::tr("render.error_vertex_packing").into());
     }
     Ok((hash.finish(), gpu))
 }
@@ -1556,16 +1650,36 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
     }
     let rect = ui.max_rect();
     app.viewport.rect = Some(rect);
-    crate::viewport::refresh_layout(app, ui.ctx().pixels_per_point());
+    crate::viewport::refresh_layout(app, ui.ctx());
     let response = ui.interact(rect, ui.id().with("render_preview"), Sense::click_and_drag());
-    // The modelling viewport's camera input (preset, Orbit around, zoom to the cursor, middle
-    // double-click), with nothing to pick or select here.
-    crate::navigation::handle(app, ui, rect, &response, crate::navigation::NavCaps::RENDER);
+    let input = crate::navigation::handle(app, ui, rect, &response, crate::navigation::NavCaps::RENDER);
+    let navigating = input.scroll != 0.0
+        || input.pinch != 1.0
+        || input.pan != egui::Vec2::ZERO
+        || input.middle
+        || input.secondary_down
+        || (input.primary_nav.is_some() && input.primary_down)
+        || input.mode.is_some()
+        || app.viewport.axis_drag.is_some()
+        || app.viewport.spin
+        || app.cam_anim.is_some();
+    let hits = input
+        .hover
+        .filter(|_| input.inside && !navigating)
+        .map(|p| crate::viewport::pick_cached(app, &crate::viewport::projection(app, rect), p))
+        .unwrap_or_default();
+    let candidate = crate::viewport::candidate(app, &hits);
+    app.viewport.hover = candidate.as_ref().map(|(hit, _)| hit.clone());
+    if response.clicked_by(egui::PointerButton::Primary) && input.inside && !navigating {
+        let (add, toggle) =
+            crate::tool_modifiers::selection_click(crate::tool_modifiers::Held::from_modifiers(input.mods), app.preferences.selection_shift_add_only);
+        crate::viewport::select(app, candidate.map(|(_, sel)| sel), add, toggle);
+    }
     let bg = app.render_workspace.view.draft.background;
     ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(bg[0], bg[1], bg[2]));
     let result = (|| -> Result<(), String> {
         if app.viewport.gpu.is_none() {
-            return Err("GPU product preview is unavailable on this host. Saved setups remain available.".into());
+            return Err(crate::i18n::tr("render.error_gpu_preview").into());
         }
         let ppp = ui.ctx().pixels_per_point();
         let setup = &app.render_workspace.view.draft;
@@ -1573,7 +1687,7 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
             || setup.environment_rotation != 0.0
             || setup.environment_intensity != 1.0
         {
-            return Err("fixed studio preview requires exposure 0, environment rotation 0 and intensity 1".into());
+            return Err(crate::i18n::tr("render.error_fixed_preview").into());
         }
         // A 4K or 5K viewport is past the preview's pixel budget: draw it smaller and filter it
         // up into the viewport rather than refusing the frame.
@@ -1591,7 +1705,7 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
         };
         solidcraft_engine::render::resolve_request(&[app.session.render_backend()], &request).map_err(|e| e.to_string())?;
         if app.session.model.is_stale() {
-            return Err("finish the modelling gesture before previewing".into());
+            return Err(crate::i18n::tr("render.error_finish_gesture").into());
         }
         let mut visibility = std::collections::hash_map::DefaultHasher::new();
         app.session.visibility.hidden_bodies.hash(&mut visibility);
@@ -1599,16 +1713,24 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
         let signature = (app.session.revision, Arc::as_ptr(&app.session.world_state()) as usize, visibility.finish());
         app.render_workspace
             .prepare_preview(signature, || solidcraft_engine::product_scene::extract(&app.session).map_err(|error| error.to_string()))?;
-        let scene = app.render_workspace.scene.as_ref().ok_or("no product scene")?;
+        let scene = app.render_workspace.scene.as_ref().ok_or(crate::i18n::tr("render.error_no_scene"))?;
         request.features = scene.required_features();
         solidcraft_engine::render::resolve_request(&[app.session.render_backend()], &request).map_err(|e| e.to_string())?;
-        let key = app.render_workspace.key.ok_or("no product geometry")?;
+        let key = app.render_workspace.key.ok_or(crate::i18n::tr("render.error_no_geometry"))?;
         if scene.bounds.is_empty() {
-            return Err("Create a visible solid in Design to preview it here.".into());
+            return Err(crate::i18n::tr("render.error_visible_solid").into());
         }
         let camera = app.cam;
         let radius = scene.bounds.diagonal().max(10.0) + scene.bounds.center().dist(camera.target);
         let eye = camera.eye();
+        let highlight_key = crate::viewport::highlight_key(app);
+        if highlight_key != app.viewport.hl_key {
+            let overlay = crate::viewport::build_highlight(app);
+            if let Ok(mut slot) = app.viewport.hl_slot.lock() {
+                *slot = Some(overlay);
+            }
+            app.viewport.hl_key = highlight_key;
+        }
         let slot = app.render_workspace.slot.clone();
         let callback = ViewportCallback(Frame {
             product: true,
@@ -1616,8 +1738,8 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
             slot: slot.clone(),
             sketch_key: 0,
             sketch_slot: slot.clone(),
-            hl_key: 0,
-            hl_slot: slot.clone(),
+            hl_key: app.viewport.hl_key,
+            hl_slot: app.viewport.hl_slot.clone(),
             pv_key: 0,
             pv_slot: slot,
             pv_hide: false,
@@ -1635,8 +1757,11 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
             ao_radius: 0.0,
             eye: [eye.x as f32, eye.y as f32, eye.z as f32, if camera.fov > 0.0 { 1.0 } else { 0.0 }],
             ssaa: if width < full.0 { width as f32 / full.0 as f32 } else { 1.0 },
-            hover_tint: [0.0; 3],
-            selection_tint: [0.0; 3],
+            hover_tint: [f32::from(Tokens::get().hover_face_lift) / 255.0; 3],
+            selection_tint: {
+                let c = Tokens::get().body_selected;
+                [f32::from(c.r()) / 255.0, f32::from(c.g()) / 255.0, f32::from(c.b()) / 255.0]
+            },
         });
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(rect, callback));
         Ok(())
@@ -1645,6 +1770,7 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
         preview_error(app, ui, rect, &error);
     }
     crate::viewport::axis_view(app, ui, rect);
+    crate::navigation_bar_view::show(app, ui, rect);
 }
 
 pub(crate) fn interactive_command_info(app: &SolveApp, command: &solidcraft_engine::CommandSpec) -> solidcraft_engine::CommandInfo {

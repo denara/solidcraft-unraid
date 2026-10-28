@@ -232,8 +232,8 @@ mod tests {
     #[test]
     fn committed_design_fixtures_have_readable_saved_metadata() {
         for bytes in [
-            include_bytes!("../../../tests/action_matrix/designs/pi-case.solidcraft").as_slice(),
-            include_bytes!("../../../tests/action_matrix/designs/pi-case-0.8.solidcraft").as_slice(),
+            include_bytes!("../../../tests/action_matrix/designs/pi-case.sc").as_slice(),
+            include_bytes!("../../../tests/action_matrix/designs/pi-case-0.8.sc").as_slice(),
         ] {
             let metadata = read_bytes(bytes);
             assert_eq!(metadata["status"], "available");

@@ -45,7 +45,7 @@ pub fn filename(encoded: &str) -> Result<String, &'static str> {
     }
     let Some((stem, extension)) = name.rsplit_once('.') else { return Err("Die Datei ist kein SolidCraft-Modell.") };
     // Existing explicit native-extension compatibility is retained on open.
-    if stem.is_empty() || !matches!(extension.to_ascii_lowercase().as_str(), "solidcraft" | "solvecraft") {
+    if stem.is_empty() || !solidcraft_engine::io::is_design_ext(extension) {
         return Err("Die Datei ist kein SolidCraft-Modell.");
     }
     if name.len() <= 200 {
@@ -58,7 +58,7 @@ pub fn filename(encoded: &str) -> Result<String, &'static str> {
         }
         short.push(ch);
     }
-    Ok(format!("{short}.solidcraft"))
+    Ok(format!("{short}.{extension}"))
 }
 
 pub fn payload(bytes: &[u8]) -> Result<(), &'static str> {
@@ -76,7 +76,7 @@ pub fn payload(bytes: &[u8]) -> Result<(), &'static str> {
 pub fn copy_name(name: &str, entropy: [u8; 16]) -> String {
     let stem = name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or("Modell");
     let random: String = entropy.iter().map(|byte| format!("{byte:02x}")).collect();
-    let suffix = format!(" (Browserkopie-{random}).solidcraft");
+    let suffix = format!(" (Browserkopie-{random}).{}", solidcraft_engine::io::DESIGN_EXT);
     let mut short = String::new();
     for ch in stem.chars() {
         if short.len() + ch.len_utf8() + suffix.len() > 200 {
@@ -194,6 +194,8 @@ mod tests {
 
     #[test]
     fn filenames_are_decoded_confined_and_shortened_without_breaking_utf8() {
+        assert_eq!(filename("bracket%20v2.sc"), Ok("bracket v2.sc".into()));
+        assert_eq!(filename("Legacy.solvecraft"), Ok("Legacy.solvecraft".into()));
         assert_eq!(filename("bracket%20v2.solidcraft"), Ok("bracket v2.solidcraft".into()));
         assert_eq!(filename("H%C3%A4uschen.SOLIDCRAFT"), Ok("Häuschen.SOLIDCRAFT".into()));
         assert_eq!(filename("recovery.solidcraft"), Ok("recovery.solidcraft".into()));
@@ -231,7 +233,7 @@ mod tests {
         let second = copy_name("Häuschen.solidcraft", [2; 16]);
         assert_ne!(first, second);
         assert!(first.starts_with("Häuschen (Browserkopie-"));
-        assert!(first.ends_with(".solidcraft"));
+        assert!(first.ends_with(".sc"));
         assert!(copy_name(&format!("{}.solidcraft", "ä".repeat(150)), [0; 16]).len() <= 200);
         assert!(!copy_name("recovery.solidcraft", [1; 16]).eq_ignore_ascii_case("recovery.solidcraft"));
     }

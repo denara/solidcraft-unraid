@@ -71,10 +71,7 @@ fn failure(status: StatusCode) -> Response {
 }
 
 fn native(name: &str) -> bool {
-    matches!(
-        std::path::Path::new(name).extension().and_then(|value| value.to_str()).map(str::to_ascii_lowercase).as_deref(),
-        Some("solidcraft" | "solvecraft")
-    )
+    crate::workspace_files::native_model(name)
 }
 
 fn read(root: &std::path::Path, name: &str, limit: u64) -> Result<Vec<u8>, StatusCode> {

@@ -139,6 +139,16 @@ async fn edit_handoff_is_cookie_bound_one_use_and_never_changes_saved_design_byt
     assert_eq!(to_bytes(imported.into_body(), 1024 * 1024).await.unwrap().as_ref(), NATIVE);
     assert!(!fixture.app().oneshot(request(Some(&owner), &ticket)).await.unwrap().status().is_success());
     assert_eq!(std::fs::read(fixture.directory.join("public-copy.solidcraft")).unwrap(), NATIVE);
+    for name in ["current.sc", "legacy.solvecraft"] {
+        std::fs::write(fixture.directory.join(name), NATIVE).unwrap();
+        let ticket = issue(&fixture, &owner, name).await;
+        let response = fixture.app().oneshot(request(Some(&owner), &ticket)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-solidcraft-filename"], name);
+        assert_eq!(to_bytes(response.into_body(), 1024 * 1024).await.unwrap().as_ref(), NATIVE);
+        assert!(!fixture.app().oneshot(request(Some(&owner), &ticket)).await.unwrap().status().is_success());
+        assert_eq!(std::fs::read(fixture.directory.join(name)).unwrap(), NATIVE);
+    }
     assert_eq!(fixture.state.slots_used(), 0);
     assert!(fixture.state.sessions.lock().await.is_empty());
 }

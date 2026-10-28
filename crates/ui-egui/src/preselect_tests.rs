@@ -8,6 +8,84 @@ use solidcraft_engine::geom::Vec3;
 use solidcraft_engine::{Sel, Session};
 
 #[test]
+fn material_selector_starts_with_the_assigned_material() {
+    let mut app = app_with(json!([
+        {"command":"solid.box","params":{"length":10,"width":10,"height":10}},
+        {"command":"material.assign","params":{"bodies":["Body1"],"material":"Aluminum"}}
+    ]));
+    app.session.selection = vec![Sel::Body { name: "Body1".into() }];
+    let before = app.session.doc.to_json();
+    let d = crate::dialogs::Dialog::for_command(&app, "material.assign").unwrap();
+    let commands = crate::dialogs::apply_commands(&app, &d).unwrap();
+    assert_eq!(commands[0].1["material"], "Aluminum");
+    assert_eq!(app.session.doc.to_json(), before);
+}
+
+fn material_selector_fixture() -> crate::SolveApp {
+    app_with(json!([
+        {"command":"solid.box","params":{"length":10,"width":10,"height":10,"body_name":"Plate"}},
+        {"command":"solid.box","params":{"corner":[30,0,0],"length":10,"width":10,"height":10,"body_name":"Block"}},
+        {"command":"material.assign","params":{"bodies":["Plate"],"material":"Aluminum"}},
+        {"command":"material.assign","params":{"bodies":["Block"],"material":"Steel"}}
+    ]))
+}
+
+fn material_body(name: &str) -> Sel {
+    Sel::Body { name: name.into() }
+}
+
+#[test]
+fn material_selector_mixed_and_empty_targets_require_an_explicit_choice() {
+    let mut app = material_selector_fixture();
+    let before = app.session.doc.to_json();
+    for selected in [vec![], vec![material_body("Plate"), material_body("Block")]] {
+        app.session.selection = selected;
+        let d = crate::dialogs::Dialog::for_command(&app, "material.assign").unwrap();
+        assert!(crate::dialogs::apply_commands(&app, &d).is_err());
+    }
+    assert_eq!(app.session.doc.to_json(), before);
+}
+
+#[test]
+fn material_selector_follows_target_changes_until_a_material_is_chosen() {
+    let mut app = material_selector_fixture();
+    app.session.selection = vec![material_body("Plate")];
+    let mut d = crate::dialogs::Dialog::for_command(&app, "material.assign").unwrap();
+    d.active = 0;
+    d.take_box(&app.session, vec![material_body("Block")], false);
+    assert_eq!(crate::dialogs::apply_commands(&app, &d).unwrap()[0].1["material"], "Steel");
+    d.take_box(&app.session, vec![material_body("Plate"), material_body("Block")], false);
+    assert!(crate::dialogs::apply_commands(&app, &d).is_err());
+    d.pick(&app.session, material_body("Block"));
+    assert_eq!(crate::dialogs::apply_commands(&app, &d).unwrap()[0].1["material"], "Aluminum");
+    let crate::dialogs::Kind::Material { index, .. } = &mut d.kind else { panic!("material dialog") };
+    *index = app.session.doc.material_names().iter().position(|name| name == "Copper").unwrap();
+    d.take_box(&app.session, vec![material_body("Block")], false);
+    let commands = crate::dialogs::apply_commands(&app, &d).unwrap();
+    assert_eq!(commands[0].1["material"], "Copper");
+    assert_eq!(commands[0].1["bodies"], json!(["Block"]));
+}
+
+#[test]
+fn material_selector_supports_custom_materials_faces_and_default_without_editing_the_document() {
+    let mut app = material_selector_fixture();
+    app.run("material.create", json!({"name":"Synthetic material","density_g_cm3":0.8})).unwrap();
+    app.run("material.assign", json!({"bodies":["Plate","Block"],"material":"Synthetic material"})).unwrap();
+    app.session = Session::new(solidcraft_engine::doc::Document::from_json(&app.session.doc.to_json()).unwrap());
+    for selection in [vec![material_body("Plate"), material_body("Block")], vec![Sel::Face { body: "Plate".into(), index: 0, point: Vec3::ZERO }]] {
+        app.session.selection = selection;
+        let before = app.session.doc.to_json();
+        let d = crate::dialogs::Dialog::for_command(&app, "material.assign").unwrap();
+        assert_eq!(crate::dialogs::apply_commands(&app, &d).unwrap()[0].1["material"], "Synthetic material");
+        assert_eq!(app.session.doc.to_json(), before);
+    }
+    app.run("material.assign", json!({"bodies":["Plate"],"material":"Default"})).unwrap();
+    app.session.selection = vec![material_body("Plate")];
+    let d = crate::dialogs::Dialog::for_command(&app, "material.assign").unwrap();
+    assert_eq!(crate::dialogs::apply_commands(&app, &d).unwrap()[0].1["material"], "Default");
+}
+
+#[test]
 fn confirming_coplanar_body_faces_uses_one_atomic_extrusion() {
     let mut h = crate::scenario::Harness::new();
     let parent = h.app.run("component.create", json!({"name":"Imported assembly"})).unwrap()["component"].clone();

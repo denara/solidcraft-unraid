@@ -4293,6 +4293,40 @@ fn renaming_an_imported_assembly_body_reads_nothing_again() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Renaming one of an imported file's solids whose siblings are numbered after it (`Bolt` beside
+/// `Bolt (2)`, as the solids of a STEP file with one label are built) evaluates nothing either: the
+/// rename keeps the siblings' names, so the model is the one evaluating the renamed design gives.
+#[test]
+fn renaming_an_imported_body_with_numbered_siblings_evaluates_nothing() {
+    let dir = std::env::temp_dir().join(format!("solidcraft-step-rename-siblings-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut a = Session::default();
+    run(&mut a, "solid.box", json!({"length": 10, "width": 10, "height": 10, "body_name": "Bolt"}));
+    run(&mut a, "solid.box", json!({"length": 4, "width": 4, "height": 4, "center": [30, 0, 2], "operation": "new", "body_name": "Bolt (2)"}));
+    let p = dir.join("Bolts.step");
+    run(&mut a, "file.export", json!({"path": p.to_string_lossy()}));
+    let mut s = Session::default();
+    run(&mut s, "doc.open", json!({"path": p.to_string_lossy()}));
+    let names = |s: &Session| s.model.state().bodies.iter().map(|b| b.name.clone()).collect::<Vec<_>>();
+    let before = names(&s);
+    let first = before.iter().find(|n| !n.ends_with(" (2)")).cloned().unwrap();
+    assert!(before.contains(&format!("{first} (2)")), "a sibling numbered after it: {before:?}");
+    s.evaluations = 0;
+    run(&mut s, "body.rename", json!({"body": first, "name": "Renamed"}));
+    assert_eq!(s.evaluations, 0, "a rename evaluates nothing");
+    let after = names(&s);
+    assert!(after.contains(&"Renamed".to_string()) && after.contains(&format!("{first} (2)")), "{after:?}");
+    let mut fresh = Session::new((*s.doc).clone());
+    fresh.refresh();
+    assert_eq!(names(&fresh), after, "the same names as evaluating the renamed design");
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!(names(&s), before);
+    run(&mut s, "edit.redo", json!({}));
+    assert_eq!(names(&s), after);
+    assert_eq!(s.evaluations, 0, "nor do its undo and redo");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// #2467: renaming a body that later features change (a hole patterned over it, then a chamfer)
 /// evaluates nothing, and leaves the bodies, volumes and face names evaluating the renamed
 /// design gives; undo and redo do the same.

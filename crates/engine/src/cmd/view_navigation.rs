@@ -4,7 +4,12 @@ use solidcraft_render::{Camera, StandardView};
 
 use super::CommandSpec;
 use crate::params::{bad, num, req_vec2, req_vec3, vec3};
+use crate::schema::view_navigation::{RenderBrowser, RenderFocus};
+use crate::schema::{TypedContract, output_schema_for};
 use crate::{Result, Sel, Session};
+
+const FOCUS_CONTRACT: TypedContract<RenderFocus> = TypedContract::new();
+const BROWSER_CONTRACT: TypedContract<RenderBrowser> = TypedContract::new();
 
 pub static COMMANDS: &[CommandSpec] = &[
 CommandSpec::new("view.fit", "Fit", fit)
@@ -23,6 +28,25 @@ CommandSpec::new("view.ground_shadow", "Ground shadow", ground_shadow)
     .icon("style").noundo().doc_only().params("on?: bool (omitted: toggle) → on?; show the ground shadow"),
 CommandSpec::new("view.navigation_bar", "Navigation bar", navigation_bar)
     .icon("pan").noundo().doc_only().params("visible?: bool (omitted: toggle) → visible?; show the navigation bar (window setting)"),
+CommandSpec::new("view.render_focus", "Render Focus View", crate::checked!("view.render_focus", render_focus))
+    .icon("render_scene").noundo().doc_only()
+    .contract(&FOCUS_CONTRACT).output(output_schema_for::<RenderFocus>)
+    .params("on: bool → {on}; per-window UI state, never saved in the design; headless validation only"),
+CommandSpec::new("view.render_browser", "Render Browser", crate::checked!("view.render_browser", render_browser))
+    .icon("list").noundo().doc_only()
+    .contract(&BROWSER_CONTRACT).output(output_schema_for::<RenderBrowser>)
+    .params("open: bool → {open}; narrow-window Browser card; per-window UI state, headless validation only"),
+CommandSpec::new("view.render_stage", "Render Stage", render_stage)
+    .icon("render_scene").noundo().doc_only()
+    .params("stage: look|light|frame|output → {stage}; per-document UI state, never edits or evaluates the design; headless validation only"),
+CommandSpec::new("view.shots_strip", "Shots Strip", shots_strip)
+    .at("RENDER CAMERA", "SHOTS").icon("camera").noundo().doc_only()
+    .params("visible: bool → {visible}; Render Shots strip UI preference. Headless echo only, no document edits or undo"),
+CommandSpec::new("view.render_dock", "Move Render Dock", crate::checked!("view.render_dock", render_dock))
+    .at("RENDER", "SCENE").icon("settings").noundo().doc_only()
+    .contract(&RENDER_DOCK_CONTRACT)
+    .output(crate::schema::output_schema_for::<crate::schema::view_navigation::RenderDock>)
+    .params("panel: inspector|browser; side: left|right → {panel, side}; Render dock UI preference; headless echo only, no document edits or undo"),
 CommandSpec::new("view.layout", "Workspace layout", layout)
     .icon("settings").noundo().doc_only().params("mode: floating|compact → validated workspace layout; display only, never opens a dialog"),
 CommandSpec::new("view.history_layout", "History layout", history_layout)
@@ -202,6 +226,47 @@ fn ground_shadow(_s: &mut Session, p: &Value) -> Result<Value> {
 }
 fn navigation_bar(_s: &mut Session, p: &Value) -> Result<Value> {
     view_toggle(p, "view.navigation_bar", "visible")
+}
+
+fn render_focus(_s: &mut Session, p: &Value) -> Result<Value> {
+    let request: RenderFocus = serde_json::from_value(p.clone()).map_err(|e| bad("view.render_focus", e.to_string()))?;
+    Ok(json!(request))
+}
+
+fn render_browser(_s: &mut Session, p: &Value) -> Result<Value> {
+    let request: RenderBrowser = serde_json::from_value(p.clone()).map_err(|e| bad("view.render_browser", e.to_string()))?;
+    Ok(json!(request))
+}
+
+fn render_stage(_s: &mut Session, p: &Value) -> Result<Value> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Request {
+        stage: String,
+    }
+    let request: Request = serde_json::from_value(p.clone()).map_err(|e| bad("view.render_stage", e.to_string()))?;
+    if !matches!(request.stage.as_str(), "look" | "light" | "frame" | "output") {
+        return Err(bad("stage", "expected look, light, frame or output"));
+    }
+    Ok(json!({"stage":request.stage}))
+}
+
+const RENDER_DOCK_CONTRACT: crate::schema::TypedContract<crate::schema::view_navigation::RenderDock> = crate::schema::TypedContract::new();
+
+fn render_dock(_s: &mut Session, p: &Value) -> Result<Value> {
+    let request: crate::schema::view_navigation::RenderDock =
+        serde_json::from_value(p.clone()).map_err(|e| bad("view.render_dock", e.to_string()))?;
+    serde_json::to_value(request).map_err(|e| bad("view.render_dock", e.to_string()))
+}
+
+fn shots_strip(_s: &mut Session, p: &Value) -> Result<Value> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Request {
+        visible: bool,
+    }
+    let request: Request = serde_json::from_value(p.clone()).map_err(|e| bad("view.shots_strip", e.to_string()))?;
+    Ok(json!({"visible": request.visible}))
 }
 
 fn layout(_s: &mut Session, p: &Value) -> Result<Value> {
@@ -841,4 +906,117 @@ fn workspace_layout_validates_modes_without_mutating_the_design() {
     }
     assert_eq!(session.doc.to_json(), before);
     assert!(session.undo.is_empty());
+}
+
+#[cfg(test)]
+#[test]
+fn render_workspace_focus_and_browser_validate_without_side_effects() {
+    let mut session = Session { camera: Some(Camera::default()), ..Default::default() };
+    let camera = session.camera;
+    let document = session.doc.clone();
+    let before = (session.undo.len(), session.redo.len(), session.revision, session.evaluations, session.is_dirty());
+    for (id, field) in [("view.render_focus", "on"), ("view.render_browser", "open")] {
+        let command = crate::find_command(id).unwrap();
+        assert!(command.contract.is_some() && command.output.is_some());
+        for on in [true, false] {
+            let request = json!({field:on});
+            assert_eq!(session.execute(id, &request).unwrap(), request);
+        }
+        for params in [
+            Value::Null,
+            json!([]),
+            json!({}),
+            json!({field:null}),
+            json!({field:"true"}),
+            json!({field:1e300}),
+            json!({field:[]}),
+            json!({field:true,"unknown":false}),
+        ] {
+            assert!(session.execute(id, &params).is_err(), "{id}: {params}");
+        }
+    }
+    assert!(std::sync::Arc::ptr_eq(&document, &session.doc));
+    assert_eq!(session.camera, camera);
+    assert_eq!(before, (session.undo.len(), session.redo.len(), session.revision, session.evaluations, session.is_dirty()));
+}
+
+#[cfg(test)]
+#[test]
+fn render_workspace_shots_strip_is_a_validated_headless_preference_request() {
+    let mut session = Session::default();
+    let document = session.doc.clone();
+    let before = (session.undo.len(), session.redo.len(), session.revision, session.evaluations, session.is_dirty());
+    for visible in [false, true] {
+        assert_eq!(session.execute("view.shots_strip", &json!({"visible":visible})).unwrap(), json!({"visible":visible}));
+    }
+    for params in [
+        Value::Null,
+        json!({}),
+        json!([]),
+        json!({"visible":null}),
+        json!({"visible":"yes"}),
+        json!({"visible":1e300}),
+        json!({"visible":true,"unknown":true}),
+    ] {
+        assert!(session.execute("view.shots_strip", &params).is_err());
+    }
+    assert!(std::sync::Arc::ptr_eq(&document, &session.doc));
+    assert_eq!(before, (session.undo.len(), session.redo.len(), session.revision, session.evaluations, session.is_dirty()));
+}
+
+#[cfg(test)]
+#[test]
+fn render_workspace_stage_validates_without_document_changes_or_evaluation() {
+    let mut session = Session::default();
+    let document = session.doc.clone();
+    let before = (session.undo.len(), session.redo.len(), session.revision, session.evaluations, session.is_dirty());
+    for stage in ["look", "light", "frame", "output"] {
+        assert_eq!(session.execute("view.render_stage", &json!({"stage":stage})).unwrap(), json!({"stage":stage}));
+    }
+    for params in [
+        Value::Null,
+        json!({}),
+        json!([]),
+        json!({"stage":true}),
+        json!({"stage":1e300}),
+        json!({"stage":"camera"}),
+        json!({"stage":"look","extra":true}),
+    ] {
+        assert!(session.execute("view.render_stage", &params).is_err());
+    }
+    assert!(std::sync::Arc::ptr_eq(&document, &session.doc));
+    assert_eq!(before, (session.undo.len(), session.redo.len(), session.revision, session.evaluations, session.is_dirty()));
+}
+
+#[cfg(test)]
+#[test]
+fn render_workspace_dock_validates_without_mutation() {
+    let mut session = Session::default();
+    session.execute("solid.box", &json!({"length":10,"width":10,"height":10})).unwrap();
+    session.execute("edit.undo", &json!({})).unwrap();
+    let document = session.doc.clone();
+    let before = (session.undo.len(), session.redo.len(), session.revision, session.evaluations, session.is_dirty(), session.camera);
+    for panel in ["inspector", "browser"] {
+        for side in ["left", "right"] {
+            let params = json!({"panel":panel,"side":side});
+            assert_eq!(session.execute("view.render_dock", &params).unwrap(), params);
+        }
+    }
+    for params in [
+        Value::Null,
+        json!([]),
+        json!({}),
+        json!({"panel":"inspector"}),
+        json!({"side":"left"}),
+        json!({"panel":true,"side":"left"}),
+        json!({"panel":"inspector","side":null}),
+        json!({"panel":"inspector","side":1e300}),
+        json!({"panel":"other","side":"left"}),
+        json!({"panel":"inspector","side":"top"}),
+        json!({"panel":"browser","side":"left","unknown":true}),
+    ] {
+        assert!(session.execute("view.render_dock", &params).is_err(), "{params}");
+    }
+    assert!(std::sync::Arc::ptr_eq(&document, &session.doc));
+    assert_eq!(before, (session.undo.len(), session.redo.len(), session.revision, session.evaluations, session.is_dirty(), session.camera));
 }

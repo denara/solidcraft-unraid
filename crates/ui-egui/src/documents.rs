@@ -403,6 +403,13 @@ pub fn close(app: &mut SolveApp, i: usize, force: bool) {
 
 /// A replacement design starts a fresh conversation while retaining the window's chat services.
 pub(crate) fn reset_chat(app: &mut SolveApp) {
+    // A chat not asked anything yet (an agent connected at start, say) holds nothing of the old
+    // design: it starts over in place, and its agent stays connected.
+    if !app.agent_chat.items.iter().any(|i| matches!(i, crate::agent_chat::Item::User { .. })) {
+        crate::agent_chat::new_chat(app);
+        app.agent_chat.input.clear();
+        return;
+    }
     crate::agent_chat::leave_document(app);
     app.agent_chat.swap_document(&mut crate::agent_chat::AgentChat::default());
 }

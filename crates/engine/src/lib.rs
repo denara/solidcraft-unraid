@@ -386,6 +386,7 @@ pub struct Session {
     occurrence_visibility_cache: std::sync::Mutex<Option<occurrences::VisibilityCache>>,
     removed_later_cache: std::sync::Mutex<Option<occurrences::RemovedLaterCache>>,
     occurrence_bodies_cache: std::sync::Mutex<Option<occurrences::OccurrenceBodiesCache>>,
+    placement_index_cache: std::sync::Mutex<Option<occurrences::PlacementIndex>>,
     /// Pairs `inspect.clearance` measured, by the bodies' geometry where they stood (shared with
     /// scratch copies): a body that did not change or move is not measured again.
     clearance_cache: std::sync::Arc<std::sync::Mutex<cmd::clearance::PairCache>>,
@@ -541,7 +542,7 @@ impl Session {
             .and_then(|saved| Model::adopt(&doc, saved).map_err(|e| log::info!("the saved model is not used: {e}")).ok());
         let model = adopted.unwrap_or_else(|| {
             let mut model = Model::new();
-            model.evaluate(&doc);
+            model.evaluate_shared(&doc);
             model
         });
         Session {
@@ -575,6 +576,7 @@ impl Session {
             occurrence_visibility_cache: Default::default(),
             removed_later_cache: Default::default(),
             occurrence_bodies_cache: Default::default(),
+            placement_index_cache: Default::default(),
             clearance_cache: Default::default(),
             body_renames: Vec::new(),
             contact_meshes: Default::default(),
@@ -721,6 +723,12 @@ impl Session {
 
     /// Mutable document (copy-on-write).
     pub fn doc_mut(&mut self) -> &mut Document {
+        // The placement index keeps the document alive with its answers; let it go before an
+        // in-place edit, so the edit stays in place (a shared handle would clone the document
+        // to a new address behind the crash journal's back, #7502) and no stale lookup outlives it.
+        if let Ok(mut index) = self.placement_index_cache.lock() {
+            *index = None;
+        }
         Arc::make_mut(&mut self.doc)
     }
 
@@ -822,16 +830,31 @@ impl Session {
     }
 
     pub fn refresh(&mut self) {
-        self.model.evaluate(&self.doc);
-        #[cfg(test)]
-        {
-            self.evaluations += 1;
+        if self.model.evaluate_shared(&self.doc) {
+            #[cfg(test)]
+            {
+                self.evaluations += 1;
+            }
         }
         self.revision += 1;
         self.prune_occurrence_state();
         // Joints follow the geometry their origins snap to.
         if !self.doc.assembly.joints.is_empty() {
-            self.solve_joints();
+            // A solve that moves parts changes what features reading where a part is placed
+            // (a mirror of a placed body) make: the model is evaluated again for the placements
+            // the design now holds, and the joints solved for that model, a few times at most.
+            for _ in 0..3 {
+                let before = self.doc.clone();
+                self.solve_joints();
+                if Arc::ptr_eq(&before, &self.doc) || before.occurrences == self.doc.occurrences {
+                    break;
+                }
+                self.model.evaluate(&self.doc);
+                #[cfg(test)]
+                {
+                    self.evaluations += 1;
+                }
+            }
         }
         cmd::motion::associative::refresh(self);
         if let Some(id) = self.active_sketch
@@ -926,7 +949,7 @@ impl Session {
         }
         doc.reserved_body_names.extend(reserve);
         // The pinned names are the ones the bodies have: no result changes, so none is evaluated.
-        self.model.refingerprint(&self.doc);
+        self.model.refingerprint_shared(&self.doc);
     }
 
     /// A hidden construction plane stays hidden when the design renames it, or undo or redo
@@ -1091,6 +1114,9 @@ impl Session {
         }
         // Checked first: storing makes the document unique (a copy when the undo step shares it).
         if self.model.edited_sketches(&self.doc).next().is_some() {
+            if let Ok(mut index) = self.placement_index_cache.lock() {
+                *index = None;
+            }
             self.model.adopt_solved_sketches(Arc::make_mut(&mut self.doc));
         }
         Ok(())
@@ -1161,10 +1187,8 @@ impl Session {
         for (host, _) in additional_jobs {
             self.register_render_job_host(host)?;
         }
-        if outermost && crash::enabled() {
-            // A failed command leaves the design as it was (restored below).
+        let crash_outcome = if outermost && crash::enabled() {
             let failed = r.as_ref().err().map(ToString::to_string);
-            let after = if failed.is_some() { &before.doc } else { &self.doc };
             // Commands that only read leave no trace (the journal keeps what a replay needs).
             let changed = !Arc::ptr_eq(&self.doc, &before.doc)
                 || self.active_sketch != before.active_sketch
@@ -1172,13 +1196,15 @@ impl Session {
                 || self.active_component != active_before.0
                 || self.active_occurrence_path != active_before.1
                 || spec.id.starts_with("select.");
-            crash::command_done(self.crash_journal, changed, &before.doc, after, spec.id, given, failed.map_or(Ok(()), Err));
-        }
+            Some((before.doc.clone(), changed, failed))
+        } else {
+            None
+        };
         let changed = !Arc::ptr_eq(&self.doc, &before.doc);
         // Hiding or showing (`browser.visibility`) leaves the document alone, so it needs its own
         // test: it is saved with the design and has an undo step of its own.
         let hidden = self.visibility != before.visibility;
-        match r {
+        let result = match r {
             Ok((v, live_edit)) => {
                 let v = if changed { self.with_created(spec.id, params, &before, v) } else { v };
                 if changed || hidden {
@@ -1222,7 +1248,14 @@ impl Session {
                 }
                 Err(e)
             }
+        };
+        if let Some((before, changed, failed)) = crash_outcome {
+            // Refresh and body-name pinning can copy the shared document. Remember the final
+            // document, so the next command does not mistake that work for an outside edit
+            // and discard the replay. Failed commands have restored their document by now.
+            crash::command_done(self.crash_journal, changed, &before, &self.doc, spec.id, given, failed.map_or(Ok(()), Err));
         }
+        result
     }
 
     /// A sketch command's result gets `created`: the ids of the points, curves, constraints and
@@ -1345,6 +1378,7 @@ impl Session {
             continuity: if observer { self.continuity.clone() } else { Vec::new() },
             joints_settled: self.joints_settled.clone(),
             occurrence_bodies_cache: Default::default(),
+            placement_index_cache: Default::default(),
             body_renames: if observer { Vec::new() } else { self.body_renames.clone() },
             contact_meshes: if observer { Default::default() } else { self.contact_meshes.clone() },
             section_hatch: if observer { self.section_hatch } else { true },

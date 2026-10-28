@@ -80,7 +80,8 @@ pub(super) fn aging_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
     }
     editor.selected_aging = editor.selected_aging.min(stack.len().saturating_sub(1));
     for (index, layer) in stack.iter().enumerate() {
-        let label = format!("{} · {}{}", index + 1, app.tr(layer.kind.key()), if layer.enabled { "" } else { " (off)" });
+        let label =
+            format!("{} · {}{}", index + 1, app.tr(layer.kind.key()), if layer.enabled { "" } else { crate::i18n::tr("render.layer_off_suffix") });
         let response = ui_kit::list_picker(ui, &format!("aging-layer-{index}"), &label, index == editor.selected_aging);
         crate::scenario::publish_target(&format!("render:aging-layer:{index}"), response.rect);
         if response.clicked() {

@@ -436,6 +436,7 @@ fn primitives_and_combine() {
             radius: "2".into(),
             height: "20".into(),
             operation: Operation::NewBody,
+            references: Vec::new(),
         },
         None,
     )
@@ -560,6 +561,21 @@ fn feature_inserted_at_a_marker_inside_a_timeline_folder_joins_it() {
     assert_eq!(doc.marker, Some(2));
     assert!(non_contiguous_timeline_group(&doc.features, &doc.timeline_groups).is_none());
     assert!(Document::from_json(&doc.to_json()).is_ok(), "the inserted feature must leave a reopenable design");
+}
+
+/// A marker after the last feature leaves every feature active, as no marker does, so a feature
+/// added then is active too, not added rolled back (#7741: editing the last feature from the
+/// History runs its command with the marker there).
+#[test]
+fn feature_added_with_the_marker_at_the_end_is_active() {
+    let mut doc = Document::new("marker at the end");
+    let first = doc.add_feature(FeatureKind::Sketch { plane: PlaneRef::Origin { name: "XY".into() }, sketch: Sketch::new() }, Some("First")).unwrap();
+    doc.marker = Some(1);
+
+    let added = doc.add_feature(FeatureKind::Sketch { plane: PlaneRef::Origin { name: "XY".into() }, sketch: Sketch::new() }, Some("Added")).unwrap();
+
+    assert_eq!(doc.features.iter().map(|feature| feature.id).collect::<Vec<_>>(), vec![first, added]);
+    assert_eq!(doc.marker, Some(2), "the marker stays after the last feature");
 }
 
 /// A construction plane that is its own side resolves through the model and back into the

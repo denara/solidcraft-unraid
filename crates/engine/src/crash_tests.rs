@@ -53,6 +53,22 @@ fn child() {
     set_environment("Renderer: test");
     let mut s = Session { crash_journal: true, ..Default::default() };
     s.execute("solid.box", &json!({"length": 10, "width": 20, "height": 30})).unwrap();
+    if mode == "read_only" {
+        let state = STATE.get().unwrap();
+        let before = read_live_journal(state);
+        assert_eq!(before.base, json!("new"));
+        assert_eq!(before.replay, vec![json!({"command":"solid.box","params":{"length":10,"width":20,"height":30}})]);
+        let evaluations = s.evaluations;
+        s.execute("document.inspect", &json!({})).unwrap();
+        assert_eq!(s.evaluations, evaluations, "reading the design does not evaluate it");
+        let after = read_live_journal(state);
+        assert_eq!(after.base, before.base, "a read must not rebase the recovery journal");
+        assert_eq!(after.replay, before.replay, "the command that made the box must remain replayable");
+        assert!(after.in_flight.is_none());
+        end_session();
+        println!("READ_ONLY_JOURNAL_OK");
+        return;
+    }
     // Commands that only read are not kept.
     for _ in 0..50 {
         s.execute("document.inspect", &json!({})).unwrap();
@@ -179,6 +195,14 @@ fn accepted_prepared_commands_replay_and_discarded_work_is_not_journaled() {
     let _ = fs::remove_dir_all(directory);
 }
 
+#[test]
+fn a_read_only_command_keeps_the_replay_after_body_names_are_pinned() {
+    let directory = fresh_dir("read-only");
+    let (output, ok) = run_child(&directory, "read_only");
+    assert!(ok && output.contains("READ_ONLY_JOURNAL_OK"), "{output}");
+    let _ = fs::remove_dir_all(directory);
+}
+
 fn only_report(dir: &Path) -> (Summary, Value) {
     let all = list(dir);
     assert_eq!(all.len(), 1, "{all:?}");
@@ -208,6 +232,7 @@ fn a_command_panic_is_reported_once_with_the_design_and_the_command() {
     assert!(!bt.iter().any(|f| f.as_str().unwrap().contains("crash::hook")), "the hook's own frames are dropped: {bt:?}");
     assert_eq!(v["recent_commands"][0]["command"], "solid.box");
     // The design from before the command, and the command: together they reproduce the crash.
+    assert!(v["design_path"].as_str().unwrap().ends_with("design.sc"), "{v}");
     let design = solidcraft_io::read_design(&fs::read(v["design_path"].as_str().unwrap()).unwrap()).unwrap();
     assert_eq!(design.features.len(), 1);
     let replay: Value = serde_json::from_slice(&fs::read(v["replay_path"].as_str().unwrap()).unwrap()).unwrap();
@@ -478,6 +503,17 @@ fn fake_report(dir: &Path, secs: u64, sig: u64, kind: &str) -> String {
     let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
     File::options().write(true).open(&f).unwrap().set_modified(t).unwrap();
     id
+}
+
+/// A report folder an earlier release wrote holds `design.solidcraft`: still found.
+#[test]
+fn a_report_from_an_earlier_release_still_finds_its_design() {
+    let d = fresh_dir("legacy-design");
+    let id = fake_report(&d, 1_700_000_000, 7, "command_panic");
+    fs::write(d.join(&id).join("design.solidcraft"), solidcraft_io::write_design(&solidcraft_doc::Document::default())).unwrap();
+    let v = read(&d, &id).unwrap();
+    assert!(v["design_path"].as_str().unwrap().ends_with("design.solidcraft"), "{v}");
+    let _ = fs::remove_dir_all(&d);
 }
 
 #[test]

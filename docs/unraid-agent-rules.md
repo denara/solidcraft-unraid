@@ -12,7 +12,7 @@ Any code adapted from other projects (MIT OR Apache-2.0) is noted in ATTRIBUTION
 
 ## Product name
 SolidCraft everywhere: crates `solidcraft-*`, binaries `solidcraft` and `solidcraft-cli`,
-`.solidcraft` designs, the `solidcraft/N` format tag, `SOLIDCRAFT_*` environment variables,
+`.sc` designs (with explicit `.solidcraft`/`.solvecraft` filename compatibility), the `solidcraft/N` format tag, `SOLIDCRAFT_*` environment variables,
 settings and recovery folders, the MCP server name, docs, CI and packaging. Container gateway, environment variables, volume paths and compatibility aliases retain their existing SolveCraft names. The upstream old name
 survives only in the explicit compatibility shims listed in `docs/compatibility.md`; don't add
 new uses of it anywhere else. Public docs/web/Flatpak deployments use project Pages
@@ -20,7 +20,7 @@ new uses of it anywhere else. Public docs/web/Flatpak deployments use project Pa
 
 ## Container prototype baseline
 The first Unraid prototype used upstream commit `af536a7`. The current validated
-container baseline is `514b0c84f9eb7655e3cdc986f0d44d4cd3416f4c`.
+container baseline is `ae07e36a7d09c6095f4de1bc7ab51067e2418093`.
 Keep later upstream CAD/UI feature updates separate from this deployment addition;
 advance the baseline only as a separate, validated update. See [update records](../docs/unraid-updates.md).
 

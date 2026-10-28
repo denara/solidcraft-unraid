@@ -325,9 +325,10 @@ pub fn component_bodies(app: &SolveApp, id: u64) -> Vec<String> {
 
 /// The eight radial commands, clockwise from the top.
 pub fn radial_items(app: &SolveApp) -> Vec<Item> {
+    let key = crate::keymap::display_for(app, "edit.repeat").unwrap_or_default();
     let repeat = match &app.last_command {
-        Some((_, label)) => act("ui.repeat", &format!("Repeat {label}"), "redo").key(crate::keymap::REPEAT_KEY),
-        None => act("ui.repeat", "Repeat", "redo").key(crate::keymap::REPEAT_KEY).on(false),
+        Some((_, label)) => act("ui.repeat", &format!("Repeat {label}"), "redo").key(&key),
+        None => act("ui.repeat", "Repeat", "redo").key(&key).on(false),
     };
     let delete = act("ui.delete", "Delete", "delete").key("Del").on(!app.session.selection.is_empty());
     if app.session.active_sketch.is_some() {
@@ -397,6 +398,7 @@ pub fn items(app: &SolveApp, target: &Target) -> Vec<Item> {
             .collect(),
         Target::NamedView { name } => crate::browser::view_items(app, name),
     };
+    v.extend(crate::browser::folded_folder_items(app, target));
     // Several items of the folder selected: they can be grouped.
     if let Some(p) = crate::browser::selection_group(app, target) {
         v.push(Item::sep());
@@ -449,6 +451,11 @@ fn picked_face_feature(app: &SolveApp) -> Option<u64> {
         Sel::Face { body, index, .. } => Some((body, *index)),
         _ => None,
     })?;
+    face_feature(app, body, index)
+}
+
+/// The feature that made face `index` of `body` (by its world name).
+pub(crate) fn face_feature(app: &SolveApp, body: &str, index: usize) -> Option<u64> {
     let state = app.session.world_state();
     let body = state.body(body)?;
     let names = solidcraft_engine::doc::naming::face_names(body);
@@ -500,7 +507,8 @@ fn viewport_items(app: &SolveApp) -> Vec<Item> {
     let has = |f: fn(&Sel) -> bool| sel.iter().any(f);
     let mut v = Vec::new();
     if let Some((_, label)) = &app.last_command {
-        v.push(act("ui.repeat", &format!("Repeat {label}"), "redo").key(crate::keymap::REPEAT_KEY));
+        let key = crate::keymap::display_for(app, "edit.repeat").unwrap_or_default();
+        v.push(act("ui.repeat", &format!("Repeat {label}"), "redo").key(&key));
         v.push(Item::sep());
     }
     // Everything under the cursor, for what lies beneath something else.
@@ -946,7 +954,7 @@ fn alignment_items(selection: &[Sel]) -> Vec<Item> {
 /// Sketch entity items: construction, fix, delete, dimension and the constraints the selection
 /// can take.
 fn sketch_entity_items(app: &SolveApp) -> Vec<Item> {
-    use solidcraft_engine::sketch::CurveKind;
+    use solidcraft_engine::sketch::{ConstraintKind, CurveKind};
     let Some(sid) = app.session.active_sketch else { return Vec::new() };
     let st = app.session.world_state();
     let Some(ss) = st.sketch(sid) else { return Vec::new() };
@@ -995,6 +1003,19 @@ fn sketch_entity_items(app: &SolveApp) -> Vec<Item> {
     if curves.is_empty() && points.is_empty() {
         if dims.len() == 1 {
             v.push(cmd(app, "sketch.toggle_driven", "Toggle Driven Dimension").with(json!({ "constraint": dims[0] })));
+            // A circle's or an arc's radius or diameter switches to the other one (#7499).
+            let round = |c: usize| matches!(ss.sketch.curves.get(c).map(|c| &c.kind), Some(CurveKind::Circle { .. } | CurveKind::Arc { .. }));
+            if ss
+                .sketch
+                .constraints
+                .iter()
+                .any(|k| k.id == dims[0] && matches!(k.kind, ConstraintKind::Radius { c, .. } | ConstraintKind::Diameter { c, .. } if round(c)))
+            {
+                v.push(cmd(app, "sketch.toggle_diameter", "Toggle Radius / Diameter").with(json!({ "constraint": dims[0] })));
+            }
+        }
+        if app.session.selection.iter().any(|s| matches!(s, Sel::SketchConstraint { .. })) {
+            v.push(act("ui.delete", "Delete", "delete").key("Del"));
             v.push(Item::sep());
         }
         if crate::sketch_text::selected_entity(app).is_some() {
@@ -1042,6 +1063,17 @@ fn sketch_entity_items(app: &SolveApp) -> Vec<Item> {
     }
     if curves.len() == 1 && ss.sketch.offset_distance(&curves[0]).is_some() {
         v.push(cmd(app, "sketch.offset.break", "Break Offset Association").with(json!({"curve":curves[0]})));
+    }
+    // #6533: a fit point on a fit point spline, where the menu was opened over it.
+    if let [curve] = curves.as_slice()
+        && ss
+            .sketch
+            .curve_index(curve)
+            .and_then(|i| ss.sketch.curves.get(i))
+            .is_some_and(|c| matches!(c.kind, CurveKind::Spline { control: false, .. }))
+        && let Some(at) = menu_sketch_point(app, &ss.plane)
+    {
+        v.push(cmd(app, "sketch.spline.insert_point", "Add Spline Point").with(json!({"curve": curve, "at": [at.x, at.y]})));
     }
     v.push(act("ui.fix", "Fix/Unfix", "c_fix").with(json!({ "entities": ents })));
     // The clipboard beside Delete, as in every menu.
@@ -1102,6 +1134,14 @@ fn sketch_entity_items(app: &SolveApp) -> Vec<Item> {
         v.extend(c);
     }
     v
+}
+
+/// Where on the active sketch's plane the viewport menu was opened (sketch coordinates).
+fn menu_sketch_point(app: &SolveApp, plane: &solidcraft_engine::geom::Plane) -> Option<solidcraft_engine::geom::Vec2> {
+    let (at, _) = app.menu.opened?;
+    let proj = crate::viewport::projection(app, app.viewport.rect?);
+    let (o, d) = proj.ray(at);
+    Some(plane.to_local(plane.intersect_ray(o, d)?))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1716,7 +1756,12 @@ pub fn open(app: &mut SolveApp, at: Pos2, held: crate::tool_modifiers::Held) {
         _ => None,
     });
     crate::select_other::close(app);
-    if app.session.active_sketch.is_none()
+    if let Some(sel) = crate::viewport::sketch_constraint_at(app, at, app.viewport.hover.as_ref()) {
+        if !in_selection(app, &sel) {
+            let _ = app.run("select.set", json!({ "items": [sel] }));
+            app.menu.picked = Some((at, before, app.session.selection.clone()));
+        }
+    } else if app.session.active_sketch.is_none()
         && let Some(h) = app.viewport.hover.clone()
         && let Some((_, sel)) = crate::viewport::candidate(app, &[h])
         && !in_selection(app, &sel)
@@ -2257,6 +2302,45 @@ mod tests {
         assert!(!items(&h.app, &Target::Viewport).iter().any(|i| i.id == "sketch.toggle_driven"));
     }
 
+    /// #7499: a selected circle's dimension offers Toggle Radius / Diameter, which switches it
+    /// both ways; a line's length does not.
+    #[test]
+    fn a_circle_dimension_menu_toggles_radius_and_diameter() {
+        use solidcraft_engine::sketch::ConstraintKind;
+        let mut h = crate::scenario::Harness::new();
+        h.app.home.open = false;
+        h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+        let sid = h.app.session.active_sketch.unwrap();
+        let c = h.app.run("sketch.circle.center", json!({"center":[0,0],"radius":10})).unwrap()["curves"][0].as_str().unwrap().to_owned();
+        let l = h.app.run("sketch.line", json!({"points":[[30,0],[50,0]],"connect":false,"infer":false})).unwrap()["curves"][0]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let pc = h.app.run("sketch.dimension", json!({"entities":[c]})).unwrap()["param"].as_str().unwrap().to_owned();
+        let pl = h.app.run("sketch.dimension", json!({"entities":[l],"value":20})).unwrap()["param"].as_str().unwrap().to_owned();
+        let dim = |h: &crate::scenario::Harness, p: &str| {
+            h.app.session.world_state().sketch(sid).unwrap().sketch.constraints.iter().find(|c| c.param.as_deref() == Some(p)).unwrap().clone()
+        };
+        let did = dim(&h, &pc).id;
+
+        h.app.session.selection = vec![Sel::SketchConstraint { id: did.clone() }];
+        let menu = items(&h.app, &Target::Viewport);
+        let item = menu.iter().find(|i| i.id == "sketch.toggle_diameter").expect("a circle's dimension must offer Toggle Radius / Diameter");
+        assert!(item.enabled);
+        assert_eq!(item.params, Some(json!({"constraint": did})));
+        run_item(&mut h.app, item, egui::pos2(0.0, 0.0));
+        assert!(matches!(dim(&h, &pc).kind, ConstraintKind::Radius { .. }), "the diameter is a radius now");
+        let menu = items(&h.app, &Target::Viewport);
+        let item = menu.iter().find(|i| i.id == "sketch.toggle_diameter").expect("a radius still offers the toggle");
+        run_item(&mut h.app, item, egui::pos2(0.0, 0.0));
+        assert!(matches!(dim(&h, &pc).kind, ConstraintKind::Diameter { .. }), "and a diameter again");
+
+        h.app.session.selection = vec![Sel::SketchConstraint { id: dim(&h, &pl).id }];
+        let menu = items(&h.app, &Target::Viewport);
+        assert!(menu.iter().any(|i| i.id == "sketch.toggle_driven"));
+        assert!(!menu.iter().any(|i| i.id == "sketch.toggle_diameter"), "a length is no radius");
+    }
+
     #[test]
     fn units_toolbar_start_offers_choices_and_one_undo_step() {
         let mut h = crate::scenario::Harness::new();
@@ -2343,6 +2427,61 @@ mod tests {
         let remaining = sk.shape(sk.curve_index(&output).unwrap()).unwrap();
         assert!(matches!(remaining, Shape::Line { a, b } if (a.dist(b) - 10.0).abs() < 1e-6), "{remaining:?}");
         assert!(remaining.dist(cut) > 1.0);
+    }
+
+    /// #6533: a right-click on a fit point spline offers Add Spline Point at the clicked spot, and
+    /// the item puts a fit point there. A control point spline is not offered it.
+    #[test]
+    fn spline_context_menu_adds_a_fit_point_where_it_was_clicked() {
+        let mut h = crate::scenario::Harness::new();
+        h.app.home.open = false;
+        h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+        let fit = h.app.run("sketch.spline.fit_point", json!({"points":[[0,0],[10,8],[20,0],[30,6]],"connect":false})).unwrap()["curves"][0]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let control = h.app.run("sketch.spline.control_point", json!({"points":[[0,-12],[10,-4],[20,-12]],"connect":false})).unwrap()["curves"][0]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let sid = h.app.session.active_sketch.unwrap();
+        let spot = |h: &crate::scenario::Harness, id: &str, piece: usize| {
+            let state = h.app.session.world_state();
+            let sk = &state.sketch(sid).unwrap().sketch;
+            sk.exact_segs(sk.curve_index(id).unwrap()).unwrap()[piece].point_at(0.5)
+        };
+        let count = |h: &crate::scenario::Harness, id: &str| {
+            let state = h.app.session.world_state();
+            let sk = &state.sketch(sid).unwrap().sketch;
+            sk.curves[sk.curve_index(id).unwrap()].kind.point_ids().len()
+        };
+        h.call("ui.view", json!({"view":"top"}));
+        h.app.cam.distance = 80.0;
+        h.settle();
+
+        let c = spot(&h, &control, 0);
+        h.step(&json!({"click":{"world":[c.x,c.y,0]},"button":"right"})).unwrap();
+        assert_eq!(h.app.session.selection, vec![Sel::SketchCurve { id: control.clone(), sketch: None }]);
+        assert!(items(&h.app, &Target::Viewport).iter().all(|item| item.id != "sketch.spline.insert_point"));
+        close(&mut h.app);
+
+        let at = spot(&h, &fit, 1);
+        h.step(&json!({"click":{"world":[at.x,at.y,0]},"button":"right"})).unwrap();
+        assert_eq!(h.app.session.selection, vec![Sel::SketchCurve { id: fit.clone(), sketch: None }]);
+        let menu = items(&h.app, &Target::Viewport);
+        let item = menu.iter().find(|item| item.id == "sketch.spline.insert_point").expect("a fit spline offers Add Spline Point");
+        assert_eq!(item.label, "Add Spline Point");
+        assert!(item.enabled);
+        let p = item.params.clone().unwrap();
+        assert_eq!(p["curve"], json!(fit));
+        let clicked = solidcraft_engine::geom::Vec2::new(p["at"][0].as_f64().unwrap(), p["at"][1].as_f64().unwrap());
+        assert!(clicked.dist(at) < 0.5, "the item carries the clicked spot: {clicked:?} for {at:?}");
+        h.step(&json!({"click":{"handle":"menu:sketch.spline.insert_point"}})).unwrap();
+        assert_eq!(count(&h, &fit), 5);
+        let state = h.app.session.world_state();
+        let sk = &state.sketch(sid).unwrap().sketch;
+        let added = sk.point(sk.curves[sk.curve_index(&fit).unwrap()].kind.point_ids()[2]).unwrap();
+        assert!(added.dist(at) < 0.5, "the new fit point is where the menu was opened: {added:?}");
     }
 
     #[test]

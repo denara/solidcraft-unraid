@@ -32,6 +32,7 @@ pub mod crash_ui;
 pub mod deferred;
 pub mod delete;
 pub mod design_properties;
+pub mod dialog_column;
 mod dialog_descriptor;
 pub mod dialogs;
 pub mod dialogs_appearance;
@@ -183,6 +184,8 @@ mod file_load_ui_tests;
 mod fillet_spline_handle_tests;
 pub mod mouse_gesture;
 pub(crate) mod navigation;
+pub mod navigation_bar;
+mod navigation_bar_view;
 pub use navigation::WebWheelGestures;
 pub mod network_prompt;
 pub mod open_elsewhere;
@@ -193,13 +196,16 @@ pub(crate) mod place_gizmo;
 pub(crate) mod plugins;
 pub mod prefs;
 pub mod prefs_notice;
+mod prefs_search;
 #[cfg(test)]
 mod preselect_tests;
 pub mod preview;
+mod primitive_placement;
 #[cfg(test)]
 mod primitive_units_tests;
 pub mod recovery_ui;
 pub mod ref_images;
+mod render_ui;
 pub mod render_workspace;
 #[cfg(test)]
 mod revolve_edit_tests;
@@ -328,6 +334,8 @@ pub struct UiState {
     pub pick_off: Vec<String>,
     /// A click on a face picks its whole body.
     pub pick_bodies: bool,
+    /// A face picks its exact component occurrence in Design and Render.
+    pub pick_components: bool,
     /// 0: shaded with edges, 1: shaded, 2: wireframe, 3: shaded with hidden edges.
     pub visual_style: u8,
     /// A soft shadow on the ground under the model (seen from above).
@@ -358,6 +366,7 @@ impl Default for UiState {
             dark: true,
             pick_off: Vec::new(),
             pick_bodies: false,
+            pick_components: false,
             visual_style: 0,
             ground_shadow: true,
             up_axis: Default::default(),
@@ -805,7 +814,7 @@ impl SolveApp {
 
     fn set_wgpu_targets(&mut self, rs: &egui_wgpu::RenderState, scene: crate::gpu::GpuTarget, window: crate::gpu::GpuTarget) {
         #[allow(unused_mut)] // Only native hosts can wait for the startup readback.
-        let (mut installed, stats) = gpu::install(rs, scene, window, !self.cpu_meshing);
+        let (mut installed, stats, tess_ready) = gpu::install(rs, scene, window, !self.cpu_meshing);
         #[cfg(not(target_arch = "wasm32"))]
         if scene.depth.is_some() && window.depth.is_none() && window.samples == 1 {
             let mut renderer = rs.renderer.write();
@@ -828,6 +837,7 @@ impl SolveApp {
             }
         }
         self.viewport.gpu = Some(installed);
+        self.viewport.tess_ready = tess_ready;
         self.viewport.draw_stats = Some(stats);
         render_workspace::invalidate_scene(self);
         let (samples, has_depth) = self.viewport.gpu.map_or((1, false), |g| (g.samples.max(1), g.depth.is_some()));
@@ -1029,6 +1039,46 @@ impl SolveApp {
                     &strings("closed_by_default"),
                 );
             }
+            if id == "view.render_focus"
+                && let Some(on) = v.get("on").and_then(Value::as_bool)
+            {
+                self.shell.render_focus = on;
+                render_ui::reset_shell(self);
+                self.shell.content = None;
+            }
+            if id == "view.render_browser"
+                && let Some(open) = v.get("open").and_then(Value::as_bool)
+            {
+                self.shell.render_browser_open = open;
+            }
+            if id == "view.render_stage"
+                && let Some(stage) = v.get("stage").and_then(Value::as_str)
+            {
+                render_workspace::select_stage(self, stage);
+            }
+            if id == "select.filter" {
+                let mode = v.get("mode").and_then(Value::as_str);
+                self.ui.pick_bodies = mode == Some("body");
+                self.ui.pick_components = mode == Some("component");
+                self.ui.pick_off.retain(|kind| kind != "faces");
+            }
+            if id == "view.render_dock"
+                && let (Some(panel), Some(side)) = (v.get("panel").and_then(Value::as_str), v.get("side").and_then(Value::as_str))
+            {
+                let other = if side == "left" { "right" } else { "left" };
+                if panel == "inspector" {
+                    self.preferences.render_inspector_side = side.into();
+                    self.preferences.render_browser_side = other.into();
+                } else {
+                    self.preferences.render_browser_side = side.into();
+                    self.preferences.render_inspector_side = other.into();
+                }
+            }
+            if id == "view.shots_strip"
+                && let Some(visible) = v.get("visible").and_then(Value::as_bool)
+            {
+                self.preferences.render_shots_strip = visible;
+            }
             if id == "view.history_layout" {
                 if let Some(width) = v.get("width").and_then(Value::as_f64) {
                     self.preferences.timeline_left_width = ui_kit::history_snap_width(width as f32);
@@ -1135,10 +1185,14 @@ impl SolveApp {
         workspace::sync_context(self);
     }
 
-    /// Start the last tool or dialog started again (Repeat in the menus, Shift+R; #3045).
-    /// `false` when none was started yet.
+    /// Start the last tool or dialog started again, with its defaults (Repeat in the menus,
+    /// the `edit.repeat` command and its key, Shift+R by default; #3045, #7077). `false` when
+    /// none was started yet: the status line says so.
     pub fn repeat_last(&mut self) -> bool {
-        let Some((id, _)) = self.last_command.clone() else { return false };
+        let Some((id, _)) = self.last_command.clone() else {
+            self.set_status(self.tr("ui.repeat_nothing").to_string(), false);
+            return false;
+        };
         self.start(&id);
         true
     }
@@ -1169,6 +1223,11 @@ impl SolveApp {
         if self.file_load.busy() || self.file_picker.is_some() {
             return;
         }
+        // Repeat Last Command starts the tool it names; it is never the one repeated itself.
+        if id == "edit.repeat" {
+            self.repeat_last();
+            return;
+        }
         // Front … Isometric (Ctrl+1…7 by default) turn the view as the view cube's faces do. The
         // flat pattern is a 2D page: it has no other side to turn to.
         if solidcraft_engine::standard_view(id).is_some() {
@@ -1193,6 +1252,7 @@ impl SolveApp {
             && let Some(why) = info.disabled_reason
         {
             let label = self.tr_label(info.label).to_string();
+            let why = self.tr_label(&why).to_string();
             self.set_status(format!("{label}: {why}"), true);
             return;
         }
@@ -1229,6 +1289,18 @@ impl SolveApp {
         if id == "view.layout" {
             let mode = if self.ui.layout == shell::LayoutMode::Floating { "compact" } else { "floating" };
             let _ = self.run(id, json!({"mode":mode}));
+            return;
+        }
+        if id == "view.render_focus" {
+            let _ = self.run(id, json!({"on": !self.shell.render_focus}));
+            return;
+        }
+        if id == "view.render_browser" {
+            let _ = self.run(id, json!({"open": !self.shell.render_browser_open}));
+            return;
+        }
+        if id == "view.shots_strip" {
+            let _ = self.run(id, json!({"visible": !self.preferences.render_shots_strip}));
             return;
         }
         if id == "view.history_layout" {
@@ -1769,7 +1841,7 @@ impl SolveApp {
         if render_workspace::active(self) {
             self.cancel_view_animation();
             match solidcraft_engine::product_scene::extract(&self.session) {
-                Ok(scene) if !scene.bounds.is_empty() => self.cam.fit(&scene.bounds),
+                Ok(scene) if !scene.bounds.is_empty() => self.fit_bounds(scene.bounds),
                 Err(e) => self.set_status(e.to_string(), true),
                 _ => {}
             }
@@ -1804,6 +1876,9 @@ impl SolveApp {
 
     fn fitted_bounds(&self, mut cam: Camera, bounds: &solidcraft_engine::geom::Aabb3) -> Camera {
         if let Some(layout) = &self.viewport.layout {
+            if render_workspace::active(self) {
+                return viewport_layout::fit_product_bounds(cam, bounds, layout).unwrap_or(cam);
+            }
             return viewport_layout::fit_bounds(cam, bounds, layout, self.perspective_view()).unwrap_or(cam);
         }
         let previous = cam;
@@ -1812,7 +1887,7 @@ impl SolveApp {
     }
 
     fn resolve_fit(&mut self, ctx: &egui::Context) {
-        viewport::refresh_layout(self, ctx.pixels_per_point());
+        viewport::refresh_layout(self, ctx);
         if self.viewport.layout.is_some()
             && let Some((cam, bounds, animate)) = self.pending_fit.take()
         {
@@ -1971,6 +2046,7 @@ impl SolveApp {
     /// Per-frame logic before layout.
     pub fn logic(&mut self, ctx: &egui::Context) {
         frame_watch::begin(self);
+        gpu::tick_tessellation(self);
         file_picker::tick(self, ctx);
         dialogs_save_mesh::tick_wait(self, ctx);
         easyprint_ui::tick(self, ctx);
@@ -2037,8 +2113,15 @@ impl SolveApp {
         control::publish_design(self, &control::DESIGN_WATCH);
     }
 
-    /// Inject synthetic events (one pointer event per frame).
+    /// The frame's input before the app reads it: synthetic events, then what is typed while a
+    /// capture hides the report waits for it (the control channel's typing too).
     pub fn raw_input_hook(&mut self, raw: &mut egui::RawInput) {
+        self.synthetic_input(raw);
+        issue_report::hold_input(self, raw);
+    }
+
+    /// Inject synthetic events (one pointer event per frame).
+    fn synthetic_input(&mut self, raw: &mut egui::RawInput) {
         if self.synthetic.is_empty() {
             return;
         }
@@ -2161,7 +2244,9 @@ impl SolveApp {
                 return;
             }
         }
-        let floating = ui_kit::Container::new(ui.ctx(), ui_kit::Surface::Panel).floating();
+        let floating = render_workspace::active(self) || ui_kit::Container::new(ui.ctx(), ui_kit::Surface::Panel).floating();
+        timeline::follow_view_pick(self);
+        render_ui::focus_shortcut(self, ui);
         let show_timeline = self.ui.show_timeline && !render_workspace::active(self);
         let left_timeline = show_timeline && self.preferences.timeline_left;
         timeline_left::animate_folds(self, ui.ctx());
@@ -2176,8 +2261,9 @@ impl SolveApp {
             timeline::timeline(self, ui);
         }
         // Browser hugs its contents in either layout; it never becomes a full-height blank column.
-        if !self.ui.show_browser {
+        if !self.ui.show_browser || render_ui::focused(self) {
             self.shell.browser = None;
+            shell::register_panel(self, "render:browser", None, None);
         }
         if floating || left_timeline || !show_timeline {
             self.shell.history = None;
@@ -2186,11 +2272,12 @@ impl SolveApp {
         dialogs::sync_feature_edit_sketch(self);
         let full = ui.available_rect_before_wrap();
         if floating {
-            let cards = shell::Cards::new(full, self.ui.layout, toolbar::ribbon_height(self.preferences.ribbon_labels));
+            let cards = toolbar::shell_cards(self, full);
             self.shell.cards = vec![cards.workspace, cards.ribbon];
             self.shell.history = if left_timeline {
                 let below_ribbon = egui::Rect::from_min_max(egui::pos2(full.left(), cards.bottom), full.max);
-                Some(timeline_left::floating_rect(self, below_ribbon))
+                // A dialog in the left column holds the History's place.
+                (!dialog_column::holds(self)).then(|| timeline_left::floating_rect(self, below_ribbon))
             } else {
                 show_timeline.then(|| timeline::floating_rect(full))
             };
@@ -2219,13 +2306,15 @@ impl SolveApp {
         if floating && show_timeline && !left_timeline {
             timeline::timeline(self, ui);
         }
+        dialog_column::layout(self, ui.available_rect_before_wrap());
         if left_timeline {
             timeline_left::left_panel(self, ui);
         }
         if render_workspace::active(self) {
+            render_ui::shots_strip(self, ui);
             render_workspace::panel(self, ui);
         }
-        if self.ui.show_browser {
+        if self.ui.show_browser && !render_ui::focused(self) {
             browser::browser(self, ui);
         }
         if floating {
@@ -2245,12 +2334,15 @@ impl SolveApp {
                     .into_iter()
                     .filter(|r| r.is_positive())
                     .collect();
-                    viewport::refresh_layout(self, ui.ctx().pixels_per_point());
+                    viewport::refresh_layout(self, ui.ctx());
                 } else {
                     preview::update(self, ui.ctx());
                     self.show_workspace(ui);
                 }
             });
+        if render_workspace::active(self) {
+            render_ui::overlays(self, ui);
+        }
         // Before the dialog: a click on the view's OK or Cancel is for this frame's dialog.
         view_confirm::show(self, ui.ctx());
         dialogs::show(self, ui.ctx());
@@ -2297,10 +2389,13 @@ impl SolveApp {
         }
         let rx = self.control_rx.take();
         for _ in 0..PER_FRAME {
-            // A file loading, an agent's design change computing, or the agent cursor acting one
-            // out: commands that change the design wait their turn (the window, inspection and
-            // screenshots still answer, #1989).
-            let waits = self.file_load.busy() || self.file_picker.is_some() || self.control_job.is_some() || self.agent.busy();
+            // A file loading, a save being written, an agent's design change computing, or the
+            // agent cursor acting one out: commands that change the design wait their turn (the
+            // window, inspection and screenshots still answer, #1989). `engine.script` runs
+            // directly, past `SolveApp::run`'s guard, so without the save here it changed the
+            // design the save was taken up for (#6003).
+            let waits =
+                self.file_load.busy() || self.file_picker.is_some() || self.saving.is_some() || self.control_job.is_some() || self.agent.busy();
             // A screenshot waiting for an opened design to be meshed holds what came after it.
             let shot_waits = open_meshing::active(self) && self.control_held.front().is_some_and(|r| r.method == "ui.screenshot");
             // Held requests go first, in order, once nothing makes them wait.

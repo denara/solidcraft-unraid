@@ -8,14 +8,14 @@ tested locally using Docker Desktop Linux containers, then deployable on Unraid.
 Upstream renamed the displayed product from SolveCraft to SolidCraft. Technical names
 use upstream compatibility shims: `solvecraft-cli` remains a CLI alias and existing
 `.solvecraft` files still open. The gateway binary, container environment variables,
-persistent volume paths and image names retain their existing identifiers. New documents
-use upstream's current container/format marker and cannot be opened by older builds. Hostnames and deployment paths below are examples: substitute your own
+persistent volume paths and image names retain their existing identifiers. New documents use the `.sc` extension; `.solidcraft` and `.solvecraft` remain explicit
+filename aliases. New saves use upstream's current container/format marker and cannot be opened by older builds. Hostnames and deployment paths below are examples: substitute your own
 values locally, outside Git. `.env` and `target/` are ignored by Git and Docker builds.
 The fork is hosted at [denara/solidcraft-unraid](https://github.com/denara/solidcraft-unraid).
 The public Unraid template names a new container `SolidCraft`; the existing local Compose service,
 image tags, command names, data format and environment variables retain compatibility.
 The first prototype used upstream commit `af536a7`. The current validated snapshot is
-`514b0c84f9eb7655e3cdc986f0d44d4cd3416f4c`. See [update records](unraid-updates.md) for checks,
+`ae07e36a7d09c6095f4de1bc7ab51067e2418093`. See [update records](unraid-updates.md) for checks,
 the transferable image archive and installation instructions for this update.
 
 For future requested updates, use the repository skill
@@ -95,11 +95,11 @@ selecting another project requires a new session. Names are bounded to 96 UTF-8 
 and must be one visible directory component, without separators, reserved names,
 surrounding spaces or a trailing dot. Existing folders retain their spelling.
 
-CAD paths are relative to the selected project: `save({"path":"part.solidcraft"})`
-writes `Demo-Bracket/part.solidcraft`. Downloads, `workspace_list_files` filters and
+CAD paths are relative to the selected project: `save({"path":"part.sc"})`
+writes `Demo-Bracket/part.sc`. Downloads, `workspace_list_files` filters and
 `expected_revisions` keys remain relative to the shared workspace and include the
-project prefix. For example, use `/files/Demo-Bracket/part.solidcraft` for download
-and `{"Demo-Bracket/part.solidcraft":"<revision>"}` for a revision precondition.
+project prefix. For example, use `/files/Demo-Bracket/part.sc` for download
+and `{"Demo-Bracket/part.sc":"<revision>"}` for a revision precondition.
 This distinction preserves the same file identity for HTTP and all MCP sessions.
 
 Existing files are not moved or rewritten. To use an older root file as a source,
@@ -256,7 +256,7 @@ guessed into a project. MCP clients choose filenames freely: there is no global 
 naming convention. For reliable grouping, reuse a stem or save to a shared relative
 directory. No file migration or design rewrite is performed.
 
-**Details** opens a popup with saved `.solidcraft` properties: title, author, project,
+**Details** opens a popup with saved native-design properties: title, author, project,
 part number, revision, description, units, format and model counts where present.
 File size and filesystem timestamps are shown separately. Missing properties are not
 invented; unsupported/corrupt/oversized metadata gets an explanatory fallback and the
@@ -490,7 +490,7 @@ Linked components may read and refresh designs only under /data/files, including
 stored in uploaded documents. The gateway supplies a per-subprocess link root; resolved
 paths and parent folders are checked again by the engine, with symlinks refused. Desktop
 linked components retain their normal behavior when no network link root is supplied.
-This upstream 0.24.0 snapshot includes pending format additions and writes format 40. Validated native format-38 files and legacy format-13 designs open without modifying their source files; parameters, measurements and named split faces are preserved. Keep pre-update server and separate browser-design backups; older builds cannot read newly saved designs.
+This upstream 0.25.1 snapshot includes pending cylinder-reference additions and writes format 41. Validated native format-40 files and legacy format-13 designs open without modifying their source files; parameters, measurements and named split faces are preserved. The `.sc` extension is the new upstream default; existing `.solidcraft`/`.solvecraft` files keep their names, and the workspace applies the same data-only validation, details and browser-copy safeguards to all three. Keep pre-update server and separate browser-design backups; older builds cannot read newly saved designs.
 
 The HTTP gateway launches native MCP with --headless, an explicit /data/files scope and --quiet. Desktop discovery never attaches a network session to a desktop app. Batch tool aliases are normalized before path/project/revision checks. The component.extract file output and component.replace_with_link source path use the same confinement and shared file gate as other file commands. This keeps upstream file confinement active without logging private per-session paths. Browser build URLs are relative, matching upstream's offline/update support; Web and HTTP MCP remain independent.
 
@@ -564,7 +564,7 @@ The initial browser upload policy follows the enabled container importers:
 
 | Kind | Accepted files | Intended use |
 | --- | --- | --- |
-| Native design | `.solidcraft`, legacy `.solvecraft`, design `.json` | Directly editable after opening; JSON must contain a design format and features, not a command script. |
+| Native design | `.sc`, legacy `.solidcraft`/`.solvecraft`, design `.json` | Directly editable after opening; JSON must contain a design format and features, not a command script. |
 | Exchange model | `.step`/`.stp`, `.igs`/`.iges`, `.stl`, `.3mf`, `.obj`, `.glb`/`.gltf` | Explicit CAD import/open; STEP/IGES carry boundary geometry, mesh formats remain mesh imports. |
 | Drawing | `.dxf`, `.svg` | Insert into a sketch or open as a new drawing design. DXF must be textual; SVG must be passive and self-contained. |
 | Image template | `.png`, `.jpg`/`.jpeg` | Reference image via the sketch canvas commands; not editable solid geometry. |

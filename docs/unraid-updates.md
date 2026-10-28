@@ -1,5 +1,69 @@
 # Validated container updates
 
+## 2026-10-28: fixed upstream 0.25.1 snapshot, native .sc compatibility
+
+Selected `ae07e36a7d09c6095f4de1bc7ab51067e2418093` once, 131 commits after
+validated `514b0c84`. The sole `codex/unraid-mcp-web` branch started clean and
+synchronized at `113c4057`; fetched fork main remains an ancestor. Upstream CAD
+features/changes belong to [the original project](https://github.com/tangency-labs/solidcraft).
+This remains unofficial integration, without an application release or Unraid install.
+
+The update preserves every published HTTP MCP, independent browser CAD and Workspace
+extension: mandatory immutable real projects, strong revisions/shared gates, remembered
+cookie-only login, server-push inventory, PNG thumbnails, independent browser copies,
+read-only observation, confirmed deletion, bounded streaming ZIP64, manual projects,
+multi-file uploads, batch conflict choices and the shared-volume capacity footer.
+The permanent Unraid Overview is unchanged. The upstream app-ID icon rename preserves
+its original bytes; catalog synchronization is only needed if actual metadata differs.
+
+Upstream now uses `.sc` for new native designs. The integration recognizes `.sc`,
+`.solidcraft` and `.solvecraft` equally for inventory, grouping, details, bounded data-only
+uploads, strong revisions and cookie-bound one-use browser handoff. New browser copies
+use `.sc`; existing files retain their original names, without a bulk migration. The
+persistent HTTP upload-to-MCP continuation regression uses `.sc` while preserving a
+legacy-extension source. Renamed public upstream fixtures are referenced at their new
+paths. New saves use format 41, including pending cylinder-reference edges; older
+builds cannot read them, so retain pre-update server and independent browser backups.
+
+Merge resolutions preserve quiet/headless MCP, the save-overwrite revision contract,
+unsafe native-bridge omissions and isolated observer caches. The new placement index
+cache starts independently in scratch snapshots. Upstream Update Links now memoizes
+reads; every actual read still passes the network link root/device/scope/symlink guard
+before cache lookup or file access, including links embedded in uploaded designs.
+Review found no new file-output command requiring an added gateway exception. Async
+UI-save adoption does not change the CLI's synchronous, gated writes. One upstream
+boolean was simplified equivalently for the pinned Clippy version; no modelling
+behavior was changed. Shipped notices were regenerated with both fork packages.
+
+Local verification passed 143 gateway tests, 48 relevant library selections (2,154 test
+executions), affected CLI cases and 29 native browser/helper cases. Native all-target
+Clippy, 13-crate Wasm compatibility and browser/client lint, fmt, license, 858 attributed
+assets, original icons, layers, sorted catalogs, containers and skills checks passed.
+`cargo xtask ci` completed its static/native gates; its unfiltered whole-workspace test
+build was deliberately stopped before execution to honor the requested scoped testing.
+The separate affected suites and native/Wasm gates passed; no failing behavior test was
+waived. Software-GL capture and all 11 depth cases, 12 stand-up UI cases, actual browser
+API/linked-source/DXF/queue checks and all 20 offline/update cases passed.
+
+A fresh labelled candidate with a disposable volume, loopback port and test credential
+passed modelling at 24000 mm3, PNG/STEP, session separation, path/origin/authentication,
+logging/privacy, restart persistence, projects, Workspace revisions, live observation,
+SSE, deletion/streaming ZIP, remembered login/revocation and browser uploads. Actual
+browser tests and inspected screenshots confirm multiple drops, fixed targets,
+overwrite/skip/cancel and apply-all reset, stale-revision denial, live folder state,
+combined overview, footer and opening `.sc` as an independent browser copy.
+
+The official MCP SDK reopened public native formats 13 and 40 without changing source
+bytes. Format-41 `.sc` saves preserve parameters, 24000 mm3, split-face names/centroids
+and STEP export; native ZIP CRCs pass. Existing aliases, extract/output confinement,
+strong revisions, embedded HDR CPU rendering and session isolation also pass. The
+closed cone retains 314.1019886 mm3 on roundtrip, within upstream's 0.2% analytic tolerance.
+Evidence and screenshots remain privately under `target/upstream-ae07e36a-20261028/`.
+
+Public workflow, anonymous pull/digest, image archive/SHA256 and local replacement/
+cleanup will be recorded after the exact validated source is published. Until then,
+the previously published immutable image and local runtime remain unchanged.
+
 ## 2026-10-27: fixed upstream 0.24.0 snapshot, format 40 and preserved integration
 
 Selected `514b0c84f9eb7655e3cdc986f0d44d4cd3416f4c` once, 185 commits after

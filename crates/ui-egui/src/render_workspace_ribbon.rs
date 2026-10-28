@@ -130,13 +130,15 @@ pub(super) fn perform_job(app: &mut SolveApp, id: &str) -> Result<(), String> {
         "render.start" => {
             let request = super::image_params(app)?;
             let reply = app.run(id, request)?;
-            let job = serde_json::from_value(reply["job"].clone()).map_err(|e| format!("invalid render job identity: {e}"))?;
+            let job = serde_json::from_value(reply["job"].clone())
+                .map_err(|e| crate::i18n::format("render.error_job_identity", &[("error", &e.to_string())]))?;
             app.render_workspace.view.job = Some(job);
         }
         "render.result.regrade" => {
             let source = app.render_workspace.view.completed.ok_or_else(|| app.tr("render.ribbon_no_result").to_string())?;
             let reply = app.run(id, json!({"job":source,"presentation":presentation(app)}))?;
-            let job = serde_json::from_value(reply["job"].clone()).map_err(|error| format!("invalid regrade identity: {error}"))?;
+            let job = serde_json::from_value(reply["job"].clone())
+                .map_err(|error| crate::i18n::format("render.error_regrade_identity", &[("error", &error.to_string())]))?;
             app.render_workspace.view.job = Some(job);
         }
         "render.cancel" => {
@@ -152,7 +154,7 @@ pub(super) fn perform_job(app: &mut SolveApp, id: &str) -> Result<(), String> {
                 super::export_image(app, job, overwrite);
             }
         }
-        _ => return Err("not an interactive image-job action".into()),
+        _ => return Err(crate::i18n::tr("render.error_job_action").into()),
     }
     Ok(())
 }
@@ -231,7 +233,7 @@ fn navigate(app: &mut SolveApp, id: &str) -> Result<(), String> {
         "render.camera.get" | "render.camera.set" => focus(app, Page::Camera, None),
         "render.quality.prepare" => focus(app, Page::Output, Some("quality")),
         "render.status" | "render.backends" => focus(app, Page::Diagnostics, None),
-        _ => return Err("unbound interactive Render command".into()),
+        _ => return Err(crate::i18n::tr("render.error_interactive_command").into()),
     }
     Ok(())
 }
