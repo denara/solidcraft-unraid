@@ -72,9 +72,41 @@ bytes unchanged. All native ZIP CRCs pass; the cone keeps 314.1019886 mm3 within
 upstream 0.2% numerical tolerance. Evidence remains under ignored
 `target/upstream-c7a1cee3-20261029/`.
 
-Exact-source workflow, anonymous registry digest/pull, archive SHA256 and local
-replacement/cleanup will be added after public image verification. Until then,
-the previously published runtime and image remain unchanged.
+Publication verified: source [`4c7db958`](https://github.com/denara/solidcraft-unraid/commit/4c7db9580faf5ee16e20ff09efe6978e8e5db151) passed [the exact container workflow](https://github.com/denara/solidcraft-unraid/actions/runs/40846614284).
+That clean CI image passed modelling/PNG/STEP, session separation, authentication,
+origin/path checks, restart persistence, logging/privacy, projects, Workspace,
+observer/live events, deletion/streaming ZIP, remembered login and uploads before
+registry push. Both `latest` and immutable `sha-4c7db9580faf5ee16e20ff09efe6978e8e5db151` pulled anonymously;
+source, Linux amd64 and direct anonymous registry manifest/digest checks passed.
+Public digest: `sha256:fbc8e1d00e1680a53f9bf81362342401408b1daeb0791a2735090a065c716a86`.
+
+Export: `target/solidcraft-unraid-upstream-c7a1cee3-4c7db958.tar` (183,386,624 bytes), own tag `solvecraft-unraid:upstream-c7a1cee3-4c7db958`.
+SHA256: `329db2b310017842591a01dff1477b4ff58832ee55c5512e48561ec78db37d90`. Tar structure and the full checksum were verified again
+before this record.
+
+The sole remaining local development runtime `solvecraft-solvecraft-1` is healthy at
+0.26.0 on that immutable public image. A private pre-swap data/config backup passed
+gzip/tar integrity and the actual prior image is retained for rollback. The same data
+volume, token, full environment, user, ports/origins and resource/security limits were
+verified unchanged. Post-swap authenticated official-SDK MCP, unchanged public
+24000 mm3 source reopened read-only, ephemeral modelling/PNG, browser cookie login/
+logout, protected saved properties/SSE and both independent web asset sets passed.
+No real saved design was overwritten. Then 9 owned unused build/check/candidate
+containers were removed after label/image/mount/activity checks, with diagnoses
+preserved. Volumes, build caches, toolchain, private backup and rollback resources
+remain. No global prune or unrelated resource deletion was used.
+
+After publication the canonical XML and original icon still match public catalog
+`denara/unraid-templates` main `ffa25fd39fbca2c4d5da2c868d5d0eed7b371925`. Profile and license
+were untouched; no catalog commit or CA submission is needed. The final fetch found
+`7341b8f6be35a69c42136e58d71fe88655340d67` (12 later upstream commits), reserved for
+the next fixed snapshot; the tested baseline stays `c7a1cee3`. Fork main is an ancestor.
+
+On Unraid, save active work, retain pre-update server and independent browser backups,
+update the existing container while preserving data/token/settings, then reload the
+browser. Older builds cannot read new native format-43 saves. This task did not
+install on Unraid, alter nginx/DNS, create application releases/Git tags or migrate
+existing files.
 
 ## 2026-10-28: fixed upstream 0.25.1 snapshot, native .sc compatibility
 
