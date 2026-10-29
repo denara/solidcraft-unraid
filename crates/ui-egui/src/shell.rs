@@ -112,6 +112,8 @@ pub(crate) struct State {
     pub left_space: Option<Rect>,
     /// The left column an open dialog holds this frame (`dialog_column`).
     pub dialog_column: Option<Rect>,
+    /// The status bar along the window's bottom edge, while it is shown (#7243).
+    pub status_bar: Option<Rect>,
 }
 
 /// Register the actual card, so fitting and pointer shielding use the same rectangle.
@@ -141,10 +143,19 @@ pub(crate) fn panel_bounds(app: &SolveApp, mut available: Rect) -> Rect {
     available
 }
 
-/// One source of occlusion for navigation, picking, overlays and fit.
+/// One source of occlusion for navigation, picking and overlays.
 pub(crate) fn covered_rects(app: &SolveApp) -> Vec<Rect> {
+    occluding_rects(app, false)
+}
+
+/// Selection controls follow the projected model, so they must not influence its fit.
+pub(crate) fn fit_rects(app: &SolveApp) -> Vec<Rect> {
+    occluding_rects(app, true)
+}
+
+fn occluding_rects(app: &SolveApp, fitting: bool) -> Vec<Rect> {
     let mut rects = Vec::new();
-    rects.extend(app.shell.workspace_panels.values().map(|(rect, _)| *rect));
+    rects.extend(app.shell.workspace_panels.iter().filter(|(id, _)| !fitting || **id != "render:selection").map(|(_, (rect, _))| *rect));
     if crate::render_workspace::active(app) || Container::for_layout(app.ui.layout, Surface::Panel).floating() {
         rects.extend(app.shell.cards.iter().copied());
         rects.extend(app.shell.panels.iter().copied());
@@ -160,6 +171,7 @@ pub(crate) fn covered_rects(app: &SolveApp) -> Vec<Rect> {
     rects.extend(app.viewport.palette_rect.filter(|_| app.session.active_sketch.is_some()));
     rects.extend(app.viewport.dialog_rect.filter(|_| app.dialog.is_some() || app.tree.redefine.is_some()));
     rects.extend(crate::view_confirm::rect(app));
+    rects.extend(app.shell.status_bar.filter(|_| crate::status_bar::shown(app)));
     rects.retain(|r| r.is_finite() && r.is_positive());
     rects
 }

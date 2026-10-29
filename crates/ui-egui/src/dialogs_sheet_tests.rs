@@ -194,6 +194,35 @@ fn shallow_pocket_overlay_labels_depth_without_drawing_a_through_void() {
     }
 }
 
+/// The Flat Pattern panel shows each side of the flat size, and the thickness, whole: on one row
+/// ("1250.00 mm × 1000.00 mm × 2.50 mm") the panel cut it off after the first side.
+#[test]
+fn flat_pattern_shows_each_side_of_the_flat_size_whole() {
+    for layout in ["docked", "floating"] {
+        let mut h = crate::scenario::Harness::new();
+        h.app.home.open = false;
+        h.call("ui.resize", json!({"width": 1600, "height": 1200}));
+        h.call("ui.set", json!({"layout": layout}));
+        h.app.run("sketch.create", json!({"plane": "XY", "name": "Base"})).unwrap();
+        h.app.run("sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [1250, 1000]})).unwrap();
+        h.app.run("sketch.finish", json!({})).unwrap();
+        h.app.run("sheet.flange", json!({"sketch": "Base"})).unwrap();
+        h.app.start("sheet.flat_pattern");
+        h.frames(4);
+        let output = h.ctx.run_ui(egui::RawInput { screen_rect: Some(h.ctx.content_rect()), focused: true, ..Default::default() }, |ui| {
+            h.app.logic(ui.ctx());
+            h.app.ui(ui);
+        });
+        let texts: Vec<_> = crate::test_support::text_shapes(&output).collect();
+        for (label, value) in [("Flat size X", "1250.00 mm"), ("Flat size Y", "1000.00 mm"), ("Thickness", "2.50 mm")] {
+            assert!(texts.iter().any(|t| t.galley.text() == label), "{layout}: no {label} row");
+            let shown = texts.iter().find(|t| t.galley.job.text == value).unwrap_or_else(|| panic!("{layout}: {label} {value} not painted"));
+            assert!(!shown.galley.elided, "{layout}: {label} is cut off");
+        }
+        assert!(!texts.iter().any(|t| t.galley.text().contains('×')), "{layout}: the sides are no longer run together");
+    }
+}
+
 #[test]
 fn flat_pattern_islands_fit_before_the_actual_command_panel() {
     for mode in [crate::shell::LayoutMode::Floating, crate::shell::LayoutMode::Docked] {

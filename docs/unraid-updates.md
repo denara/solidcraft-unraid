@@ -1,5 +1,81 @@
 # Validated container updates
 
+## 2026-10-29: fixed upstream 0.26.0 snapshot and native format 43
+
+Selected `c7a1cee357359145fb6ad6a8a0a5b2764e34c42e` once, 290 commits after
+validated `ae07e36a`. The sole `codex/unraid-mcp-web` branch started clean and
+synchronized at `1bdb06d4`; fetched fork main is already an ancestor. For upstream
+CAD features/changes see [the original project](https://github.com/tangency-labs/solidcraft).
+This is unofficial integration, not an application release or an Unraid installation.
+
+All published integration behavior remains: independent browser CAD and HTTP MCP,
+quiet/headless workers, immutable project binding, strong file revisions, shared
+file/transfer gates, cookie-only remembered browser login, live Workspace inventory,
+PNG thumbnails and independent browser copies, read-only observation, confirmed
+deletion, bounded streaming ZIP64, manual projects, multi-file uploads with batch
+choices and the shared-volume storage footer. Existing layouts, original assets,
+private settings and saved designs are preserved. Canonical Unraid XML/icon bytes
+are unchanged, so no new catalog commit is expected.
+
+The merge preserves VFS/link confinement and isolated observer caches. The new
+appearance clipboard is copied only by ordinary scratch sessions, never by an
+observer. New point-cloud source reads use the shared HTTP/MCP gate. PLY/XYZ/PTS
+opening is a new unsaved design, protecting its original source from implicit
+native saving; scan-only designs now count as nonempty session drafts. The portable
+CPU/headless renderer lacks a point-cloud pass: observation refuses a misleading
+empty/partial image before snapshot work; hiding the reference permits normal CAD
+observation. Import/edit/save work continues. The browser uses its separate WebGL
+point pass. Browser upload types and resource limits are deliberately unchanged;
+native `.sc` containers with embedded scans pass the existing bounded data policy.
+
+Save-tool batch normalization now retains the explicit `overwrite` argument, matching
+the direct tool and existing documented contract. It still requires each current
+strong file revision and never overrides stale revisions or active file/transfer
+locks. A real SDK test changes the file externally, rejects a stale revision even
+with overwrite, then accepts the current revision and preserves the intended model.
+No new unconfined output command was enabled: reference import only reads, drawing
+container helpers remain library APIs, render copy is retained-image metadata in
+headless mode, and 3MF component parts stay inside the single archive output. Desktop/
+cloud slicer and unsupported multi-file output restrictions remain in place.
+
+The toolchain stays Rust 1.95/Trunk 0.21.14. Upstream's Apache-2.0 winit patch supplies
+Wayland gestures and the existing permissive font parser enables variable fonts;
+updated dependencies/notices pass the shipped-license policy. Three equivalent
+Clippy simplifications cover the HLR face predicate, sketch-extension match guard
+and tree-icon condition; browser reveal uses the new upstream row identity. Initial
+lint diagnostics remain private; no behavior was altered to silence a test.
+
+Scoped checks passed: 143 gateway cases, 58 affected library selections (2,181 test
+executions), affected CLI integrations and 30 native web/helper cases. Full native
+all-target Clippy, 13-crate Wasm compatibility, browser/client lint, formatting,
+licenses, 867 attributed assets, 350 original icon masters, layers, lists, shared
+containers and skills pass. The unfiltered repository test suite was not rerun.
+Actual software-GL capture/depth and stand-up UI cases, browser API/linked-source/
+DXF/queue checks and all 20 offline/update cases pass.
+
+A new labelled candidate, fresh disposable volume, loopback port and test token
+passed HTTP MCP modelling at 24000 mm3, PNG/STEP, session separation, auth/origin/
+path denial, logging/privacy, restart persistence, project binding, Workspace file
+revisions, live observation/SSE, confirmed deletion/streaming ZIP, remembered login/
+revocation and upload tests. Real browser proofs and inspected screenshots cover
+multi-file drop, immutable targets, overwrite/skip/cancel/apply-all reset, stale
+revision denial, live folder choices, compact actions/combined overview, footer and
+independent native-design handoff. No existing runtime was changed during these tests.
+
+The official MCP SDK reopens original public native formats 13 and 41 without changing
+source bytes. Native format-43 saves preserve parameters, 24000 mm3, split-face names/
+centroids, STEP, embedded HDR CPU rendering, source/output confinement and revisions.
+A three-point public XYZ scan opens as an unsaved draft, survives native roundtrip,
+refuses escape paths and implicit source saving, uploads as native `.sc`, and opens
+independently in the real WebGL browser. Local color/point-size edits leave the server
+bytes unchanged. All native ZIP CRCs pass; the cone keeps 314.1019886 mm3 within the
+upstream 0.2% numerical tolerance. Evidence remains under ignored
+`target/upstream-c7a1cee3-20261029/`.
+
+Exact-source workflow, anonymous registry digest/pull, archive SHA256 and local
+replacement/cleanup will be added after public image verification. Until then,
+the previously published runtime and image remain unchanged.
+
 ## 2026-10-28: fixed upstream 0.25.1 snapshot, native .sc compatibility
 
 Selected `ae07e36a7d09c6095f4de1bc7ab51067e2418093` once, 131 commits after

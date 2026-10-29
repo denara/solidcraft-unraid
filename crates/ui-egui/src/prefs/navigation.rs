@@ -16,7 +16,7 @@ pub(super) fn show(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
                 };
                 let mut keys = Vec::new();
                 if binding.keys.shift {
-                    keys.push("Shift");
+                    keys.push(crate::i18n::tr("prefs.shift"));
                 }
                 if binding.keys.ctrl {
                     keys.push("Ctrl/Cmd");
@@ -53,7 +53,7 @@ pub(super) fn show(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
             ui_kit::settings_form(ui, 110.0, |ui| {
                 ui_kit::row(ui, app.tr("prefs.mouse_mapping"), |ui| {
                     let picker = ui_kit::dropdown_menu(ui, "pref_nav", nav_preset(&app.preferences.nav).translated_label(), |ui| {
-                        for preset in &NAV_PRESETS {
+                        for preset in NAV_PRESETS {
                             if ui_kit::list_picker(ui, preset.id, preset.translated_label(), app.preferences.nav == preset.id).clicked() {
                                 app.preferences.nav = preset.id.into();
                                 app.preferences.zoom_reverse = preset.reverse_zoom;
@@ -119,6 +119,8 @@ pub(super) fn show(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
                 setting::zoom_to_cursor(app, ui);
                 setting::zoom_reverse(app, ui);
                 setting::pan_reverse_x(app, ui);
+                setting::pan_reverse_y(app, ui);
+                setting::orbit_reverse(app, ui);
             });
             ui.allocate_ui_with_layout(egui::vec2(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
                 setting::smooth_wheel_zoom(app, ui);

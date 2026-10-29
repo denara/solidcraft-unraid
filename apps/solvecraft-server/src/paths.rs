@@ -122,7 +122,7 @@ fn normalize_batch_step(step: &mut Value) -> Result<(), String> {
         }
         "save" | "open" | "export" | "new_design" => {
             let (mapped, keys): (&str, &[&str]) = match command.as_str() {
-                "save" => ("file.save", &["path", "format"]),
+                "save" => ("file.save", &["path", "format", "overwrite"]),
                 "open" => ("doc.open", &["path", "up", "names"]),
                 "export" => ("file.export", &["path", "format", "bodies", "mesh_prefix", "effort", "velocity"]),
                 _ => ("file.new", &["name"]),
@@ -247,6 +247,12 @@ mod tests {
         prepare_tool(&root, "batch", &mut save).unwrap();
         assert_eq!(save["commands"][0]["command"], "file.save");
         assert_eq!(save["commands"][0]["params"]["path"], root.join("part.solidcraft").to_string_lossy().as_ref());
+        for alias in ["save", "file.save"] {
+            let mut overwrite = json!({"commands":[{"id":alias,"params":{"path":"part.sc","overwrite":true}}]});
+            prepare_tool(&root, "batch", &mut overwrite).unwrap();
+            assert_eq!(overwrite["commands"][0]["params"]["overwrite"], true);
+            assert_eq!(overwrite["commands"][0]["params"]["path"], json!(root.join("part.sc")));
+        }
         for (command, params) in [("doc.recover", json!({})), ("file.save", json!({"path":"../escape.solidcraft"}))] {
             assert!(prepare_tool(&root, "batch", &mut json!({"commands":[{"id":command,"params":params}]})).is_err());
         }

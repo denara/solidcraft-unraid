@@ -538,6 +538,14 @@ fn display_menu(app: &mut SolveApp, ui: &mut egui::Ui) {
             }
         }
     }
+    // The View angles readout under the orientation gizmo (#6032).
+    let mut angles = NavigationMenuRow::new("view_angles", app.tr("ui.view_angles"), "select");
+    angles.selected = app.preferences.show_view_angles;
+    let response = angles.show(ui).on_hover_text(app.tr("ui.view_angles_help"));
+    crate::scenario::publish_target("view:view_angles", response.rect);
+    if response.clicked() {
+        let _ = app.run("view.angle_readout", json!({"enabled": !app.preferences.show_view_angles}));
+    }
     separator(ui);
     heading(ui, app.tr("navbar.assistant"));
     let mut cursor = NavigationMenuRow::new("agent_cursor", app.tr("navbar.agent_cursor"), "select");

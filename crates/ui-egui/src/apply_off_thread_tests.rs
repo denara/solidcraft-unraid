@@ -24,6 +24,12 @@ fn square_on_a_block() -> Harness {
     h.app.finish_sketch();
     h.app.start("solid.extrude");
     h.frames(2);
+    // The window's own operation check would hand OK its Join already evaluated (#6901): these
+    // tests are about OK computing it.
+    if let Some(d) = h.app.dialog.as_mut() {
+        d.op_auto.manual = true;
+    }
+    h.app.op_check = Default::default();
     h
 }
 

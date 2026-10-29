@@ -4,6 +4,89 @@ fn save(s: &mut Session, patch: Value) {
     s.execute("render.settings.set", &json!({"name":"Studio", "set":patch})).unwrap();
 }
 
+#[test]
+fn environment_editor_rotation_wraps_and_each_edit_is_one_undo() {
+    let mut s = Session::default();
+    save(&mut s, json!({"job":{"method":"gpu_path","options":{"environment":{"kind":"sky"}}}}));
+    for (degrees, expected) in [(215.0, -145.0), (540.0, -180.0), (-541.0, 179.0), (1e6, -80.0), (-1e6, 80.0)] {
+        let before = s.doc.clone();
+        let undo = s.undo.len();
+        let result = s.execute("render.environment.set", &json!({"name":"Studio","rotation_deg":degrees})).unwrap();
+        let angle = result["setup"]["job"]["options"]["environment"]["rotation_rad"].as_f64().unwrap().to_degrees();
+        assert!((-180.0..180.0).contains(&angle));
+        assert!((angle - expected).abs() < 1e-9);
+        assert_eq!(s.undo.len(), undo + 1);
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(s.doc, before);
+        s.execute("edit.redo", &json!({})).unwrap();
+    }
+    let undo = s.undo.len();
+    s.execute("render.environment.set", &json!({"name":"Studio","intensity":2.5})).unwrap();
+    assert_eq!(s.undo.len(), undo + 1);
+    s.execute("render.environment.set", &json!({"name":"Studio","intensity":2.5})).unwrap();
+    assert_eq!(s.undo.len(), undo + 1, "unchanged values do not add history");
+}
+
+#[test]
+fn environment_editor_hostile_inputs_refuse_atomically() {
+    let mut s = Session::default();
+    save(&mut s, json!({"job":{"method":"gpu_path","options":{"environment":{"kind":"sky"}}}}));
+    let before = s.doc.clone();
+    let history = (s.revision, s.undo.len(), s.redo.len());
+    for extra in [
+        json!({"rotation_deg":1e6+1.0}),
+        json!({"rotation_deg":-1e6-1.0}),
+        json!({"rotation_deg":1e300}),
+        json!({"rotation_deg":"NaN"}),
+        json!({"rotation_deg":null}),
+        json!({"intensity":-0.01}),
+        json!({"intensity":100.01}),
+        json!({"intensity":1e300}),
+        json!({"intensity":"Infinity"}),
+        json!({"rotation_deg":30,"intensity":101}),
+        json!({"unexpected":true}),
+        json!({}),
+    ] {
+        let mut request = json!({"name":"Studio"});
+        request.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        assert!(s.execute("render.environment.set", &request).is_err(), "{request}");
+        assert!(Arc::ptr_eq(&before, &s.doc));
+        assert_eq!(history, (s.revision, s.undo.len(), s.redo.len()));
+    }
+}
+
+#[test]
+fn environment_editor_preserves_source_and_refuses_absent_or_incompatible_environment() {
+    let mut s = Session::default();
+    save(&mut s, json!({"job":{"method":"cpu_raytrace","options":{"environment":{"color":[0.2,0.3,0.4],"intensity":1}}}}));
+    let before = s.doc.clone();
+    for request in [json!({"rotation_deg":30}), json!({"intensity":64.01})] {
+        let mut params = json!({"name":"Studio"});
+        params.as_object_mut().unwrap().extend(request.as_object().unwrap().clone());
+        assert!(s.execute("render.environment.set", &params).is_err());
+        assert!(Arc::ptr_eq(&before, &s.doc));
+    }
+    let reply = s.execute("render.environment.set", &json!({"name":"Studio","intensity":64})).unwrap();
+    assert_eq!(reply["setup"]["job"]["options"]["environment"]["color"], json!([0.2, 0.3, 0.4]));
+    for job in [json!({"method":"raster"}), json!({"method":"gpu_path"}), json!({"method":"cpu_raytrace"})] {
+        let before = s.doc.clone();
+        assert!(s.execute("render.environment.set", &json!({"name":"Studio","set":{"job":job},"intensity":2})).is_err());
+        assert!(Arc::ptr_eq(&before, &s.doc));
+    }
+}
+
+#[test]
+fn environment_editor_command_has_schemas_and_strict_validation() {
+    let command = crate::find_command("render.environment.set").unwrap();
+    assert!(command.contract.is_some());
+    assert!(command.output.is_some());
+    let mut s = Session { param_check: crate::schema::ParamCheck::Strict, ..Default::default() };
+    save(&mut s, json!({"job":{"method":"gpu_path","options":{"environment":{"kind":"sky"}}}}));
+    let reply = s.execute("render.environment.set", &json!({"name":"Studio","intensity":2})).unwrap();
+    assert_eq!(reply["setup"]["job"]["options"]["environment"]["intensity"], 2.0);
+    assert!(s.execute("render.environment.set", &json!({"name":"Studio","intensity":2,"unknown":true})).is_err());
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn embedded_hdr_capture_is_offline_atomic_deduplicated_and_undoable_after_source_removal() {

@@ -31,11 +31,16 @@ mod hdr;
 
 #[path = "render_workspace_effects.rs"]
 mod effects;
+#[path = "render_workspace_environment.rs"]
+mod environment;
 #[path = "render_workspace_inspector.rs"]
 mod inspector;
 
 #[path = "render_workspace_library.rs"]
 mod library;
+
+#[path = "render_ui/assign.rs"]
+pub(crate) mod assign;
 
 #[path = "render_workspace_materials.rs"]
 mod materials;
@@ -43,10 +48,21 @@ mod materials;
 #[path = "render_workspace_setups.rs"]
 mod setups;
 
+#[path = "render_workspace_shots.rs"]
+pub(crate) mod shots;
+
+#[path = "render_ui/scene.rs"]
+pub(crate) mod scene;
+
 #[path = "render_workspace_studio.rs"]
 mod studio;
 #[path = "render_workspace_transport.rs"]
 mod transport;
+
+#[path = "render_workspace_thumbnails.rs"]
+mod thumbnails;
+#[path = "render_ui/wear.rs"]
+mod wear;
 
 #[cfg(test)]
 #[path = "render_workspace_tests.rs"]
@@ -55,6 +71,7 @@ mod tests;
 type PathFactory = Box<dyn FnOnce() -> Result<ImageHost, String> + Send>;
 
 pub struct State {
+    thumbnails: thumbnails::Cache,
     pending_setup: Option<PathFactory>,
     pub host: Option<ExecutorDescriptor>,
     pub path_host: PathHost,
@@ -76,6 +93,8 @@ pub struct State {
     image: Option<(solidcraft_engine::render::job::JobId, Result<egui::TextureHandle, String>)>,
     image_info: Option<solidcraft_engine::render::job::FrameInfo>,
     preview_image: Option<PreviewImage>,
+    clipboard_image: Option<egui::ColorImage>,
+    clipboard_text: Option<String>,
 }
 
 /// Provisional pixels are never an export source and never replace the retained final image.
@@ -141,6 +160,7 @@ impl PathHost {
 }
 
 /// The samples slider's top end: 2^12 = 4096 samples per pixel.
+#[cfg(test)]
 const MAX_SAMPLES_EXPONENT: u32 = 12;
 
 /// Setup times kept per adapter, at most.
@@ -240,11 +260,35 @@ impl Stage {
     }
 }
 
+/// Browser focus is transient per-document view state, never part of a saved design.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum RenderSelection {
+    #[default]
+    Nothing,
+    Object(Vec<solidcraft_engine::Sel>),
+    Environment,
+    Wear,
+    /// Method/type/index identity until named light commands provide persistent IDs.
+    Light(String),
+    Shot(String),
+    Output,
+    Sampling,
+    Effects,
+    Check,
+}
+
 /// Small per-document editor state; GPU uploads and host capabilities stay outside tabs.
 #[derive(Clone, Debug)]
 pub struct ViewState {
+    pub(crate) assign: assign::State,
+    job_shot: Option<String>,
+    save_shot_name: Option<String>,
     pub name: String,
+    pub selection: RenderSelection,
     pub(crate) stage: Stage,
+    pub(crate) by_look: bool,
+    pub(crate) search_objects: bool,
+    pub(crate) object_query: String,
     draft: RenderSetup,
     dirty: bool,
     clean_setup: Option<RenderSetup>,
@@ -260,6 +304,7 @@ pub struct ViewState {
     materials: materials::View,
     library: library::View,
     inspector: inspector::View,
+    environment_ring: environment::RingView,
 
     cpu: cpu::View,
     overwrite: bool,
@@ -298,8 +343,15 @@ impl ImageMethod {
 impl Default for ViewState {
     fn default() -> Self {
         Self {
+            assign: assign::State::default(),
+            job_shot: None,
+            save_shot_name: None,
             name: "Studio".into(),
+            selection: RenderSelection::Nothing,
             stage: Stage::Look,
+            by_look: false,
+            search_objects: false,
+            object_query: String::new(),
             draft: RenderSetup::default(),
             dirty: false,
             clean_setup: None,
@@ -315,6 +367,7 @@ impl Default for ViewState {
             materials: materials::View::default(),
             library: library::View::default(),
             inspector: inspector::View::default(),
+            environment_ring: environment::RingView::default(),
 
             cpu: cpu::View::default(),
             overwrite: false,
@@ -329,6 +382,7 @@ impl Default for ViewState {
 impl Default for State {
     fn default() -> Self {
         Self {
+            thumbnails: Default::default(),
             host: None,
             path_host: PathHost::default(),
             pending_setup: None,
@@ -347,6 +401,8 @@ impl Default for State {
             image: None,
             image_info: None,
             preview_image: None,
+            clipboard_image: None,
+            clipboard_text: None,
         }
     }
 }
@@ -461,6 +517,12 @@ pub fn sync_backend(app: &mut SolveApp) {
 /// Cooperative work belongs to the frame loop, never to a status/control request. Keep
 /// scheduling frames even after leaving Render so a browser job can finish in Design.
 pub fn tick(app: &mut SolveApp, ctx: &egui::Context) {
+    if let Some(text) = app.render_workspace.clipboard_text.take() {
+        ctx.copy_text(text);
+    }
+    if let Some(image) = app.render_workspace.clipboard_image.take() {
+        ctx.copy_image(image);
+    }
     if matches!(app.render_workspace.path_host, PathHost::Preparing(..)) {
         // Poll even in Design or an idle window, without continuously redrawing.
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -471,6 +533,9 @@ pub fn tick(app: &mut SolveApp, ctx: &egui::Context) {
             Ok(false) => {}
             Err(e) => app.set_status(e.to_string(), true),
         }
+    }
+    if app.render_workspace.view.job.is_some() {
+        cache_render_images(app, ctx);
     }
 }
 
@@ -497,6 +562,7 @@ pub(crate) fn invalidate_images(app: &mut SolveApp) {
 }
 
 pub fn invalidate_scene(app: &mut SolveApp) {
+    app.render_workspace.thumbnails = Default::default();
     app.render_workspace.revision = u64::MAX;
     app.render_workspace.scene_signature = None;
     app.render_workspace.scene = None;
@@ -530,6 +596,7 @@ pub fn enter(app: &mut SolveApp, render: bool) -> Result<(), String> {
         #[cfg(not(target_arch = "wasm32"))]
         app.render_workspace.start_deferred_path_host();
     } else {
+        assign::stop(app);
         if let Some((camera, perspective)) = app.render_workspace.design_camera.take() {
             app.cam = camera;
             app.ui.up_axis = camera.up;
@@ -556,9 +623,17 @@ pub(crate) fn select_stage(app: &mut SolveApp, key: &str) {
         _ => return,
     };
     app.render_workspace.view.stage = stage;
+    app.render_workspace.view.inspector.hidden = false;
     app.render_workspace.view.inspector.page = stage.page();
-    // The current Browser has model folders only. Reveal Objects for Look; scene-specific
-    // Lights/Shots/Output expansion belongs to the scene Browser implementation.
+    let sections: &[&str] = match stage {
+        Stage::Look => &["objects"],
+        Stage::Light => &["lights", "environment"],
+        Stage::Frame => &["shots"],
+        Stage::Output => &[],
+    };
+    for section in sections {
+        app.tree.collapsed.remove(&format!("render:tree:{section}"));
+    }
     if stage == Stage::Look {
         app.tree.collapsed.remove("c0");
         app.tree.collapsed.remove("c0/bodies");
@@ -579,8 +654,43 @@ pub(crate) fn output_summary(app: &SolveApp) -> (String, &'static str) {
     (format!("{} × {}", view.draft.width, view.draft.height), if view.studio.export_exr { "EXR" } else { "PNG" })
 }
 
+pub(crate) fn output_child_summary(app: &SolveApp, kind: &str) -> String {
+    let view = &app.render_workspace.view;
+    match kind {
+        "sampling" => format!(
+            "{} · {} spp",
+            app.tr("render.quality_custom"),
+            if view.method == ImageMethod::GpuRaytrace {
+                view.samples
+            } else {
+                view.raytrace.progressive.map_or(u32::from(view.raytrace.primary_samples), |p| p.samples_per_pixel)
+            }
+        ),
+        "effects" => crate::i18n::format(
+            "render.children.look_summary",
+            &[
+                ("tone", if view.studio.tone_map == solidcraft_engine::render::job::ToneMap::AcesFitted { "ACES" } else { "Reinhard" }),
+                ("count", &view.studio.finishing.looks.len().to_string()),
+            ],
+        ),
+        "check" => inspector::check_summary(app),
+        _ => String::new(),
+    }
+}
+
+pub(crate) fn job_busy(app: &SolveApp) -> bool {
+    ribbon::busy(app)
+}
+pub(crate) fn output_stage_tools(app: &mut SolveApp, ui: &mut egui::Ui) {
+    inspector::stage_tools(app, ui);
+}
+
 pub(crate) fn job_ready(app: &SolveApp, id: &str) -> Result<(), String> {
     ribbon::action_ready(app, id)
+}
+
+pub(crate) fn set_inspector_visible(app: &mut SolveApp, visible: bool) {
+    app.render_workspace.view.inspector.hidden = !visible;
 }
 
 pub fn panel(app: &mut SolveApp, ui: &mut egui::Ui) {
@@ -590,29 +700,47 @@ pub fn panel(app: &mut SolveApp, ui: &mut egui::Ui) {
     inspector::panel(app, ui);
 }
 
+/// Interactive stage-panel review. Direct engine JSON calls remain dialog-free.
+/// S5 supplies its selected specification id without owning another consent form.
+pub(crate) fn review_resource(app: &mut SolveApp, command: &str, id: &str) -> Result<(), String> {
+    match command {
+        "render.quality.prepare" => library::review::quality(app, id),
+        _ => Err("this command has no stage-panel review adapter".into()),
+    }
+}
+
+pub(crate) fn apply_browser_controls(app: &mut SolveApp, value: &serde_json::Value) {
+    let view = &mut app.render_workspace.view;
+    if let Some(by_look) = value.get("by_look").and_then(serde_json::Value::as_bool) {
+        view.by_look = by_look;
+    }
+    if let Some(search) = value.get("search").and_then(serde_json::Value::as_bool) {
+        view.search_objects = search;
+    }
+    if let Some(query) = value.get("query").and_then(serde_json::Value::as_str) {
+        view.object_query = query.into();
+    }
+}
+
 /// Local Browser-card content, never a new workspace or an alternative model tree.
 pub(crate) fn browser_mode(app: &mut SolveApp, ui: &mut egui::Ui) -> bool {
     if !active(app) {
         return false;
     }
-    let labels = [app.tr("render.browser_model").to_string(), app.tr("render.browser_library").to_string()];
-    let mut selected = usize::from(app.render_workspace.view.inspector.library_open);
-    let top = ui.cursor().min;
-    let width = ui.available_width();
-    crate::ui_kit::segmented(ui, &mut selected, &labels.iter().map(String::as_str).collect::<Vec<_>>(), Default::default());
-    for (i, name) in ["render:browser-model", "render:browser-library"].iter().enumerate() {
-        crate::scenario::publish_target(
-            name,
-            egui::Rect::from_min_size(top + egui::vec2(width * i as f32 / 2.0, 0.0), egui::vec2(width / 2.0, crate::ui_kit::row_height())),
-        );
+    if app.render_workspace.view.search_objects {
+        let mut query = app.render_workspace.view.object_query.clone();
+        crate::ui_kit::scope(ui, |ui| {
+            if crate::ui_kit::search_field(ui, ui.id().with("render:tree:query"), &mut query, crate::i18n::tr("render.tree_search")).changed() {
+                let _ = app.run("view.render_browser", json!({"query":query}));
+            }
+        });
     }
-    app.render_workspace.view.inspector.library_open = selected == 1;
-    if selected == 1 {
-        crate::ui_kit::scope(ui, |ui| library::browse(app, ui));
-        true
-    } else {
-        false
-    }
+    false
+}
+
+/// Per-stage companion sharing the Browser's dock policy.
+pub(crate) fn appearances_card(app: &mut SolveApp, ui: &mut egui::Ui, bounds: egui::Rect) {
+    library::card(app, ui, bounds);
 }
 
 fn image_host(app: &SolveApp, method: ImageMethod) -> Result<&ImageHost, String> {
@@ -688,8 +816,20 @@ fn select_image_method(app: &mut SolveApp, method: ImageMethod) {
     app.render_workspace.view.dirty = true;
 }
 
+#[cfg(test)]
 fn method_selector(app: &mut SolveApp, ui: &mut egui::Ui) {
     ui.label(app.tr("render.image_method"));
+    method_dropdown(app, ui);
+    if image_host(app, app.render_workspace.view.method).is_err() {
+        crate::ui_kit::text(ui, app.tr("render.setup_offline_help"), crate::ui_kit::Text::Note("render.setup_offline_help"));
+    }
+    if app.render_workspace.view.method != ImageMethod::Raster {
+        crate::ui_kit::text(ui, app.tr("render.preview_image_settings_help"), crate::ui_kit::Text::Note("render.preview_image_settings_help"));
+    }
+}
+
+/// The same method authority in an aligned editor row or the legacy master form.
+fn method_dropdown(app: &mut SolveApp, ui: &mut egui::Ui) -> egui::Response {
     let current = app.render_workspace.view.method;
     let label = app.tr(current.label()).to_string();
     let response = crate::ui_kit::dropdown_menu(ui, "render_image_method", &label, |ui| {
@@ -712,26 +852,16 @@ fn method_selector(app: &mut SolveApp, ui: &mut egui::Ui) {
         }
     });
     crate::scenario::publish_handle("render:method", response.rect.center());
-    if image_host(app, app.render_workspace.view.method).is_err() {
-        if app.render_workspace.view.inspector.page == inspector::Page::All {
-            ui.small(app.tr("render.setup_offline_help"));
-        } else {
-            crate::ui_kit::text(ui, app.tr("render.setup_offline_help"), crate::ui_kit::Text::Note("render.setup_offline_help"));
-        }
-    }
-    if app.render_workspace.view.method != ImageMethod::Raster {
-        if app.render_workspace.view.inspector.page == inspector::Page::All {
-            ui.small(app.tr("render.preview_image_settings_help"));
-        } else {
-            crate::ui_kit::text(ui, app.tr("render.preview_image_settings_help"), crate::ui_kit::Text::Note("render.preview_image_settings_help"));
-        }
-    }
+    response
 }
 
 fn cpu_sampling_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
     let progressive = cpu::progressive_controls(app, ui);
-    if !progressive {
-        ui.label(app.tr("render.cpu_primary_samples"));
+    if progressive {
+        crate::ui_kit::text(ui, app.tr("render.cpu_progressive_help"), crate::ui_kit::Text::Note("render.cpu_progressive_help"));
+    }
+    ui.add_enabled_ui(!progressive, |ui| {
+        crate::ui_kit::text(ui, app.tr("render.children.edge_samples"), crate::ui_kit::Text::Inline);
         let samples = app.render_workspace.view.raytrace.primary_samples;
         let aa = crate::ui_kit::dropdown_menu(ui, "render_cpu_samples", &format!("{samples}×"), |ui| {
             for count in [1, 4, 16] {
@@ -746,7 +876,7 @@ fn cpu_sampling_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
         });
         crate::scenario::publish_handle("render:aa", aa.rect.center());
         ui.small(app.tr("render.cpu_aa_help"));
-    }
+    });
 }
 
 fn cpu_lighting_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
@@ -777,6 +907,7 @@ fn cpu_lighting_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
     crate::ui_kit::checkbox(ui, &shadows, &mut app.render_workspace.view.raytrace.shadows);
 }
 
+#[cfg(test)]
 fn image_method_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
     method_selector(app, ui);
     if app.render_workspace.view.method != ImageMethod::CpuRaytrace {
@@ -790,27 +921,25 @@ fn image_method_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
     cpu::controls(app, ui);
 }
 
+#[cfg(test)]
 fn image_edit_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
     ui.heading(app.tr("render.image_title"));
     let preview = app.tr("render.result_preview").to_string();
     let result = app.tr("render.result_title").to_string();
     let mut selected = usize::from(app.render_workspace.view.result);
     if crate::ui_kit::segmented(ui, &mut selected, &[&preview, &result], crate::ui_kit::Segments { compact: true, ..Default::default() }) {
-        app.render_workspace.view.result = selected == 1;
-        app.cancel_view_animation();
-        app.viewport.key_hold = None;
-        app.viewport.orbit_free = None;
+        let _ = app.run("render.result.view", json!({"view":if selected == 1 {"image"} else {"model"}}));
     }
     if app.render_workspace.view.result {
         ui.horizontal(|ui| {
             if crate::ui_kit::button(ui, app.tr("render.result_fit"), crate::ui_kit::Button::Normal).clicked() {
-                fit_result(app);
+                let _ = app.run("render.result.view", json!({"view":"fit"}));
             }
             if crate::ui_kit::button(ui, crate::i18n::tr("render.result_actual_size"), crate::ui_kit::Button::Enabled(!reduced_display(app)))
                 .on_hover_text(app.tr("render.result_actual_help"))
                 .clicked()
             {
-                app.render_workspace.view.result_scale = ResultScale::Actual;
+                let _ = app.run("render.result.view", json!({"view":"actual"}));
             }
         });
         ui.small(app.tr("render.result_navigation"));
@@ -880,6 +1009,7 @@ fn image_edit_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
             crate::ui_kit::number_field(ui, &mut app.render_workspace.view.draft.exposure_ev, -32.0..=32.0, 0.1, " EV");
             ui.small(app.tr("render.gpu_options_help"));
             studio::controls(app, ui);
+            studio::backdrop_controls(app, ui);
         });
     }
     library::controls(app, ui);
@@ -1016,6 +1146,7 @@ fn job_controls(app: &mut SolveApp, ui: &mut egui::Ui, compact: bool) {
 
 /// Decode each published sequence once. Provisional textures stay separate from the last
 /// final image, so cancellation or a failed pass cannot change the export target.
+#[cfg(test)]
 fn completed_image(app: &mut SolveApp, ui: &mut egui::Ui) {
     cache_render_images(app, ui.ctx());
     if let Some(display) = displayed_image(app) {
@@ -1029,10 +1160,7 @@ fn completed_image(app: &mut SolveApp, ui: &mut egui::Ui) {
                     .on_hover_text(app.tr("render.result_open"))
                     .clicked()
                 {
-                    app.render_workspace.view.result = true;
-                    app.cancel_view_animation();
-                    app.viewport.key_hold = None;
-                    app.viewport.orbit_free = None;
+                    let _ = app.run("render.result.view", json!({"view":"image"}));
                 }
             }
             Err(error) => {
@@ -1265,22 +1393,79 @@ fn result_rect(camera: Camera, size: [u32; 2], canvas: egui::Rect) -> egui::Rect
     egui::Rect::from_center_size(center, egui::vec2((f64::from(size[0]) * scale) as f32, (f64::from(size[1]) * scale) as f32))
 }
 
+fn result_actions(app: &mut SolveApp, ui: &mut egui::Ui) {
+    for (view, key) in [("model", "render.state_model"), ("fit", "render.output_fit"), ("actual", "render.result_actual")] {
+        let enabled = view != "actual" || !reduced_display(app);
+        if crate::ui_kit::button(ui, app.tr(key), crate::ui_kit::Button::Enabled(enabled)).clicked() {
+            let _ = app.run("render.result.view", json!({"view":view}));
+        }
+    }
+    let copy = crate::ui_kit::button(
+        ui,
+        app.tr("render.output_copy"),
+        crate::ui_kit::Button::Enabled(ribbon::action_ready(app, "render.result.copy").is_ok()),
+    );
+    crate::scenario::publish_target("render:result-copy", copy.rect);
+    if copy.clicked() {
+        app.start("render.result.copy");
+    }
+    let export =
+        crate::ui_kit::button(ui, studio::export_label(app), crate::ui_kit::Button::Enabled(ribbon::action_ready(app, "render.export").is_ok()));
+    crate::scenario::publish_target("render:result-export", export.rect);
+    if export.clicked() {
+        app.start("render.export");
+    }
+    let close = crate::ui_kit::StageBar::icon_action(ui, "close", app.tr("cmd.render_result_close"));
+    crate::scenario::publish_target("render:result-close", close.rect);
+    if close.clicked() {
+        app.start("render.result.close");
+    }
+}
+
 fn show_result(app: &mut SolveApp, ui: &mut egui::Ui) {
     cache_render_images(app, ui.ctx());
     let t = Tokens::get();
     ui.painter().rect_filled(ui.max_rect(), 0.0, t.viewport_bottom);
+    // The floating shell paints after this canvas. Keep image actions in its free
+    // content area so neither ribbon nor Browser can cover their hit targets.
+    let mut free = crate::render_ui::canvas(app, ui.max_rect());
+    if ribbon::busy(app) {
+        free = crate::ui_kit::Container::below_navigation_row(free);
+    }
+    let mut content = ui.new_child(egui::UiBuilder::new().max_rect(free).id_salt("render_result_content"));
+    let ui = &mut content;
     let Some((info, preview)) = displayed_image(app).map(|display| (display.info.clone(), display.preview.cloned())) else {
         let message = match &app.render_workspace.image {
             Some((_, Err(error))) => error.clone(),
+            _ if ribbon::busy(app) => app.tr("render.state_in_progress").to_string(),
             _ => app.tr("render.result_empty").to_string(),
         };
+        crate::ui_kit::Container::navigation_contents(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                crate::ui_kit::text(
+                    ui,
+                    app.tr(if ribbon::busy(app) { "render.state_in_progress" } else { "render.result_title" }),
+                    crate::ui_kit::Text::Inline,
+                );
+                result_actions(app, ui);
+            });
+        });
+        let canvas = ui.available_rect_before_wrap();
         ui.centered_and_justified(|ui| {
             ui.add(egui::Label::new(egui::RichText::new(message).size(t.font_heading).color(t.text)).wrap());
         });
-        app.viewport.rect = None;
+        app.viewport.rect = Some(canvas);
         return;
     };
-    egui::Frame::NONE.fill(t.panel).inner_margin(t.space_8).show(ui, |ui| {
+    crate::ui_kit::Container::navigation_contents(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            crate::ui_kit::text(
+                ui,
+                app.tr(if preview.is_some() { "render.state_in_progress" } else { "render.state_completed" }),
+                crate::ui_kit::Text::Inline,
+            );
+            result_actions(app, ui);
+        });
         if let Some(preview) = &preview {
             ui.colored_label(
                 t.warning,
@@ -1645,6 +1830,8 @@ pub fn preview_size(executor: Option<&ExecutorDescriptor>, full: (u64, u64)) -> 
 
 pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
     if app.render_workspace.view.result {
+        app.render_workspace.view.environment_ring = environment::RingView::default();
+        assign::stop(app);
         show_result(app, ui);
         return;
     }
@@ -1652,28 +1839,46 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
     app.viewport.rect = Some(rect);
     crate::viewport::refresh_layout(app, ui.ctx());
     let response = ui.interact(rect, ui.id().with("render_preview"), Sense::click_and_drag());
-    let input = crate::navigation::handle(app, ui, rect, &response, crate::navigation::NavCaps::RENDER);
-    let navigating = input.scroll != 0.0
-        || input.pinch != 1.0
-        || input.pan != egui::Vec2::ZERO
-        || input.middle
-        || input.secondary_down
-        || (input.primary_nav.is_some() && input.primary_down)
-        || input.mode.is_some()
-        || app.viewport.axis_drag.is_some()
-        || app.viewport.spin
-        || app.cam_anim.is_some();
-    let hits = input
-        .hover
-        .filter(|_| input.inside && !navigating)
-        .map(|p| crate::viewport::pick_cached(app, &crate::viewport::projection(app, rect), p))
-        .unwrap_or_default();
-    let candidate = crate::viewport::candidate(app, &hits);
-    app.viewport.hover = candidate.as_ref().map(|(hit, _)| hit.clone());
-    if response.clicked_by(egui::PointerButton::Primary) && input.inside && !navigating {
-        let (add, toggle) =
-            crate::tool_modifiers::selection_click(crate::tool_modifiers::Held::from_modifiers(input.mods), app.preferences.selection_shift_add_only);
-        crate::viewport::select(app, candidate.map(|(_, sel)| sel), add, toggle);
+    if !environment::ring_input(app, ui, rect, &response) {
+        let input = crate::navigation::handle(app, ui, rect, &response, crate::navigation::NavCaps::RENDER);
+        let navigating = input.scroll != 0.0
+            || input.pinch != 1.0
+            || input.pan != egui::Vec2::ZERO
+            || input.middle
+            || input.secondary_down
+            || (input.primary_nav.is_some() && input.primary_down)
+            || input.mode.is_some()
+            || app.viewport.axis_drag.is_some()
+            || app.viewport.spin
+            || app.cam_anim.is_some();
+        let hits = input
+            .hover
+            .filter(|_| input.inside && !navigating)
+            .map(|p| crate::viewport::pick_cached(app, &crate::viewport::projection(app, rect), p))
+            .unwrap_or_default();
+        let candidate = assign::candidate(app, &hits, input.mods);
+        app.viewport.hover = candidate.as_ref().map(|(hit, _)| hit.clone());
+        let assigning = assign::input(app, ui, &response, candidate.as_ref(), input.inside && !navigating);
+        if !assigning && input.inside && !navigating {
+            assign::hover_tooltip(app, &response, candidate.as_ref());
+        }
+        if !assigning && response.clicked_by(egui::PointerButton::Primary) && input.inside && !navigating {
+            let (add, toggle) = crate::tool_modifiers::selection_click(
+                crate::tool_modifiers::Held::from_modifiers(input.mods),
+                app.preferences.selection_shift_add_only,
+            );
+            crate::viewport::select(app, candidate.as_ref().map(|(_, sel)| sel.clone()), add, toggle);
+        }
+        if response.secondary_clicked()
+            && let Some((crate::viewport::Hit::Face { body, .. }, _)) = &candidate
+        {
+            if let Some(candidate) = &candidate {
+                assign::context(app, candidate);
+            }
+            crate::context_menu::open_for(app, input.hover.unwrap_or(rect.center()), crate::context_menu::Target::Body { name: body.clone() });
+        }
+    } else {
+        app.viewport.hover = None;
     }
     let bg = app.render_workspace.view.draft.background;
     ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(bg[0], bg[1], bg[2]));
@@ -1710,9 +1915,13 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
         let mut visibility = std::collections::hash_map::DefaultHasher::new();
         app.session.visibility.hidden_bodies.hash(&mut visibility);
         app.session.visibility.hidden_occurrences.hash(&mut visibility);
-        let signature = (app.session.revision, Arc::as_ptr(&app.session.world_state()) as usize, visibility.finish());
-        app.render_workspace
-            .prepare_preview(signature, || solidcraft_engine::product_scene::extract(&app.session).map_err(|error| error.to_string()))?;
+        let signature = (app.session.revision, Arc::as_ptr(&app.session.world_state()) as usize, visibility.finish() ^ assign::preview_key(app));
+        let preview = assign::preview(app);
+        app.render_workspace.prepare_preview(signature, || {
+            let mut scene = solidcraft_engine::product_scene::extract(&app.session).map_err(|error| error.to_string())?;
+            assign::preview_scene(&mut scene, preview.as_ref())?;
+            Ok(scene)
+        })?;
         let scene = app.render_workspace.scene.as_ref().ok_or(crate::i18n::tr("render.error_no_scene"))?;
         request.features = scene.required_features();
         solidcraft_engine::render::resolve_request(&[app.session.render_backend()], &request).map_err(|e| e.to_string())?;
@@ -1749,12 +1958,14 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
             clip: [0.0; 4],
             cap: [0.0; 4],
             images: Vec::new(),
+            points: Vec::new(),
             analysis: [0.0; 8],
             analysis_colors: [0.0; 36],
             access: None,
             outline: false,
             // Product rendering has its own lighting; AO is a Design viewport setting.
             ao_radius: 0.0,
+            ao_samples: solidcraft_gpu::view::AO_SAMPLES,
             eye: [eye.x as f32, eye.y as f32, eye.z as f32, if camera.fov > 0.0 { 1.0 } else { 0.0 }],
             ssaa: if width < full.0 { width as f32 / full.0 as f32 } else { 1.0 },
             hover_tint: [f32::from(Tokens::get().hover_face_lift) / 255.0; 3],
@@ -1773,9 +1984,103 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
     crate::navigation_bar_view::show(app, ui, rect);
 }
 
+/// Apply validated UI requests after the same registry call used by automation.
+pub(crate) fn apply_command(app: &mut SolveApp, id: &str, reply: &serde_json::Value) -> Result<(), String> {
+    match id {
+        "render.preflight.copy" => {
+            app.render_workspace.clipboard_text = Some(reply["text"].as_str().ok_or("invalid check report")?.to_string());
+        }
+        "render.output.size" => {
+            let width = reply["width"].as_u64().and_then(|v| u32::try_from(v).ok()).ok_or("invalid output width")?;
+            let height = reply["height"].as_u64().and_then(|v| u32::try_from(v).ok()).ok_or("invalid output height")?;
+            if cpu::image_limits(app).fit(u64::from(width), u64::from(height), None) != Some((u64::from(width), u64::from(height))) {
+                return Err(app.tr("render.output_over_budget").into());
+            }
+            app.render_workspace.view.inspector.resolution.custom = reply["custom"].as_bool().unwrap_or(false);
+            app.render_workspace.view.draft.width = width;
+            app.render_workspace.view.draft.height = height;
+            app.render_workspace.view.dirty = true;
+        }
+        "render.result.view" | "render.result.close" => {
+            let view = reply["view"].as_str().ok_or("invalid result view")?;
+            if view == "actual" && reduced_display(app) {
+                return Err(app.tr("render.result_reduced_display").into());
+            }
+            app.render_workspace.view.result = view != "model";
+            match view {
+                "fit" => fit_result(app),
+                "actual" => app.render_workspace.view.result_scale = ResultScale::Actual,
+                _ => {}
+            }
+            app.cancel_view_animation();
+            app.viewport.nav = None;
+            app.viewport.key_hold = None;
+            app.viewport.orbit_free = None;
+        }
+        "render.result.copy" => {
+            let job = serde_json::from_value(reply["frame"]["job"].clone()).map_err(|e| e.to_string())?;
+            let frame = app
+                .session
+                .render_job_handle(job)
+                .map_err(|e| e.to_string())?
+                .frame()
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| app.tr("render.ribbon_no_result").to_string())?;
+            let image = decode_render_image(frame.png(), frame.info.width, frame.info.height, RenderLimits::default(), 4096)?;
+            app.render_workspace.clipboard_image = Some(image);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+pub(crate) fn progress_pill(app: &mut SolveApp, ui: &mut egui::Ui) -> bool {
+    if !ribbon::busy(app) {
+        return false;
+    }
+    let Some(job) = app.render_workspace.view.job else { return false };
+    let Ok(status) = app.session.execute("render.status", &json!({"job":job})) else { return false };
+    let phase = status["progress"]["phase"].as_str().unwrap_or("unknown");
+    if !matches!(phase, "queued" | "preparing" | "running" | "encoding" | "cancelling") {
+        return false;
+    }
+    let done = status["progress"]["done"].as_u64().unwrap_or(0);
+    let total = status["progress"]["total"].as_u64().unwrap_or(1).max(1);
+    let fraction = (done as f64 / total as f64).clamp(0.0, 1.0) as f32;
+    let phase_key = format!("render.image_{phase}");
+    let name = app.render_workspace.view.job_shot.as_ref().unwrap_or(&app.render_workspace.view.name).clone();
+    let cancel =
+        crate::ui_kit::progress_action(ui, &format!("{name} · {} · {:.0}%", app.tr(&phase_key), fraction * 100.0), fraction, app.tr_label("Cancel"));
+    crate::scenario::publish_target("render:progress-cancel", cancel.rect);
+    if cancel.clicked() {
+        app.start("render.cancel");
+    }
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+    true
+}
+
+pub(crate) fn environment_overlay(app: &mut SolveApp, ui: &mut egui::Ui, viewport: egui::Rect) {
+    environment::ring_overlay(app, ui, viewport);
+}
+
 pub(crate) fn interactive_command_info(app: &SolveApp, command: &solidcraft_engine::CommandSpec) -> solidcraft_engine::CommandInfo {
-    ribbon::command_info(app, command)
+    let mut info = ribbon::command_info(app, command);
+    // A drawing tool on the SKETCH tab kept shown outside a sketch starts one (#7904).
+    if crate::workspace::starts_a_sketch(app, command.id) {
+        info.enabled = true;
+        info.disabled_reason = None;
+    }
+    info
 }
 pub(crate) fn start_interactive(app: &mut SolveApp, id: &str) -> bool {
-    ribbon::start(app, id)
+    let handled = assign::start(app, id) || ribbon::start(app, id);
+    // Opening Appearance Advanced must still reach its atmosphere controls after leaving Wear.
+    if handled
+        && id == "render.aging.describe"
+        && app.render_workspace.view.inspector.page == inspector::Page::Appearance
+        && app.render_workspace.view.selection == RenderSelection::Wear
+    {
+        let _ = app.run("view.render_select", json!({"kind":"nothing"}));
+    }
+    handled
 }

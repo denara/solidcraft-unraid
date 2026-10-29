@@ -130,3 +130,34 @@ fn hostile_view_metadata_and_assembly_expansion_are_bounded_before_rendering() {
     });
     assert!(placement_budget(&backend.session).is_err());
 }
+
+#[test]
+fn point_cloud_preview_is_explicitly_unavailable_before_rendering_and_hidden_scans_do_not_block_cad() {
+    use solidcraft_engine::doc::point_cloud::{ColorBy, Colors, PointCloud, Points};
+    let mut backend = Headless::default();
+    Arc::make_mut(&mut backend.session.doc).point_clouds.push(PointCloud {
+        id: 1,
+        name: "Public scan".into(),
+        file: "scan.xyz".into(),
+        origin: Vec3::ZERO,
+        points: Points::new(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0].into()),
+        colors: Colors::default(),
+        source_points: 2,
+        units: "mm".into(),
+        transform: solidcraft_engine::doc::IDENTITY,
+        point_size: 2.0,
+        color_by: ColorBy::File,
+        color: None,
+        height_range: None,
+        visible: true,
+    });
+    let before = backend.workspace_status();
+    let error = backend.observer_start(&json!({}), Some(renderer())).unwrap_err();
+    assert!(error.contains("point-cloud preview is not supported"));
+    assert!(backend.observer.job.is_none());
+    assert_eq!(backend.workspace_status(), before);
+    Arc::make_mut(&mut backend.session.doc).point_clouds[0].visible = false;
+    backend.call("engine.execute", json!({"command":"solid.box","params":{"length":1,"width":2,"height":3}})).unwrap();
+    backend.observer_start(&json!({}), Some(renderer())).unwrap();
+    assert_eq!(completed(&mut backend).unwrap()["status"], "ready");
+}

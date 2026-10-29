@@ -193,8 +193,12 @@ impl Tokens {
             sketch_halo: Color32::from_rgb(240, 243, 247),
             sketch_point: Color32::BLACK,
             sketch_locked: Color32::from_rgb(0, 140, 60),
-            dimension: Color32::from_rgb(36, 40, 48),
-            dimension_driven: Color32::from_rgb(120, 126, 138),
+            // The error red (`error`).
+            sketch_conflict: Color32::from_rgb(214, 54, 54),
+            // Sketch dimensions in a plum of their own, apart from the blue and black curves for
+            // every colour vision mode (#7861).
+            dimension: Color32::from_rgb(130, 42, 110),
+            dimension_driven: Color32::from_rgb(160, 90, 120),
             sketch_point_free: Color32::from_rgb(30, 90, 200),
             section_cap: Color32::from_rgb(214, 128, 72),
             dialog_bg: Color32::from_rgb(250, 251, 252),
@@ -341,6 +345,7 @@ impl Tokens {
         t.selected_bg = Color32::from_rgb(42, 70, 110);
         t.construction_geom = icon_primary(crate::icon_svg::CONSTRUCTION_PRIMARY[1]);
         t.error = Color32::from_rgb(240, 100, 96);
+        t.sketch_conflict = t.error;
         t.warning = Color32::from_rgb(236, 170, 70);
         t.icon = Color32::from_rgb(208, 214, 226);
         t.timeline = Color32::from_rgb(33, 37, 45);
@@ -358,8 +363,9 @@ impl Tokens {
         t.sketch_halo = Color32::from_rgb(28, 32, 40);
         t.sketch_point = Color32::from_rgb(232, 234, 238);
         t.sketch_locked = Color32::from_rgb(96, 204, 116);
-        t.dimension = Color32::from_rgb(224, 228, 234);
-        t.dimension_driven = Color32::from_rgb(142, 150, 164);
+        // Sketch dimensions: Light's plum, lightened for the dark view (#7861).
+        t.dimension = Color32::from_rgb(224, 176, 224);
+        t.dimension_driven = Color32::from_rgb(176, 104, 144);
         t.sketch_point_free = Color32::from_rgb(92, 150, 255);
         t.profile_fill = Color32::from_rgba_unmultiplied_const(120, 150, 200, 40);
         t.dialog_bg = Color32::from_rgb(39, 43, 52);
@@ -410,6 +416,9 @@ impl Tokens {
         }
         t.construction_geom = icon_primary(crate::icon_svg::CONSTRUCTION_RED_GREEN[dark as usize]);
         t.glyph_text = icon_primary(crate::icon_svg::CONSTRAINT_RED_GREEN[dark as usize]);
+        // A deeper red keeps conflicting sketch geometry (#7244) apart from the orange
+        // construction and centerline lines and the crimson lost links for a red-green loss.
+        t.sketch_conflict = Color32::from_rgb(195, 35, 30);
         t.surface_accent = if dark { Color32::from_rgb(200, 135, 55) } else { Color32::from_rgb(164, 80, 0) };
         t.mesh_accent = if dark { Color32::from_rgb(190, 175, 70) } else { Color32::from_rgb(130, 103, 0) };
         t.form_accent = if dark { Color32::from_rgb(165, 135, 220) } else { Color32::from_rgb(115, 73, 205) };
@@ -440,6 +449,9 @@ impl Tokens {
         t.preview_sketch = Color32::from_rgb(125, 180, 105);
         t.glyph_text = icon_primary(crate::icon_svg::CONSTRAINT_BLUE_YELLOW[dark as usize]);
         t.construction_geom = icon_primary(crate::icon_svg::CONSTRUCTION_BLUE_YELLOW[dark as usize]);
+        // Conflicting sketch geometry (#7244) apart from the lost links and the construction and
+        // centerline lines for a blue-yellow loss: darker on the light view, lighter on the dark.
+        t.sketch_conflict = if dark { Color32::from_rgb(255, 170, 160) } else { Color32::from_rgb(165, 15, 30) };
         if dark {
             t.sketch_locked = Color32::from_rgb(140, 225, 110);
             t.box_crossing = Color32::from_rgb(240, 110, 170);

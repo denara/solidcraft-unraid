@@ -897,6 +897,59 @@ fn the_default_folders_are_the_designs_the_recovery_folder_and_the_scratch_folde
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// #7181: the folder the agent opened or saved a design in stays one of its folders when the
+/// design moves on (a new design, a STEP file opened from there, a save-as into a subfolder), so
+/// a later `save` beside it works. Its hidden files and the folders beside it stay out of reach,
+/// and a refused call adds nothing.
+#[test]
+fn a_folder_the_agent_saved_a_design_in_stays_its_folder() {
+    use solidcraft_engine::io::vfs::PathScope;
+    let base = solidcraft_engine::io::vfs::temp_dir().join(format!("solidcraft-mcp-remembered-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let (proj, other) = (base.join("proj"), base.join("other"));
+    std::fs::create_dir_all(proj.join("sub")).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    let at = |d: &std::path::Path, f: &str| d.join(f).to_string_lossy().to_string();
+    let mut session = solidcraft_engine::Session::default();
+    session.execute("solid.box", &json!({"length": 10, "width": 10, "height": 10})).unwrap();
+    session.execute("file.save_as", &json!({"path": at(&proj, "part.solidcraft")})).unwrap();
+    let mut s = Server::new(Box::new(Headless::new(session))).with_path_scope(Some(PathScope::new([])));
+    tool(&mut s, "export", json!({"path": at(&proj, "part.step")}));
+    tool(&mut s, "new_design", json!({}));
+    tool(&mut s, "execute", json!({"command": "solid.box", "params": {"length": 5, "width": 5, "height": 5}}));
+    tool(&mut s, "save", json!({"path": at(&proj, "part-2.solidcraft")}));
+    // A STEP file opens as a new, unsaved design; it saves beside its file.
+    tool(&mut s, "open", json!({"path": at(&proj, "part.step")}));
+    tool(&mut s, "save", json!({"path": at(&proj, "part-3.solidcraft")}));
+    // A save-as into a subfolder moves the design there; the folder above goes on counting.
+    tool(&mut s, "execute", json!({"command": "file.save_as", "params": {"path": at(&proj.join("sub"), "part-4.solidcraft")}}));
+    tool(&mut s, "save", json!({"path": at(&proj, "part-5.solidcraft")}));
+    for f in ["part-2", "part-3", "sub/part-4", "part-5"] {
+        assert!(proj.join(format!("{f}.solidcraft")).exists(), "{f}");
+    }
+    // Twice: the first refusal must not have added anything.
+    for _ in 0..2 {
+        let r = raw_tool(&mut s, "export", json!({"path": at(&proj, ".env")}));
+        assert_eq!(r["result"]["isError"], json!(true), "{r}");
+        let r = raw_tool(&mut s, "save", json!({"path": at(&other, "x.solidcraft")}));
+        assert!(r.to_string().contains("outside the folders this agent may use"), "{r}");
+    }
+    assert!(!proj.join(".env").exists());
+    assert_eq!(std::fs::read_dir(&other).unwrap().count(), 0);
+    // A link beside it to a design here counts where it leads, never where it lies.
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(proj.join("part.step"), other.join("link.step")).unwrap();
+        std::os::unix::fs::symlink(proj.join("part.solidcraft"), other.join("link.solidcraft")).unwrap();
+        tool(&mut s, "open", json!({"path": at(&other, "link.step")}));
+        tool(&mut s, "open", json!({"path": at(&other, "link.solidcraft")}));
+        let r = raw_tool(&mut s, "save", json!({"path": at(&other, "x.solidcraft")}));
+        assert!(r.to_string().contains("outside the folders this agent may use"), "{r}");
+        assert!(!other.join("x.solidcraft").exists());
+    }
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// Tool calls reach files only inside the server's folders (#205): the usual workflow (save,
 /// export, open, screenshots) works there; a path outside, directly, through `..` or through a
 /// symlink that leads out, is refused with a clear error and nothing is written.
@@ -1039,6 +1092,43 @@ fn a_bridged_request_carries_the_agents_folders() {
     assert_eq!(got["command"], "file.new");
     assert_eq!(got["sent_token"], "0123456789abcdef0123456789abcdef");
     echo.join().unwrap();
+}
+
+/// #7181, bridged: once the agent has saved a design through the app, that file's folder goes
+/// with every later request as `design_folders`, so the app counts it after the design moves on.
+/// Not before the save succeeded, not for one the app refused, not for a relative path (the app
+/// resolves those against its own working folder).
+#[test]
+fn a_bridged_server_sends_the_folders_the_agent_saved_designs_in() {
+    use solidcraft_engine::io::vfs::PathScope;
+    let base = solidcraft_engine::io::vfs::temp_dir().join(format!("solidcraft-mcp-bridged-folders-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let (proj, other) = (base.join("proj"), base.join("other"));
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    let at = |d: &std::path::Path, f: &str| d.join(f).to_string_lossy().to_string();
+    let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let (log, refused) = (sent.clone(), at(&other, "x.solidcraft"));
+    let (addr, _) = scripted_app(move |req| {
+        if req["method"] == "engine.execute" {
+            log.lock().unwrap().push(req["params"]["design_folders"].clone());
+        }
+        if req["params"]["params"]["path"] == refused.as_str() {
+            json!({"ok": false, "error": "outside the folders this agent may use"})
+        } else {
+            json!({"ok": true, "result": {}})
+        }
+    });
+    let remote = crate::Remote::connect_with_token(&addr, Some("0123456789abcdef0123456789abcdef")).unwrap();
+    let mut s = Server::new(Box::new(remote)).with_path_scope(Some(PathScope::new([])));
+    let r = raw_tool(&mut s, "save", json!({"path": at(&other, "x.solidcraft")}));
+    assert_eq!(r["result"]["isError"], json!(true), "{r}");
+    tool(&mut s, "save", json!({"path": "relative/y.solidcraft"}));
+    tool(&mut s, "save", json!({"path": at(&proj, "a.solidcraft")}));
+    tool(&mut s, "new_design", json!({}));
+    let proj = std::fs::canonicalize(&proj).unwrap();
+    assert_eq!(*sent.lock().unwrap(), [Value::Null, Value::Null, Value::Null, json!([proj.to_string_lossy()])]);
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// #528: an agent saves the angle of a product photo as a named view once, then renders the
@@ -2162,6 +2252,17 @@ fn batch_steps_may_name_tools() {
     assert!(body["failed"]["error"].as_str().is_some_and(|e| e.contains("screenshot")), "{body}");
     let (_, body, _) = recorded_batch(Ok(json!({})), json!({"commands": [{"command": "body_topology", "params": {"body": "Body1"}}]}));
     assert!(body["failed"]["error"].as_str().is_some_and(|e| e.contains("model.edges") && e.contains("model.faces")), "{body}");
+    // Editing in place goes to another design's tab: never a step, not even one by one
+    for step in [
+        json!({"command": "component.edit_in_place"}),
+        json!({"command": "Component.Finish_Edit"}),
+        json!({"command": "execute", "params": {"command": "component.finish_edit"}}),
+    ] {
+        let command = step.to_string();
+        let (b, body, is_error) = recorded_batch(Ok(json!({})), json!({"commands": [{"command": "solid.box"}, step]}));
+        assert!(is_error && b.calls.is_empty(), "{command}: {body}");
+        assert!(body["failed"]["error"].as_str().is_some_and(|e| e.contains("on its own")), "{body}");
+    }
 
     // Headless, step by step.
     let mut s = server();

@@ -706,6 +706,22 @@ pub(super) fn pin(s: &mut Session, params: &Value) -> Result<Value> {
     Ok(json!({"frame":s.render_jobs.pin(input.job).map_err(job_error)?}))
 }
 
+pub(super) fn copy(s: &mut Session, params: &Value) -> Result<Value> {
+    let input: Job = serde_json::from_value(params.clone()).map_err(|e| bad("render.result.copy", e.to_string()))?;
+    let frame = s
+        .render_jobs
+        .handle(input.job)
+        .map_err(job_error)?
+        .frame()
+        .map_err(job_error)?
+        .ok_or_else(|| bad("render.result.copy", "render has no completed image"))?;
+    let size = (u64::from(frame.info.width), u64::from(frame.info.height));
+    if solidcraft_render::RenderLimits::default().fit(size.0, size.1, None) != Some(size) {
+        return Err(bad("render.result.copy", "clipboard image exceeds 4096 per side or 4194304 pixels; export the PNG instead"));
+    }
+    Ok(json!({"frame":frame.info}))
+}
+
 pub(super) fn cancel(s: &mut Session, params: &Value) -> Result<Value> {
     let input: Job = serde_json::from_value(params.clone()).map_err(|e| bad("render.cancel", e.to_string()))?;
     let status = s.render_jobs.status(input.job).map_err(job_error)?;

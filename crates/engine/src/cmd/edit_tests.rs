@@ -8,6 +8,28 @@ fn run(s: &mut Session, id: &str, params: Value) -> Value {
     s.execute(id, &params).unwrap_or_else(|e| panic!("{id} {params}: {e}"))
 }
 
+#[test]
+fn history_playback_is_a_typed_display_request_without_history_edits() {
+    let mut s = Session::default();
+    let revision = s.revision;
+    let undo = s.undo.len();
+    for action in ["toggle", "play", "stop"] {
+        assert_eq!(run(&mut s, "timeline.play", json!({"action": action})), json!({"action": action}));
+    }
+    assert_eq!(run(&mut s, "timeline.play", json!({})), json!({"action": "toggle"}));
+    for action in [json!("pause"), json!(true), json!(1), json!([])] {
+        assert!(s.execute("timeline.play", &json!({"action": action})).is_err());
+    }
+    assert_eq!(s.revision, revision);
+    assert_eq!(s.undo.len(), undo);
+    assert!(s.doc.marker.is_none());
+    let description = run(&mut s, "engine.describe", json!({"command": "timeline.play"}));
+    assert!(description["input"].is_object());
+    assert!(description["output"].is_object());
+    run(&mut s, "sketch.create", json!({"plane": "XY"}));
+    assert!(s.execute("timeline.play", &json!({})).is_err());
+}
+
 /// `timeline.roll_to` takes a number of features or "end"; any other value is refused instead of
 /// silently moving the marker to the end.
 #[test]
@@ -185,7 +207,8 @@ fn redefining_a_blend_replaces_persistent_edge_selection_and_survives_resize() {
 
 /// A redefine computes the features after the edited one once: its trial's results are kept
 /// for the session's own evaluation, though the cache holds only the last state (a large
-/// design's).
+/// design's). The reply reports that one rebuild (#5694): a session that had to compute the
+/// features again would count them twice.
 #[test]
 fn redefining_computes_the_later_features_once() {
     let mut s = Session::default();
@@ -196,9 +219,27 @@ fn redefining_computes_the_later_features_once() {
     *s.model.cache.lock().unwrap() = solidcraft_doc::EvalCache::with_budget(1);
     let reply =
         run(&mut s, "timeline.redefine", json!({"feature": "Base", "command": "solid.box", "params": {"length": 25, "width": 10, "height": 5}}));
-    assert_eq!(reply["recomputed"], 0, "{reply}");
+    assert_eq!((reply["recomputed"].as_u64(), reply["restored"].as_u64()), (Some(4), Some(0)), "{reply}");
     let volume = run(&mut s, "inspect.measure", json!({}))["total"]["volume_mm3"].as_f64().unwrap();
     assert!((volume - (25.0 * 10.0 * 5.0 + 3.0 * 125.0)).abs() < 1e-6, "{volume}");
+}
+
+/// #5694: the reply reports what the redefine rebuilt — the edited feature and the features
+/// after it — not the session's reuse of the trial's own results, which read as "nothing was
+/// rebuilt" and did not match what the same change reports through `timeline.edit`.
+#[test]
+fn redefining_reports_the_features_it_rebuilt() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 40, "width": 40, "height": 20, "center": [0, 0, 10], "name": "Block"}));
+    run(&mut s, "solid.hole", json!({"position": [0, 0, 20], "diameter": 6, "depth": 12, "name": "H"}));
+    run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 5, "center": [30, 0, 2.5], "operation": "new", "name": "Other"}));
+    let reply = run(
+        &mut s,
+        "timeline.redefine",
+        json!({"feature": "H", "command": "solid.hole",
+               "params": {"position": [0, 0, 20], "type": "counterbore", "diameter": 6, "depth": 12, "cb_diameter": 10, "cb_depth": 4}}),
+    );
+    assert_eq!((reply["recomputed"].as_u64(), reply["restored"].as_u64()), (Some(2), Some(0)), "{reply}");
 }
 
 #[test]
@@ -1243,4 +1284,73 @@ fn a_reorder_keeps_the_model_it_was_checked_on() {
     let mut fresh = solidcraft_doc::Model::new();
     fresh.evaluate(&s.doc);
     assert_eq!(fresh.state().bodies.len(), bodies(&s));
+}
+
+#[test]
+fn select_same_look_uses_resolved_looks_without_document_history_edits_and_refuses_hostile_input() {
+    let mut s = Session::default();
+    for (name, x) in [("A", 0), ("B", 20), ("C", 40)] {
+        run(&mut s, "solid.box", json!({"corner":[x,0,0],"length":10,"width":10,"height":10,"body_name":name}));
+    }
+    run(&mut s, "appearance.assign", json!({"bodies":["A","B"],"appearance":"ABS - Red"}));
+    run(&mut s, "appearance.assign", json!({"bodies":["C"],"appearance":"ABS - Blue"}));
+    run(&mut s, "appearance.assign", json!({"body":"C","faces":[[40,5,5]],"appearance":"ABS - Red"}));
+    let doc = s.doc.clone();
+    let history = (s.undo.len(), s.redo.len(), s.evaluations);
+    run(&mut s, "select.same_look", json!({"body":"A"}));
+    assert_eq!(s.selection.len(), 3);
+    let point = solidcraft_geom::Vec3::new(40.0, 5.0, 5.0);
+    let face = solidcraft_doc::appearance::face_index_at(s.world_state().body("C").unwrap(), point).unwrap();
+    run(&mut s, "select.set", json!({"items":[Sel::Face {body:"C".into(),index:face,point}]}));
+    run(&mut s, "select.same_look", json!({}));
+    assert_eq!(s.selection.len(), 3);
+    run(&mut s, "select.same_look", json!({"body":"C"}));
+    assert_eq!(s.selection, [Sel::Body { name: "C".into() }]);
+    let selected = s.selection.clone();
+    // Session treats null parameters as the command's empty/default object.
+    run(&mut s, "select.same_look", Value::Null);
+    for params in [
+        json!([]),
+        json!({"body":"missing"}),
+        json!({"body":"A","face":u64::MAX}),
+        json!({"body":"A","face":-1}),
+        json!({"body":1}),
+        json!({"body":"A","extra":true}),
+    ] {
+        assert!(s.execute("select.same_look", &params).is_err(), "{params}");
+        assert_eq!(s.selection, selected);
+    }
+    assert!(std::sync::Arc::ptr_eq(&doc, &s.doc));
+    assert_eq!(history, (s.undo.len(), s.redo.len(), s.evaluations));
+}
+
+/// A body changed by a few hundred features in a row whose names nothing asks for, then
+/// filleted: reordering or moving an earlier feature evaluates them all again, and the fillet
+/// finds its edge by the names of the body before it, which are worked out from the body before
+/// that, and so on back to the start. That walk recursed once per feature and overflowed the
+/// window thread's stack (1 MB on Windows), ending the app (#7587, #7926). On a thread with that
+/// stack, both moves are made.
+#[test]
+fn a_move_before_a_long_history_of_one_body_fits_a_window_threads_stack() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10, "body_name": "Peg"}));
+    run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10, "corner": [50, 0, 0], "body_name": "Other"}));
+    for i in 0..300 {
+        run(&mut s, "solid.move", json!({"bodies": ["Peg"], "translate": [0, 0, if i % 2 == 0 { 1 } else { -1 }]}));
+    }
+    run(&mut s, "solid.fillet", json!({"body": "Peg", "radius": 1, "edges": [[5, 0, 10]]}));
+    let other = s.doc.features.get(1).map(|f| f.id).unwrap();
+    let fillet = s.doc.features.last().map(|f| f.id).unwrap();
+    let moved = std::thread::Builder::new()
+        .stack_size(1024 * 1024)
+        .spawn(move || {
+            run(&mut s, "timeline.reorder", json!({"feature": other, "position": 0}));
+            assert!(s.model.result(fillet).is_some_and(|r| r.error.is_none()), "the fillet is made after the reorder");
+            run(&mut s, "timeline.move_many", json!({"features": [other], "position": 2}));
+            assert_eq!(s.doc.features.get(1).map(|f| f.id), Some(other));
+            assert!(s.model.result(fillet).is_some_and(|r| r.error.is_none()), "the fillet is made after the move");
+        })
+        .unwrap()
+        .join();
+    assert!(moved.is_ok());
 }

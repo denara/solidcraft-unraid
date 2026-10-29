@@ -13,7 +13,10 @@ fn measure_input_fits_external_sketch_geometry() {
     assert!(fits(accept, &curve));
     assert!(fits(accept, &point));
     assert_eq!(d.items(), vec![curve.clone(), point.clone()]);
-    assert_eq!(d.candidate(&h.app.session, &Hit::SketchCurve { sketch: 17, id: "line1".into(), straight: true }), Some(curve.clone()));
+    assert_eq!(
+        d.candidate(&h.app.session, &Hit::SketchCurve { sketch: 17, id: "line1".into(), straight: true, point: solidcraft_engine::geom::Vec3::ZERO }),
+        Some(curve.clone())
+    );
     assert_eq!(
         d.candidate(&h.app.session, &Hit::SketchPoint { sketch: 17, id: "p1".into(), at: solidcraft_engine::geom::Vec2::new(0.0, 0.0) }),
         Some(point.clone())
@@ -255,6 +258,42 @@ form_case!(shell, "solid.shell", ["Thickness", "Direction"]);
 form_case!(draft, "solid.draft", ["Angle"]);
 form_case!(mirror, "solid.mirror", ["Operation"]);
 
+/// The Motion Study's and Motion Trace's hints read in the user's language: the dialogs drew them
+/// as they got them, in English.
+#[test]
+fn motion_dialog_hints_are_translated() {
+    fn texts(shape: &egui::Shape, out: &mut Vec<String>) {
+        match shape {
+            egui::Shape::Text(text) => out.push(text.galley.job.text.clone()),
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| texts(shape, out)),
+            _ => {}
+        }
+    }
+    let mut h = fixture();
+    h.app.preferences.language = "ja".into();
+    let _japanese = crate::i18n::scope("ja");
+    for (command, english) in [("motion.study", "add a key for a joint first"), ("motion.trace", "select a point on a component")] {
+        let mut d = Dialog::for_command(&h.app, command).unwrap();
+        let mut painted = Vec::new();
+        for _ in 0..2 {
+            let mut out = h.ctx.run_ui(
+                egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(320.0, 1600.0))), ..Default::default() },
+                |ui| {
+                    ui.set_width(264.0);
+                    ui_kit::scope(ui, |ui| {
+                        rows(&mut h.app, &h.ctx, &mut d, ui);
+                    });
+                },
+            );
+            out.textures_delta.clear();
+            painted.clear();
+            out.shapes.iter().for_each(|shape| texts(&shape.shape, &mut painted));
+        }
+        assert!(!painted.iter().any(|p| p == english), "{command} paints {english:?} in Japanese");
+        assert!(painted.iter().any(|p| p == crate::i18n::tr_label(english)), "{command} paints {painted:?}");
+    }
+}
+
 fn mirror_preselection() -> (Harness, Vec<Sel>) {
     let mut h = Harness::new();
     h.app.run("sketch.create", json!({"plane":"XY","name":"Sketch1"})).unwrap();
@@ -366,12 +405,12 @@ form_case!(pipe, "solid.pipe", ["Diameter", "Wall", "Operation"]);
 form_case!(stock, "solid.bounding_solid", ["Margin"]);
 form_case!(frame_member, "frame.member", ["All Lines", "Anchor", "Angle", "Mirror", "Name"]);
 form_case!(thread, "solid.thread", ["Profile", "Size", "Pitch", "Designation"]);
-form_case!(primitive_box, "solid.box", ["length", "width", "height", "Operation"]);
-form_case!(cylinder, "solid.cylinder", ["diameter", "height", "Operation"]);
-form_case!(sphere, "solid.sphere", ["diameter", "Operation"]);
-form_case!(torus, "solid.torus", ["major", "minor", "Operation"]);
-form_case!(cone, "solid.cone", ["diameter", "top_diameter", "height", "Operation"]);
-form_case!(coil, "solid.coil", ["diameter", "revolutions", "pitch", "section_size", "Operation"]);
+form_case!(primitive_box, "solid.box", ["ui.length", "ui.width", "ui.height", "Operation"]);
+form_case!(cylinder, "solid.cylinder", ["ui.diameter", "ui.height", "Operation"]);
+form_case!(sphere, "solid.sphere", ["ui.diameter", "Operation"]);
+form_case!(torus, "solid.torus", ["ui.major_radius", "ui.minor_radius", "Operation"]);
+form_case!(cone, "solid.cone", ["ui.diameter", "ui.top_diameter", "ui.height", "Operation"]);
+form_case!(coil, "solid.coil", ["ui.diameter", "ui.revolutions", "ui.pitch", "ui.section_size", "Operation"]);
 form_case!(combine, "solid.combine", ["Operation"]);
 form_case!(surface_extrude, "surface.extrude", ["Distance", "Direction"]);
 form_case!(surface_revolve, "surface.revolve", ["Angle", "Direction"]);
@@ -418,6 +457,47 @@ fn registry_dialog_inventory_has_no_unclassified_feature_forms() {
     for spec in solidcraft_engine::command_specs() {
         let Some(d) = Dialog::for_command(&h.app, spec.id) else { continue };
         assert!(super::command(&d.kind).is_some(), "{}: {:?}", spec.id, d.kind);
+    }
+}
+
+/// Texts these dialogs draw themselves read in the user's language: the joints' Play button, the
+/// Motion Study's Loop, the Stitch tolerance hint, the Flange type and the Emboss note.
+#[test]
+fn hand_drawn_dialog_texts_are_translated() {
+    fn texts(shape: &egui::Shape, out: &mut Vec<String>) {
+        match shape {
+            egui::Shape::Text(text) => out.push(text.galley.job.text.clone()),
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| texts(shape, out)),
+            _ => {}
+        }
+    }
+    let mut h = fixture();
+    h.app.preferences.language = "ja".into();
+    let _japanese = crate::i18n::scope("ja");
+    for (command, english) in [
+        ("joint.gear", "▶ Play"),
+        ("motion.study", "Loop"),
+        ("surface.stitch", "tight"),
+        ("sheet.flange", "Base"),
+        ("solid.emboss", "Orthogonal line profiles tangent to one supported cylinder wrap automatically. Pick a wall to choose a target."),
+    ] {
+        let mut d = Dialog::for_command(&h.app, command).unwrap();
+        let mut painted = Vec::new();
+        for _ in 0..2 {
+            let mut out = h.ctx.run_ui(
+                egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(320.0, 1600.0))), ..Default::default() },
+                |ui| {
+                    ui.set_width(264.0);
+                    ui_kit::scope(ui, |ui| {
+                        rows(&mut h.app, &h.ctx, &mut d, ui);
+                    });
+                },
+            );
+            out.textures_delta.clear();
+            painted.clear();
+            out.shapes.iter().for_each(|shape| texts(&shape.shape, &mut painted));
+        }
+        assert!(!painted.iter().any(|p| p == english), "{command} paints {english:?} in Japanese: {painted:?}");
     }
 }
 
@@ -866,6 +946,33 @@ fn viewport_profile_click_returns_extrude_value_focus() {
     assert!((bounds.max.z - bounds.min.z - 30.0).abs() < 1e-7);
 }
 
+/// Typing `depth = 30` in the extrude dialog's distance defines the user parameter `depth` and
+/// the extrude uses it, in the dialog's one undo step; the preview made nothing (#4071).
+#[test]
+fn a_dialog_field_typed_as_a_definition_defines_the_parameter() {
+    let mut h = extrude_focus_fixture();
+    let undo = h.app.session.undo.len();
+    // As above: the first click returns focus to the distance, the second picks the profile.
+    h.step(&json!({"click":{"world":[15,10,0]}})).unwrap();
+    h.step(&json!({"text":"30"})).unwrap();
+    h.step(&json!({"click":{"world":[15,10,0]}})).unwrap();
+    h.step(&json!({"text":"depth = 30"})).unwrap();
+    assert!(matches!(&h.app.dialog.as_ref().unwrap().kind, Kind::Extrude { distance, .. } if distance == "depth = 30"));
+    h.settle();
+    assert!(h.app.session.doc.param("depth").is_none(), "the preview defined nothing");
+    h.step(&json!({"key":"Enter"})).unwrap();
+    h.settle();
+    assert!(h.app.dialog.is_none(), "{:?} {:?}", h.app.status, h.app.dialog.as_ref().map(|d| (d.error.clone(), format!("{:?}", d.kind))));
+    let doc = &h.app.session.doc;
+    let depth = doc.param("depth").expect("the user parameter was added");
+    assert!(!depth.model && depth.expr == "30" && depth.unit == "mm", "{depth:?}");
+    let extrude = doc.features.iter().rev().find(|f| f.name.starts_with("Extrude")).unwrap();
+    assert!(extrude.kind.inputs().iter().any(|(label, e, _)| *label == "Distance" && e == "depth"), "{:?}", extrude.kind.inputs());
+    assert_eq!(h.app.session.undo.len(), undo + 1, "one undo step");
+    let bounds = h.app.session.world_state().bodies.first().unwrap().mesh().bounds();
+    assert!((bounds.max.z - bounds.min.z - 30.0).abs() < 1e-7);
+}
+
 #[test]
 fn viewport_empty_click_falls_back_to_first_numeric_dialog_field() {
     let mut h = extrude_focus_fixture();
@@ -933,4 +1040,24 @@ fn extrude_builds_the_one_region_clicked_where_the_face_outline_cuts_a_profile()
         let volume = h.app.run("inspect.measure", json!({})).unwrap()["total"]["volume_mm3"].as_f64().unwrap();
         assert!(((volume - before) - area * 5.0).abs() < 5e-3 * area * 5.0, "x = {x}: {volume} - {before} vs {}", area * 5.0);
     }
+}
+
+/// Every selection field of every command's dialog is labelled with a message the catalogs carry,
+/// so it reads in the user's language ("First edge", "Second point" read English everywhere when
+/// they were missing).
+#[test]
+fn every_selection_field_label_is_translated() {
+    let h = fixture();
+    let _japanese = crate::i18n::scope("ja");
+    let mut missing = std::collections::BTreeSet::new();
+    for spec in solidcraft_engine::command_specs() {
+        let Some(d) = Dialog::for_command(&h.app, spec.id) else { continue };
+        for input in &d.inputs {
+            let label = input.label.trim();
+            if label.chars().any(|c| c.is_ascii_alphabetic()) && crate::i18n::tr_label(label) == label {
+                missing.insert(format!("{}: {label}", spec.id));
+            }
+        }
+    }
+    assert!(missing.is_empty(), "selection fields without a message: {missing:#?}");
 }

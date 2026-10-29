@@ -18,6 +18,7 @@ mod layout;
 mod look_chain;
 mod menu;
 mod metrics;
+mod name_list;
 mod navigation;
 mod navigation_menu;
 mod navigation_settings;
@@ -29,6 +30,7 @@ mod preferences_navigation;
 mod preferences_small;
 mod radial;
 mod reports;
+mod review;
 mod search;
 mod shortcuts;
 mod sphere;
@@ -36,12 +38,18 @@ mod stages;
 mod status;
 mod table;
 mod text;
+mod tree;
 mod value_focus;
+mod viewport_status;
 
 pub(crate) use actions::*;
 pub use actions::{Button, button};
 pub(crate) use assistant::*;
 pub(crate) use assistant_entry::*;
+#[cfg(test)]
+pub(crate) use checks::tests::{raster as raster_ui, textures_update as update_test_textures};
+#[cfg(test)]
+pub(crate) use checks::tests::{raster as test_raster, textures_update as test_textures_update};
 pub(crate) use checks::*;
 pub(crate) use choice::*;
 pub(crate) use color::*;
@@ -57,10 +65,13 @@ pub(crate) use layout::*;
 pub use look_chain::{LookStep, look_chain};
 pub(crate) use menu::{Menu, MenuItem, rename_menu, workspace_menu};
 pub(crate) use metrics::{ContentWidth, header_height, row_height, table_row_height};
+pub use name_list::{NameList, NameRow, name_list};
 pub(crate) use navigation::*;
 pub(crate) use navigation_menu::*;
 pub(crate) use navigation_settings::*;
-pub(crate) use panel::{ComputeStatus, FeatureOptions, Panel, Part, WindowPage, WorkspaceOptions, panel_header_hover};
+pub(crate) use panel::{
+    ComputeStatus, FeatureOptions, InspectorAction, Panel, Part, WindowPage, WorkspaceOptions, inspector_header, panel_header_hover,
+};
 pub use panel::{DialogButtons, Window};
 #[cfg(test)]
 pub(crate) use panel::{collapsible_header, header};
@@ -70,13 +81,19 @@ pub(crate) use preferences_navigation::*;
 pub(crate) use preferences_small::*;
 pub(crate) use radial::{RADIAL_RADIUS, radial_menu};
 pub(crate) use reports::*;
+pub(crate) use review::ReviewAndApply;
 pub(crate) use search::{CommandSearch, SearchBadge, SearchFieldGeometry};
 pub(crate) use shortcuts::*;
+#[cfg(test)]
+pub(crate) use sphere::sphere_preview;
 pub use sphere::{FinishKind, Sphere, sphere_thumbnail};
+pub(crate) use sphere::{SphereTile, sphere_cursor, sphere_grid, sphere_grid_drag, sphere_preview_with_source};
 pub(crate) use stages::{StageAction, StageBar};
 pub(crate) use status::*;
 pub(crate) use table::*;
+pub(crate) use tree::*;
 pub(crate) use value_focus::*;
+pub(crate) use viewport_status::*;
 
 #[cfg(test)]
 mod gallery;

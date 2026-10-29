@@ -14,9 +14,8 @@
 //! - Windows portable `.zip` / standalone `.exe`: the running `solidcraft.exe` is renamed to
 //!   `solidcraft.exe.old` (Windows allows renaming a running executable), the new one takes its
 //!   name, and SolidCraft offers a restart; the `.old` file is deleted at the next start.
-//! - macOS: the `.dmg` is verified and opened; the user drags the app to Applications. SolidCraft
-//!   is ad-hoc signed and not notarized, so replacing the bundle in place would install code the
-//!   system can't vouch for without the user seeing it.
+//! - macOS: the `.dmg` is verified and opened; the user drags the app to Applications. The
+//!   bundle is never replaced in place from the background.
 //! - Flatpak, Snap, `.deb`, `.rpm`, `.tar.gz`: never replaced; the window shows the command.
 
 use std::io::{Read, Write};

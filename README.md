@@ -64,9 +64,9 @@
 - **Web:** [try it in your browser][web-app], no install.
 
 ARM64 and 32-bit builds, portable zip, .deb, .rpm, Flatpak and the other packages are on the
-[downloads page](docs/downloads.md). The downloads aren't signed yet: on Windows choose
-**More info**, then **Run anyway** in SmartScreen; on macOS right-click SolidCraft and choose **Open**
-the first time. On SolidCraft 0.11 to 0.14, download once by hand; see
+[downloads page](docs/downloads.md). The macOS app is signed with a Developer ID and notarized by
+Apple. The Windows downloads aren't signed yet: choose **More info**, then **Run anyway** in
+SmartScreen. On SolidCraft 0.11 to 0.14, download once by hand; see
 [updating](https://docs.solidcraft.io/guide/updates.html#updating-from-011-to-014).
 
 ## What works

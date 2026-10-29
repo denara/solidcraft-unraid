@@ -2,17 +2,17 @@
 
 The desktop executable is `solidcraft`, the CLI is `solidcraft-cli`, and designs are saved as
 `.sc` (`.solidcraft` designs from earlier releases still open, and Save keeps their name). Designs, settings and setups from builds released under the previous product name keep
-working (see the [compatibility notes](https://github.com/bherbruck/solidcraft/blob/main/docs/compatibility.md)).
+working (see the [compatibility notes](https://github.com/tangency-labs/solidcraft/blob/main/docs/compatibility.md)).
 
 ## Desktop
 
 Download the installer for your system from the
-[Download section of the README](https://github.com/bherbruck/solidcraft#download) or the
-[releases page](https://github.com/bherbruck/solidcraft/releases), or build it yourself with
+[Download section of the README](https://github.com/tangency-labs/solidcraft#download) or the
+[releases page](https://github.com/tangency-labs/solidcraft/releases), or build it yourself with
 stable Rust (1.95 or newer):
 
 ```sh
-git clone https://github.com/bherbruck/solidcraft && cd solidcraft
+git clone https://github.com/tangency-labs/solidcraft && cd solidcraft
 cargo run --release -p solidcraft -- --sample   # opens with a sample part
 ```
 
@@ -24,18 +24,21 @@ cargo run --release -p solidcraft -- --sample   # opens with a sample part
 
 Open the release `.dmg` and drag `SolidCraft.app` onto Applications.
 
-The macOS build is signed ad-hoc and not notarized, so macOS blocks the first launch with
-"SolidCraft can't be opened, because Apple can't verify if the app is vulnerable". Open
-**System Settings › Privacy & Security**, scroll down to the message about SolidCraft, click
-**Open Anyway** and confirm: the app opens normally from then on. From a terminal, remove the
-quarantine flag instead:
+The release `.dmg` is signed with a Developer ID and notarized by Apple, and the app and the disk
+image carry the notarization ticket, so macOS opens SolidCraft normally, even offline.
+
+A copy you build yourself, or one from a fork that has no signing keys, is signed ad hoc and not
+notarized, so macOS blocks its first launch with "SolidCraft can't be opened, because Apple can't
+verify if the app is vulnerable". Open **System Settings › Privacy & Security**, scroll down to the
+message about SolidCraft, click **Open Anyway** and confirm: the app opens normally from then on.
+From a terminal, remove the quarantine flag instead:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/SolidCraft.app
 ```
 
 When updating from a build released under the previous product name, follow the
-[macOS upgrade notes](https://github.com/bherbruck/solidcraft/blob/main/docs/compatibility.md#macos) so you replace it rather than install a second copy.
+[macOS upgrade notes](https://github.com/tangency-labs/solidcraft/blob/main/docs/compatibility.md#macos) so you replace it rather than install a second copy.
 
 ### Linux AppImage
 
@@ -76,7 +79,7 @@ Earlier releases used the application IDs `ai.storyteller.solidcraft` and, up to
 `io.tangencylabs.solidcraft`; accept, and your settings and autosaves move with it. If you
 installed a `.flatpak` bundle, install the new bundle, launch it once (it copies your settings),
 then run `flatpak uninstall --user ai.storyteller.solidcraft` (or `ai.storyteller.solvecraft`; see the
-[compatibility notes](https://github.com/bherbruck/solidcraft/blob/main/docs/compatibility.md#linux-app-id)).
+[compatibility notes](https://github.com/tangency-labs/solidcraft/blob/main/docs/compatibility.md#linux-app-id)).
 
 Alternatively, download the release's `.flatpak` file for your architecture and run
 `flatpak install --user ./solidcraft-VERSION-linux-ARCH.flatpak`. The bundle supplies the
@@ -108,7 +111,7 @@ part, `?webgl` forces WebGL2 where WebGPU is missing or misbehaves; the browser 
 `?webgpu`, and an app installed from Chrome or Edge starts with it too). Designs are saved in the
 browser's private file storage, which needs HTTPS or localhost.
 Planned worker and tiered-storage integration is
-described in [web-runtime.md](https://github.com/bherbruck/solidcraft/blob/main/docs/web-runtime.md)
+described in [web-runtime.md](https://github.com/tangency-labs/solidcraft/blob/main/docs/web-runtime.md)
 (design; not yet wired in the shipped wasm build).
 
 After the first visit the web app works offline: the browser keeps a copy of it. Online, each
@@ -358,7 +361,7 @@ name: the `solidcraft` and `solidcraft-cli` programs, `.solidcraft` designs (`.s
 environment variables, settings folders and the `solidcraft` MCP server. Upgrading keeps
 working: designs, settings, recovery files, environment variables and CLI/MCP setups from
 earlier builds carry over. Every compatibility shim is listed in the
-[compatibility notes](https://github.com/bherbruck/solidcraft/blob/main/docs/compatibility.md).
+[compatibility notes](https://github.com/tangency-labs/solidcraft/blob/main/docs/compatibility.md).
 
 Use the SolidCraft documentation and web-app URLs. GitHub redirects links to the renamed
 repository; old-name Pages and Flatpak URLs are not maintained as permanent aliases.

@@ -116,6 +116,7 @@ fn snapshot_budget(s: &Session) -> Result<(), String> {
     let v = &s.visibility;
     let model = s.model.state();
     if s.doc.features.len() > MAX_FEATURES
+        || s.doc.point_clouds.len() > MAX_FEATURES
         || s.model.results.len() > MAX_FEATURES
         || model.bodies.len() > MAX_INSTANCES
         || model.sketches.len() > MAX_FEATURES
@@ -136,6 +137,11 @@ fn snapshot_budget(s: &Session) -> Result<(), String> {
             > 4096
     {
         return Err(BUDGET.into());
+    }
+    // Point clouds currently have a dedicated GPU pass, outside the portable Scene.
+    // Refuse a misleading empty/partial CPU image before cloning or fitting the scan.
+    if solidcraft_engine::view::shown_point_clouds(s).next().is_some() {
+        return Err("point-cloud preview is not supported by the headless renderer; hide the reference scan to observe CAD geometry".into());
     }
     let continuity = s.continuity.iter().fold(0usize, |n, seam| n.saturating_add(seam.points.len()));
     if continuity > MAX_POINTS || v.hidden_occurrences.iter().any(|path| path.len() > 64) {

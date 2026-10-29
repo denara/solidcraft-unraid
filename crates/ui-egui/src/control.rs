@@ -223,6 +223,10 @@ fn execute(app: &mut SolveApp, id: &str, params: Value) -> Result<Value, String>
         return crate::view_pick::pick_command(app, &params);
     }
     let r = app.run(id, params);
+    // Update Links in a part edited in place reads the assembly around it too, as its button does.
+    if r.is_ok() && is_command(Some(id), "component.update_links") && app.edit_in_place.active.is_some() {
+        crate::edit_in_place::refresh(app);
+    }
     if r.is_ok()
         && !matches!(
             id,
@@ -234,12 +238,16 @@ fn execute(app: &mut SolveApp, id: &str, params: Value) -> Result<Value, String>
                 | "view.grid"
                 | "view.ground_shadow"
                 | "view.navigation_bar"
+                | "view.next_tab"
+                | "view.previous_tab"
                 | "view.layout"
                 | "view.navigate"
                 | "view.ambient_occlusion"
                 | "view.perspective"
+                | "view.angle_readout"
                 | "view.graphics_preset"
                 | "view.history_layout"
+                | "timeline.play"
                 | "browser.expand_all"
                 | "browser.collapse_all"
         )
@@ -265,11 +273,28 @@ const MAX_BATCH: usize = 10_000;
 /// Commands that load a file: through `engine.execute` they go to the app's file loader
 /// (`file_load::control`: off the window thread, with progress and Cancel), which a batch would
 /// bypass.
-const LOADS_A_FILE: [&str; 3] = ["doc.open", "file.insert_step", "file.insert_mesh"];
+const LOADS_A_FILE: [&str; 4] = ["doc.open", "file.insert_step", "file.insert_mesh", "pointcloud.insert"];
 
-/// Why `engine.batch` refuses these steps before running any: a step loads a file (send such
-/// steps one by one).
+/// Edit in Place, Finish Edit and the next or previous tab go to another design's tab: a batch's
+/// rollback, or a script's later steps, would land in the wrong design.
+const SWITCHES_DESIGN: [&str; 4] = ["component.edit_in_place", "component.finish_edit", "view.next_tab", "view.previous_tab"];
+
+/// `command` names the command `id`, in any of the spellings the engine takes.
+fn is_command(command: Option<&str>, id: &str) -> bool {
+    command.and_then(solidcraft_engine::find_command).is_some_and(|spec| spec.id == id)
+}
+
+/// The command of `step` when it goes to another design's tab.
+fn switches_design(step: &Value) -> Option<&'static str> {
+    SWITCHES_DESIGN.into_iter().find(|id| is_command(command(step), id))
+}
+
+/// Why `engine.batch` refuses these steps before running any: a step loads a file or switches
+/// to another design (send such steps one by one).
 pub(crate) fn batch_refusal(steps: &[Value]) -> Option<String> {
+    if let Some((i, c)) = steps.iter().enumerate().find_map(|(i, step)| switches_design(step).map(|c| (i, c))) {
+        return Some(format!("engine.batch unavailable: step {i} ({c}) switches to another design"));
+    }
     let (i, c) = steps.iter().enumerate().find_map(|(i, step)| command(step).filter(|c| LOADS_A_FILE.contains(c)).map(|c| (i, c)))?;
     Some(format!("engine.batch unavailable: step {i} ({c}) loads a file"))
 }
@@ -366,12 +391,21 @@ fn with_timings(mut reply: Value, timed: bool, rows: Vec<Value>, total_ms: f64) 
 /// file the request reaches must lie inside them (docs/mcp.md). `None`: it names none.
 pub fn request_scope(app: &SolveApp, params: &Value) -> Result<Option<vfs::PathScope>, String> {
     let Some(allowed) = params.get("allow_paths") else { return Ok(None) };
-    let Some(roots) = allowed.as_array().and_then(|a| a.iter().map(|r| r.as_str().map(std::path::PathBuf::from)).collect::<Option<Vec<_>>>()) else {
+    let folders = |v: &Value| v.as_array().and_then(|a| a.iter().map(|r| r.as_str().map(std::path::PathBuf::from)).collect::<Option<Vec<_>>>());
+    let Some(roots) = folders(allowed) else {
         return Err("`allow_paths` must be a list of folders".into());
+    };
+    // The folders the agent opened or saved a design in (#7181), judged as the open design's is.
+    let designs = match params.get("design_folders") {
+        None => Vec::new(),
+        Some(v) => folders(v)
+            .filter(|d| d.len() <= vfs::MAX_DESIGN_FOLDERS)
+            .ok_or_else(|| format!("`design_folders` must be a list of at most {} folders", vfs::MAX_DESIGN_FOLDERS))?,
     };
     // Plus the app's own recovery folder and, when it is a safe one, the open design's folder.
     let roots = roots.into_iter().chain(solidcraft_engine::recovery::default_dir());
-    Ok(Some(vfs::PathScope::new(roots).with_design(app.session.path.as_deref())))
+    let scope = designs.iter().fold(vfs::PathScope::new(roots), |s, d| s.with_design_folder(d));
+    Ok(Some(scope.with_design(app.session.path.as_deref())))
 }
 
 /// What a picture of the view shows: the model as the window shows it (theme and colour vision
@@ -420,6 +454,7 @@ pub fn handle(app: &mut SolveApp, ctx: &egui::Context, req: &ControlRequest) -> 
     let mut p = req.params.clone();
     if let Some(o) = p.as_object_mut() {
         o.remove("allow_paths");
+        o.remove("design_folders");
     }
     vfs::scoped(Some(scope), || dispatch(app, ctx, &req.method, &p))
 }
@@ -430,6 +465,7 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
     let f = |k: &str| p.get(k).and_then(Value::as_f64).filter(|x| x.is_finite());
     let b = |k: &str| p.get(k).and_then(Value::as_bool).unwrap_or(false);
     match method {
+        "ui.status_fixture" => wrap(crate::viewport_status_fixture::control(app, p)),
         "ui.workspace" => {
             if let Some(workspace) = s("workspace") {
                 if !matches!(workspace, "design" | "render") {
@@ -464,6 +500,9 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
         }
         "engine.script" => {
             let steps = p.as_array().or_else(|| p.get("commands").and_then(Value::as_array));
+            if let Some(c) = steps.and_then(|steps| steps.iter().find_map(switches_design)) {
+                return err(format!("engine.script unavailable: {c} switches to another design (send it on its own)"));
+            }
             let mut replaced = false;
             let r = app
                 .session
@@ -476,6 +515,7 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
             // A successful replacement still happened if a later script step failed.
             if replaced {
                 crate::documents::reset_chat(app);
+                app.edit_in_place.active = None;
             }
             app.follow_view_request(false);
             wrap(r)
@@ -1186,6 +1226,29 @@ mod tests {
 
     use super::*;
     use crate::Services;
+
+    #[test]
+    fn viewport_status_fixture_rejects_hostile_presets_without_mutating_the_session() {
+        let mut h = crate::scenario::Harness::new();
+        let revision = h.app.session.revision;
+        for params in [Value::Null, json!([]), json!({}), json!({"preset":false}), json!({"preset":[]}), json!({"preset":"unknown"})] {
+            let reply = h.call("ui.status_fixture", params);
+            assert_eq!(reply["ok"], false, "{reply}");
+            assert_eq!(h.app.session.revision, revision);
+        }
+        let reply = h.call("ui.status_fixture", json!({"preset":"mode"}));
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert_eq!(h.app.session.revision, revision);
+        assert!(h.app.session.analysis.is_none());
+        for preset in ["off", "mode"] {
+            h.call("ui.status_fixture", json!({"preset":preset}));
+            h.call("ui.resize", json!({"width":200,"height":600}));
+            h.frames(4);
+            assert_eq!(h.app.session.revision, revision);
+            h.call("ui.resize", json!({"width":1400,"height":900}));
+            h.frames(4);
+        }
+    }
 
     #[test]
     fn touchpad_automation_moves_with_modifiers_and_releases_without_buttons() {
@@ -1914,6 +1977,47 @@ mod tests {
         let reply = save_screenshot(&image, None);
         assert_eq!(reply, json!({"ok": true, "result": {"path": path.to_string_lossy(), "width": 4, "height": 3}}));
         assert!(path.is_file());
+    }
+
+    /// A request's `design_folders` (where its MCP agent opened or saved a design, #7181) count
+    /// as the open design's folder does: their files are reachable, their hidden files and the
+    /// folders beside them are not, and a list that is not one of at most
+    /// `vfs::MAX_DESIGN_FOLDERS` folders is refused.
+    #[test]
+    fn a_requests_design_folders_count_as_the_open_designs() {
+        let mut s = Session::default();
+        s.execute("solid.box", &json!({"length": 10, "width": 10, "height": 10})).unwrap();
+        let mut app = SolveApp::new(s, Services::default());
+        let base = vfs::temp_dir().join(format!("solidcraft-control-design-folders-{}", std::process::id()));
+        let (root, proj, out) = (base.join("root"), base.join("proj"), base.join("out"));
+        for d in [&root, &proj.join(".git"), &out] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let at = |d: &std::path::Path, f: &str| d.join(f).to_string_lossy().to_string();
+        let mut call = |path: String, designs: Value| {
+            let params =
+                json!({"command": "file.export", "params": {"path": path}, "allow_paths": [root.to_string_lossy()], "design_folders": designs});
+            let (req, _rx) = ControlRequest::new("engine.execute", params);
+            match handle(&mut app, &crate::fonts::test_context(), &req) {
+                Outcome::Done(v) => v,
+                Outcome::Screenshot { path } => json!({"ok": true, "screenshot": path}),
+            }
+        };
+        let designs = json!([proj.to_string_lossy()]);
+        assert_eq!(call(at(&proj, "a.step"), designs.clone())["ok"], true);
+        for p in [at(&proj, ".secret.step"), at(&proj, ".git/a.step"), at(&out, "a.step")] {
+            let v = call(p.clone(), designs.clone());
+            assert!(v["ok"] == false && v.to_string().contains("outside the folders this agent may use"), "{p}: {v}");
+        }
+        assert!(!proj.join(".secret.step").exists() && !proj.join(".git/a.step").exists());
+        assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0, "nothing written beside it");
+        let too_many = json!(vec![proj.to_string_lossy(); vfs::MAX_DESIGN_FOLDERS + 1]);
+        for bad in [json!(proj.to_string_lossy()), json!([1]), too_many] {
+            let v = call(at(&proj, "b.step"), bad);
+            assert!(v["error"].as_str().is_some_and(|e| e.contains("design_folders")), "{v}");
+        }
+        assert!(!proj.join("b.step").exists());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// `ui.camera` reads the camera and sets it; its reply, passed back, sets the same view

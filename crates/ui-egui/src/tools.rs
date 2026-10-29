@@ -91,6 +91,9 @@ pub struct Tool {
     pub dim_history: Vec<crate::sketch_dims::DimBox>,
     pub dims_stage: usize,
     pub dims_focus: bool,
+    /// How far (radians, signed) the cursor has gone round a centre-point arc's centre since its
+    /// start was placed: its sign is the way the arc runs (#6645).
+    pub arc_turn: f64,
 }
 
 impl Tool {
@@ -138,6 +141,7 @@ impl Tool {
             dim_history: Vec::new(),
             dims_stage: usize::MAX,
             dims_focus: false,
+            arc_turn: 0.0,
         })
     }
 }
@@ -152,7 +156,7 @@ pub fn hint(id: &str) -> String {
         "sketch.circle.center" => "Circle: click the centre, then a point on the circle".into(),
         "sketch.arc.three_point" => "Arc: click start, end, then a point on the arc".into(),
         "sketch.arc3d" => "3D Arc: click start, end, then a point on the arc (points may leave the sketch plane)".into(),
-        "sketch.arc.center_point" => "Arc: click centre and start, then click end or type a signed sweep".into(),
+        "sketch.arc.center_point" => "Arc: click centre and start, go round either way and click the end, or type a signed sweep".into(),
         "sketch.dimension" => {
             "Dimension: pick one or two entities and type the value (or click to place it first); click a dimension to edit it; Enter applies".into()
         }
@@ -207,9 +211,45 @@ pub fn on_hover(app: &mut SolveApp, proj: &Proj, pos: Pos2, shift: bool) {
     } else {
         sketch_point_at(app, proj, pos)
     };
+    let follow = app.preferences.center_arc_follows_cursor;
     if let Some(t) = app.tool.as_mut() {
         t.hover = h;
+        if follow {
+            follow_arc_turn(t);
+        } else {
+            t.arc_turn = 0.0;
+        }
     }
+}
+
+/// Add the cursor's latest step round a centre-point arc's centre to the turn it has made since
+/// the start was placed, a step never more than half a turn. A full turn back to the start wraps.
+fn follow_arc_turn(t: &mut Tool) {
+    let (Some(c), Some(a), Some(h)) = (t.pts.first(), t.pts.get(1), t.hover.as_ref()) else {
+        t.arc_turn = 0.0;
+        return;
+    };
+    if t.cmd != "sketch.arc.center_point" || t.pts.len() != 2 {
+        t.arc_turn = 0.0;
+        return;
+    }
+    let (c, a, h) = (c.0, a.0, h.0);
+    if h.dist(c) <= 1e-9 || a.dist(c) <= 1e-9 {
+        return;
+    }
+    let at = (a - c).angle() + t.arc_turn;
+    let step = ((h - c).angle() - at + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI;
+    if step.is_finite() {
+        t.arc_turn = (t.arc_turn + step) % std::f64::consts::TAU;
+    }
+}
+
+/// A centre-point arc's sweep from its start to `end` (radians): counter-clockwise, unless the
+/// cursor went round the centre clockwise from the start (#6645).
+pub(crate) fn center_arc_sweep(t: &Tool, end: Vec2) -> f64 {
+    let (Some(c), Some(a)) = (t.pts.first(), t.pts.get(1)) else { return 0.0 };
+    let ccw = ((end - c.0).angle() - (a.0 - c.0).angle()).rem_euclid(std::f64::consts::TAU);
+    if t.arc_turn < 0.0 && ccw > 0.0 { ccw - std::f64::consts::TAU } else { ccw }
 }
 
 pub fn on_click(app: &mut SolveApp, proj: &Proj, pos: Pos2, shift: bool) {
@@ -410,7 +450,7 @@ pub fn on_click(app: &mut SolveApp, proj: &Proj, pos: Pos2, shift: bool) {
             }
         }
     }
-    if !crate::sketch_text::editing(app) {
+    if !crate::sketch_text::editing(app) && !crate::sketch_tools::image_placement_finished(&tool) {
         app.tool = Some(tool);
     }
 }
@@ -496,13 +536,21 @@ pub fn place(app: &mut SolveApp, p: (Vec2, Option<String>)) {
     app.tool = Some(tool);
 }
 
-/// Geometry and typed constraints are committed atomically, as one undo step.
+/// Geometry and typed constraints are committed atomically, as one undo step. With "Dimension
+/// new shapes" on (Preferences › Sketch), every other size of a shape the engine can dimension
+/// joins them at its size as drawn, and with "Also place them from the origin" the shape is then
+/// placed until fully constrained; the engine's `dimension_roles` decides which shapes those are.
+/// This is the one place drawing tools commit through: the 3D tools (`sketch3d`) take part by
+/// committing here once their creators are listed there.
 pub(crate) fn draw(app: &mut SolveApp, t: &Tool, params: Value) -> Result<Value, String> {
     let dimensions = crate::sketch_dims::dimensions(t);
-    if dimensions.as_object().is_none_or(|values| values.is_empty()) {
+    let as_drawn = app.preferences.sketch_auto_dimensions && solidcraft_engine::dimension_roles(t.cmd).is_some();
+    let locate = as_drawn && app.preferences.sketch_auto_locate;
+    if !as_drawn && dimensions.as_object().is_none_or(|values| values.is_empty()) {
         app.run(t.cmd, params)
     } else {
-        let result = app.run("sketch.draw.dimensioned", json!({"command": t.cmd, "params": params, "dimensions": dimensions}))?;
+        let request = json!({"command": t.cmd, "params": params, "dimensions": dimensions, "as_drawn": as_drawn, "locate": locate});
+        let result = app.run("sketch.draw.dimensioned", request)?;
         // The internal wrapper has no toolbar category; apply the original creator's line
         // type while retaining the draw's undo history, including at the history limit.
         let history = std::mem::take(&mut app.session.undo);
@@ -558,6 +606,9 @@ fn run_shape(app: &mut SolveApp, t: &Tool) -> Result<Vec<String>, String> {
             };
             match crate::sketch_dims::locked_value(app, t, "Sweep") {
                 Some(sweep) => json!({"center": center, "start": arg(&p[1]), "sweep": sweep.to_degrees()}),
+                None if center_arc_sweep(t, p[2].0) < 0.0 => {
+                    json!({"center": center, "start": arg(&p[1]), "end": xy(&p[2]), "clockwise": true})
+                }
                 None => json!({"center": center, "start": arg(&p[1]), "end": xy(&p[2])}),
             }
         }
@@ -698,7 +749,7 @@ pub(crate) fn projection_preselection(selection: &[solidcraft_engine::Sel]) -> O
 
 /// `x` or `y` when the origin axis `name` is the active sketch's own x or y axis: along it, and
 /// through the sketch's origin.
-fn sketch_axis_of(app: &SolveApp, name: &str) -> Option<&'static str> {
+pub(crate) fn sketch_axis_of(app: &SolveApp, name: &str) -> Option<&'static str> {
     use solidcraft_engine::geom::Vec3;
     let dir = match name {
         "X" => Vec3::X,
@@ -901,7 +952,7 @@ pub(crate) fn preview_curve(
         }
         ("sketch.arc.center_point", [c, a]) => {
             let start = (*a - *c).angle();
-            let sweep = sweep.unwrap_or_else(|| ((hover - *c).angle() - start).rem_euclid(std::f64::consts::TAU));
+            let sweep = sweep.unwrap_or_else(|| center_arc_sweep(t, hover));
             if !sweep.is_finite() || sweep.abs() <= 1e-9 || sweep.abs() >= std::f64::consts::TAU {
                 return None;
             }

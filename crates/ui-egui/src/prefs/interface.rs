@@ -45,6 +45,15 @@ pub(super) fn interface(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
                     app.preferences.viewport_theme = *view;
                 }
             });
+            // The logo in the theme's own logo colours or in its accent.
+            let label = app.tr("prefs.logo");
+            ui_kit::row(ui, label, |ui| {
+                let labels = [crate::i18n::tr("prefs.logo_theme"), crate::i18n::tr("prefs.logo_accent")];
+                let mut selected = usize::from(app.preferences.logo_accent);
+                if ui_kit::settings_segments(ui, label, &mut selected, &labels) {
+                    app.preferences.logo_accent = selected == 1;
+                }
+            });
             // A theme file another tool writes, reloaded when it changes (#7573).
             if FOLLOW_AVAILABLE {
                 follow_row(app, ui);
@@ -73,6 +82,11 @@ pub(super) fn interface(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
                             app.preferences.ribbon_labels = selected == 0;
                         }
                     });
+                    // The SKETCH tab outside a sketch too (#7904).
+                    ui_kit::row(ui, "", |ui| {
+                        let check = setting::sketch_tab_always(app, ui).on_hover_text(app.tr("prefs.sketch_tab_always_note"));
+                        crate::scenario::publish_target("prefs:sketch_tab_always", check.rect);
+                    });
                     // Where every feature dialog puts its OK and Cancel (#6708).
                     ui_kit::row(ui, app.tr("prefs.dialog_buttons"), |ui| {
                         let placements = [crate::ui_kit::DialogButtons::Bottom, crate::ui_kit::DialogButtons::Top];
@@ -90,15 +104,48 @@ pub(super) fn interface(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
                             crate::scenario::publish_handle(&format!("prefs:dialog_buttons:{key}"), at);
                         }
                     }
+                    // Where notices and offers stack (#7893).
+                    ui_kit::row(ui, app.tr("prefs.toast_place"), |ui| {
+                        let places = [crate::viewport::ToastPlace::Corner, crate::viewport::ToastPlace::Centre];
+                        let mut selected = places.iter().position(|p| *p == app.preferences.toast_place).unwrap_or(0);
+                        if ui_kit::segmented(ui, &mut selected, &[app.tr("prefs.bottom_right"), app.tr("prefs.bottom_centre")], Default::default())
+                            && let Some(place) = places.get(selected)
+                        {
+                            app.preferences.toast_place = *place;
+                        }
+                    });
+                    let row = app.tr("prefs.toast_place");
+                    for (label, key) in [("prefs.bottom_right", "corner"), ("prefs.bottom_centre", "centre")] {
+                        if let Some(at) = crate::scenario::handle_at(&format!("dialog:{row}:{}", app.tr(label))) {
+                            crate::scenario::publish_handle(&format!("prefs:toast_place:{key}"), at);
+                        }
+                    }
                     ui_kit::row(ui, app.tr("prefs.history"), |ui| {
-                        let mut selected = if app.preferences.timeline_left { if app.preferences.timeline_under_browser { 2 } else { 1 } } else { 0 };
+                        let mut selected = if app.preferences.history_in_browser {
+                            3
+                        } else if app.preferences.timeline_left {
+                            if app.preferences.timeline_under_browser { 2 } else { 1 }
+                        } else {
+                            0
+                        };
                         if ui_kit::segmented(
                             ui,
                             &mut selected,
-                            &[crate::i18n::tr("prefs.bottom"), crate::i18n::tr("prefs.left"), crate::i18n::tr("prefs.under_browser")],
+                            &[
+                                crate::i18n::tr("prefs.bottom"),
+                                crate::i18n::tr("prefs.left"),
+                                crate::i18n::tr("prefs.under_browser"),
+                                crate::i18n::tr("prefs.in_browser"),
+                            ],
                             ui_kit::Segments { proportional: true, compact: true, ..Default::default() },
                         ) {
-                            let _ = app.run("view.history_layout", json!({"dock": match selected { 1=>"left",2=>"under_browser",_=>"bottom" }}));
+                            let dock = match selected {
+                                1 => "left",
+                                2 => "under_browser",
+                                3 => "browser",
+                                _ => "bottom",
+                            };
+                            let _ = app.run("view.history_layout", json!({ "dock": dock }));
                         }
                     });
                     for (short, legacy) in [
@@ -111,9 +158,10 @@ pub(super) fn interface(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
                             crate::scenario::publish_handle(&format!("dialog:{row}:{}", app.tr(legacy)), at);
                         }
                     }
-                    // Only the History at the left can list a sketch under its feature (#6489).
+                    // The History at the left and the one in the browser can list a sketch under its
+                    // feature (#6489); the timeline at the bottom can't.
                     ui_kit::row(ui, app.tr("prefs.history_sketches"), |ui| {
-                        ui.add_enabled_ui(app.preferences.timeline_left, |ui| {
+                        ui.add_enabled_ui(app.preferences.timeline_left || app.preferences.history_in_browser, |ui| {
                             let mut selected = usize::from(app.preferences.history_sketches == HistorySketches::UnderFeature);
                             if ui_kit::segmented(
                                 ui,
@@ -134,6 +182,11 @@ pub(super) fn interface(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
                                 .on_disabled_hover_text(app.tr("prefs.history_origin_bodies_note"));
                             crate::scenario::publish_target("prefs:history_origin_bodies", check.rect);
                         });
+                    });
+                    // Play History between Previous and Next, for people who want it there (#3688).
+                    ui_kit::row(ui, "", |ui| {
+                        let check = setting::history_play_button(app, ui).on_hover_text(app.tr("prefs.history_play_button_note"));
+                        crate::scenario::publish_target("prefs:history_play_button", check.rect);
                     });
                     ui_kit::row(ui, app.tr("prefs.browser"), |ui| {
                         ui.add_enabled_ui(app.ui.layout == crate::shell::LayoutMode::Floating, |ui| {
@@ -169,12 +222,23 @@ pub(super) fn interface(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
                             app.preferences.browser_bodies_folders = *mode;
                         }
                     });
+                    // What is being edited, the sketch's state and the units, along the bottom (#7243).
+                    ui_kit::row(ui, "", |ui| {
+                        let check = setting::status_bar(app, ui).on_hover_text(app.tr("prefs.status_bar_note"));
+                        crate::scenario::publish_target("prefs:status_bar", check.rect);
+                    });
                     ui_kit::text(ui, app.tr("prefs.layout_note"), ui_kit::Text::Hint("layout"));
                     ui_kit::text(ui, app.tr("prefs.history_sketches_note"), ui_kit::Text::Hint("history_sketches"));
                     ui_kit::LayoutPreview {
                         compact: app.ui.layout == crate::shell::LayoutMode::Docked,
                         labels: app.preferences.ribbon_labels,
-                        history: if app.preferences.timeline_left { if app.preferences.timeline_under_browser { 2 } else { 1 } } else { 0 },
+                        history: if app.preferences.history_in_browser {
+                            3
+                        } else if app.preferences.timeline_left {
+                            if app.preferences.timeline_under_browser { 2 } else { 1 }
+                        } else {
+                            0
+                        },
                         translucent: app.preferences.browser_float,
                     }
                 })

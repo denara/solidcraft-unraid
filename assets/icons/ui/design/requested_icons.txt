@@ -103,8 +103,10 @@ extend	false
 extrude	false
 eye	false
 fastener	false
+feature_group	false
 fillet	false
 finish	false
+finish_edit	false
 fit	false
 fit_section	false
 flange	false
@@ -142,6 +144,7 @@ loft	false
 lookat	false
 material	false
 measure	false
+mesh_body	false
 mesh_export	false
 min_radius	false
 mirror	false
@@ -256,6 +259,7 @@ split_face	false
 spun	false
 star	false
 status_error	false
+status_pin	false
 status_recovery	false
 style	false
 style_hidden_edges	false
@@ -287,6 +291,8 @@ svg	false
 sweep	false
 text	false
 thread	false
+timeline_play	false
+timeline_stop	false
 torus	false
 trace	false
 trim	false

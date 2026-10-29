@@ -274,6 +274,10 @@ impl Remote {
         // The app confines the files this request reaches to the agent's folders (control.rs).
         if let (Some(scope), Some(o)) = (solidcraft_engine::io::vfs::current_scope(), params.as_object_mut()) {
             o.insert("allow_paths".into(), json!(scope.roots().iter().map(|r| r.to_string_lossy()).collect::<Vec<_>>()));
+            // And the folders it opened or saved a design in, which count as its open design's.
+            if !scope.design_roots().is_empty() {
+                o.insert("design_folders".into(), json!(scope.design_roots().iter().map(|r| r.to_string_lossy()).collect::<Vec<_>>()));
+            }
         }
         let mut msg = json!({"id": id, "method": method, "params": params});
         // The token goes with every request (an app restarted mid-session has a new one).
@@ -520,7 +524,7 @@ impl Headless {
         json!({
             "current_file": self.session.path,
             "dirty": self.session.is_dirty(),
-            "has_model": !self.session.doc.features.is_empty(),
+            "has_model": !self.session.doc.features.is_empty() || !self.session.doc.point_clouds.is_empty(),
             "revision": self.workspace_revision,
         })
     }

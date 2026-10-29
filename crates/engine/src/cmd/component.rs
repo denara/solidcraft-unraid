@@ -11,7 +11,12 @@ use solidcraft_geom::Vec3;
 
 use super::CommandSpec;
 use crate::params::{bad, bool_, str_, string_list, vec3};
+use crate::schema::component::{EditInPlaceParams, EditInPlaceResult, FinishEditParams, FinishEditResult};
+use crate::schema::{TypedContract, output_schema_for};
 use crate::{Result, Session};
+
+const EDIT_IN_PLACE_CONTRACT: TypedContract<EditInPlaceParams> = TypedContract::new();
+const FINISH_EDIT_CONTRACT: TypedContract<FinishEditParams> = TypedContract::new();
 
 #[path = "component_drag.rs"]
 mod drag;
@@ -43,6 +48,30 @@ pub static COMMANDS: &[CommandSpec] = &[
         .icon("component")
         .params("bodies: [names] → one new component per body, named after it"),
     CommandSpec::new("component.activate", "Activate Component", activate).icon("activate").noundo().params("component: id or name (0 or \"root\" for the design); occurrence?, path?: exact placement used to author shared geometry"),
+    CommandSpec::new("component.edit_in_place", "Edit in Place", crate::checked!("component.edit_in_place", edit_in_place))
+        .icon("edit")
+        .noundo()
+        .doc_only()
+        .contract(&EDIT_IN_PLACE_CONTRACT)
+        .output(output_schema_for::<EditInPlaceResult>)
+        .params(
+            "component: id or name of a linked component; path?: its placement (occurrence ids, default its first) → in the app \
+             window: open the design it links in a tab of its own with the assembly drawn around it (component.finish_edit goes \
+             back); fails when it is not linked, the assembly has no file yet, something is open or running in it, or the file is \
+             missing, on a network location not allowed yet or open in another SolidCraft; asked during the agent's turn it opens \
+             once the turn ends (queued: true); elsewhere it only checks",
+        ),
+    CommandSpec::new("component.finish_edit", "Finish Edit", crate::checked!("component.finish_edit", finish_edit))
+        .icon("finish_edit")
+        .noundo()
+        .doc_only()
+        .contract(&FINISH_EDIT_CONTRACT)
+        .output(output_schema_for::<FinishEditResult>)
+        .params(
+            "no parameters → in the app window: go back from the linked design edited in place to its assembly, which reads it again; \
+             fails while the design has unsaved changes (run file.save first) or something is open in it; asked during the agent's \
+             turn it finishes once the turn ends (queued: true); elsewhere nothing changes",
+        ),
     CommandSpec::new("component.list", "List Components", list).icon("list").noundo().params(
         "compact?: bool (counts of bodies, features, sketches and construction planes instead of their names; occurrences leave out \
          identity transforms; children as occurrence ids); bodies?: bool (with compact: body names, not their count)",
@@ -193,6 +222,30 @@ fn from_bodies(s: &mut Session, p: &Value) -> Result<Value> {
     transfer::from_bodies(s, p)
 }
 
+/// The app window opens the edit in place from what this returns; here the component and its
+/// placement are only checked.
+fn edit_in_place(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "component.edit_in_place";
+    let id = component(s, p, "component", cmd)?;
+    if !s.doc.links.contains_key(&id) {
+        return Err(bad(cmd, "that component is not linked to a design"));
+    }
+    let path = match p.get("path") {
+        Some(_) => serde_json::from_value::<Vec<u64>>(p["path"].clone()).map_err(|_| bad(cmd, "`path` must be occurrence ids"))?,
+        None => s.doc.first_path(id),
+    };
+    if s.occurrence_placement(&path).map_err(|e| bad(cmd, e.to_string()))?.component != id {
+        return Err(bad(cmd, "`path` is a placement of another component"));
+    }
+    serde_json::to_value(EditInPlaceResult { component: id, path, ..Default::default() }).map_err(|e| crate::EngineError::Other(e.to_string()))
+}
+
+/// The app window finishes an edit in place (it knows the part's tab and its assembly); here
+/// there is none, so nothing changes.
+fn finish_edit(_s: &mut Session, _p: &Value) -> Result<Value> {
+    serde_json::to_value(FinishEditResult::default()).map_err(|e| crate::EngineError::Other(e.to_string()))
+}
+
 fn activate(s: &mut Session, p: &Value) -> Result<Value> {
     let id = component(s, p, "component", "component.activate")?;
     let path = if p.get("path").is_some() || p.get("occurrence").is_some() {
@@ -328,7 +381,7 @@ fn move_bodies(s: &mut Session, p: &Value) -> Result<Value> {
 fn copy_bodies(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "component.copy_bodies";
     let to = if p.get("component").is_some() { component(s, p, "component", cmd)? } else { s.active_component };
-    let names = string_list(p, "bodies");
+    let names = string_list(cmd, p, "bodies")?;
     if names.is_empty() || names.len() > 1000 {
         return Err(bad(cmd, "`bodies` must list 1…1000 bodies"));
     }
@@ -354,7 +407,7 @@ fn copy_bodies(s: &mut Session, p: &Value) -> Result<Value> {
         // The copy is made where its body is, so it starts out in the same place.
         scratch.active_component = from;
         scratch.active_occurrence_path = None;
-        let mut made = string_list(&scratch.execute("solid.move", &json!({"bodies": bodies, "copy": true}))?, "created_bodies");
+        let mut made = string_list(cmd, &scratch.execute("solid.move", &json!({"bodies": bodies, "copy": true}))?, "created_bodies")?;
         // Each copy is its body's name numbered as all copies are (`Cube (2)`, `Cube (2)(2)`): the
         // move names a copy of `Cube (2)` `Cube (2) (2)`.
         if made.len() == bodies.len() {
@@ -397,7 +450,7 @@ pub(crate) fn transfer_constructor_result(s: &mut Session, p: &Value) -> Result<
 fn move_sketches(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "component.move_sketches";
     let to = component(s, p, "component", cmd)?;
-    let keys = string_list(p, "sketches");
+    let keys = string_list(cmd, p, "sketches")?;
     let mut ids = Vec::new();
     for k in &keys {
         match s.doc.find_feature(k) {

@@ -612,6 +612,7 @@ fn curve_ids(inputs: &[SelInput], i: usize) -> Vec<String> {
 /// parameters, in the range the command accepts. Checking the range here lets the window say
 /// so in its own error line instead of the status bar.
 pub(crate) fn factor(app: &SolveApp, text: &str) -> Result<f64, String> {
+    crate::length_input::no_definition(text, "Factor")?;
     let v = app.session.doc.eval(text.trim(), ValueKind::Unitless).map_err(|e| format!("Factor: {e}"))?;
     if !(v.is_finite() && v > 1e-9 && v < 1e6) {
         return Err("Factor must be a positive number".into());
@@ -627,6 +628,7 @@ pub(crate) fn value(app: &SolveApp, text: &str, kind: ValueKind, label: &str) ->
     if text.is_empty() {
         return Ok(0.0);
     }
+    crate::length_input::no_definition(text, label)?;
     let doc = &app.session.doc;
     let v = crate::length_input::eval(doc, text, kind).map_err(|e| format!("{label}: {e}"))?;
     if !v.is_finite() {
@@ -689,6 +691,7 @@ fn corner_ids(app: &SolveApp, inputs: &[SelInput], i: usize) -> Vec<String> {
 /// of a field, where an empty row means zero and a negative distance is a direction; neither is
 /// a radius or a chamfer leg, so this one is its own.
 fn corner_size(app: &SolveApp, label: &str, text: &str, kind: ValueKind) -> Result<f64, String> {
+    crate::length_input::no_definition(text, label)?;
     let doc = &app.session.doc;
     let v = crate::length_input::eval(doc, text.trim(), kind).map_err(|e| format!("{label}: {e}"))?;
     if !v.is_finite() || v <= 1e-9 {
@@ -776,7 +779,12 @@ pub fn commands(app: &SolveApp, k: &Mod, inputs: &[SelInput], extra: &Map<String
                 }
                 if *mode == TWO_SIDES {
                     let d2 = signed_length(app, "Distance 2", distance2, false)?;
-                    m.insert("distance2".into(), json!(if d2 > 0.0 { distance2.trim().to_string() } else { format!("-({})", distance2.trim()) }));
+                    // The other way is the value negated; a definition keeps its name (#4071).
+                    let negated = match solidcraft_engine::doc::expr::definition(distance2) {
+                        Some((name, rhs)) => format!("{name} = -({rhs})"),
+                        None => format!("-({})", distance2.trim()),
+                    };
+                    m.insert("distance2".into(), json!(if d2 > 0.0 { distance2.trim().to_string() } else { negated }));
                 }
             }
             ("sketch.offset", params)
@@ -786,14 +794,26 @@ pub fn commands(app: &SolveApp, k: &Mod, inputs: &[SelInput], extra: &Map<String
             if entities.is_empty() {
                 return Err("Select the sketch curves or points to mirror first".into());
             }
-            // The AXES mask also takes an origin axis, which is not a curve of this sketch and
-            // cannot be a mirror line.
             let line = match items(inputs, 1).first() {
-                Some(Sel::SketchCurve { id, .. }) => id.clone(),
-                Some(_) => return Err("The mirror line must be a straight curve of this sketch, not an origin axis".into()),
+                Some(Sel::SketchCurve { id, .. }) => json!(id),
+                Some(sel @ Sel::Axis { name }) if matches!(name.as_str(), "X" | "Y" | "Z") => {
+                    if let Some(axis) = crate::tools::sketch_axis_of(app, name) {
+                        json!(axis)
+                    } else {
+                        let (origin, dir) = crate::dialogs::axis_of(app, sel).ok_or("Select an origin axis")?;
+                        let st = app.session.world_state();
+                        let plane =
+                            st.sketch(app.session.active_sketch.ok_or("No sketch is being edited")?).ok_or("The sketch no longer exists")?.plane;
+                        if plane.normal().dot(dir).abs() > 1e-9 || plane.normal().dot(origin - plane.origin).abs() > 1e-6 {
+                            return Err("The origin axis must lie in the sketch plane".into());
+                        }
+                        json!({"axis":name})
+                    }
+                }
+                Some(_) => return Err("The mirror line must be a straight curve of this sketch or an origin axis in its plane".into()),
                 None => return Err("Select the mirror line".into()),
             };
-            if entities.contains(&line) {
+            if line.as_str().is_some_and(|line| entities.iter().any(|entity| entity == line)) {
                 return Err("The mirror line cannot also be mirrored".into());
             }
             ("sketch.mirror", json!({"entities": entities, "line": line}))

@@ -3,7 +3,7 @@
 SolidCraft is a clean-room, pure-Rust parametric 3D CAD app. This file is a router: the hard rules, then the skill to read for your task. Humans: CONTRIBUTING.md.
 
 ## This Unraid fork
-Read [all mandatory fork rules](docs/unraid-agent-rules.md) first. They preserve the sole branch `codex/unraid-mcp-web`, private configuration, HTTP MCP and independent web/Workspace behavior; no unsafe platform bridges. Updates use [update-solvecraft-unraid](.agents/skills/update-solvecraft-unraid/SKILL.md). Validated baseline: `ae07e36a7d09c6095f4de1bc7ab51067e2418093`. Fork rules override upstream PR/release defaults; use relevant snapshot checks.
+Read [all mandatory fork rules](docs/unraid-agent-rules.md) first. They preserve the sole branch `codex/unraid-mcp-web`, private configuration, HTTP MCP and independent web/Workspace behavior; no unsafe platform bridges. Updates use [update-solvecraft-unraid](.agents/skills/update-solvecraft-unraid/SKILL.md). Validated baseline: `c7a1cee357359145fb6ad6a8a0a5b2764e34c42e`. Fork rules override upstream PR/release defaults; use relevant snapshot checks.
 
 ## Start here
 Work: ROADMAP.md, "Where help is wanted most" in CONTRIBUTING.md, issues labelled `help wanted`, `good first issue`, `needs-triage`; architecture in `docs/architecture.md`. Act when the code, docs and rules settle a question; ask only when it changes what users see. Local `plan/` notes are optional.

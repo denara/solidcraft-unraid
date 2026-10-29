@@ -9,9 +9,11 @@ use crate::i18n;
 /// The commands that have help text. Each one needs a `help.<id>` message in the catalogs.
 pub const DOCUMENTED: &[&str] = &[
     "appearance.assign",
+    "component.finish_edit",
     "face.delete",
     "material.assign",
     "parameters.change",
+    "pointcloud.insert",
     "solid.align",
     "solid.chamfer",
     "solid.combine",
@@ -36,6 +38,7 @@ pub const DOCUMENTED: &[&str] = &[
     "solid.sweep",
     "timeline.compute_all",
     "timeline.delete",
+    "timeline.play",
 ];
 
 /// The help for `command` in the current language, when it has any.

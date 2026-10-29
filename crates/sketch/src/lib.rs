@@ -88,6 +88,8 @@ mod construct_tests;
 #[cfg(test)]
 mod continuation_tests;
 #[cfg(test)]
+mod degenerate_line_tests;
+#[cfg(test)]
 mod ends_tests;
 #[cfg(test)]
 mod font_tests;

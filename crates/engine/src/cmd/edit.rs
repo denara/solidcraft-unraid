@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use solidcraft_doc::{Feature, FeatureKind};
 
 use super::CommandSpec;
-use crate::params::{bad, bool_, num, str_, string_list};
+use crate::params::{bad, bool_, name_or_id_list, num, str_};
 use crate::{EngineError, Result, Sel, Session, Snapshot};
 
 pub static COMMANDS: &[CommandSpec] = &[
@@ -29,6 +29,15 @@ pub static COMMANDS: &[CommandSpec] = &[
         .doc_only()
         .params("checkpoint: id; forget?: bool (true = drop it without going back). Goes back to it, undo history included"),
     CommandSpec::new("timeline.compute_all", "Compute All", compute_all).at("SOLID", "MODIFY").icon("compute").noundo(),
+    CommandSpec::new("timeline.play", "Play History", crate::checked!("timeline.play", play))
+        .at("INSPECT", "HISTORY")
+        .icon("timeline_play")
+        .noundo()
+        .doc_only()
+        .enabled(super::not_in_sketch)
+        .contract(&PLAY_CONTRACT)
+        .output(crate::schema::output_schema_for::<crate::schema::edit::TimelinePlayResult>)
+        .params("action?: toggle|play|stop (default toggle) → action: validated display request; the connected UI plays from the marker to the end with a half-second pause per rebuilt step. Headless callers only validate the request; no dialog, document edit or animation clock is created"),
     CommandSpec::new("timeline.delete", "Delete", delete)
         .at("SOLID", "MODIFY")
         .icon("delete")
@@ -83,7 +92,16 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("select.filter", "Selection filter", select_filter).icon("select").noundo().doc_only()
         .params("mode: body|face|component → validated UI pick granularity; headless echo only, no document edits or undo"),
     CommandSpec::new("select.clear", "Clear Selection", select_clear).icon("select").noundo(),
+    CommandSpec::new("select.same_look", "Select Same Look", select_same_look).icon("select").noundo().doc_only()
+        .params("body?: world body name, face?: face index; defaults to the current body/face selection → selects objects using the resolved appearance"),
 ];
+
+const PLAY_CONTRACT: crate::schema::TypedContract<crate::schema::edit::TimelinePlayParams> = crate::schema::TypedContract::new();
+
+fn play(_s: &mut Session, p: &Value) -> Result<Value> {
+    let request: crate::schema::edit::TimelinePlayParams = serde_json::from_value(p.clone()).map_err(|e| bad("timeline.play", e.to_string()))?;
+    serde_json::to_value(crate::schema::edit::TimelinePlayResult { action: request.action }).map_err(|e| EngineError::Other(e.to_string()))
+}
 
 fn undo(s: &mut Session, _p: &Value) -> Result<Value> {
     let Some(prev) = s.undo.pop() else { return Err(EngineError::Other("nothing to undo".into())) };
@@ -172,10 +190,8 @@ fn feature_id(s: &Session, v: Option<&Value>, cmd: &str) -> Result<u64> {
 
 fn delete(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "timeline.delete";
-    let mut keys = string_list(p, "features");
-    if let Some(Value::Array(a)) = p.get("features") {
-        keys.extend(a.iter().filter_map(Value::as_u64).map(|n| n.to_string()));
-    }
+    // The features are named or numbered, and both kinds can sit in one list.
+    let mut keys = name_or_id_list(cmd, p, "features")?;
     if let Some(f) = p.get("feature") {
         keys.push(match f {
             Value::Number(n) => n.to_string(),
@@ -1214,6 +1230,44 @@ fn select_filter(_s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"mode": request.mode}))
 }
 
+fn select_same_look(s: &mut Session, p: &Value) -> Result<Value> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Request {
+        body: Option<String>,
+        face: Option<usize>,
+    }
+    let request: Request = serde_json::from_value(p.clone()).map_err(|e| bad("select.same_look", e.to_string()))?;
+    let selected = s.selection.last();
+    let name = request
+        .body
+        .as_deref()
+        .or(match selected {
+            Some(Sel::Body { name }) => Some(name.as_str()),
+            Some(Sel::Face { body, .. }) => Some(body.as_str()),
+            _ => None,
+        })
+        .ok_or_else(|| bad("select.same_look", "select an object or face"))?;
+    let state = s.world_state();
+    let body = state.body(name).ok_or_else(|| bad("select.same_look", "unknown object"))?;
+    let face = request.face.or(match selected {
+        Some(Sel::Face { body, index, .. }) if request.body.is_none() && body == name => Some(*index),
+        _ => None,
+    });
+    if let Some(face) = face
+        && face >= body.body.face_count()
+    {
+        return Err(bad("select.same_look", "unknown face"));
+    }
+    let look = face.map_or_else(|| s.doc.model_display_look(body), |face| s.doc.model_face_look(body, face));
+    let items: Vec<_> =
+        state.bodies.iter().filter(|b| s.doc.model_used_looks(b).contains(&look)).take(10_001).map(|b| Sel::Body { name: b.name.clone() }).collect();
+    if items.len() > 10_000 {
+        return Err(bad("select.same_look", "too many objects"));
+    }
+    select_set(s, &json!({"items":items}))
+}
+
 fn select_clear(s: &mut Session, _p: &Value) -> Result<Value> {
     s.selection.clear();
     s.revision += 1;
@@ -1630,6 +1684,11 @@ fn redefine(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(e) = trial.model.result(id).and_then(|r| r.error.clone()) {
         return Err(EngineError::Other(e));
     }
+    // What this edit rebuilt: the trial computed the edited feature and the features after it. The
+    // session's evaluation below only takes those results from what the trial kept, so its own
+    // counters read as "nothing was rebuilt" (#5694).
+    let rebuilt = trial.model.last_recomputed;
+    let reused = trial.model.last_restored;
     let original_ids: std::collections::BTreeSet<u64> = s.doc.features.iter().map(|feature| feature.id).collect();
     let added_ids: std::collections::BTreeSet<u64> =
         trial.doc.features.iter().filter(|feature| !original_ids.contains(&feature.id)).map(|feature| feature.id).collect();
@@ -1671,7 +1730,9 @@ fn redefine(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(e) = s.model.result(id).and_then(|r| r.error.clone()) {
         return Err(EngineError::Other(e));
     }
-    Ok(json!({"feature": id, "recomputed": s.model.last_recomputed, "restored": s.model.last_restored}))
+    // Report the trial's rebuild, plus anything the session still had to compute itself (a kept
+    // result its budget dropped); `s.model`'s own counters would only report the reuse (#5694).
+    Ok(json!({"feature": id, "recomputed": rebuilt + s.model.last_recomputed, "restored": reused}))
 }
 
 fn dependents(s: &mut Session, p: &Value) -> Result<Value> {

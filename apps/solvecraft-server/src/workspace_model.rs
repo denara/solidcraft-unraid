@@ -83,7 +83,7 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
     }
     fn imports_as_new(path: &str) -> bool {
         Path::new(path).extension().and_then(|ext| ext.to_str()).is_some_and(|ext| {
-            ["step", "stp", "igs", "iges", "fcstd", "3dm", "3mf", "stl", "obj", "glb", "gltf", "dxf", "svg"]
+            ["step", "stp", "igs", "iges", "fcstd", "3dm", "3mf", "stl", "obj", "glb", "gltf", "dxf", "svg", "ply", "xyz", "pts"]
                 .iter()
                 .any(|import| ext.eq_ignore_ascii_case(import))
         })
@@ -99,7 +99,9 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
             "component.insert_design" | "component.relink" | "component.update_links" | "component.replace_with_link" => {
                 out.push(FileOperation::ReadSources)
             }
-            "render.hdr.inspect" | "render.settings.capture_hdr" | "render.preflight" | "render.start" => out.push(FileOperation::ReadSources),
+            "pointcloud.insert" | "render.hdr.inspect" | "render.settings.capture_hdr" | "render.preflight" | "render.start" => {
+                out.push(FileOperation::ReadSources)
+            }
             "doc.open" => {
                 if let Some(path) = name(root, args)? {
                     *current = (!imports_as_new(&path)).then(|| path.clone());
@@ -251,7 +253,7 @@ mod tests {
     #[test]
     fn upstream_drawing_open_does_not_plan_an_implicit_native_save_over_the_source() {
         let root = std::env::temp_dir();
-        for path in ["Project/template.svg", "Project/template.dxf"] {
+        for path in ["Project/template.svg", "Project/template.dxf", "Project/scan.ply", "Project/scan.xyz", "Project/scan.pts"] {
             let message = batch(json!([{"command":"doc.open","params":{"path":path}},{"command":"file.save","params":{}}]));
             assert_eq!(operations(&root, &message, None).unwrap(), vec![FileOperation::Open(path.into())]);
         }
@@ -388,6 +390,7 @@ mod tests {
             "component.relink",
             "component.update_links",
             "component.replace_with_link",
+            "pointcloud.insert",
             "render.hdr.inspect",
             "render.settings.capture_hdr",
             "render.preflight",

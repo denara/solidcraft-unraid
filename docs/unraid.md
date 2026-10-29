@@ -15,7 +15,7 @@ The fork is hosted at [denara/solidcraft-unraid](https://github.com/denara/solid
 The public Unraid template names a new container `SolidCraft`; the existing local Compose service,
 image tags, command names, data format and environment variables retain compatibility.
 The first prototype used upstream commit `af536a7`. The current validated snapshot is
-`ae07e36a7d09c6095f4de1bc7ab51067e2418093`. See [update records](unraid-updates.md) for checks,
+`c7a1cee357359145fb6ad6a8a0a5b2764e34c42e`. See [update records](unraid-updates.md) for checks,
 the transferable image archive and installation instructions for this update.
 
 For future requested updates, use the repository skill
@@ -490,7 +490,7 @@ Linked components may read and refresh designs only under /data/files, including
 stored in uploaded documents. The gateway supplies a per-subprocess link root; resolved
 paths and parent folders are checked again by the engine, with symlinks refused. Desktop
 linked components retain their normal behavior when no network link root is supplied.
-This upstream 0.25.1 snapshot includes pending cylinder-reference additions and writes format 41. Validated native format-40 files and legacy format-13 designs open without modifying their source files; parameters, measurements and named split faces are preserved. The `.sc` extension is the new upstream default; existing `.solidcraft`/`.solvecraft` files keep their names, and the workspace applies the same data-only validation, details and browser-copy safeguards to all three. Keep pre-update server and separate browser-design backups; older builds cannot read newly saved designs.
+This upstream 0.26.0 snapshot writes native format 43, including linked-body property baselines and reference point clouds. Validated native format-41 files and legacy format-13 designs open without modifying their source files; parameters, measurements and named split faces are preserved. The `.sc` extension is the new upstream default; existing `.solidcraft`/`.solvecraft` files keep their names, and the workspace applies the same data-only validation, details and browser-copy safeguards to all three. Keep pre-update server and separate browser-design backups; older builds cannot read newly saved designs.
 
 The HTTP gateway launches native MCP with --headless, an explicit /data/files scope and --quiet. Desktop discovery never attaches a network session to a desktop app. Batch tool aliases are normalized before path/project/revision checks. The component.extract file output and component.replace_with_link source path use the same confinement and shared file gate as other file commands. This keeps upstream file confinement active without logging private per-session paths. Browser build URLs are relative, matching upstream's offline/update support; Web and HTTP MCP remain independent.
 
@@ -541,6 +541,19 @@ Use `packaging/unraid/workspace-actions-test.ps1` only against a labelled dispos
 candidate container and fresh test volume. Existing model previews and independent
 browser CAD remain read-only with respect to server models.
 
+
+## Reference scans in the current snapshot
+
+The enabled native importer can open PLY/XYZ/PTS reference scans through MCP. Their
+paths remain project-relative and use the common source-read gate; opening a scan
+creates an unsaved design rather than making the source its implicit save target.
+A scan-only document is reported as a draft. Save explicitly to a new `.sc` file.
+The existing browser upload allowlist and limits remain unchanged; native `.sc` files
+containing embedded scans are accepted within those bounds. Raw scan extensions are
+not yet offered by the browser uploader. Independent browser copies render reference
+points with WebGL. The portable CPU/headless image path has no point-cloud pass, so
+the read-only session observer explicitly reports unavailability for visible scans;
+hide the reference scan to observe the CAD geometry. This does not stop MCP editing.
 
 ## Manual projects and browser uploads
 

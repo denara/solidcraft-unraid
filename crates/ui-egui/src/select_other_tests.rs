@@ -486,3 +486,132 @@ fn an_edge_is_as_deep_as_its_point_under_the_pointer_not_its_middle() {
     let mid = solidcraft_engine::geom::Vec3::new(15.0, 0.0, 2.0);
     assert!((t - want).abs() < 0.5, "depth {t}, the point under the pointer {want}, its middle {}", (mid - o).dot(d));
 }
+
+/// The navigation bar's Orbit, Pan and Zoom: each one's slot and the mode it lights.
+fn lit_modes() -> [(&'static str, crate::viewport::NavMode); 3] {
+    use crate::viewport::NavMode;
+    [("orbit", NavMode::Orbit), ("pan", NavMode::Pan), ("zoom", NavMode::Zoom)]
+}
+
+/// Screen point `at` moved by `d` points right and down.
+fn offset(at: &Value, d: f64) -> Value {
+    json!([at[0].as_f64().unwrap_or_default() + d, at[1].as_f64().unwrap_or_default() + d])
+}
+
+/// A mode lit in the navigation bar owns left drags, not a press held still: the hold opens
+/// the list as it does with no mode lit, and a plain click still selects.
+#[test]
+fn holding_still_opens_the_list_while_a_navigation_mode_is_lit() {
+    for (slot, mode) in lit_modes() {
+        let (mut h, at) = two_lines();
+        h.step(&json!({"click": {"handle": format!("nav:slot:{slot}")}})).unwrap();
+        assert_eq!(h.app.viewport.nav, Some(mode), "{slot} is lit");
+        let cam = h.app.cam;
+        h.step(&json!({"hold": at})).unwrap();
+        assert!(crate::select_other::is_open(&h.app), "a held press opens Select Other with {slot} lit");
+        assert_eq!(h.app.cam, cam, "{slot}: holding still did not move the view");
+        assert!(h.app.session.selection.is_empty(), "{slot}: {:?}", h.app.session.selection);
+        h.step(&json!({"click": {"handle": "select_other:1"}})).unwrap();
+        assert_eq!(curves(&h), ["l2"], "{slot}");
+        h.app.session.selection.clear();
+        h.step(&json!({"click": at})).unwrap();
+        assert_eq!(curves(&h).len(), 1, "{slot}: a click still selects");
+        assert_eq!(h.app.viewport.nav, Some(mode), "{slot} stays lit");
+    }
+}
+
+/// A drag under a lit mode still moves the view and does not open the list, whether it starts
+/// at once or after the press was held still for longer than egui waits to call it a drag.
+#[test]
+fn a_drag_under_a_lit_navigation_mode_moves_the_view_and_opens_nothing() {
+    for (slot, _) in lit_modes() {
+        let (mut h, at) = two_lines();
+        h.step(&json!({"click": {"handle": format!("nav:slot:{slot}")}})).unwrap();
+        let cam = h.app.cam;
+        h.step(&json!({"drag": [at, offset(&at, 40.0)]})).unwrap();
+        assert_ne!(h.app.cam, cam, "{slot}: the drag moved the view");
+        assert!(!crate::select_other::is_open(&h.app), "{slot}: a drag does not open Select Other");
+        assert!(h.app.session.selection.is_empty(), "{slot}: {:?}", h.app.session.selection);
+    }
+}
+
+/// A preset's modifier chord is a gesture to navigate from the press on: Maya's Alt+left held
+/// still on overlapping lines does not open the list, unlike a mode lit in the navigation bar.
+#[test]
+fn a_preset_chord_held_still_does_not_open_the_list() {
+    let (mut h, at) = two_lines();
+    h.app.preferences.nav = "maya".into();
+    let (x, y) = (at[0].as_f64().unwrap_or_default(), at[1].as_f64().unwrap_or_default());
+    h.call("ui.drag", json!({"x0": x, "y0": y, "x1": x, "y1": y, "steps": 1, "hold": 40, "alt": true}));
+    h.settle();
+    assert!(!crate::select_other::is_open(&h.app), "Maya Alt+left held still navigates, it does not open Select Other");
+}
+
+/// Once the list is open, the press it came from does not turn into a drag of the view at
+/// egui's 0.8 s mark: the camera stays put under the open list while the pointer moves to a row.
+#[test]
+fn a_press_that_opened_the_list_does_not_move_the_view_when_it_moves_on() {
+    for (slot, _) in lit_modes() {
+        let (mut h, at) = two_lines();
+        h.step(&json!({"click": {"handle": format!("nav:slot:{slot}")}})).unwrap();
+        let cam = h.app.cam;
+        let (x, y) = (at[0].as_f64().unwrap_or_default(), at[1].as_f64().unwrap_or_default());
+        h.call("ui.drag", json!({"x0": x, "y0": y, "x1": x + 40.0, "y1": y + 40.0, "steps": 8, "hold": 60}));
+        h.settle();
+        assert!(crate::select_other::is_open(&h.app), "{slot}: the list stays open");
+        assert_eq!(h.app.cam, cam, "{slot}: the view did not move under the open list");
+    }
+}
+
+/// Zooming out does not make a click reach through the body. The pixel of the box's hidden far
+/// corner is on the near +X face, so every distance picks something standing on that face —
+/// the face, or one of its edges or corners once the box is small on screen — never the far
+/// side behind it. The occlusion slack used to be cut from the camera's distance, so far
+/// enough out the whole body fitted inside it.
+#[test]
+fn a_zoomed_out_click_picks_the_near_face_not_an_edge_through_the_body() {
+    let mut h = Harness::new();
+    h.app.set_origin_shown(false);
+    h.app.run("solid.box", json!({"length":10,"width":10,"height":10,"corner":[-5,-5,-5]})).unwrap();
+    for distance in [40.0, 300.0, 1000.0, 3000.0] {
+        h.app.cam.distance = distance;
+        h.settle();
+        let at = h.at(&json!({"world": [0, 5, -5]})).unwrap();
+        let proj = crate::viewport::projection(&h.app, h.app.viewport.rect.unwrap());
+        let hits = crate::viewport::pick(&h.app, &proj, egui::pos2(at[0] as f32, at[1] as f32));
+        let first = hits.first().expect("the box is under the cursor");
+        let point = match first {
+            crate::viewport::Hit::Face { point, .. } | crate::viewport::Hit::Vertex { point, .. } => *point,
+            crate::viewport::Hit::Edge { mid, .. } => *mid,
+            other => panic!("at {distance} mm away the box is not picked: {other:?}"),
+        };
+        assert!(point.x > 4.9, "at {distance} mm away the pick is behind the near face: {first:?}");
+    }
+}
+
+/// A small part on a large one is picked by its own size, not the assembly's: the 2 mm box's
+/// far corner is 2 mm behind its near face, and a slack cut from the 200 mm plate (or from the
+/// camera) reached straight through it — the kraken board's 2.54 mm connectors picked their far
+/// side from 5 mm behind.
+#[test]
+fn a_small_body_on_a_large_one_is_not_picked_through() {
+    let mut h = Harness::new();
+    h.app.set_origin_shown(false);
+    h.app.run("solid.box", json!({"length":200,"width":200,"height":10,"corner":[-100,-100,-10]})).unwrap();
+    h.app.run("solid.box", json!({"length":2,"width":2,"height":2,"corner":[-1,-1,0]})).unwrap();
+    for distance in [20.0, 100.0, 600.0] {
+        h.app.cam.distance = distance;
+        h.settle();
+        // The small box's far bottom corner, whose pixel is on its near +X face.
+        let at = h.at(&json!({"world": [0, 1, 0]})).unwrap();
+        let proj = crate::viewport::projection(&h.app, h.app.viewport.rect.unwrap());
+        let hits = crate::viewport::pick(&h.app, &proj, egui::pos2(at[0] as f32, at[1] as f32));
+        let first = hits.first().expect("the small box is under the cursor");
+        let point = match first {
+            crate::viewport::Hit::Face { point, .. } | crate::viewport::Hit::Vertex { point, .. } => *point,
+            crate::viewport::Hit::Edge { mid, .. } => *mid,
+            other => panic!("at {distance} mm away the small box is not picked: {other:?}"),
+        };
+        assert!(point.x > 0.9, "at {distance} mm away the pick is behind the near face: {first:?}");
+    }
+}

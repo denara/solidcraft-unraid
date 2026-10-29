@@ -114,6 +114,13 @@ fn check_download_size(current: usize, incoming: u64) -> Result<(), String> {
     Ok(())
 }
 
+/// Ctrl+W (⌘W, without Shift or Alt) while a design is shown closes it in the app, so the
+/// browser must not close the tab (#5366). On the start page the browser closes the tab.
+#[cfg(any(target_arch = "wasm32", test))]
+fn closes_design(key: &str, command: bool, shift: bool, alt: bool, design_shown: bool) -> bool {
+    design_shown && command && !shift && !alt && key.eq_ignore_ascii_case("w")
+}
+
 #[cfg(target_arch = "wasm32")]
 mod web {
     use std::rc::Rc;
@@ -165,6 +172,23 @@ mod web {
     thread_local! {
         /// An open design has unsaved changes: leaving the page asks first.
         static UNSAVED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        /// A design is shown (not the start page): Ctrl+W closes it, not the browser tab.
+        static DESIGN_SHOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// Ctrl+W (⌘W) closes the design shown, as on the desktop; on the start page it is left to
+    /// the browser, which closes the tab (#5366). Browsers that keep Ctrl+W to themselves still
+    /// close the tab, after asking when a design is unsaved ([`ask_before_unload`]).
+    fn keep_ctrl_w_for_the_design(window: &web_sys::Window) {
+        let on_key = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(|e: web_sys::KeyboardEvent| {
+            let command = e.ctrl_key() || e.meta_key();
+            if crate::closes_design(&e.key(), command, e.shift_key(), e.alt_key(), DESIGN_SHOWN.with(std::cell::Cell::get)) {
+                e.prevent_default();
+            }
+        });
+        let _ = window.add_event_listener_with_callback_and_bool("keydown", on_key.as_ref().unchecked_ref(), true);
+        // The listener lives as long as the page.
+        on_key.forget();
     }
 
     /// The browser's "leave site? changes you made may not be saved" prompt while a design has
@@ -315,6 +339,10 @@ mod web {
                 !companion
             });
             for (name, bytes, intent) in incoming {
+                if intent == Intent::Theme {
+                    solidcraft_ui_egui::prefs::import_theme_bytes(&mut self.app, bytes);
+                    continue;
+                }
                 let design = solidcraft_engine::io::is_design_path(&name);
                 let path = if design && intent == Intent::Open {
                     // A design from the computer is kept in the browser (a copy), so Save works.
@@ -331,7 +359,7 @@ mod web {
                 };
                 match intent {
                     Intent::Open => self.app.open_path(&path),
-                    Intent::Insert => self.app.drop_path(&path),
+                    Intent::Insert | Intent::Theme => self.app.drop_path(&path),
                 }
                 self.files.panel.set(false);
             }
@@ -397,7 +425,8 @@ mod web {
             }
             let mut act: Option<(&'static str, String)> = None;
             let closed = solidcraft_ui_egui::ui_kit::Window::new(egui::Id::new("sc_browser_files"), "folder", "Files in this browser")
-                .cards(3.0)
+                // Room for long names; the kit still caps the window at the browser's width.
+                .cards(4.0)
                 .show_body(ctx, |ui| {
                     ui.horizontal(|ui| {
                         if ui_kit::button(ui, "Open from computer…", ui_kit::Button::Normal).clicked() {
@@ -425,61 +454,62 @@ mod web {
                         return;
                     }
                     let entries = self.files.entries.borrow().clone();
-                    if entries.is_empty() {
-                        ui.label("Designs you save appear here. They stay in this browser.");
-                    }
                     egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-                        egui::Grid::new("opfs_files").num_columns(3).spacing([12.0, 6.0]).show(ui, |ui| {
+                        // The name takes the width the size and the actions leave (#8097).
+                        let empty = "Designs you save appear here. They stay in this browser.";
+                        ui_kit::name_list(ui, "opfs_files", &["Name", "Size", "Actions"], empty, |list| {
                             for e in &entries {
-                                match &mut self.renaming {
-                                    Some((from, to)) if *from == e.name => {
-                                        let r = ui_kit::cell_editor(ui, ui.make_persistent_id(("stored_file_name", from.as_str())), to, "", false);
-                                        if std::mem::take(&mut self.rename_focus) {
-                                            r.request_focus();
+                                list.row(&e.name, |row| {
+                                    match &mut self.renaming {
+                                        Some((from, to)) if *from == e.name => row.cell(|ui| {
+                                            let r =
+                                                ui_kit::cell_editor(ui, ui.make_persistent_id(("stored_file_name", from.as_str())), to, "", false);
+                                            if std::mem::take(&mut self.rename_focus) {
+                                                r.request_focus();
+                                            }
+                                            if r.lost_focus() {
+                                                act = Some(if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                                    ("rename", to.clone())
+                                                } else {
+                                                    ("rename_cancel", String::new())
+                                                });
+                                            }
+                                        }),
+                                        _ => {
+                                            row.name(&e.name);
                                         }
-                                        if r.lost_focus() {
-                                            act = Some(if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                                                ("rename", to.clone())
-                                            } else {
-                                                ("rename_cancel", String::new())
-                                            });
+                                    }
+                                    row.cell(|ui| ui.label(format!("{:.1} KB", e.size as f64 / 1024.0)));
+                                    row.cell(|ui| {
+                                        if ui_kit::button(ui, "Open", ui_kit::Button::Small).clicked() {
+                                            act = Some(("open", e.name.clone()));
                                         }
-                                    }
-                                    _ => {
-                                        ui.label(&e.name);
-                                    }
-                                }
-                                ui.label(format!("{:.1} KB", e.size as f64 / 1024.0));
-                                ui.horizontal(|ui| {
-                                    if ui_kit::button(ui, "Open", ui_kit::Button::Small).clicked() {
-                                        act = Some(("open", e.name.clone()));
-                                    }
-                                    let design = solidcraft_engine::io::is_design_path(&e.name);
-                                    if !design
-                                        && ui_kit::button(ui, "Insert", ui_kit::Button::Small)
-                                            .on_hover_text(solidcraft_ui_egui::i18n::tr("web.files.insert_stored_drawings_hint"))
+                                        let design = solidcraft_engine::io::is_design_path(&e.name);
+                                        if !design
+                                            && ui_kit::button(ui, "Insert", ui_kit::Button::Small)
+                                                .on_hover_text(solidcraft_ui_egui::i18n::tr("web.files.insert_stored_drawings_hint"))
+                                                .clicked()
+                                        {
+                                            act = Some(("insert", e.name.clone()));
+                                        }
+                                        if ui_kit::button(ui, "Rename", ui_kit::Button::Small).clicked() {
+                                            self.renaming = Some((e.name.clone(), e.name.clone()));
+                                            self.rename_focus = true;
+                                        }
+                                        if ui_kit::button(ui, "Save to computer…", ui_kit::Button::Small)
+                                            .on_hover_text("A copy in a file you choose; the stored design stays here")
                                             .clicked()
-                                    {
-                                        act = Some(("insert", e.name.clone()));
-                                    }
-                                    if ui_kit::button(ui, "Rename", ui_kit::Button::Small).clicked() {
-                                        self.renaming = Some((e.name.clone(), e.name.clone()));
-                                        self.rename_focus = true;
-                                    }
-                                    if ui_kit::button(ui, "Save to computer…", ui_kit::Button::Small)
-                                        .on_hover_text("A copy in a file you choose; the stored design stays here")
-                                        .clicked()
-                                    {
-                                        act = Some(("save_copy", e.name.clone()));
-                                    }
-                                    if ui_kit::button(ui, "Download", ui_kit::Button::Small).clicked() {
-                                        act = Some(("download", e.name.clone()));
-                                    }
-                                    if ui_kit::button(ui, "Delete", ui_kit::Button::Small).clicked() {
-                                        act = Some(("delete", e.name.clone()));
-                                    }
+                                        {
+                                            act = Some(("save_copy", e.name.clone()));
+                                        }
+                                        if ui_kit::button(ui, "Download", ui_kit::Button::Small).clicked() {
+                                            act = Some(("download", e.name.clone()));
+                                        }
+                                        if ui_kit::button(ui, "Delete", ui_kit::Button::Small).clicked() {
+                                            act = Some(("delete", e.name.clone()));
+                                        }
+                                    });
                                 });
-                                ui.end_row();
                             }
                         });
                     });
@@ -668,6 +698,7 @@ mod web {
             self.files_tick(ctx);
             self.workspace_import_tick(ctx);
             UNSAVED.with(|u| u.set(solidcraft_ui_egui::documents::any_dirty(&self.app)));
+            DESIGN_SHOWN.with(|d| d.set(solidcraft_ui_egui::toolbar::design_shown(&self.app)));
         }
         fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
             let now = raw.time.unwrap_or_else(|| ctx.input(|i| i.time));
@@ -675,7 +706,8 @@ mod web {
                 ctx.request_repaint_after(delay);
             }
             if self.launch.persists() {
-                files::take_drops(&self.files, raw);
+                let theme = solidcraft_ui_egui::prefs::theme_drop_target(&self.app, ctx);
+                files::take_drops(&self.files, raw, theme);
             } else {
                 raw.dropped_files.clear();
             }
@@ -767,6 +799,7 @@ mod web {
                 ask_before_unload(&window);
             }
             leave_tab_switching_to_browser(&window);
+            keep_ctrl_w_for_the_design(&window);
             let Some(document) = window.document() else { return };
             let Some(canvas) = document.get_element_by_id(CANVAS_ID).and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok()) else {
                 log::error!("missing <canvas id=\"{CANVAS_ID}\">");
@@ -1003,5 +1036,19 @@ mod tests {
         // Tab and Shift+Tab move between the app's fields; Ctrl with other keys stays the app's.
         assert!(!browser_switches_tabs("Tab", false));
         assert!(!browser_switches_tabs("s", true));
+    }
+
+    #[test]
+    fn ctrl_w_closes_the_design_not_the_tab() {
+        // Ctrl+W and ⌘W (either case of the key) close the design shown.
+        assert!(closes_design("w", true, false, false, true));
+        assert!(closes_design("W", true, false, false, true));
+        // On the start page the browser closes the tab.
+        assert!(!closes_design("w", true, false, false, false));
+        // Ctrl+Shift+W (close the window), plain W and other keys stay the browser's or the app's.
+        assert!(!closes_design("W", true, true, false, true));
+        assert!(!closes_design("w", true, false, true, true));
+        assert!(!closes_design("w", false, false, false, true));
+        assert!(!closes_design("s", true, false, false, true));
     }
 }

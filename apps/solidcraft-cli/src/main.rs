@@ -23,6 +23,7 @@
 //! solidcraft-cli icon --out F.png|F.ico [--size N]             the app icon (packaging; drawn, not a file)
 //!
 //! --debug (with any command)                                  SolidCraft's debug log on stderr (or RUST_LOG=LEVEL)
+//! --max-file-size SIZE (with any command)                     read STEP and design files up to SIZE (2GB, 1500MB; at most 16GB)
 //! ```
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
@@ -99,7 +100,7 @@ const USAGE_BENCH_EDIT: &str = "  solidcraft-cli bench-edit <script.json|recipe.
 /// `save-stress`'s lines in the usage: the file saved over and over.
 const USAGE_SAVE_STRESS: &str = "  solidcraft-cli save-stress <path> <rounds>\n";
 /// The flags every command takes, at the end of the top-level usage.
-const USAGE_DEBUG: &str = "  --debug, with any command: what SolidCraft logs (why a body has no display plan, why a save left its\n      model cache out), on stderr; RUST_LOG=error|warn|info|debug|trace sets one level for every crate\n";
+const USAGE_DEBUG: &str = "  --debug, with any command: what SolidCraft logs (why a body has no display plan, why a save left its\n      model cache out), on stderr; RUST_LOG=error|warn|info|debug|trace sets one level for every crate\n  --max-file-size SIZE, with any command: read STEP and import files and design files up to SIZE for this run\n      (for example 2GB or 1500MB; at most 16GB; the defaults are 512 MB and 256 MB, and a smaller SIZE keeps them)\n";
 
 /// The commands the CLI takes, in the order the top-level usage lists them.
 const COMMANDS: &[Command] = &[
@@ -131,6 +132,10 @@ const COMMANDS: &[Command] = &[
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     logger::init(&mut args);
+    if let Err(e) = max_file_size(&mut args) {
+        eprintln!("error: {e}");
+        return ExitCode::FAILURE;
+    }
     let r = match args.first().map(String::as_str) {
         // Asked-for help is not an error: the command's usage on stdout, exit 0. It is read
         // before the command runs, so `--help` never starts a run (a fuzz run, a server).
@@ -205,6 +210,28 @@ fn main() -> ExitCode {
     }
 }
 
+/// Take `--max-file-size SIZE` (or `--max-file-size=SIZE`), which any command takes, out of the
+/// arguments and raise the file size limits for this run (#4086). A bad size is an error.
+fn max_file_size(args: &mut Vec<String>) -> Result<(), String> {
+    let mut size = None;
+    let mut i = 0;
+    while let Some(arg) = args.get(i) {
+        if arg == "--max-file-size" {
+            let value = args.get(i + 1).cloned().ok_or("--max-file-size needs a size, for example --max-file-size 2GB")?;
+            args.drain(i..i + 2);
+            size = Some(value);
+        } else if let Some(value) = arg.strip_prefix("--max-file-size=") {
+            size = Some(value.to_string());
+            args.remove(i);
+        } else {
+            i += 1;
+        }
+    }
+    let Some(size) = size else { return Ok(()) };
+    let bytes = solidcraft_engine::io::limits::parse_flag(&size).map_err(|e| format!("--max-file-size: {e}"))?;
+    solidcraft_engine::io::limits::set_override(Some(bytes))
+}
+
 fn pretty(v: &Value) -> String {
     serde_json::to_string_pretty(v).unwrap_or_default()
 }
@@ -241,11 +268,12 @@ fn wants_help(args: &[String]) -> bool {
 pub fn read_json(path: &str) -> Result<Value, String> {
     // Through the engine's file access, which refuses anything that is not a regular file and
     // reads no more than the cap: a character device or a FIFO would otherwise never end.
-    let s = solidcraft_engine::io::vfs::read_to_string(path, solidcraft_engine::io::MAX_DESIGN_BYTES).map_err(|e| format!("{path}: {e}"))?;
+    let s = solidcraft_engine::io::vfs::read_to_string(path, solidcraft_engine::io::limits::max_design_bytes())
+        .map_err(|e| format!("{path}: {}", solidcraft_engine::io::limits::explain(solidcraft_engine::io::limits::Kind::Design, e)))?;
     serde_json::from_str(&s).map_err(|e| format!("{path}: {e}"))
 }
 
-/// A session from a design file, a STEP/3MF/STL file, a command script, or an oracle recipe.
+/// A session from a design file, a STEP/3MF/STL file, a point cloud, a command script, or an oracle recipe.
 pub fn load(path: &str) -> Result<Session, String> {
     load_checked(path, solidcraft_engine::schema::ParamCheck::Off)
 }
@@ -255,11 +283,11 @@ pub fn load(path: &str) -> Result<Session, String> {
 fn load_checked(path: &str, check: solidcraft_engine::schema::ParamCheck) -> Result<Session, String> {
     let mut s = Session::default();
     s.param_check = check;
-    if solidcraft_engine::io::is_step_path(path) || solidcraft_engine::io::is_mesh_path(path) {
+    if solidcraft_engine::io::is_step_path(path) || solidcraft_engine::io::is_mesh_path(path) || solidcraft_engine::io::is_point_cloud_path(path) {
         s.execute("doc.open", &json!({"path": path})).map_err(|e| e.to_string())?;
         return Ok(s);
     }
-    let bytes = solidcraft_engine::io::vfs::read(path, solidcraft_engine::io::MAX_DESIGN_BYTES).map_err(|e| format!("{path}: {e}"))?;
+    let bytes = solidcraft_engine::io::limits::read(path, solidcraft_engine::io::limits::Kind::Design).map_err(|e| format!("{path}: {e}"))?;
     if solidcraft_engine::io::is_design_container(&bytes) {
         let doc = solidcraft_engine::io::read_design(&bytes).map_err(|e| format!("{path}: {e}"))?;
         let mut session = Session::opened_at(doc, None, Some(path));
@@ -655,7 +683,7 @@ fn cmd_mcp(args: &[String]) -> Result<(), String> {
     {
         let roots: Vec<String> = s.roots().iter().map(|r| r.display().to_string()).collect();
         eprintln!(
-            "solidcraft mcp: files limited to {} and the open design's folder (--allow-path DIR adds one, --allow-any-path lifts the limit)",
+            "solidcraft mcp: files limited to {} and the folders of designs opened or saved here (--allow-path DIR adds one, --allow-any-path lifts the limit)",
             roots.join(", ")
         );
         let design_dir = flag(args, "--in")
@@ -822,8 +850,8 @@ pub(crate) fn cmd_bench_open(args: &[String]) -> Result<(), String> {
     let path = args.first().ok_or("usage: solidcraft-cli bench-open <design.sc | part.step> [--parse-only]")?;
     let t = std::time::Instant::now();
     let step = solidcraft_engine::io::is_step_path(path);
-    let limit = if step { solidcraft_engine::io::MAX_STEP_BYTES } else { solidcraft_engine::io::MAX_DESIGN_BYTES };
-    let bytes = solidcraft_engine::io::vfs::read(path, limit).map_err(|e| format!("{path}: {e}"))?;
+    let kind = if step { solidcraft_engine::io::limits::Kind::Step } else { solidcraft_engine::io::limits::Kind::Design };
+    let bytes = solidcraft_engine::io::limits::read(path, kind).map_err(|e| format!("{path}: {e}"))?;
     let read_ms = t.elapsed().as_secs_f64() * 1000.0;
     println!("{}", json!({"step": "read", "ms": read_ms, "bytes": bytes.len()}));
     let t = std::time::Instant::now();

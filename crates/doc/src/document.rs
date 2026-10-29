@@ -2617,13 +2617,42 @@ pub struct StandardPart {
 /// A component whose contents come from another design file (Insert Design): where that file
 /// is, and the Import feature in the component that holds its bodies (Update Links replaces
 /// them; Break Link keeps them and forgets the file).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct DesignLink {
     /// The design file: relative to this design's folder once this design is saved, else as
     /// given (`/` separates folders).
     pub path: String,
     /// The Import feature holding the linked design's bodies.
     pub feature: u64,
+    /// Last inherited values, by Import body slot. Differing assembly assignments are
+    /// local overrides and survive a source update. Older links start with no baseline.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inherited: Vec<LinkedBodyProperties>,
+}
+
+/// The values last inherited by a linked body, not another editable material library.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct LinkedBodyProperties {
+    pub material: String,
+    /// SHA-256 of the inherited custom definition, for equality only. The complete
+    /// engineering card stays in user_materials, not duplicated once per linked body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material_fingerprint: Option<String>,
+    /// Explicit body/component look only: material fallback must remain a fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub appearance: Option<crate::appearance::Look>,
+    /// Last inherited authored face overrides. None marks links saved before face
+    /// inheritance; Some(empty) records that the source has no authored face overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub faces: Option<Vec<crate::appearance::FaceLook>>,
+}
+
+impl LinkedBodyProperties {
+    pub fn fingerprint(material: &UserMaterial) -> Result<String> {
+        use sha2::{Digest, Sha256};
+        let bytes = serde_json::to_vec(material).map_err(|e| DocError::Invalid(e.to_string()))?;
+        Ok(format!("{:x}", Sha256::digest(bytes)))
+    }
 }
 
 /// A name the design's counter hands out (`Body1`).
@@ -2698,6 +2727,9 @@ pub struct Document {
     /// Reference images on planes (Insert Canvas).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub canvases: Vec<crate::canvas::Canvas>,
+    /// Scanned points kept as a reference (Insert Point Cloud).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub point_clouds: Vec<crate::point_cloud::PointCloud>,
     /// Comments of feature-input parameters (by name).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub param_comments: std::collections::BTreeMap<String, String>,
@@ -2903,6 +2935,7 @@ impl Document {
             .map(|g| g.id)
             .chain(self.timeline_groups.iter().map(|g| g.id))
             .chain(self.canvases.iter().map(|c| c.id))
+            .chain(self.point_clouds.iter().map(|c| c.id))
             .chain(a.joints.iter().map(|j| j.id))
             .chain(a.contact_sets.iter().map(|c| c.id))
             .chain(a.studies.iter().map(|s| s.id))
@@ -2950,6 +2983,7 @@ impl Document {
             appearances: Default::default(),
             favorites: Default::default(),
             canvases: Vec::new(),
+            point_clouds: Vec::new(),
             param_comments: Default::default(),
             browser_groups: Vec::new(),
             timeline_groups: Vec::new(),
@@ -3131,14 +3165,22 @@ impl Document {
     /// The model with each body carrying the colour, opacity and face colours it is shown with
     /// (for export).
     pub fn painted(&self, state: &crate::ModelState) -> crate::ModelState {
+        self.painted_with_faces(state, true)
+    }
+
+    /// Linked designs carry authored face overrides as editable properties. Their STEP
+    /// geometry keeps imported paint, without baking a second copy of those overrides.
+    pub fn painted_for_link(&self, state: &crate::ModelState) -> crate::ModelState {
+        self.painted_with_faces(state, false)
+    }
+
+    fn painted_with_faces(&self, state: &crate::ModelState, authored_faces: bool) -> crate::ModelState {
         let mut st = state.clone();
         for b in &mut st.bodies {
             let c = self.body_color(b);
-            let faces: Vec<solidcraft_kernel::FacePaint> = self
-                .face_colors(b)
-                .into_iter()
-                .map(|(face, l)| solidcraft_kernel::FacePaint { face, color: l.rgb(), opacity: l.opacity as f32 })
-                .collect();
+            let face_colors = if authored_faces { self.face_colors(b) } else { self.imported_face_colors(b) };
+            let faces: Vec<solidcraft_kernel::FacePaint> =
+                face_colors.into_iter().map(|(face, l)| solidcraft_kernel::FacePaint { face, color: l.rgb(), opacity: l.opacity as f32 }).collect();
             let opacity = self.model_body_opacity(b) as f32;
             let paint = solidcraft_kernel::Paint { opacity, faces };
             if c != b.body.color() || b.body.paint() != Some(&paint) {
@@ -3309,12 +3351,13 @@ impl Document {
         Ok(id)
     }
 
-    /// A component by id or name (0 / "root" is the design itself).
+    /// A component by id or name (0 / "root" is the design itself). A component that carries the
+    /// design's own name is found by that name: the design is still named by 0 / "root".
     pub fn find_component(&self, key: &str) -> Option<u64> {
-        if key == "0" || key.eq_ignore_ascii_case("root") || key == self.name {
+        if key == "0" || key.eq_ignore_ascii_case("root") {
             return Some(0);
         }
-        self.components.iter().find(|c| c.id.to_string() == key || c.name == key).map(|c| c.id)
+        self.components.iter().find(|c| c.id.to_string() == key || c.name == key).map(|c| c.id).or_else(|| (key == self.name).then_some(0))
     }
 
     /// Read a design file's JSON (any format this build knows; older ones are upgraded).

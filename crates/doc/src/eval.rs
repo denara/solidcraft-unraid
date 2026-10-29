@@ -1888,6 +1888,14 @@ fn placement_digest(doc: &Document, f: &Feature, st: Option<&ModelState>) -> u64
                 reads.placed_body(st, tool);
             }
         }
+        // A pattern of bodies copies them along its directions or about its axis in its own
+        // component's frame, so it follows where each body it copies is placed relative to that
+        // frame: copies of a root block, patterned in a component, move with the component.
+        FeatureKind::Pattern { bodies, .. } if !bodies.is_empty() => {
+            for b in bodies {
+                reads.placed_body(st, &b.0);
+            }
+        }
         // Joins, cuts and intersects meet their targets where those are placed (#3383).
         kind if drawn_tools_change_bodies(kind) => reads.drawn_targets(st, f),
         FeatureKind::Sketch { plane, sketch } => {
@@ -2744,10 +2752,22 @@ fn note_join_apart(before: &ModelState, after: &ModelState, f: &Feature, warning
     if operation != Operation::Join {
         return;
     }
+    for (name, n) in join_pieces_added(before, after) {
+        append_warning(
+            warning,
+            format!("the joined piece doesn't touch `{name}`, so `{name}` is now in {n} separate pieces (New Body makes it a body of its own)"),
+        );
+    }
+}
+
+/// The bodies a Join from `before` to `after` left in more separate pieces than it found, with
+/// their piece counts now: empty when the joined material made one body with what it touched
+/// (or bridged pieces). A lid closing a cavity adds a void, not a piece.
+pub fn join_pieces_added(before: &ModelState, after: &ModelState) -> Vec<(String, usize)> {
     let pieces = |b: &Body| b.lumps().map_or(1, |l| l.len());
     // Pieces of the bodies the join changed or absorbed before it, and of those it kept after.
     let (mut had, mut have) = (0usize, 0usize);
-    let mut grown: Vec<(&str, usize)> = Vec::new();
+    let mut grown: Vec<(String, usize)> = Vec::new();
     for was in &before.bodies {
         match after.body(&was.name) {
             Some(now) if now.body.same_shape(&was.body) => {}
@@ -2756,21 +2776,13 @@ fn note_join_apart(before: &ModelState, after: &ModelState, f: &Feature, warning
                 had += old;
                 have += new;
                 if new > old {
-                    grown.push((now.name.as_str(), new));
+                    grown.push((now.name.clone(), new));
                 }
             }
             None => had += pieces(&was.body),
         }
     }
-    if have <= had {
-        return;
-    }
-    for (name, n) in grown {
-        append_warning(
-            warning,
-            format!("the joined piece doesn't touch `{name}`, so `{name}` is now in {n} separate pieces (New Body makes it a body of its own)"),
-        );
-    }
+    if have <= had { Vec::new() } else { grown }
 }
 
 /// Add tool bodies to the model according to the operation.
@@ -6263,7 +6275,7 @@ pub fn pattern_matrices(doc: &Document, st: &ModelState, p: &crate::PatternKind)
 
 fn pattern_transforms(doc: &Document, vals: &BTreeMap<String, Value>, st: &ModelState, component: u64, p: &crate::PatternKind) -> Result<Vec<Mat>> {
     let count = |e: &str| -> Result<usize> {
-        let n = val(vals, e, Kind::Unitless)?.round();
+        let n = expr::eval_count(e, vals)?;
         if !(1.0..=MAX_INSTANCES as f64).contains(&n) {
             return Err(DocError::Invalid(format!("pattern count must be 1…{MAX_INSTANCES}")));
         }

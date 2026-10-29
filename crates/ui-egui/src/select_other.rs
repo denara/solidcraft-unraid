@@ -194,7 +194,7 @@ fn hit_depth(
     let along = |p: solidcraft_engine::geom::Vec3| Some((p - o).dot(d)).filter(|t| t.is_finite());
     match h {
         Hit::Vertex { point, .. } | Hit::Face { point, .. } => along(*point),
-        Hit::Edge { body, index: ei, mid } => {
+        Hit::Edge { body, index: ei, mid, .. } => {
             let under = index.get(body.as_str()).and_then(|i| st.bodies.get(*i)).and_then(|b| {
                 let (m, place) = b.mesh_in_place();
                 let at = |p: solidcraft_engine::geom::Vec3| solidcraft_engine::doc::apply_point(&place, p);

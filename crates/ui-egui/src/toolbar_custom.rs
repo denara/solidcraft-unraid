@@ -241,12 +241,18 @@ fn home_panel(tab: &str, id: &str) -> Option<&'static str> {
     lists.iter().find(|(_, cmds, _)| cmds.iter().any(|c| c.id == id)).or(lists.first()).map(|(p, ..)| *p)
 }
 
+/// FINISH EDITING, shown only while a linked design is edited in place, keeps its one button:
+/// nothing moves into it, and Finish Edit moves nowhere else.
+fn fixed(tab: &str, panel: &str, id: &str) -> bool {
+    (tab == "MODEL" && panel == "FINISH EDITING") || id == "component.finish_edit"
+}
+
 /// Pin a command to the toolbar of a tab (as a button of its panel, at the end).
 pub fn pin(app: &mut SolveApp, tab: &str, id: &str) -> Result<(), String> {
     if solidcraft_engine::find_command(id).is_none() {
         return Err(format!("no command `{id}`"));
     }
-    if pinned_on(app, tab, id).is_some() {
+    if pinned_on(app, tab, id).is_some() || fixed(tab, "", id) {
         return Ok(());
     }
     let panel = home_panel(tab, id).ok_or_else(|| format!("the {tab} tab has no panels"))?;
@@ -258,7 +264,7 @@ pub fn pin(app: &mut SolveApp, tab: &str, id: &str) -> Result<(), String> {
 
 /// Remove a command's button from a tab (it stays in its panel's drop-down).
 pub fn remove(app: &mut SolveApp, tab: &str, id: &str) {
-    let Some(panel) = pinned_on(app, tab, id) else { return };
+    let Some(panel) = pinned_on(app, tab, id).filter(|panel| !fixed(tab, panel, id)) else { return };
     let mut ids = own(app, tab, panel);
     ids.retain(|x| x != id);
     app.toolbar_custom.panels.insert(key(tab, panel), ids);
@@ -266,6 +272,9 @@ pub fn remove(app: &mut SolveApp, tab: &str, id: &str) {
 
 /// Move a button before another one (`before`: None puts it at the end of `panel`).
 pub fn reorder(app: &mut SolveApp, tab: &str, id: &str, panel: &str, before: Option<&str>) {
+    if fixed(tab, panel, id) {
+        return;
+    }
     // A gallery command dropped on a gallery cell goes (back) into the gallery; dropped anywhere
     // else it becomes a full-size button.
     if tab == "SKETCH" && crate::workspace::CONSTRAINT_GALLERY.contains(&id) {

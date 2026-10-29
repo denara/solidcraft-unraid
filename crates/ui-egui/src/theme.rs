@@ -25,6 +25,9 @@ thread_local! {
     /// The palette of a theme file (`theme_files`) in place of the built-in one of its base
     /// (dark or light), per thread like the rest. `None`: the built-in palettes.
     static CUSTOM: Cell<Option<Custom>> = const { Cell::new(None) };
+    /// The application bar's logo in the theme's accent instead of its own logo colours
+    /// (Preferences › Interface › Logo), per thread like the rest.
+    static LOGO_ACCENT: Cell<bool> = const { Cell::new(false) };
     /// The 3D view's own dark or light when Preferences give it one ([`ViewportTheme`], #4146),
     /// per thread like the rest. `None`: the view is as dark as the window.
     static VIEWPORT_DARK: Cell<Option<bool>> = const { Cell::new(None) };
@@ -230,6 +233,12 @@ pub fn set_custom(custom: Option<Custom>) -> bool {
     CUSTOM.with(|c| c.replace(custom) != custom)
 }
 
+/// Draw the logo in the theme's accent (`true`) or its own logo colours. Returns whether that
+/// changed anything (the visuals follow on the next [`apply`]).
+pub fn set_logo_accent(on: bool) -> bool {
+    LOGO_ACCENT.with(|c| c.replace(on) != on)
+}
+
 /// Isolated widget tests restore the thread's theme even when an assertion fails.
 #[cfg(test)]
 pub(crate) fn scoped_tokens(tokens: Tokens) -> impl Drop {
@@ -267,10 +276,7 @@ pub(crate) fn icon_accent_for_tab(tab: &str) -> Option<&'static str> {
 /// WCAG contrast of two opaque sRGB colours.
 pub(crate) fn contrast_ratio(a: Color32, b: Color32) -> f64 {
     let luminance = |c: Color32| {
-        let linear = |v: u8| {
-            let v = f64::from(v) / 255.0;
-            if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
-        };
+        let linear = solidcraft_engine::geom::srgb::decode8;
         0.2126 * linear(c.r()) + 0.7152 * linear(c.g()) + 0.0722 * linear(c.b())
     };
     let (a, b) = (luminance(a), luminance(b));
@@ -485,6 +491,11 @@ pub fn vision() -> ColorVision {
 /// Switch the colour vision mode (the visuals follow on the next [`apply`]).
 pub fn set_vision(mode: ColorVision) {
     VISION.with(|v| v.set(mode));
+}
+
+/// An sRGB colour carried by model data, including file colours and point-cloud shading.
+pub(crate) const fn model_color(rgb: [u8; 3]) -> Color32 {
+    Color32::from_rgb(rgb[0], rgb[1], rgb[2])
 }
 
 /// An sRGB colour given as 0..1 (the analysis colours), for drawing in the UI.
@@ -758,7 +769,12 @@ pub struct Tokens {
     pub sketch_halo: Color32,
     /// Fixed (locked) sketch geometry.
     pub sketch_locked: Color32,
-    /// Sketch dimensions: driving, driven (reference).
+    /// The open sketch's curves and points that a failing constraint holds, and that
+    /// constraint's glyph or dimension, while the constraints conflict (#7244). The error red by
+    /// default; a theme file that sets `error` but not this key takes its `error`.
+    pub sketch_conflict: Color32,
+    /// Sketch dimensions: driving, driven (reference). Each theme gives them a colour of their
+    /// own, apart from the sketch curves they measure (#7861).
     pub dimension: Color32,
     pub dimension_driven: Color32,
     /// Sketch points: fully constrained, free.
@@ -915,6 +931,7 @@ impl Tokens {
             sketch: view.sketch,
             sketch_fixed: view.sketch_fixed,
             sketch_locked: view.sketch_locked,
+            sketch_conflict: view.sketch_conflict,
             dimension: view.dimension,
             dimension_driven: view.dimension_driven,
             sketch_point: view.sketch_point,
@@ -944,7 +961,17 @@ impl Tokens {
     /// that base ([`set_custom`]), else the built-in one; the colour vision mode on top.
     pub fn themed(dark: bool, mode: ColorVision) -> Tokens {
         let custom = CUSTOM.get().filter(|c| c.dark == dark).map(|c| c.tokens);
-        custom.unwrap_or(if dark { Tokens::dark() } else { Tokens::light() }).with_vision(dark, mode)
+        let t = custom.unwrap_or(if dark { Tokens::dark() } else { Tokens::light() });
+        let t = if LOGO_ACCENT.get() { t.with_accent_logo() } else { t };
+        t.with_vision(dark, mode)
+    }
+
+    /// These tokens with the logo's three faces in shades of the accent: lighter, the accent
+    /// itself, darker (as the built-in logo's blues are).
+    pub fn with_accent_logo(mut self) -> Tokens {
+        let accent = self.accent.to_opaque();
+        self.logo = [accent.lerp_to_gamma(Color32::WHITE, 0.22), accent, accent.lerp_to_gamma(Color32::BLACK, 0.2)];
+        self
     }
 
     /// These tokens with a colour vision mode's values on top (the tables in `palettes.rs`); Off

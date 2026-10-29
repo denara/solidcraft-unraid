@@ -152,3 +152,19 @@ fn workspace_revision_counts_observed_content_not_refresh_attempts() {
     execute(&mut backend, "file.new", json!({})).unwrap();
     assert_eq!(status(&mut backend)["revision"], 4);
 }
+
+#[test]
+fn point_cloud_only_design_is_an_unsaved_model_and_keeps_its_source_unchanged() {
+    let files = Files::new();
+    let path = files.path("scan.xyz");
+    let bytes = b"0 0 0\n10 0 0\n0 10 0\n";
+    std::fs::write(&path, bytes).unwrap();
+    let mut backend = Headless::default();
+    execute(&mut backend, "doc.open", json!({"path":path})).unwrap();
+    assert!(backend.session.doc.features.is_empty());
+    let result = status(&mut backend);
+    assert_eq!(result["has_model"], true);
+    assert_eq!(result["dirty"], true);
+    assert_eq!(result["current_file"], Value::Null);
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}

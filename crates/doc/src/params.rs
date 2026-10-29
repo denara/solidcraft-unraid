@@ -225,6 +225,12 @@ impl Document {
     /// A typed length that is a bare number means the design's units: it gets that unit written
     /// in (feature inputs are stored in mm otherwise). Anything else is returned unchanged.
     pub fn with_design_unit(&self, e: &str, kind: Kind) -> String {
+        // A definition's value reads as the value would (#4071): `w = 2` is `w = 2 in`.
+        if let Some((name, rhs)) = expr::definition(e)
+            && expr::is_bare_number(rhs)
+        {
+            return format!("{name} = {}", self.with_design_unit(rhs, kind));
+        }
         let u = self.units.trim();
         let bare = expr::is_bare_number(e);
         if kind == Kind::Length && bare && !u.is_empty() && u != "mm" && expr::unit_info(u).is_some_and(|(k, _)| k == Kind::Length) {

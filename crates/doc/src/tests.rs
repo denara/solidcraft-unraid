@@ -159,6 +159,22 @@ fn results_kept_ahead_outlive_the_cache() {
     assert!(rel(measure(&m.state().bodies[0].body).unwrap().volume, 30000.0) < 1e-9);
 }
 
+/// A saved model whose feature warning is longer than 65,536 characters is still taken on open
+/// (#8541): Save writes it, so Open reads it.
+#[test]
+fn a_saved_model_with_a_long_warning_is_adopted() {
+    let (doc, _) = plate_doc();
+    let mut m = Model::new();
+    m.evaluate(&doc);
+    let mut saved = m.saved(&doc).unwrap();
+    let last = doc.features.last().unwrap().id;
+    let warning = "w".repeat(122_701);
+    let features = saved.records["features"].as_array_mut().unwrap();
+    features.last_mut().unwrap()["warning"] = warning.clone().into();
+    let reopened = Model::adopt(&doc, &saved).unwrap();
+    assert_eq!(reopened.result(last).and_then(|r| r.warning.as_deref()), Some(warning.as_str()));
+}
+
 /// Rolling the marker back must not discard unchanged results just because the bounded cache
 /// evicted them. Opening an earlier feature and returning to the end otherwise rebuilds it all.
 #[test]

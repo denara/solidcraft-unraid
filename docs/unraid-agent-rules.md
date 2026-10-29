@@ -20,7 +20,7 @@ new uses of it anywhere else. Public docs/web/Flatpak deployments use project Pa
 
 ## Container prototype baseline
 The first Unraid prototype used upstream commit `af536a7`. The current validated
-container baseline is `ae07e36a7d09c6095f4de1bc7ab51067e2418093`.
+container baseline is `c7a1cee357359145fb6ad6a8a0a5b2764e34c42e`.
 Keep later upstream CAD/UI feature updates separate from this deployment addition;
 advance the baseline only as a separate, validated update. See [update records](../docs/unraid-updates.md).
 
@@ -79,6 +79,13 @@ to a running desktop app. New `component.extract` destinations and
 `component.replace_with_link` source paths retain file confinement and shared revision gates.
 Nested renderer file sources remain project-relative and share the HTTP/MCP read gate.
 Observer snapshots never inherit render-job hosts; ordinary scratch rendering retains them.
+Appearance clipboards also remain isolated from observer snapshots. Point-cloud source
+reads share the HTTP/MCP file gate; opening PLY/XYZ/PTS creates an unsaved design, never
+an implicit native save over the scan. Point-cloud-only documents count as nonempty
+models in authoritative session metadata. The portable headless renderer has no scan
+pass: visible reference clouds report preview unavailability before scene fitting or
+snapshot copying; hiding the scan permits normal CAD observation. Never substitute a
+misleading empty/partial image.
 Run `packaging/unraid/workspace-test.ps1` against an isolated candidate along with
 the existing modelling, persistence, logging and browser checks.
 

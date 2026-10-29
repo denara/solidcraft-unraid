@@ -364,6 +364,9 @@ jobs:
           cargo test -p xtask ui_containers --locked
       - name: Sorted lists
         run: cargo xtask lists
+      # New UI text must reach every complete catalog; report it here, before review (#8542).
+      - name: Translations in the complete catalogs
+        run: cargo xtask i18n --check
       - name: Agent router and skills cite real files
         run: |
           cargo xtask skills
