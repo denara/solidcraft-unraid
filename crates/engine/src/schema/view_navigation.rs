@@ -39,6 +39,11 @@ pub struct RenderBrowser {
     pub open: bool,
 }
 
+/// Empty input for the read-only viewport effect query.
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StatusItemsParams {}
+
 /// Show or hide the View angles readout under the orientation gizmo (#6032): the view's pitch, yaw
 /// and roll in degrees (the angles of `view.apply`'s camera, which takes them in radians) and Ortho
 /// or Persp for the projection. A display setting the app keeps: not saved with the design, not an
@@ -104,8 +109,10 @@ impl<'de> Deserialize<'de> for RenderSelect {
         }
         let request = Request::deserialize(d)?;
         let identified = matches!(request.kind.as_str(), "light" | "shot");
-        if !matches!(request.kind.as_str(), "nothing" | "environment" | "light" | "shot" | "output" | "wear" | "sampling" | "effects" | "check")
-            || identified != request.id.is_some()
+        if !matches!(
+            request.kind.as_str(),
+            "nothing" | "environment" | "lighting" | "light" | "shot" | "output" | "wear" | "sampling" | "effects" | "check"
+        ) || identified != request.id.is_some()
             || request.id.as_ref().is_some_and(|id| id.trim().is_empty() || id.len() > 1024)
         {
             return Err(serde::de::Error::custom("expected a Browser kind and an id only for light or shot"));
@@ -124,7 +131,7 @@ impl JsonSchema for RenderSelect {
                 {
                     "type": "object",
                     "properties": {
-                        "kind": {"type": "string", "enum": ["nothing", "environment", "output", "wear", "sampling", "effects", "check"]},
+                        "kind": {"type": "string", "enum": ["nothing", "environment", "lighting", "output", "wear", "sampling", "effects", "check"]},
                         "id": {"type": "null"}
                     },
                     "required": ["kind"],
@@ -143,6 +150,40 @@ impl JsonSchema for RenderSelect {
             ]
         })
     }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema)]
+pub enum FrameAspect {
+    #[serde(rename = "16:9")]
+    Wide,
+    #[serde(rename = "3:2")]
+    Photo,
+    #[serde(rename = "1:1")]
+    Square,
+    #[serde(rename = "4:5")]
+    Portrait,
+    #[serde(rename = "9:16")]
+    Tall,
+    #[serde(rename = "custom")]
+    Custom,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RenderFrame {
+    /// Overlay aspect selection only; output dimensions require render.settings.set.
+    #[serde(default, deserialize_with = "super::types::present", skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "FrameAspect")]
+    pub aspect: Option<FrameAspect>,
+    #[serde(default, deserialize_with = "super::types::present", skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "bool")]
+    pub thirds: Option<bool>,
+    #[serde(default, deserialize_with = "super::types::present", skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "bool")]
+    pub safe_area: Option<bool>,
+    #[serde(default, deserialize_with = "super::types::present", skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "bool")]
+    pub centre_mark: Option<bool>,
 }
 
 #[cfg(test)]

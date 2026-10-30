@@ -371,8 +371,16 @@ opaque CPU snapshot path to approximate transparent appearances.
 GPU product batches are separate from Design batches while sharing the installed
 device and pipelines. Model/visibility/appearance changes update the product scene;
 camera movement updates uniforms without rebuilding vertices. Selection and section
-state do not change the product buffers. Vertex uploads are bounded to 128 MiB and
-checked before allocation; malformed/non-finite triangles and invalid opacity fail.
+state do not change the product buffers. On desktop the preview takes up to eight of
+the device's largest buffers of vertex geometry (2 GiB with the usual 256 MiB buffers,
+never more than 2 GiB); uploads are split into buffers within that size. The web keeps
+a 128 MiB budget. The budget is checked before allocation, and a refusal names the
+scene's geometry size, the limit and how to get under it (hide bodies in Design). The
+upload itself runs under its own GPU error scopes: an allocation the device refuses is
+shown in the preview instead of drawing, and nothing else in the app changes how GPU
+errors are handled. Messages sit on a theme panel card so they stay readable on any
+background colour. The separate CPU image job keeps its own memory and work limits.
+Malformed/non-finite triangles and invalid opacity fail.
 Reinstalling the host invalidates product uploads. This is not a general device-loss,
 render-job or cancellation protocol; those ownership mechanisms belong to R4.
 
@@ -455,6 +463,20 @@ that pending request. Hover uses the shared tooltip with the object and look nam
 
 ## Browser scene focus
 
+The existing Camera Inspector page shows a standalone Shot editor when the Browser selection
+is a saved shot. Opening it leaves the live camera and saved design unchanged. Camera fields
+use `render.camera.set`; Update shot saves that camera and Revert restores the saved camera.
+Name, output dimensions and exposure use the existing undoable shot/settings commands.
+Distance is shown as a multiple of the visible subject's bounding-box diagonal (one millimetre
+for an empty scene). The lens chip uses the camera's vertical FOV and a 24 mm sensor height.
+
+Frame's floating panel offers five aspect presets and Custom, plus composition guides.
+Clicking a preset saves its output dimensions in one undo step; Custom preserves dimensions.
+`view.render_frame` independently validates and echoes transient aspect/guide preferences;
+headless calls never edit a design. Guides are per-document UI state, never saved in design JSON.
+The frame and its size/lens chips appear only in Frame or the Shot editor. Product preview,
+navigation and picking use the fitted frame aspect; image jobs and the Result canvas omit guides.
+
 The shared Browser lists Environment (with its source), Lights, saved Shots,
 Objects and Output (with image dimensions and format). Shots **+** opens the
 existing Shots manager; Lights **+**, Solo and Mute remain faded with an explicit
@@ -521,3 +543,5 @@ existing reasons. Destination selection uses the completed-image export picker.
 Render and Cancel stay in the stage bar. Active jobs also show a single-row progress
 pill with Cancel. The result viewer retains Copy, export, close, Fit/100% and shared
 pan/zoom. R starts the active setup; Escape closes the image without cancelling its job.
+
+Preferences › Graphics offers “Use previous Render preview geometry budget” (`render_previous_geometry_budget`). It restores the fixed limit (512 MiB on 64-bit desktop, 128 MiB elsewhere); by default, desktop previews use the device-based budget. Changes apply to the next preview frame.

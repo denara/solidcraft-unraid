@@ -290,7 +290,7 @@ fn visibility(s: &mut Session, p: &Value) -> Result<Value> {
                 s.visibility.hidden_folders.push(k.clone());
             }
         }
-        s.revision += 1;
+        s.refresh_display();
         return Ok(json!({"visible":visible,"changed":keys.len(),"visibility":s.visibility}));
     }
     if let Some(value) = p.get("paths") {
@@ -341,7 +341,7 @@ fn visibility(s: &mut Session, p: &Value) -> Result<Value> {
             root_bodies.extend(ancestor_bodies);
             s.visibility.hidden_occurrences = hidden;
             s.visibility.hidden_bodies = root_bodies;
-            s.revision += 1;
+            s.refresh_display();
             return Ok(json!({"visible":true,"isolated":paths,"visibility":s.visibility}));
         }
         for path in &paths {
@@ -350,7 +350,7 @@ fn visibility(s: &mut Session, p: &Value) -> Result<Value> {
                 s.visibility.hidden_occurrences.push(path.clone());
             }
         }
-        s.revision += 1;
+        s.refresh_display();
         return Ok(json!({"visible":visible,"changed":paths.len(),"visibility":s.visibility}));
     }
     let items: Vec<Shown> = match (str_(p, "folder"), p.get("items")) {
@@ -462,7 +462,7 @@ fn visibility(s: &mut Session, p: &Value) -> Result<Value> {
             }
         }
     }
-    s.revision += 1;
+    s.refresh_display();
     Ok(json!({ "visible": visible, "changed": items.len(), "visibility": s.visibility }))
 }
 
@@ -1729,6 +1729,43 @@ mod tests {
         s.feature_edit_sketch = None;
         run(&mut s, "browser.visibility", json!({"items": [wall], "visible": true}));
         assert!(crate::view::sketch_shown(&s, wall) && !crate::view::sketch_shown(&s, base));
+    }
+
+    #[test]
+    fn a_hole_at_sketch_points_hides_its_sketch_as_an_extrude_does() {
+        // #9082: a Hole's points sketch stayed shown, and its points were drawn in the holes. A
+        // Single hole snapped to one point (#2110) leaves its sketch shown: it was placed on a face,
+        // and a hidden sketch offers no points for the next one to snap to.
+        let mut s = Session::default();
+        let plate = run(&mut s, "sketch.create", json!({"plane": "XY", "name": "PlateSketch"}))["sketch"].as_u64().unwrap();
+        run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [40, 30]}));
+        run(&mut s, "sketch.finish", json!({}));
+        run(&mut s, "solid.extrude", json!({"sketch": plate, "distance": 6}));
+        assert!(!crate::view::sketch_shown(&s, plate), "the Extrude used its sketch");
+        let pts = run(&mut s, "sketch.create", json!({"plane": "XY", "name": "HolePts", "offset": 6}))["sketch"].as_u64().unwrap();
+        run(&mut s, "sketch.point", json!({"point": [10, 10]}));
+        run(&mut s, "sketch.point", json!({"point": [30, 20]}));
+        run(&mut s, "sketch.finish", json!({}));
+        let spot = run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Spot", "offset": 6}))["sketch"].as_u64().unwrap();
+        run(&mut s, "sketch.point", json!({"point": [20, 15], "id": "c"}));
+        run(&mut s, "sketch.finish", json!({}));
+        assert!(crate::view::sketch_shown(&s, pts) && crate::view::sketch_shown(&s, spot), "unused sketches are shown");
+        run(&mut s, "solid.hole", json!({"sketch": "HolePts", "diameter": 3, "name": "Holes"}));
+        assert!(!crate::view::sketch_shown(&s, pts), "the Hole used its points sketch");
+        run(&mut s, "solid.hole", json!({"sketch": "Spot", "points": ["c"], "single": true, "diameter": 3, "depth": 3, "name": "One"}));
+        assert!(crate::view::sketch_shown(&s, spot), "a Single hole leaves the sketch it snapped to shown");
+        let d = run(&mut s, "document.inspect", json!({}));
+        let visible = |id: u64| d["sketches"].as_array().unwrap().iter().find(|x| x["id"] == id).unwrap()["visible"].clone();
+        assert_eq!((visible(pts), visible(spot)), (json!(false), json!(true)), "{d}");
+        // While the Hole is edited it is drawn, then hidden again; shown on its own, it stays drawn.
+        s.feature_edit_sketch = Some(pts);
+        assert!(crate::view::sketch_shown(&s, pts));
+        s.feature_edit_sketch = None;
+        assert!(!crate::view::sketch_shown(&s, pts));
+        run(&mut s, "browser.visibility", json!({"items": [pts], "visible": true}));
+        assert!(crate::view::sketch_shown(&s, pts) && !crate::view::sketch_shown(&s, plate));
+        run(&mut s, "browser.visibility", json!({"items": [pts], "visible": false}));
+        assert!(!crate::view::sketch_shown(&s, pts));
     }
 
     #[test]

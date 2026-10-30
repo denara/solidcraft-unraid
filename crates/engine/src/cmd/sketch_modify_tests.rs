@@ -171,6 +171,57 @@ fn trim_extend_break() {
     assert!(sketch(&s).curve_index(&lone).is_none());
 }
 
+/// A line that ends where an arc ends crosses it there only within the intersection's
+/// tolerance: trimmed from its other end, it was cut a hair inside its own end and left a piece
+/// about 1e-7 mm long (found by a local trim fuzzer). Nothing else crosses it, so it trims away.
+#[test]
+fn trimming_a_line_that_ends_on_an_arc_leaves_no_piece_of_no_length() {
+    let mut s = new_sketch();
+    let l =
+        ids(&run(&mut s, "sketch.line", json!({"points": [[30, 20], [-6.10565359059288, -8.884522872474289]], "infer": false}))["curves"])[0].clone();
+    run(
+        &mut s,
+        "sketch.arc.three_point",
+        json!({"start": [-8.972171771153333, -9.973571767012182], "end": format!("{l}.end"), "through": [-7.4533649085502365, -9.654220170934645]}),
+    );
+    run(&mut s, "sketch.trim", json!({"curve": l, "at": [30.001, 19.999]}));
+    let sk = sketch(&s);
+    for c in &sk.curves {
+        if let Some((a, b)) = c.kind.ends().and_then(|(a, b)| sk.point(a).zip(sk.point(b))) {
+            assert!(a.dist(b) > 1e-6, "{} is left {} mm long: {:?}", c.id, a.dist(b), c.kind);
+        }
+    }
+}
+
+/// An arc rounded into a corner, whose end is also where a line ends that touches the arc's
+/// circle there: extended from that end, it stopped on the touch at its own end and added an arc
+/// from that point to itself (found by a local trim fuzzer). The touch is the growing end, not a
+/// stop.
+#[test]
+fn an_arc_extended_from_an_end_a_tangent_line_ends_on_adds_no_arc_of_no_length() {
+    let mut s = new_sketch();
+    for (id, p) in [
+        ("sketch.line", json!({"infer": false, "points": [[-20, -20], [-10, 20]]})),
+        ("sketch.arc.three_point", json!({"end": [0, 30], "start": [10, 20], "through": [-7, 7]})),
+        ("sketch.line", json!({"infer": false, "points": [[-10, -30], [10, 30]]})),
+        ("sketch.rectangle.two_point", json!({"p0": [-10, 30], "p1": [20, 0]})),
+        ("sketch.arc.three_point", json!({"end": [0, 10], "start": [20, -30], "through": [3, 27]})),
+        ("sketch.trim", json!({"at": [2.829281375022314, 26.51870311540471], "curve": "a2"})),
+        ("sketch.trim", json!({"at": [-9.999, 29.999], "curve": "l6"})),
+        ("sketch.fillet", json!({"point": "p1", "radius": 5})),
+    ] {
+        run(&mut s, id, p);
+    }
+    let _ = s.execute("sketch.extend", &json!({"at": [-8.670612547178429, 1.6049962723352929], "curve": "a4"}));
+    let sk = sketch(&s);
+    for c in &sk.curves {
+        if let CurveKind::Arc { a: p, b: q, .. } = c.kind {
+            let (pa, pb) = (sk.point(p).unwrap(), sk.point(q).unwrap());
+            assert!(p != q && pa.dist(pb) > 1e-6, "{} runs from {pa:?} to {pb:?}: {:?}", c.id, c.kind);
+        }
+    }
+}
+
 #[test]
 fn trim_circle_makes_an_arc_and_a_profile() {
     let mut s = new_sketch();
@@ -2492,6 +2543,26 @@ fn ends_tied_through_a_trimmed_away_end_stay_tied() {
     assert!(at("l1.end").dist(at("l2.start")) < 1e-9);
 }
 
+/// An end held on a line exactly where that line meets another curve stays tied to it when a
+/// trim takes the line away (found by the local trim fuzzer: a trimmed circle ended on a line
+/// where a fillet started, and trimming the line left the circle's end loose on the fillet's).
+#[test]
+fn an_end_held_on_a_trimmed_away_line_at_its_end_stays_tied() {
+    let mut s = new_sketch();
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [10, 0], [10, 10]], "infer": false}));
+    run(&mut s, "sketch.line", json!({"points": [[20, 5], [10, 0]], "infer": false, "connect": false}));
+    run(&mut s, "sketch.constraint.coincident", json!({"a": "l3.end", "b": "l2"}));
+    assert!(solidcraft_sketch::loose_ends(&sketch(&s)).untied.is_empty());
+    let r = run(&mut s, "sketch.trim", json!({"curve": "l2", "at": [10, 5]}));
+    assert_eq!(r["result"]["deleted"], "l2");
+    let ends = solidcraft_sketch::loose_ends(&sketch(&s));
+    assert!(ends.untied.is_empty(), "l1 and l3 still meet at (10, 0): {ends:?}");
+    run(&mut s, "sketch.drag", json!({"entity": "l1.end", "from": [10, 0], "to": [12, 1]}));
+    let sk = sketch(&s);
+    let at = |r: &str| sk.point(sk.resolve_point(r).unwrap()).unwrap();
+    assert!(at("l1.end").dist(at("l3.end")) < 1e-9);
+}
+
 #[test]
 fn trim_keeps_the_rest_of_a_dimensioned_line_where_it_was() {
     // A 40 x 40 square, its right side dimensioned with the Dimension tool (a line length).
@@ -2866,6 +2937,60 @@ fn freeform_chain_offsets_take_the_straight_pieces_of_the_chain_along() {
     certified(&s, &curves);
 }
 
+#[test]
+fn sketch_inspect_names_each_curve_of_a_free_form_loop_once() {
+    // A loop is walked piece by piece, and a conic or spline as many short pieces:
+    // `sketch.inspect` listed such a curve once per piece, 50 times for one Bézier (#9179).
+    let svg = r#"<svg width="40mm" height="40mm" viewBox="-5 -5 40 40"><path d="M0,0 L20,0 L20,10 Q20,20 10,30 Q0,20 0,10 Z"/></svg>"#;
+    let mut s = new_sketch();
+    run(&mut s, "sketch.insert_svg", json!({"text": svg}));
+    let drawn: std::collections::BTreeSet<String> = sketch(&s).curves.iter().map(|c| c.id.clone()).collect();
+    assert_eq!(drawn.len(), 5, "three lines and two Bézier curves: {drawn:?}");
+    let line = sketch(&s).curves[0].id.clone();
+    let out = run(&mut s, "sketch.offset", json!({"curves": [line], "distance": 1, "side": [100, 100]}));
+    let made: std::collections::BTreeSet<String> = ids(&out["curves"]).into_iter().collect();
+    assert!(!made.is_empty() && made.is_disjoint(&drawn), "{out}");
+
+    let once = |ids: &[String], what: &str| {
+        let set: std::collections::BTreeSet<&String> = ids.iter().collect();
+        assert_eq!(set.len(), ids.len(), "{what} names a curve twice: {ids:?}");
+    };
+    let si = run(&mut s, "sketch.inspect", json!({}));
+    let state = s.model.state();
+    let solved = state.sketch(s.active_sketch.unwrap()).unwrap();
+    let profiles = si["profiles"].as_array().unwrap();
+    assert_eq!(profiles.len(), 2, "the outline and the wall around it: {si}");
+    for (p, solved) in profiles.iter().zip(&solved.profiles) {
+        let curves = ids(&p["curves"]);
+        once(&curves, "a profile");
+        // In the order the loop walks them, as the solved profile has them.
+        assert_eq!(curves, solidcraft_sketch::distinct_curves(&solved.outer_curves));
+        let holes: Vec<Vec<String>> = p["holes"].as_array().unwrap().iter().map(ids).collect();
+        holes.iter().for_each(|h| once(h, "a hole"));
+        let set = |v: &[String]| v.iter().cloned().collect::<std::collections::BTreeSet<_>>();
+        match holes.as_slice() {
+            [] => assert_eq!(set(&curves), drawn, "the outline is the drawn curves"),
+            [hole] => {
+                assert_eq!(set(&curves), made, "the wall's outside is the offset");
+                assert_eq!(set(hole), drawn, "its hole is the outline");
+            }
+            _ => panic!("one hole at most: {p}"),
+        }
+    }
+
+    // The lists are a profile pick as they stand (a pick refuses a curve named twice): the
+    // wall extrudes from them.
+    let wall = profiles.iter().find(|p| p["holes"].as_array().is_some_and(|h| !h.is_empty())).unwrap();
+    let pick = json!({"type": "whole_boundaries", "profiles": [{"outer": wall["curves"], "holes": wall["holes"]}]});
+    let areas = profiles.iter().map(|p| p["area_mm2"].as_f64().unwrap()).collect::<Vec<_>>();
+    let ring = areas.iter().copied().fold(f64::INFINITY, f64::min).min((areas[1] - areas[0]).abs());
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"distance": 10, "profiles": pick}));
+    let volume = body_volumes(&mut s);
+    assert_eq!(volume.len(), 1);
+    assert!((volume[0] - 10.0 * ring).abs() < 0.02 * volume[0], "{volume:?} against {areas:?}");
+}
+
 /// The arc's counter-clockwise sweep from its stored start to its end, degrees, from `sketch.inspect`.
 fn arc_sweep_deg(si: &Value, id: &str) -> f64 {
     let c = si["curves"].as_array().unwrap().iter().find(|c| c["id"] == id).unwrap();
@@ -3236,5 +3361,33 @@ fn mirror_origin_axis_in_rotated_plane_reuses_projection_and_rejects_invalid_lin
     for line in [json!({"axis":"Z"}), json!({"axis":"bad"}), json!({"plane":"XY"}), json!("circle"), json!("missing")] {
         assert!(s.execute("sketch.mirror", &json!({"entities":["source"],"line":line})).is_err(), "{line}");
         assert_eq!(s.doc.to_json(), before);
+    }
+}
+
+#[test]
+fn corner_tools_refuse_all_spatial_curves_with_an_unsupported_message() {
+    let mut s = Session::default();
+    run(&mut s, "solid.sphere", json!({"radius":20}));
+    run(&mut s, "sketch.create", json!({"plane":"XY", "offset":50}));
+    run(&mut s, "sketch.line", json!({"points":[[-10,0],[10,0]],"ids":["source"]}));
+    run(&mut s, "sketch.finish", json!({}));
+    let src = s.doc.features.last().unwrap().id;
+    run(&mut s, "sketch.create", json!({"plane":"XY"}));
+    let projected = run(&mut s, "sketch.project_to_surface", json!({"curves":[{"sketch":src,"curve":"source"}],"face":[0,0,20]}));
+    let linked = projected["links"][0]["wires"][0].as_str().unwrap().to_owned();
+    run(&mut s, "sketch.options", json!({"sketch_3d":true}));
+    let line = ids(&run(&mut s, "sketch.line3d", json!({"points":[[0,0,0],[20,0,20]]}))["curves"])[0].clone();
+    let spline = ids(&run(&mut s, "sketch.spline3d", json!({"points":[[0,0,0],[10,5,10],[20,0,20]]}))["curves"])[0].clone();
+    run(&mut s, "sketch.line", json!({"points":[[0,0],[0,20]],"ids":["side"]}));
+    let before = s.doc.to_json();
+    for cmd in ["sketch.fillet", "sketch.chamfer.equal_distance", "sketch.chamfer.two_distance", "sketch.chamfer.distance_angle"] {
+        let action = if cmd == "sketch.fillet" { "filleting" } else { "chamfering" };
+        for wire in [&line, &spline, &linked] {
+            for (a, b) in [(wire.as_str(), "side"), ("side", wire.as_str())] {
+                let error = s.execute(cmd, &json!({"a":a,"b":b,"radius":2,"distance":2,"distance2":3,"angle":45})).unwrap_err().to_string();
+                assert!(error.contains(&format!("not supported yet: {action} 3D or linked sketch curves")), "{cmd}: {error}");
+                assert_eq!(s.doc.to_json(), before);
+            }
+        }
     }
 }

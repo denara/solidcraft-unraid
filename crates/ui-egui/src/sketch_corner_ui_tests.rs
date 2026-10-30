@@ -925,3 +925,36 @@ fn centre_circle_on_an_existing_point_is_tied_by_a_coincident() {
         .any(|k| matches!(k.kind, ConstraintKind::Coincident { p, q } if (p, q) == (corner, centre) || (p, q) == (centre, corner)));
     assert!(tied, "a Coincident ties the centre to the corner: {:?}", sk.constraints);
 }
+
+#[test]
+fn corner_candidates_agree_with_engine_spatial_curve_filter() {
+    use crate::sketch_modify_ui::candidate;
+    use crate::viewport::Hit;
+
+    let mut h = crate::scenario::Harness::new();
+    h.app.run("solid.sphere", json!({"radius":20})).unwrap();
+    h.app.run("sketch.create", json!({"plane":"XY", "offset":50})).unwrap();
+    h.app.run("sketch.line", json!({"points":[[-10,0],[10,0]],"ids":["source"]})).unwrap();
+    h.app.run("sketch.finish", json!({})).unwrap();
+    let src = h.app.session.doc.features.last().unwrap().id;
+    h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+    let projected = h.app.run("sketch.project_to_surface", json!({"curves":[{"sketch":src,"curve":"source"}],"face":[0,0,20]})).unwrap();
+    let linked = projected["links"][0]["wires"][0].as_str().unwrap().to_owned();
+    h.app.run("sketch.options", json!({"sketch_3d":true})).unwrap();
+    let line = h.app.run("sketch.line3d", json!({"points":[[0,0,0],[20,0,20]]})).unwrap()["curves"][0].as_str().unwrap().to_owned();
+    let spline = h.app.run("sketch.spline3d", json!({"points":[[0,0,0],[10,5,10],[20,0,20]]})).unwrap()["curves"][0].as_str().unwrap().to_owned();
+    h.app.run("sketch.line", json!({"points":[[0,0],[0,20]],"ids":["side"]})).unwrap();
+    let sketch = h.app.session.active_sketch.unwrap();
+    for cmd in ["sketch.fillet", "sketch.chamfer.equal_distance", "sketch.chamfer.two_distance", "sketch.chamfer.distance_angle"] {
+        h.app.start(cmd);
+        for id in [&line, &spline, &linked, &"side".to_owned()] {
+            let state = h.app.session.world_state();
+            let sk = &state.sketch(sketch).unwrap().sketch;
+            let hit = Hit::SketchCurve { sketch, id: id.clone(), straight: true, point: solidcraft_engine::geom::Vec3::ZERO };
+            let offered = candidate(h.app.dialog.as_ref().unwrap(), &h.app.session, &hit).is_some();
+            assert_eq!(offered, !sk.is_spatial_corner_curve(id), "{cmd}: {id}");
+            assert_eq!(offered, id == "side", "{cmd}: {id}");
+        }
+        h.app.dialog = None;
+    }
+}

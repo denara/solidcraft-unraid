@@ -266,6 +266,8 @@ pub(crate) fn view_frame(
     let none = || std::sync::Arc::new(std::sync::Mutex::new(None));
     crate::gpu::Frame {
         product: false,
+        product_lights: None,
+        upload_error: None,
         key: model.0,
         slot: model.1.clone(),
         sketch_key: 0,

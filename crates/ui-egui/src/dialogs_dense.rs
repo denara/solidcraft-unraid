@@ -19,6 +19,8 @@ pub(super) fn command(kind: &Kind) -> Option<&'static str> {
         Kind::ViewDxf { .. } => Some("file.export_view_dxf"),
         Kind::InsertDrawing(p) => Some(if p.command.ends_with("dxf") { "sketch.insert_dxf" } else { "sketch.insert_svg" }),
         Kind::Sketch => Some("sketch.create"),
+        Kind::SketchIntersect { .. } => Some("sketch.intersect"),
+        Kind::SketchProject { .. } => Some("sketch.project"),
         Kind::SketchModify(k) => Some(crate::sketch_modify_ui::command(k)),
         Kind::Text(_) => Some("sketch.edit_text"),
         Kind::TextMove(_) => Some("sketch.move"),
@@ -183,7 +185,7 @@ pub(super) fn rows(app: &mut SolveApp, ctx: &egui::Context, d: &mut Dialog, ui: 
     if let Some(key) = manage_hint {
         ui_kit::text(ui, tr(key), ui_kit::Text::Hint("manage"));
     }
-    placement_row(d, ui, &app.session);
+    placement_row(d, ui, app);
     if crate::hole_refs::takes(d) {
         // Each reference edge with its distance (#37, #6380).
         enter |= crate::hole_refs::input_rows(d, ui, &app.session, app.preferences.origin_plane_names);
@@ -211,6 +213,30 @@ pub(super) fn rows(app: &mut SolveApp, ctx: &egui::Context, d: &mut Dialog, ui: 
                     d.extra.insert("fixed_plane".into(), json!(true));
                 }
             }
+        }
+        Kind::SketchIntersect { bodies, projection_link } => {
+            let mut selected = if *bodies { 1 } else { 0 };
+            let changed = ui_kit::row(ui, tr("ui.sketch_intersect_selection_filter"), |ui| {
+                ui_kit::segmented(ui, &mut selected, &[tr("Faces"), tr("Bodies")], Default::default())
+            });
+            if changed && let Some(input) = d.inputs.first_mut() {
+                *bodies = selected == 1;
+                input.accept = if *bodies { BODIES } else { FACES };
+                input.items.clear();
+            }
+            ui_kit::row(ui, tr("ui.sketch_intersect_projection_link"), |ui| ui_kit::checkbox(ui, "", projection_link));
+        }
+        Kind::SketchProject { bodies, projection_link } => {
+            let mut selected = if *bodies { 1 } else { 0 };
+            let changed = ui_kit::row(ui, tr("ui.sketch_intersect_selection_filter"), |ui| {
+                ui_kit::segmented(ui, &mut selected, &[tr("Geometry"), tr("Bodies")], Default::default())
+            });
+            if changed && let Some(input) = d.inputs.first_mut() {
+                *bodies = selected == 1;
+                input.accept = if *bodies { BODIES } else { super::PROJECT_GEOMETRY };
+                input.items.clear();
+            }
+            ui_kit::row(ui, tr("ui.sketch_intersect_projection_link"), |ui| ui_kit::checkbox(ui, "", projection_link));
         }
         Kind::SketchModify(k) => enter |= crate::sketch_modify_ui::rows(ui, k, &app.session.doc),
         Kind::Text(k) => enter |= crate::sketch_text::rows(ui, k, &mut d.inputs, &mut d.active),
@@ -727,15 +753,21 @@ fn additional_rows(app: &mut SolveApp, d: &mut Dialog, ui: &mut egui::Ui) -> boo
             });
             ui.add(egui::Label::new(crate::i18n::tr("ui.emboss_wrap_note")).wrap());
         }
-        Kind::Align { flip } => {
+        Kind::Align { flip, components } => {
             // Where on the picked face or edge to snap: as picked (a face turns to meet
             // the other, an edge at its middle), its centre, or a round one's centre.
             for (label, key) in [("From Snap", "from_snap"), ("To Snap", "to_snap")] {
                 form_row(ui, label, |ui| {
-                    extra_choice(ui, &mut d.extra, key, key, &[("As Picked", "picked"), ("Centre", "center"), ("Circle Centre", "circle")]);
+                    extra_choice(ui, &mut d.extra, key, key, &[("As Picked", "picked"), ("Center", "center"), ("Circle Center", "circle")]);
                 });
             }
             ui_kit::options(ui, "feature_options", &mut [("Flip", flip)]);
+            // A part inside a subassembly placed more than once sits where that shared
+            // definition says: aligning it moves it in every placement.
+            if *components && align_moves_shared(&app.session, d.inputs.first().map_or(&[], |i| i.items.as_slice())) {
+                let t = Tokens::get();
+                ui.add(egui::Label::new(RichText::new(tr(ALIGN_SHARED_WARNING)).color(t.warning).size(t.font_small)).wrap());
+            }
         }
         Kind::BoundaryFill { operation, cells, .. } => {
             form_row(ui, "Cells", |_| {});
@@ -752,7 +784,7 @@ fn additional_rows(app: &mut SolveApp, d: &mut Dialog, ui: &mut egui::Ui) -> boo
         }
         Kind::PathPattern { count, spacing } => {
             enter |= quantity_row(ui, &app.session.doc, "Quantity", count);
-            enter |= expr_row(ui, "Spacing", spacing);
+            enter |= expr_row(ui, if d.extra.contains_key("distance") { "Distance" } else { "Spacing" }, spacing);
         }
         Kind::Pipe { diameter, wall, operation } => {
             enter |= expr_row(ui, "Diameter", diameter);

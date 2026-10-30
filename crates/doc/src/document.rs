@@ -2736,6 +2736,9 @@ pub struct Document {
     /// Physical material per body (by body name); others use the default.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub materials: std::collections::BTreeMap<String, String>,
+    /// The flat face per body (by body name) that a slicer export lays on the print bed.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub print_faces: std::collections::BTreeMap<String, crate::config::ConfigFaceTarget>,
     /// Physical materials defined in this design (`material.create`), next to the built-in ones.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub user_materials: Vec<UserMaterial>,
@@ -2851,7 +2854,7 @@ pub struct BrowserGroup {
     pub items: Vec<String>,
 }
 
-/// A saved feature-history folder. Folders may nest, and a feature can belong to at most one folder.
+/// A saved history folder. Folders may nest; each feature or joint belongs to at most one folder.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct TimelineGroup {
     pub id: u64,
@@ -2861,6 +2864,9 @@ pub struct TimelineGroup {
     pub parent: Option<u64>,
     #[serde(default)]
     pub features: Vec<u64>,
+    /// Joints stored in this timeline folder.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub joints: Vec<u64>,
 }
 
 /// The first feature-history folder whose own and nested features do not form one
@@ -2979,6 +2985,7 @@ impl Document {
             body_components: Default::default(),
             body_offsets: Default::default(),
             materials: Default::default(),
+            print_faces: Default::default(),
             user_materials: Vec::new(),
             appearances: Default::default(),
             favorites: Default::default(),
@@ -2994,7 +3001,7 @@ impl Document {
     }
 
     /// Rename body `old` to `new` where the design keeps things by body name outside its
-    /// features: materials, appearances, plastic rules, configuration columns, offsets, components and the
+    /// features: materials, print faces, appearances, plastic rules, configuration columns, offsets, components and the
     /// browser's groups and order. (The features are the rename command's to change.)
     ///
     /// A name the design numbered (`Body1`) is not used again after the rename: the design's
@@ -3009,6 +3016,10 @@ impl Document {
         }
         if let Some(m) = self.materials.remove(old) {
             self.materials.insert(new.to_string(), m);
+        }
+        if let Some(mut face) = self.print_faces.remove(old) {
+            face.body = new.to_string();
+            self.print_faces.insert(new.to_string(), face);
         }
         if let Some(rule) = self.plastic.assigned.remove(old) {
             self.plastic.assigned.insert(new.to_string(), rule);
@@ -3702,7 +3713,7 @@ impl Document {
     }
 
     /// Add or change a parameter. Fails if the result would not evaluate. A new parameter
-    /// without a unit takes the unit of its value (mm, deg or none).
+    /// without a unit takes the unit of its value (a length in the design's units, deg or none).
     pub fn set_param(&mut self, name: &str, expr_s: &str, unit: Option<&str>, comment: Option<&str>) -> Result<()> {
         // A text parameter: one with the text unit, or an existing one when no unit is given.
         match (unit.map(crate::text_params::is_text_unit), self.text_param(name).is_some()) {
@@ -3886,10 +3897,11 @@ impl Document {
         }
     }
 
-    /// Apply parameter values to every dimension in a sketch, and to its points placed by
-    /// parameters (in place).
+    /// Apply parameter values to every dimension in a sketch, to its points placed by parameters
+    /// and to its equation curves (in place).
     pub fn apply_dimension_values(&self, vals: &std::collections::BTreeMap<String, expr::Value>, sk: &mut Sketch) -> Result<()> {
         self.apply_point_values(vals, sk)?;
+        self.apply_equation_values(vals, sk)?;
         self.apply_pattern_values(vals, sk)?;
         for c in &mut sk.constraints {
             if let Some(p) = &c.param {

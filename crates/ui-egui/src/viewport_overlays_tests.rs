@@ -680,6 +680,8 @@ fn toast_buttons_group_by_purpose_and_wrap_as_groups() {
 #[test]
 fn bottom_readouts_clear_floating_history_on_the_first_frame() {
     let mut h = Harness::new();
+    // The corner legend remains available through the analysis HUD compatibility setting.
+    h.app.preferences.viewport_analysis_status = false;
     h.app.home.open = false;
     h.app.ui.layout = LayoutMode::Floating;
     h.app.preferences.timeline_left = false;
@@ -738,6 +740,8 @@ fn continuity_legend_clears_floating_history() {
 #[test]
 fn left_history_sidebar_leaves_bottom_readouts_at_the_bottom() {
     let mut h = Harness::new();
+    // The corner legend remains available through the analysis HUD compatibility setting.
+    h.app.preferences.viewport_analysis_status = false;
     h.app.home.open = false;
     h.app.ui.layout = LayoutMode::Floating;
     h.app.preferences.timeline_left = true;
@@ -746,9 +750,18 @@ fn left_history_sidebar_leaves_bottom_readouts_at_the_bottom() {
     h.app.run("inspect.draft", json!({})).unwrap();
     h.frame();
     let viewport = h.app.viewport.layout.as_ref().unwrap().viewport;
+    let history = crate::scenario::rect_of("history:vertical").expect("left History");
     for name in ["analysis:legend", "viewport:frame_rate"] {
         let readout = crate::scenario::rect_of(name).unwrap();
         assert!((readout.bottom() - (viewport.bottom() - 12.0)).abs() < 0.01, "{name}: {readout:?} in {viewport:?}");
+        assert!(!readout.intersects(history), "{name}: {readout:?} under History {history:?}");
+    }
+    for command in ["inspect.accessibility", "inspect.curvature_map"] {
+        h.app.run(command, json!({})).unwrap();
+        h.frame();
+        let legend = crate::scenario::rect_of("analysis:legend").unwrap();
+        assert!(!legend.intersects(history), "{command}: {legend:?} under History {history:?}");
+        assert!(legend.left() >= history.right() - 0.5, "{command}: legend stays right of History");
     }
 }
 
@@ -932,6 +945,84 @@ fn corner_toasts_share_one_width_against_the_right_edge() {
     ToastPlace::Corner.publish(&ctx);
 }
 
+/// A pane at the right edge (an edge-docked dialog, the Assistant) takes the corner column's
+/// width with it: the stack moves, at full `TOAST_WIDTH`, to just left of the pane instead of
+/// being squeezed into the strip beside it (#8804, as the frame-rate readout does, #6755).
+#[test]
+fn corner_toasts_move_left_of_a_pane_at_the_right_edge_at_full_width() {
+    let t = Tokens::get();
+    let view = Rect::from_min_size(Pos2::ZERO, vec2(1600.0, 1000.0));
+    let axis = Rect::from_min_max(pos2(1600.0 - 8.0 - 110.0, 8.0), pos2(1592.0, 118.0));
+    let alone = corner_free(view, &[axis]);
+    assert!((alone.right() - (view.right() - t.space_8)).abs() < 0.01, "no pane keeps the corner: {alone:?}");
+    for width in [230.0, 280.0, 480.0, 760.0] {
+        let pane = Rect::from_min_max(pos2(1600.0 - 8.0 - width, 40.0), pos2(1592.0, 990.0));
+        let free = corner_free(view, &[axis, pane]);
+        assert!(free.width() >= TOAST_WIDTH - 0.5, "{width}: squeezed to {free:?}");
+        assert!(!free.intersects(pane), "{width}: {free:?} over {pane:?}");
+        assert!(free.right() <= pane.left() - t.space_8 + 0.01, "{width}: {free:?} not left of {pane:?}");
+        assert!(view.contains_rect(free), "{width}: {free:?} outside the view");
+    }
+    // Nothing is wide enough: a tall place left of the pane beats a full-width strip a line high.
+    let small = Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 1000.0));
+    let axis = Rect::from_min_max(pos2(1000.0 - 8.0 - 110.0, 8.0), pos2(992.0, 118.0));
+    let pane = Rect::from_min_max(pos2(1000.0 - 8.0 - 760.0, 40.0), pos2(992.0, 990.0));
+    let free = corner_free(small, &[axis, pane]);
+    assert!(free.width() > 40.0 && free.height() >= 8.0 * t.space_8, "a strip too flat to show a toast: {free:?}");
+    assert!(!free.intersects(pane), "{free:?} over {pane:?}");
+    // Hostile input never panics or loops, and gives a finite rect or nothing.
+    let nan = Rect::from_min_max(pos2(f32::NAN, 0.0), pos2(10.0, f32::NAN));
+    let inf = Rect::from_min_max(pos2(f32::NEG_INFINITY, f32::NEG_INFINITY), pos2(f32::INFINITY, f32::INFINITY));
+    let many: Vec<Rect> = (0..40).map(|i| Rect::from_min_max(pos2(i as f32 * 30.0, 0.0), pos2(i as f32 * 30.0 + 20.0, 1000.0))).collect();
+    let cases: [(Rect, Vec<Rect>); 5] = [
+        (view, vec![nan, inf]),
+        (view, vec![view]),
+        (Rect::from_min_size(Pos2::ZERO, vec2(1.0, 1.0)), vec![axis]),
+        (view, many),
+        (Rect::NOTHING, vec![axis]),
+    ];
+    for (v, obstacles) in &cases {
+        let free = corner_free(*v, obstacles);
+        assert!(!free.is_positive() || (free.is_finite() && v.contains_rect(free)), "{free:?} in {v:?}");
+    }
+}
+
+/// With a real dialog docked at the right edge, a long status toast stays `TOAST_WIDTH` wide left
+/// of it, clear of everything covered, and goes back to the corner when the dialog closes (#8804).
+#[test]
+fn corner_toast_keeps_its_width_beside_a_docked_dialog() {
+    use crate::scenario::rect_of;
+    let t = Tokens::get();
+    for mode in [LayoutMode::Floating, LayoutMode::Docked] {
+        let mut h = Harness::new();
+        h.app.home.open = false;
+        h.call("ui.set", json!({"layout": mode}));
+        h.call("ui.resize", json!({"width":1600,"height":1000}));
+        let text = "Calibrating your 3D mouse fixes swapped or reversed axes and sets its speed and feel.";
+        h.app.start("parts.insert");
+        h.app.status = Some((text.into(), crate::now_ms(), true));
+        h.frames(3);
+        let dialog = h.app.viewport.dialog_rect.expect("the dialog is open");
+        let layout = h.app.viewport.layout.as_ref().unwrap();
+        let content = crate::shell::content_rect(&h.app, layout.viewport);
+        let toast = rect_of("toast").expect("the toast is drawn beside the dialog");
+        assert!((toast.width() - TOAST_WIDTH).abs() < 0.5, "{mode:?}: {toast:?} beside {dialog:?}");
+        assert!(!toast.intersects(dialog), "{mode:?}: {toast:?} over {dialog:?}");
+        assert!(content.contains_rect(toast), "{mode:?}: {toast:?} outside {content:?}");
+        for covered in crate::shell::covered_rects(&h.app) {
+            assert!(!toast.intersects(covered), "{mode:?}: {toast:?} under {covered:?}");
+        }
+        h.app.dialog = None;
+        h.app.status = Some((text.into(), crate::now_ms(), true));
+        h.frames(3);
+        let layout = h.app.viewport.layout.as_ref().unwrap();
+        let content = crate::shell::content_rect(&h.app, layout.viewport);
+        let toast = rect_of("toast").expect("the toast is drawn");
+        assert!((toast.right() - (content.right() - t.space_8)).abs() < 0.5, "{mode:?}: back in the corner: {toast:?} in {content:?}");
+        assert!((toast.width() - TOAST_WIDTH).abs() < 0.5, "{mode:?}: {toast:?}");
+    }
+}
+
 /// A dashed line reaching far off screen is cut to the view before it is dashed: epaint makes a
 /// shape per dash and steps along in f32, so one a trillion points long made billions of them,
 /// or never finished. A line in view is dashed exactly as before, and a cut one keeps its
@@ -971,4 +1062,476 @@ fn a_huge_extrude_distance_draws_its_handles_at_once() {
     h.frames(4);
     assert!(crate::scenario::handle_at("taper").is_some(), "the taper handle is drawn");
     assert!(started.elapsed().as_secs_f64() < 10.0, "{:?}", started.elapsed());
+}
+
+fn point_overlays(app: &SolveApp) -> Vec<Shape> {
+    let ctx = egui::Context::default();
+    let proj = display_proj(app);
+    let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(proj.rect), ..Default::default() }, |ui| {
+        overlays(app, &ui.ctx().layer_painter(egui::LayerId::background()), &proj);
+    });
+    output.textures_delta.clear();
+    output.shapes.into_iter().map(|shape| shape.shape).collect()
+}
+
+fn point_selection_rings(shapes: &[Shape]) -> Vec<Pos2> {
+    shapes
+        .iter()
+        .filter_map(|shape| match shape {
+            Shape::Circle(circle)
+                if circle.radius == 6.0 && circle.stroke == Stroke::new(2.0, Tokens::get().sel_edge) && circle.fill == Color32::TRANSPARENT =>
+            {
+                Some(circle.center)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn selected_sketch_points_stay_marked_after_hover_and_in_dialogs() {
+    let mut h = Harness::new();
+    h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+    h.app.run("sketch.line", json!({"points":[[10,10],[30,10]]})).unwrap();
+    h.call("ui.view", json!({"view":"top"}));
+    h.settle();
+    let plain = point_overlays(&h.app);
+    assert!(point_selection_rings(&plain).is_empty());
+    h.step(&json!({"click":{"sketch":[10,10]}})).unwrap();
+    h.step(&json!({"click":{"sketch":[30,10]},"shift":true})).unwrap();
+    h.step(&json!({"move":[5,5]})).unwrap();
+    assert!(h.app.viewport.hover.is_none());
+    assert_eq!(h.app.session.selection.iter().filter(|sel| matches!(sel, Sel::SketchPoint { .. })).count(), 2);
+    let marked = point_overlays(&h.app);
+    let proj = display_proj(&h.app);
+    let expected = [Vec3::new(10.0, 10.0, 0.0), Vec3::new(30.0, 10.0, 0.0)].map(|point| proj.to_screen(point).unwrap());
+    let rings = point_selection_rings(&marked);
+    assert_eq!(rings.len(), 2, "selection must remain visible after hover leaves");
+    assert!(expected.iter().all(|point| rings.iter().any(|ring| ring.distance(*point) < 0.01)));
+    // The markers that describe the points' constraint state keep their original fill.
+    let fills = |shapes: &[Shape]| {
+        shapes.iter().filter_map(|shape| if let Shape::Rect(rect) = shape { Some((rect.rect, rect.fill)) } else { None }).collect::<Vec<_>>()
+    };
+    assert_eq!(fills(&plain), fills(&marked));
+    h.app.start("sketch.mirror");
+    assert!(h.app.session.selection.is_empty(), "preselection transfers to the dialog");
+    assert_eq!(point_selection_rings(&point_overlays(&h.app)), rings, "dialog inputs stay highlighted");
+    h.call("ui.key", json!({"key":"Escape"}));
+    h.app.run("select.clear", json!({})).unwrap();
+    assert!(point_selection_rings(&point_overlays(&h.app)).is_empty());
+}
+
+#[test]
+fn selected_sketch_point_aliases_respect_owner_and_visibility() {
+    let mut h = Harness::new();
+    h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+    h.app.run("sketch.line", json!({"points":[[10,10],[30,10]]})).unwrap();
+    h.app.run("sketch.point", json!({"point":[20,20],"id":"custom:point"})).unwrap();
+    h.call("ui.view", json!({"view":"top"}));
+    h.settle();
+    let sid = h.app.session.active_sketch.unwrap();
+    let origin = h.app.session.world_state().sketch(sid).unwrap().sketch.points[0].id.clone();
+    let ids = [origin, "custom:point".into(), "l1.end".into(), format!("{sid}:l1.end"), format!("{}:l1.start", sid + 1)];
+    h.app.run("select.set", json!({"items":ids.iter().map(|id| json!({"type":"sketch_point","id":id})).collect::<Vec<_>>()})).unwrap();
+    let rings = point_selection_rings(&point_overlays(&h.app));
+    let proj = display_proj(&h.app);
+    let expected = [Vec3::ZERO, Vec3::new(20.0, 20.0, 0.0), Vec3::new(30.0, 10.0, 0.0)].map(|point| proj.to_screen(point).unwrap());
+    assert_eq!(rings.len(), 3, "aliases deduplicate, colon-containing local IDs survive, foreign owners are ignored");
+    assert!(expected.iter().all(|point| rings.iter().any(|ring| ring.distance(*point) < 0.01)));
+    h.app.run("sketch.options", json!({"show_points":false})).unwrap();
+    assert_eq!(
+        point_selection_rings(&point_overlays(&h.app)),
+        vec![expected[0]],
+        "selection does not reveal hidden points; the origin stays visible"
+    );
+}
+
+#[test]
+fn live_analysis_status_uses_session_settings_and_declared_clear_without_history() {
+    let mut h = Harness::new();
+    h.app.run("solid.box", json!({"length":10,"width":10,"height":10})).unwrap();
+    h.app.session.mark_saved();
+    let before = (h.app.session.doc.to_json(), h.app.session.undo.len());
+    for (command, params, expected, key) in [
+        ("inspect.zebra", json!({"stripes":14.5}), "14.5 stripes", false),
+        ("inspect.draft", json!({"pull":[0,0,1],"angle":7.5}), "Z · 7.5°", true),
+        ("inspect.environment_map", json!({}), "", false),
+        ("inspect.accessibility", json!({"direction":[0,0,1]}), "from Z", true),
+        ("inspect.curvature_map", json!({"radius":12}), "R 12.00 mm", true),
+        ("inspect.continuity", json!({"edges":[[5,0,0]],"samples":5}), "1 edges", false),
+    ] {
+        h.app.run(command, params).unwrap();
+        let effect = h.app.session.status_items().remove(0);
+        let item = crate::viewport_status::presentation(&h.app, &effect).unwrap();
+        assert_eq!(item.setting, expected);
+        assert_eq!(item.has_key, key);
+        assert_eq!(item.name, crate::toolbar::persistent_button_name(&h.app, solidcraft_engine::find_command(command).unwrap()));
+        h.frames(4);
+        assert!(crate::scenario::rect_of(&format!("viewport_status:{}:item", item.id)).is_some());
+        if key {
+            assert!(crate::scenario::rect_of("analysis:legend").is_none());
+            h.step(&json!({"click":{"handle":format!("viewport_status:{}:key",item.id)}})).unwrap();
+            h.frames(3);
+            let pill = crate::scenario::rect_of(&format!("viewport_status:{}:item", item.id)).unwrap();
+            let card = crate::scenario::rect_of("viewport_status:card").unwrap();
+            assert!(card.top() > pill.bottom());
+            assert!((card.left() - pill.left()).abs() < 1.0);
+            h.step(&json!({"key":"Escape"})).unwrap();
+            assert!(h.app.viewport_status.open_key.is_none());
+            assert_eq!(h.app.session.status_items()[0].command, command);
+        }
+        h.step(&json!({"click":{"handle":format!("viewport_status:{}:close",item.id)}})).unwrap();
+        assert!(h.app.session.status_items().is_empty());
+        assert_eq!((h.app.session.doc.to_json(), h.app.session.undo.len()), before);
+        assert!(!h.app.session.is_dirty());
+    }
+}
+
+#[test]
+fn analysis_status_preference_restores_corner_legend_and_old_escape() {
+    let mut h = Harness::new();
+    h.app.run("inspect.draft", json!({})).unwrap();
+    h.call("ui.prefs", json!({"viewport_analysis_status":false}));
+    h.frames(4);
+    assert!(crate::scenario::rect_of("analysis:legend").is_some());
+    assert!(crate::scenario::rect_of("viewport_status:row").is_none());
+    h.step(&json!({"key":"Escape"})).unwrap();
+    assert!(h.app.session.analysis.is_some());
+    assert!(h.app.preferences.persistent_ribbon_pressed);
+    assert!(h.app.session.single_surface_analysis());
+    h.call("ui.prefs", json!({"viewport_analysis_status":true}));
+    h.frames(4);
+    assert!(crate::scenario::rect_of("analysis:legend").is_none());
+    assert!(crate::scenario::rect_of("viewport_status:row").is_some());
+    h.step(&json!({"key":"Escape"})).unwrap();
+    assert!(h.app.session.analysis.is_none());
+}
+
+#[test]
+fn analysis_status_formats_units_and_truthful_non_axis_directions() {
+    let mut h = Harness::new();
+    h.app.run("inspect.draft", json!({"pull":[1,1,0],"angle":2})).unwrap();
+    let effect = h.app.session.status_items().remove(0);
+    assert_eq!(crate::viewport_status::presentation(&h.app, &effect).unwrap().setting, "(0.71, 0.71, 0.00) · 2°");
+    h.app.run("inspect.accessibility", json!({"direction":[0,0,-1]})).unwrap();
+    let effect = h.app.session.status_items().remove(0);
+    assert_eq!(crate::viewport_status::presentation(&h.app, &effect).unwrap().setting, "from −Z");
+    h.app.run("inspect.curvature_map", json!({"radius":25.4})).unwrap();
+    let effect = h.app.session.status_items().remove(0);
+    for (units, expected) in [("mm", "R 25.40 mm"), ("in", "R 1.000 in")] {
+        h.app.session.doc_mut().units = units.into();
+        assert_eq!(crate::viewport_status::presentation(&h.app, &effect).unwrap().setting, expected);
+    }
+}
+
+#[test]
+fn analysis_status_escape_ends_live_tool_before_effect_and_never_hidden_section() {
+    let mut h = Harness::new();
+    h.app.run("solid.box", json!({"length":10,"width":10,"height":10})).unwrap();
+    h.app.start("inspect.continuity");
+    assert!(h.app.tool.is_some());
+    assert!(!h.app.session.continuity.is_empty());
+    h.frames(3);
+    h.step(&json!({"key":"Escape"})).unwrap();
+    assert!(h.app.tool.is_none());
+    assert!(!h.app.session.continuity.is_empty(), "first Escape only puts down the live tool");
+    h.step(&json!({"key":"Escape"})).unwrap();
+    assert!(h.app.session.continuity.is_empty());
+    h.app.run("inspect.zebra", json!({})).unwrap();
+    h.app.run("inspect.section", json!({"plane":"XY"})).unwrap();
+    h.app.run("inspect.draft", json!({})).unwrap();
+    h.app.run("inspect.section", json!({"plane":"XZ"})).unwrap();
+    h.frames(3);
+    h.step(&json!({"key":"Escape"})).unwrap();
+    assert!(h.app.session.analysis.is_none());
+    assert!(h.app.session.section.is_some(), "a later-issue effect with no presented item is ineligible");
+}
+
+#[test]
+fn analysis_status_escape_yields_to_search_even_without_text_field_focus() {
+    let mut h = Harness::new();
+    h.app.run("inspect.draft", json!({})).unwrap();
+    h.frames(3);
+    let effect = h.app.session.status_items().remove(0);
+    let item = crate::viewport_status::presentation(&h.app, &effect).unwrap();
+    h.step(&json!({"click":{"handle":format!("viewport_status:{}:key",item.id)}})).unwrap();
+    assert!(h.app.viewport_status.open_key.is_some());
+    h.app.start("ui.palette");
+    h.frames(3);
+    h.ctx.memory_mut(|memory| {
+        if let Some(id) = memory.focused() {
+            memory.surrender_focus(id);
+        }
+    });
+    h.step(&json!({"key":"Escape"})).unwrap();
+    assert!(!h.app.ui.palette_open, "Search commands owns the first Escape");
+    assert!(h.app.viewport_status.open_key.is_some());
+    assert!(h.app.session.analysis.is_some());
+    h.step(&json!({"key":"Escape"})).unwrap();
+    assert!(h.app.viewport_status.open_key.is_none());
+    assert!(h.app.session.analysis.is_some(), "the following Escape closes only the analysis key");
+}
+
+#[test]
+fn analysis_status_ignores_invalid_layout_bounds_without_ending_the_effect() {
+    let mut h = Harness::new();
+    h.app.run("inspect.draft", json!({})).unwrap();
+    let before = (h.app.session.status_items(), h.app.session.revision);
+    for bounds in [Rect::NOTHING, Rect::from_min_max(pos2(165.0, 165.0), pos2(1.0, 1.0)), Rect::from_min_max(pos2(f32::NAN, 0.0), pos2(10.0, 10.0))] {
+        crate::viewport_status::show(&mut h.app, &h.ctx, bounds);
+        assert_eq!((h.app.session.status_items(), h.app.session.revision), before);
+    }
+}
+
+#[test]
+fn analysis_status_preferences_take_first_escape_and_release_the_next_frame() {
+    let mut h = Harness::new();
+    h.app.run("inspect.zebra", json!({})).unwrap();
+    h.call("ui.prefs", json!({"open":"Interface"}));
+    h.ctx.memory_mut(|memory| {
+        if let Some(id) = memory.focused() {
+            memory.surrender_focus(id);
+        }
+    });
+    h.step(&json!({"key":"Escape"})).unwrap();
+    assert!(!h.app.prefs_window.open);
+    assert!(h.app.session.analysis.is_some(), "Preferences owns the first Escape even without text focus");
+    h.step(&json!({"key":"Escape"})).unwrap();
+    assert!(h.app.session.analysis.is_none(), "the next idle frame may end the effect");
+}
+
+#[test]
+fn analysis_status_escape_owner_survives_egui_layout_repasses() {
+    for owner in ["preferences", "command", "tool", "card", "search"] {
+        let mut h = Harness::new();
+        h.app.run("solid.box", json!({"length":10,"width":10,"height":10})).unwrap();
+        h.app.run("inspect.draft", json!({})).unwrap();
+        match owner {
+            "preferences" => {
+                h.call("ui.prefs", json!({"open":"Interface"}));
+            }
+            "command" => {
+                h.app.start("solid.fillet");
+                assert!(h.app.dialog.is_some());
+            }
+            "tool" => {
+                h.app.start("inspect.continuity");
+                assert!(h.app.tool.is_some());
+            }
+            "search" => {
+                h.app.start("ui.palette");
+            }
+            _ => {
+                h.frames(3);
+                let effect = h.app.session.status_items().remove(0);
+                let item = crate::viewport_status::presentation(&h.app, &effect).unwrap();
+                h.step(&json!({"click":{"handle":format!("viewport_status:{}:key", item.id)}})).unwrap();
+                assert!(h.app.viewport_status.open_key.is_some());
+            }
+        }
+        h.frames(3);
+        h.ctx.memory_mut(|memory| {
+            if let Some(id) = memory.focused() {
+                memory.surrender_focus(id);
+            }
+        });
+        let before = h.app.session.status_items();
+        let mut passes = 0;
+        // One tap, like ui.key, rather than a held Escape that makes the next press a repeat.
+        let mut escape = crate::test_support::key(egui::Key::Escape);
+        escape.push(egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: false, repeat: false, modifiers: Default::default() });
+        let _output = h.ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(h.ctx.content_rect()),
+                time: Some(h.ctx.input(|input| input.time) + 1.0 / 60.0),
+                focused: true,
+                events: escape,
+                ..Default::default()
+            },
+            |ui| {
+                passes += 1;
+                h.app.logic(ui.ctx());
+                h.app.ui(ui);
+                if ui.ctx().current_pass_index() == 0 {
+                    ui.ctx().request_discard("check Escape ownership over layout passes");
+                }
+            },
+        );
+        assert!(passes >= 2, "the frame must actually repeat its layout");
+        assert_eq!(h.app.session.status_items(), before, "{owner} owns one Escape over every pass");
+        assert!(!h.app.prefs_window.open && h.app.dialog.is_none() && h.app.tool.is_none() && !h.app.ui.palette_open);
+        assert!(h.app.viewport_status.open_key.is_none());
+        h.frame();
+        h.step(&json!({"key":"Escape"})).unwrap();
+        assert!(h.app.session.status_items().is_empty(), "{owner} releases the following idle Escape");
+    }
+}
+
+#[test]
+fn analysis_status_row_and_key_stay_below_preferences_and_cannot_steal_its_click() {
+    for window_first in [false, true] {
+        let mut h = Harness::new();
+        if window_first {
+            h.call("ui.prefs", json!({"open":"Interface"}));
+        }
+        h.app.run("inspect.draft", json!({})).unwrap();
+        h.frames(3);
+        let effect = h.app.session.status_items().remove(0);
+        let item = crate::viewport_status::presentation(&h.app, &effect).unwrap();
+        if !window_first {
+            h.step(&json!({"click":{"handle":format!("viewport_status:{}:key", item.id)}})).unwrap();
+            h.call("ui.prefs", json!({"open":"Interface"}));
+        }
+        h.frames(3);
+        let window = crate::scenario::rect_of("prefs:window").unwrap();
+        let mut targets = vec![format!("viewport_status:{}:close", item.id)];
+        if !window_first {
+            targets.push("viewport_status:card".into());
+        }
+        for target in targets {
+            let at = crate::scenario::rect_of(&target).unwrap().center();
+            assert!(window.contains(at), "the real Preferences window must overlap {target}");
+            let layer = h.ctx.layer_id_at(at).unwrap();
+            assert_eq!(layer.order, egui::Order::Middle, "Preferences stays above {target}");
+            assert_ne!(layer.id, egui::Id::new("viewport_status_row"));
+            assert_ne!(layer.id, egui::Id::new("viewport_status_key"));
+        }
+        let at = crate::scenario::handle_at(&format!("viewport_status:{}:close", item.id)).unwrap();
+        h.call("ui.click", json!({"x":at.x,"y":at.y}));
+        assert!(h.app.prefs_window.open);
+        assert!(h.app.session.analysis.is_some(), "an occluded HUD close never receives the window's click");
+    }
+}
+
+#[test]
+fn analysis_status_focused_dialog_and_real_text_popup_preserve_owner_priority_in_both_policies() {
+    for enabled in [false, true] {
+        for popup in [false, true] {
+            let mut h = Harness::new();
+            h.call("ui.prefs", json!({"viewport_analysis_status":enabled}));
+            h.app.run("solid.box", json!({"length":10,"width":10,"height":10})).unwrap();
+            h.app.run("inspect.draft", json!({})).unwrap();
+            h.app.start("solid.fillet");
+            h.frames(3);
+            let at = crate::scenario::handle_at("dialog:Radius").unwrap();
+            h.call("ui.click", json!({"x":at.x,"y":at.y}));
+            assert!(h.ctx.memory(|memory| memory.focused().is_some()), "the real radius editor has focus");
+            if popup {
+                h.call("ui.click", json!({"x":at.x,"y":at.y,"button":"right"}));
+                assert!(egui::Popup::is_any_open(&h.ctx), "a real editor context menu is open");
+                let mut reached_guard = false;
+                let mut tap = crate::test_support::key(egui::Key::Escape);
+                tap.push(egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed: false,
+                    repeat: false,
+                    modifiers: Default::default(),
+                });
+                let _output = h.ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(h.ctx.content_rect()),
+                        time: Some(h.ctx.input(|input| input.time) + 1.0 / 60.0),
+                        focused: true,
+                        events: tap,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        let first = ui.ctx().current_pass_index() == 0;
+                        if first {
+                            assert!(egui::Popup::is_any_open(ui.ctx()), "the surviving popup predicate reaches the global guard");
+                            reached_guard = true;
+                        }
+                        h.app.logic(ui.ctx());
+                        if first {
+                            assert!(h.app.dialog.is_some());
+                            assert!(!h.app.esc_handled, "routing first refusal is not completed cancellation");
+                            assert!(ui.ctx().input(|input| input.key_pressed(egui::Key::Escape)), "the real popup still receives its Escape");
+                        }
+                        h.app.ui(ui);
+                    },
+                );
+                assert!(reached_guard);
+                assert!(!egui::Popup::is_any_open(&h.ctx));
+                assert!(h.app.dialog.is_some(), "the first Escape closes only the editor's menu");
+                assert!(h.app.session.analysis.is_some());
+            }
+            // Plain TextEdit may blur at begin-pass: this asserts behavior, not guard capture.
+            h.step(&json!({"key":"Escape"})).unwrap();
+            assert!(h.app.dialog.is_none(), "the dialog's own Escape still cancels in policy {enabled}");
+            assert!(h.app.session.analysis.is_some());
+            h.step(&json!({"key":"Escape"})).unwrap();
+            assert_eq!(h.app.session.analysis.is_none(), enabled, "the idle Escape follows the selected policy");
+        }
+    }
+}
+
+fn analysis_escape_relayout_frame(h: &mut Harness, mut first_pass: impl FnMut(&crate::SolveApp)) {
+    let ctx = h.ctx.clone();
+    let mut tap = crate::test_support::key(egui::Key::Escape);
+    tap.push(egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: false, repeat: false, modifiers: Default::default() });
+    let mut passes = 0;
+    let _output = ctx.run_ui(
+        egui::RawInput {
+            screen_rect: Some(ctx.content_rect()),
+            time: Some(ctx.input(|input| input.time) + 1.0 / 60.0),
+            focused: true,
+            events: tap,
+            ..Default::default()
+        },
+        |ui| {
+            passes += 1;
+            h.app.logic(ui.ctx());
+            h.app.ui(ui);
+            if ui.ctx().current_pass_index() == 0 {
+                first_pass(&h.app);
+                ui.ctx().request_discard("check restored policy during the same Escape frame");
+            }
+        },
+    );
+    assert!(passes >= 2, "the policy transition must actually cross a layout re-pass");
+}
+
+#[test]
+fn analysis_status_preferences_cancel_can_restore_either_policy_without_reusing_escape() {
+    for saved in [false, true] {
+        let mut h = Harness::new();
+        h.call("ui.prefs", json!({"viewport_analysis_status":saved}));
+        h.app.run("inspect.zebra", json!({})).unwrap();
+        h.call("ui.prefs", json!({"open":"Interface"}));
+        h.call("ui.prefs", json!({"viewport_analysis_status":!saved}));
+        analysis_escape_relayout_frame(&mut h, |app| {
+            assert!(!app.prefs_window.open);
+            assert_eq!(app.preferences.viewport_analysis_status, saved, "Cancel restores policy in pass one");
+            assert!(app.session.analysis.is_some());
+        });
+        assert_eq!(h.app.preferences.viewport_analysis_status, saved);
+        assert!(h.app.session.analysis.is_some(), "Cancel owns this Escape through pass two while restoring policy {saved}");
+        h.step(&json!({"key":"Escape"})).unwrap();
+        assert_eq!(h.app.session.analysis.is_none(), saved);
+    }
+}
+
+#[test]
+fn analysis_status_preferences_restore_false_keeps_underlying_dialog_through_the_owned_frame() {
+    let mut h = Harness::new();
+    h.call("ui.prefs", json!({"viewport_analysis_status":false}));
+    h.app.run("solid.box", json!({"length":10,"width":10,"height":10})).unwrap();
+    h.app.run("inspect.draft", json!({})).unwrap();
+    h.app.start("solid.fillet");
+    assert!(h.app.dialog.is_some());
+    h.call("ui.prefs", json!({"open":"Interface"}));
+    h.call("ui.prefs", json!({"viewport_analysis_status":true}));
+    analysis_escape_relayout_frame(&mut h, |app| {
+        assert!(!app.prefs_window.open);
+        assert!(!app.preferences.viewport_analysis_status, "Cancel restores false before pass two");
+        assert!(app.dialog.is_some(), "Preferences shields the existing command dialog in pass one");
+    });
+    assert!(h.app.dialog.is_some(), "the same Escape must not cancel the underlying dialog in pass two");
+    assert!(h.app.session.analysis.is_some());
+    h.step(&json!({"key":"Escape"})).unwrap();
+    assert!(h.app.dialog.is_none(), "the next physical Escape belongs to the command dialog");
+    assert!(h.app.session.analysis.is_some());
+    h.step(&json!({"key":"Escape"})).unwrap();
+    assert!(h.app.session.analysis.is_some(), "the restored legacy policy keeps shading on idle Escape");
 }

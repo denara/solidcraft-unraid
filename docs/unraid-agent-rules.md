@@ -20,7 +20,7 @@ new uses of it anywhere else. Public docs/web/Flatpak deployments use project Pa
 
 ## Container prototype baseline
 The first Unraid prototype used upstream commit `af536a7`. The current validated
-container baseline is `c7a1cee357359145fb6ad6a8a0a5b2764e34c42e`.
+container baseline is `6c9afc6f7e08672c802b4f3fb37a80529e86dfe2`.
 Keep later upstream CAD/UI feature updates separate from this deployment addition;
 advance the baseline only as a separate, validated update. See [update records](../docs/unraid-updates.md).
 

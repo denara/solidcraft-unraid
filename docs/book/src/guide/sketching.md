@@ -10,7 +10,7 @@ plane the sketch will lie on before you click.
 keeping what changed since the sketch was created or opened for editing: a new sketch is removed,
 an edited one goes back to how it was, as one step that Undo brings back.
 
-Opening a sketch turns the view to face it. When the sketch ends, the view stays where it is by default. Preferences › Sketch › **When a sketch ends** changes that: **Return to the previous view** goes back to the view from before the sketch, and **Return unless rotated** goes back only when you panned or zoomed the sketch view but didn't turn it.
+Opening a sketch turns the view to face it; to keep the view as it is and face the sketch only with **Look At**, turn off Preferences › Sketch › **Turn to face a sketch when it opens**. When the sketch ends, the view stays where it is by default. Preferences › Sketch › **When a sketch ends** changes that: **Return to the previous view** goes back to the view from before the sketch, and **Return unless rotated** goes back only when you panned or zoomed the sketch view but didn't turn it.
 
 In scripts, `XY`, `XZ`, `YZ` and their `Top`, `Front`, `Right` aliases name origin planes.
 Preferences › Interface › **Origin plane names** shows them as Top, Front and Right in the
@@ -32,10 +32,18 @@ constraint status and **Finish Sketch** button remain visible.
 Hover over a circle or arc centre, or the midpoint of a straight sketch edge, then move
 horizontally or vertically to see a dotted alignment guide. The guide connects that reference
 to the cursor's projection on the sketch axis, within the viewport; it disappears when you
-move away from the axis. This works while editing and before a drawing tool's first click.
-It adds no geometry or constraints. Esc, leaving the viewport, or ending the sketch clears
-the reference. Preferences › Sketch › **Center and midpoint alignment guides** turns it off;
-the configured snap-suppression modifier also hides it.
+move away from the axis. SolidCraft keeps the two most recent of these references and can
+draw both guides. One guide on its own does not move the cursor, and endpoints are ordinary
+point snaps rather than remembered references. Preferences › Sketch › **Auto snap to recent
+centers and midpoints** is off until you turn it on. With it on, a drawing tool snaps the
+cursor where the horizontal through one reference meets the vertical through the other. On a
+rectangle, the top midpoint and a side midpoint then meet at the rectangle's centre, so that
+point can be placed without a construction line. Holding Shift for midpoint-only snapping
+skips the crossing. This works while editing and before a drawing tool's first click.
+Placing the point adds no geometry or constraint of its own. Esc, leaving the viewport, or
+ending the sketch clears the references. **Center and midpoint alignment guides** turns the
+guides off, which also leaves the cursor unmoved; the configured snap-suppression modifier
+does the same for that gesture.
 
 ## Geometry
 
@@ -50,6 +58,12 @@ into reference geometry that doesn't form profiles. Modify tools include trim (T
 fillet, chamfer, offset (O), mirror, patterns, move/copy and scale. With trim on, click a
 piece to remove it, or press and drag a path across several pieces: the ones it crosses light up
 and all go when you let go, in one undo step (`sketch.trim.path`).
+
+Line draws a chain: each click adds a segment from the last point, and a right-click or Esc
+ends the chain. To draw one separate line with a press, a drag and the release instead, turn on
+**Preferences › Sketch › Press and drag draws one line**: the line runs from where you press to
+where you let go, snapping and lining up as clicks do, and ends there; clicks still draw a
+chain, and a drag shorter than about 24 points is still a click.
 
 Tools with several variants (line and midpoint line; two-point, three-point, centre and rounded
 rectangle; the circle, arc, slot, polygon and spline variants) share one toolbar button with a
@@ -71,6 +85,37 @@ is selectable. The option belongs to one sketch and is saved with the design. Ce
 a line type of their own and keep showing. Projected geometry that carries the construction
 line type, such as the trace of a plane, answers to **Projected Geometries** instead. The
 option changes display only. Construction curves were already outside every profile.
+
+The **Construction Line** drop-down in Sketch **CREATE** draws infinite reference lines
+directly. It contains two-point, horizontal, vertical, angle, parallel, perpendicular, tangent
+through an external point, tangent at a curve point, common tangent, and angle-bisector tools.
+These lines remain construction geometry regardless of the Sketch Palette's drawing line type.
+Turn off **Extended construction line tools** in Preferences > Sketch to restore the earlier menu.
+
+For horizontal or vertical lines, click the point to pass through. For a line at an angle,
+click its point, then type the angle from sketch X in the inline box and press Enter, or click
+the direction. Angle expressions can refer to parameters and follow their later changes.
+Parallel and perpendicular lines ask for a straight sketch line, then a point;
+the reference stays picked so you can place several lines. Right-click clears the current
+points and references; Escape ends the tool.
+
+Tangents through an external point take a circle or circular arc, the external point, and a
+click choosing the desired preview. A common tangent takes two circles/arcs and a click choosing
+the solution. Contacts outside an arc's drawn sweep are excluded. A tangent at a curve point
+takes a circle/arc and a contact point, or an endpoint of an open spline or conic. Interior
+free-form contacts and ellipse tangents are not supported by these tools yet. A bisector takes
+two intersecting straight lines; click near the desired one of the two preview lines. Parallel
+or coincident references have no unique angle bisector and are refused.
+
+Each placement is one undo step. Direction, parallel, perpendicular, tangency and bisector
+relations are kept as ordinary sketch constraints; the reference geometry follows later edits
+within those constraints. Programmatic callers can use `sketch.construction_line` with `mode`,
+or one of its named variants. `near` chooses the closest solution; `solution` chooses its
+zero-based index. For example:
+
+```json
+{"command":"sketch.construction_line.parallel","params":{"curve":"l1","at":[20,10]}}
+```
 
 Polygon tools show their edge outline while positioning the second point, so the orientation
 can be checked before placement. Inscribed and circumscribed polygons retain their support
@@ -181,6 +226,12 @@ While drawing a fit spline, click its starting point after three distinct sample
 it smoothly. Right-click finishes an ordinary natural fit. Offset accepts both ellipse
 handles and dense fitted curves; the second click sets the side and distance from the curve.
 
+**Equation Curve** draws a curve from formulas instead of clicks: x(t) and y(t) over a range of
+t, or y = f(x) over a range of x, using the design's parameters. [Equation curves](equation-curves.md)
+walks through it step by step, with pictures and examples (a line, a parabola, a wave, a circle,
+a spiral, a gear tooth's involute). Right-click the curve and choose **Edit Equation Curve** to
+change the formulas (`sketch.equation_curve` and `sketch.equation_curve.edit` from scripts and agents).
+
 While drawing in a planar sketch, **Construction** (X) changes the line type without
 ending the tool or losing picked points and inline values. The preview and hover feedback
 keep construction dashes and centerline dash-dot patterns visible. With curves selected,
@@ -192,6 +243,17 @@ hint shows **X**. The new point stays on both curves when either one moves. Hold
 to prefer a line midpoint instead; hold Ctrl/Cmd or Alt/Option (the default suppress chord)
 to stop snapping for that gesture. Scripts pass `"x:<curve>+<curve>:x,y"` as a point
 argument, the same way `"mid:<line>"` and `"on:<curve>:x,y"` work.
+
+With Preferences › Sketch › **Line up with other sketch points while drawing** turned on (it's
+off by default), the pointer also **lines up** while drawing with the sketch's points on screen:
+line ends, centres, standalone points and the origin, and the shape's own earlier points. It
+lines up on both axes at once, level with one point and plumb with another, so a rectangle drawn
+beside another can take its height from one and its width from a point below. A line kept
+horizontal or vertical from its start can still end under or beside another point. A dotted guide
+runs from each point it lines up with, and the snap hint shows **H**, **V** or **H+V**. The click
+keeps the alignment: the new point gets a Horizontal or Vertical constraint with each sketch
+point it lined up with, in the shape's undo step, unless the sketch already sets it. With the
+preference off, drawing lines up only with the previous point, one axis at a time.
 
 Enable **3D Sketch** in the Sketch Palette to draw lines, fit splines and points off the plane.
 While placing these points, you can snap to points on other visible sketches. For a bridge

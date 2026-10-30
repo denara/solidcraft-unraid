@@ -54,7 +54,7 @@ pub use threemf::{
 pub use urdf::{UrdfOptions, UrdfPackage, urdf};
 
 use solidcraft_doc::{Document, Metadata, ModelState};
-use solidcraft_geom::{Mesh, Vec3};
+use solidcraft_geom::{MassProperties, Mesh, Vec3};
 
 /// Design file extension: new designs, autosaves and recovery files are written as `.sc`.
 pub const DESIGN_EXT: &str = "sc";
@@ -423,6 +423,14 @@ pub fn export_mesh_at(b: &solidcraft_kernel::Body, quality: MeshQuality) -> Resu
 /// Distance within which an exported mesh's vertices are welded (STL and 3MF alike).
 fn weld_eps(b: &solidcraft_kernel::Body) -> f64 {
     (b.size() * 1e-6).max(1e-7)
+}
+
+/// Unit-density [`MassProperties`] of a body from its welded [`export_mesh`], the mesh URDF links
+/// take their inertia from; `None` when that mesh does not close (an open surface).
+pub fn mass_properties(b: &solidcraft_kernel::Body) -> Result<Option<MassProperties>> {
+    let m = export_mesh(b)?;
+    let (positions, triangles) = weld(&m.positions, &m.triangles, weld_eps(b));
+    Ok(Mesh { positions, triangles, ..Mesh::default() }.mass_properties())
 }
 
 /// Binary STL of several meshes (one solid).

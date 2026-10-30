@@ -321,7 +321,7 @@ pub(super) fn open_category(app: &mut SolveApp, kind: &str) {
     };
     app.ui.show_browser = true;
     let _ = app.run("view.render_browser", json!({"open":true}));
-    app.tree.panel_collapsed = false;
+    app.preferences.browser_collapsed = false;
 }
 pub(super) fn choose(app: &mut SolveApp, view: &mut View, kind: &str, id: &str) -> Result<(), String> {
     switch_kind(view, kind);
@@ -531,7 +531,7 @@ pub(super) fn card(app: &mut SolveApp, ui: &mut egui::Ui, bounds: egui::Rect) {
             fill_height: true,
             compact: crate::render_ui::compact(app, bounds.width()),
             editor: false,
-            enabled: stage != super::Stage::Frame,
+            enabled: true,
             header_actions: (stage == super::Stage::Look).then_some(&mut actions as &mut dyn FnMut(&mut egui::Ui)),
         },
         &mut side,
@@ -545,11 +545,8 @@ pub(super) fn card(app: &mut SolveApp, ui: &mut egui::Ui, bounds: egui::Rect) {
                 }
             }),
             super::Stage::Light => light_panel(app, ui),
+            super::Stage::Frame => super::shot::presets(app, ui),
             super::Stage::Output => super::inspector::size_presets(app, ui),
-            super::Stage::Frame => {
-                let reason = app.tr("render.frame_presets_pending");
-                ui_kit::text(ui, reason, ui_kit::Text::Note("render:stage-presets-pending"));
-            }
         },
     );
     let look_tab = usize::from(mode == 2);
@@ -579,7 +576,7 @@ fn stage_title(stage: super::Stage) -> &'static str {
     match stage {
         super::Stage::Look => "render.appearances",
         super::Stage::Light => "render.studios_environments",
-        super::Stage::Frame => "render.frame_presets",
+        super::Stage::Frame => "render.stage_frame",
         super::Stage::Output => "render.size_presets",
     }
 }
@@ -1555,6 +1552,7 @@ pub(super) fn stage_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
     let title = app.tr("render.passive_stage").to_string();
     ui_kit::section(ui, "render_passive_stage", &title, false, |ui| stage_content(app, ui));
 }
+#[cfg(test)]
 pub(super) fn stage_content(app: &mut SolveApp, ui: &mut egui::Ui) {
     ui_kit::text(ui, app.tr("render.passive_stage_help"), ui_kit::Text::Note("render.passive_stage_help"));
     let stage = &app.render_workspace.view.draft.stage;
@@ -1704,6 +1702,10 @@ mod studio_browser_tests {
         // available under Advanced when no model target is selected.
         h.app.run("select.clear", json!({})).unwrap();
         h.frames(3);
+        // Clearing model selection opens Scene overview; inspect the resource again.
+        h.step(&json!({"click":{"handle":format!("render:library:{id}")}})).unwrap();
+        h.frames(3);
+        assert_eq!(h.app.render_workspace.view.inspector.page, super::super::inspector::Page::Appearance);
         h.step(&json!({"click":{"handle":format!("dialog:section:{}", h.app.tr("render.inspector_advanced"))}})).unwrap();
         h.frames(3);
         h.step(&json!({"widget":h.app.tr("render.library_favorite")})).unwrap();
@@ -1804,7 +1806,7 @@ mod studio_browser_tests {
         for (stage, key) in [
             ("look", "render.appearances"),
             ("light", "render.studios_environments"),
-            ("frame", "render.frame_presets"),
+            ("frame", "render.stage_frame"),
             ("output", "render.size_presets"),
         ] {
             h.app.run("view.render_stage", json!({"stage":stage})).unwrap();

@@ -35,6 +35,13 @@ pub(crate) struct StatusItem {
 #[derive(Default)]
 pub(crate) struct StatusPresentation {
     pub open_key: Option<String>,
+    focus_ids: Vec<Id>,
+}
+
+impl StatusPresentation {
+    pub(crate) fn owns_focus(&self, ctx: &egui::Context) -> bool {
+        ctx.memory(|memory| memory.focused().is_some_and(|id| self.focus_ids.contains(&id)))
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -116,19 +123,24 @@ pub(crate) fn viewport_status_item(ui: &mut Ui, item: &StatusItem, state: &mut S
                 if item.has_key {
                     let open = state.open_key.as_deref() == Some(&item.id);
                     let label = crate::i18n::format("ui.viewport_status_key", &[("name", &item.name)]);
-                    if icon_action(ui, item, "key", "chevron", &label, &label, open).clicked() {
+                    let response = icon_action(ui, item, "key", "chevron", &label, &label, open);
+                    state.focus_ids.push(response.id);
+                    if response.clicked() {
                         state.open_key = if open { None } else { Some(item.id.clone()) };
                     }
                 }
                 let label = crate::i18n::format("ui.viewport_status_clear", &[("name", &item.name)]);
                 let hint = crate::i18n::format("ui.viewport_status_clear_hint", &[("name", &item.name)]);
-                if icon_action(ui, item, "close", "close", &label, &hint, false).clicked() {
+                let response = icon_action(ui, item, "close", "close", &label, &hint, false);
+                state.focus_ids.push(response.id);
+                if response.clicked() {
                     action = Some(StatusAction::Clear(item.id.clone()));
                 }
             });
         })
         .response;
     let focus = ui.interact(response.rect, Id::new(target(item, "item")), egui::Sense::focusable_noninteractive());
+    state.focus_ids.push(focus.id);
     focus.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), format!("{} {}", item.name, item.setting)));
     if focus.has_focus() {
         ui.painter().rect_stroke(response.rect.expand(t.space_3), frame.corner_radius, ui.visuals().selection.stroke, egui::StrokeKind::Outside);
@@ -145,6 +157,7 @@ pub(crate) fn viewport_status_row(
     state: &mut StatusPresentation,
     mut key_contents: impl FnMut(&mut Ui, &str),
 ) -> Vec<StatusAction> {
+    state.focus_ids.clear();
     if items.is_empty() {
         state.open_key = None;
         return Vec::new();
@@ -179,11 +192,40 @@ pub(crate) fn viewport_status_row(
     scenario::publish_count("viewport_status:count", items.len() as f64);
     if let Some((anchor, id)) = key_anchor {
         let card = Container::new(ctx, Surface::Popup);
-        let result = card.area(Id::new("viewport_status_key")).movable(false).fixed_pos(anchor + vec2(0.0, t.space_6)).show(ctx, |ui| {
-            let frame = card.frame(ctx, t.overlay, crate::frame::Side::Left).inner_margin(t.space_12);
-            card.show_frame(ui, frame, free, |ui| key_contents(ui, id));
-        });
+        // The key belongs to viewport chrome, not to the system-window/popup layer.
+        let result =
+            card.area(Id::new("viewport_status_key")).order(egui::Order::Background).movable(false).fixed_pos(anchor + vec2(0.0, t.space_6)).show(
+                ctx,
+                |ui| {
+                    let frame = card.frame(ctx, t.overlay, crate::frame::Side::Left).inner_margin(t.space_12);
+                    card.show_frame(ui, frame, free, |ui| key_contents(ui, id));
+                },
+            );
         scenario::publish_target("viewport_status:card", result.response.rect);
     }
     actions
+}
+
+/// Shared legend content; the caller supplies the existing analysis-token swatches and text.
+pub(crate) fn analysis_key(ui: &mut Ui, title: &str, along: Option<&str>, rows: &[(egui::Color32, String, bool)]) {
+    let t = Tokens::get();
+    ui.label(RichText::new(title).semibold().size(t.font_label).color(t.text));
+    if let Some(along) = along {
+        ui.label(RichText::new(along).monospace().size(t.font_small).color(t.text_dim));
+    }
+    for (colour, label, hatched) in rows {
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(vec2(t.space_12, t.space_12), egui::Sense::hover());
+            ui.painter().rect_filled(rect, t.radius_sm, *colour);
+            if *hatched {
+                let painter = ui.painter().with_clip_rect(rect);
+                for offset in [-t.space_8, -t.space_4, 0.0, t.space_4, t.space_8] {
+                    let from = rect.left_bottom() + vec2(offset, 0.0);
+                    painter
+                        .line_segment([from, from + vec2(rect.height(), -rect.height())], egui::Stroke::new(t.primary_border(t.text).width, t.text));
+                }
+            }
+            ui.label(RichText::new(label).size(t.font_label).color(t.text));
+        });
+    }
 }

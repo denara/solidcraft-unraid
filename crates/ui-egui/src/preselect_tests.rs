@@ -1046,6 +1046,97 @@ fn a_hole_is_patterned_as_a_feature() {
     assert_eq!(e.inputs[0].items, vec![Sel::Feature { id: hole }]);
 }
 
+fn path_pattern_editor(params: serde_json::Value) -> crate::scenario::Harness {
+    let mut h = crate::scenario::Harness::new();
+    h.app.run("solid.box", json!({"length":4,"width":4,"height":4,"name":"Seed","body_name":"Pin"})).unwrap();
+    h.app.run("sketch.create", json!({"plane":"XY","name":"Path"})).unwrap();
+    h.app.run("sketch.line", json!({"points":[[0,0],[30,0],[60,0]],"ids":["first","second"]})).unwrap();
+    h.app.run("sketch.finish", json!({})).unwrap();
+    h.app.run("parameters.add", json!({"name":"copies","expression":"3","unit":""})).unwrap();
+    h.app.run("parameters.add", json!({"name":"pitch","expression":"10 mm"})).unwrap();
+    let mut p = json!({"path_sketch":"Path","path":["first","second"],"count":"copies","name":"Copies"});
+    p.as_object_mut().unwrap().extend(params.as_object().unwrap().clone());
+    h.app.run("solid.pattern.path", p).unwrap();
+    h.frames(4);
+    h
+}
+
+#[test]
+fn path_pattern_editor_restores_sources_path_expressions_and_options() {
+    for as_features in [false, true] {
+        for (distance_key, flip, orient) in [("spacing", false, false), ("spacing", true, true), ("distance", true, false), ("distance", false, true)]
+        {
+            let mut p = json!({"flip":flip,"orientation":if orient { "path" } else { "identical" }});
+            p[distance_key] = json!("pitch");
+            p[if as_features { "features" } else { "bodies" }] = if as_features { json!(["Seed"]) } else { json!(["Pin"]) };
+            let mut h = path_pattern_editor(p);
+            let original = h.app.session.doc.find_feature("Copies").unwrap().clone();
+            let seed = h.app.session.doc.find_feature("Seed").unwrap().id;
+            let path = h.app.session.doc.find_feature("Path").unwrap().id;
+            let bounds: Vec<_> = h.app.session.world_state().bodies.iter().map(|b| b.mesh().bounds()).collect();
+            h.step(&json!({"call":"ui.editFeature","params":{"feature":"Copies"}})).unwrap();
+            h.frames(8);
+            assert!(!h.app.ui.palette_open, "Edit Feature must open the existing pattern dialog");
+            let d = h.app.dialog.as_mut().expect("path pattern editor");
+            assert!(matches!(&d.kind, Kind::PathPattern { count, spacing } if count == "copies" && spacing == "pitch"));
+            assert_eq!(d.inputs[0].accept, if as_features { crate::selection::FEATURES } else { crate::selection::BODIES });
+            assert_eq!(d.inputs[0].items, if as_features { vec![Sel::Feature { id: seed }] } else { vec![Sel::Body { name: "Pin".into() }] });
+            assert_eq!(
+                d.inputs[1].items,
+                vec![Sel::SketchCurve { id: "first".into(), sketch: Some(path) }, Sel::SketchCurve { id: "second".into(), sketch: Some(path) },]
+            );
+            assert_eq!(d.primary().unwrap().0, if distance_key == "distance" { "Distance" } else { "Spacing" });
+            h.step(&json!({"widget":"OK"})).unwrap();
+            assert!(h.app.dialog.is_none(), "{:?}", h.app.session.log);
+            let edited = h.app.session.doc.find_feature("Copies").unwrap();
+            assert_eq!(edited.id, original.id);
+            assert_eq!(edited.kind, original.kind);
+            assert_eq!(edited.param_names, original.param_names);
+            assert_eq!(h.app.session.world_state().bodies.iter().map(|b| b.mesh().bounds()).collect::<Vec<_>>(), bounds);
+        }
+    }
+}
+
+#[test]
+fn path_pattern_editor_applies_in_place_cancels_and_undoes() {
+    for distance_key in ["spacing", "distance"] {
+        let mut p = json!({"bodies":["Pin"]});
+        p[distance_key] = json!("pitch");
+        let mut h = path_pattern_editor(p);
+        let original = h.app.session.doc.find_feature("Copies").unwrap().clone();
+        let feature_count = h.app.session.doc.features.len();
+        let undo = h.app.session.undo.len();
+        for cancel in [true, false] {
+            h.step(&json!({"call":"ui.editFeature","params":{"feature":"Copies"}})).unwrap();
+            h.frames(8);
+            let d = h.app.dialog.as_mut().expect("path pattern editor");
+            let Kind::PathPattern { count, spacing } = &mut d.kind else { panic!("path pattern") };
+            *count = "5".into();
+            *spacing = "12 mm".into();
+            h.frames(4);
+            h.step(&json!({"widget":if cancel { "Cancel" } else { "OK" }})).unwrap();
+            assert!(h.app.dialog.is_none(), "{:?}", h.app.session.log);
+            assert_eq!(h.app.session.doc.features.len(), feature_count);
+            let edited = h.app.session.doc.find_feature("Copies").unwrap();
+            assert_eq!(edited.id, original.id);
+            assert_eq!(edited.param_names, original.param_names);
+            if cancel {
+                assert_eq!(edited.kind, original.kind);
+                assert_eq!(h.app.session.undo.len(), undo);
+                assert_eq!(h.app.session.world_state().bodies.len(), 3);
+            } else {
+                assert_eq!(h.app.session.world_state().bodies.len(), 5);
+                let max_x = h.app.session.world_state().bodies.iter().map(|b| b.mesh().bounds().max.x).fold(f64::NEG_INFINITY, f64::max);
+                let expected = if distance_key == "distance" { 16.0 } else { 52.0 };
+                assert!((max_x - expected).abs() < 1e-7, "five 4 mm bodies, {distance_key} 12 mm: {max_x}");
+                h.app.run("edit.undo", json!({})).unwrap();
+                assert_eq!(h.app.session.doc.find_feature("Copies").unwrap().kind, original.kind);
+                assert_eq!(h.app.session.world_state().bodies.len(), 3);
+            }
+        }
+    }
+}
+
 #[test]
 fn a_hole_is_mirrored_as_a_feature() {
     let mut app = app_with(json!([
@@ -1808,6 +1899,32 @@ fn align_accepts_a_plane_click() {
     d.pick(&app.session, sel.unwrap());
     let p = apply_commands(&app, &d).unwrap().remove(0).1;
     assert_eq!(p["to"], json!("origin"));
+}
+
+#[test]
+fn align_components_input_picks_occurrence_from_viewport_body_and_skips_root_body() {
+    let mut app = app_with(json!([]));
+    app.run("solid.box", json!({"length": 10, "width": 10, "height": 10, "body_name": "RootBody"})).unwrap();
+    let comp = app.run("component.create", json!({"name": "Extrusion", "grounded": false})).unwrap()["component"].as_u64().unwrap();
+    app.run("solid.box", json!({"length": 10, "width": 10, "height": 40, "corner": [20, 0, 0], "body_name": "Beam"})).unwrap();
+    app.run("component.activate", json!({"component": "root"})).unwrap();
+    let second = app.run("occurrence.copy", json!({"component": comp, "translate": [30, 0, 0]})).unwrap()["occurrence"].as_u64().unwrap();
+
+    let mut d = start(&mut app, vec![], "solid.align");
+    d.kind = Kind::Align { flip: false, components: true };
+    d.inputs[0].label = "Components";
+    d.active = 0;
+
+    // Root-component bodies are not components.
+    let root_hit = crate::viewport::Hit::Face { body: "RootBody".into(), index: 0, point: Vec3::new(5.0, 5.0, 10.0) };
+    assert_eq!(d.candidate(&app.session, &root_hit), None);
+
+    // Clicking the second instance's body picks its exact occurrence path.
+    let inst_hit = crate::viewport::Hit::Face { body: "Beam (Extrusion:2)".into(), index: 0, point: Vec3::new(55.0, 5.0, 20.0) };
+    let cand = d.candidate(&app.session, &inst_hit);
+    assert_eq!(cand, Some(Sel::Occurrence { path: vec![second] }));
+    d.pick(&app.session, cand.unwrap());
+    assert_eq!(d.inputs[0].items, vec![Sel::Occurrence { path: vec![second] }]);
 }
 
 #[test]

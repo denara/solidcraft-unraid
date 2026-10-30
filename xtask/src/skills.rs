@@ -408,6 +408,10 @@ mod tests {
         );
         assert_eq!(front_matter("no front matter"), None);
         assert_eq!(front_matter(SKILL), front_matter(&SKILL.replace("\n", "\r\n")));
+        assert_eq!(
+            front_matter("---\r\nname: solidcraft-a\r\ndescription: Windows checkout\r\n---\r\n"),
+            Some(("solidcraft-a".into(), "Windows checkout".into()))
+        );
     }
 
     #[test]

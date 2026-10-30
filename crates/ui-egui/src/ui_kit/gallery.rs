@@ -123,7 +123,7 @@ const ELEMENTS: &[Element] = &[
             });
             navigation_tile(ui, "grid", "Grid", "style", false);
             row(ui, "Position", |ui| {
-                segmented(ui, &mut state.selected, &["Left", "Centre", "Right"], Default::default());
+                segmented(ui, &mut state.selected, &["Left", "Center", "Right"], Default::default());
             });
             checkbox(ui, "Show navigation bar", &mut state.checked);
             button(ui, "Reset to default", Button::Normal);
@@ -152,6 +152,24 @@ const ELEMENTS: &[Element] = &[
         method_section(ui, "gallery_method", "Path tracing", "GPU", Some("Needs GPU path tracing"), |ui| {
             checkbox(ui, "Reduce noise", &mut state.checked);
         });
+    }),
+    element!("icon_action", |ui, _| {
+        icon_action(ui, "Duplicate", "copy", true, false);
+        icon_action(ui, "Remove", "delete", true, true);
+    }),
+    element!("aspect_grid", |ui, _| {
+        aspect_grid(
+            ui,
+            &[
+                AspectTile { id: "gallery:aspect:wide", label: "16:9", aspect: 16.0 / 9.0, selected: true },
+                AspectTile { id: "gallery:aspect:square", label: "1:1", aspect: 1.0, selected: false },
+                AspectTile { id: "gallery:aspect:tall", label: "9:16", aspect: 9.0 / 16.0, selected: false },
+            ],
+        );
+    }),
+    element!("frame_guides", |ui, _| {
+        let (viewport, _) = ui.allocate_exact_size(vec2(200.0, 150.0), egui::Sense::hover());
+        frame_guides(ui, viewport, viewport.shrink(20.0), FrameGuides { thirds: true, safe_area: true, centre_mark: true });
     }),
     element!("tree_row_rect", |ui, _| {
         for (index, row) in [
@@ -253,7 +271,7 @@ const ELEMENTS: &[Element] = &[
         let actions = [
             StageAction { icon: Some("chain"), label: "Appearance Chain", enabled: true, primary: false, reason: None },
             StageAction { icon: Some("reorder"), label: "Replace All", enabled: true, primary: false, reason: None },
-            StageAction { icon: Some("star"), label: "Favourite Look", enabled: true, primary: true, reason: None },
+            StageAction { icon: Some("star"), label: "Favorite Look", enabled: true, primary: true, reason: None },
             StageAction { icon: Some("suppress"), label: "Hide", enabled: true, primary: false, reason: None },
         ];
         selection_actions(ui, "Boss", &actions);
@@ -677,7 +695,7 @@ const ELEMENTS: &[Element] = &[
         });
     }),
     element!("file_action", |ui, _| {
-        FileView::action_tile(ui, "gallery:file:new", ui.available_width(), "new", "New design", "Millimetres · opens in Design", true);
+        FileView::action_tile(ui, "gallery:file:new", ui.available_width(), "new", "New design", "Millimeters · opens in Design", true);
     }),
     element!("file_recovery_banner", |ui, _| {
         FileView::recovery_banner(
@@ -1058,6 +1076,11 @@ const ELEMENTS: &[Element] = &[
     element!("number_field", |ui, _| {
         number_field(ui, &mut 3_u32, 1..=200, 1.0, "");
     }),
+    element!("number_fields", |ui, _| {
+        row(ui, "Target", |ui| {
+            number_fields(ui, &mut [-18.0, 125.5, -18.0], -1e9..=1e9, 0.1, "");
+        });
+    }),
     element!("slider_percent", |ui, _| {
         slider(ui, &mut 1.0, 0.5..=2.5, Slider { step: Some(0.05), format: |v| format!("{:.0} %", v * 100.0), ..Default::default() });
     }),
@@ -1391,6 +1414,21 @@ const ELEMENTS: &[Element] = &[
     }),
     element!("wide_primary_button", |ui, _| {
         wide_primary_button(ui, "Finish Sketch");
+    }),
+    element!("persistent_button_shape", "gallery:persistent_button", Some("gallery:persistent_button"), |ui, _| {
+        let t = Tokens::get();
+        let (rect, response) = ui.allocate_exact_size(vec2(t.form_button_height * 3.0, t.form_button_height * 2.0), egui::Sense::click());
+        ui.painter().add(persistent_button_shape(ui, &response, rect));
+        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "Selected", crate::fonts::semibold(t.font_label), t.selected_ink);
+        scenario::publish_target("gallery:persistent_button", rect);
+    }),
+    element!("native_button_focus", "gallery:native_button_focus", Some("gallery:native_button_focus"), |ui, _| {
+        let t = Tokens::get();
+        let (rect, response) = ui.allocate_exact_size(vec2(t.form_button_height * 3.0, t.form_button_height), egui::Sense::click());
+        response.request_focus();
+        ui.painter().rect_filled(rect, t.radius_sm, t.control_fill);
+        ui.painter().add(native_button_focus(ui, &response, rect));
+        scenario::publish_target("gallery:native_button_focus", rect);
     }),
     element!("button", "dialog:row:Gallery", Some("dialog:button:Gallery:Add"), |ui, _| {
         row(ui, "Gallery", |ui| {
@@ -1866,6 +1904,7 @@ fn gallery_covers_every_inline_element() {
         "color.rs",
         "disclosure.rs",
         "fields.rs",
+        "framing.rs",
         "layout.rs",
         "look_chain.rs",
         "menu.rs",

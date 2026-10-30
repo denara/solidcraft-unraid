@@ -22,6 +22,8 @@
 mod app_icon;
 mod come_forward;
 mod control_server;
+#[cfg(target_os = "linux")]
+mod desktop_theme;
 mod device_lost;
 #[cfg(target_os = "macos")]
 mod native_menu;
@@ -380,6 +382,12 @@ fn services(cc: &eframe::CreationContext<'_>, folder: &DialogFolder) -> Services
         graphics_adapters: Vec::new(),
         graphics_path: graphics_path().map(|p| p.to_string_lossy().to_string()),
         window_system: window_system_now(),
+        // Linux: the desktop's dark or light setting, which the window is not told on every
+        // desktop (#7944). Windows and macOS: the window's own theme.
+        #[cfg(target_os = "linux")]
+        desktop_dark: Some(desktop_theme::start(&cc.egui_ctx)),
+        #[cfg(not(target_os = "linux"))]
+        desktop_dark: None,
         http_get: Some(std::sync::Arc::new(http_get)),
         http_download: Some(std::sync::Arc::new(http_download)),
         // Already an installed app: only the browser build offers to install.
@@ -708,6 +716,16 @@ fn main() -> eframe::Result {
     #[cfg(target_os = "macos")]
     objc2_foundation::NSProcessInfo::processInfo().setProcessName(objc2_foundation::ns_string!("SolidCraft"));
     mark("main");
+    // On OCLP-patched Macs, wgpu picks a Metal Shading Language standard that the system's
+    // compiler refuses (`invalid value 'metal3.2'`), because the patched OS reports a newer
+    // macOS version than the GPU's Metal compiler supports. Re-launching with
+    // SYSTEM_VERSION_COMPAT=1 makes the OS report the real (older) version so wgpu selects
+    // a standard the compiler accepts. The variable must be set before the process starts, so
+    // we detect OCLP here and re-exec immediately, before any macOS framework call (#3080, #4605).
+    #[cfg(target_os = "macos")]
+    if let Err(e) = startup::relaunch_with_version_compat() {
+        log::warn!("startup: OCLP check failed (continuing normally): {e}");
+    }
     // Validate before legacy adoption, crash markers or any user preference read.
     let settings = settings_dir().map_err(|error| eframe::Error::AppCreation(error.into()))?;
     if std::env::var_os("SOLIDCRAFT_SETTINGS_DIR").is_none() {
@@ -958,6 +976,10 @@ fn main() -> eframe::Result {
                 app.session.doc_mut().name = "Sample Plate".into();
                 app.session.mark_saved();
                 app.session.undo.clear();
+                // Built straight into the session, so nothing asked for a fit: frame it at the
+                // home view as any opened design is (#9195). The fit waits for the first layout.
+                app.cam.set_view(solidcraft_engine::render::StandardView::Iso);
+                app.fit_view();
             }
             solidcraft_ui_egui::open_elsewhere::start(&mut app);
             // No design given: the designs open at the last quit, when the preference asks (#5542).

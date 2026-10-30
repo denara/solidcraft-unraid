@@ -326,6 +326,20 @@ impl Session {
         })
     }
 
+    /// Is the leaf of `path` placed inside a component that has more than one placement? Its
+    /// transform lives in that shared definition, so moving it moves it in every placement.
+    /// Top-level placements and unknown ids are never shared.
+    pub fn occurrence_shared(&self, path: &[u64]) -> bool {
+        let Some((_, ancestors)) = path.split_last() else { return false };
+        ancestors.iter().take(64).any(|id| {
+            self.doc
+                .occurrences
+                .iter()
+                .find(|o| o.id == *id)
+                .is_some_and(|a| self.doc.occurrences.iter().filter(|o| o.component == a.component).nth(1).is_some())
+        })
+    }
+
     /// Children are definitions shared by every placement of the parent component.
     pub fn occurrence_children(&self, path: &[u64]) -> Result<Vec<OccurrencePlacement>> {
         let component = if path.is_empty() { 0 } else { self.occurrence_placement(path)?.component };

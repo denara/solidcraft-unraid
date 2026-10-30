@@ -24,9 +24,9 @@ const MAX_BAD_LINES: usize = 8;
 const EVENT_GAP: Duration = Duration::from_millis(100);
 
 static OPEN: AtomicUsize = AtomicUsize::new(0);
-/// The token files this launch wrote (its control port, the agent chat's endpoint), removed
-/// when the app ends.
-static TOKEN_FILES: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+/// The token files this launch wrote (its control port, the agent chat's endpoint) and the
+/// token in each, removed when the app ends unless another launch has written the file since.
+static TOKEN_FILES: std::sync::Mutex<Vec<(std::path::PathBuf, String)>> = std::sync::Mutex::new(Vec::new());
 
 /// A new random token: 32 bytes from the operating system, as hex.
 fn new_token() -> Option<String> {
@@ -35,20 +35,21 @@ fn new_token() -> Option<String> {
     Some(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// Remove this launch's token file (at exit).
+/// Remove this launch's token files and discovery file (at exit), leaving any that another
+/// launch has written since (#8794).
 pub fn remove_token_file() {
     if let Ok(files) = TOKEN_FILES.lock() {
-        for p in files.iter() {
-            control_auth::remove_token_file(p);
+        for (path, token) in files.iter() {
+            control_auth::remove_token_file(path, token);
         }
     }
-    if let Some(port) = APP_PORT.lock().ok().and_then(|p| *p) {
-        control_auth::remove_current_port(port);
+    if let Some((port, token)) = APP_PORT.lock().ok().and_then(|p| p.clone()) {
+        control_auth::remove_current_port(port, &token);
     }
 }
 
-/// The port the app's own channel listens on, for removing the discovery file at exit.
-static APP_PORT: std::sync::Mutex<Option<u16>> = std::sync::Mutex::new(None);
+/// The port the app's own channel listens on and its token, for removing the discovery file at exit.
+static APP_PORT: std::sync::Mutex<Option<(u16, String)>> = std::sync::Mutex::new(None);
 
 pub fn start(listen_on: control_auth::Listen, ctx: egui::Context) -> Receiver<ControlRequest> {
     let (tx, rx) = channel::<ControlRequest>();
@@ -61,7 +62,7 @@ pub fn start(listen_on: control_auth::Listen, ctx: egui::Context) -> Receiver<Co
             };
             match listener {
                 Ok(l) => {
-                    if let Some(port) = listen_on_listener(l, token, tx, ctx, false) {
+                    if let Some(port) = listen_on_listener(l, token.clone(), tx, ctx, false) {
                         if matches!(listen_on, control_auth::Listen::Default) {
                             eprintln!("solidcraft: control channel on the default port 127.0.0.1:{port} (Preferences > Assistant turns it off)");
                         }
@@ -69,7 +70,7 @@ pub fn start(listen_on: control_auth::Listen, ctx: egui::Context) -> Receiver<Co
                         match control_auth::write_current_port(port) {
                             Ok(_) => {
                                 if let Ok(mut p) = APP_PORT.lock() {
-                                    *p = Some(port);
+                                    *p = Some((port, token));
                                 }
                             }
                             Err(e) => eprintln!("solidcraft: could not write the control discovery file ({e})"),
@@ -112,7 +113,7 @@ fn listen_on_listener(listener: TcpListener, token: String, tx: Sender<ControlRe
             Ok(()) => {
                 eprintln!("solidcraft: control server listening on 127.0.0.1:{port} (token in {})", path.display());
                 if let Ok(mut files) = TOKEN_FILES.lock() {
-                    files.push(path);
+                    files.push((path, token.clone()));
                 }
             }
             Err(e) => eprintln!(
@@ -474,6 +475,14 @@ fn send_events(design: &DesignWatch, lines: &Lines, stop: &AtomicBool, mut seen:
     }
 }
 
+/// What this app's control channel does beyond the methods every version has, for a client to
+/// find out before it relies on it (an older app answers `control.capabilities` with "unknown
+/// method"). `param_check`: the levels `engine.execute`, `engine.batch` and `engine.script` take
+/// as a request's own parameter check (#9184).
+fn capabilities() -> Value {
+    json!({"param_check": solidcraft_engine::schema::ParamCheck::ALL.map(|l| l.name())})
+}
+
 /// Write `reply` on the connection: through its subscription once it has one.
 fn answer(out: &mut TcpStream, events: Option<&Subscription>, reply: &Value) -> std::io::Result<()> {
     match events {
@@ -534,15 +543,20 @@ fn serve_with(
                 let id = msg.get("id").cloned().unwrap_or(Value::Null);
                 let method = msg.get("method").and_then(Value::as_str).unwrap_or("").to_string();
                 let params = msg.get("params").cloned().unwrap_or(json!({}));
-                // A request that timed out may have finished since (#1618). `control.running` only
-                // looks, so it leaves that reply where it is.
-                let late = pending.as_ref().filter(|_| method != "control.running").and_then(|p| match p.reply.try_recv() {
+                // A request that timed out may have finished since (#1618). `control.running` and
+                // `control.capabilities` only look, so they leave that reply where it is.
+                let late = pending.as_ref().filter(|_| !matches!(method.as_str(), "control.running" | "control.capabilities")).and_then(|p| match p
+                    .reply
+                    .try_recv()
+                {
                     Ok(reply) => Some(reply),
                     Err(TryRecvError::Disconnected) => Some(json!({"ok": false, "error": "the app ended the request without a reply"})),
                     Err(TryRecvError::Empty) => None,
                 });
                 let mut r = if method == "control.running" {
                     json!({"ok": true, "result": running.result(connection)})
+                } else if method == "control.capabilities" {
+                    json!({"ok": true, "result": capabilities()})
                 } else if method == "control.pending" {
                     match (pending.take(), late) {
                         (None, _) => json!({"ok": true, "result": {"pending": null}}),
@@ -749,6 +763,9 @@ mod tests {
         let mut watcher = open();
         let (r, rows) = running(&mut watcher, &|_| true);
         assert!(r["ok"] == true && rows.is_empty(), "idle: {r}");
+        // What the app's control channel does beyond the methods every version has (#9184).
+        let r = watcher(json!({"id": 0, "method": "control.capabilities", "token": token}));
+        assert_eq!((&r["ok"], &r["result"]["param_check"]), (&json!(true), &json!(["off", "warn", "strict"])), "{r}");
 
         let mut export = open();
         let path = "/private/part.step";
@@ -780,6 +797,9 @@ mod tests {
         let own: Vec<&Value> = r["result"]["running"].as_array().unwrap().iter().filter(|row| row["self"] == true).collect();
         assert_eq!(own.len(), 1, "{r}");
         assert_eq!(own[0]["command"], "file.export", "{r}");
+        // So may it ask what the app can do: answered at once, not refused as busy.
+        let r = export(json!({"id": 8, "method": "control.capabilities"}));
+        assert_eq!(r["result"]["param_check"], json!(["off", "warn", "strict"]), "{r}");
 
         gate_tx.send(()).unwrap();
         assert_eq!(queued.join().unwrap()["result"], "engine.batch");

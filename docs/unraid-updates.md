@@ -1,5 +1,82 @@
 # Validated container updates
 
+## 2026-10-30: fixed upstream 0.27.1 snapshot, native format 45
+
+Selected `6c9afc6f7e08672c802b4f3fb37a80529e86dfe2` once, 238 commits after validated
+`c7a1cee3`. The sole `codex/unraid-mcp-web` branch started clean and synchronized
+at `aac46c91`; fork main remains an ancestor. Upstream CAD functions and changes
+belong to [the original project](https://github.com/tangency-labs/solidcraft).
+This is unofficial integration, not an application release or Unraid installation.
+
+All published integrations remain: independent browser CAD and HTTP MCP, headless
+project-bound workers, shared path/revision/transfer gates, remembered cookie-only
+login, live inventory, thumbnails/browser copies, read-only observation, confirmed
+deletion, bounded streaming ZIP64, projects/multi-file uploads and storage footer.
+Existing layouts, original icons, private settings and saved files are preserved.
+The canonical Unraid product description/icon are unchanged.
+
+Merge resolutions preserve the independent browser-import tick alongside upstream's
+cross-tab preferences/font logic, construction-line dimension rules, CRLF skill
+parsing and isolated observer state. The new cross-design clipboard is omitted from
+observer snapshots so they cannot retain another design and its shared model caches;
+ordinary scratch sessions retain cross-design paste. An existing isolation regression
+covers both paths. The Zoom match guard is simplified equivalently for Clippy.
+
+No new unconstrained output command is enabled. Print-face mesh orientation writes
+through existing confined export paths; desktop/cloud slicer delivery stays blocked.
+Settings-profile commands only echo data in a headless engine. Component extraction
+keeps its existing exact destination/revision gate. Network CAD workers remain
+explicitly headless and cannot discover/bridge to desktop apps. New native fields
+cover equation curves/timeline joint folders (44) and print faces (45); saved files
+from the new build require a compatible reader. No existing files are migrated.
+
+Toolchains remain Rust 1.95 and Trunk 0.21.14. The upstream local AccessKit macOS
+patch is MIT OR Apache-2.0; existing zbus/sha2 and original OFL CJK font subsets pass
+licensing/asset rules. No unsafe native bridge is enabled. The production Docker
+context remains Git-free: the new evaluation-cache source is unknown and existing
+saved caches are rebuilt rather than trusted. Local release artifacts use the same
+behavior, avoiding a dirty-worktree HEAD cache stamp. The target-only Slicer result
+field remains an upstream harmless Wasm dependency warning; scoped browser/client
+Clippy and native all-target lint pass.
+
+Relevant local checks passed: 143 gateway tests, 69 affected library selections,
+full native all-target Clippy, 13-crate Wasm compatibility, browser/client lint,
+formatting, licensing, 883 attributed assets, 362 original icon masters, layers,
+lists, containers and skills. The hostile-parameter test passed, as did affected
+CLI integrations, all seven cache roundtrip cases, 32 native web/helper cases and
+the new analytic prism common-height test. No unfiltered repository suite was run.
+Actual software-GL capture/depth, stand-up UI, real browser API/linked-source/DXF/
+queue behavior and all 20 offline/update cases pass. Initial lint and private
+harness diagnostics are retained; no failing product test was waived.
+
+A fresh labelled candidate, disposable volume, loopback port and test credential
+passed real HTTP MCP modelling (24000 mm3), PNG/STEP, independent sessions, auth/
+origin/path denial, logging/privacy, project binding, restart persistence, strong
+revisions, Workspace/observer/live SSE, deletion/streamed ZIP and backup exclusions,
+remembered login/logout and UI uploads. Real browser captures were inspected:
+multi-file drop, fixed targets, overwrite/skip/cancel/apply-all reset, stale revision
+denial, live collapsed groups, compact actions, joined overview, capacity footer
+and an independent native browser copy remain correct. The existing runtime was
+not mutated during candidate testing.
+
+The official MCP SDK reopened public original formats 13 and 43 without changing
+source bytes; new native format-45 saves preserve parameters, 24000 mm3, split-face
+names/centroids, STEP, embedded HDR CPU rendering and file/session/revision gates.
+The new equation curve and print face survive native roundtrip; the prism's height
+and cone's analytic volume pass their tolerances. New native archives pass CRCs.
+The three-point scan survives native45 save/reopen, cookie upload, saved metadata
+and independent WebGL opening. Browser-only scan edits leave server bytes unchanged;
+headless observation still explicitly refuses visible scans. Raw browser upload
+formats/limits are unchanged. Evidence is private under ignored
+`target/upstream-6c9afc6f-20261030/`.
+
+Publication, archive checksum and local runtime replacement are recorded after the
+exact-source image workflow and anonymous pull checks pass. Canonical XML/icon are
+unchanged, so no catalog commit is needed. On Unraid save active work, retain server
+and browser backups, update the existing container with the same data/token/settings
+and reload the browser. Older images cannot read new native format-45 designs.
+No Unraid deployment, nginx/DNS change, application release or Git tag is created.
+
 ## 2026-10-29: fixed upstream 0.26.0 snapshot and native format 43
 
 Selected `c7a1cee357359145fb6ad6a8a0a5b2764e34c42e` once, 290 commits after

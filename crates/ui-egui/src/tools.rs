@@ -94,6 +94,9 @@ pub struct Tool {
     /// How far (radians, signed) the cursor has gone round a centre-point arc's centre since its
     /// start was placed: its sign is the way the arc runs (#6645).
     pub arc_turn: f64,
+    /// Where each point was placed and the sketch points the snap lined it up with (#7828):
+    /// constrained to them once the shape is made.
+    pub lined: Vec<(Vec2, Vec<crate::sketch_tools::Lined>)>,
 }
 
 impl Tool {
@@ -109,6 +112,9 @@ impl Tool {
             "sketch.circle.three_point" => ("sketch.circle.three_point", Kind::Draw(3)),
             "sketch.arc.three_point" => ("sketch.arc.three_point", Kind::Draw(3)),
             "sketch.arc3d" => ("sketch.arc3d", Kind::Draw(3)),
+            "sketch.line3d" => ("sketch.line3d", Kind::Draw(0)),
+            "sketch.spline3d" => ("sketch.spline3d", Kind::Draw(0)),
+            "sketch.point3d" => ("sketch.point3d", Kind::Draw(1)),
             "sketch.arc.center_point" => ("sketch.arc.center_point", Kind::Draw(3)),
             "sketch.polygon.inscribed" => ("sketch.polygon.inscribed", Kind::Draw(2)),
             "sketch.polygon.circumscribed" => ("sketch.polygon.circumscribed", Kind::Draw(2)),
@@ -142,6 +148,7 @@ impl Tool {
             dims_stage: usize::MAX,
             dims_focus: false,
             arc_turn: 0.0,
+            lined: Vec::new(),
         })
     }
 }
@@ -156,6 +163,9 @@ pub fn hint(id: &str) -> String {
         "sketch.circle.center" => "Circle: click the centre, then a point on the circle".into(),
         "sketch.arc.three_point" => "Arc: click start, end, then a point on the arc".into(),
         "sketch.arc3d" => "3D Arc: click start, end, then a point on the arc (points may leave the sketch plane)".into(),
+        "sketch.line3d" => "3D Line: click world points; right-click or Esc to finish (points may leave the sketch plane)".into(),
+        "sketch.spline3d" => "3D Spline: click fit points in 3D; right-click or Esc to finish".into(),
+        "sketch.point3d" => "3D Point: click where a 3D point goes".into(),
         "sketch.arc.center_point" => "Arc: click centre and start, go round either way and click the end, or type a signed sweep".into(),
         "sketch.dimension" => {
             "Dimension: pick one or two entities and type the value (or click to place it first); click a dimension to edit it; Enter applies".into()
@@ -378,15 +388,29 @@ pub fn on_click(app: &mut SolveApp, proj: &Proj, pos: Pos2, shift: bool) {
                             })
                     })
             });
-            let hit = midpoint.as_deref().and_then(|id| id.strip_prefix("mid:")).map(|id| (id.to_string(), true, true)).or_else(|| {
-                hits.iter().find_map(|h| match h {
-                    Hit::SketchPoint { sketch, id, .. } if Some(*sketch) == app.session.active_sketch => Some((id.clone(), false, true)),
-                    Hit::SketchCurve { sketch, id, straight, .. } if Some(*sketch) == app.session.active_sketch => {
-                        Some((id.clone(), true, *straight))
-                    }
-                    _ => None,
+            let hit = midpoint
+                .as_deref()
+                .and_then(|id| id.strip_prefix("mid:"))
+                .map(|id| (id.to_string(), true, true))
+                .or_else(|| {
+                    hits.iter().find_map(|h| match h {
+                        Hit::SketchPoint { sketch, id, .. } if Some(*sketch) == app.session.active_sketch => Some((id.clone(), false, true)),
+                        Hit::SketchCurve { sketch, id, straight, .. } if Some(*sketch) == app.session.active_sketch => {
+                            Some((id.clone(), true, *straight))
+                        }
+                        _ => None,
+                    })
                 })
-            });
+                .or_else(|| {
+                    // With nothing of the sketch under the cursor, a body's edge or vertex may be
+                    // measured too (#7912): the command projects it into the sketch. An edge is a
+                    // length of its own; a vertex waits for the entity it is measured against.
+                    hits.iter().find_map(|h| match h {
+                        Hit::Edge { .. } => crate::sketch_tools::model_ref(app, h).map(|r| (r.to_string(), true, false)),
+                        Hit::Vertex { .. } => crate::sketch_tools::model_ref(app, h).map(|r| (r.to_string(), false, false)),
+                        _ => None,
+                    })
+                });
             let fresh = |tool: &Tool, id: &String| !tool.picks.contains(id) && tool.picks.len() < 2;
             // Before a new dimension is under way, a click on an existing one edits its value;
             // the tool stays on for the next dimension.
@@ -490,7 +514,9 @@ pub fn place(app: &mut SolveApp, p: (Vec2, Option<String>)) {
         app.tool = Some(tool);
         return;
     }
+    tool.lined.push((p.0, crate::sketch_tools::lined_at(p.0)));
     tool.pts.push(p);
+    let before = crate::sketch_tools::point_ids(app);
     if tool.cmd == "sketch.line" {
         if tool.pts.len() >= 2 {
             let (a, b) = (tool.pts[tool.pts.len() - 2].clone(), tool.pts[tool.pts.len() - 1].clone());
@@ -502,11 +528,13 @@ pub fn place(app: &mut SolveApp, p: (Vec2, Option<String>)) {
                 if let Some(id) = curves.first() {
                     if angled {
                         crate::inference::clear();
+                        tool.lined.clear();
                     } else {
                         // Endpoint inference is part of this drawing. Preserve its original
                         // undo history even when the history is already at the engine's cap.
                         let history = dimensioned.then(|| std::mem::take(&mut app.session.undo));
                         crate::inference::commit(app, id, b.0);
+                        crate::sketch_tools::constrain_lined(app, &mut tool, &[a.0, b.0], &before);
                         if let Some(history) = history {
                             app.session.undo = history;
                         }
@@ -519,17 +547,21 @@ pub fn place(app: &mut SolveApp, p: (Vec2, Option<String>)) {
                 crate::sketch_dims::reset(&mut tool);
             } else {
                 tool.pts.pop();
+                tool.lined.pop();
             }
         }
     } else if n > 0 && tool.pts.len() >= n {
         match run_shape(app, &tool) {
             Ok(_) => {
+                let placed: Vec<Vec2> = tool.pts.iter().map(|p| p.0).collect();
+                crate::sketch_tools::constrain_lined(app, &mut tool, &placed, &before);
                 tool.pts.clear();
                 crate::sketch_dims::reset(&mut tool);
             }
             Err(error) => {
                 app.set_status(error, true);
                 tool.pts.pop();
+                tool.lined.pop();
             }
         }
     }

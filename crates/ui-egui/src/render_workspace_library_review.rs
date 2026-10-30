@@ -114,6 +114,7 @@ pub(in crate::render_workspace) fn light(app: &mut SolveApp, view: &View, id: &s
     }
 }
 
+#[cfg(test)]
 pub(in crate::render_workspace) fn command(app: &mut SolveApp, id: &str, params: Value) {
     let result = open(app, "stage", app.tr("render.passive_stage").into(), Value::Null, Apply::Command { id: id.into(), params });
     if let Err(error) = result {
@@ -283,6 +284,7 @@ pub(in crate::render_workspace) struct Removal {
     revision: u64,
     document: Weak<Document>,
 }
+#[cfg(test)]
 pub(in crate::render_workspace) fn remove(app: &mut SolveApp, command: &str, params: Value) {
     app.render_workspace.view.library.removal =
         Some(Removal { command: command.into(), params, revision: app.session.revision, document: Arc::downgrade(&app.session.doc) });

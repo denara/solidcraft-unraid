@@ -138,6 +138,7 @@ pub(super) fn refresh(app: &mut SolveApp, ctx: &egui::Context) {
         let permit = WorkerPermit;
         let Some(setup) = app.session.doc.render.setups.get(&key.name) else { return };
         let request = solidcraft_engine::render::job::ImageRequest {
+            studio_weights: None,
             camera: setup.camera,
             width: SIZE[0],
             height: SIZE[1],

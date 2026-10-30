@@ -111,6 +111,9 @@ pub(crate) struct Footer<'a> {
     /// Parent surface corners; the footer inherits only its two bottom corners.
     pub corners: Option<egui::CornerRadius>,
     pub secondary_left: bool,
+    /// Nothing to apply yet (nothing changed since the dialog opened or since the last Apply):
+    /// Apply is drawn and reported disabled, and clicking it does nothing (#8561).
+    pub nothing_to_apply: bool,
 }
 
 pub(crate) fn footer(ui: &mut Ui, ok_label: &str, cancel_label: &str, ok_enabled: bool, options: Footer<'_>) -> Action {
@@ -125,7 +128,7 @@ pub(super) fn footer_with_left(
     options: Footer<'_>,
     left: impl FnOnce(&mut Ui),
 ) -> Action {
-    let Footer { apply: apply_label, status, selected, danger, confirm, corners, secondary_left } = options;
+    let Footer { apply: apply_label, status, selected, danger, confirm, corners, secondary_left, nothing_to_apply } = options;
     let t = Tokens::get();
     let ok_enabled = ok_enabled && !ok_label.is_empty();
     // The footer is a full-width band (the card has no margin of its own): its own fill, a rule
@@ -146,7 +149,11 @@ pub(super) fn footer_with_left(
     let inner = band.shrink2(vec2(t.space_12, t.space_10));
     scenario::publish_rect("dialog:footer:actions", inner);
     let mut action = if ui.is_enabled() { keyboard(ui.ctx(), ok_enabled) } else { Action::None };
-    let look = ActionLook::new(ok_enabled, selected, danger);
+    let look = ActionLook::new(ok_enabled, !nothing_to_apply, selected, danger);
+    if apply_label.is_some() {
+        let live = if confirm { !nothing_to_apply } else { look.live(Action::Apply) };
+        scenario::publish_count("dialog:apply:enabled", f64::from(live && ui.is_enabled()));
+    }
     let mut actions_left = inner.right();
     let row = ui.scope_builder(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -184,7 +191,8 @@ pub(super) fn footer_with_left(
                     .stroke(egui::Stroke::new(1.0, if marked { t.form_primary } else { t.control_border }))
                     .corner_radius(t.control_radius);
             }
-            let response = ui.add(button);
+            // A confirmation's third choice (Don't Save, Keep) never waited for OK's inputs.
+            let response = ui.add_enabled(!nothing_to_apply, button);
             pointer_on_hover(ui, &response);
             scenario::publish_target("dialog:apply", response.rect);
             scenario::publish_handle(&format!("dialog:{label}"), response.rect.center());
@@ -207,13 +215,14 @@ pub(super) fn footer_with_left(
 /// What every OK, Apply and Cancel button shares, wherever the row of them sits.
 struct ActionLook {
     ok_enabled: bool,
+    apply_enabled: bool,
     selected: Option<Action>,
     primary_fill: egui::Color32,
     primary_ink: egui::Color32,
 }
 
 impl ActionLook {
-    fn new(ok_enabled: bool, selected: Option<Action>, danger: bool) -> Self {
+    fn new(ok_enabled: bool, apply_enabled: bool, selected: Option<Action>, danger: bool) -> Self {
         let t = Tokens::get();
         let primary_fill = if t.borders.bevel.is_some() && !danger {
             t.control_fill
@@ -229,7 +238,16 @@ impl ActionLook {
         } else {
             t.on_accent
         };
-        Self { ok_enabled, selected, primary_fill, primary_ink }
+        Self { ok_enabled, apply_enabled, selected, primary_fill, primary_ink }
+    }
+
+    /// Cancel always works; OK and Apply need valid inputs, and Apply also something to apply.
+    fn live(&self, kind: Action) -> bool {
+        match kind {
+            Action::Cancel => true,
+            Action::Apply => self.ok_enabled && self.apply_enabled,
+            Action::Ok | Action::None => self.ok_enabled,
+        }
     }
 
     /// OK carries the accent unless the keyboard marks another action.
@@ -245,11 +263,11 @@ fn action_button(ui: &mut Ui, label: &str, kind: Action, look: &ActionLook, padd
     let ok_enabled = look.ok_enabled;
     let marked = look.selected == Some(kind);
     let primary = look.primary(kind);
-    let live = kind == Action::Cancel || ok_enabled;
+    let live = look.live(kind);
     ui.spacing_mut().button_padding = vec2(padding, 0.0);
     let text = RichText::new(crate::i18n::tr_label(label)).size(t.font_label).color(if primary && ok_enabled {
         look.primary_ink
-    } else if primary {
+    } else if primary || !live {
         t.form_dim
     } else {
         t.form_ink
@@ -333,7 +351,7 @@ impl<'a> HeaderActions<'a> {
         let ok_enabled = ok_enabled && self.rect(Action::Ok).is_some();
         scenario::publish_count("dialog:ok:enabled", f64::from(ok_enabled && ui.is_enabled()));
         let mut action = if ui.is_enabled() { keyboard(ui.ctx(), ok_enabled) } else { Action::None };
-        let look = ActionLook::new(ok_enabled, None, false);
+        let look = ActionLook::new(ok_enabled, true, None, false);
         let padding = Tokens::get().space_8;
         for (kind, label, rect) in &self.slots {
             let builder = egui::UiBuilder::new()
@@ -425,6 +443,37 @@ pub enum Button {
     SmallSelected,
 }
 
+/// Selected palette shared by SmallSelected and opt-in persistent native buttons.
+fn selected_button_palette(t: &Tokens) -> (egui::Color32, egui::Color32) {
+    (t.selected_bg, t.selected_ink)
+}
+
+/// Persistent counterpart of SmallSelected at a caller's native rectangle. This opt-in recipe
+/// leaves existing SmallSelected controls unchanged. Tokens: selected_bg/ink, form_primary,
+/// accent, radius_sm, space_8. The underline is two logical pixels; focus uses native visuals.
+pub(crate) fn persistent_button_shape(ui: &Ui, response: &Response, rect: egui::Rect) -> egui::Shape {
+    let t = Tokens::get();
+    let (fill, _) = selected_button_palette(&t);
+    let mut shapes = vec![
+        egui::Shape::rect_filled(rect, t.radius_sm, fill),
+        egui::Shape::rect_stroke(rect, t.radius_sm, egui::Stroke::new(1.0, t.form_primary), egui::StrokeKind::Inside),
+    ];
+    let inset = t.space_8.min(rect.width() / 4.0);
+    let y = rect.bottom() - t.space_4;
+    shapes
+        .push(egui::Shape::line_segment([egui::pos2(rect.left() + inset, y), egui::pos2(rect.right() - inset, y)], egui::Stroke::new(2.0, t.accent)));
+    if response.has_focus() {
+        shapes.push(native_button_focus(ui, response, rect));
+    }
+    egui::Shape::Vec(shapes)
+}
+
+/// The same standard focused-button outline used by native egui buttons, without resizing.
+pub(crate) fn native_button_focus(ui: &Ui, response: &Response, rect: egui::Rect) -> egui::Shape {
+    let visuals = ui.style().interact(response);
+    egui::Shape::rect_stroke(rect, Tokens::get().radius_sm, visuals.bg_stroke, egui::StrokeKind::Inside)
+}
+
 fn button_widget(label: egui::WidgetText, options: Button) -> egui::Button<'static> {
     let t = Tokens::get();
     if t.borders.bevel.is_some() && !matches!(options, Button::Ghost) {
@@ -439,7 +488,8 @@ fn button_widget(label: egui::WidgetText, options: Button) -> egui::Button<'stat
         }
         Button::Ghost => egui::Button::new(label).frame(false),
         Button::SmallSelected => {
-            egui::Button::new(label.color(t.selected_ink)).small().fill(t.selected_bg).stroke(egui::Stroke::new(1.0, t.form_primary))
+            let (fill, ink) = selected_button_palette(&t);
+            egui::Button::new(label.color(ink)).small().fill(fill).stroke(egui::Stroke::new(1.0, t.form_primary))
         }
         _ => egui::Button::new(label),
     }
@@ -578,6 +628,14 @@ pub(crate) fn compact_button(ui: &mut Ui, glyph: &str, tooltip: &str, enabled: b
 /// Secondary action with an existing icon, optionally using the danger ink. Keeps button handles.
 pub(crate) fn icon_label_button(ui: &mut Ui, label: &str, icon: &str, enabled: bool, danger: bool) -> Response {
     icon_label_presentation(ui, crate::i18n::tr_label(label), Some(icon), enabled, false, danger, false)
+}
+
+/// Icon-only action with an accessible name and tooltip, using the shared action
+/// geometry, enabled state and optional danger ink. Tokens: icon-label action tokens.
+pub(crate) fn icon_action(ui: &mut Ui, label: &str, icon: &str, enabled: bool, danger: bool) -> Response {
+    let response = icon_label_button(ui, "", icon, enabled, danger).on_hover_text(label);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled && ui.is_enabled(), label));
+    response
 }
 
 /// Compact stage actions share the icon-label button's frame, typography and hit target.

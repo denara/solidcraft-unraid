@@ -241,75 +241,9 @@ pub(super) fn environment_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
     }
 }
 
+#[cfg(test)]
 pub(super) fn lighting_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
-    let label = app.tr("render.studio_lighting_enable").to_string();
-    ui_kit::checkbox(ui, &label, &mut app.render_workspace.view.studio.lighting_enabled);
-    if !app.render_workspace.view.studio.lighting_enabled {
-        return;
-    }
-    let ambient = app.tr("render.studio_ambient_rgb").to_string();
-    vector(ui, &ambient, &mut app.render_workspace.view.studio.ambient, 0.0..=1e6, 0.1);
-    let label = app.tr("render.studio_sun").to_string();
-    ui_kit::checkbox(ui, &label, &mut app.render_workspace.view.studio.sun_enabled);
-    if app.render_workspace.view.studio.sun_enabled {
-        let direction = app.tr("render.studio_direction").to_string();
-        vector(ui, &direction, &mut app.render_workspace.view.studio.sun.direction, -1e8..=1e8, 0.01);
-        let radiance = app.tr("render.studio_radiance").to_string();
-        vector(ui, &radiance, &mut app.render_workspace.view.studio.sun.radiance, 0.0..=1e8, 1.0);
-        ui.label(app.tr("render.studio_sun_radius"));
-        let mut radius = app.render_workspace.view.studio.sun.angular_radius_rad.to_degrees();
-        if ui_kit::number_field(ui, &mut radius, 0.001_f64.to_degrees()..=90.0, 0.05, "°").changed() {
-            app.render_workspace.view.studio.sun.angular_radius_rad = radius.to_radians();
-        }
-    }
-    let title = app.tr("render.studio_area").to_string();
-    let mut remove = None;
-    for index in 0..app.render_workspace.view.studio.area_lights.len() {
-        ui_kit::section(ui, ("render_area", index), &format!("{title} {}", index + 1), false, |ui| {
-            for (key, field) in [("render.studio_center", 0), ("render.studio_half_u", 1), ("render.studio_half_v", 2), ("render.studio_radiance", 3)]
-            {
-                let label = app.tr(key).to_string();
-                let Some(light) = app.render_workspace.view.studio.area_lights.get_mut(index) else { continue };
-                let value = match field {
-                    0 => &mut light.center,
-                    1 => &mut light.u,
-                    2 => &mut light.v,
-                    _ => &mut light.radiance,
-                };
-                vector(
-                    ui,
-                    &label,
-                    value,
-                    if field == 3 {
-                        0.0..=1e6
-                    } else if field == 0 {
-                        -1e12..=1e12
-                    } else {
-                        -1e6..=1e6
-                    },
-                    1.0,
-                );
-            }
-            if ui_kit::button(ui, app.tr("render.studio_remove_area"), ui_kit::Button::Normal).clicked() {
-                remove = Some(index);
-            }
-        });
-    }
-    if let Some(index) = remove {
-        app.render_workspace.view.studio.area_lights.remove(index);
-    }
-    if ui_kit::button(ui, app.tr("render.studio_add_area"), ui_kit::Button::Enabled(app.render_workspace.view.studio.area_lights.len() < 4)).clicked()
-    {
-        let target = app.cam.target;
-        let size = (app.cam.distance * 0.25).clamp(1.0, 1e5);
-        app.render_workspace.view.studio.area_lights.push(AreaLight {
-            center: [target.x, target.y, target.z + size * 2.0],
-            u: [size, 0.0, 0.0],
-            v: [0.0, -size, 0.0],
-            radiance: [8.0; 3],
-        });
-    }
-    ui.small(app.tr("render.studio_area_help"));
+    super::light::lighting(app, ui);
 }
 
 /// Presentation is opt-in; raw radiance and engineering appearance stay untouched.

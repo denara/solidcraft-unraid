@@ -62,7 +62,7 @@ Written against SolidCraft `main` after 0.11.1, which counts the degrees of free
 - **Sweep until contact:** `joint.sweep {"joint":..., "from":0, "to":120, "occurrences":[...], "against":[...], "report_gaps":true}` answers how far a hinge, door or linkage opens: `stopped_at` (last clear value, bisected to `refine` mm, default 0.01), `stopped_by` `{a, b, at}` (or `"loop"`, `"limit"`), per-sample `min_gap_mm` and the nearest each part came (`min_gap`). It runs on a copy; `"apply":true` leaves the design at the stop. Pairs touching at `from` (`touching_at_start`) stop it only once they pass into each other.
 
 ## Verify
-- **Each joint:** `execute occurrence.properties {"occurrence":"Wing:1"}` (under 1 KB) gives the world bbox and centre of mass of one occurrence. Joining must not move them.
+- **Each joint:** `execute occurrence.properties {"occurrence":"Wing:1"}` (about 2 KB) gives the world bbox, centre of mass and inertia of one occurrence. Joining must not move them.
 - **Each drive:** compute the expected value of every follower, and read it back from `joint.list` (degrees and mm, with `unit`). For an actuator from root R to tip T on a panel hinged at H: `L(θ) = |T(θ) - R|`, where `T(θ)` is T turned by θ about the hinge axis through H, and the stroke is `L(θ) - L(0)`. A closed loop matches to 1e-6 mm.
 - **Each stop:** solve for where the limit is reached, and compare with the value the drive stopped at. Stops are found by bisection, so they land within about 0.01 degrees.
 - **Links:** b must equal r·a + o exactly, unless that is outside b's limits; then b sits at the limit and the mirror stops following.

@@ -45,6 +45,18 @@ pub(super) fn interface(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
                     app.preferences.viewport_theme = *view;
                 }
             });
+            // The view's background: the theme's gradient, or one colour of the user's (#7688).
+            let label = app.tr("prefs.viewport_background");
+            ui_kit::row(ui, label, |ui| {
+                let labels = [crate::i18n::tr("prefs.viewport_background_theme"), crate::i18n::tr("prefs.viewport_background_colour")];
+                let mut selected = usize::from(app.preferences.viewport_background.is_some());
+                if ui_kit::settings_segments(ui, label, &mut selected, &labels) {
+                    app.preferences.viewport_background = (selected == 1).then_some([255, 255, 255]);
+                }
+                if let Some(colour) = &mut app.preferences.viewport_background {
+                    ui_kit::color_field(ui, colour);
+                }
+            });
             // The logo in the theme's own logo colours or in its accent.
             let label = app.tr("prefs.logo");
             ui_kit::row(ui, label, |ui| {
@@ -82,10 +94,23 @@ pub(super) fn interface(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
                             app.preferences.ribbon_labels = selected == 0;
                         }
                     });
+                    ui_kit::row(ui, "", |ui| {
+                        let check = setting::persistent_ribbon_pressed(app, ui).on_hover_text(app.tr("prefs.persistent_ribbon_pressed_help"));
+                        crate::scenario::publish_target("prefs:persistent_ribbon_pressed", check.rect);
+                    });
+                    ui_kit::row(ui, "", |ui| {
+                        let check = setting::viewport_analysis_status(app, ui).on_hover_text(app.tr("prefs.viewport_analysis_status_help"));
+                        crate::scenario::publish_target("prefs:viewport_analysis_status", check.rect);
+                    });
                     // The SKETCH tab outside a sketch too (#7904).
                     ui_kit::row(ui, "", |ui| {
                         let check = setting::sketch_tab_always(app, ui).on_hover_text(app.tr("prefs.sketch_tab_always_note"));
                         crate::scenario::publish_target("prefs:sketch_tab_always", check.rect);
+                    });
+                    // Search results point out their place in the ribbon (#7287).
+                    ui_kit::row(ui, "", |ui| {
+                        let check = setting::ribbon_reveal(app, ui).on_hover_text(app.tr("prefs.ribbon_reveal_note"));
+                        crate::scenario::publish_target("prefs:ribbon_reveal", check.rect);
                     });
                     // Where every feature dialog puts its OK and Cancel (#6708).
                     ui_kit::row(ui, app.tr("prefs.dialog_buttons"), |ui| {
@@ -120,6 +145,14 @@ pub(super) fn interface(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
                             crate::scenario::publish_handle(&format!("prefs:toast_place:{key}"), at);
                         }
                     }
+                    // The ribbon's panel drop-downs: a list, or a grid of large icons (#4739).
+                    ui_kit::row(ui, app.tr("prefs.menus"), |ui| {
+                        let mut selected = usize::from(app.preferences.ribbon_icon_grid);
+                        if ui_kit::segmented(ui, &mut selected, &[app.tr("prefs.menu_list"), app.tr("prefs.menu_grid")], Default::default()) {
+                            app.preferences.ribbon_icon_grid = selected == 1;
+                        }
+                    });
+                    setting::ribbon_menus_skip_pinned(app, ui);
                     ui_kit::row(ui, app.tr("prefs.history"), |ui| {
                         let mut selected = if app.preferences.history_in_browser {
                             3
@@ -196,6 +229,20 @@ pub(super) fn interface(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
                             }
                         });
                     });
+                    // Out of sight until the pointer comes to it (#8692); the browser sharing its
+                    // column with History keeps its place.
+                    ui_kit::row(ui, "", |ui| {
+                        use crate::browser::BrowserShow;
+                        ui.add_enabled_ui(!crate::timeline_left::stacked(app), |ui| {
+                            let mut selected = usize::from(app.preferences.browser_show == BrowserShow::Hover);
+                            let options = [app.tr("prefs.browser_shown"), app.tr("prefs.browser_reveal_on_hover")];
+                            let segments = ui.scope(|ui| ui_kit::segmented(ui, &mut selected, &options, Default::default()));
+                            segments.response.on_hover_text(app.tr("prefs.browser_show_note"));
+                            if segments.inner {
+                                app.preferences.browser_show = if selected == 1 { BrowserShow::Hover } else { BrowserShow::Shown };
+                            }
+                        });
+                    });
                     // Where command dialogs open (#6707).
                     ui_kit::row(ui, app.tr("prefs.dialogs"), |ui| {
                         use crate::dialog_column::DialogPlace;
@@ -221,6 +268,11 @@ pub(super) fn interface(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
                         {
                             app.preferences.browser_bodies_folders = *mode;
                         }
+                    });
+                    // The eye beside the fold arrow, where it was before #8718.
+                    ui_kit::row(ui, "", |ui| {
+                        let check = setting::browser_eye_left(app, ui).on_hover_text(app.tr("prefs.browser_eye_left_note"));
+                        crate::scenario::publish_target("prefs:browser_eye_left", check.rect);
                     });
                     // What is being edited, the sketch's state and the units, along the bottom (#7243).
                     ui_kit::row(ui, "", |ui| {
@@ -248,6 +300,17 @@ pub(super) fn interface(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
     });
     origin_plane_names(app, ui);
     super::navbar::show(app, ui);
+    // The same choice as the toolbar's own menu (the plus after the tabs, or right-click a tab).
+    ui_kit::settings_section(ui, "toolbar_tabs", app.tr("prefs.toolbar_tabs"), |ui| {
+        for tab in crate::workspace::choosable_tabs() {
+            let mut on = crate::workspace::tab_turned_on(app, tab);
+            let response = ui_kit::checkbox(ui, &crate::toolbar::ribbon_label(app, tab), &mut on);
+            crate::scenario::publish_target(&format!("prefs:toolbar_tab:{tab}"), response.rect);
+            if response.changed() {
+                crate::workspace::set_tab_shown(app, tab, on);
+            }
+        }
+    });
     ui_kit::settings_section(ui, "scale", app.tr("prefs.scale_text"), |ui| {
         ui_kit::settings_pair(
             ui,

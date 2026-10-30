@@ -1,0 +1,34 @@
+{
+  "en": {
+    "prefs.select_other_hidden": "Select hidden geometry with Select Other",
+    "prefs.select_other_hidden_help": "On: include hidden bodies, sketches and occluded edges near the pointer. Off: use the original list of visible geometry under the pointer."
+  },
+  "ar": {
+    "prefs.select_other_hidden": "تحديد العناصر الهندسية المخفية باستخدام «تحديد عنصر آخر»",
+    "prefs.select_other_hidden_help": "عند التفعيل: تضمين الأجسام والمخططات المخفية والحواف المحجوبة قرب المؤشر. عند التعطيل: استخدام القائمة الأصلية للعناصر الهندسية المرئية أسفل المؤشر."
+  },
+  "he": {
+    "prefs.select_other_hidden": "בחירת גאומטריה מוסתרת באמצעות בחירה אחרת",
+    "prefs.select_other_hidden_help": "מופעל: כולל גופים, סקיצות וקצוות מוסתרים בקרבת הסמן. כבוי: שימוש ברשימה המקורית של גאומטריה גלויה מתחת לסמן."
+  },
+  "ja": {
+    "prefs.select_other_hidden": "「他を選択」で非表示のジオメトリを選択",
+    "prefs.select_other_hidden_help": "オン: ポインター付近の非表示のボディやスケッチ、遮られたエッジを含めます。オフ: ポインター直下の表示中のジオメトリだけを元のリストに表示します。"
+  },
+  "vi": {
+    "prefs.select_other_hidden": "Chọn hình học ẩn bằng Chọn đối tượng khác",
+    "prefs.select_other_hidden_help": "Bật: bao gồm các khối, bản phác thảo ẩn và cạnh bị che gần con trỏ. Tắt: dùng danh sách ban đầu chỉ gồm hình học đang hiển thị ngay dưới con trỏ."
+  },
+  "zh": {
+    "prefs.select_other_hidden": "使用“选择其他”选择隐藏几何体",
+    "prefs.select_other_hidden_help": "开启：包括指针附近的隐藏实体、草图和被遮挡的边。关闭：恢复原来的列表，仅包含指针正下方的可见几何体。"
+  },
+  "de": {
+    "prefs.select_other_hidden": "Verborgene Geometrie mit „Andere auswählen“ auswählen",
+    "prefs.select_other_hidden_help": "Ein: Verborgene Körper, Skizzen und verdeckte Kanten nahe dem Zeiger einbeziehen. Aus: Die ursprüngliche Liste sichtbarer Geometrie direkt unter dem Zeiger verwenden."
+  },
+  "ko": {
+    "prefs.select_other_hidden": "다른 항목 선택으로 숨겨진 형상 선택",
+    "prefs.select_other_hidden_help": "켜짐: 포인터 근처의 숨겨진 바디, 스케치 및 가려진 모서리를 포함합니다. 꺼짐: 포인터 바로 아래에 보이는 형상만 포함하는 기존 목록을 사용합니다."
+  }
+}

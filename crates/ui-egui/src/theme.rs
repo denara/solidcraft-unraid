@@ -31,6 +31,9 @@ thread_local! {
     /// The 3D view's own dark or light when Preferences give it one ([`ViewportTheme`], #4146),
     /// per thread like the rest. `None`: the view is as dark as the window.
     static VIEWPORT_DARK: Cell<Option<bool>> = const { Cell::new(None) };
+    /// The 3D view's background colour when Preferences give it one (#7688), per thread like the
+    /// rest. `None`: the theme's gradient.
+    static VIEWPORT_BACKGROUND: Cell<Option<[u8; 3]>> = const { Cell::new(None) };
 }
 
 /// Three structural border levels plus independent content and control outlines.
@@ -360,6 +363,11 @@ pub fn is_dark() -> bool {
 /// Is the 3D view dark? As the window, unless Preferences give the view its own (#4146).
 pub fn viewport_dark() -> bool {
     VIEWPORT_DARK.get().unwrap_or_else(is_dark)
+}
+
+/// The 3D view's own background colour, or `None` for the theme's gradient (#7688).
+pub fn viewport_background() -> Option<[u8; 3]> {
+    VIEWPORT_BACKGROUND.get()
 }
 
 /// The common conversion boundary for compiled icon palette data.
@@ -740,6 +748,10 @@ pub struct Tokens {
     pub body_edge: Color32,
     /// Command manipulators (direction arrows, handles).
     pub manipulator: Color32,
+    /// Allowed assembly motion, separate from the selected face's blue.
+    pub joint_manipulator: Color32,
+    /// Assembly Move axis and centre, distinct from its draggable amber arrows.
+    pub joint_axis: Color32,
     /// New surface in a feature preview.
     pub preview_add: Color32,
     /// The surface of a body a feature preview creates (New Body), apart from a join (#1805).
@@ -875,14 +887,24 @@ impl Tokens {
     /// mode being chosen before it is applied (#7152).
     pub fn get_in(mode: ColorVision) -> Tokens {
         let window = Tokens::themed(is_dark(), mode);
-        if viewport_dark() == is_dark() { window } else { window.with_viewport(Tokens::themed(viewport_dark(), mode)) }
+        let tokens = if viewport_dark() == is_dark() { window } else { window.with_viewport(Tokens::themed(viewport_dark(), mode)) };
+        tokens.with_background(viewport_background())
     }
 
     /// The tokens of the 3D view's side (#4146), for a window colour drawn straight onto the view
     /// with nothing behind it (a status line, a label or a warning beside the geometry), so it
     /// reads on the view's background. As [`Tokens::get`] unless the view has its own side.
     pub fn view() -> Tokens {
-        Tokens::themed(viewport_dark(), vision())
+        Tokens::themed(viewport_dark(), vision()).with_background(viewport_background())
+    }
+
+    /// These tokens with the 3D view's background one flat colour (#7688), or as they are for `None`.
+    pub fn with_background(mut self, colour: Option<[u8; 3]>) -> Tokens {
+        if let Some([r, g, b]) = colour {
+            self.viewport_top = Color32::from_rgb(r, g, b);
+            self.viewport_bottom = self.viewport_top;
+        }
+        self
     }
 
     /// These tokens with the colours drawn in the 3D view taken from `view`: the background and
@@ -915,6 +937,8 @@ impl Tokens {
             body: view.body,
             body_edge: view.body_edge,
             manipulator: view.manipulator,
+            joint_manipulator: view.joint_manipulator,
+            joint_axis: view.joint_axis,
             preview_add: view.preview_add,
             preview_new: view.preview_new,
             preview_sketch: view.preview_sketch,
@@ -1013,6 +1037,11 @@ pub fn set_dark(dark: bool) {
 /// Give the 3D view its own dark or light (#4146), or `None` to draw it as dark as the window.
 pub fn set_viewport_dark(dark: Option<bool>) {
     VIEWPORT_DARK.set(dark);
+}
+
+/// Give the 3D view a background colour of its own (#7688), or `None` for the theme's gradient.
+pub fn set_viewport_background(colour: Option<[u8; 3]>) {
+    VIEWPORT_BACKGROUND.set(colour);
 }
 
 fn visuals(dark: bool) -> egui::Visuals {
@@ -1330,6 +1359,7 @@ mod tests {
                     (t.box_window, t.section_cap, t.preview_add, t.sketch_construction, t.continuity),
                     (v.box_window, v.section_cap, v.preview_add, v.sketch_construction, v.continuity)
                 );
+                assert_eq!((t.joint_manipulator, t.joint_axis), (v.joint_manipulator, v.joint_axis));
                 assert_eq!(t.analysis, v.analysis);
                 // The window's: panels, text, accents, dialogs, and the chips over the view with
                 // their borders and icons.

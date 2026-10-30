@@ -298,9 +298,9 @@ impl Container {
     }
 
     pub fn area(self, id: Id) -> egui::Area {
-        // Persistent workspace cards stay below tool/system windows even when clicked.
-        // Other areas keep egui's normal window layer; popups choose their own order.
-        let order = if self.surface == Surface::Panel { egui::Order::Background } else { egui::Order::Middle };
+        // Workspace cards and viewport status stay below tool/system windows even when
+        // clicked. Other areas keep the normal window layer; popups choose their order.
+        let order = if matches!(self.surface, Surface::Panel | Surface::ViewportStatus) { egui::Order::Background } else { egui::Order::Middle };
         egui::Area::new(id).enabled(self.input_enabled()).order(order)
     }
 

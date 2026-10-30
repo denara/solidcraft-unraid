@@ -506,7 +506,7 @@ mod tests;
 
 /// A snap point near `at` on the model: the nearest vertex, edge midpoint, planar face's centre
 /// or circular edge's centre (the end of a cylindrical face).
-pub(super) fn snap_point(s: &Session, kind: &str, at: Vec3) -> Option<Vec3> {
+pub(crate) fn snap_point(s: &Session, kind: &str, at: Vec3) -> Option<Vec3> {
     let st = s.world_state();
     let near = |pts: Vec<Vec3>| pts.into_iter().min_by(|a, b| a.dist(at).total_cmp(&b.dist(at)));
     match kind {

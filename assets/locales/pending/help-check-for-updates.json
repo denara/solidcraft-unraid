@@ -1,0 +1,122 @@
+{
+  "en": {
+    "update.check_for_updates": "Check for updates",
+    "update.check_unavailable": "Update checks are not available for this installation."
+  },
+  "ar": {
+    "update.check_for_updates": "التحقق من وجود تحديثات",
+    "update.check_unavailable": "التحقق من التحديثات غير متاح لهذا التثبيت."
+  },
+  "bs": {
+    "update.check_for_updates": "Provjeri ažuriranja",
+    "update.check_unavailable": "Provjera ažuriranja nije dostupna za ovu instalaciju."
+  },
+  "cs": {
+    "update.check_for_updates": "Zkontrolovat aktualizace",
+    "update.check_unavailable": "Pro tuto instalaci není kontrola aktualizací dostupná."
+  },
+  "da": {
+    "update.check_for_updates": "Søg efter opdateringer",
+    "update.check_unavailable": "Søgning efter opdateringer er ikke tilgængelig for denne installation."
+  },
+  "de": {
+    "update.check_for_updates": "Nach Updates suchen",
+    "update.check_unavailable": "Für diese Installation ist keine Update-Prüfung verfügbar."
+  },
+  "es": {
+    "update.check_for_updates": "Buscar actualizaciones",
+    "update.check_unavailable": "La búsqueda de actualizaciones no está disponible para esta instalación."
+  },
+  "fr": {
+    "update.check_for_updates": "Rechercher des mises à jour",
+    "update.check_unavailable": "La recherche de mises à jour n’est pas disponible pour cette installation."
+  },
+  "gl": {
+    "update.check_for_updates": "Buscar actualizacións",
+    "update.check_unavailable": "A busca de actualizacións non está dispoñible para esta instalación."
+  },
+  "he": {
+    "update.check_for_updates": "בדיקת עדכונים",
+    "update.check_unavailable": "בדיקת עדכונים אינה זמינה עבור התקנה זו."
+  },
+  "hr": {
+    "update.check_for_updates": "Provjeri ažuriranja",
+    "update.check_unavailable": "Provjera ažuriranja nije dostupna za ovu instalaciju."
+  },
+  "hu": {
+    "update.check_for_updates": "Frissítések keresése",
+    "update.check_unavailable": "Ehhez a telepítéshez nem érhető el a frissítések keresése."
+  },
+  "id": {
+    "update.check_for_updates": "Periksa pembaruan",
+    "update.check_unavailable": "Pemeriksaan pembaruan tidak tersedia untuk instalasi ini."
+  },
+  "it": {
+    "update.check_for_updates": "Verifica aggiornamenti",
+    "update.check_unavailable": "La verifica degli aggiornamenti non è disponibile per questa installazione."
+  },
+  "ja": {
+    "update.check_for_updates": "アップデートを確認",
+    "update.check_unavailable": "このインストールではアップデートを確認できません。"
+  },
+  "ko": {
+    "update.check_for_updates": "업데이트 확인",
+    "update.check_unavailable": "이 설치에서는 업데이트를 확인할 수 없습니다."
+  },
+  "ms": {
+    "update.check_for_updates": "Semak kemas kini",
+    "update.check_unavailable": "Semakan kemas kini tidak tersedia untuk pemasangan ini."
+  },
+  "nb": {
+    "update.check_for_updates": "Se etter oppdateringer",
+    "update.check_unavailable": "Søk etter oppdateringer er ikke tilgjengelig for denne installasjonen."
+  },
+  "nl": {
+    "update.check_for_updates": "Controleren op updates",
+    "update.check_unavailable": "Controleren op updates is niet beschikbaar voor deze installatie."
+  },
+  "pl": {
+    "update.check_for_updates": "Sprawdź aktualizacje",
+    "update.check_unavailable": "Sprawdzanie aktualizacji nie jest dostępne dla tej instalacji."
+  },
+  "pt-BR": {
+    "update.check_for_updates": "Verificar atualizações",
+    "update.check_unavailable": "A verificação de atualizações não está disponível para esta instalação."
+  },
+  "ro": {
+    "update.check_for_updates": "Caută actualizări",
+    "update.check_unavailable": "Căutarea actualizărilor nu este disponibilă pentru această instalare."
+  },
+  "ru": {
+    "update.check_for_updates": "Проверить обновления",
+    "update.check_unavailable": "Проверка обновлений недоступна для этой установки."
+  },
+  "sr": {
+    "update.check_for_updates": "Провери ажурирања",
+    "update.check_unavailable": "Провера ажурирања није доступна за ову инсталацију."
+  },
+  "sv": {
+    "update.check_for_updates": "Sök efter uppdateringar",
+    "update.check_unavailable": "Sökning efter uppdateringar är inte tillgänglig för den här installationen."
+  },
+  "tr": {
+    "update.check_for_updates": "Güncellemeleri denetle",
+    "update.check_unavailable": "Bu kurulum için güncelleme denetimi kullanılamıyor."
+  },
+  "uk": {
+    "update.check_for_updates": "Перевірити оновлення",
+    "update.check_unavailable": "Перевірка оновлень недоступна для цього встановлення."
+  },
+  "vi": {
+    "update.check_for_updates": "Kiểm tra bản cập nhật",
+    "update.check_unavailable": "Không thể kiểm tra bản cập nhật cho bản cài đặt này."
+  },
+  "zh": {
+    "update.check_for_updates": "检查更新",
+    "update.check_unavailable": "此安装版本无法检查更新。"
+  },
+  "zh-TW": {
+    "update.check_for_updates": "檢查更新",
+    "update.check_unavailable": "此安裝版本無法檢查更新。"
+  }
+}

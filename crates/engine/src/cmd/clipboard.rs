@@ -39,7 +39,7 @@ fn copy(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 /// Origin planes become explicit planes so a translation can move them.
-fn explicit_planes(p: &mut PlaneRef) {
+pub(in crate::cmd) fn explicit_planes(p: &mut PlaneRef) {
     match p {
         PlaneRef::Origin { name } => {
             if let Some(plane) = solidcraft_geom::Plane::named(name) {

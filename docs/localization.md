@@ -117,16 +117,21 @@ Chinese font-name list (`PingFang`, `Microsoft YaHei`, `Noto Sans CJK SC`, …) 
 glyph. No fonts are redistributed in native desktop distribution packages; native builds rely
 entirely on existing operating system fonts or craft-fonts.
 
-In the browser, `solidcraft-web` bundles a self-hosted Japanese font (`BIZUDPGothic-Regular.ttf`, licensed
-under SIL OFL 1.1) within the web distribution artifacts only. The font is loaded asynchronously from the same
-origin (`./fonts/BIZUDPGothic-Regular.ttf`) on-demand when the interface language is a CJK one, or, with
-any other interface language, the first time Japanese text (kana, kanji or full-width forms in a design name,
-file name, body name or typed text) is drawn, without contacting any external CDNs or third-party servers.
-A session that never shows such text downloads no font. If font loading fails with a CJK interface, the web
-interface shows English for that session only to prevent missing glyphs (tofu); the saved language
-preference is kept, so the next visit tries again. The bundled font specifically targets Japanese; it also
-renders the kanji Chinese shares with Japanese, while Korean (Hangul) and simplified-only Chinese characters
-are not covered, so a self-hosted SC/Korean font bundle remains follow-up work for full web coverage.
+In the browser, `solidcraft-web` ships self-hosted script fonts (SIL OFL 1.1) in the web distribution
+artifacts only, loaded asynchronously from the same origin without contacting any external CDNs or
+third-party servers:
+
+- Japanese (and Hangul-less Korean UI for now): `./fonts/BIZUDPGothic-Regular.ttf`
+- Simplified Chinese (`zh`): `./fonts/CraftUI-SC.otf` (a locale-glyph subset of Noto Sans SC, renamed
+  under the OFL so it does not use the reserved name Noto)
+- Traditional Chinese (`zh-TW`): `./fonts/CraftUI-TC.otf` (same for Noto Sans TC)
+
+A CJK interface language fetches the matching face on demand. With any other interface language, the
+first time Japanese text (kana, kanji or full-width forms in a design name, file name, body name or
+typed text) is drawn, the Japanese face is fetched (#720). A session that never shows such text
+downloads no script font. If the needed face fails to load, the web interface shows English for that
+session only to prevent missing glyphs (tofu); the saved language preference is kept, so the next
+visit tries again. Korean Hangul coverage on the web remains follow-up work.
 
 ## Right-to-left text
 

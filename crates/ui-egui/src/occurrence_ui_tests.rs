@@ -35,6 +35,29 @@ fn fixture() -> (Harness, u64, u64, u64) {
 }
 
 #[test]
+fn folder_visibility_shortcut_targets_only_the_clicked_placement() {
+    let (mut h, component, first, second) = fixture();
+    let group = h.app.run("browser.group", json!({"component":component,"folder":"bodies","items":["Body1"],"name":"Group"})).unwrap()["group"]
+        .as_u64()
+        .unwrap();
+    h.app.preferences.browser_bodies_folders = crate::prefs::BodiesFolders::Always;
+    h.app.tree.collapsed.insert(super::occurrence_key(&[first]));
+    h.settle();
+    let first_body = h.app.session.occurrence_bodies(&[first], false).unwrap()[0].clone();
+    let second_body = h.app.session.occurrence_bodies(&[second], false).unwrap()[0].clone();
+    for (label, key) in [("Bodies", format!("o:{second}/bodies")), ("Group (1)", format!("o:{second}/g{group}"))] {
+        h.step(&json!({"click":{"handle":format!("row:{label}")}})).unwrap();
+        h.step(&json!({"key":"V"})).unwrap();
+        assert_eq!(h.app.session.visibility.hidden_folders, vec![key]);
+        assert!(h.app.session.body_visible(&first_body));
+        assert!(!h.app.session.body_visible(&second_body));
+        h.step(&json!({"key":"V"})).unwrap();
+        assert!(h.app.session.body_visible(&second_body));
+        h.step(&json!({"click":{"handle":format!("row:{label}")}})).unwrap();
+    }
+}
+
+#[test]
 fn browser_reuses_unchanged_rows_and_refreshes_live_state_and_replaced_documents() {
     let (mut h, _, first, second) = fixture();
     let second_body = h.app.session.occurrence_bodies(&[second], false).unwrap().pop().unwrap();
@@ -126,6 +149,24 @@ fn occurrence_second_row_selects_exact_path_and_menu_actions() {
     click(&mut h, &[second], "activate");
     assert_eq!(h.app.session.active_component, component);
     assert_eq!(h.app.session.active_occurrence_path, Some(vec![second]));
+}
+
+#[test]
+fn turn_up_axis_follows_the_placement_right_clicked() {
+    // Whichever placement comes first, a grounded one can't turn and a free one can.
+    let (mut h, _, first, second) = fixture();
+    let turns = |h: &Harness, occurrence: u64| {
+        let items = context_menu::items(&h.app, &Target::Occurrence { path: vec![occurrence] });
+        let turn = items.into_iter().find(|i| i.id == "ui.turnUpAxis").unwrap();
+        let children: Vec<_> = turn.children.iter().map(|c| (c.enabled, c.params.as_ref().unwrap()["occurrence"].as_u64())).collect();
+        (turn.enabled, children)
+    };
+    for (grounded, free) in [(first, second), (second, first)] {
+        h.app.run("occurrence.ground", json!({"occurrence": grounded, "grounded": true})).unwrap();
+        h.app.run("occurrence.ground", json!({"occurrence": free, "grounded": false})).unwrap();
+        assert_eq!(turns(&h, free), (true, vec![(true, Some(free)); 2]), "free placement {free}");
+        assert_eq!(turns(&h, grounded), (false, vec![(false, Some(grounded)); 2]), "grounded placement {grounded}");
+    }
 }
 
 #[test]
@@ -391,11 +432,10 @@ fn a_folded_body_sits_one_level_under_its_nested_placement() {
     h.app.run("solid.box", json!({"length":10,"width":10,"height":10,"body_name":"Pin"})).unwrap();
     h.app.run("component.activate", json!({"component":0})).unwrap();
     h.app.tree.collapsed.insert(format!("{}/bodies", super::occurrence_key(&[parent, child])));
-    // How many levels the body's row sits under its placement's (each eye sits at the same offset
-    // in its row).
+    // How many levels the body's row sits under its placement's.
     let levels = || -> Option<i32> {
-        let placement = crate::scenario::handle_at(&format!("eye:occurrence:{parent}/{child}"))?;
-        let body = crate::scenario::handle_at("eye:Pin")?;
+        let placement = crate::scenario::handle_at("indent:Child:1")?;
+        let body = crate::scenario::handle_at("indent:Pin")?;
         Some(((body.x - placement.x) / super::INDENT).round() as i32)
     };
     for (mode, want) in [(BodiesFolders::Several, Some(1)), (BodiesFolders::Never, Some(1)), (BodiesFolders::Always, None)] {

@@ -31,8 +31,8 @@
 //!   `ui.rename {text?, commit?}` finishes the rename box
 //! - `ui.window {action: minimize|maximize|restore|toggle|close}`: what the title bar's buttons do
 //! - `ui.confirm {accept?}`: the Delete confirmation (without `accept`: what it lists)
-//! - `ui.shortcut {command, key?, replace?}`: a command's key, or bind one ("" clears)
-//! - `ui.help {item?: about|shortcuts|report}`: the Help menu; returns the version and diagnostics
+//! - `ui.shortcut {command, key?, slot?, replace?}`: a command's keys, or bind one ("" clears)
+//! - `ui.help {item?: about|updates|shortcuts|report}`: the Help menu; returns the version and diagnostics
 //! - `ui.prefs {...}`: the preferences (default_units, nav, zoom_reverse, orbit_around, msaa,
 //!   length_decimals, angle_decimals); returns them all
 //! - `ui.capture {action?: capture|revert|cancel}`: the Capture Position question
@@ -48,7 +48,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use solidcraft_engine::io::vfs;
-use solidcraft_engine::render::StandardView;
+use solidcraft_engine::render::{Camera, StandardView};
+use solidcraft_engine::schema::ParamCheck;
 use solidcraft_engine::{batch_params, timing};
 
 use crate::SolveApp;
@@ -251,6 +252,7 @@ fn execute(app: &mut SolveApp, id: &str, params: Value) -> Result<Value, String>
                 | "browser.expand_all"
                 | "browser.collapse_all"
         )
+        && !id.starts_with("settings.")
         && app.session.active_sketch.is_none()
         && app.session.world_state().bodies.len() == 1
         && app.session.undo.len() <= 2
@@ -412,12 +414,17 @@ pub fn request_scope(app: &SolveApp, params: &Value) -> Result<Option<vfs::PathS
 /// mode, the section the viewport shows: an open Section Analysis dialog's preview, a sketch's
 /// Slice), with the grid and the origin's axes as `guides` says.
 pub(crate) fn view_scene(app: &SolveApp, guides: solidcraft_engine::view::Guides) -> solidcraft_engine::render::Scene {
+    let mut palette = crate::viewport::scene_palette(app.viewport_dark(), app.preferences.color_vision);
+    // The view's own background colour (#7688).
+    if let Some([r, g, b]) = app.preferences.viewport_background {
+        palette.background = (solidcraft_engine::render::Rgb(r, g, b), solidcraft_engine::render::Rgb(r, g, b));
+    }
     let mut scene = solidcraft_engine::view::scene_with_thread_markings(
         &app.session,
         &app.cam,
         crate::viewport::section_plane(app),
         solidcraft_engine::view::world_curve_parts,
-        &crate::viewport::scene_palette(app.viewport_dark(), app.preferences.color_vision),
+        &palette,
         guides,
         app.preferences.cosmetic_threads,
     );
@@ -428,7 +435,7 @@ pub(crate) fn view_scene(app: &SolveApp, guides: solidcraft_engine::view::Guides
 /// The grid and the origin's axes as the window shows them (the Grid and Origin switches).
 pub(crate) fn window_guides(app: &SolveApp) -> solidcraft_engine::view::Guides {
     solidcraft_engine::view::Guides {
-        grid: app.session.active_sketch.is_some() || (app.ui.show_grid && !crate::viewport::active_view(app).hide_grid),
+        grid: (app.session.active_sketch.is_some() || app.ui.show_grid) && !crate::viewport::active_view(app).hide_grid,
         axes: app.origin_visible(),
     }
 }
@@ -446,17 +453,84 @@ pub fn view_png(app: &SolveApp, w: u32, h: u32) -> Result<Vec<u8>, String> {
 }
 
 pub fn handle(app: &mut SolveApp, ctx: &egui::Context, req: &ControlRequest) -> Outcome {
-    let scope = match request_scope(app, &req.params) {
-        Ok(Some(scope)) => scope,
-        Ok(None) => return dispatch(app, ctx, &req.method, &req.params),
+    let level = match request_param_check(&req.method, &req.params) {
+        Ok(level) => level,
         Err(e) => return err(e),
     };
+    let scope = match request_scope(app, &req.params) {
+        Ok(scope) => scope,
+        Err(e) => return err(e),
+    };
+    if scope.is_none() && level.is_none() {
+        return dispatch(app, ctx, &req.method, &req.params);
+    }
     let mut p = req.params.clone();
     if let Some(o) = p.as_object_mut() {
         o.remove("allow_paths");
         o.remove("design_folders");
+        o.remove("param_check");
     }
-    vfs::scoped(Some(scope), || dispatch(app, ctx, &req.method, &p))
+    let run = |app: &mut SolveApp| match level {
+        Some(level) => dispatch_checked(app, ctx, &req.method, &p, level),
+        None => dispatch(app, ctx, &req.method, &p),
+    };
+    match scope {
+        Some(scope) => vfs::scoped(Some(scope), || run(app)),
+        None => run(app),
+    }
+}
+
+/// The request's `param_check` (#9184): how the commands of an `engine.execute`, `engine.batch`
+/// or `engine.script` are checked against their contracts, whatever the app's own session level;
+/// `None` when it names none (other methods ignore the field).
+pub(crate) fn request_param_check(method: &str, params: &Value) -> Result<Option<ParamCheck>, String> {
+    if !matches!(method, "engine.execute" | "command" | "engine.batch" | "engine.script") {
+        return Ok(None);
+    }
+    match params.get("param_check") {
+        None => Ok(None),
+        Some(v) => v.as_str().and_then(ParamCheck::parse).map(Some).ok_or_else(|| "`param_check` must be off, warn or strict".to_string()),
+    }
+}
+
+/// `dispatch` of an `engine.execute`, `engine.batch` or `engine.script` with its commands checked
+/// at `level`, echoed in the reply as `param_check`, so a client can tell an app that checked
+/// from an older one that ignored the field. The session goes back to its own level afterwards.
+fn dispatch_checked(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value, level: ParamCheck) -> Outcome {
+    let mut out = if switches_design(p).is_some() {
+        switch_checked(app, ctx, method, p, level)
+    } else {
+        let own = app.session.param_check;
+        app.session.param_check = level;
+        let out = dispatch(app, ctx, method, p);
+        app.session.param_check = own;
+        out
+    };
+    if let Outcome::Done(Value::Object(o)) = &mut out {
+        o.insert("param_check".into(), json!(level.name()));
+    }
+    out
+}
+
+/// A command that switches to another design, checked at `level` before it runs: it runs at the
+/// app's own level, since the session it leaves and the one it brings in each keep theirs.
+fn switch_checked(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value, level: ParamCheck) -> Outcome {
+    let id = command(p).unwrap_or_default();
+    let issues: Vec<String> = solidcraft_engine::schema::issues(id, p.get("params").unwrap_or(&Value::Null)).into_iter().map(|i| i.message).collect();
+    if level == ParamCheck::Strict
+        && let Some(first) = issues.first()
+    {
+        return err(solidcraft_engine::params::bad(id, first.as_str()));
+    }
+    let mut out = dispatch(app, ctx, method, p);
+    if level == ParamCheck::Warn
+        && !issues.is_empty()
+        && let Outcome::Done(v) = &mut out
+        && let Some(o) = v.get_mut("result").and_then(Value::as_object_mut)
+    {
+        o.insert("param_warnings".into(), json!(issues));
+    }
+    out
 }
 
 fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) -> Outcome {
@@ -579,8 +653,17 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
                 Some(false) => app.home.open = false,
                 None => {}
             }
-            if let Some(i) = p.get("sample").and_then(Value::as_u64) {
-                crate::home::open_sample(app, i as usize);
+            if let Some(sample) = p.get("sample") {
+                // The index is checked here: `open_sample` drops an index that names no sample
+                // and says nothing, so the request would look like it had worked (#9087).
+                let count = solidcraft_engine::sample::samples().len();
+                let Some(index) = sample.as_i64() else {
+                    return err(format!("`sample` must be an index from 0 to {}", count - 1));
+                };
+                if !(0..count as i64).contains(&index) {
+                    return err(format!("`sample` must be an index from 0 to {}, not {index}", count - 1));
+                }
+                crate::home::open_sample(app, index as usize);
             }
             ok(json!({"open": app.home.open, "recent": app.home.recent}))
         }
@@ -918,17 +1001,40 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
         }
         "ui.scroll" => {
             let (Some(x), Some(y)) = (f("x"), f("y")) else { return err("missing x/y") };
-            app.synthetic.push(egui::Event::PointerMoved(egui::pos2(x as f32, y as f32)));
             // Mouse-wheel semantics (lines): zooms regardless of the trackpad pan
             // preference, so scripts and agents keep working. Trackpads report points.
+            // `ctrl: true` replays a Ctrl+wheel pinch in points (#8480). An explicit `unit`
+            // overrides that choice; without ctrl the default remains a line wheel.
             let speed = ctx.options(|o| o.input_options.line_scroll_speed).max(1.0);
-            let lines = f("delta").unwrap_or(-100.0) / f64::from(speed);
-            app.synthetic.push(egui::Event::MouseWheel {
-                unit: egui::MouseWheelUnit::Line,
-                delta: egui::vec2(0.0, lines as f32),
-                modifiers: Default::default(),
-                phase: egui::TouchPhase::Move,
-            });
+            let points = f("delta").unwrap_or(-100.0);
+            let ctrl = b("ctrl");
+            let unit = match p.get("unit") {
+                Some(Value::String(unit)) if unit == "point" => egui::MouseWheelUnit::Point,
+                Some(Value::String(unit)) if unit == "line" => egui::MouseWheelUnit::Line,
+                Some(_) => return err("`unit` must be point or line"),
+                None if ctrl => egui::MouseWheelUnit::Point,
+                None => egui::MouseWheelUnit::Line,
+            };
+            let delta = match unit {
+                // A point wheel reaches the app as points; a line wheel is scaled up by the
+                // line scroll speed, so divide it out and both land on the same points.
+                egui::MouseWheelUnit::Line => points / f64::from(speed),
+                _ => points,
+            };
+            let (x, y, delta) = (x as f32, y as f32, delta as f32);
+            if !x.is_finite() || !y.is_finite() || !delta.is_finite() {
+                return err("x, y and delta must fit finite screen coordinates");
+            }
+            let modifiers = if ctrl { egui::Modifiers::CTRL } else { Default::default() };
+            let explicit = p.get("ctrl").is_some();
+            app.synthetic.push(egui::Event::PointerMoved(egui::pos2(x, y)));
+            if explicit {
+                app.synthetic.push(egui::Event::ModifiersChanged(modifiers));
+            }
+            app.synthetic.push(egui::Event::MouseWheel { unit, delta: egui::vec2(0.0, delta), modifiers, phase: egui::TouchPhase::Move });
+            if explicit {
+                app.synthetic.push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+            }
             ok(Value::Null)
         }
         "ui.key" => {
@@ -999,12 +1105,14 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
         },
         "ui.shortcut" => {
             let Some(id) = s("command") else { return err("missing `command`") };
+            let slot = p.get("slot").and_then(Value::as_u64).map(|n| usize::try_from(n).unwrap_or(usize::MAX));
+            let report = |app: &SolveApp| ok(json!({"command": id, "key": crate::keymap::effective(app, id), "keys": crate::keymap::keys(app, id)}));
             match s("key") {
-                Some(k) => match crate::keymap::bind(app, id, k, b("replace")) {
-                    Ok(()) => ok(json!({"command": id, "key": crate::keymap::effective(app, id)})),
+                Some(k) => match crate::keymap::bind_at(app, id, slot, k, b("replace")) {
+                    Ok(()) => report(app),
                     Err(e) => err(e),
                 },
-                None => ok(json!({"command": id, "key": crate::keymap::effective(app, id)})),
+                None => report(app),
             }
         }
         "ui.browser" => ok(json!({
@@ -1023,7 +1131,7 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
         "ui.prefs" => wrap(crate::prefs::control(app, p)),
         "ui.agent_chat" => wrap(crate::agent_chat::control(app, ctx, p)),
         "ui.help" => match s("item") {
-            Some(i @ ("about" | "shortcuts" | "report" | "crashes")) => {
+            Some(i @ ("about" | "updates" | "shortcuts" | "report" | "crashes")) => {
                 crate::help::run(app, ctx, i);
                 ok(
                     json!({"diagnostics": crate::help::diagnostics(app), "version": crate::help::VERSION, "commit": crate::help::COMMIT, "built": crate::help::BUILD_DATE}),
@@ -1105,7 +1213,7 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
 
 /// `ui.camera`: the viewport's orbit camera (`target`, `yaw`, `pitch`, `roll` in radians,
 /// `distance` in mm, `fov`, `up`), or a new one. A field left out keeps its value, so a reply
-/// passed back sets the same view again. `fit`: frame the listed occurrences (ids or names;
+/// passed back sets the same view again. `fov` is the angle the window draws with (see [`drawn`]). `fit`: frame the listed occurrences (ids or names;
 /// `root`: the bodies outside every component), or everything (`true`), keeping the direction;
 /// `false` frames nothing.
 /// Nothing changes when a field is refused.
@@ -1119,10 +1227,10 @@ fn camera(app: &mut SolveApp, p: &Value) -> Result<Value, String> {
     if let Some(k) = o.keys().find(|k| !FIELDS.contains(&k.as_str())) {
         return Err(format!("unknown camera field `{k}` (it takes {})", FIELDS.join(", ")));
     }
-    let mut cam = app.cam;
+    let mut cam = drawn(app);
     let sets = o.keys().any(|k| k != "fit");
     if sets {
-        let mut v = serde_json::to_value(app.cam).map_err(|e| e.to_string())?;
+        let mut v = serde_json::to_value(cam).map_err(|e| e.to_string())?;
         for (k, x) in o.iter().filter(|(k, _)| *k != "fit") {
             v[k] = x.clone();
         }
@@ -1134,10 +1242,11 @@ fn camera(app: &mut SolveApp, p: &Value) -> Result<Value, String> {
         // Straight up or down keeps a heading, as the standard views do.
         let lim = std::f64::consts::FRAC_PI_2 - 1e-6;
         cam.pitch = cam.pitch.clamp(-lim, lim);
-        // Perspective and the up axis are settings the camera follows, not its own.
-        if cam.fov != app.cam.fov {
-            return Err("`fov` follows the perspective setting (ui.set {perspective})".into());
+        // Perspective, its angle and the up axis are settings the camera follows, not its own.
+        if cam.fov != drawn(app).fov {
+            return Err("`fov` follows Perspective view (ui.set {perspective}) and its angle (ui.prefs {perspective_fov})".into());
         }
+        cam.fov = app.cam.fov;
         if cam.up != app.cam.up {
             return Err("`up` follows the up axis preference (ui.prefs {up_axis})".into());
         }
@@ -1160,7 +1269,7 @@ fn camera(app: &mut SolveApp, p: &Value) -> Result<Value, String> {
     };
     // A read leaves a view change that is animating alone.
     if !sets && fit.is_none() {
-        return serde_json::to_value(app.cam).map_err(|e| e.to_string());
+        return serde_json::to_value(drawn(app)).map_err(|e| e.to_string());
     }
     app.cancel_view_animation();
     app.viewport.orbit_free = None;
@@ -1170,7 +1279,17 @@ fn camera(app: &mut SolveApp, p: &Value) -> Result<Value, String> {
         Some(Some(b)) => app.fit_bounds(b),
         None => {}
     }
-    serde_json::to_value(app.cam).map_err(|e| e.to_string())
+    serde_json::to_value(drawn(app)).map_err(|e| e.to_string())
+}
+
+/// The camera as the window draws it: with the view's angle ([`SolveApp::view_fov`]), or in Render
+/// with the Render camera's own.
+fn drawn(app: &SolveApp) -> Camera {
+    let mut cam = app.cam;
+    if !crate::render_workspace::active(app) {
+        cam.fov = app.view_fov();
+    }
+    cam
 }
 
 /// An occurrence by id or name (or a component's name: its first occurrence); 0 is the root.
@@ -1271,6 +1390,79 @@ mod tests {
         assert!(h.ctx.input(|i| i.modifiers.is_none()));
         assert!(h.app.session.selection.is_empty());
         assert!(h.app.viewport.boxsel.is_none());
+    }
+
+    /// #8480: `ui.scroll` with `ctrl: true` replays a Ctrl+wheel pinch in points. Without
+    /// `ctrl` the wheel stays a line wheel on the mouse path.
+    #[test]
+    fn scroll_sends_a_native_pinch_with_ctrl() {
+        let mut app = SolveApp::new(Session::default(), Services::default());
+        let ctx = crate::fonts::test_context();
+        let (req, _) = ControlRequest::new("ui.scroll", json!({"x":200,"y":300,"delta":40,"ctrl":true}));
+        assert!(matches!(handle(&mut app, &ctx, &req), Outcome::Done(_)));
+        // The pointer event is delivered a frame before the wheel (one pointer event per frame).
+        let mut events = Vec::new();
+        for _ in 0..3 {
+            let mut raw = egui::RawInput::default();
+            app.raw_input_hook(&mut raw);
+            events.extend(raw.events);
+        }
+        let wheels: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                egui::Event::MouseWheel { unit, delta, modifiers, .. } => Some((*unit, *delta, *modifiers)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(wheels.len(), 1, "one wheel event: {wheels:?}");
+        let (unit, delta, modifiers) = wheels[0];
+        assert_eq!(unit, egui::MouseWheelUnit::Point, "the pinch replay uses points");
+        assert!((delta.y - 40.0).abs() < 1e-6, "points pass through: {delta:?}");
+        assert!(modifiers.matches_any(egui::Modifiers::COMMAND), "Ctrl is held: {modifiers:?}");
+        let changes: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                egui::Event::ModifiersChanged(m) => Some(*m),
+                _ => None,
+            })
+            .collect();
+        assert!(changes.iter().any(|m| m.matches_any(egui::Modifiers::COMMAND)), "Ctrl is set for the wheel: {changes:?}");
+        assert_eq!(changes.last().copied(), Some(egui::Modifiers::NONE), "Ctrl is released after it: {changes:?}");
+        app.synthetic.clear();
+
+        let (req, _) = ControlRequest::new("ui.scroll", json!({"x":200,"y":300,"delta":40}));
+        assert!(matches!(handle(&mut app, &ctx, &req), Outcome::Done(_)));
+        let mut events = Vec::new();
+        for _ in 0..2 {
+            let mut raw = egui::RawInput::default();
+            app.raw_input_hook(&mut raw);
+            events.extend(raw.events);
+        }
+        let wheel = events.iter().find_map(|e| match e {
+            egui::Event::MouseWheel { unit, delta, modifiers, .. } => Some((*unit, *delta, *modifiers)),
+            _ => None,
+        });
+        let (unit, delta, modifiers) = wheel.expect("a wheel event");
+        assert_eq!(unit, egui::MouseWheelUnit::Line, "without ctrl the wheel stays a mouse wheel");
+        assert!((delta.y * ctx.options(|o| o.input_options.line_scroll_speed) - 40.0).abs() < 1e-3, "lines land on the same points: {delta:?}");
+        assert!(!modifiers.matches_any(egui::Modifiers::COMMAND), "no modifier without ctrl");
+        assert!(app.synthetic.is_empty());
+    }
+
+    #[test]
+    fn scroll_rejects_invalid_input_without_queuing_events() {
+        let mut app = SolveApp::new(Session::default(), Services::default());
+        let ctx = crate::fonts::test_context();
+        for invalid in
+            [json!({"unit":"invalid"}), json!({"unit":42}), json!({"unit":null}), json!({"x":1e300}), json!({"y":-1e300}), json!({"delta":1e300})]
+        {
+            let mut params = json!({"x":200,"y":300,"delta":40,"ctrl":true});
+            params.as_object_mut().unwrap().extend(invalid.as_object().unwrap().clone());
+            let (req, _) = ControlRequest::new("ui.scroll", params.clone());
+            let Outcome::Done(reply) = handle(&mut app, &ctx, &req) else { panic!("not a scroll reply") };
+            assert_eq!(reply["ok"], false, "{params}: {reply}");
+            assert!(app.synthetic.is_empty(), "a rejected scroll must not queue input: {params}");
+        }
     }
 
     #[test]
@@ -1792,6 +1984,60 @@ mod tests {
         assert!(!v["result"]["failed"]["error"].as_str().is_some_and(|e| e.starts_with("unknown command")), "{v}");
     }
 
+    /// A request's own `param_check` (#9184): `engine.execute`, `engine.batch` and `engine.script`
+    /// run at it and say so in the reply, whatever the app's session level, which is its own again
+    /// afterwards. A command that switches designs keeps the app's level.
+    #[test]
+    fn a_request_carries_its_own_param_check_level() {
+        use solidcraft_engine::schema::ParamCheck;
+        let mut h = crate::scenario::Harness::new();
+        let before = inspect(&mut h);
+        let warning = "unknown key `operaton`; did you mean `operation`?";
+        let misspelt = |level: &str| json!({"command": "solid.box", "params": {"length": 10, "width": 10, "height": 10, "operaton": "cut"}, "param_check": level});
+
+        let v = h.call("engine.execute", misspelt("strict"));
+        assert_eq!((&v["ok"], &v["param_check"]), (&json!(false), &json!("strict")), "{v}");
+        assert!(v["error"].as_str().is_some_and(|e| e.contains(warning)), "{v}");
+        assert_eq!(inspect(&mut h)["bodies"], before["bodies"], "refused unrun");
+        assert_eq!(h.app.session.param_check, ParamCheck::Off, "the app's own level again");
+
+        let v = h.call("engine.execute", misspelt("warn"));
+        assert_eq!((&v["ok"], &v["param_check"], &v["result"]["param_warnings"]), (&json!(true), &json!("warn"), &json!([warning])), "{v}");
+        assert_eq!(h.app.session.param_check, ParamCheck::Off);
+
+        let steps = json!([
+            {"command": "solid.sphere", "params": {"radius": 3, "center": [50, 0, 0]}},
+            {"command": "solid.box", "params": {"lenght": 10, "width": 10, "height": 10}},
+        ]);
+        let shown = inspect(&mut h)["bodies"].clone();
+        let v = h.call("engine.batch", json!({"commands": steps, "param_check": "strict"}));
+        assert_eq!((&v["result"]["completed"], &v["result"]["failed"]["index"], &v["param_check"]), (&json!(0), &json!(1), &json!("strict")), "{v}");
+        assert_eq!(inspect(&mut h)["bodies"], shown, "nothing ran");
+        let step = json!({"command": "solid.box", "params": {"length": 10, "width": 10, "height": 10, "operaton": "cut"}});
+        let v = h.call("engine.script", json!({"commands": [step], "param_check": "warn"}));
+        assert_eq!((&v["param_check"], &v["result"][0]["param_warnings"]), (&json!("warn"), &json!([warning])), "{v}");
+
+        // Asked nothing, told nothing; a word that is no level is refused.
+        let v = h.call("engine.execute", json!({"command": "inspect.measure", "params": {}}));
+        assert_eq!((&v["ok"], v.get("param_check")), (&json!(true), None), "{v}");
+        let v = h.call("engine.execute", json!({"command": "inspect.measure", "params": {}, "param_check": "loud"}));
+        assert!(v["ok"] == false && v["error"].as_str().is_some_and(|e| e.contains("`param_check` must be off, warn or strict")), "{v}");
+        // The level is this request's, not another design's.
+        let v = h.call("engine.execute", json!({"command": "view.next_tab", "params": {}, "param_check": "strict"}));
+        assert_eq!((&v["ok"], &v["param_check"]), (&json!(true), &json!("strict")), "{v}");
+        assert_eq!(h.app.session.param_check, ParamCheck::Off);
+        // Its own parameters are still checked at the request's level, before it runs.
+        let v = h.call("engine.execute", json!({"command": "view.next_tab", "params": {"nonsense": 1}, "param_check": "strict"}));
+        assert!(v["ok"] == false && v["error"].as_str().is_some_and(|e| e.contains("nonsense")), "{v}");
+        assert_eq!(v["param_check"], "strict", "{v}");
+        let v = h.call("engine.execute", json!({"command": "view.next_tab", "params": {"nonsense": 1}, "param_check": "warn"}));
+        assert!(v["result"]["param_warnings"].as_array().is_some_and(|w| !w.is_empty()), "{v}");
+        assert_eq!(h.app.session.param_check, ParamCheck::Off);
+        // Other methods ignore the field, whatever it holds.
+        let v = h.call("ui.inspect", json!({"param_check": "loud"}));
+        assert_eq!((&v["ok"], v.get("param_check")), (&json!(true), None), "{v}");
+    }
+
     #[test]
     fn engine_batch_is_refused_when_a_step_loads_a_file() {
         let mut h = crate::scenario::Harness::new();
@@ -2100,6 +2346,25 @@ mod tests {
         assert!(r["ok"] == false && empty.app.cam == before, "{r}");
     }
 
+    /// With Perspective view on, `ui.camera` reports the angle the window draws with (#5364) and
+    /// its reply replays; another angle is refused, naming the preference. A sketch draws parallel.
+    #[test]
+    fn ui_camera_reports_the_drawn_angle_and_its_reply_replays() {
+        let mut h = crate::scenario::Harness::new();
+        h.call("ui.set", json!({"perspective": true}));
+        h.call("ui.prefs", json!({"perspective_fov": 1.0}));
+        let read = h.call("ui.camera", Value::Null);
+        assert_eq!(read["result"]["fov"], json!(1.0), "{read}");
+        let stored = h.app.cam.fov;
+        let again = h.call("ui.camera", read["result"].clone());
+        assert_eq!(again["result"], read["result"], "the reply replays");
+        assert_eq!(h.app.cam.fov, stored, "the camera's own angle is left as it was");
+        let refused = h.call("ui.camera", json!({"fov": 0.6}));
+        assert!(refused["ok"] == false && refused["error"].as_str().unwrap().contains("ui.prefs {perspective_fov}"), "{refused}");
+        h.app.run("sketch.create", json!({"plane": "XY"})).unwrap();
+        assert_eq!(h.call("ui.camera", Value::Null)["result"]["fov"], json!(0.0), "a sketch draws parallel");
+    }
+
     /// `ui.start` params set what a dialog opens on: Drive Joints on a joint (by name or id) at
     /// the given values, driving nothing yet. A param it doesn't take is refused and closes it.
     #[test]
@@ -2141,5 +2406,24 @@ mod tests {
             assert!(r["ok"] == false && r["error"].as_str().unwrap().contains("takes no ui.start params"), "{r}");
             assert!(h.app.dialog.is_none() && h.app.tool.is_none() && h.app.session.analysis.is_none(), "{command} started nothing");
         }
+    }
+
+    /// #9087: a sample index that names no sample is refused, so an agent can tell a typo from
+    /// a sample that opened. The index is checked before it reaches `open_sample`, which would
+    /// otherwise drop it and reply `ok`.
+    #[test]
+    fn ui_home_refuses_a_sample_index_that_names_no_sample() {
+        let mut h = crate::scenario::Harness::new();
+        let count = solidcraft_engine::sample::samples().len();
+        for bad in [json!({"sample": count}), json!({"sample": 99}), json!({"sample": -1})] {
+            let r = h.call("ui.home", bad.clone());
+            assert_eq!(r["ok"], false, "{bad}: {r}");
+            let error = r["error"].as_str().unwrap_or_default();
+            assert!(error.contains(&format!("0 to {}", count - 1)), "the error names the valid range: {bad}: {r}");
+        }
+        // A sample that exists still opens.
+        let r = h.call("ui.home", json!({"sample": 0}));
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(r["result"]["open"], true, "the sample was asked for: {r}");
     }
 }

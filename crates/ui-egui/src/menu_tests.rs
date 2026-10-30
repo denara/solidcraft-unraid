@@ -72,10 +72,10 @@ fn linked_component_opens_its_part_in_a_tab_and_reports_a_missing_source() {
     assert!(!context_menu::items(&h.app, &Target::Component { id: 0 }).iter().any(|item| item.label == "Open Linked Design"));
 
     act(&mut h.app, &linked, "Open Linked Design");
-    for _ in 0..600 {
-        if h.app.session.path.as_deref() == part.to_str() {
-            break;
-        }
+    // The part opens in the background. A count of frames is no bound for that: frames are quick
+    // while a loaded machine is slow to read the file. Wait as `Harness::settle` waits for a load.
+    let began = std::time::Instant::now();
+    while h.app.session.path.as_deref() != part.to_str() && began.elapsed() < std::time::Duration::from_secs(120) {
         h.frame();
     }
     assert_eq!(h.app.session.path.as_deref(), part.to_str());
@@ -952,6 +952,9 @@ fn v_with_a_menu_open_shows_or_hides_what_the_menu_is_for() {
     open(&mut h, Target::OriginPlane { name: "XY".into() });
     press_v(&mut h);
     assert!(h.app.session.visibility.hidden_origin.iter().any(|o| o == "XY"), "V on an origin plane's menu");
+    open(&mut h, Target::OriginAxis { name: "Z".into() });
+    press_v(&mut h);
+    assert!(h.app.session.visibility.hidden_origin.iter().any(|o| o == "Z"), "V on an origin axis's menu (#8382)");
     assert!(!h.app.session.visibility.hidden_bodies.contains(&b));
     // With no menu open, V still flips the selection.
     press_v(&mut h);
@@ -1235,6 +1238,27 @@ fn right_click_on_a_plane_offers_a_sketch_on_it() {
     assert_eq!(sketch, Some(25.0), "the sketch is on the construction plane");
 }
 
+/// A right-click on an origin axis row opens its own menu, with the planes' Show/Hide (#8382).
+#[test]
+fn right_click_on_an_origin_axis_offers_show_hide() {
+    let mut h = crate::scenario::Harness::new();
+    h.app.home.open = false;
+    crate::browser::toggle(&mut h.app, "origin", false);
+    h.frames(3);
+    let at = crate::scenario::handle_at("row:Y").expect("the Origin folder lists the Y axis");
+    h.call("ui.click", json!({"x": at.x, "y": at.y, "button": "right"}));
+    h.frames(2);
+    let menu = h.call("ui.menu", json!({}))["result"].clone();
+    assert_eq!(menu["target"], json!({"type": "origin_axis", "name": "Y"}), "{menu}");
+    let t = Target::OriginAxis { name: "Y".into() };
+    let labels: Vec<String> = context_menu::items(&h.app, &t).iter().map(|i| i.label.clone()).collect();
+    assert_eq!(labels, ["Show/Hide"], "an axis offers no Create Sketch");
+    act(&mut h.app, &t, "Show/Hide");
+    assert!(h.app.session.visibility.hidden_origin.contains(&"Y".to_string()), "hidden through the menu");
+    act(&mut h.app, &t, "Show/Hide");
+    assert!(!h.app.session.visibility.hidden_origin.contains(&"Y".to_string()), "shown again");
+}
+
 /// A right-click on empty space leads with Create Sketch too (#3032), in the same place as on a
 /// plane: the toolbar's, which asks for the plane or face. Either way the menu offers it once.
 #[test]
@@ -1436,11 +1460,14 @@ fn every_context_target_has_identified_icon_rows_including_submenus() {
         Target::Plane { id: plane },
         Target::Feature { id: feature },
         Target::OriginPlane { name: "XY".into() },
+        Target::OriginAxis { name: "Z".into() },
         Target::Component { id: part },
         Target::Occurrence { path: vec![occurrence] },
         Target::Group { id: group_id, scope: "c0".into() },
         Target::Origin,
         Target::Units,
+        Target::VisualStyle,
+        Target::ViewTool,
         Target::ToolbarCommand { id: "solid.extrude".into() },
         Target::Toolbar,
         Target::HistoryControls,
@@ -1784,4 +1811,85 @@ mod browser_rows {
         h.frames(2);
         assert!(h.app.viewport.context_menu.is_none(), "a click outside the menu closes it");
     }
+}
+
+/// #8570: Insert Design lists the designs open in other tabs. One click inserts a saved one; one
+/// with unsaved changes inserts its saved file and says so; one never saved is greyed out, as there
+/// is no file to link. Browse… opens the file picker. Alone, or with the preference off, the
+/// button goes straight to the picker, as before.
+#[test]
+fn insert_design_offers_the_other_open_designs_then_browse() {
+    let mut h = crate::scenario::Harness::new();
+    let open = |dir: &std::path::Path, file: &str, size: f64| {
+        let path = dir.join(file);
+        let mut s = Session::default();
+        s.execute("solid.box", &json!({"length": size, "width": size, "height": size})).unwrap();
+        s.execute("file.save", &json!({"path": path})).unwrap();
+        let mut opened = Session::default();
+        opened.execute("doc.open", &json!({"path": path})).unwrap();
+        opened
+    };
+    let linked = |app: &SolveApp, file: &str| app.session.doc.links.values().filter(|l| l.path.ends_with(file)).count();
+    let menu_open = |app: &SolveApp| app.viewport.context_menu.is_some() && app.menu.target == Target::InsertDesign;
+
+    // Alone: the picker, as before.
+    h.step(&json!({"choose_file": "none.solidcraft"})).unwrap();
+    h.app.start("component.insert_design");
+    assert!(!menu_open(&h.app));
+    h.frames(3);
+    context_menu::close(&mut h.app);
+
+    let dir = h.dir.clone();
+    crate::documents::open_tab(&mut h.app, open(&dir, "bracket.solidcraft", 10.0)).unwrap();
+    crate::documents::open_tab(&mut h.app, open(&dir, "plate.solidcraft", 20.0)).unwrap();
+    h.app.run("solid.box", json!({"length": 5, "width": 5, "height": 5, "corner": [40, 0, 0]})).unwrap();
+    crate::documents::open_tab(&mut h.app, Session::default()).unwrap();
+    h.app.run("solid.box", json!({"length": 5, "width": 5, "height": 5})).unwrap();
+    crate::documents::open_tab(&mut h.app, Session::default()).unwrap();
+    crate::documents::switch(&mut h.app, 0);
+    h.app.run("solid.box", json!({"length": 1, "width": 1, "height": 1, "body_name": "Base"})).unwrap();
+
+    h.app.start("component.insert_design");
+    assert!(menu_open(&h.app));
+    let items = context_menu::items(&h.app, &Target::InsertDesign);
+    let rows: Vec<(&str, &str, bool)> = items.iter().map(|i| (i.label.as_str(), i.shortcut.as_str(), i.enabled)).collect();
+    let names: Vec<String> = h.app.docs.background().map(|s| s.doc.name.clone()).collect();
+    assert_eq!(
+        rows,
+        [
+            ("Open designs", "", false),
+            (names[0].as_str(), "bracket.solidcraft", true),
+            (names[1].as_str(), "Unsaved changes", true),
+            (names[2].as_str(), "Not saved yet", false),
+            ("", "", false),
+            ("Browse…", "", true),
+        ],
+        "a saved design, one with unsaved changes, one never saved; not the blank new tab"
+    );
+
+    act(&mut h.app, &Target::InsertDesign, &names[0]);
+    assert_eq!(linked(&h.app, "bracket.solidcraft"), 1);
+    assert!(h.app.status.as_ref().is_none_or(|(s, _, _)| !s.contains("unsaved")), "{:?}", h.app.status);
+    act(&mut h.app, &Target::InsertDesign, &names[1]);
+    assert_eq!(linked(&h.app, "plate.solidcraft"), 1);
+    assert!(
+        h.app.status.as_ref().is_some_and(|(s, _, error)| !*error && s.contains("unsaved changes") && s.contains("Update Links")),
+        "{:?}",
+        h.app.status
+    );
+
+    // Browse…: the picker, for any file on disk.
+    h.step(&json!({"choose_file": "bracket.solidcraft"})).unwrap();
+    act(&mut h.app, &Target::InsertDesign, "Browse…");
+    h.frames(3);
+    assert_eq!(linked(&h.app, "bracket.solidcraft"), 2);
+
+    // The preference off: straight to the picker.
+    h.app.preferences.insert_lists_open_designs = false;
+    context_menu::close(&mut h.app);
+    h.step(&json!({"choose_file": "plate.solidcraft"})).unwrap();
+    h.app.start("component.insert_design");
+    assert!(!menu_open(&h.app));
+    h.frames(3);
+    assert_eq!(linked(&h.app, "plate.solidcraft"), 2);
 }

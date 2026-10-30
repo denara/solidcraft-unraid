@@ -161,6 +161,12 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("ceil", "ceil(x)"),
     ("round", "round(x)"),
     ("exp", "exp(x)"),
+    ("sinh", "sinh(x)"),
+    ("cosh", "cosh(x)"),
+    ("tanh", "tanh(x)"),
+    ("asinh", "asinh(x)"),
+    ("acosh", "acosh(x), x ≥ 1"),
+    ("atanh", "atanh(x), −1 < x < 1"),
     ("ln", "ln(x)"),
     ("log", "log(x) (base 10)"),
     ("log10", "log10(x)"),
@@ -589,9 +595,11 @@ pub fn is_literal(s: &str) -> bool {
     }
 }
 
-/// Is the expression a bare number without a unit, like `20` or `-1.5`?
+/// Is the expression a bare number without a unit, like `20` or `-1.5`? A leading `=` only marks
+/// a formula (#4681), so `=20` is the same bare number.
 pub fn is_bare_number(s: &str) -> bool {
-    is_literal(s) && s.trim().trim_start_matches(['-', '+']).trim().parse::<f64>().is_ok()
+    let number = s.trim().strip_prefix('=').unwrap_or(s);
+    is_literal(s) && number.trim().trim_start_matches(['-', '+']).trim().parse::<f64>().is_ok()
 }
 
 /// Is `s` shaped like a parameter name: a letter or `_`, then letters, digits and `_`? The shape
@@ -943,6 +951,24 @@ fn call(f: &str, args: &[Value], d: Defaults) -> Result<Value, DocError> {
             unit_fn(r * if scale != 0.0 { scale } else { 1.0 }, a)
         }
         "exp" => Value::num(num(one()?)?.exp()),
+        "sinh" => Value::num(num(one()?)?.sinh()),
+        "cosh" => Value::num(num(one()?)?.cosh()),
+        "tanh" => Value::num(num(one()?)?.tanh()),
+        "asinh" => Value::num(num(one()?)?.asinh()),
+        "acosh" => {
+            let x = num(one()?)?;
+            if !(x >= 1.0) {
+                return Err(DocError::Expr("`acosh` needs a number of at least 1".into()));
+            }
+            Value::num(x.acosh())
+        }
+        "atanh" => {
+            let x = num(one()?)?;
+            if !(x > -1.0 && x < 1.0) {
+                return Err(DocError::Expr("`atanh` needs a number between -1 and 1, both excluded".into()));
+            }
+            Value::num(x.atanh())
+        }
         "ln" | "log" | "log10" => {
             let x = num(one()?)?;
             if x <= 0.0 {
@@ -1328,6 +1354,15 @@ mod tests {
         assert!((ev("atan2(1; 1)", Kind::Angle).unwrap() - std::f64::consts::FRAC_PI_4).abs() < 1e-12);
         assert!((ev("exp(ln(5))", Kind::Unitless).unwrap() - 5.0).abs() < 1e-12);
         assert!((ev("log(1000)", Kind::Unitless).unwrap() - 3.0).abs() < 1e-12);
+        // Hyperbolic functions (#9332): their definitions in exp, identities and inverses.
+        assert!((ev("cosh(1.5) - (exp(1.5) + exp(-1.5)) / 2", Kind::Unitless).unwrap()).abs() < 1e-12);
+        assert!((ev("sinh(1.5) - (exp(1.5) - exp(-1.5)) / 2", Kind::Unitless).unwrap()).abs() < 1e-12);
+        assert!((ev("tanh(0.7) - sinh(0.7) / cosh(0.7)", Kind::Unitless).unwrap()).abs() < 1e-12);
+        assert!((ev("cosh(2) ^ 2 - sinh(2) ^ 2", Kind::Unitless).unwrap() - 1.0).abs() < 1e-12);
+        assert!((ev("asinh(sinh(1.25))", Kind::Unitless).unwrap() - 1.25).abs() < 1e-12);
+        assert!((ev("acosh(cosh(1.25))", Kind::Unitless).unwrap() - 1.25).abs() < 1e-12);
+        assert!((ev("atanh(tanh(0.5))", Kind::Unitless).unwrap() - 0.5).abs() < 1e-12);
+        assert_eq!(ev("cosh(0) + sinh(0) + tanh(0) + asinh(0) + acosh(1) + atanh(0)", Kind::Unitless).unwrap(), 1.0);
         assert_eq!(ev("floor(2.7) + ceil(0.2) + round(1.5) + abs(-1)", Kind::Unitless).unwrap(), 6.0);
         assert!((ev("1 rad", Kind::Angle).unwrap() - 1.0).abs() < 1e-12);
         assert!((ev("acos(0)", Kind::Angle).unwrap() - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
@@ -1335,6 +1370,22 @@ mod tests {
         assert_eq!(ev("hypot(3 mm, 4 mm)", Kind::Length).unwrap(), 5.0);
         assert_eq!(ev("7 % 4", Kind::Unitless).unwrap(), 3.0);
         assert_eq!(ev("width^2 / width", Kind::Length).unwrap(), 40.0);
+    }
+
+    /// The hyperbolic functions (#9332) take a unit-less number, and the inverses refuse what lies
+    /// outside their domain, as `asin` and `ln` do.
+    #[test]
+    fn hyperbolic_functions_refuse_units_and_numbers_outside_their_domain() {
+        for (e, says) in [
+            ("cosh(2 mm)", "`cosh` needs a unit-less number"),
+            ("tanh(30 deg)", "`tanh` needs a unit-less number"),
+            ("acosh(0.5)", "`acosh` needs a number of at least 1"),
+            ("atanh(1)", "`atanh` needs a number between -1 and 1"),
+            ("atanh(-1.5)", "`atanh` needs a number between -1 and 1"),
+        ] {
+            let err = ev(e, Kind::Unitless).map(|v| v.to_string()).unwrap_or_else(|e| e.to_string());
+            assert!(err.contains(says), "{e}: {err}");
+        }
     }
 
     /// A count from a length (`(L - 20) / 210`, the 210 read as unit-less) names the fix (#5901).
@@ -1449,6 +1500,8 @@ mod tests {
         assert!(is_literal("20") && is_literal("-1.5 in") && is_literal("3 deg"));
         assert!(!is_literal("d1") && !is_literal("2 * 3") && !is_literal("2 width"));
         assert!(is_bare_number(" -1.5 ") && is_bare_number("+2") && !is_bare_number("20 mm") && !is_bare_number("(2)"));
+        // A leading `=` only marks a formula (#4681): `=5` is the bare number `5`, not `==5`.
+        assert!(is_bare_number("=5") && is_bare_number(" = -1.5") && !is_bare_number("=5 mm") && !is_bare_number("==5") && !is_bare_number("=d3"));
         assert_eq!((length_unit_or_mm(" in "), length_unit_or_mm("deg"), length_unit_or_mm("")), ("in", "mm", "mm"));
     }
 

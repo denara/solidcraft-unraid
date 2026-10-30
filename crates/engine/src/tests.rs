@@ -4537,8 +4537,14 @@ fn observation_snapshot_isolates_contact_work_from_the_editing_session() {
     session.easyprint_upload = Some(std::sync::Arc::new(|_, _| Ok(())));
     session.appearance_clipboard =
         Some(solidcraft_doc::appearance::Look { name: "Public look".into(), color: [20, 40, 60], opacity: 0.5, pbr: None });
+    session.foreign_copy = Some(std::sync::Arc::new(crate::ForeignCopy::of(&session, Vec::new(), Vec::new())));
     let observer = session.observation_snapshot();
     let scratch = session.scratch();
+    assert!(observer.foreign_copy.is_none(), "observation must not retain another design clipboard or its model caches");
+    assert!(
+        std::sync::Arc::ptr_eq(scratch.foreign_copy.as_ref().unwrap(), session.foreign_copy.as_ref().unwrap()),
+        "ordinary scratch keeps cross-design paste"
+    );
     assert!(observer.easyprint_upload.is_none(), "observation must not inherit cloud upload capabilities");
     assert!(observer.appearance_clipboard.is_none(), "observation must not inherit tool clipboard data");
     assert_eq!(scratch.appearance_clipboard, session.appearance_clipboard, "ordinary scratch keeps appearance tools");

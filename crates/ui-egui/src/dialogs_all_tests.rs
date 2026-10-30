@@ -398,7 +398,53 @@ form_case!(web, "solid.web", ["Direction", "Thickness", "Depth"]);
 form_case!(emboss, "solid.emboss", ["Depth", "Type"]);
 form_case!(replace_face, "solid.replace_face", []);
 form_case!(boundary_fill, "solid.boundary_fill", ["Cells", "Operation"]);
-form_case!(align, "solid.align", ["From Snap", "To Snap"]);
+form_case!(align, "solid.align", ["Object Type", "From Snap", "To Snap"]);
+
+#[test]
+fn align_components_mode_switches_and_aligns_only_selected_instance() {
+    let mut h = Harness::new();
+    let comp = h.app.run("component.create", json!({"name": "Extrusion"})).unwrap()["component"].as_u64().unwrap();
+    h.app.run("solid.box", json!({"length": 10, "width": 10, "height": 60, "body_name": "Beam"})).unwrap();
+    h.app.run("component.activate", json!({"component": "root"})).unwrap();
+    let second = h.app.run("occurrence.copy", json!({"component": comp, "translate": [40, 0, 0]})).unwrap()["occurrence"].as_u64().unwrap();
+
+    // Preselecting an occurrence opens Align in Components mode and advances to From.
+    let picked = vec![Sel::Occurrence { path: vec![second] }];
+    h.app.session.selection = picked.clone();
+    h.app.start("solid.align");
+    h.frames(4);
+    assert_eq!(h.app.dialog.as_ref().unwrap().inputs[0].label, "Components");
+    assert_eq!(h.app.dialog.as_ref().unwrap().inputs[0].items, picked);
+    assert_eq!(h.app.dialog.as_ref().unwrap().active, 1);
+
+    // Switching Object Type to Bodies and back restores the preselected occurrence.
+    mirror_object_type(&mut h, "Bodies");
+    assert_eq!(h.app.dialog.as_ref().unwrap().inputs[0].label, "Bodies");
+    assert!(h.app.dialog.as_ref().unwrap().inputs[0].items.is_empty());
+    mirror_object_type(&mut h, "Components");
+    assert_eq!(h.app.dialog.as_ref().unwrap().inputs[0].label, "Components");
+    assert_eq!(h.app.dialog.as_ref().unwrap().inputs[0].items, picked);
+
+    let from = face_sel(&h.app.session, Vec3::new(45.0, 5.0, 0.0)).unwrap();
+    let to = face_sel(&h.app.session, Vec3::new(10.0, 5.0, 30.0)).unwrap();
+    {
+        let d = h.app.dialog.as_mut().unwrap();
+        d.inputs[1].items = vec![from];
+        d.inputs[2].items = vec![to];
+    }
+    let commands = apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap();
+    assert_eq!(commands[0].0, "occurrence.align");
+    assert_eq!(commands[0].1["paths"], json!([[second]]));
+    for (command, params) in commands {
+        h.app.run(&command, params).unwrap();
+    }
+
+    let st = h.app.session.world_state();
+    let b1 = st.body("Beam").unwrap().mesh().bounds();
+    assert!((b1.min.x - 0.0).abs() < 1e-5 && (b1.max.x - 10.0).abs() < 1e-5, "{b1:?}");
+    let b2 = st.body("Beam (Extrusion:2)").unwrap().mesh().bounds();
+    assert!((b2.min.x - 10.0).abs() < 1e-5 && (b2.max.x - 70.0).abs() < 1e-5, "{b2:?}");
+}
 form_case!(remove, "solid.remove", []);
 form_case!(path_pattern, "solid.pattern.path", ["Type", "Object Type", "Quantity", "Spacing"]);
 form_case!(pipe, "solid.pipe", ["Diameter", "Wall", "Operation"]);
@@ -1060,4 +1106,70 @@ fn every_selection_field_label_is_translated() {
         }
     }
     assert!(missing.is_empty(), "selection fields without a message: {missing:#?}");
+}
+
+#[test]
+fn align_components_picks_the_placement_under_the_active_component_and_warns_when_shared() {
+    let mut h = Harness::new();
+    let made = h.app.run("component.create", json!({"name": "Frame", "grounded": false})).unwrap();
+    let (frame, a) = (made["component"].as_u64().unwrap(), made["occurrence"].as_u64().unwrap());
+    let bracket = h.app.run("component.create", json!({"name": "Bracket", "grounded": false})).unwrap()["occurrence"].as_u64().unwrap();
+    h.app.run("solid.box", json!({"length": 10, "width": 10, "height": 4, "body_name": "Plate"})).unwrap();
+    h.app.run("component.activate", json!({"component": "root"})).unwrap();
+    let plate = h.app.session.world_state().bodies.first().map(|b| b.name.clone()).unwrap();
+
+    // With the design active, a click on the part inside Frame picks the Frame placement.
+    assert_eq!(occurrence_path_of_body(&h.app.session, &plate), Some(vec![a]));
+    // With that Frame placement active, the same click picks the part inside it.
+    h.app.run("component.activate", json!({"component": frame, "occurrence": a, "path": [a]})).unwrap();
+    assert_eq!(occurrence_path_of_body(&h.app.session, &plate), Some(vec![a, bracket]));
+    assert!(!align_moves_shared(&h.app.session, &[Sel::Occurrence { path: vec![a, bracket] }]), "Frame is placed once");
+
+    // Once Frame is placed twice, the part's placement inside it is shared: the dialog says so.
+    h.app.run("component.activate", json!({"component": "root"})).unwrap();
+    h.app.run("occurrence.copy", json!({"component": frame, "translate": [0, 50, 0]})).unwrap();
+    assert!(align_moves_shared(&h.app.session, &[Sel::Occurrence { path: vec![a, bracket] }]));
+    assert!(!align_moves_shared(&h.app.session, &[Sel::Occurrence { path: vec![a] }]), "a top-level placement is its own");
+
+    h.app.session.selection = vec![Sel::Occurrence { path: vec![a] }];
+    h.app.start("solid.align");
+    h.frames(4);
+    assert!(h.widget(ALIGN_SHARED_WARNING).is_none(), "no warning for a top-level pick");
+    h.app.dialog.as_mut().unwrap().inputs[0].items = vec![Sel::Occurrence { path: vec![a, bracket] }];
+    h.frames(4);
+    assert!(h.widget(ALIGN_SHARED_WARNING).is_some(), "the shared pick is called out");
+}
+
+/// OK on the editor of a pattern behind the history marker leaves it rolled back, so the view
+/// does not change: the status line says why, where the edit used to look as if it had silently
+/// failed (#8100).
+#[test]
+fn ok_on_a_rolled_back_pattern_editor_says_it_is_not_built() {
+    let mut h = Harness::new();
+    h.app.home.open = false;
+    for (id, params) in [
+        ("solid.box", json!({"length":40,"width":30,"height":10,"corner":[0,0,0],"body_name":"Plate"})),
+        ("solid.cylinder", json!({"radius":2,"height":20,"base":[10,15,-5],"operation":"cut","targets":["Plate"],"name":"Cut"})),
+        ("solid.pattern.circular", json!({"features":["Cut"],"axis":{"origin":[20,15,0],"dir":[0,0,1]},"count":2,"name":"Pattern"})),
+        ("timeline.roll_to", json!({"position":2})),
+    ] {
+        h.app.run(id, params).unwrap();
+    }
+    let pattern = h.app.session.doc.features.last().unwrap().id;
+    h.app.edit_feature(pattern);
+    h.settle();
+    assert!(h.app.dialog.is_some(), "the pattern's editor opens");
+    h.step(&json!({"click":{"handle":"dialog:OK"}})).unwrap();
+    for _ in 0..500 {
+        if h.app.dialog.is_none() {
+            break;
+        }
+        h.frames(1);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(h.app.dialog.is_none(), "the edit is applied");
+    assert_eq!(h.app.session.doc.marker, Some(2), "the pattern stays behind the marker");
+    let (text, _, error) = h.app.status.clone().unwrap();
+    assert!(!error, "{text}");
+    assert!(text.starts_with("Pattern changed, but it is after the history marker"), "{text}");
 }
