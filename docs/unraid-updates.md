@@ -70,12 +70,43 @@ headless observation still explicitly refuses visible scans. Raw browser upload
 formats/limits are unchanged. Evidence is private under ignored
 `target/upstream-6c9afc6f-20261030/`.
 
-Publication, archive checksum and local runtime replacement are recorded after the
-exact-source image workflow and anonymous pull checks pass. Canonical XML/icon are
-unchanged, so no catalog commit is needed. On Unraid save active work, retain server
-and browser backups, update the existing container with the same data/token/settings
-and reload the browser. Older images cannot read new native format-45 designs.
-No Unraid deployment, nginx/DNS change, application release or Git tag is created.
+Publication passed [the exact container workflow](https://github.com/denara/solidcraft-unraid/actions/runs/41089912629) from validated
+source [`c38faa72`](https://github.com/denara/solidcraft-unraid/commit/c38faa72760ca8013f2214561e713e00b1e5072a). Its fresh CI image passed modelling/PNG/STEP,
+session separation, authentication/origin/path gates, restart persistence, browser
+assets, logs/privacy, projects, Workspace/observer/live events, deletion/streaming
+ZIP, remembered logins and uploads before registry push. Public Linux amd64 tags
+are `ghcr.io/denara/solidcraft-unraid:latest` and
+`sha-c38faa72760ca8013f2214561e713e00b1e5072a`. Both tags pulled anonymously using an empty Docker
+configuration; source, architecture and direct anonymous registry digest checks pass.
+Digest: `sha256:9a605eb2934406b65c98ea61bbef9bd59fda4e1da2d0e71e4c42ca2591fbaec0`.
+
+Export: `target/solidcraft-unraid-upstream-6c9afc6f-c38faa72.tar` (187,040,768 bytes), own tag
+`solvecraft-unraid:upstream-6c9afc6f-c38faa72`. SHA256:
+`56246c805b657195d6cd68a8c359d9956a356b5c9f37ecef7919a8afccddc6eb`. The tar structure and full checksum were verified again independently.
+
+The sole remaining local test runtime `solvecraft-solvecraft-1` is healthy at
+0.27.1 on the immutable public image. A private pre-swap data/config backup passed
+gzip/tar checks, and the previous actual image remains for rollback. The same data
+volume, token, complete environment, user, port/origin settings and resource/security
+limits were verified unchanged. Authenticated official-SDK MCP, unchanged public
+24000 mm3 source reopened read-only, ephemeral 4000 mm3 modelling/PNG, cookie login/
+logout, protected saved properties/SSE and both independent web asset sets passed.
+No real saved file was overwritten. Then 10 owned idle build/check/candidate containers
+were removed after label/image/mount/activity checks; diagnoses remain private.
+All volumes, caches, toolchain, private backup and rollback resources are preserved.
+No global prune or unrelated resource removal was used.
+
+After publication canonical XML/original icon still match catalog
+`denara/unraid-templates` main `ffa25fd39fbca2c4d5da2c868d5d0eed7b371925`; profile and license were
+untouched, so no catalog commit or CA submission was needed. The final fetch found
+`f913a2a45935722720f7cf541b9010e908ab73a7` (24 later upstream commits), deferred to the next
+fixed snapshot. Fork main is an ancestor; the validated baseline stays `6c9afc6f`.
+
+On Unraid save active work, retain server and independent browser backups, update
+the existing container with the same data/token/settings and reload the browser.
+Keep pre-update files for rollback: older readers cannot open new native format-45
+saves. This task did not install on Unraid, change nginx/DNS, create application
+releases/Git tags or migrate existing files.
 
 ## 2026-10-29: fixed upstream 0.26.0 snapshot and native format 43
 
