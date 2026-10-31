@@ -1477,6 +1477,51 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 
+    /// #9170: a design holding a mesh body (an inserted STL) keeps its saved model and opens from
+    /// it. One mesh body left the cache out for the whole model, so every feature, the boxes
+    /// too, was evaluated again on opening.
+    #[test]
+    fn a_design_with_a_mesh_body_keeps_its_saved_model() {
+        let dir = std::env::temp_dir().join(format!("solidcraft-mesh-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stl = dir.join("tetra.stl");
+        let facets = [
+            [[0, 0, 0], [0, 10, 0], [10, 0, 0]],
+            [[0, 0, 0], [10, 0, 0], [0, 0, 10]],
+            [[0, 0, 0], [0, 0, 10], [0, 10, 0]],
+            [[10, 0, 0], [0, 10, 0], [0, 0, 10]],
+        ];
+        let mut text = String::from("solid tetra\n");
+        for f in facets {
+            text += "facet normal 0 0 0\nouter loop\n";
+            for [x, y, z] in f {
+                text += &format!("vertex {x} {y} {z}\n");
+            }
+            text += "endloop\nendfacet\n";
+        }
+        std::fs::write(&stl, text + "endsolid tetra\n").unwrap();
+        let mut session = Session::new(Document::new("Boxes and a mesh"));
+        for x in [0, 40, 80] {
+            session.execute("solid.box", &json!({"length": 20, "width": 20, "height": 20, "corner": [x, 0, 0], "operation": "new_body"})).unwrap();
+        }
+        session.execute("file.insert_mesh", &json!({"path": stl})).unwrap();
+        let triangles = |s: &Session| s.model.state().bodies.iter().filter_map(|b| b.body.triangle_mesh().map(|(_, t)| t.len())).collect::<Vec<_>>();
+        assert_eq!(triangles(&session), [4], "one mesh body");
+        let bytes = session.design_container(solidcraft_io::DesignCompression::Fast, false, true).unwrap();
+        assert!(solidcraft_io::read_design_geometry(&bytes).is_some(), "the model is saved with the mesh body");
+        let path = dir.join("boxes-mesh.solidcraft");
+        std::fs::write(&path, &bytes).unwrap();
+        let mut reopened = Session::default();
+        reopened.execute("doc.open", &json!({"path": path})).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(reopened.model.results.len(), session.model.results.len());
+        assert!(reopened.model.results.iter().zip(&session.model.results).all(|(a, b)| a.ms == b.ms), "taken from the file, not evaluated");
+        assert_eq!(triangles(&reopened), [4]);
+        let volume = |s: &mut Session| s.execute("inspect.measure", &json!({})).unwrap()["total"]["volume_mm3"].as_f64().unwrap();
+        let (saved, opened) = (volume(&mut session), volume(&mut reopened));
+        assert!((opened - saved).abs() < 1e-9 && (saved - (3. * 8000. + 1000. / 6.)).abs() < 1e-6, "{opened} vs {saved}");
+    }
+
     /// A sheet-metal design keeps each sheet body once in its saved model, not again with every
     /// later feature's state: a design of many features after its sheet metal wrote the sheets
     /// over and over, and past the cache's size limit kept only some of its states.

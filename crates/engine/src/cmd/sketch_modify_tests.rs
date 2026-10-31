@@ -579,6 +579,71 @@ fn exact_extend_takes_one_of_two_stops_at_the_same_distance() {
 }
 
 #[test]
+fn extend_does_not_treat_a_line_end_inside_a_circle_as_lying_on_it() {
+    // #9731: the "lies on a circle" test was true for every end *inside* a circle, so a large
+    // construction circle around the drawing made Extend treat a free end as held and lay a
+    // loose new line instead of lengthening the line. Only an end on the circle is held.
+    let mut s = new_sketch();
+    let l1 = ids(&run(&mut s, "sketch.line", json!({"points":[[0,5],[10,5]],"connect":false,"infer":false}))["curves"])[0].clone();
+    let l2 = ids(&run(&mut s, "sketch.line", json!({"points":[[20,-10],[20,20]],"connect":false,"infer":false}))["curves"])[0].clone();
+    run(&mut s, "sketch.circle.center", json!({"center":[5,5],"radius":60}));
+    run(&mut s, "sketch.extend", json!({"curve": l1, "at": [9,5]}));
+    let sk = sketch(&s);
+    assert_eq!(sk.curves.len(), 3, "the circle around the drawing must not add a line");
+    let end = sk.resolve_point(&format!("{l1}.end")).expect("l1's end");
+    assert!(sk.point(end).is_some_and(|p| p.dist(Vec2::new(20.0, 5.0)) < 1e-6), "l1 reaches l2: {:?}", sk.point(end));
+    let l2i = sk.curve_index(&l2).expect("l2");
+    assert!(
+        sk.constraints.iter().any(|c| matches!(c.kind, ConstraintKind::PointOnCurve { p, c } if p == end && c == l2i)),
+        "the extended end is held on l2"
+    );
+
+    // The same end deep inside a far larger circle behaves the same way.
+    let mut s = new_sketch();
+    let l1 = ids(&run(&mut s, "sketch.line", json!({"points":[[0,5],[10,5]],"connect":false,"infer":false}))["curves"])[0].clone();
+    run(&mut s, "sketch.line", json!({"points":[[20,-10],[20,20]],"connect":false,"infer":false}));
+    run(&mut s, "sketch.circle.center", json!({"center":[100,100],"radius":200}));
+    run(&mut s, "sketch.extend", json!({"curve": l1, "at": [9,5]}));
+    let sk = sketch(&s);
+    assert_eq!(sk.curves.len(), 3, "an end inside a circle is not held by it");
+    let end = sk.resolve_point(&format!("{l1}.end")).expect("l1's end");
+    assert!(sk.point(end).is_some_and(|p| p.dist(Vec2::new(20.0, 5.0)) < 1e-6), "{:?}", sk.point(end));
+
+    // An end that lies ON the circle is still held: Extend adds a new line from it.
+    let mut s = new_sketch();
+    let l1 = ids(&run(&mut s, "sketch.line", json!({"points":[[0,5],[10,5]],"connect":false,"infer":false}))["curves"])[0].clone();
+    run(&mut s, "sketch.line", json!({"points":[[20,-10],[20,20]],"connect":false,"infer":false}));
+    run(&mut s, "sketch.circle.center", json!({"center":[5,5],"radius":5}));
+    run(&mut s, "sketch.extend", json!({"curve": l1, "at": [9,5]}));
+    let sk = sketch(&s);
+    assert_eq!(sk.curves.len(), 4, "an end on the circle stays put and gains a new line");
+    let end = sk.resolve_point(&format!("{l1}.end")).expect("l1's end");
+    assert!(sk.point(end).is_some_and(|p| p.dist(Vec2::new(10.0, 5.0)) < 1e-6), "l1 stays put: {:?}", sk.point(end));
+}
+
+#[test]
+fn extend_from_a_held_end_is_pinned_to_the_curve_it_stops_on() {
+    // The end being extended carries geometry (another line meets it there), so the extension is
+    // a new line. It stops in the middle of a third curve: the new end point is held on that
+    // curve, as the free-end path holds its end, instead of lying loose over it.
+    let mut s = new_sketch();
+    let both = ids(&run(&mut s, "sketch.line", json!({"points":[[0,0],[10,0],[10,10]],"connect":false,"infer":false}))["curves"]);
+    let l1 = both[0].clone();
+    let wall = ids(&run(&mut s, "sketch.line", json!({"points":[[20,-10],[20,10]],"connect":false,"infer":false}))["curves"])[0].clone();
+    run(&mut s, "sketch.extend", json!({"curve": l1, "at": [10,0]}));
+    let sk = sketch(&s);
+    assert_eq!(sk.curves.len(), 4, "the held end stays and a new line is added");
+    let new_line = sk.curves.last().expect("the new line");
+    let CurveKind::Line { b, .. } = new_line.kind else { panic!("the new curve is a line: {new_line:?}") };
+    assert!(sk.point(b).is_some_and(|p| p.dist(Vec2::new(20.0, 0.0)) < 1e-6), "the new line stops on the wall: {:?}", sk.point(b));
+    let walli = sk.curve_index(&wall).expect("the wall");
+    assert!(
+        sk.constraints.iter().any(|c| matches!(c.kind, ConstraintKind::PointOnCurve { p, c } if p == b && c == walli)),
+        "the new end point is held on the curve it stops on"
+    );
+}
+
+#[test]
 fn fillet_keeps_expression_corner_when_parameter_changes() {
     let mut s = new_sketch();
     run(&mut s, "parameters.add", json!({"name": "W", "expression": "40 mm"}));

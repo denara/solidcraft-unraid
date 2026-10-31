@@ -1,5 +1,92 @@
 # Validated container updates
 
+## 2026-10-31: fixed upstream 0.28.0 snapshot, linked-file digests and native format 46
+
+Selected `251c20bef0f98ed15ee8807e4787a0c112e43e9a` once, 162 commits after
+validated `6c9afc6f`. The sole `codex/unraid-mcp-web` branch started clean and
+synchronized at `de5ac53b`; fork main is already an ancestor. For upstream CAD
+functions/changes see [the original project](https://github.com/tangency-labs/solidcraft).
+This is unofficial integration, not an application release or Unraid installation.
+
+All published HTTP MCP and independent browser/Workspace behavior is preserved:
+immutable projects, shared file/revision gates, cookie-only remembered login,
+live inventory, PNG thumbnails and independent browser copies, read-only observation,
+confirmed deletion, bounded streaming ZIP64 and backup exclusions, manual projects,
+multi-file uploads with batch conflict choices and the storage footer. Existing
+layouts, original assets, private settings and saved files are retained. The
+canonical Unraid Overview/icon are unchanged and need no catalog update.
+
+The link-list merge keeps the network root guard while retaining upstream's new
+`changed` result and stored SHA-256 digests. The new digest cache rechecks remote/
+device, network-root, scope, symlink and self-link restrictions before metadata or
+cached results; existing tests cover a digest primed before a later scope denial.
+`component.links` now shares the HTTP/MCP source-reader gate and cannot bless a
+write revision. Headless clients see a changed source after reopening and explicitly
+call Update Links; the desktop's auto-update remains its own preference. Observer
+snapshots keep isolated caches/render hosts and omit all tool clipboards, including
+foreign sketch data. Their new visibility index starts cold. The existing cloud
+observer test now supplies defaults for the new properties and filters; visible
+scans remain explicitly unavailable to the headless observer rather than yielding
+a misleading empty image. Hidden scans still allow normal CAD previews.
+
+Section reference UI behavior is retained when resolving the second conflict.
+Two equivalent parser/dialog predicates satisfy Clippy without changing input or
+selection behavior. No new unconstrained file-output command is enabled: mass and
+cloud analysis return data, clipboard changes are in memory, and desktop preference/
+crash files stay outside the headless adapter. Existing slicer/multi-output exclusions
+remain. Source files use the common read gate, and no upload format/limit is widened.
+External dependencies and toolchain requirements are unchanged (Rust 1.95/Trunk
+0.21.14); notices are regenerated with both fork packages. Native format45 includes
+browser groups/cloud properties and print faces; new saves use46 to retain linked
+file digests. Existing files are not migrated. The Git-free production cache policy
+continues to rebuild unknown-source caches; local release artifacts match it.
+
+Relevant local checks passed: 143 gateway tests and 82 affected library selections
+(including native format/browser groups, linked sources, mass/cloud analysis, sketch
+clipboard, assembly visibility, UI, capture and section paths). CLI connection/help/
+render-host checks and all 32 native web/helper cases pass. Full native all-target
+Clippy, 13-crate Wasm compatibility, scoped browser/client Wasm lint, formatting,
+licensing, 884 attributed assets, 362 original icon masters, layers, lists, containers
+and skills pass. No unfiltered repository suite was run. Initial strict-lint and
+private test-harness diagnostics were corrected and retained; none was waived.
+The Condvar field used only by the native point-cloud worker is now native-only;
+Wasm retains its existing synchronous path without a lint suppression. The target-only
+slicer field remains a harmless dependency warning in the Wasm build.
+
+A fresh labelled candidate on a new disposable volume and loopback port passed
+real HTTP MCP modelling (24000 mm3), PNG/STEP, independent sessions, authentication,
+origin/path denial, logging/privacy, project binding and restart persistence. Shared
+strong revisions, Workspace/observer/live SSE, deletion and streamed ZIP with backup
+exclusions, remembered login/logout and manual projects/uploads pass. The existing
+runtime was not changed during isolated validation. Real browser captures were
+inspected: multi-file drop, fixed target, overwrite/skip/cancel/apply-all reset,
+stale-revision denial, live collapsed groups, compact actions, joined overview,
+capacity footer and independent browser-native copies remain correct.
+
+The official MCP SDK reopened public formats 13 and 45 without modifying original
+bytes. Native format-46 saves preserve parameters, 24000 mm3, split-face names and
+centroids, embedded HDR CPU rendering, equation curves and print faces. A public
+analytic four-face tetrahedron imported from STL survives native save/reopen and
+binary STL export with identical oriented triangles and signed volume 1000/6 mm3.
+Linked-file digests survive native save/reopen; an independently changed source is
+reported without replacing saved geometry until explicit Update Links. Its new
+2000 mm3 geometry and refreshed digest then save under a new name, leaving the
+original assembly bytes unchanged. All checked native ZIP CRCs pass, including
+mesh and linked-assembly containers. The Git-free production cache policy matches.
+
+The three-point reference scan survives format46 save/reopen, cookie upload,
+inventory/details and real WebGL opening. Browser-only scan edits leave server
+bytes unchanged; visible headless clouds remain explicitly unavailable rather than
+rendered empty. Raw scan upload formats are not enabled. All helper fixtures,
+private diagnostics and screenshots remain ignored under
+`target/upstream-251c20be-20261031/`.
+
+Actual software-GL capture/depth and the stand-up UI integration pass. Real browser
+API, linked-source, DXF and bounded command-queue behavior and all 20 offline/update
+cases pass. Format46 is forward-only for older readers; retain pre-update designs
+and independent browser backups for rollback. Existing server files are not migrated.
+Publication and local runtime replacement are recorded below only after they pass.
+
 ## 2026-10-30: fixed upstream 0.27.1 snapshot, native format 45
 
 Selected `6c9afc6f7e08672c802b4f3fb37a80529e86dfe2` once, 238 commits after validated

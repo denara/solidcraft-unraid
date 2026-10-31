@@ -156,26 +156,44 @@ pub(crate) fn record(stamps: &mut Vec<(u64, Stamp)>, component: u64, stamp: Stam
     }
 }
 
+/// The shown design's linked components whose files are no longer what the design last read
+/// (`component.links` `changed`), as when one changed while the design was closed (#9739).
+fn changed_since_read(session: &mut solidcraft_engine::Session) -> Vec<u64> {
+    let Ok(links) = session.execute("component.links", &json!({})) else { return Vec::new() };
+    links["links"].as_array().into_iter().flatten().filter(|l| l["changed"].as_bool() == Some(true)).filter_map(|l| l["component"].as_u64()).collect()
+}
+
 /// The links of the shown design it holds no record of yet (it was just opened, a link was just
-/// made) are taken as their files are now.
+/// made) are taken as their files are now, except a file that changed since the design last read
+/// it (#9739): that one counts as not read yet, so [`update_changed`] reads it.
 pub(crate) fn note_unread(app: &mut SolveApp) {
     if app.session.doc.links.keys().all(|c| app.docs.link_stamps.iter().any(|(k, _)| k == c)) {
         return;
     }
-    for (c, s) in disk_stamps(app) {
+    let now = disk_stamps(app);
+    let stale = if now.is_empty() { Vec::new() } else { changed_since_read(&mut app.session) };
+    for (c, s) in now {
         if !app.docs.link_stamps.iter().any(|(k, _)| *k == c) {
-            app.docs.link_stamps.push((c, s));
+            app.docs.link_stamps.push((c, if stale.contains(&c) { None } else { s }));
         }
     }
 }
 
-/// The shown design came back to its tab: read again, off the window thread as Update Links
-/// does, the linked designs whose files changed since it last read them. Each is a run of its
-/// own, so one that cannot be read holds up no other; one that fails is tried again next time.
+/// The shown design came back to its tab, or was just opened: read again, off the window thread
+/// as Update Links does, the linked designs whose files changed since it last read them. Each is
+/// a run of its own, so one that cannot be read holds up no other; one that fails is tried again
+/// next time.
 pub(crate) fn update_changed(app: &mut SolveApp) {
     let now = disk_stamps(app);
-    let changed: Vec<u64> =
-        now.iter().filter(|(c, s)| s.is_some() && app.docs.link_stamps.iter().any(|(k, was)| k == c && was != s)).map(|(c, _)| *c).collect();
+    // Links met here for the first time: those whose files changed since the design last read
+    // them (#9739) are read again too.
+    let first: Vec<u64> = now.iter().map(|(c, _)| *c).filter(|c| !app.docs.link_stamps.iter().any(|(k, _)| k == c)).collect();
+    let stale = if first.is_empty() { Vec::new() } else { changed_since_read(&mut app.session) };
+    let changed: Vec<u64> = now
+        .iter()
+        .filter(|(c, s)| s.is_some() && (app.docs.link_stamps.iter().any(|(k, was)| k == c && was != s) || (first.contains(c) && stale.contains(c))))
+        .map(|(c, _)| *c)
+        .collect();
     for (c, s) in now {
         if !app.docs.link_stamps.iter().any(|(k, _)| *k == c) {
             app.docs.link_stamps.push((c, s));
@@ -598,6 +616,36 @@ mod tests {
         crate::documents::switch(&mut app, 0);
         settle(&mut app);
         assert!((volume(&app) - 7250.0).abs() < 1e-6, "{}", volume(&app));
+        let _ = std::fs::remove_dir_all(folder);
+    }
+
+    /// #9739: a linked design changed while the assembly was closed is read when the assembly
+    /// opens, in place of the blank design or in a tab of its own. Nothing changed, nothing is.
+    #[test]
+    fn a_design_changed_while_the_assembly_was_closed_is_read_when_it_opens() {
+        let (app, folder, plate, _) = two_links("closed");
+        drop(app);
+        let case = folder.join("case.solidcraft");
+        let open = |in_tab: bool| {
+            let mut app = SolveApp::new(Session::default(), Default::default());
+            if in_tab {
+                app.run("solid.box", json!({"length": 1, "width": 1, "height": 1})).unwrap();
+            }
+            let mut opened = Session::default();
+            opened.execute("doc.open", &json!({"path": case})).unwrap();
+            crate::documents::adopt(&mut app, opened);
+            assert_eq!(app.docs.count(), if in_tab { 2 } else { 1 });
+            app
+        };
+        let app = open(false);
+        assert!(app.file_load.idle(), "nothing changed: nothing to read");
+        assert!((volume(&app) - 7000.0).abs() < 1e-6, "{}", volume(&app));
+        save_part(&plate, [10.0, 20.0, 30.0], true);
+        for in_tab in [false, true] {
+            let mut app = open(in_tab);
+            settle(&mut app);
+            assert!((volume(&app) - 7250.0).abs() < 1e-6, "in a tab of its own: {in_tab}: {}", volume(&app));
+        }
         let _ = std::fs::remove_dir_all(folder);
     }
 

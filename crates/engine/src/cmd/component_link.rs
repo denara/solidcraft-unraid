@@ -59,7 +59,8 @@ pub static COMMANDS: &[CommandSpec] = &[
     ),
     CommandSpec::new("component.links", "List Links", list_links).icon("chain").noundo().params(
         "→ linked components: component, name, path, file (resolved), found (null when the file is on a network location not allowed, \
-         or names a device: it is not looked for), and then host (the network location) and reason",
+         or names a device: it is not looked for), changed (whether the file is no longer what this design last read: Update Links \
+         reads it again; null when not found or the link is older than this record), and then host (the network location) and reason",
     ),
 ];
 
@@ -171,9 +172,45 @@ fn read_link(file: &Path, own: Option<&str>) -> Result<Vec<u8>> {
     })
 }
 
-/// The solid bodies of the design at `file`, evaluated, as an Import feature.
-fn linked_bodies(file: &Path, own: Option<&str>) -> Result<Linked> {
-    design_bodies(file, &read_link(file, own)?)
+/// The solid bodies of the design at `file`, evaluated, as an Import feature, with the digest of
+/// the bytes read, which the link keeps ([`DesignLink::file_sha256`], #9739).
+fn linked_bodies_read(file: &Path, own: Option<&str>) -> Result<(Linked, String)> {
+    let bytes = read_link(file, own)?;
+    Ok((design_bodies(file, &bytes)?, DesignLink::file_digest(&bytes)))
+}
+
+/// Linked files' digests as [`file_sha256`] last worked them out, by file, with the time and
+/// size the file had then. Bounded, oldest first out.
+static DIGESTS: Mutex<Vec<(PathBuf, (std::time::SystemTime, u64), String)>> = Mutex::new(Vec::new());
+const DIGESTS_SIZE: usize = 256;
+
+/// The digest of the design file at `file` now ([`DesignLink::file_digest`]), `None` when it
+/// can't be read. `component.links` asks each time a tab is shown, so a file is read again only
+/// when its time or size changed since; the browser build keeps no times and reads it each time.
+pub(super) fn file_sha256(file: &Path, own: Option<&str>) -> Option<String> {
+    // Stored links are untrusted; permission/root/symlink checks precede metadata
+    // and cached digests, just as they precede an actual source read.
+    let file = network_link_path(file).ok()?;
+    link_refused(own, &file.to_string_lossy()).ok()?;
+    let file = absolute(&file);
+    if own.is_some_and(|o| absolute(Path::new(o)) == file) {
+        return None;
+    }
+    let stamp = solidcraft_io::vfs::design_path_stamp(&file.to_string_lossy(), own);
+    if let Some(stamp) = stamp
+        && let Some(known) = DIGESTS.lock().ok()?.iter().find(|(f, s, _)| *f == file && *s == stamp).map(|(_, _, d)| d.clone())
+    {
+        return Some(known);
+    }
+    let digest = DesignLink::file_digest(&read_link(&file, own).ok()?);
+    if let (Some(stamp), Ok(mut digests)) = (stamp, DIGESTS.lock()) {
+        digests.retain(|(f, _, _)| *f != file);
+        if digests.len() >= DIGESTS_SIZE {
+            digests.remove(0);
+        }
+        digests.push((file, stamp, digest.clone()));
+    }
+    Some(digest)
 }
 
 /// The solid bodies of `bytes`, the design at `file`, as an Import feature. The model the file
@@ -515,7 +552,7 @@ fn insert_design(s: &mut Session, p: &Value) -> Result<Value> {
             return super::component::copy_occurrence(s, &json!({"component": component, "parent": parent, "translate": translate}));
         }
     }
-    let (design_name, sf, faces, metadata, properties) = linked_bodies(&file, s.path.as_deref())?;
+    let ((design_name, sf, faces, metadata, properties), read) = linked_bodies_read(&file, s.path.as_deref())?;
     let name = str_(p, "name").filter(|n| !n.trim().is_empty()).map(str::to_string).unwrap_or(design_name);
     let mut create = json!({"name": name, "activate": false});
     // Clipboard insertion uses reuse even for the first paste, which must stay movable.
@@ -542,7 +579,9 @@ fn insert_design(s: &mut Session, p: &Value) -> Result<Value> {
         o.transform[3] = [translate.x, translate.y, translate.z, 1.0];
     }
     let path = stored(s.path.as_deref(), &file);
-    s.doc_mut().links.insert(comp, DesignLink { path: file.to_string_lossy().into_owned(), feature: id, inherited: Vec::new() });
+    s.doc_mut()
+        .links
+        .insert(comp, DesignLink { path: file.to_string_lossy().into_owned(), feature: id, inherited: Vec::new(), file_sha256: Some(read) });
     s.refresh();
     if let Some(e) = s.model.result(id).and_then(|r| r.error.clone()) {
         return Err(EngineError::Other(e));
@@ -586,6 +625,14 @@ fn update_links(s: &mut Session, p: &Value) -> Result<Value> {
         link_refused(s.path.as_deref(), &link.path).map_err(|e| bad(cmd, format!("{cname}: {e}")))?;
         let file = resolve(s.path.as_deref(), &link.path);
         let bytes = read_link(&file, s.path.as_deref()).map_err(|e| bad(cmd, format!("{cname}: {e}")))?;
+        // The link keeps what it read, so opening this design again knows whether the file
+        // changed while it was closed (#9739).
+        let read = DesignLink::file_digest(&bytes);
+        if link.file_sha256.as_deref() != Some(read.as_str())
+            && let Some(kept) = s.doc_mut().links.get_mut(&comp)
+        {
+            kept.file_sha256 = Some(read);
+        }
         // A link that has not recorded the properties it inherited (made before they were) is read again.
         let kept_faces = s
             .doc
@@ -691,7 +738,7 @@ fn relink(s: &mut Session, p: &Value) -> Result<Value> {
     }
     // Read/evaluate the candidate before changing anything. Session::execute owns the single
     // undo step and restores both the document and evaluated state on any later failure.
-    let (_, sf, faces, _, properties) = linked_bodies(&file, s.path.as_deref()).map_err(|e| bad(cmd, e.to_string()))?;
+    let ((_, sf, faces, _, properties), read) = linked_bodies_read(&file, s.path.as_deref()).map_err(|e| bad(cmd, e.to_string()))?;
     let geometry_changed = match (s.doc.feature(link.feature).map(|f| &f.kind), &sf.kind) {
         (Some(FeatureKind::Import { step: old, .. }), FeatureKind::Import { step, .. }) => old != step,
         _ => true,
@@ -714,7 +761,7 @@ fn relink(s: &mut Session, p: &Value) -> Result<Value> {
         f.kind = sf.kind;
         f.link_faces = faces;
     }
-    s.doc_mut().links.insert(comp, DesignLink { path: file.to_string_lossy().into_owned(), ..link.clone() });
+    s.doc_mut().links.insert(comp, DesignLink { path: file.to_string_lossy().into_owned(), file_sha256: Some(read), ..link.clone() });
     s.refresh();
     if let Some(error) = s.model.result(link.feature).and_then(|r| r.error.clone()) {
         return Err(bad(cmd, error));
@@ -755,8 +802,17 @@ fn list_links(s: &mut Session, _p: &Value) -> Result<Value> {
             // A refused path is not looked for at all: on Windows asking whether a file on
             // `\\host\share` exists already connects to the host.
             match link_refusal(s.path.as_deref(), &l.path) {
-                None => json!({"component": c, "name": name, "path": path, "file": file,
-                    "found": if permitted { solidcraft_io::vfs::design_path_is_file(&file, s.path.as_deref()) } else { Some(false) }}),
+                None => {
+                    let found = if permitted { solidcraft_io::vfs::design_path_is_file(&file, s.path.as_deref()) } else { Some(false) };
+                    // Whether the file is no longer what this design last read (#9739): `null`
+                    // when it isn't found, or the link keeps no digest (made before they were).
+                    let changed = l
+                        .file_sha256
+                        .as_ref()
+                        .filter(|_| found == Some(true))
+                        .and_then(|kept| file_sha256(Path::new(file.as_ref()), s.path.as_deref()).map(|now| now != *kept));
+                    json!({"component": c, "name": name, "path": path, "file": file, "found": found, "changed": changed})
+                }
                 Some(solidcraft_io::vfs::Remote::Network(host)) => json!({"component": c, "name": name, "path": path, "file": file,
                     "found": null, "host": host, "reason": format!("on the network location \\\\{host}, which is not allowed")}),
                 Some(solidcraft_io::vfs::Remote::Device) => json!({"component": c, "name": name, "path": path, "file": file,
@@ -951,6 +1007,41 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// #9739: a link keeps what it read of its file, so an assembly opened again says which
+    /// linked designs changed while it was closed; Update Links takes the change and the record.
+    #[test]
+    fn a_link_says_its_file_changed_while_the_design_was_closed() {
+        let dir = std::env::temp_dir().join(format!("solidcraft-link-changed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (part, assembly) = (dir.join("p.sc"), dir.join("a.sc"));
+        save_box(&part, 10.0);
+        let mut a = Session::default();
+        run(&mut a, "component.insert_design", json!({"path": part}));
+        run(&mut a, "file.save", json!({"path": assembly}));
+        let changed = |s: &mut Session| run(s, "component.links", json!({}))["links"][0]["changed"].clone();
+        assert_eq!(changed(&mut a), json!(false));
+        // The part is edited while the assembly is closed.
+        save_box(&part, 30.0);
+        let mut opened = Session::default();
+        run(&mut opened, "doc.open", json!({"path": assembly}));
+        assert_eq!(changed(&mut opened), json!(true));
+        assert!((volume(&mut opened) - 2000.0).abs() < 1e-6, "{}", volume(&mut opened));
+        assert_eq!(run(&mut opened, "component.update_links", json!({}))["updated"], json!(["p"]));
+        assert_eq!(changed(&mut opened), json!(false));
+        assert!((volume(&mut opened) - 6000.0).abs() < 1e-6, "{}", volume(&mut opened));
+        // Saved, it opens up to date.
+        run(&mut opened, "file.save", json!({}));
+        let mut again = Session::default();
+        run(&mut again, "doc.open", json!({"path": assembly}));
+        assert_eq!(changed(&mut again), json!(false));
+        // A link made before the record says nothing; Update Links gives it one.
+        again.doc_mut().links.values_mut().for_each(|l| l.file_sha256 = None);
+        assert_eq!(changed(&mut again), Value::Null);
+        assert_eq!(run(&mut again, "component.update_links", json!({}))["unchanged"], json!(["p"]));
+        assert_eq!(changed(&mut again), json!(false));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn inserting_a_missing_file_or_bad_parameters_changes_nothing() {
         let mut s = Session::default();
@@ -976,6 +1067,20 @@ mod tests {
         assert!(confined_link_path(&root, &root.join("parts/../parts/part.solidcraft")).is_ok());
         assert!(confined_link_path(&root, &root.join("../outside.solidcraft")).is_err());
         assert!(confined_link_path(&root, &dir.join("outside.solidcraft")).is_err());
+        let local = root.join("parts/part.solidcraft");
+        assert!(file_sha256(&local, None).is_some());
+        let calls = solidcraft_io::vfs::file_calls();
+        assert!(file_sha256(&local, Some(&local.to_string_lossy())).is_none(), "a cached digest must not bypass self-link rejection");
+        assert_eq!(solidcraft_io::vfs::file_calls(), calls, "self-link rejection must not probe a cached source");
+        solidcraft_io::vfs::scoped(Some(solidcraft_io::vfs::PathScope::new([])), || {
+            assert!(file_sha256(&local, None).is_none(), "a cached digest must not bypass a later scope restriction");
+        });
+        // The scope resolves the path to judge it; it must not return the cached digest.
+        let calls = solidcraft_io::vfs::file_calls();
+        for denied in [r"\\evil.example\share\x.solidcraft", r"\\.\COM1"] {
+            assert!(file_sha256(Path::new(denied), None).is_none());
+        }
+        assert_eq!(solidcraft_io::vfs::file_calls(), calls, "refused digest sources must not touch the filesystem");
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(dir.join("outside.solidcraft"), root.join("escape.solidcraft")).unwrap();

@@ -150,6 +150,9 @@ fn point_cloud_preview_is_explicitly_unavailable_before_rendering_and_hidden_sca
         color: None,
         height_range: None,
         visible: true,
+        complex: Default::default(),
+        color_property: None,
+        filters: Vec::new(),
     });
     let before = backend.workspace_status();
     let error = backend.observer_start(&json!({}), Some(renderer())).unwrap_err();

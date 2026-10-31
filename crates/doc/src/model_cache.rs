@@ -177,9 +177,6 @@ impl Writer {
     }
 
     fn model_body(&mut self, b: &ModelBody) -> Option<usize> {
-        if b.body.is_mesh() {
-            return None;
-        }
         let key = BodyKey::of(b);
         if let Some(i) = self.model_body_index.get(&key) {
             return Some(*i);
@@ -261,7 +258,7 @@ impl Writer {
 
 impl Model {
     /// The model as a design file keeps it: `None` unless it is `doc`'s evaluation without an
-    /// error, holds no mesh bodies, and `doc` keeps no names saved before format 14. Works out
+    /// error and `doc` keeps no names saved before format 14. Works out
     /// the face names not asked for yet (a saved model keeps them as worked out).
     pub fn saved(&self, doc: &Document) -> Option<SavedModel> {
         if self.results.is_empty() || self.results.iter().any(|r| r.error.is_some()) || !self.is_current(doc) || has_legacy_names(doc) {

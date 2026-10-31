@@ -160,8 +160,7 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
         done = true;
     }
     if !features.is_empty() {
-        let ids: Vec<String> = features.iter().map(u64::to_string).collect();
-        sub(s, "timeline.delete", json!({ "features": ids }))?;
+        sub(s, "timeline.delete", json!({ "features": features }))?;
         done = true;
     }
     // Bodies still there (not made by a feature deleted above) get a Remove feature.

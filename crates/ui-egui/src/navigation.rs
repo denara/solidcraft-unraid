@@ -293,6 +293,39 @@ pub(crate) fn pinch_factor(input: &egui::InputState, options: egui::InputOptions
     factor
 }
 
+/// The wheel and pinch of this frame for a widget that zooms and moves along one axis itself (a
+/// range track), claimed so that nothing under it moves as well: the wheel's vertical points
+/// (zoom), its sideways points (the content moves by them) and the pinch factor. Units and
+/// modifier routing are egui's, as for the camera.
+pub(crate) fn axis_wheel(ctx: &egui::Context, page_height: f32) -> (f32, f32, f32) {
+    let options = ctx.options(|o| o.input_options);
+    let (zoom, sideways, pinch) = ctx.input(|i| {
+        let (mut zoom, mut sideways) = (0.0, 0.0);
+        for event in &i.events {
+            let egui::Event::MouseWheel { unit, delta, modifiers, phase } = event else { continue };
+            if *phase != egui::TouchPhase::Move || modifiers.matches_any(options.zoom_modifier) {
+                continue;
+            }
+            let points = match unit {
+                egui::MouseWheelUnit::Point => *delta,
+                egui::MouseWheelUnit::Line => *delta * options.line_scroll_speed,
+                egui::MouseWheelUnit::Page => *delta * page_height,
+            };
+            let up = route_wheel_vertical(points, *modifiers, options);
+            zoom += up;
+            sideways += if up == 0.0 { points.x + points.y } else { points.x };
+        }
+        // A zoom-modified wheel, skipped above, zooms the track once, as a pinch: no chosen
+        // trackpad modifier turns it into anything else here.
+        (zoom, sideways, pinch_factor(i, options, page_height, None))
+    });
+    let (zoom, sideways) = (if zoom.is_finite() { zoom } else { 0.0 }, if sideways.is_finite() { sideways } else { 0.0 });
+    if zoom != 0.0 || sideways != 0.0 || pinch != 1.0 {
+        claim_wheel(ctx);
+    }
+    (zoom, sideways, pinch)
+}
+
 /// Give this frame's wheel to the widget under the pointer that uses it itself (a value field
 /// stepping its number, `value_step`): no scroll area or camera under it moves as well.
 pub(crate) fn claim_wheel(ctx: &egui::Context) {
@@ -795,9 +828,17 @@ pub(crate) fn handle(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, resp: &e
         if pressed || key || dragging || motion.is_some() || !caps.orbit {
             app.viewport.spin = false;
         } else {
-            orbit_camera(app, f64::from(dt.min(0.1)) * 30.0, 0.0);
+            let pivot = spin_pivot(app, rect);
+            let dx = f64::from(dt.min(0.1)) * 30.0;
+            match pivot {
+                Some(p) => orbit_about(app, rect, dx, 0.0, p),
+                None => orbit_camera(app, dx, 0.0),
+            }
             ui.ctx().request_repaint();
         }
+    }
+    if !app.viewport.spin {
+        app.viewport.spin_pivot = None;
     }
     if !app.cam.is_valid() {
         app.viewport.orbit_free = None;
@@ -809,22 +850,26 @@ pub(crate) fn handle(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, resp: &e
 
 /// The 3D mouse's motion this frame (#1336), on a page `rect` whose camera may do `caps`: the cap
 /// pans and zooms every page, and turns the view where the page may orbit. In a sketch, turning
-/// stays off while the camera is in its initial sketch orientation. [`handle`] calls it for its page; the 3D
-/// mouse only reads the device and queues the motion ([`crate::space_mouse::navigate_frame`]).
+/// stays off while the camera is in its initial sketch orientation, unless the user lets the 3D
+/// mouse turn sketches (`space_mouse_sketch_orbit`, #2227), as the mouse can. [`handle`] calls it
+/// for its page; the 3D mouse only reads the device and queues the motion
+/// ([`crate::space_mouse::navigate_frame`]).
 pub(crate) fn device(app: &mut SolveApp, rect: Rect, caps: NavCaps) {
     if app.viewport.device_motion.is_none() && app.viewport.bridge_motion.is_none() {
         return;
     }
-    let sketch_view_is_initial = solidcraft_engine::view::open_sketch_plane(&app.session).is_some_and(|plane| {
-        let normal = plane.normal();
-        let mut initial = app.cam.looking_from(normal);
-        if normal.z.abs() > 0.999 {
-            initial.yaw = if normal.z > 0.0 { (-plane.x.y).atan2(plane.x.x) } else { plane.x.y.atan2(plane.x.x) };
-        }
-        let (right, up, back) = app.cam.basis();
-        let (initial_right, initial_up, initial_back) = initial.basis();
-        right.dot(initial_right) > 0.999 && up.dot(initial_up) > 0.999 && back.dot(initial_back) > 0.999
-    });
+    let sketch_turns = app.preferences.space_mouse_sketch_orbit;
+    let sketch_view_is_initial = !sketch_turns
+        && solidcraft_engine::view::open_sketch_plane(&app.session).is_some_and(|plane| {
+            let normal = plane.normal();
+            let mut initial = app.cam.looking_from(normal);
+            if normal.z.abs() > 0.999 {
+                initial.yaw = if normal.z > 0.0 { (-plane.x.y).atan2(plane.x.x) } else { plane.x.y.atan2(plane.x.x) };
+            }
+            let (right, up, back) = app.cam.basis();
+            let (initial_right, initial_up, initial_back) = initial.basis();
+            right.dot(initial_right) > 0.999 && up.dot(initial_up) > 0.999 && back.dot(initial_back) > 0.999
+        });
     let turn = caps.orbit && !sketch_view_is_initial;
     let height = f64::from(rect.height().max(1.0));
     // A device has no pointer, so opt-in zoom holds the model at the middle of the view (#7435).
@@ -1103,6 +1148,25 @@ pub fn orbit(app: &mut SolveApp, rect: egui::Rect, dx: f64, dy: f64, press: Opti
         None => app.cam.orbit(dx, dy),
     }
     app.viewport.orbit_from = Some(OrbitFrom { dx, dy, last: app.cam, ..from });
+}
+
+/// What continuous orbit turns about, by Orbit around: the view's centre (none), the world origin,
+/// or around the cursor the model point in the middle of the view (else the middle of the bodies
+/// in view), chosen once when the spin starts. Turning about the view's centre instead let the
+/// model swing out of view once earlier cursor orbits had left that centre off the model (#1044).
+fn spin_pivot(app: &mut SolveApp, rect: Rect) -> Option<Vec3> {
+    match app.preferences.orbit_around {
+        OrbitAround::ViewCentre => None,
+        OrbitAround::Origin => Some(Vec3::ZERO),
+        OrbitAround::Cursor => Some(match app.viewport.spin_pivot {
+            Some(p) => p,
+            None => {
+                let p = pivot_under(app, &projection(app, rect), rect.center());
+                app.viewport.spin_pivot = Some(p);
+                p
+            }
+        }),
+    }
 }
 
 /// An orbit drag so far: the camera it began with, the pointer's total motion since, the pivot
@@ -1850,6 +1914,76 @@ mod tests {
         assert!(distances.windows(2).all(|pair| pair[0] == pair[1]));
     }
 
+    /// Continuous orbit turns about what Orbit around names (#1044): around the cursor, the model
+    /// point in the middle of the view stays still on screen for the whole spin, even when the
+    /// view's centre has been left far behind the model; around the view's centre, as before.
+    #[test]
+    fn continuous_orbit_turns_about_the_orbit_around_point() {
+        use crate::prefs::OrbitAround;
+        for fov in [0.0, 0.6] {
+            for around in [OrbitAround::Cursor, OrbitAround::Origin, OrbitAround::ViewCentre] {
+                let mut s = solidcraft_engine::Session::default();
+                s.execute("solid.box", &serde_json::json!({"length":40,"width":30,"height":20})).unwrap();
+                let mut app = crate::SolveApp::new(s, crate::Services::default());
+                app.preferences.orbit_around = around;
+                app.cam.fov = fov;
+                let ctx = crate::fonts::test_context();
+                let mut time = 0.0;
+                let mut frame = |app: &mut crate::SolveApp| {
+                    time += 1.0 / 60.0;
+                    let raw = egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+                        time: Some(time),
+                        focused: true,
+                        ..Default::default()
+                    };
+                    let mut out = ctx.run_ui(raw, |ui| {
+                        let rect = ui.max_rect();
+                        app.viewport.rect = Some(rect);
+                        let resp = ui.interact(rect, ui.id().with("spin"), egui::Sense::click_and_drag());
+                        super::handle(app, ui, rect, &resp, super::NavCaps::MODEL);
+                    });
+                    out.textures_delta.clear();
+                };
+                frame(&mut app);
+                app.fit_view();
+                // Earlier cursor orbits leave the view's centre far behind the model, which still
+                // shows in the middle of the view.
+                let back = app.cam.basis().2;
+                app.cam.target -= back * 300.0;
+                app.cam.distance += 300.0;
+                let rect = app.viewport.rect.unwrap();
+                let held = match around {
+                    OrbitAround::Cursor => crate::prefs::pivot_under(&app, &super::projection(&app, rect), rect.center()),
+                    OrbitAround::Origin => super::Vec3::ZERO,
+                    OrbitAround::ViewCentre => app.cam.target,
+                };
+                let start = super::projection(&app, rect).to_screen(held).unwrap();
+                let (yaw, target) = (app.cam.yaw, app.cam.target);
+                app.viewport.spin = true;
+                for i in 0..90 {
+                    frame(&mut app);
+                    assert!(app.viewport.spin, "{around:?}: nothing stopped the spin");
+                    let now = super::projection(&app, rect).to_screen(held).unwrap();
+                    assert!(now.distance(start) < 0.5, "fov {fov} {around:?}, frame {i}: the held point moved {start:?} -> {now:?}");
+                }
+                assert!((app.cam.yaw - yaw).abs() > 0.1, "{around:?}: the view turned");
+                match around {
+                    OrbitAround::Cursor => {
+                        assert_eq!(app.viewport.spin_pivot, Some(held), "the point is chosen once");
+                        let middle = crate::prefs::pivot_under(&app, &super::projection(&app, rect), rect.center());
+                        assert!(middle.dist(held) < 30.0, "fov {fov}: the model is still in the middle: {middle:?} vs {held:?}");
+                    }
+                    OrbitAround::ViewCentre => assert!((app.cam.target - target).len() < 1e-9, "the view's centre stays as before"),
+                    OrbitAround::Origin => assert!(app.viewport.spin_pivot.is_none()),
+                }
+                app.viewport.spin = false;
+                frame(&mut app);
+                assert!(app.viewport.spin_pivot.is_none(), "a stopped spin forgets its point");
+            }
+        }
+    }
+
     /// A flat page (orbit off) pans and zooms with the same bindings and never turns the view.
     #[test]
     fn flat_pages_pan_and_zoom_with_the_same_bindings_but_never_orbit() {
@@ -2281,6 +2415,45 @@ mod tests {
         let still = app.cam;
         super::device(&mut app, page, super::NavCaps::MODEL);
         assert_eq!(app.cam, still);
+    }
+
+    /// With "3D mouse turns sketches" on (#2227), the cap and a device app turn a sketch seen square
+    /// on, as the mouse does; pages that may not orbit still only pan.
+    #[test]
+    fn the_3d_mouse_turns_a_square_on_sketch_when_the_preference_allows_it() {
+        use crate::space_mouse::{BridgeMotion, DeviceMotion, Motion};
+        use solidcraft_engine::render::Camera;
+        let mut s = solidcraft_engine::Session::default();
+        s.execute("sketch.create", &serde_json::json!({"plane": "XY"})).unwrap();
+        let mut app = crate::SolveApp::new(s, crate::Services::default());
+        assert!(!app.preferences.space_mouse_sketch_orbit, "off by default");
+        app.preferences.space_mouse_sketch_orbit = true;
+        let square_on = Camera { yaw: 0.0, pitch: std::f64::consts::FRAC_PI_2, ..Camera::default() };
+        let page = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let turn = |c: &Camera| (c.yaw, c.pitch, c.roll);
+
+        app.cam = square_on;
+        app.viewport.device_motion = Some(DeviceMotion { motion: Motion { translation: [0.0; 3], rotation: [0.3, 0.3, 0.0] }, seconds: 0.05 });
+        super::device(&mut app, page, super::NavCaps::MODEL);
+        assert_ne!(turn(&app.cam), turn(&square_on), "the cap turns the square-on sketch");
+
+        app.cam = square_on;
+        app.viewport.bridge_motion = Some(BridgeMotion { orbit: [6.0, 6.0], ..Default::default() });
+        super::device(&mut app, page, super::NavCaps::MODEL);
+        assert_ne!(turn(&app.cam), turn(&square_on), "a device app turns it too");
+
+        // A page that may not orbit keeps its orientation whatever the preference.
+        app.cam = square_on;
+        app.viewport.device_motion = Some(DeviceMotion { motion: Motion { translation: [0.0; 3], rotation: [0.3, 0.3, 0.3] }, seconds: 0.05 });
+        super::device(&mut app, page, super::NavCaps { orbit: false, ..super::NavCaps::MODEL });
+        assert_eq!(turn(&app.cam), turn(&square_on));
+
+        // Off again: the square-on sketch keeps its orientation, as before.
+        app.preferences.space_mouse_sketch_orbit = false;
+        app.cam = square_on;
+        app.viewport.device_motion = Some(DeviceMotion { motion: Motion { translation: [0.0; 3], rotation: [0.3, 0.3, 0.3] }, seconds: 0.05 });
+        super::device(&mut app, page, super::NavCaps::MODEL);
+        assert_eq!(turn(&app.cam), turn(&square_on));
     }
 }
 

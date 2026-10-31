@@ -17,6 +17,8 @@ fn app_with_discovered_login() -> SolveApp {
             argv: vec!["qwen".into(), "--acp".into()],
             version: None,
             login: discover::Login::LooksLoggedIn,
+            problem: None,
+            install: "npm install -g @qwen-code/qwen-code",
         }],
         ..Default::default()
     });
@@ -96,6 +98,38 @@ fn agent_login_refresh_returns_to_unverified_discovery() {
     frame(&mut app);
     assert_eq!(agents::current(&app).unwrap().login, "login_found");
     assert!(!app.agent_chat.settings.tests.contains_key("qwen"));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_sign_in_proven_in_one_tab_holds_in_every_tab() {
+    // #9293: discovery found no login file before the user signed in from the panel. The chat's
+    // proof of the sign-in belongs to the window, so a new tab doesn't ask for it again.
+    let mut app = app_with_discovered_login();
+    if let Some(d) = app.agent_chat.detection.as_mut() {
+        d.found[0].login = discover::Login::NotLoggedIn;
+    }
+    assert_eq!(assistant_mark(&app), AssistantMark::NeedsAuth);
+    app.agent_chat.on_event(Event::Ready { agent: "Qwen Code".into(), images: false });
+    assert_eq!(agents::current(&app).unwrap().login, "signed_in");
+
+    crate::documents::open_tab(&mut app, solidcraft_engine::Session::default()).unwrap();
+    assert_eq!(app.agent_chat.state(), State::Off, "a new tab starts its own conversation");
+    assert_eq!(agents::current(&app).unwrap().login, "signed_in");
+    assert_eq!(assistant_mark(&app), AssistantMark::Ready, "no sign-in mark in the new tab");
+
+    // Evidence from the new tab is the newest, also back in the first one.
+    app.agent_chat.running_id = "qwen".into();
+    app.agent_chat.on_event(Event::AuthRequired { methods: vec![] });
+    crate::documents::switch(&mut app, 0);
+    assert_eq!(agents::current(&app).unwrap().login, "signed_out");
+    app.agent_chat.on_event(Event::Ready { agent: "Qwen Code".into(), images: false });
+
+    // A replacement design starts a fresh conversation, not a fresh sign-in.
+    crate::documents::reset_chat(&mut app);
+    assert_eq!(agents::current(&app).unwrap().login, "signed_in");
+    crate::documents::close(&mut app, 0, true);
+    assert_eq!(agents::current(&app).unwrap().login, "signed_in", "closing a tab keeps the window's evidence");
 }
 
 #[test]
@@ -554,6 +588,9 @@ impl ChatBackend for Script {
     }
     fn answer_permission(&mut self, key: u64, option: Option<&str>) {
         self.calls.lock().unwrap().push(format!("permission: {key} {option:?}"));
+    }
+    fn set_config_option(&mut self, id: &str, value: &str) {
+        self.calls.lock().unwrap().push(format!("set_config_option: {id}={value}"));
     }
     fn authenticate(&mut self, _: &str) {}
     fn shutdown(&mut self, _: bool) {}
@@ -1231,6 +1268,367 @@ fn hostile_provider_names_are_bounded() {
     assert_eq!(model_provider(&m(" · model".into(), "")), None);
     assert_eq!(model_provider(&m("model".into(), "Provider:  ")), None);
     assert_eq!(model_provider(&m("model".into(), "Provider: A\nsecond line • current")).map(|p| p.0), Some("A".into()));
+}
+
+fn modern_options(model: &str) -> Vec<acp::ConfigOption> {
+    vec![
+        acp::ConfigOption {
+            id: "some.provider.model".into(),
+            name: "Model".into(),
+            description: String::new(),
+            category: "model".into(),
+            current_value: model.into(),
+            options: ["fast", "smart"]
+                .into_iter()
+                .map(|v| acp::ConfigChoice { value: v.into(), name: v.into(), description: String::new(), group: None })
+                .collect(),
+        },
+        acp::ConfigOption {
+            id: "custom-mode-key".into(),
+            name: "Mode".into(),
+            description: String::new(),
+            category: "mode".into(),
+            current_value: "ask".into(),
+            options: ["ask", "plan"]
+                .into_iter()
+                .map(|v| acp::ConfigChoice { value: v.into(), name: v.into(), description: String::new(), group: None })
+                .collect(),
+        },
+    ]
+}
+
+#[test]
+fn modern_snapshots_replace_provider_choices_and_ignore_legacy_updates() {
+    let (mut app, script, ctx) = app_with_script();
+    script.report(Event::Models { current: "plain".into(), available: provider_models() });
+    poll(&mut app, &ctx);
+    set_model_provider(&mut app, "Host");
+    script.report(Event::ConfigOptions(modern_options("smart")));
+    script.report(Event::Models { current: "plain".into(), available: provider_models() });
+    script.report(Event::Modes { current: "old-mode".into(), available: vec![("old-mode".into(), "Old mode".into())] });
+    poll(&mut app, &ctx);
+    assert_eq!(app.agent_chat.model, "smart");
+    assert_eq!(app.agent_chat.mode, "ask");
+    assert!(app.agent_chat.model_provider.is_none());
+    assert!(model_providers(&app).is_empty());
+    assert_eq!(listed_models(&app).into_iter().map(|(m, _)| m.id).collect::<Vec<_>>(), ["fast", "smart"]);
+    script.report(Event::ConfigOptions(vec![]));
+    poll(&mut app, &ctx);
+    assert_eq!(app.agent_chat.config_options, Some(vec![]));
+    assert!(app.agent_chat.models.is_empty() && app.agent_chat.modes.is_empty());
+    set_model(&mut app, "plain");
+    set_mode(&mut app, "old-mode");
+    assert!(script.calls().is_empty(), "an empty modern snapshot never falls back to stale legacy choices");
+}
+
+#[test]
+fn modern_acknowledgements_stay_with_their_document_without_resuming_its_queue() {
+    let (mut app, first, ctx) = app_with_script();
+    app.agent_chat.running_id = "first-modern".into();
+    app.agent_chat.on_event(Event::ConfigOptions(modern_options("fast")));
+    app.preferences.agent_models.insert("first-modern".into(), "smart".into());
+    new_chat(&mut app);
+    send(&mut app, &ctx, "first request".into());
+    first.report(Event::ConfigOptions(modern_options("fast")));
+    first.report(Event::Ready { agent: "first-modern".into(), images: false });
+    poll(&mut app, &ctx);
+    assert!(app.agent_chat.config_pending && app.agent_chat.queued.is_some());
+
+    crate::documents::open_tab(&mut app, solidcraft_engine::Session::default()).unwrap();
+    assert!(app.agent_chat.config_options.is_none() && !app.agent_chat.config_pending);
+    let second = Script::default();
+    app.agent_chat.backend = Some(Box::new(second.clone()));
+    app.agent_chat.state = Some(State::Ready);
+    app.agent_chat.running_id = "second-modern".into();
+    app.agent_chat.on_event(Event::ConfigOptions(modern_options("fast")));
+    set_model(&mut app, "smart");
+    first.report(Event::ConfigOptionFinished { id: "some.provider.model".into(), result: Ok(modern_options("smart")) });
+    poll(&mut app, &ctx);
+    assert!(app.agent_chat.config_pending, "the hidden tab's acknowledgement cannot unlock this one");
+    assert_eq!(app.agent_chat.model, "fast");
+    assert!(!app.preferences.agent_models.contains_key("second-modern"));
+    second.report(Event::ConfigOptionFinished { id: "some.provider.model".into(), result: Ok(modern_options("smart")) });
+    poll(&mut app, &ctx);
+    assert_eq!(app.preferences.agent_models.get("second-modern").map(String::as_str), Some("smart"));
+
+    crate::documents::switch(&mut app, 0);
+    assert!(app.agent_chat.config_pending, "pending configuration belongs to the conversation");
+    poll(&mut app, &ctx);
+    assert!(!app.agent_chat.config_pending);
+    assert_eq!(app.agent_chat.model, "smart");
+    assert_eq!(app.preferences.agent_models.get("first-modern").map(String::as_str), Some("smart"));
+    assert_eq!(texts(&app), ["first request"]);
+    assert!(app.agent_chat.queued.is_none() && app.agent_chat.stopped);
+    assert!(first.prompts().is_empty() && second.prompts().is_empty(), "a late configuration reply cannot resume a departed tab's prompt");
+}
+
+#[test]
+fn closing_a_pending_modern_chat_preserves_the_surviving_api_endpoint_and_saved_models() {
+    for close_active in [false, true] {
+        let (mut app, modern, ctx) = app_with_script();
+        app.agent_chat.running_id = "modern".into();
+        app.agent_chat.on_event(Event::ConfigOptions(modern_options("fast")));
+        app.preferences.agent_models.insert("modern".into(), "fast".into());
+        set_model(&mut app, "smart");
+        assert!(app.agent_chat.config_pending);
+
+        crate::documents::open_tab(&mut app, solidcraft_engine::Session::default()).unwrap();
+        let endpoint = "http://127.0.0.1:12345/v1";
+        let api = Script::default();
+        app.agent_chat.backend = Some(Box::new(api.clone()));
+        app.agent_chat.state = Some(State::Ready);
+        app.agent_chat.running_id = "endpoint-agent".into();
+        app.agent_chat.running_endpoint = endpoint.into();
+        app.preferences.agents.push(agents::AgentConfig {
+            id: "endpoint-agent".into(),
+            kind: agents::Kind::Api,
+            base_url: endpoint.into(),
+            model: "fast".into(),
+            ..Default::default()
+        });
+        api.report(models_reply("fast"));
+        poll(&mut app, &ctx);
+        set_model(&mut app, "smart");
+        let cached = app.agent_chat.models_cache.get(endpoint).cloned().unwrap();
+        modern.report(Event::ConfigOptionFinished { id: "some.provider.model".into(), result: Ok(modern_options("smart")) });
+        modern.report(Event::ConfigOptions(vec![]));
+        if close_active {
+            crate::documents::switch(&mut app, 0);
+            assert!(app.agent_chat.config_pending);
+        }
+        crate::documents::close(&mut app, 0, true);
+        poll(&mut app, &ctx);
+        assert_eq!(app.agent_chat.running_id, "endpoint-agent");
+        assert_eq!(app.agent_chat.running_endpoint, endpoint);
+        assert!(app.agent_chat.config_options.is_none() && !app.agent_chat.config_pending);
+        assert_eq!(app.agent_chat.model, "smart");
+        assert_eq!(app.agent_chat.models_cache.get(endpoint), Some(&cached));
+        assert_eq!(app.preferences.agent_models.get("modern").map(String::as_str), Some("fast"));
+        assert_eq!(app.preferences.agent_models.get("endpoint-agent").map(String::as_str), Some("smart"));
+        assert_eq!(app.preferences.agents.iter().find(|a| a.id == "endpoint-agent").unwrap().model, "smart");
+        assert_eq!(api.calls(), ["set_model: smart"], "the closed chat's events cannot reach the surviving backend");
+
+        // Reusing the same agent in a fresh design must restore only the last confirmed model.
+        crate::documents::open_tab(&mut app, solidcraft_engine::Session::default()).unwrap();
+        assert!(app.agent_chat.config_options.is_none() && !app.agent_chat.config_pending);
+        let fresh = Script::default();
+        app.agent_chat.backend = Some(Box::new(fresh.clone()));
+        app.agent_chat.state = Some(State::Starting);
+        app.agent_chat.running_id = "modern".into();
+        fresh.report(Event::ConfigOptions(modern_options("fast")));
+        fresh.report(Event::Ready { agent: "modern".into(), images: false });
+        poll(&mut app, &ctx);
+        assert_eq!(app.agent_chat.model, "fast");
+        assert!(!app.agent_chat.config_pending);
+        assert!(fresh.calls().is_empty(), "an unacknowledged choice from the closed chat is not restored");
+        assert_eq!(app.agent_chat.models_cache.get(endpoint), Some(&cached));
+    }
+}
+
+#[test]
+fn document_disconnect_paths_clear_modern_configuration_and_pending_requests() {
+    let assert_cleared = |app: &SolveApp| {
+        assert!(app.agent_chat.backend.is_none());
+        assert!(app.agent_chat.config_options.is_none() && !app.agent_chat.config_pending);
+        assert!(app.agent_chat.models.is_empty() && app.agent_chat.modes.is_empty());
+        assert!(app.agent_chat.model.is_empty() && app.agent_chat.mode.is_empty());
+        assert!(app.agent_chat.model_provider.is_none());
+        assert_eq!(app.agent_chat.state(), State::Off);
+    };
+    let (mut app, _, _) = app_with_script();
+    app.agent_chat.on_event(Event::ConfigOptions(modern_options("fast")));
+    set_model(&mut app, "smart");
+    disconnect(&mut app);
+    assert_cleared(&app);
+
+    for quitting in [false, true] {
+        let (mut app, first, ctx) = app_with_script();
+        app.agent_chat.on_event(Event::ConfigOptions(modern_options("fast")));
+        set_model(&mut app, "smart");
+        crate::documents::open_tab(&mut app, solidcraft_engine::Session::default()).unwrap();
+        app.agent_chat.backend = Some(Box::new(Script::default()));
+        app.agent_chat.state = Some(State::Ready);
+        app.agent_chat.on_event(Event::ConfigOptions(modern_options("fast")));
+        set_model(&mut app, "smart");
+        first.report(Event::ConfigOptionFinished { id: "some.provider.model".into(), result: Ok(modern_options("smart")) });
+        if quitting {
+            shutdown(&mut app);
+        } else {
+            app.preferences.ai_features = false;
+            poll(&mut app, &ctx);
+        }
+        assert_cleared(&app);
+        crate::documents::switch(&mut app, 0);
+        assert_cleared(&app);
+        assert!(app.preferences.agent_models.is_empty(), "an unpolled acknowledgement is discarded with its backend");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn modern_config_requests_roundtrip_success_rejection_malformed_and_retry() {
+    let dir = std::env::temp_dir().join(format!("sc-chat-config-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("requests.jsonl");
+    let script = r#"
+log="$1"; n=0
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> "$log"
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"agentInfo":{"name":"fake"}}}\n' "$id" ;;
+    *'"method":"session/new"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"s1","configOptions":[{"id":"vendor.model-key","name":"Model","category":"model","type":"select","currentValue":"fast","options":[{"value":"fast","name":"Fast"},{"value":"smart","name":"Smart"}]}]}}\n' "$id" ;;
+    *'"method":"session/set_config_option"'*)
+      n=$((n+1))
+      case "$n" in
+        1|4) v=smart; [ "$n" = 4 ] && v=fast; printf '{"jsonrpc":"2.0","id":%s,"result":{"configOptions":[{"id":"vendor.model-key","name":"Model","category":"model","type":"select","currentValue":"%s","options":[{"value":"fast","name":"Fast"},{"value":"smart","name":"Smart"}]}]}}\n' "$id" "$v" ;;
+        2) printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32001,"message":"rejected"}}\n' "$id" ;;
+        3) printf '{"jsonrpc":"2.0","id":%s,"result":{"configOptions":[{"type":"select"}]}}\n' "$id" ;;
+      esac ;;
+  esac
+done
+"#;
+    let argv = vec!["sh".into(), "-c".into(), script.into(), "fake".into(), log.to_string_lossy().into_owned()];
+    let (wake_tx, wake_rx) = channel();
+    let start = backend::StartContext {
+        cwd: dir.clone(),
+        bridge: None,
+        tools: None,
+        wake: Box::new(move || {
+            let _ = wake_tx.send(());
+        }),
+    };
+    let mut app = SolveApp::new(solidcraft_engine::Session::default(), crate::Services::default());
+    app.agent_chat.backend = Some(Box::new(acp_client::AcpBackend::start(&argv, start).unwrap()));
+    app.agent_chat.running_id = "modern".into();
+    app.agent_chat.state = Some(State::Starting);
+    let ctx = crate::fonts::test_context();
+    let until = |app: &mut SolveApp, done: &dyn Fn(&SolveApp) -> bool| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            poll(app, &ctx);
+            if done(app) {
+                return;
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            assert!(!left.is_zero(), "timed out; status={}", status(app));
+            wake_rx.recv_timeout(left).expect("backend wake");
+        }
+    };
+    until(&mut app, &|a| a.agent_chat.state() == State::Ready);
+    assert_eq!(app.agent_chat.model, "fast");
+    for (value, expected, saved) in [("smart", "smart", "smart"), ("fast", "smart", "smart"), ("smart", "smart", "smart"), ("fast", "fast", "fast")] {
+        set_model(&mut app, value);
+        assert!(app.agent_chat.config_pending);
+        until(&mut app, &|a| !a.agent_chat.config_pending);
+        assert_eq!(app.agent_chat.model, expected);
+        assert_eq!(app.preferences.agent_models.get("modern").map(String::as_str), Some(saved));
+    }
+    disconnect(&mut app);
+    let requests: Vec<Value> = std::fs::read_to_string(&log).unwrap().lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    let configs: Vec<_> = requests.iter().filter(|v| v["method"] == "session/set_config_option").collect();
+    assert_eq!(configs.len(), 4);
+    assert_eq!(
+        configs.iter().map(|v| v["params"].clone()).collect::<Vec<_>>(),
+        ["smart", "fast", "smart", "fast"].map(|value| json!({"sessionId":"s1","configId":"vendor.model-key","value":value}))
+    );
+    assert!(!requests.iter().any(|v| v["method"] == "session/set_model"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn modern_controls_route_by_category_and_wait_for_acknowledgement() {
+    let (mut app, script, _) = app_with_script();
+    app.agent_chat.running_id = "modern".into();
+    app.agent_chat.on_event(Event::ConfigOptions(modern_options("fast")));
+    set_model(&mut app, "smart");
+    assert!(app.agent_chat.config_pending);
+    assert_eq!(app.agent_chat.model, "fast");
+    assert!(!app.preferences.agent_models.contains_key("modern"));
+    assert_eq!(script.calls(), ["set_config_option: some.provider.model=smart"]);
+    app.agent_chat.on_event(Event::ConfigOptions(modern_options("fast")));
+    assert!(app.agent_chat.config_pending, "a notification does not acknowledge the request");
+    app.agent_chat.on_event(Event::ConfigOptionFinished { id: "some.provider.model".into(), result: Ok(modern_options("smart")) });
+    assert!(!app.agent_chat.config_pending);
+    assert_eq!(app.agent_chat.model, "smart");
+    app.preferences.agent_models.insert("modern".into(), app.agent_chat.model.clone());
+    set_mode(&mut app, "ask");
+    assert_eq!(script.calls().last().map(String::as_str), Some("set_config_option: custom-mode-key=ask"));
+}
+
+#[test]
+fn modern_rejection_and_malformed_success_unlock_without_changing_confirmed_value() {
+    let (mut app, script, _) = app_with_script();
+    app.agent_chat.on_event(Event::ConfigOptions(modern_options("fast")));
+    set_model(&mut app, "smart");
+    app.agent_chat.on_event(Event::ConfigOptionFinished { id: "some.provider.model".into(), result: Err("rejected".into()) });
+    assert!(!app.agent_chat.config_pending);
+    assert_eq!(app.agent_chat.model, "fast");
+    set_model(&mut app, "smart");
+    app.agent_chat.on_event(Event::ConfigOptionFinished { id: "some.provider.model".into(), result: Err("malformed snapshot".into()) });
+    assert!(!app.agent_chat.config_pending);
+    assert_eq!(app.agent_chat.model, "fast");
+    assert_eq!(script.calls().len(), 2);
+}
+
+#[test]
+fn modern_saved_model_restore_waits_for_ack_and_manual_confirmation_persists() {
+    let (mut app, script, ctx) = app_with_script();
+    app.agent_chat.running_id = "modern".into();
+    app.preferences.agent_models.insert("modern".into(), "smart".into());
+    script.report(Event::ConfigOptions(modern_options("fast")));
+    script.report(Event::Ready { agent: "modern".into(), images: false });
+    poll(&mut app, &ctx);
+    assert_eq!(app.agent_chat.model, "fast");
+    assert_eq!(app.preferences.agent_models.get("modern").map(String::as_str), Some("smart"));
+    assert_eq!(script.calls(), ["set_config_option: some.provider.model=smart"]);
+    script.report(Event::ConfigOptionFinished { id: "some.provider.model".into(), result: Ok(modern_options("smart")) });
+    poll(&mut app, &ctx);
+    assert_eq!(app.agent_chat.model, "smart");
+    assert_eq!(app.preferences.agent_models.get("modern").map(String::as_str), Some("smart"));
+}
+
+#[test]
+fn modern_model_restore_then_mode_restore_are_acknowledged_before_queued_prompt() {
+    let (mut app, script, ctx) = app_with_script();
+    app.agent_chat.running_id = "modern".into();
+    app.preferences.agent_models.insert("modern".into(), "smart".into());
+    app.agent_chat.restore_mode = Some("plan".into());
+    app.agent_chat.queued = Some(("describe the model".into(), false, None, Vec::new()));
+    script.report(Event::ConfigOptions(modern_options("fast")));
+    script.report(Event::Ready { agent: "modern".into(), images: false });
+    poll(&mut app, &ctx);
+    assert_eq!(script.calls(), ["set_config_option: some.provider.model=smart"]);
+    assert_eq!(app.agent_chat.model, "fast");
+    assert_eq!(app.preferences.agent_models.get("modern").map(String::as_str), Some("smart"));
+    script.report(Event::ConfigOptionFinished { id: "some.provider.model".into(), result: Ok(modern_options("smart")) });
+    poll(&mut app, &ctx);
+    assert_eq!(script.calls().get(1).map(String::as_str), Some("set_config_option: custom-mode-key=plan"));
+    assert!(app.agent_chat.queued.is_some(), "prompt waits for mode confirmation");
+    let mut confirmed = modern_options("smart");
+    confirmed[1].current_value = "plan".into();
+    script.report(Event::ConfigOptionFinished { id: "custom-mode-key".into(), result: Ok(confirmed) });
+    poll(&mut app, &ctx);
+    assert!(script.calls().iter().any(|s| s == "prompt: describe the model"));
+    assert_eq!(app.preferences.agent_models.get("modern").map(String::as_str), Some("smart"));
+}
+
+#[test]
+fn invalidated_modern_sessions_do_not_expose_stale_legacy_choices() {
+    for event in [Event::AuthRequired { methods: vec![] }, Event::Exited { tail: vec![] }] {
+        let (mut app, _, _) = app_with_script();
+        app.agent_chat.on_event(Event::ConfigOptions(modern_options("smart")));
+        app.agent_chat.config_pending = true;
+        app.agent_chat.on_event(event);
+        assert!(app.agent_chat.config_options.is_none() && !app.agent_chat.config_pending);
+        assert!(app.agent_chat.models.is_empty() && app.agent_chat.modes.is_empty());
+        assert!(app.agent_chat.model.is_empty() && app.agent_chat.mode.is_empty());
+    }
+    let (mut app, _, _) = app_with_script();
+    app.agent_chat.on_event(Event::ConfigOptions(modern_options("smart")));
+    new_chat(&mut app);
+    assert_eq!(app.agent_chat.restore_mode.as_deref(), Some("ask"));
+    assert!(app.agent_chat.config_options.is_none() && app.agent_chat.models.is_empty());
 }
 
 /// An agent that reports no models gets no picker; another agent's choice is not applied to it.
@@ -2071,6 +2469,34 @@ fn a_connection_that_never_gets_ready_says_connection_failed_and_offers_retry() 
     assert_eq!(app.agent_chat.state(), State::Failed);
     assert!(app.preferences.agent_last.is_empty(), "only an agent that started is remembered");
 
+    // A found agent that failed its version check (#9034): the picker says it doesn't start, and
+    // connecting says why and how to install it again, besides the system's own message.
+    let mut app = SolveApp::new(solidcraft_engine::Session::default(), crate::Services::default());
+    let reason = "This version of opencode.exe is not compatible with the version of Windows you're running.";
+    app.agent_chat.detection = Some(discover::Detection {
+        found: vec![discover::Found {
+            id: "opencode",
+            name: "OpenCode",
+            argv: vec!["solidcraft-no-such-agent-9034".into(), "acp".into()],
+            version: None,
+            login: discover::Login::Unknown,
+            problem: Some(reason.into()),
+            install: "npm install -g opencode-ai",
+        }],
+        ..Default::default()
+    });
+    let entry = agents::current(&app).unwrap();
+    assert!(entry.detail().contains(reason), "{}", entry.detail());
+    connect(&mut app, &ctx);
+    assert_eq!(app.agent_chat.state(), State::Failed);
+    let told = |needle: &str| app.agent_chat.items.iter().any(|i| matches!(i, Item::Notice { text, error: true } if text.contains(needle)));
+    assert!(told(reason) && told("npm install -g opencode-ai") && told("OpenCode"), "{:?}", app.agent_chat.items);
+    assert_eq!(status(&app)["agents"][0]["problem"], reason);
+    // One that answered has nothing to say.
+    let mut fine = entry.clone();
+    fine.problem = None;
+    assert_eq!(fine.problem_hint(), None);
+
     // No agent at all: the picker opens on what to install.
     let mut app = SolveApp::new(solidcraft_engine::Session::default(), crate::Services::default());
     app.agent_chat.detection = Some(discover::Detection::default());
@@ -2657,6 +3083,27 @@ fn no_tool_turn_warning_leaves_answers_and_incomplete_turns_quiet() {
     }
 }
 
+/// A turn that ends with nothing shown because the reply hit its length limit, or the model
+/// declined, says so instead of blaming tool support (#9495).
+#[test]
+fn a_cut_off_or_declined_reply_says_so_instead_of_blaming_tools() {
+    for (reason, said) in [("max_tokens", "ui.agent_chat_reply_cut_off"), ("refusal", "ui.agent_chat_reply_declined")] {
+        let (mut app, _, _) = app_with_script();
+        app.agent_chat.tools_port = Some(12345);
+        start_turn(&mut app, "Make a box".into(), false, None, vec![]);
+        app.agent_chat.on_event(Event::TurnEnded { reason: reason.into() });
+        end_turn(&mut app);
+        assert!(status(&app)["turnWarning"].is_null(), "{reason}");
+        let notices: Vec<&str> = app
+            .agent_chat
+            .items
+            .iter()
+            .filter_map(|i| if let Item::Notice { text, error: false } = i { Some(text.as_str()) } else { None })
+            .collect();
+        assert_eq!(notices, [tr(said)], "{reason}");
+    }
+}
+
 // ---- Tool calls in words (#1457) ----
 
 fn in_mm() -> summary::Units<'static> {
@@ -2901,4 +3348,22 @@ fn the_composer_hint_stays_on_one_row_at_the_narrowest_width() {
         }
     }
     assert!(checked >= 20, "every language was checked");
+}
+
+/// The room tool windows get beside the docked Assistant, in a view that came out inside out
+/// (the window of #9492): the Assistant's side gives way instead of panicking in `f32::clamp`.
+#[test]
+fn tool_room_beside_the_docked_assistant_survives_an_inside_out_view() {
+    let mut app = SolveApp::new(solidcraft_engine::Session::default(), crate::Services::default());
+    app.ui.layout = crate::shell::LayoutMode::Floating;
+    app.preferences.ai_features = true;
+    app.agent_chat.open = true;
+    app.preferences.agent_chat_popped = false;
+    app.agent_chat.panel_rect = Some(egui::Rect::from_min_max(egui::pos2(100.0, 40.0), egui::pos2(150.0, 600.0)));
+    let inside_out = egui::Rect::from_min_max(egui::pos2(264.1875, 40.0), egui::pos2(159.0, 600.0));
+    for side in ["right", "left"] {
+        app.preferences.agent_chat_side = side.into();
+        let free = tool_space(&app, inside_out);
+        assert!(free.min.x.is_finite() && free.max.x.is_finite(), "{side}: {free:?}");
+    }
 }

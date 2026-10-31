@@ -96,7 +96,7 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
         }
         match id {
             "file.new" => *current = None,
-            "component.insert_design" | "component.relink" | "component.update_links" | "component.replace_with_link" => {
+            "component.insert_design" | "component.relink" | "component.update_links" | "component.replace_with_link" | "component.links" => {
                 out.push(FileOperation::ReadSources)
             }
             "pointcloud.insert" | "render.hdr.inspect" | "render.settings.capture_hdr" | "render.preflight" | "render.start" => {
@@ -387,6 +387,7 @@ mod tests {
         std::fs::write(root.join("source.solidcraft"), b"public fixture").unwrap();
         for command in [
             "component.insert_design",
+            "component.links",
             "component.relink",
             "component.update_links",
             "component.replace_with_link",

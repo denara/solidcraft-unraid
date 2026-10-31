@@ -24,6 +24,7 @@ mod bom;
 mod browser;
 pub(crate) mod clearance;
 mod clipboard;
+mod clipboard_foreign;
 mod compare;
 mod component;
 mod component_clone;
@@ -59,6 +60,7 @@ pub(crate) mod inspect;
 mod interference;
 pub(crate) mod joints;
 mod libraries;
+pub mod mass_properties;
 mod material_properties;
 mod materials;
 mod measure_sel;
@@ -91,6 +93,7 @@ pub(crate) use sheet::{
 mod silhouette;
 mod sketch;
 pub(crate) use sketch::author_path_for_rebind;
+pub(crate) use sketch::collapse_reason;
 pub(crate) use sketch::created as sketch_created;
 mod canvas_sketch;
 mod sketch_3d;
@@ -324,6 +327,7 @@ pub fn command_specs() -> Vec<&'static CommandSpec> {
     v.extend(config::COMMANDS.iter());
     v.extend(parts::COMMANDS.iter());
     v.extend(bom::COMMANDS.iter());
+    v.extend(mass_properties::COMMANDS.iter());
     v.extend(browser::COMMANDS.iter());
     v.extend(delete::COMMANDS.iter());
     v.extend(edit::COMMANDS.iter());
@@ -379,6 +383,20 @@ pub(crate) fn did_you_mean(id: &str) -> String {
         [] => String::new(),
         [one] => format!(" (did you mean {one}?)"),
         [rest @ .., end] => format!(" (did you mean {} or {end}?)", rest.join(", ")),
+    }
+}
+
+/// "no body `name`", and the closest of `bodies` when it is near enough to be a typo or another
+/// case of the same name (`b` for `B`): `no body `Bdy`; did you mean `Body`?` (#9740).
+pub(crate) fn no_body<'a>(name: &str, bodies: impl IntoIterator<Item = &'a str>) -> String {
+    let want = name.to_lowercase();
+    let near = (want.chars().count() / 3).max(1);
+    let closest = (want.len() <= 256)
+        .then(|| bodies.into_iter().map(|b| (edit_distance(&want, &b.to_lowercase()), b)).filter(|(d, _)| *d <= near).min_by_key(|(d, _)| *d))
+        .flatten();
+    match closest {
+        Some((_, b)) => format!("no body `{name}`; did you mean `{b}`?"),
+        None => format!("no body `{name}`"),
     }
 }
 

@@ -1190,6 +1190,63 @@ mod tests {
         }
     }
 
+    /// #9170: a mesh body (an imported STL) is kept in the model cache with the rest of the
+    /// model, as its own triangles, colour and paint. One mesh body left the whole cache out, so
+    /// opening the design evaluated every feature again.
+    #[test]
+    fn model_cache_keeps_mesh_bodies_with_the_rest_of_the_model() {
+        use solidcraft_geom::Vec3;
+        let corners = [Vec3::ZERO, Vec3::new(10., 0., 0.), Vec3::new(0., 10., 0.), Vec3::new(0., 0., 10.)];
+        let tetra = solidcraft_kernel::mesh_body(&corners, &[[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]])
+            .unwrap()
+            .with_color(Some([0.25, 0.5, 0.75]))
+            .with_paint(Some(solidcraft_kernel::Paint { opacity: 0.5, faces: Vec::new() }));
+        let block = solidcraft_kernel::box_solid(Vec3::new(40., 0., 0.), Vec3::new(60., 20., 20.)).unwrap();
+        let model = saved_model(vec![block, tetra.clone()]);
+        let doc = document();
+        let bytes = write_design_container_with_cache(&doc, DesignCompression::Fast, None, Some(&model)).unwrap();
+        let entries = parts(&bytes);
+        let manifest: Value = serde_json::from_slice(&entries["cache/model.json"]).expect("the cache is written");
+        assert_eq!(manifest["slices"].as_array().unwrap().len(), 2);
+        let read = DesignContainerReader::new(Cursor::new(&bytes)).unwrap().geometry().unwrap();
+        assert_eq!(read.records, model.records);
+        assert_eq!(solidcraft_kernel::encode_native_body(&read.bodies[0]).unwrap(), solidcraft_kernel::encode_native_body(&model.bodies[0]).unwrap());
+        let mesh = &read.bodies[1];
+        assert_eq!(mesh.triangle_mesh(), tetra.triangle_mesh());
+        assert_eq!((mesh.color(), mesh.paint()), (tetra.color(), tetra.paint()));
+        // The picture shown while opening draws the mesh body with its own triangles.
+        let preview = read_design_preview(&bytes).unwrap();
+        assert_eq!(preview.meshes.len(), 2);
+        let (positions, triangles) = tetra.triangle_mesh().unwrap();
+        assert_eq!(&*preview.meshes[1].positions, &positions.iter().flat_map(|p| [p.x, p.y, p.z]).collect::<Vec<_>>()[..]);
+        assert_eq!(&*preview.meshes[1].triangles, &triangles.iter().flatten().copied().collect::<Vec<_>>()[..]);
+        assert_eq!(preview.meshes[1].color, tetra.color());
+
+        // A changed or cut-short mesh slice (signed again, so it reaches the slice's reader) is a
+        // cache miss or another mesh, never a crash.
+        let range = |i: usize| manifest["slices"][1][i].as_u64().unwrap() as usize;
+        let (start, length) = (range(0), range(1));
+        let payload = entries["cache/bodies.bin"].clone();
+        assert_eq!(payload.len(), start + length, "the mesh slice is the last");
+        let with = |payload: &[u8], length: usize| {
+            let mut entries = entries.clone();
+            let mut manifest = manifest.clone();
+            manifest["payload"] = json!(digest(payload));
+            manifest["slices"][1][1] = json!(length);
+            entries.insert("cache/model.json".into(), serde_json::to_vec(&manifest).unwrap());
+            entries.insert("cache/bodies.bin".into(), payload.to_vec());
+            package(&entries)
+        };
+        assert!(read_design_geometry(&with(&payload, length)).is_some(), "signed again as it was, it reads");
+        for n in (start..start + length).step_by(5) {
+            let mut changed = payload.clone();
+            changed[n] ^= 0xff;
+            let changed = with(&changed, length);
+            assert!(std::panic::catch_unwind(|| (read_design_geometry(&changed), read_design_preview(&changed))).is_ok(), "byte {n}");
+            assert!(read_design_geometry(&with(&payload[..n], n - start)).is_none(), "cut short at {n}");
+        }
+    }
+
     /// A model cache that does not fit the design file is left out: the save succeeds, and the
     /// design reads back as saved.
     #[test]

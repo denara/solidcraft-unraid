@@ -774,6 +774,45 @@ fn feature_names(s: &Session) -> Vec<String> {
     s.doc.features.iter().map(|feature| feature.name.clone()).collect()
 }
 
+#[test]
+fn timeline_keys_distinguish_numeric_names_from_ids() {
+    let mut s = four_boxes();
+    let id = s.doc.find_feature("Second").unwrap().id;
+    let named = s.doc.find_feature("Third").unwrap().id;
+    let key = id.to_string();
+    run(&mut s, "timeline.rename", json!({"feature": named, "name": key}));
+
+    assert_eq!(run(&mut s, "timeline.inspect", json!({"feature": key}))["id"], named);
+    assert_eq!(run(&mut s, "timeline.inspect", json!({"feature": id}))["id"], id);
+    assert_eq!(run(&mut s, "timeline.inspect", json!({"feature": named.to_string()}))["id"], named);
+    assert_eq!(run(&mut s, "timeline.copy", json!({"features": [key, id]}))["copied"], json!(["Second", key]));
+
+    // Resolve the whole request before deleting: a repeated name must not turn into an id
+    // after the first deletion removes the feature with that name.
+    assert_eq!(run(&mut s, "timeline.delete", json!({"features": [key, key]}))["deleted"], json!([named]));
+    assert!(s.doc.feature(id).is_some());
+    run(&mut s, "edit.undo", json!({}));
+    run(&mut s, "selection.delete", json!({"items": [Sel::Feature { id }]}));
+    assert!(s.doc.feature(id).is_none());
+    assert!(s.doc.feature(named).is_some());
+}
+
+#[test]
+fn timeline_keys_prefer_exact_case_and_refuse_an_ambiguous_fallback() {
+    let mut s = four_boxes();
+    let second = s.doc.find_feature("Second").unwrap().id;
+    let third = s.doc.find_feature("Third").unwrap().id;
+    run(&mut s, "timeline.rename", json!({"feature": third, "name": "second"}));
+
+    let before = s.doc.clone();
+    let error = s.execute("timeline.delete", &json!({"features": ["First", "SECOND"]})).unwrap_err().to_string();
+    assert!(error.contains("ambiguous"), "{error}");
+    assert_eq!(s.doc, before);
+    assert_eq!(run(&mut s, "timeline.inspect", json!({"feature": "Second"}))["id"], second);
+    assert_eq!(run(&mut s, "timeline.suppress", json!({"feature": "second"}))["feature"], third);
+    assert_eq!(run(&mut s, "timeline.inspect", json!({"feature": "FIRST"}))["name"], "First");
+}
+
 /// `timeline.delete {groups}` deletes a folder with its features and nested folders in one undo
 /// step; other folders and features stay, and `timeline.ungroup` still keeps the features (#7219).
 #[test]

@@ -185,13 +185,6 @@ impl Keymap {
     }
     pub fn load(&mut self, v: &Value) {
         self.custom = v.as_object().map(|o| o.iter().take(2000).filter_map(|(k, v)| Some((k.clone(), saved_keys(v)?))).collect()).unwrap_or_default();
-        // A shortcut that named a modifier key twice ("Shift+ShiftLeft", before shift
-        // keys were named after themselves) is the modifier itself (#4582).
-        for key in self.custom.values_mut().flatten() {
-            if let Some(named) = named_modifier_key(key) {
-                *key = named;
-            }
-        }
     }
 }
 
@@ -206,12 +199,70 @@ pub(crate) fn keys_value(keys: &[String]) -> Value {
 
 /// A command's saved keys: `""` (none), one key, or a list of them.
 pub(crate) fn saved_keys(v: &Value) -> Option<Vec<String>> {
-    match v {
-        Value::String(key) if key.is_empty() => Some(Vec::new()),
-        Value::String(key) => Some(vec![key.clone()]),
-        Value::Array(keys) => Some(keys.iter().filter_map(Value::as_str).filter(|k| !k.is_empty()).take(MAX_KEYS).map(str::to_string).collect()),
-        _ => None,
+    let raw: Vec<&str> = match v {
+        Value::String(key) => vec![key.as_str()],
+        Value::Array(keys) => keys.iter().filter_map(Value::as_str).filter(|k| !k.is_empty()).take(MAX_KEYS).collect(),
+        _ => return None,
+    };
+    if raw.iter().any(|key| key.len() > 256) {
+        log::warn!("saved shortcut name exceeds 256 bytes; binding ignored");
+        return None;
     }
+    let mut keys = Vec::new();
+    for key in raw.into_iter().filter(|key| !key.is_empty()) {
+        let Some(key) = canonical_key(key).filter(|key| !RESERVED.contains(&key.as_str())) else {
+            log::warn!("invalid or reserved saved shortcut ignored");
+            continue;
+        };
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    Some(keys)
+}
+
+/// Read the same chord that recording a key produces, independent of case and modifier order.
+/// The last token is the key; the preceding tokens are modifiers. Keep the historical primary
+/// Ctrl/Cmd alias, explicit Control+Command chords and old physical modifier-key names.
+fn canonical_key(text: &str) -> Option<String> {
+    if text.len() > 256 {
+        return None;
+    }
+    let text = text.trim();
+    if text.is_empty() || (text.starts_with('+') && text != "+") {
+        return None;
+    }
+    let (prefix, name) = if text == "+" {
+        ("", "+")
+    } else if let Some(prefix) = text.strip_suffix("++") {
+        (prefix, "+")
+    } else {
+        text.rsplit_once('+').unwrap_or(("", text))
+    };
+    let mut mods = egui::Modifiers::NONE;
+    if !prefix.is_empty() {
+        for part in prefix.split('+') {
+            match part.trim().to_ascii_lowercase().as_str() {
+                "ctrl" | "control" => mods.ctrl = true,
+                "cmd" | "command" => mods.mac_cmd = true,
+                "alt" | "option" => mods.alt = true,
+                "shift" => mods.shift = true,
+                _ => return None,
+            }
+        }
+    }
+    mods.command = mods.ctrl || mods.mac_cmd;
+    let name = name.trim();
+    let key = match name.to_ascii_lowercase().as_str() {
+        "ctrl" | "control" if !mods.ctrl && !mods.mac_cmd => egui::Key::ControlLeft,
+        "cmd" | "command" if !mods.ctrl && !mods.mac_cmd => egui::Key::SuperLeft,
+        "alt" | "option" if !mods.alt => egui::Key::AltLeft,
+        "shift" if !mods.shift => egui::Key::ShiftLeft,
+        "esc" => egui::Key::Escape,
+        "return" => egui::Key::Enter,
+        _ => egui::Key::ALL.iter().copied().find(|key| key.name().eq_ignore_ascii_case(name)).or_else(|| egui::Key::from_name(name))?,
+    };
+    Some(key_name(key, mods))
 }
 
 /// A key press as a shortcut name: `E`, `Shift+E`, `Ctrl+Alt+K`, `F5`, `Delete`.
@@ -268,16 +319,6 @@ impl Modifier {
         }
     }
 
-    /// The modifier a key is called in a shortcut name.
-    fn of_name(name: &str) -> Option<Self> {
-        match name {
-            "ShiftLeft" | "ShiftRight" => Some(Modifier::Shift),
-            "ControlLeft" | "ControlRight" | "SuperLeft" | "SuperRight" => Some(Modifier::Ctrl),
-            "AltLeft" | "AltRight" => Some(Modifier::Alt),
-            _ => None,
-        }
-    }
-
     /// The modifier's name in a shortcut.
     fn name(self) -> &'static str {
         match self {
@@ -286,21 +327,6 @@ impl Modifier {
             Modifier::Shift => "Shift",
         }
     }
-}
-
-/// A shortcut name that ends in a modifier key, with that key named after its modifier:
-/// `Shift+ShiftLeft` is `Shift` and `Ctrl+ShiftLeft` is `Ctrl+Shift` (#4582).
-fn named_modifier_key(key: &str) -> Option<String> {
-    let mut parts: Vec<&str> = key.split('+').collect();
-    let last = parts.pop()?;
-    let modifier = Modifier::of_name(last)?;
-    let name = modifier.name();
-    // The modifier named twice ("Shift+Shift") is the modifier alone.
-    if parts.last() == Some(&name) {
-        parts.pop();
-    }
-    parts.push(name);
-    Some(parts.join("+"))
 }
 
 /// The key a command runs from now, the one menus and tooltips show: its first.
@@ -461,6 +487,8 @@ pub fn bind(app: &mut SolveApp, id: &str, key: &str, replace: bool) -> Result<()
 /// sketch tool and a model command may share a key: each runs in its own mode.
 pub fn bind_at(app: &mut SolveApp, id: &str, slot: Option<usize>, key: &str, replace: bool) -> Result<(), String> {
     let spec = solidcraft_engine::find_command(id).ok_or_else(|| format!("no command `{id}`"))?;
+    let canonical = if key.is_empty() { String::new() } else { canonical_key(key).ok_or("unknown shortcut key")? };
+    let key = canonical.as_str();
     if RESERVED.contains(&key) {
         return Err(format!("{key} is used by SolidCraft itself"));
     }
@@ -817,6 +845,105 @@ mod tests {
 
     fn app() -> SolveApp {
         SolveApp::new(solidcraft_engine::Session::default(), Default::default())
+    }
+
+    #[test]
+    fn text_shortcuts_preserve_recorded_keys_and_modifier_aliases() {
+        for &key in egui::Key::ALL.iter().filter(|&&key| Modifier::of(key).is_none()) {
+            for flags in 0..16 {
+                let mods = egui::Modifiers {
+                    ctrl: flags & 1 != 0,
+                    mac_cmd: flags & 2 != 0,
+                    command: flags & 3 != 0,
+                    alt: flags & 4 != 0,
+                    shift: flags & 8 != 0,
+                };
+                let recorded = key_name(key, mods);
+                assert_eq!(canonical_key(&recorded), Some(recorded.clone()), "{recorded}");
+            }
+        }
+        for (text, expected) in [
+            (" shift + CTRL + shift + t ", "Ctrl+Shift+T"),
+            ("cmd+option+t", "Ctrl+Alt+T"),
+            ("shift+cmd+ctrl+t", "Ctrl+Cmd+Shift+T"),
+            ("ctrl++", "Ctrl+Plus"),
+            ("+", "Plus"),
+            ("Ctrl+ShiftLeft", "Ctrl+Shift"),
+            ("shift+shiftright", "Shift"),
+            ("shift", "Shift"),
+        ] {
+            assert_eq!(canonical_key(text).as_deref(), Some(expected), "{text}");
+        }
+        for text in ["", " ", "+T", "++", "Ctrl+", "Ctrl++T", "Foo+T", "T+Ctrl", "Shift+Shift"] {
+            assert_eq!(canonical_key(text), None, "{text}");
+        }
+        assert_eq!(canonical_key(&"T".repeat(257)), None);
+    }
+
+    #[test]
+    fn text_shortcuts_use_the_recorded_chord_and_check_conflicts() {
+        let mut h = crate::scenario::Harness::new();
+        h.app.home.open = false;
+        for spelling in ["ctrl+shift+t", "Shift+Ctrl+T", "CTRL+SHIFT+T", "Ctrl+Shift+T"] {
+            let reply = h.call("ui.shortcut", json!({"command":"solid.box", "key":spelling}));
+            assert_eq!(reply["result"]["keys"], json!(["Ctrl+Shift+T"]), "{reply}");
+            h.call("ui.key", json!({"key":"T", "cmd":true, "shift":true}));
+            assert!(
+                matches!(h.app.dialog.as_ref().map(|d| &d.kind), Some(crate::dialogs::Kind::Primitive { cmd: "solid.box", .. })),
+                "{spelling} opens Box"
+            );
+            h.call("ui.key", json!({"key":"Escape"}));
+        }
+        let before = h.app.keymap.prefs();
+        let conflict = h.call("ui.shortcut", json!({"command":"solid.cylinder", "key":"shift+CTRL+t"}));
+        assert!(conflict["error"].as_str().unwrap().contains("already used by Box"));
+        for key in ["Foo", "Shift+Shift", "Ctrl+", "Ctrl++T", "T+Ctrl", "escape", "ctrl+z", "delete", "ctrl+comma"] {
+            let reply = h.call("ui.shortcut", json!({"command":"solid.box", "key":key}));
+            assert_eq!(reply["ok"], false, "{key}: {reply}");
+            assert_eq!(h.app.keymap.prefs(), before, "a refused binding changes nothing");
+        }
+        bind(&mut h.app, "solid.cylinder", "shift+ctrl+t", true).unwrap();
+        assert!(keys(&h.app, "solid.box").is_empty());
+        assert_eq!(keys(&h.app, "solid.cylinder"), ["Ctrl+Shift+T"]);
+    }
+
+    #[test]
+    fn text_shortcuts_are_checked_in_settings_and_shortcut_imports() {
+        let saved = json!({
+            "solid.box":["shift+ctrl+t", "CTRL+SHIFT+T", "Foo", "ctrl+z", "delete", "escape"],
+            "solid.cylinder":"alt+f12",
+            "solid.extrude":"Shift+ShiftLeft",
+            "solid.sphere":""
+        });
+        let mut a = app();
+        a.keymap.load(&saved);
+        assert_eq!(keys(&a, "solid.box"), ["Ctrl+Shift+T"]);
+        assert_eq!(keys(&a, "solid.cylinder"), ["Alt+F12"]);
+        assert_eq!(keys(&a, "solid.extrude"), ["Shift"], "legacy modifier-only keys survive");
+        assert!(keys(&a, "solid.sphere").is_empty());
+        let mut imported = app();
+        crate::toolbar_custom::import(&mut imported, &json!({"format":"solidcraft-shortcuts/1", "shortcuts":saved})).unwrap();
+        assert_eq!(imported.keymap.prefs(), a.keymap.prefs());
+        let mut h = crate::scenario::Harness::new();
+        let profile = json!({"format":crate::settings_profiles::FORMAT, "name":"Text keys", "shortcuts":saved});
+        for (command, params) in [("settings.profile.import", json!({"profile":profile})), ("settings.profile.apply", json!({"name":"Text keys"}))] {
+            let reply = h.call("engine.execute", json!({"command":command, "params":params}));
+            assert_eq!(reply["ok"], true, "{reply}");
+        }
+        assert_eq!(h.app.keymap.prefs(), a.keymap.prefs());
+    }
+
+    #[test]
+    fn text_shortcuts_command_catalog_reports_the_current_binding() {
+        let mut h = crate::scenario::Harness::new();
+        for key in ["Ctrl+Shift+F", ""] {
+            bind(&mut h.app, "solid.fillet", key, false).unwrap();
+            for (method, params) in [("engine.commands", json!({})), ("engine.execute", json!({"command":"engine.commands", "params":{}}))] {
+                let reply = h.call(method, params);
+                let row = reply["result"].as_array().unwrap().iter().find(|row| row["id"] == "solid.fillet").unwrap();
+                assert_eq!(row["shortcut"], json!(effective(&h.app, "solid.fillet")), "{method}");
+            }
+        }
     }
 
     fn recorder_frame(a: &mut SolveApp, ctx: &egui::Context, time: f64, events: Vec<egui::Event>) {
@@ -1178,7 +1305,7 @@ mod tests {
         assert!(keys(&b, "solid.extrude").is_empty());
         assert_eq!(b.keymap.prefs()["solid.extrude"], json!(""));
         // A hostile settings file can't give one command endless keys.
-        let many: Vec<String> = (0..50).map(|n| format!("Ctrl+Alt+F{n}")).collect();
+        let many: Vec<String> = (1..50).map(|n| format!("Ctrl+Alt+F{n}")).collect();
         b.keymap.load(&json!({"solid.extrude": many}));
         assert_eq!(keys(&b, "solid.extrude").len(), MAX_KEYS);
         assert!(bind_at(&mut b, "solid.extrude", Some(MAX_KEYS), "Shift+L", false).is_err());

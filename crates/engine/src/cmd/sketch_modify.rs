@@ -947,11 +947,19 @@ fn stop_point(sk: &Sketch, ci: usize, q: Vec2) -> Option<usize> {
 }
 
 /// Add the line an extension needs, from the growing end to the stop: the sketch's own point
-/// when the stop already is one, a new point otherwise.
-fn add_line_extension(sk: &mut Sketch, end: usize, q: Vec2, stop: Option<usize>) -> Result<String> {
+/// when the stop already is one, a new point otherwise. A new point stopped in the middle of a
+/// curve is pinned onto it, as the free-end path pins its end, so the extension is attached to
+/// the curve it stops on instead of lying loose over it.
+fn add_line_extension(sk: &mut Sketch, end: usize, q: Vec2, stop: Option<usize>, cutter: Option<usize>) -> Result<String> {
     let b = match stop {
         Some(p) => p,
-        None => sk.add_point(q, None)?,
+        None => {
+            let p = sk.add_point(q, None)?;
+            if let Some(cutter) = cutter {
+                pin(sk, p, cutter)?;
+            }
+            p
+        }
     };
     sk.add_curve(CurveKind::Line { a: end, b }, None)?;
     Ok(sk.points.get(b).map(|x| x.id.clone()).unwrap_or_default())
@@ -1076,7 +1084,7 @@ fn grow_line(sk: &mut Sketch, ci: usize, aim: LineAim) -> Result<String> {
 
     // The end joined to other geometry stays where it is: add a line from it.
     if !neighbors.is_empty() {
-        return add_line_extension(sk, end, q, stop);
+        return add_line_extension(sk, end, q, stop, cutter);
     }
 
     // An end held by a constraint, or lying on a circle or arc, stays where it is too: the
@@ -1096,7 +1104,9 @@ fn grow_line(sk: &mut Sketch, ci: usize, aim: LineAim) -> Result<String> {
         // Geometric check: does the endpoint lie on any circle or arc?
         let ep = sk.point(end).unwrap_or_default();
         sk.curves.iter().any(|curve| match curve.kind {
-            CurveKind::Circle { c, r } => (ep - sk.point(c).unwrap_or_default()).len().abs() - r < 1e-6,
+            // On the circle means its distance to the centre equals the radius: a point merely
+            // *inside* the circle is not held by it.
+            CurveKind::Circle { c, r } => ((ep - sk.point(c).unwrap_or_default()).len() - r).abs() < TOL,
             // This is an arc's own start or end: it sits on that arc.
             CurveKind::Arc { a, b, .. } => ep.dist(sk.point(a).unwrap_or_default()) < 1e-6 || ep.dist(sk.point(b).unwrap_or_default()) < 1e-6,
             _ => false,
@@ -1104,7 +1114,7 @@ fn grow_line(sk: &mut Sketch, ci: usize, aim: LineAim) -> Result<String> {
     };
 
     if end_is_held {
-        return add_line_extension(sk, end, q, stop);
+        return add_line_extension(sk, end, q, stop, cutter);
     }
 
     // A free end moves along instead, if the solver lets it. The attempt is made on a copy,
@@ -1134,7 +1144,7 @@ fn grow_line(sk: &mut Sketch, ci: usize, aim: LineAim) -> Result<String> {
         return Ok(sk.points.get(end).map(|x| x.id.clone()).unwrap_or_default());
     }
     // The solve could not put the end where it belongs: add a new line instead.
-    add_line_extension(sk, end, q, stop)
+    add_line_extension(sk, end, q, stop, cutter)
 }
 
 /// The two-curve form of `sketch.extend`: `curves` names exactly two curves, `at` optionally one

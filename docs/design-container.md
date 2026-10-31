@@ -118,8 +118,8 @@ Engine Save/Save As write the evaluated model with the design by default
 `cache/bodies.bin`. Plain JSON, recovery/autosave and browser downloads do not
 carry it. Saving never forces placement, evaluation or tessellation: the model is
 the session's own evaluation, and only when it is the evaluation of the document
-being saved (`Model::is_current`). An active sketch, uncaptured moves, feature
-errors or mesh bodies leave the cache out; the design saves as before. A cache
+being saved (`Model::is_current`). An active sketch, uncaptured moves or feature
+errors leave the cache out; the design saves as before. A cache
 over its budgets keeps fewer states (below) and is left out only when not even
 the final state fits.
 
@@ -146,6 +146,14 @@ kernel holds them, never refitted). Identical bodies share one slice (keyed by t
 SHA-256 of their encoding), and a placed copy of a repeated part (an instance from
 a STEP assembly) records the part and its matrix, so it shows that part's display
 again instead of being meshed on its own.
+
+A mesh body (an imported STL or 3MF, or a STEP part shown as a mesh of its faces) has no
+B-rep to encode. Its slice starts `SCMESH01`, then the length of a JSON header (u32) and the
+header (its vertex and triangle counts, colour and paint), then each vertex as three f64
+and each triangle as three u32, little-endian: the triangles exactly as the body holds them.
+Before #9170 one mesh body left the cache out for the whole model. As for a B-rep body, a
+mesh body is kept only when its slice reads back as the same vertices, bit for bit, the
+same triangles, colour and paint; the picture shown while opening draws its triangles.
 
 `cache/model.json` records `solidcraft-model-cache/5`, the producer revision
 `solidcraft-truck-adapter/3`, the application version, the build (source commit,

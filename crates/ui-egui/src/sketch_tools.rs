@@ -214,30 +214,6 @@ fn continuity_label(app: &SolveApp, seam: &Value) -> String {
 
 /// The Continuity Analysis legend in the viewport's lower left corner: each class in its
 /// colour, while seams are shaded.
-fn continuity_legend(app: &SolveApp, painter: &egui::Painter, proj: &Proj) {
-    if app.session.continuity.is_empty() {
-        return;
-    }
-    let tk = crate::theme::Tokens::get();
-    let [smooth, jump, sharp, gap] = tk.continuity;
-    // Stable ids: this Gap is a hole between faces, not the sheet-metal gap (`ui.sheet_gap`).
-    let tr = crate::i18n::tr;
-    let rows = [(tr("ui.continuity_g2"), smooth), (tr("ui.continuity_g1"), jump), (tr("ui.continuity_g0"), sharp), (tr("ui.continuity_gap"), gap)];
-    let font = egui::FontId::proportional(tk.font_body);
-    let (row, pad, swatch) = (18.0, 8.0, 22.0);
-    let text_width = rows.iter().map(|(label, _)| painter.layout_no_wrap(label.to_string(), font.clone(), tk.text).size().x).fold(0.0, f32::max);
-    let size = egui::vec2(pad + swatch + 8.0 + text_width + pad, rows.len() as f32 * row + 2.0 * pad);
-    let available = crate::shell::bottom_overlay_rect(app, proj.rect);
-    let frame = egui::Rect::from_min_size(available.left_bottom() + egui::vec2(16.0, -(size.y + 16.0)), size);
-    painter.rect_filled(frame, tk.radius_sm, tk.panel.gamma_multiply(0.9));
-    crate::scenario::publish_rect("continuity_legend", frame);
-    for (i, (label, col)) in rows.iter().enumerate() {
-        let y = frame.top() + pad + row * (i as f32 + 0.5);
-        painter.line_segment([egui::pos2(frame.left() + pad, y), egui::pos2(frame.left() + pad + swatch, y)], Stroke::new(3.0, *col));
-        painter.text(egui::pos2(frame.left() + pad + swatch + 8.0, y), egui::Align2::LEFT_CENTER, *label, font.clone(), tk.text);
-    }
-}
-
 /// Isocurve analysis lines.
 fn iso_lines(app: &SolveApp, painter: &egui::Painter, proj: &Proj) {
     if app.tool.as_ref().map(|t| t.cmd) != Some("inspect.isocurve") {
@@ -291,6 +267,10 @@ fn marks(app: &SolveApp, painter: &egui::Painter, proj: &Proj) {
 /// Commands that start with a step of their own: Canvas and Decal ask for the image first,
 /// Edit Canvas opens the canvas panel. False when the command should not go on.
 pub fn start_hook(app: &mut SolveApp, id: &str) -> bool {
+    if id == "inspect.section" && app.preferences.viewport_section_status && app.session.section.is_some() {
+        let _ = app.run(id, json!({"clear":true}));
+        return false;
+    }
     if id == "sketch.intersect"
         && let Some(dialog) = crate::dialogs::Dialog::for_command(app, id)
     {
@@ -1800,7 +1780,6 @@ pub fn show(app: &mut SolveApp, ui: &egui::Ui, painter: &egui::Painter, proj: &P
     }
     marks(app, painter, proj);
     iso_lines(app, painter, proj);
-    continuity_legend(app, painter, proj);
 }
 
 #[cfg(test)]

@@ -8,14 +8,27 @@ use std::sync::{Arc, Mutex};
 
 use egui_wgpu::wgpu;
 pub use solidcraft_gpu::view::{
-    AccessMap, BlockBuilder, BlockBytes, BlockTris, CLOUD_POINT_SIZE, DrawStats, DrawStatsHandle, Frame, GpuImage, GpuPoints, GpuScene, GpuTarget,
-    INSTANCE_SIZE, InstanceLook, InstancedMesh, LINE_SIZE, LOD_PX, MAX_PALETTE, PBR_SIZE, Palette, PaletteIndex, PlannedBody, Renderer, SHARED_SIZE,
-    SceneBlock, SceneSlot, SharedTris, TRI_SIZE, TriClass, UploadError, cloud_point, extend_runs, level_for, lifted_width, placement_scale,
-    runs_within, supersampled_size,
+    AccessMap, BlockBuilder, BlockBytes, BlockTris, DrawStats, DrawStatsHandle, Frame, GpuImage, GpuScene, GpuTarget, INSTANCE_SIZE, InstanceLook,
+    InstancedMesh, LINE_SIZE, LOD_PX, MAX_PALETTE, PBR_SIZE, Palette, PaletteIndex, PlannedBody, Renderer, SHARED_SIZE, SceneBlock, SceneSlot,
+    SharedTris, TRI_SIZE, TriClass, UploadError, extend_runs, level_for, lifted_width, placement_scale, runs_within, supersampled_size,
 };
 
 /// A frame of the viewport as an egui paint callback.
 pub struct ViewportCallback(pub Frame);
+
+/// The viewport callback composites transparently onto this egui GPU mesh. Both its clear
+/// surface and gradient therefore use the same published/animated tokens as the panels; no
+/// background colour belongs to a cached model scene or GPU upload.
+pub(crate) fn paint_background(painter: &egui::Painter, rect: egui::Rect, tokens: &crate::theme::Tokens) {
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(rect.left_top(), tokens.viewport_top);
+    mesh.colored_vertex(rect.right_top(), tokens.viewport_top);
+    mesh.colored_vertex(rect.right_bottom(), tokens.viewport_bottom);
+    mesh.colored_vertex(rect.left_bottom(), tokens.viewport_bottom);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    painter.add(egui::Shape::mesh(mesh));
+}
 
 /// The GPU plan evaluation compiling beside the window: there once it is ready ([`tick_tessellation`]).
 pub type TessReady = std::sync::Arc<std::sync::OnceLock<solidcraft_gpu::TessGpu>>;
@@ -454,7 +467,7 @@ fn offscreen(
         clip: [0.0; 4],
         cap: [0.0; 4],
         images: Vec::new(),
-        points: Vec::new(),
+        clouds: Vec::new(),
         analysis,
         analysis_colors,
         access: None,

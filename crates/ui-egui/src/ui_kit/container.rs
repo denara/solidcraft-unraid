@@ -146,6 +146,18 @@ impl Container {
         });
     }
 
+    /// [`Self::tooltip`] holding what `add` draws (a picture, say), beside `response` rather than
+    /// at the pointer, so it does not cover the row's neighbours.
+    pub(crate) fn tooltip_ui(response: &egui::Response, add: impl FnOnce(&mut egui::Ui)) {
+        let ctx = &response.ctx;
+        let mut tip = egui::Tooltip::for_enabled(response);
+        tip.popup = tip.popup.align(egui::RectAlign::RIGHT_START).frame(Self::new(ctx, Surface::Toast).tooltip_frame(ctx));
+        tip.show(|ui| {
+            add(ui);
+            crate::scenario::publish_rect("kit:tooltip", ui.min_rect());
+        });
+    }
+
     /// Declare contacts from shell geometry; styling remains entirely in the container.
     pub fn joined(mut self, edges: DockEdges) -> Self {
         self.joined = Some(edges);

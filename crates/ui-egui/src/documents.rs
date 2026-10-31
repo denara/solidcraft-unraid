@@ -378,11 +378,13 @@ pub fn adopt(app: &mut SolveApp, session: Session) {
         app.session.replace_design(session);
         // The blank design's record of its links goes with it; the new one's start now.
         app.docs.link_stamps.clear();
-        crate::linked_source::note_unread(app);
         crate::render_workspace::reset_document(app);
         app.session.invalidate_view(rev);
         app.cam = Camera::default();
         app.fit_view();
+        // The linked designs that changed while it was closed are read again (#9739): last, as a
+        // read is taken up only by the design revision it started from.
+        crate::linked_source::update_changed(app);
     } else if let Err(e) = open_tab(app, session) {
         app.set_status(e, true);
     }

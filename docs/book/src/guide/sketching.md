@@ -33,8 +33,11 @@ Hover over a circle or arc centre, or the midpoint of a straight sketch edge, th
 horizontally or vertically to see a dotted alignment guide. The guide connects that reference
 to the cursor's projection on the sketch axis, within the viewport; it disappears when you
 move away from the axis. SolidCraft keeps the two most recent of these references and can
-draw both guides. One guide on its own does not move the cursor, and endpoints are ordinary
-point snaps rather than remembered references. Preferences › Sketch › **Auto snap to recent
+draw both guides. One guide on its own does not move the cursor. While a drawing tool (Line,
+Rectangle, Circle, Arc, Polygon, Slot, Point…) waits for a point, any sketch point is a
+reference too: the end of a line or arc, a rectangle's corner, or a free point. Preferences ›
+Sketch › **Alignment guides from end points and corners while drawing** turns that off and
+keeps only centres and midpoints. Preferences › Sketch › **Auto snap to recent
 centers and midpoints** is off until you turn it on. With it on, a drawing tool snaps the
 cursor where the horizontal through one reference meets the vertical through the other. On a
 rectangle, the top midpoint and a side midpoint then meet at the rectangle's centre, so that
@@ -419,6 +422,9 @@ Measure shows the currently selected distance (centre, minimum or maximum) and s
 distances on the canvas. The component dimensions follow the world axes and remain visible
 until the Measure dialog closes. To hide these extra lines and labels, turn off
 **Preferences > Graphics > Show X/Y/Z distances**. The choice is saved between runs.
+Drag the distance or an X, Y or Z label to move it away from the part; a moved label keeps a
+line to what it measures. Double-click a label to put it back. Measuring other items starts the
+labels in their own places again.
 
 ### Reviewing mirror, pattern, and offset results
 

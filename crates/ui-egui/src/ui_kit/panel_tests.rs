@@ -952,6 +952,58 @@ fn required_platform_window_keeps_recovery_pending_until_an_explicit_choice() {
     assert!(scenario::rect_of("dialog:footer").is_none());
 }
 
+/// #9472: a card first laid out while the page is still tiny (a browser canvas not sized yet)
+/// grows its body once the page has its size, so the choice stays visible on every page size and
+/// scale. The browser's recovery card and the desktop one (with a footer) share this body.
+#[test]
+fn window_body_buttons_stay_visible_after_the_page_grows_from_nothing() {
+    for desktop in [false, true] {
+        for ppp in [1.0, 1.5, 2.0] {
+            for size in [egui::vec2(2992.0, 1692.0), egui::vec2(1496.0, 846.0), egui::vec2(800.0, 600.0), egui::vec2(320.0, 200.0)] {
+                let ctx = crate::fonts::test_context();
+                let mut buttons = Vec::new();
+                for page in [egui::Vec2::ZERO, egui::vec2(1.0, 1.0), egui::vec2(300.0, 150.0), size, size, size, size] {
+                    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, page);
+                    let viewport = egui::ViewportInfo { native_pixels_per_point: Some(ppp), ..Default::default() };
+                    let input = egui::RawInput {
+                        screen_rect: Some(screen),
+                        focused: true,
+                        viewports: std::iter::once((egui::ViewportId::ROOT, viewport)).collect(),
+                        ..Default::default()
+                    };
+                    buttons.clear();
+                    crate::test_support::frame(&ctx, input, |ui| {
+                        let window = Window::new(egui::Id::new("sc_browser_recovery"), "restore", "Recover unsaved work?");
+                        let body = |ui: &mut Ui| {
+                            ui.label("“Bracket” had unsaved changes when this page last closed.");
+                            ui.horizontal(|ui| {
+                                for label in ["Recover", "Discard"] {
+                                    let rect = button(ui, label, Button::Normal).rect;
+                                    buttons.push((label, rect, ui.clip_rect()));
+                                }
+                            });
+                        };
+                        if desktop {
+                            window.actions("", "Later", None).show_with_left(ui.ctx(), true, body, |_| {});
+                        } else {
+                            window.required().show_body(ui.ctx(), body);
+                        }
+                    });
+                }
+                let screen = ctx.content_rect();
+                assert_eq!(buttons.len(), 2, "desktop {desktop}, {size:?} at {ppp}");
+                for (label, rect, clip) in &buttons {
+                    assert!(rect.height() > 0.0 && rect.width() > 0.0, "{label}: desktop {desktop}, {size:?} at {ppp}: {rect:?}");
+                    assert!(
+                        clip.contains_rect(*rect) && screen.contains_rect(*rect),
+                        "{label} hidden: desktop {desktop}, {size:?} at {ppp}: {rect:?} clipped to {clip:?} on {screen:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn adjoining_compact_frames_share_one_stroke_and_only_exposed_corners_round() {
     use crate::ui_kit::DockEdges;
@@ -1210,4 +1262,22 @@ fn bevel_lighting_reverses_for_fields_and_pressed_buttons_without_changing_geome
     let tiny = Rect::from_min_size(Pos2::ZERO, egui::vec2(2.0, 2.0));
     let output = crate::test_support::frame(&ctx, egui::RawInput::default(), |ui| bevel.paint(ui.painter(), tiny, 0, false, true));
     assert!(!output.shapes.iter().any(|s| matches!(&s.shape, egui::Shape::LineSegment { .. })));
+}
+
+/// A left-anchored panel in a view that came out inside out keeps an anchor instead of
+/// panicking in `f32::clamp`, as the layout beside it did in #9492.
+#[test]
+fn a_left_panel_in_an_inside_out_view_keeps_an_anchor() {
+    let ctx = crate::fonts::test_context();
+    let inside_out = egui::Rect::from_min_max(egui::pos2(264.1875, 40.0), egui::pos2(159.0, 600.0));
+    let panel = super::Panel::new(
+        "Panel",
+        egui::Id::new("inside_out_panel"),
+        egui::pos2(200.0, 80.0),
+        inside_out,
+        crate::frame::Side::Left,
+        egui::Frame::NONE,
+    );
+    let anchor = panel.bounded_anchor(&ctx);
+    assert!(anchor.x.is_finite() && anchor.y.is_finite(), "{anchor:?}");
 }

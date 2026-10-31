@@ -268,7 +268,7 @@ fn card_and_column_keep_body_eyes_menus_and_group_drops() {
         h.step(&json!({"drag":[{"handle":"row:Two"},{"handle":"row:Group (1)"}]})).unwrap();
         h.settle();
         let group = h.app.session.doc.browser_groups.iter().find(|g| g.id == group).unwrap();
-        assert!(group.items.iter().any(|name| name == "Two"), "body drop into the folder failed in {mode:?}");
+        assert!(group.has_item("Two"), "body drop into the folder failed in {mode:?}");
     }
 }
 
@@ -796,4 +796,147 @@ fn an_eye_at_the_row_end_takes_its_click_from_the_scroll_bar() {
     h.settle();
     assert_eq!(h.app.session.visibility.hidden_sketches.len(), 1, "the eye hides its sketch");
     assert_eq!(handle_at("row:Sketch3"), Some(row), "the list did not scroll");
+}
+
+/// Dragging a group's row onto the middle of another group's row nests it; onto the top of a row
+/// puts it before that group. A group cannot be dropped into one of its own groups.
+#[test]
+fn a_group_dragged_onto_another_group_nests_in_it_or_goes_before_it() {
+    let mut h = Harness::new();
+    let ids: Vec<u64> = ["Alpha", "Beta", "Gamma"]
+        .into_iter()
+        .enumerate()
+        .map(|(i, name)| {
+            h.app.run("solid.box", json!({"length":10,"width":10,"height":10,"corner":[i as f64 * 20.0,0,0],"body_name":name})).unwrap();
+            h.app.run("browser.group", json!({"component":0,"folder":"bodies","items":[name],"name":name})).unwrap()["group"].as_u64().unwrap()
+        })
+        .collect();
+    let (alpha, beta, gamma) = (ids[0], ids[1], ids[2]);
+    h.settle();
+    let drag = |h: &mut Harness, from: &str, to: &str, dy: f32| {
+        let (from, to) = (handle_at(from).unwrap(), handle_at(to).unwrap());
+        assert_eq!(h.call("ui.drag", json!({"x0":from.x,"y0":from.y,"x1":to.x,"y1":to.y + dy,"steps":12}))["ok"], true);
+        h.settle();
+    };
+    let parent = |h: &Harness, id: u64| h.app.session.doc.browser_group(id).unwrap().parent;
+    drag(&mut h, "row:Alpha (1)", "row:Beta (1)", 0.0);
+    assert_eq!(parent(&h, alpha), Some(beta));
+    drag(&mut h, "row:Beta (2)", "row:Alpha (1)", 0.0);
+    assert_eq!(parent(&h, beta), None, "a group does not go into its own group");
+    drag(&mut h, "row:Gamma (1)", "row:Beta (2)", -10.0);
+    assert_eq!(h.app.session.doc.ordered_entries(0, "bodies", None), [BrowserEntry::Group(gamma), BrowserEntry::Group(beta)]);
+}
+
+/// Three bodies with their eyes in the Browser, the first one's eye hidden or shown per the test.
+fn three_bodies(h: &mut Harness) {
+    for (name, x) in [("One", 0), ("Two", 20), ("Three", 40)] {
+        h.app.run("solid.box", json!({"length":10,"width":10,"height":10,"corner":[x,0,0],"operation":"new_body","body_name":name})).unwrap();
+    }
+    h.settle();
+}
+
+fn body_hidden(h: &Harness, name: &str) -> bool {
+    h.app.session.visibility.hidden_bodies.iter().any(|b| b == name)
+}
+
+/// #9680: a press on an eye that drags over other eyes sets each eye it passes to the first eye's
+/// new state, and the whole drag is one undo step.
+#[test]
+fn eye_drag_sets_every_eye_it_passes_in_one_undo_step() {
+    for eye_left in [false, true] {
+        let mut h = Harness::new();
+        three_bodies(&mut h);
+        if eye_left {
+            h.call("ui.prefs", json!({"browser_eye_left": true}));
+            h.settle();
+        }
+        let undo = h.app.session.undo.len();
+        h.step(&json!({"drag":[{"handle":"eye:One"},{"handle":"eye:Three"}],"steps":40})).unwrap();
+        h.settle();
+        for name in ["One", "Two", "Three"] {
+            assert!(body_hidden(&h, name), "eye_left {eye_left}: {name} is hidden by the drag");
+        }
+        assert_eq!(h.app.session.undo.len(), undo + 1, "eye_left {eye_left}: the drag is one undo step");
+        h.app.run("edit.undo", json!({})).unwrap();
+        for name in ["One", "Two", "Three"] {
+            assert!(!body_hidden(&h, name), "eye_left {eye_left}: one undo shows {name} again");
+        }
+    }
+}
+
+/// #9680: an eye already in the target state stays as it is: a drag from a shown eye over a hidden
+/// one hides both, and undo brings back the hidden one as it was.
+#[test]
+fn eye_drag_leaves_an_eye_already_in_the_target_state_alone() {
+    let mut h = Harness::new();
+    three_bodies(&mut h);
+    h.app.run("browser.visibility", json!({"items":["Two"],"visible":false})).unwrap();
+    h.settle();
+    h.step(&json!({"drag":[{"handle":"eye:One"},{"handle":"eye:Three"}],"steps":40})).unwrap();
+    h.settle();
+    for name in ["One", "Two", "Three"] {
+        assert!(body_hidden(&h, name), "{name} is hidden: the hidden eye is not flipped back");
+    }
+    h.app.run("edit.undo", json!({})).unwrap();
+    assert!(!body_hidden(&h, "One") && !body_hidden(&h, "Three"), "undo shows the two the drag hid");
+    assert!(body_hidden(&h, "Two"), "undo keeps the eye hidden before the drag");
+    h.app.run("edit.undo", json!({})).unwrap();
+    assert!(!body_hidden(&h, "Two"), "the hide before the drag is its own undo step");
+}
+
+/// #9680: a plain click on an eye still toggles that one row, as one undo step.
+#[test]
+fn a_plain_eye_click_still_toggles_one_row_as_one_undo_step() {
+    let mut h = Harness::new();
+    three_bodies(&mut h);
+    let undo = h.app.session.undo.len();
+    h.step(&json!({"click":{"handle":"eye:Two"}})).unwrap();
+    h.settle();
+    assert!(body_hidden(&h, "Two") && !body_hidden(&h, "One") && !body_hidden(&h, "Three"), "only Two is hidden");
+    assert_eq!(h.app.session.undo.len(), undo + 1, "the click is one undo step");
+}
+
+/// #9680: a drag over the eyes that rests near the rows' bottom edge scrolls them, and the eyes
+/// the rows bring under the pointer take the drag's state too.
+#[test]
+fn eye_drag_near_the_rows_bottom_edge_scrolls_them() {
+    let mut h = Harness::new();
+    h.call("ui.resize", json!({"width":1400,"height":900}));
+    for i in 0..35 {
+        h.app.run("sketch.create", json!({"plane":"XY", "name":format!("Sketch{i}")})).unwrap();
+        h.app.run("sketch.finish", json!({})).unwrap();
+    }
+    h.settle();
+    assert!(handle_at("row:Sketch34").is_none(), "the rows overflow the card");
+    let card = rect_of("browser:card").unwrap();
+    let eye = handle_at("eye:Sketch0").unwrap();
+    h.call("ui.drag", json!({"x0": eye.x, "y0": eye.y, "x1": eye.x, "y1": card.bottom() - 10.0, "steps": 20, "hold_end": 240}));
+    h.settle();
+    assert!(handle_at("row:Sketch34").is_some(), "the drag scrolled the list down to its last row");
+    assert!(h.app.session.visibility.hidden_sketches.len() > 10, "the eyes the drag reached are hidden");
+}
+
+/// #9680: a drag from the Origin's eye over the plane eyes is one undo step of its own, and the show
+/// before it stays a step: one undo takes back only the drag. The Origin's eye is not an undo step (a
+/// click on it is not either), so that one undo leaves it as the drag set it.
+#[test]
+fn eye_drag_from_the_origin_is_its_own_undo_step_and_leaves_an_earlier_show_alone() {
+    let mut h = Harness::new();
+    h.app.run("solid.box", json!({"length":10,"width":10,"height":10,"body_name":"One"})).unwrap();
+    h.app.run("browser.visibility", json!({"items":["One"],"visible":false})).unwrap();
+    h.app.run("browser.visibility", json!({"items":["One"],"visible":true})).unwrap();
+    h.app.run("browser.expand_all", json!({})).unwrap();
+    h.settle();
+    let undo = h.app.session.undo.len();
+    h.step(&json!({"drag":[{"handle":"eye:Origin"},{"handle":"eye:YZ"}],"steps":40})).unwrap();
+    h.settle();
+    let origin_hidden = |h: &Harness| h.app.session.visibility.origin_hidden == Some(true);
+    assert!(origin_hidden(&h) && h.app.session.visibility.hidden_origin.iter().any(|k| k == "YZ"), "the drag hid the Origin and its planes");
+    assert_eq!(h.app.session.undo.len(), undo + 1, "the drag is one undo step");
+    h.app.run("edit.undo", json!({})).unwrap();
+    assert!(!body_hidden(&h, "One"), "one undo takes back only the drag: the show before it stays");
+    assert!(h.app.session.visibility.hidden_origin.is_empty(), "the planes the drag hid are shown again");
+    assert!(origin_hidden(&h), "the Origin's eye is not an undo step: it keeps what the drag set");
+    h.app.run("edit.undo", json!({})).unwrap();
+    assert!(body_hidden(&h, "One"), "the show is its own undo step: undoing it hides One again");
 }

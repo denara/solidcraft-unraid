@@ -987,15 +987,26 @@ fn ribbon_label_lines(painter: &egui::Painter, label: &str, width: f32) -> Vec<S
 }
 
 /// Commands opt into persistent presentation; the engine status list remains the only truth.
-const PERSISTENT_COMMANDS: &[&str] =
-    &["inspect.accessibility", "inspect.continuity", "inspect.curvature_map", "inspect.draft", "inspect.environment_map", "inspect.zebra"];
+const PERSISTENT_COMMANDS: &[&str] = &[
+    "inspect.accessibility",
+    "inspect.continuity",
+    "inspect.curvature_map",
+    "inspect.draft",
+    "inspect.environment_map",
+    "inspect.section",
+    "inspect.zebra",
+];
 
 fn persistent_command(id: &str) -> bool {
     PERSISTENT_COMMANDS.contains(&id)
 }
 
+fn persistent_available(app: &SolveApp, id: &str) -> bool {
+    persistent_command(id) && (id != "inspect.section" || app.preferences.viewport_section_status)
+}
+
 fn persistent_pressed(app: &SolveApp, id: &str) -> bool {
-    app.preferences.persistent_ribbon_pressed && persistent_command(id) && app.session.status_items().iter().any(|item| item.command == id)
+    app.preferences.persistent_ribbon_pressed && persistent_available(app, id) && app.session.status_items().iter().any(|item| item.command == id)
 }
 
 pub(crate) fn persistent_button_name(app: &SolveApp, command: &solidcraft_engine::CommandSpec) -> String {
@@ -1016,6 +1027,8 @@ fn persistent_hint(app: &SolveApp, command: &solidcraft_engine::CommandSpec, ena
 struct PersistentRibbonPaint {
     command: &'static solidcraft_engine::CommandSpec,
     response: egui::Response,
+    // Keep the allocating layer, clip and opacity when replacing these deferred slots.
+    painter: egui::Painter,
     rect: Rect,
     background: egui::layers::ShapeIdx,
     label_slot: egui::layers::ShapeIdx,
@@ -1025,12 +1038,11 @@ struct PersistentRibbonPaint {
     disabled: Option<String>,
 }
 
-fn paint_persistent_ribbon(app: &SolveApp, ui: &egui::Ui, paints: Vec<PersistentRibbonPaint>, tab: &str) {
+fn paint_persistent_ribbon(app: &SolveApp, ui: &egui::Ui, paints: Vec<PersistentRibbonPaint>, tab: &str, namespace: &str) {
     let t = Tokens::get();
-    let items = app.session.status_items();
     let mut count = 0;
     for paint in paints {
-        let selected = app.preferences.persistent_ribbon_pressed && items.iter().any(|item| item.command == paint.command.id);
+        let selected = persistent_pressed(app, paint.command.id);
         let ink = if !paint.enabled {
             t.text_dim
         } else if selected {
@@ -1054,24 +1066,25 @@ fn paint_persistent_ribbon(app: &SolveApp, ui: &egui::Ui, paints: Vec<Persistent
         };
         let background = if selected {
             count += 1;
-            crate::scenario::publish_target(&format!("ribbon:pressed:{}", paint.command.id), paint.rect);
+            crate::scenario::publish_target(&format!("{namespace}:pressed:{}", paint.command.id), paint.rect);
             ui_kit::persistent_button_shape(ui, &paint.response, paint.rect)
         } else if paint.response.has_focus() && app.preferences.persistent_ribbon_pressed {
             egui::Shape::Vec(vec![neutral, ui_kit::native_button_focus(ui, &paint.response, paint.rect)])
         } else {
             neutral
         };
-        ui.painter().set(paint.background, background);
+        paint.painter.set(paint.background, background);
         if paint.response.has_focus() {
-            crate::scenario::publish_target(&format!("ribbon:focus:{}", paint.command.id), paint.rect);
+            crate::scenario::publish_target(&format!("{namespace}:focus:{}", paint.command.id), paint.rect);
         }
         if let Some(label) = paint.label {
-            let galley = ribbon_button_galley_weight(ui.painter(), &label, paint.rect.width() - BUTTON_LABEL_PADDING, ink, selected);
-            ui.painter()
+            let galley = ribbon_button_galley_weight(&paint.painter, &label, paint.rect.width() - BUTTON_LABEL_PADDING, ink, selected);
+            paint
+                .painter
                 .set(paint.label_slot, egui::Shape::galley(pos2(paint.rect.center().x, ribbon_label_top(paint.rect, galley.size().y)), galley, ink));
         }
         paint.response.widget_info(|| {
-            if app.preferences.persistent_ribbon_pressed {
+            if app.preferences.persistent_ribbon_pressed && persistent_available(app, paint.command.id) {
                 egui::WidgetInfo::selected(egui::WidgetType::Button, paint.enabled, selected, persistent_button_name(app, paint.command))
             } else {
                 let info = crate::render_workspace::interactive_command_info(app, paint.command);
@@ -1080,7 +1093,7 @@ fn paint_persistent_ribbon(app: &SolveApp, ui: &egui::Ui, paints: Vec<Persistent
         });
         let _ = ribbon_tooltip(app, paint.response, paint.command, paint.disabled.as_deref());
     }
-    crate::scenario::publish_count("ribbon:pressed", count as f64);
+    crate::scenario::publish_count(&format!("{namespace}:pressed"), count as f64);
 }
 
 fn ribbon_button_galley(painter: &egui::Painter, label: &str, width: f32, color: Color32) -> std::sync::Arc<egui::Galley> {
@@ -1270,6 +1283,9 @@ fn ribbon_tabs(app: &mut SolveApp, ui: &mut egui::Ui, row: Rect) {
                     }
                     if response.clicked() {
                         app.ui.tab = tab.to_string();
+                        // Floating ribbons draw after the viewport. An instant surface switch
+                        // needs one more pass too; settled tabs never schedule their own frames.
+                        ui.ctx().request_repaint();
                     }
                     if response.secondary_clicked() {
                         crate::context_menu::open_for(
@@ -1528,8 +1544,11 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
         let finish_plan =
             sizes.last().and_then(|size| if tab == "SKETCH" || (tab == "MODEL" && editing_in_place) { Some(Plan::full(size)) } else { None });
         let finish_width = finish_plan.as_ref().map_or(0.0, |p| p.width().max(80.0));
+        // The Finish group keeps its own gap before it, so the panels on its left give up room
+        // (collapse) before they would touch it.
+        let finish_gap = if finish_plan.is_some() { 4.0 } else { 0.0 };
         let normal_count = sizes.len().saturating_sub(usize::from(finish_plan.is_some()));
-        let mut plans = fit(sizes.get(..normal_count).unwrap_or_default(), right - 4.0 - px - finish_width);
+        let mut plans = fit(sizes.get(..normal_count).unwrap_or_default(), right - 4.0 - px - finish_width - finish_gap);
         let finish_right = plans.iter().any(|p| p.fit == Fit::More);
         plans.extend(finish_plan);
         crate::scenario::publish_count("toolbar_collapsed", plans.iter().filter(|p| p.fit == Fit::Collapsed).count() as f64);
@@ -1644,7 +1663,7 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
                 if resp.secondary_clicked() {
                     menu = Some((resp.interact_pointer_pos().unwrap_or(br.left_bottom()), c.id));
                 }
-                let persistent = persistent_command(selected.id);
+                let persistent = persistent_available(app, selected.id);
                 let background_slot = painter.add(egui::Shape::Noop);
                 let accent = crate::theme::TabAccent::for_tab(&t, &tab);
                 let family_open = family.is_some_and(|f| egui::Popup::is_id_open(ui.ctx(), ui.id().with(("family", f.label)).with("popup")));
@@ -1704,6 +1723,7 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
                     persistent_paints.push(PersistentRibbonPaint {
                         command: selected,
                         response: resp,
+                        painter: painter.clone(),
                         rect: whole,
                         background: background_slot,
                         label_slot: painter.add(egui::Shape::Noop),
@@ -1914,8 +1934,10 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
                                 ui.label(egui::RichText::new(crate::i18n::tr_label("Not available yet")).color(t.text_dim));
                             }
                             if sketch_create && app.preferences.ribbon_icon_grid && !cmds.is_empty() {
-                                let action = dropdown_grid(app, ui, &tab, &sketch_create_grouped(&cmds), &[]);
+                                let mut paints = Vec::new();
+                                let action = dropdown_grid(app, ui, &tab, &sketch_create_grouped(&cmds), &[], &mut paints);
                                 grid_action(app, ui, action, &mut menu, &mut toggle);
+                                paint_persistent_ribbon(app, ui, paints, &tab, "ribbon_grid");
                                 return;
                             }
                             if sketch_create {
@@ -1928,8 +1950,11 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
                             }
                             let grouped = crate::workspace::grouped_commands(&tab, panel, &cmds);
                             if app.preferences.ribbon_icon_grid && !grouped.is_empty() {
-                                let action = dropdown_grid(app, ui, &tab, &grouped, &crate::workspace::ungrouped(&tab, panel, &cmds));
+                                let mut paints = Vec::new();
+                                let action = dropdown_grid(app, ui, &tab, &grouped, &crate::workspace::ungrouped(&tab, panel, &cmds), &mut paints);
                                 grid_action(app, ui, action, &mut menu, &mut toggle);
+                                // Paint in this popup's layer, after its command has changed the session.
+                                paint_persistent_ribbon(app, ui, paints, &tab, "ribbon_grid");
                                 return;
                             }
                             let cmds: Vec<_> = grouped.iter().map(|(_, c)| *c).collect();
@@ -2012,7 +2037,7 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
                             for c in cmds {
                                 let info = crate::render_workspace::interactive_command_info(app, c);
                                 let shortcut = crate::keymap::display_for(app, c.id).unwrap_or_default();
-                                let response = if persistent_command(c.id) && app.preferences.persistent_ribbon_pressed {
+                                let response = if persistent_available(app, c.id) && app.preferences.persistent_ribbon_pressed {
                                     let mut item = ui_kit::MenuItem::new(c.id, info.label, info.icon);
                                     item.shortcut = &shortcut;
                                     item.enabled = info.enabled;
@@ -2039,7 +2064,7 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
 
         // Resolve persistent paint only after large buttons, dropdowns and overflow have
         // dispatched their actions. No already-painted old analysis can survive replacement.
-        paint_persistent_ribbon(app, ui, persistent_paints, &tab);
+        paint_persistent_ribbon(app, ui, persistent_paints, &tab, "ribbon");
 
         // Dragging a command: its icon follows the pointer; a toolbar button dragged off the
         // toolbar (or into the open drop-down) shows it will be removed.
@@ -2306,7 +2331,7 @@ fn dropdown_row(
     let hot = info.enabled && (pointer_on || resp.has_focus());
     let mut row = crate::ui_kit::MenuItem::new(c.id, &label, info.icon);
     row.enabled = info.enabled;
-    if persistent_command(c.id) && app.preferences.persistent_ribbon_pressed {
+    if persistent_available(app, c.id) && app.preferences.persistent_ribbon_pressed {
         row.checked = Some(persistent_pressed(app, c.id));
     }
     if c.id == "view.shots_strip" {
@@ -2576,6 +2601,7 @@ fn dropdown_grid(
     tab: &str,
     grouped: &[(Option<&'static str>, &'static solidcraft_engine::CommandSpec)],
     loose: &[&str],
+    paints: &mut Vec<PersistentRibbonPaint>,
 ) -> Option<(&'static str, RowAction)> {
     // Wide enough for groups side by side, short of the window's edge.
     let room = ui.ctx().content_rect().right() - ui.cursor().left() - 24.0;
@@ -2609,7 +2635,7 @@ fn dropdown_grid(
         for ((_, c), (rect, _)) in grouped.iter().zip(&layout.cells) {
             let rect = rect.translate(origin.to_vec2());
             let pinned = crate::toolbar_custom::pinned_on(app, tab, c.id).is_some();
-            match dropdown_cell(app, ui, c, rect, pinned) {
+            match dropdown_cell(app, ui, c, rect, pinned, paints) {
                 RowAction::None => {}
                 done => action = Some((c.id, done)),
             }
@@ -2652,7 +2678,14 @@ fn pin_armed(ui: &egui::Ui, id: &'static str, on: bool) -> bool {
 /// One icon of a grid drop-down: clicked, dragged onto the ribbon (to pin it) or right-clicked
 /// like a list row; its tooltip is a ribbon button's (name, shortcut, help, why it is off), and a
 /// pin in its corner says it is on the ribbon.
-fn dropdown_cell(app: &SolveApp, ui: &mut egui::Ui, c: &'static solidcraft_engine::CommandSpec, rect: Rect, pinned: bool) -> RowAction {
+fn dropdown_cell(
+    app: &SolveApp,
+    ui: &mut egui::Ui,
+    c: &'static solidcraft_engine::CommandSpec,
+    rect: Rect,
+    pinned: bool,
+    paints: &mut Vec<PersistentRibbonPaint>,
+) -> RowAction {
     let t = Tokens::get();
     let info = c.info(&app.session);
     let sense = if info.enabled { Sense::click_and_drag() } else { Sense::drag() };
@@ -2671,20 +2704,42 @@ fn dropdown_cell(app: &SolveApp, ui: &mut egui::Ui, c: &'static solidcraft_engin
     let armed = pin_armed(ui, c.id, ui.rect_contains_pointer(rect) && !dragging);
     let pin = armed.then(|| ui.interact(pr, ui.id().with(("dropdown_pin", c.id)), Sense::click()));
     let pin_hovered = pin.as_ref().is_some_and(egui::Response::hovered);
-    let label = app.tr_label(c.label).to_string();
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled() && info.enabled, &label));
+    let persistent = app.preferences.persistent_ribbon_pressed && persistent_available(app, c.id);
+    if !persistent {
+        let label = app.tr_label(c.label).to_string();
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled() && info.enabled, &label));
+    }
     crate::scenario::publish_handle(&format!("toolbar:{}", c.id), rect.center());
     crate::scenario::publish_handle(&format!("dropdown:{}", c.id), rect.center());
     let pointer_on = (resp.hovered() || pin_hovered) && !dragging;
     let hot = info.enabled && (pointer_on || resp.has_focus());
     let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(rect));
     let cell = rect.shrink(2.0);
+    let mut neutral = Vec::new();
     if hot {
-        painter.rect_filled(cell, t.control_radius, t.accent_soft);
+        neutral.push(egui::Shape::rect_filled(cell, t.control_radius, t.accent_soft));
         crate::scenario::publish_handle(&format!("dropdown_hot:{}", c.id), rect.center());
     }
-    if resp.has_focus() {
-        painter.rect_stroke(cell, t.control_radius, Stroke::new(1.0, t.accent), egui::StrokeKind::Inside);
+    if resp.has_focus() && !persistent {
+        neutral.push(egui::Shape::rect_stroke(cell, t.control_radius, Stroke::new(1.0, t.accent), egui::StrokeKind::Inside));
+    }
+    let neutral = egui::Shape::Vec(neutral);
+    if persistent {
+        // Reuse the native ribbon recipe; only responses/paint slots survive until dispatch.
+        paints.push(PersistentRibbonPaint {
+            command: c,
+            response: resp.clone(),
+            painter: painter.clone(),
+            rect: cell,
+            background: painter.add(egui::Shape::Noop),
+            label_slot: painter.add(egui::Shape::Noop),
+            neutral,
+            label: None,
+            enabled: ui.is_enabled() && info.enabled,
+            disabled: info.disabled_reason.clone(),
+        });
+    } else {
+        painter.add(neutral);
     }
     icons::paint_icon(&painter, Rect::from_center_size(rect.center(), vec2(GRID_ICON, GRID_ICON)), c.icon, if info.enabled { 1.0 } else { 0.4 });
     // A pinned command always shows its pin, clear of the icon's own artwork; any other shows one
@@ -2702,7 +2757,7 @@ fn dropdown_cell(app: &SolveApp, ui: &mut egui::Ui, c: &'static solidcraft_engin
             return RowAction::TogglePin;
         }
     }
-    let resp = ribbon_tooltip(app, resp, c, info.disabled_reason.as_deref());
+    let resp = if persistent { resp } else { ribbon_tooltip(app, resp, c, info.disabled_reason.as_deref()) };
     if resp.secondary_clicked() {
         return RowAction::Menu(resp.interact_pointer_pos().unwrap_or(rect.left_bottom()));
     }
@@ -2829,8 +2884,14 @@ fn drag_ghost(app: &SolveApp, ctx: &egui::Context, id: &str, at: egui::Pos2, rem
 pub(crate) fn selection_filter(app: &mut SolveApp, ui: &mut egui::Ui) {
     let t = Tokens::get();
     ui.label(egui::RichText::new(crate::i18n::tr_label("Selection filter")).color(t.text_dim).size(t.font_small));
-    if crate::ui_kit::checkbox(ui, crate::i18n::tr_label("Select bodies (a face picks its body)"), &mut app.ui.pick_bodies).changed() {
-        app.ui.pick_components = false;
+    for (mode, label) in [("body", app.tr_label("Select bodies (a face picks its body)")), ("component", app.tr("ui.select_components_by_face"))] {
+        let mut on = app.ui.pick_mode() == mode;
+        if ui_kit::checkbox(ui, label, &mut on).changed() {
+            // The Faces checkbox below is independent. The standalone command enables faces.
+            let filters = std::mem::take(&mut app.ui.pick_off);
+            let _ = app.run("select.filter", json!({"mode": if on { mode } else { "face" }}));
+            app.ui.pick_off = filters;
+        }
     }
     for (k, label) in [
         ("faces", "Faces"),
@@ -2857,6 +2918,7 @@ pub const ESCAPE_TWICE_S: f64 = 0.4;
 
 /// Global keyboard shortcuts (when no text field has focus).
 pub fn shortcuts(app: &mut SolveApp, ctx: &egui::Context) {
+    crate::viewport_status::reconcile(app, ctx);
     crate::browser::update_folder_pick(app, ctx);
     if design_shown(app) {
         crate::navigation::step_key_hold(app, ctx);
@@ -2866,7 +2928,7 @@ pub fn shortcuts(app: &mut SolveApp, ctx: &egui::Context) {
     if app.file_load.busy() {
         return;
     }
-    if app.preferences.viewport_analysis_status
+    if crate::viewport_status::enabled(app)
         && (app.esc_handled || app.escape_owner.is_some())
         && ctx.input(|input| input.key_pressed(egui::Key::Escape))
     {
@@ -2903,7 +2965,7 @@ pub fn shortcuts(app: &mut SolveApp, ctx: &egui::Context) {
         && (app.prefs_window.open || app.keymap.open || app.ui.palette_open || ctx.memory(|memory| memory.top_modal_layer().is_some()))
     {
         app.escape_owner = Some(crate::EscapeOwner::Overlay);
-        if app.preferences.viewport_analysis_status {
+        if crate::viewport_status::enabled(app) {
             app.last_escape = None;
             return;
         }
@@ -2913,20 +2975,36 @@ pub fn shortcuts(app: &mut SolveApp, ctx: &egui::Context) {
     }
     // A dimension value that is taking the keyboard: letters belong to it (a parameter name
     // starting with L or D), even on the frame before its field holds the focus.
-    let popup_owner =
-        egui::Popup::is_any_open(ctx) || crate::dialogs_save_mesh::popup_open(ctx) || crate::hole_presets::name_prompt_open(ctx, app.dialog.as_ref());
+    let popup_owner = egui::Popup::is_any_open(ctx)
+        || crate::dialogs_save_mesh::popup_open(ctx)
+        || crate::hole_presets::name_prompt_open(ctx, app.dialog.as_ref())
+        || crate::personal_sheet_rules::name_prompt_open(ctx, app.dialog.as_ref());
     let inline_editor = crate::dim_view::editing();
+    if !popup_owner
+        && app.viewport_status.open_key.is_some()
+        && crate::ui_kit::details_field_owned_escape(ctx)
+        && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+    {
+        ctx.memory_mut(|memory| {
+            if let Some(id) = memory.focused() {
+                memory.surrender_focus(id);
+            }
+        });
+        app.esc_handled = true;
+        app.escape_owner = Some(crate::EscapeOwner::Overlay);
+        return;
+    }
     if popup_owner
         || inline_editor
-        || (app.preferences.viewport_analysis_status && app.ui.palette_open)
-        || (ctx.egui_wants_keyboard_input() && !(app.preferences.viewport_analysis_status && app.viewport_status.owns_focus(ctx)))
+        || (crate::viewport_status::enabled(app) && app.ui.palette_open)
+        || (ctx.egui_wants_keyboard_input() && !(crate::viewport_status::enabled(app) && app.viewport_status.owns_focus(ctx)))
     {
         if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
             let owner = if app.dialog.is_some() && !popup_owner && !inline_editor { crate::EscapeOwner::Dialog } else { crate::EscapeOwner::Overlay };
             // Reserve first refusal without claiming that cancellation already occurred.
             // A dialog's own late handler must still be able to cancel its focused field.
             app.escape_owner.get_or_insert(owner);
-            if app.preferences.viewport_analysis_status {
+            if crate::viewport_status::enabled(app) {
                 app.last_escape = None;
             }
         }
@@ -3017,8 +3095,7 @@ pub fn shortcuts(app: &mut SolveApp, ctx: &egui::Context) {
                 // Not while a tool is still out (its first Esc only ended a chain): this press
                 // puts it down, and the next quick one finishes.
                 if again
-                    && !(app.preferences.viewport_analysis_status
-                        && (app.viewport_status.open_key.is_some() || crate::viewport_status::has_effect(app)))
+                    && !(crate::viewport_status::enabled(app) && (app.viewport_status.open_key.is_some() || crate::viewport_status::has_effect(app)))
                     && app.tool.is_none()
                     && app.dialog.is_none()
                     && let Some(sketch) = app.session.active_sketch
@@ -3029,7 +3106,7 @@ pub fn shortcuts(app: &mut SolveApp, ctx: &egui::Context) {
                     let blank = app.session.doc.sketch(sketch).is_ok_and(crate::sketch_palette::is_blank);
                     let depth = app.session.undo.len();
                     app.finish_sketch();
-                    if blank && app.session.active_sketch.is_none() && app.run("timeline.delete", json!({ "feature": sketch.to_string() })).is_ok() {
+                    if blank && app.session.active_sketch.is_none() && app.run("timeline.delete", json!({ "feature": sketch })).is_ok() {
                         app.session.undo.truncate(depth + 1);
                     }
                     continue;
@@ -3043,7 +3120,7 @@ pub fn shortcuts(app: &mut SolveApp, ctx: &egui::Context) {
                     crate::tools::finish(app);
                 } else if app.dialog.is_some() || app.pending_feature_edit.is_some() {
                     crate::dialogs::cancel(app);
-                } else if app.preferences.viewport_analysis_status && crate::viewport_status::escape(app, repeat) {
+                } else if crate::viewport_status::enabled(app) && crate::viewport_status::escape(app, repeat) {
                     app.last_escape = None;
                 } else if !app.session.selection.is_empty() || app.session.active_sketch.is_none() {
                     crate::edit_clipboard::drop_cut(app);
@@ -5189,12 +5266,283 @@ mod persistent_ribbon_tests {
         }
     }
 
+    fn open_status_grid(h: &mut Harness, panel: &str) {
+        h.app.preferences.ribbon_icon_grid = true;
+        h.app.preferences.ribbon_menus_skip_pinned = false;
+        h.frames(3);
+        h.step(&json!({"click":{"handle":format!("panel:INSPECT:{panel}")}})).unwrap();
+        // Exact token colours are checked after the native Area fade, not during its opacity ramp.
+        let settle_frames = (h.ctx.global_style().animation_time * 60.0).ceil() as usize + 2;
+        h.frames(settle_frames.max(3));
+        assert!(scenario::rect_of("toolbar_dropdown").is_some());
+    }
+
+    fn close_status_grid(h: &mut Harness, panel: &str) {
+        // Use the real header toggle so closing a menu never supplies an idle effect Escape.
+        h.step(&json!({"click":{"handle":format!("panel:INSPECT:{panel}")}})).unwrap();
+        h.frames(3);
+        assert!(scenario::rect_of("toolbar_dropdown").is_none());
+    }
+
+    fn status_grid_rect(_h: &Harness, id: &str) -> Rect {
+        let at = scenario::handle_at(&format!("dropdown:{id}")).unwrap();
+        Rect::from_center_size(at, vec2(GRID_CELL, GRID_CELL)).shrink(2.0)
+    }
+
+    fn assert_status_grid(h: &Harness, id: &str, selected: bool, toggled: Option<egui::accesskit::Toggled>) {
+        let rect = status_grid_rect(h, id);
+        let t = Tokens::get();
+        let mut drawn = Vec::new();
+        for shape in &h.shapes {
+            shapes(&shape.shape, &mut drawn);
+        }
+        assert_eq!(
+            drawn.iter().any(|shape| matches!(shape, egui::Shape::Rect(s) if s.rect == rect && s.fill == t.selected_bg)),
+            selected,
+            "{id} grid fill"
+        );
+        assert_eq!(drawn.iter().any(|shape| matches!(shape, egui::Shape::LineSegment { points, stroke } if stroke.width == 2.0 && stroke.color == t.accent && points[0].y == rect.bottom() - t.space_4 && rect.contains(points[0]))), selected, "{id} grid underline");
+        let command = solidcraft_engine::find_command(id).unwrap();
+        let label = if toggled.is_some() { persistent_button_name(&h.app, command) } else { h.app.tr_label(command.label).to_string() };
+        let node = h
+            .output
+            .accesskit_update
+            .as_ref()
+            .and_then(|tree| {
+                tree.nodes.iter().find(|(_, node)| {
+                    node.role() == egui::accesskit::Role::Button
+                        && node.label() == Some(label.as_str())
+                        && node.bounds().is_some_and(|b| rect.contains(pos2(((b.x0 + b.x1) / 2.0) as f32, ((b.y0 + b.y1) / 2.0) as f32)))
+                })
+            })
+            .map(|(_, node)| node)
+            .expect("the actual grid button, distinguished from a same-named pinned ribbon button by bounds");
+        assert_eq!(node.toggled(), toggled, "{id} grid accessibility");
+    }
+
     #[test]
-    fn persistent_commands_derive_all_six_programmatic_effects_and_clear_without_residue() {
+    fn persistent_grid_deferred_paint_retains_partial_and_offscreen_scroll_clips() {
+        let mut saw_partial = false;
+        let mut saw_offscreen = false;
+        for offset in [0.0, 24.0, 96.0] {
+            let mut h = harness();
+            h.app.session.execute("inspect.section", &json!({"plane":"XY","at":4})).unwrap();
+            h.app.session.execute("inspect.zebra", &json!({})).unwrap();
+            let effects = h.app.session.status_items();
+            let ctx = h.ctx.clone();
+            let mut expected = Vec::new();
+            let output = ctx.run_ui(
+                egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(400.0, 240.0))), focused: true, ..Default::default() },
+                |ui| {
+                    expected.clear(); // Context layout passes never accumulate stale paint expectations.
+                    // Leave visible space above the scroll viewport, where a broadened clip leaks.
+                    ui.add_space(80.0);
+                    let mut paints = Vec::new();
+                    egui::ScrollArea::vertical()
+                        .id_salt("persistent_grid_clip_regression")
+                        .auto_shrink([false, false])
+                        .max_height(64.0)
+                        .min_scrolled_height(64.0)
+                        .vertical_scroll_offset(offset)
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.y = 0.0;
+                            for id in ["inspect.section", "inspect.zebra", "inspect.draft"] {
+                                let command = solidcraft_engine::find_command(id).unwrap();
+                                let (rect, _) = ui.allocate_exact_size(vec2(GRID_CELL, GRID_CELL), Sense::hover());
+                                let clip = ui.clip_rect().intersect(rect);
+                                let _ = dropdown_cell(&h.app, ui, command, rect, false, &mut paints);
+                                if id != "inspect.draft" {
+                                    expected.push((id, rect.shrink(2.0), clip));
+                                }
+                            }
+                        });
+                    // This is deliberately the larger parent Ui, matching the real post-dispatch call.
+                    paint_persistent_ribbon(&h.app, ui, paints, "INSPECT", "ribbon_grid");
+                },
+            );
+            assert_eq!(h.app.session.status_items(), effects, "rendering real active cells never changes their effects");
+            for (id, cell, original_clip) in expected {
+                let mut backgrounds = Vec::new();
+                for clipped in &output.shapes {
+                    let mut drawn = Vec::new();
+                    shapes(&clipped.shape, &mut drawn);
+                    if drawn
+                        .iter()
+                        .any(|shape| matches!(shape, egui::Shape::Rect(rect) if rect.rect == cell && rect.fill == Tokens::get().selected_bg))
+                    {
+                        backgrounds.push(clipped.clip_rect);
+                    }
+                }
+                if original_clip.intersect(cell).is_positive() {
+                    assert!(!backgrounds.is_empty(), "{id} actually paints its visible selected fragment at offset {offset}");
+                    assert!(
+                        backgrounds.iter().all(|clip| *clip == original_clip),
+                        "{id} retains its original cell/scroll clip, not the parent clip, at offset {offset}"
+                    );
+                    saw_partial |= !original_clip.contains_rect(cell);
+                } else {
+                    assert!(
+                        backgrounds.iter().all(|clip| !clip.intersect(cell).is_positive()),
+                        "offscreen {id} must not paint into the space above its scroll viewport"
+                    );
+                    saw_offscreen = true;
+                }
+            }
+        }
+        assert!(saw_partial, "the native ScrollArea must actually partly clip an active cell");
+        assert!(saw_offscreen, "the native ScrollArea must actually scroll an active cell out of view");
+    }
+
+    #[test]
+    fn persistent_grid_uses_actual_section_and_analysis_with_independent_compatibility_preferences() {
+        for section in [false, true] {
+            for ribbon in [false, true] {
+                let mut h = harness();
+                h.app.preferences.viewport_analysis_status = false;
+                h.app.preferences.viewport_section_status = section;
+                h.app.preferences.persistent_ribbon_pressed = ribbon;
+                h.app.session.execute("inspect.zebra", &json!({"stripes":14})).unwrap();
+                h.app.session.execute("inspect.section", &json!({"plane":"XY","at":4})).unwrap();
+                let effects = h.app.session.status_items();
+                open_status_grid(&mut h, "SECTION");
+                assert_status_grid(&h, "inspect.section", section && ribbon, (section && ribbon).then_some(egui::accesskit::Toggled::True));
+                assert_eq!(h.app.session.status_items(), effects);
+                close_status_grid(&mut h, "SECTION");
+                open_status_grid(&mut h, "SURFACE QUALITY");
+                assert_status_grid(&h, "inspect.zebra", ribbon, ribbon.then_some(egui::accesskit::Toggled::True));
+                assert_eq!(h.app.session.status_items(), effects, "presentation preferences and menu navigation never mutate effects");
+                close_status_grid(&mut h, "SURFACE QUALITY");
+            }
+        }
+    }
+
+    #[test]
+    fn persistent_grid_tracks_all_six_analysis_replacements_queries_and_failed_activation() {
+        let mut h = harness();
+        h.app.session.execute("inspect.section", &json!({"plane":"YZ","at":3})).unwrap();
+        let cut = h.app.session.section;
+        for id in PERSISTENT_COMMANDS.iter().copied().filter(|id| *id != "inspect.section") {
+            h.app.session.execute(id, &json!({})).unwrap();
+            let before = h.app.session.status_items();
+            h.app.session.execute("view.status_items", &json!({})).unwrap();
+            assert!(h.app.session.execute("inspect.draft", &json!({"pull":[0,0,0]})).is_err());
+            assert_eq!(h.app.session.status_items(), before);
+            let panel = if matches!(id, "inspect.draft" | "inspect.accessibility") { "CHECK" } else { "SURFACE QUALITY" };
+            open_status_grid(&mut h, panel);
+            assert_status_grid(&h, id, true, Some(egui::accesskit::Toggled::True));
+            assert_eq!(h.app.session.section, cut, "analysis replacement leaves Section independent");
+            close_status_grid(&mut h, panel);
+        }
+    }
+
+    #[test]
+    fn persistent_grid_keeps_native_keyboard_focus_and_active_tooltip() {
+        let mut h = harness();
+        h.app.session.execute("inspect.section", &json!({"plane":"XY","at":4})).unwrap();
+        open_status_grid(&mut h, "SECTION");
+        h.step(&json!({"key":"ArrowRight"})).unwrap();
+        h.frames(3);
+        assert!(scenario::rect_of("ribbon_grid:focus:inspect.section").is_some());
+        assert_status_grid(&h, "inspect.section", true, Some(egui::accesskit::Toggled::True));
+        h.step(&json!({"move":{"handle":"dropdown:inspect.section"}})).unwrap();
+        h.frames(100);
+        let command = solidcraft_engine::find_command("inspect.section").unwrap();
+        let hint = persistent_hint(&h.app, command, true).unwrap();
+        let mut drawn = Vec::new();
+        for shape in &h.shapes {
+            shapes(&shape.shape, &mut drawn);
+        }
+        assert!(
+            drawn.iter().any(|shape| matches!(shape, egui::Shape::Text(text) if text.galley.text() == hint)),
+            "the actual grid uses the same native turn-off tooltip"
+        );
+        assert!(h.app.session.section.is_some());
+    }
+
+    #[test]
+    fn persistent_grid_clear_uses_post_dispatch_session_without_stale_paint_or_cross_effect_clear() {
+        for (id, panel) in [("inspect.section", "SECTION"), ("inspect.zebra", "SURFACE QUALITY")] {
+            let mut h = harness();
+            h.app.session.execute("inspect.zebra", &json!({})).unwrap();
+            h.app.session.execute("inspect.section", &json!({"plane":"XY","at":4})).unwrap();
+            open_status_grid(&mut h, panel);
+            assert_status_grid(&h, id, true, Some(egui::accesskit::Toggled::True));
+            let rect = status_grid_rect(&h, id);
+            let at = scenario::handle_at(&format!("dropdown:{id}")).unwrap();
+            let before = h.app.session.status_items();
+            h.frame_with(crate::test_support::pointer(at, true));
+            assert_eq!(h.app.session.status_items(), before, "pointer down is not a command activation");
+            h.frame_with(crate::test_support::pointer(at, false));
+            // Check the release frame, with no settling frame: both paint paths resolve after dispatch.
+            assert_paint(&h, id, false);
+            let mut drawn = Vec::new();
+            for shape in &h.shapes {
+                shapes(&shape.shape, &mut drawn);
+            }
+            let t = Tokens::get();
+            // The pointer still hovers this cell: native hover may share the selected fill.
+            // Persistence is distinguished by the underline, identity and native toggled state.
+            assert!(
+                drawn.iter().any(|shape| matches!(shape, egui::Shape::Rect(s) if s.rect == rect && s.fill == t.accent_soft)),
+                "{id} retains its normal hovered fill on release"
+            );
+            assert!(!drawn.iter().any(|shape| matches!(shape, egui::Shape::LineSegment { points, stroke } if stroke.width == 2.0 && stroke.color == t.accent && points[0].y == rect.bottom() - t.space_4 && rect.contains(points[0]))), "{id} has no persistent underline on release");
+            assert!(scenario::rect_of(&format!("ribbon_grid:pressed:{id}")).is_none(), "{id} has no published pressed identity on release");
+            let command = solidcraft_engine::find_command(id).unwrap();
+            let label = persistent_button_name(&h.app, command);
+            let node = h
+                .output
+                .accesskit_update
+                .as_ref()
+                .and_then(|tree| {
+                    tree.nodes.iter().find(|(_, node)| {
+                        node.role() == egui::accesskit::Role::Button
+                            && node.label() == Some(label.as_str())
+                            && node.bounds().is_some_and(|b| rect.contains(pos2(((b.x0 + b.x1) / 2.0) as f32, ((b.y0 + b.y1) / 2.0) as f32)))
+                    })
+                })
+                .map(|(_, node)| node)
+                .expect("the actual cleared grid button, distinguished from its pinned ribbon button by bounds");
+            assert_eq!(node.toggled(), Some(egui::accesskit::Toggled::False), "{id} grid accessibility is off on the release frame");
+            assert_eq!(h.app.session.section.is_some(), id != "inspect.section");
+            assert_eq!(h.app.session.analysis.is_some(), id != "inspect.zebra");
+        }
+    }
+
+    #[test]
+    fn section_persistent_ribbon_uses_independent_status_preference_and_active_toggle() {
+        let mut h = harness();
+        h.app.session.execute("inspect.zebra", &json!({})).unwrap();
+        h.app.session.execute("inspect.section", &json!({"plane":"XY","at":4})).unwrap();
+        h.frame();
+        assert_paint(&h, "inspect.section", true);
+        assert_paint(&h, "inspect.zebra", true);
+        h.app.preferences.viewport_analysis_status = false;
+        h.frame();
+        assert_paint(&h, "inspect.section", true);
+        h.app.preferences.viewport_section_status = false;
+        h.frame();
+        assert_paint(&h, "inspect.section", false);
+        assert!(persistent_hint(&h.app, solidcraft_engine::find_command("inspect.section").unwrap(), true).is_none());
+        assert!(h.app.session.section.is_some());
+        h.app.preferences.viewport_section_status = true;
+        h.app.preferences.persistent_ribbon_pressed = false;
+        h.frame();
+        assert_paint(&h, "inspect.section", false);
+        h.app.preferences.persistent_ribbon_pressed = true;
+        h.frames(2);
+        tap(&mut h, "inspect.section");
+        assert!(h.app.session.section.is_none() && h.app.session.analysis.is_some());
+        assert_paint(&h, "inspect.section", false);
+        assert_paint(&h, "inspect.zebra", true);
+    }
+
+    #[test]
+    fn persistent_commands_derive_all_seven_programmatic_effects_and_clear_without_residue() {
         let mut h = harness();
         for id in PERSISTENT_COMMANDS {
             assert!(!persistent_pressed(&h.app, id));
-            h.app.session.execute(id, &json!({})).unwrap();
+            h.app.session.execute(id, &if *id == "inspect.section" { json!({"plane":"XY"}) } else { json!({}) }).unwrap();
             h.frame(); // Exactly the first output following the engine mutation.
             assert_eq!(h.app.session.status_items().iter().map(|s| s.command.as_str()).collect::<Vec<_>>(), [*id]);
             for c in PERSISTENT_COMMANDS {
@@ -5209,7 +5557,7 @@ mod persistent_ribbon_tests {
             h.frame();
             assert_paint(&h, id, false);
         }
-        for id in ["inspect.minimum_radius", "solid.extrude", "inspect.section"] {
+        for id in ["inspect.minimum_radius", "solid.extrude"] {
             assert!(!persistent_command(id));
         }
         h.app.session.execute("inspect.zebra", &json!({})).unwrap();

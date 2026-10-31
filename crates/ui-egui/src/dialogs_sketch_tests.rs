@@ -265,6 +265,25 @@ fn apply_in_the_header_row_commits_once_and_keeps_the_dialog() {
     assert_eq!(scenario::rect_of("dialog:apply"), Some(apply), "the buttons stay where they were");
 }
 
+/// Interface › Dialog buttons › Top (#9860): the sketch panel's Finish Sketch row sits above its
+/// options, and below them with the preference off.
+#[test]
+fn sketch_panel_finish_row_follows_dialog_buttons() {
+    for (placement, on_top) in [("top", true), ("bottom", false)] {
+        let mut h = fixture();
+        h.call("ui.prefs", json!({"dialog_buttons": placement}));
+        h.settle();
+        let finish = scenario::rect_of("sketch_palette:finish").unwrap_or_else(|| panic!("{placement}: no Finish Sketch"));
+        let first = scenario::rect_of("sketch_palette:toggle:show_constraints").unwrap_or_else(|| panic!("{placement}: no first option"));
+        if on_top {
+            assert!(finish.bottom() <= first.top(), "top: Finish {finish:?} above its first option {first:?}");
+        } else {
+            assert!(first.bottom() <= finish.top(), "bottom: Finish {finish:?} below its first option {first:?}");
+        }
+        assert!(scenario::handle_at("sketch_palette:finish").is_some(), "{placement}: the handle stays");
+    }
+}
+
 #[test]
 fn picked_list_removes_one_item_and_field_still_activates_input() {
     let mut h = fixture();
