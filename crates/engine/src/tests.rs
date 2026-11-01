@@ -1618,6 +1618,23 @@ fn auto_extrude_starts_new_body_in_empty_component() {
 
 /// Measuring picked geometry: distance between faces, angle, edge length.
 #[test]
+fn measure_origin_planes_axes_and_points() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 40, "width": 30, "height": 20}));
+    let at = |p: [f64; 3]| json!({"type": "vertex", "body": "Body1", "point": p});
+    // A point 10 above the XY plane.
+    let r = run(&mut s, "inspect.measure", json!({"items": [{"type": "plane", "name": "XY"}, at([5.0, 5.0, 10.0])]}));
+    assert!((r["distance_mm"].as_f64().unwrap() - 10.0).abs() < 1e-9, "{r}");
+    assert_eq!(r["from"], json!([5.0, 5.0, 0.0]));
+    // The point's distance from the Z axis.
+    let r = run(&mut s, "inspect.measure", json!({"items": [{"type": "axis", "name": "Z"}, at([3.0, 4.0, 7.0])]}));
+    assert!((r["distance_mm"].as_f64().unwrap() - 5.0).abs() < 1e-9, "{r}");
+    // The XY plane and the Z axis meet: nothing between them.
+    let r = run(&mut s, "inspect.measure", json!({"items": [{"type": "plane", "name": "XY"}, {"type": "axis", "name": "Z"}]}));
+    assert!(r["distance_mm"].as_f64().unwrap().abs() < 1e-9, "{r}");
+}
+
+#[test]
 fn measure_items() {
     let mut s = Session::default();
     run(&mut s, "solid.box", json!({"length": 40, "width": 30, "height": 20}));
@@ -3437,6 +3454,48 @@ fn computed_import_preserves_file_and_earlier_undo_history() {
     assert!(s.model.state().bodies.is_empty());
 }
 
+/// The unsaved-changes answer is worked out once per pair of documents and revision, and stays
+/// right through every way the design changes: an edit in place (`doc_mut`, which stays in
+/// place), one that bypasses it, a new document equal to the saved one, Save, a change of what
+/// is hidden, and undo back to the saved design. Each answer is checked against the plain
+/// comparison it stands for.
+#[test]
+fn the_unsaved_changes_answer_follows_every_change() {
+    let plain = |s: &Session| (!std::sync::Arc::ptr_eq(&s.doc, &s.saved) && *s.doc != *s.saved) || s.visibility != s.saved_visibility;
+    let check = |s: &Session, want: bool, why: &str| {
+        for _ in 0..2 {
+            assert_eq!(s.is_dirty(), want, "{why}");
+            assert_eq!(plain(s), want, "{why}: the plain comparison");
+        }
+    };
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10}));
+    s.mark_saved();
+    check(&s, false, "saved");
+    // An edit in place: the cached answer holds the document, yet the edit is not a copy.
+    s.doc = std::sync::Arc::new((*s.doc).clone());
+    check(&s, false, "an equal copy of the saved design");
+    let at = std::sync::Arc::as_ptr(&s.doc);
+    s.doc_mut().name = "Renamed".into();
+    assert_eq!(std::sync::Arc::as_ptr(&s.doc), at, "doc_mut edits in place");
+    check(&s, true, "renamed in place, same revision");
+    s.doc_mut().name = s.saved.name.clone();
+    check(&s, false, "named back in place");
+    // An edit that goes around doc_mut while the answer holds the document copies it.
+    std::sync::Arc::make_mut(&mut s.doc).name = "Elsewhere".into();
+    check(&s, true, "edited past doc_mut");
+    s.mark_saved();
+    check(&s, false, "saved again");
+    run(&mut s, "solid.box", json!({"length": 5, "width": 5, "height": 5, "corner": [30, 0, 0]}));
+    check(&s, true, "a command");
+    run(&mut s, "edit.undo", json!({}));
+    check(&s, false, "undone back to the saved design");
+    s.visibility.hidden_bodies.push("Body1".into());
+    check(&s, true, "a body hidden");
+    s.visibility.hidden_bodies.clear();
+    check(&s, false, "shown again");
+}
+
 /// Commands evaluated ahead (off the window thread) and then run for real take what was
 /// evaluated: on a design whose states are past the shared cache's budget the second run
 /// evaluated everything again, so an off-thread command cost twice its time.
@@ -4551,6 +4610,10 @@ fn creating_a_component_recomputes_nothing() {
 #[test]
 fn observation_snapshot_isolates_contact_work_from_the_editing_session() {
     let mut session = Session::default();
+    run(&mut session, "solid.box", json!({"length":10,"width":10,"height":10}));
+    assert!(session.is_dirty());
+    assert!(session.dirty_cache.lock().unwrap().is_some(), "prime the cached comparison that retains document references");
+    assert!(!session.made_bodies.is_empty(), "prime the feature body-name cache");
     session.set_render_job_host(Some(solidcraft_render::job::CpuHost::cooperative())).unwrap();
     session.easyprint_upload = Some(std::sync::Arc::new(|_, _| Ok(())));
     session.appearance_clipboard =
@@ -4558,6 +4621,10 @@ fn observation_snapshot_isolates_contact_work_from_the_editing_session() {
     session.foreign_copy = Some(std::sync::Arc::new(crate::ForeignCopy::of(&session, Vec::new(), Vec::new())));
     let observer = session.observation_snapshot();
     let scratch = session.scratch();
+    for copy in [&observer, &scratch] {
+        assert!(copy.dirty_cache.lock().unwrap().is_none(), "copies must not retain cached document comparisons");
+        assert!(copy.made_bodies.is_empty(), "copies must re-read feature body names rather than retaining editing cache references");
+    }
     assert!(observer.foreign_copy.is_none(), "observation must not retain another design clipboard or its model caches");
     assert!(
         std::sync::Arc::ptr_eq(scratch.foreign_copy.as_ref().unwrap(), session.foreign_copy.as_ref().unwrap()),

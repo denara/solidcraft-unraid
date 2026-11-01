@@ -1,5 +1,117 @@
 # Validated container updates
 
+## 2026-11-01: fixed upstream 0.29.0 snapshot and native format 47
+
+Selected `7239c95858553997457d28c244f4234628b69ac6` once, 186 commits after
+validated `251c20be`. The sole `codex/unraid-mcp-web` branch started clean and
+synchronized at `91bd0ca6`; fork main is an ancestor. For upstream CAD functions
+and changes see [the original project](https://github.com/tangency-labs/solidcraft).
+This is unofficial integration, not an application release or Unraid installation.
+
+All published HTTP MCP and independent browser/Workspace behavior is retained:
+immutable projects, shared path/revision/transfer gates, remembered cookie-only
+login, live inventory, thumbnails and independent browser copies, read-only
+observation, confirmed deletion, bounded streaming ZIP64 and backup exclusions,
+manual projects, multi-file uploads with batch conflict choices and the volume
+capacity footer. Existing layouts, original assets and private configuration stay
+intact. The canonical Unraid Overview and icon are unchanged.
+
+The engine merge retains observer isolation for world/contact/display caches,
+clipboards, upload capabilities and render-job hosts. Upstream's new body-name
+cache starts empty in all scratch copies, and the new dirty-answer cache also starts
+cold rather than retaining cached document comparisons. The existing isolation
+regression primes both caches before checking observer and ordinary scratch copies.
+User-named-design state, settled joints and original editing behavior are retained.
+The generated notices conflict is resolved by regeneration with both fork packages.
+
+Two small strict-lint adaptations retain finite circle-turn bounds and ribbon tool
+behavior; invalid NaN turns are refused. The Wasm no-op blur call is a statement,
+while native builds retain the original scope guard for the entire UI frame. No
+lint suppression, alternate compositor or unsafe platform bridge is introduced.
+The new `sys-locale` 0.3.2 dependency is MIT OR Apache-2.0, checked in Cargo metadata
+and shipped notices. Toolchains remain Rust 1.95 and Trunk 0.21.14.
+
+No new unrestricted output command is enabled. Sketch-to-part transfers and MCP
+`check_parameters` operate on the model; the latter uses a checkpoint and does not
+accept file-output paths. Existing exporter/script destination checks remain.
+Linked-source digests and multi-link refresh keep root/scope/remote/device/symlink
+checks and the shared HTTP/MCP source-reader gate. Native save backups now use an
+atomic hard-link when supported, with the existing copy fallback; target/backup/
+temporary names remain beside the checked destination and share the save gate.
+ZIPs still omit backups without reading them, while delete confirmations remain
+strict. UI upload formats and limits are unchanged.
+
+Upstream's incremental browser loading and native viewport blur stay separate from
+the independent Workspace handoff. Native format46 folded the earlier pending
+fields; this post-release snapshot saves format47 for captured cross-component face
+placements. Existing format46 attachments retain their original live placement
+semantics. No existing file is migrated. The Git-free production evaluation-cache
+policy is unchanged: unknown-source caches are rebuilt.
+
+Relevant library checks passed: 143 gateway tests, 66 affected library selections
+and 34 additional new upstream regression cases not already covered by those
+selections. This includes observer cache isolation, dirty-state comparisons,
+checkpoint restoration and the new MCP tool, native format/face anchors, geometry
+and sketch projection, component transfers, hard-link/copy safe-write behavior,
+GPU/curve display and changed UI/loading paths. Existing manual benchmark, measurement and evidence cases
+retain their upstream ignore markers. No unfiltered repository test suite was run.
+
+Full native all-target Clippy, 13-crate Wasm compatibility, scoped browser/client
+Wasm lint, formatting, licensing, 880 attributed assets (264 render-resource
+receipts), 362 original icon masters, layers, lists, containers and 17 skills pass.
+Initial strict-lint and private shell-harness diagnostics are retained and fixed;
+no failing product check was waived. The target-only slicer field remains a harmless
+Wasm dependency warning, without suppressing browser/client lint.
+
+CLI connection/help/render-host, run-result and script-roundtrip integrations pass,
+as do all 32 native web/helper cases. Script export explicitly reports omitted
+print-face assignments rather than pretending to preserve them.
+
+A fresh labelled candidate on a new disposable volume, loopback port and disposable
+credential passed real HTTP MCP modelling (24000 mm3), PNG/STEP, separate sessions,
+authentication/origin/path denial, logging/privacy, project selection and restart
+persistence. Shared strong revisions, Workspace/observer/live SSE, confirmed deletion,
+bounded streaming ZIP with native-backup exclusions, remembered login/logout and
+manual projects/uploads pass. The existing runtime was not mutated during these checks.
+
+Real browser captures were inspected: multi-file drag/drop, fixed batch targets,
+overwrite/skip/cancel/apply-all reset and stale-revision denial, live collapsed
+groups, compact folder actions, joined overview, storage footer and an independent
+native CAD copy remain correct. The new build loads the public native scan in real
+WebGL with three points; browser-only changes leave saved server bytes unchanged.
+Visible headless clouds retain explicit preview unavailability, while hiding the
+scan permits CAD observation. No raw-scan upload policy was widened.
+
+The official MCP SDK reopened public formats 13 and 46 without changing source
+bytes. New format47 saves preserve parameters, 24000 mm3, split-face names/centroids,
+STEP, BOM/DXF revisions, embedded HDR CPU rendering, equation curves and print faces.
+The analytic four-face STL tetrahedron retains oriented triangles and 1000/6 mm3
+signed volume through native save/reopen and STL export. Linked-file digests survive
+source replacement and explicit refresh, retaining original assembly bytes.
+All checked native archives pass CRCs and the Git-free production cache policy.
+
+The new MCP `check_parameters` tool reports 3000 mm3 for a temporary 30 mm trial,
+then restores the 20 mm/2000 mm3 model, parameter values and clean state. Unknown
+parameters are refused and original saved bytes stay unchanged. A new native47
+cross-component face attachment captures its authoring placement: moving its author
+part 40 mm moves its badge by 40 mm without reshaping it. The saved and reopened
+assembly retains the captured 4x4 matrix and analytic 1008 mm3 total volume.
+Private proofs, fixtures and screenshots remain ignored under
+`target/upstream-7239c958-20261101/`.
+
+Actual software-GL capture/depth and the 22-case stand-up UI integration pass.
+The browser API check now waits up to 120 frames for incremental linked-source
+opening, retaining its tab/body checks and the unchanged assembly in the original
+tab. The previous synchronous assumption failed before the open finished; no
+application behavior or success assertion is weakened. The bounded queue, DXF,
+shortcut/linked-source API behavior and all 20 offline/update cases pass after this
+scoped harness correction. No application artifact changed for that test-only fix.
+
+Retain pre-update designs and independent browser backups for rollback: saved
+format47 files require a compatible reader. This task does not migrate existing
+files. Publication and the authorized local runtime replacement are recorded only
+after the corresponding checks pass.
+
 ## 2026-10-31: fixed upstream 0.28.0 snapshot, linked-file digests and native format 46
 
 Selected `251c20bef0f98ed15ee8807e4787a0c112e43e9a` once, 162 commits after

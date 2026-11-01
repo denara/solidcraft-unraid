@@ -227,7 +227,12 @@ const LINKED_TEST: &str = r#"(async () => {
     }
     check(menu.items?.some(item => item.id === 'ui.openLinkedDesign'), 'occurrence menu offers the source design');
     await app.request('ui.menuPick', {item: 'ui.openLinkedDesign'});
-    const tabs = await app.request('ui.documents');
+    // Opening is incremental: the menu starts it, and subsequent frames finish it.
+    let tabs;
+    for (let frame = 0; frame < 120; frame++) {
+        tabs = await app.request('ui.documents');
+        if (tabs.documents.length === 2 && tabs.active === 1) break;
+    }
     check(tabs.documents.length === 2 && tabs.active === 1, 'linked source opens in another tab');
     check((await app.inspect()).bodies[0].name === 'Browser API box', 'source design is active');
     await app.request('ui.documents', {action: 'switch', index: 0});
