@@ -69,11 +69,34 @@ an owned test volume. Runtime projects, tokens and data volumes are outside clea
 A storage-related interrupted build was resumed after verified private recovery;
 previously passed source checks were preserved rather than rerun wholesale.
 
-Publication is verified separately against the exact source workflow, immutable and
-latest anonymous pulls, image/source digest, archive checksum and local runtime
-preservation. Record those completed facts below after they pass. Before an Unraid
-update, retain a private backup and rollback image: older builds cannot open newly
-saved format48 files. Existing files are not automatically migrated.
+Published source `a8de7a7a03aed662ab74f1f31f77f814d6a42c75` on `codex/unraid-mcp-web`.
+The exact [container workflow](https://github.com/denara/solidcraft-unraid/actions/runs/41447951359)
+passed before publication. Anonymous pulls of `sha-a8de7a7a03aed662ab74f1f31f77f814d6a42c75`
+and `latest` resolve to the same Linux amd64 image, with source labels checked.
+Published digest: `sha256:a209ba8753646e94941667a646fee1256fae702eeff834739917850d277f565e`.
+
+The transferable archive is `target/solidcraft-unraid-upstream-544de55b-a8de7a7a.tar`
+(191,694,336 bytes), tagged `solvecraft-unraid:upstream-544de55b-a8de7a7a`.
+SHA256: `14a98b80e1a06bcbe19fe20c74314e1fd38023cfc1186be631f3ba5c11b5d34c`.
+An independent read rechecks its checksum, tar structure, repository tag, source label,
+architecture, absence of private token/origin environment values and all eight
+content-blob hashes. The archive and evidence stay ignored, outside publications.
+
+After a fresh private data/configuration backup, the local development instance was
+selected by its immutable source tag in ignored configuration. Health, authenticated
+MCP, 24000 mm3 public-design reopen, temporary 4000 mm3/PNG, browser cookie login,
+Workspace events/metadata and web startup pass. Saved public source bytes, data
+volume, token, ownership, ports and security/resource settings are preserved.
+Only then were 31 verified inactive build/check/candidate containers removed.
+One healthy development runtime remains; volumes, native cache, useful toolchain,
+private backups and the prior image remain available. No global prune was used.
+
+Canonical template/icon blobs still match `denara/unraid-templates` main
+`ffa25fd39fbca2c4d5da2c868d5d0eed7b371925`; XML and unofficial authorship are checked.
+There is no metadata change, catalog commit or new portal submission for this image.
+Unraid was not modified. Before manually using its Docker update action, retain a
+private backup and rollback image: older builds cannot open newly saved format48
+files. Reload the browser after updating. Existing files are not automatically migrated.
 
 
 ## 2026-11-01: fixed upstream 0.29.0 snapshot and native format 47
