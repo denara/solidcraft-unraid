@@ -15,7 +15,7 @@ The fork is hosted at [denara/solidcraft-unraid](https://github.com/denara/solid
 The public Unraid template names a new container `SolidCraft`; the existing local Compose service,
 image tags, command names, data format and environment variables retain compatibility.
 The first prototype used upstream commit `af536a7`. The current validated snapshot is
-`7239c95858553997457d28c244f4234628b69ac6`. See [update records](unraid-updates.md) for checks,
+`544de55baaa34f44956aa4d377596929490f1dbe`. See [update records](unraid-updates.md) for checks,
 the transferable image archive and installation instructions for this update.
 
 For future requested updates, use the repository skill
@@ -32,6 +32,67 @@ and remove obsolete project build/check containers. Select the local image with
 `SOLVECRAFT_IMAGE` in ignored `.env`; preserve the existing data volume and MCP token.
 Useful build images and caches, saved designs and a rollback image are retained.
 This local cleanup does not update Unraid or remove unrelated Docker resources.
+
+## Local development build storage
+
+The Windows development cache is separate from container designs. Configure the local
+absolute cache/checkout paths and the immutable approved toolchain image ID in
+ignored `target/build-storage.json`; keep this file and cache contents out of Git
+and build contexts. The cache root needs `.solidcraft-build-cache.json` with
+`{"Owner":"denara/solidcraft-unraid","Purpose":"disposable-build-cache"}`.
+Only compiler output (`Target`) and the Cargo registry (`Registry`) belong there.
+Neither runtime data nor private backups may be placed in the cache.
+For Linux filesystem performance on Windows, the owner uses a dedicated cache-only
+WSL filesystem whose virtual disk is on the chosen secondary drive. Its Linux data
+is exported at a private shared mount; the Docker runtime data disk stays separate.
+The runner verifies that the registered WSL disk belongs to the marked host root,
+prepares the checked mount without administrator access and keeps it alive for builds.
+The WSL distribution name is `SolidCraftBuildCache`; it contains no project data.
+
+Example configuration structure; replace the placeholders locally:
+
+```json
+{
+  "Schema": 1,
+  "Backend": "directory",
+  "Root": "<absolute-cache-directory>",
+  "Workspace": "<absolute-checkout-directory>",
+  "Target": "<cache-directory>/target",
+  "Registry": "<cache-directory>/registry",
+  "ImageId": "sha256:<approved-toolchain-image-digest>",
+  "LimitGiB": 120,
+  "SystemReserveGiB": 30,
+  "CacheReserveGiB": 80
+}
+```
+
+For the native layout set `Backend` to `wsl`, `WslDistribution` to
+`SolidCraftBuildCache`, `WslDisk` to the actual registered disk under the marked
+host root, and `Target` / `Registry` to the verified shared Linux target/registry
+paths. `PhysicalLimitGiB: 160` also caps the host disk-image high-water mark;
+`LimitGiB: 120` measures actual cache data. Both are monitored ceilings rather
+than filesystem quotas. Check ownership and idle consumers before compacting or
+recreating a disposable cache disk; never unregister or clear a runtime data store.
+
+`packaging/unraid/build-storage.ps1 -Mode Check` verifies the marked root, cache
+usage and both disk reserves. `-Mode Run` runs the selected private evidence `.sh`
+script in a labelled build container with the configured host cache mounts and
+bounded CPU/memory/process resources, with `CARGO_INCREMENTAL=0`. It streams stdout/stderr to separate private
+logs. It checks free disk space every three seconds and cache size every 30 seconds,
+so the 120 GiB budget is an enforced monitored threshold, not a filesystem quota.
+A limit breach stops only the verified build container; it does not stop the local
+CAD runtime, rotate credentials, delete files or prune other Docker resources.
+
+Remove obsolete compiler artifacts only between builds after checking cache
+ownership and all consumers. Cargo's scoped package/workspace clean can remove
+old application artifacts while keeping downloaded/compiled dependencies useful.
+Keep the cache below its limit before the next build; do not silently increase
+limits or bypass the runner. `build-storage-test.ps1` checks thresholds, disk
+reserves, build ownership and link exclusion. A real disposable limit-stop proof
+is also required when changing the runner.
+
+The actual private drive layout is not a product default. Moving this development
+cache does not move or migrate Unraid projects or change the runtime data mapping.
 
 ## Registry installation and Community Applications
 
@@ -315,6 +376,24 @@ session's loaded revision for its current file. A conflict refuses the write and
 the session model; reopen the newer file or save under a different name. New filenames
 remain available without a revision. This applies to command-based writes inside
 `execute` and `batch`, as well as the direct tools.
+
+Typed `file.export_step`, `file.export_stl`, `file.export_3mf` and
+`file.export_obj` commands use the same destination/revision checks as ordinary
+exports. The command selects its real output format, even with a misleading filename
+extension. Both ordinary and typed OBJ exports check the `.obj` file and its sibling
+`.mtl` material library before either write. Replacing either existing output requires
+its own current strong revision. Typed URDF is refused for the same multi-file reason
+as ordinary URDF. A failed multi-file export can leave already-written outputs; it
+reports that failure rather than claiming an atomic group write.
+
+`compare_picture` and `inspect.compare_picture` reference images are data-only reads
+inside the selected project, with the same path/symlink and shared source-read gate
+as other imports. Direct tools, `execute` and normalized `batch` aliases use these
+checks. Geometry fields named `reference` still represent geometry, not filenames.
+Saved-shot queues (`render.batch`) and their `render.status` advancement also hold
+the shared source-read gate while preparing each shot, including nested HDR sources.
+Their transient results remain session-local; explicit image export retains the
+normal destination and revision checks.
 
 Managed HTTP and MCP writes are serialized with their revision checks. This is not an
 operating-system file lock: programs writing directly to the data share can still race

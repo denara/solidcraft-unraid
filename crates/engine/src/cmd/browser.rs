@@ -1424,6 +1424,51 @@ mod tests {
         assert_eq!(s.selection.len(), 2);
     }
 
+    /// The viewport asks whether each body is shown several times a frame: a lookup reads the
+    /// set of hidden bodies, not the list, and follows every change of the list, one written in
+    /// place included.
+    #[test]
+    fn hidden_body_lookups_do_not_walk_the_hidden_body_list() {
+        use crate::occurrences::visibility_work;
+
+        let mut s = Session::default();
+        let hide_many = |s: &mut Session, n: usize| {
+            s.visibility.hidden_bodies.clear();
+            s.visibility.hidden_bodies.extend((0..n).map(|i| format!("Hidden{i}")));
+        };
+        let walked_by = |s: &Session, name: &str| {
+            visibility_work::take();
+            let visible = s.body_visible(name);
+            (visible, visibility_work::take())
+        };
+        hide_many(&mut s, 10);
+        let (_, few) = walked_by(&s, "Shown");
+        hide_many(&mut s, 10_000);
+        visibility_work::built_take();
+        let (visible, many) = walked_by(&s, "Shown");
+        assert!(visible);
+        assert!(many <= few, "a lookup walked {many} entries of 10,000 hidden bodies and {few} of 10");
+        assert_eq!(visibility_work::built_take(), 10_000, "the hidden bodies are read into the set once");
+        for i in 0..300 {
+            assert!(walked_by(&s, &format!("Body{i}")) == (true, 0));
+        }
+        assert_eq!(visibility_work::built_take(), 0, "and not again for the next lookups");
+        assert!(!s.body_visible("Hidden5000") && !s.body_visible("Hidden9999"));
+        s.visibility.hidden_bodies.retain(|name| name != "Hidden5000");
+        assert!(s.body_visible("Hidden5000"), "shown again in place");
+        s.visibility.hidden_bodies.push("Shown".into());
+        assert!(!s.body_visible("Shown"), "hidden in place");
+        s.visibility.hidden_bodies.clear();
+        assert!(s.body_visible("Shown") && s.body_visible("Hidden0"), "all shown");
+        run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10, "body_name": "Peg"}));
+        run(&mut s, "browser.visibility", json!({"items": ["Peg"], "visible": false}));
+        assert!(!s.body_visible("Peg"));
+        run(&mut s, "edit.undo", json!({}));
+        assert!(s.body_visible("Peg"), "undo shows it again");
+        run(&mut s, "edit.redo", json!({}));
+        assert!(!s.body_visible("Peg"), "redo hides it again");
+    }
+
     #[test]
     fn show_all_bodies_clears_stale_hidden_names() {
         for folder in ["bodies", "all"] {
@@ -1757,7 +1802,9 @@ mod tests {
         run(&mut s, "solid.box", json!({"length": 5, "width": 5, "height": 5, "corner": [20, 0, 0], "operation": "new", "body_name": "Tab"}));
         run(&mut s, "solid.combine", json!({"target": "A", "tools": ["Tab"], "operation": "join", "name": "Joined"}));
         let want = total(&mut s);
+        s.evaluations = 0;
         run(&mut s, "body.rename", json!({"body": "A", "name": "B"}));
+        assert_eq!(s.evaluations, 0, "renaming primitive participants changes no geometry");
         assert!(
             s.model.results.iter().all(|r| r.error.is_none()),
             "{:?}",
@@ -1767,6 +1814,7 @@ mod tests {
         assert!((total(&mut s) - want).abs() < 1e-6);
         run(&mut s, "edit.undo", json!({}));
         assert_eq!(s.doc.find_feature("Hole").unwrap().participants, vec!["A".to_string()]);
+        assert_eq!(s.evaluations, 0);
     }
 
     /// #1109: renaming counted bodies (`Body1`, `Body2` of one pattern) leaves the counted bodies
@@ -1830,12 +1878,78 @@ mod tests {
         assert_eq!(names(&s), vec!["Plate".to_string(), "B".to_string()]);
         assert_eq!(s.evaluations, 0, "undo and redo of a rename evaluate nothing");
         assert_eq!(meshes(&s), shown);
-        // A body a later feature uses is renamed in that feature too: that is evaluated.
+        // A later feature's body reference follows the rename without rebuilding geometry.
         run(&mut s, "solid.combine", json!({"target": "Plate", "tools": ["B"], "operation": "join", "keep_tools": true}));
+        let shown = meshes(&s);
         s.evaluations = 0;
         run(&mut s, "body.rename", json!({"body": "B", "name": "Tool"}));
-        assert!(s.evaluations > 0);
+        assert_eq!(s.evaluations, 0);
+        assert_eq!(meshes(&s), shown);
         assert!(names(&s).contains(&"Tool".to_string()));
+    }
+
+    /// #6287: one rename in a timeline of named body references used to rebuild every feature
+    /// and replace every mesh, including the other bodies' meshes.
+    #[test]
+    fn renaming_a_body_with_downstream_references_keeps_every_mesh() {
+        let mut s = Session::default();
+        for i in 0..18 {
+            run(
+                &mut s,
+                "solid.box",
+                json!({"length": 40, "width": 30, "height": 10, "center": [50 * i, 0, 0], "operation": "new", "body_name": format!("Block{i}")}),
+            );
+        }
+        for _ in 0..2 {
+            for i in 0..18 {
+                run(&mut s, "solid.move", json!({"bodies": [format!("Block{i}")], "translate": [0, 5, 0]}));
+            }
+        }
+        assert_eq!(s.doc.features.len(), 54);
+        let meshes = |s: &Session| s.model.state().bodies.iter().map(|b| b.mesh()).collect::<Vec<_>>();
+        let looks = |s: &Session| {
+            s.model.state().bodies.iter().map(|b| (b.name.clone(), (*solidcraft_doc::naming::face_names(b)).clone())).collect::<Vec<_>>()
+        };
+        let shown = meshes(&s);
+        let before = looks(&s);
+        let measurements = run(&mut s, "inspect.measure", json!({}))["total"].clone();
+        assert!((measurements["volume_mm3"].as_f64().unwrap() - 216_000.0).abs() < 1e-6);
+        s.evaluations = 0;
+        run(&mut s, "body.rename", json!({"body": "Block0", "name": "Bracket"}));
+        assert_eq!(s.evaluations, 0, "renaming references must not evaluate the timeline");
+        let after = looks(&s);
+        assert_eq!(after[0].0, "Bracket");
+        let mut fresh = Session::new((*s.doc).clone());
+        fresh.refresh();
+        assert_eq!(looks(&fresh), after, "the same bodies and face names as rebuilding");
+        assert_eq!(run(&mut fresh, "inspect.measure", json!({}))["total"], measurements);
+        run(&mut s, "edit.undo", json!({}));
+        assert_eq!(looks(&s), before);
+        run(&mut s, "edit.redo", json!({}));
+        assert_eq!(looks(&s), after);
+        assert_eq!(s.evaluations, 0, "undo and redo must also retain the evaluated model");
+        assert!(shown.iter().zip(meshes(&s)).all(|(a, b)| std::sync::Arc::ptr_eq(a, &b)), "every body retains its display mesh");
+    }
+
+    #[test]
+    fn a_body_rename_with_changed_dimensions_still_evaluates() {
+        let mut s = Session::default();
+        run(&mut s, "solid.box", json!({"length": 40, "width": 30, "height": 10, "body_name": "Block"}));
+        run(&mut s, "solid.move", json!({"bodies": ["Block"], "translate": [5, 0, 0]}));
+        let before = s.doc.clone();
+        let model = s.model.clone();
+        run(&mut s, "body.rename", json!({"body": "Block", "name": "Bracket"}));
+        // An outside edit can include a rename and a geometry change together. It must not
+        // take the rename shortcut merely because the later Move's body reference matches.
+        let solidcraft_doc::FeatureKind::Box { height, .. } = &mut s.doc_mut().features[0].kind else { panic!("expected the box") };
+        *height = "20".into();
+        s.model = model;
+        s.evaluations = 0;
+        s.refresh_from(&before, false);
+        assert_eq!(s.evaluations, 1);
+        assert_eq!(names(&s), ["Bracket"]);
+        let volume = run(&mut s, "inspect.measure", json!({}))["total"]["volume_mm3"].as_f64().unwrap();
+        assert!((volume - 24_000.0).abs() < 1e-6, "the changed height must be evaluated: {volume}");
     }
 
     #[test]

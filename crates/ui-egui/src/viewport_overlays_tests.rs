@@ -67,7 +67,8 @@ fn section_details_live_fields_reconstruct_arbitrary_plane_without_losing_compan
     assert!((original.1 + flipped.1).len() < 1e-9);
     h.app.session.doc_mut().units = "in".into();
     let effect = h.app.session.status_items().remove(0);
-    let params = crate::viewport_details::edit_params(&h.app, &effect, "offset", &V::Length { value: -25.4, units: "in".into() }).unwrap();
+    let params =
+        crate::viewport_details::edit_params(&h.app, &effect, "offset", &V::Length { value: -25.4, units: "in".into(), decimals: 2 }).unwrap();
     assert_eq!(params["offset"], "-25.4 mm");
     assert_eq!(params["hatch"], true);
     assert_eq!(params["flip"], !current_flip);
@@ -121,7 +122,7 @@ fn details_record_scope_preserves_mixed_limits_and_stale_targets_never_move_came
     crate::viewport_details::dispatch(&mut h.app, &h.ctx, &owner, DetailEvent::Target(target));
     assert_eq!(h.app.session.camera, before);
     let effect = h.app.session.status_items().remove(0);
-    assert!(crate::viewport_details::edit_params(&h.app, &effect, "gap", &V::Length { value: 1.0, units: "in".into() }).is_none());
+    assert!(crate::viewport_details::edit_params(&h.app, &effect, "gap", &V::Length { value: 1.0, units: "in".into(), decimals: 2 }).is_none());
     assert!(crate::viewport_details::description(&h.app, &effect).findings.iter().all(|row| !row.target));
 }
 
@@ -1543,6 +1544,37 @@ fn a_huge_extrude_distance_draws_its_handles_at_once() {
     assert!(started.elapsed().as_secs_f64() < 10.0, "{:?}", started.elapsed());
 }
 
+/// The taper handle's limits come from the profiles' inradii, a grid search over every side:
+/// an open extrude works them out once for its profiles, not every frame, and again when the
+/// profiles change.
+#[test]
+fn an_open_extrude_keeps_its_taper_limits_while_the_profiles_stay() {
+    let mut h = Harness::new();
+    h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+    h.app.run("sketch.rectangle.two_point", json!({"p0":[-20,-20],"p1":[20,20]})).unwrap();
+    h.app.run("sketch.circle.center", json!({"center":[0,0],"radius":6})).unwrap();
+    h.app.run("sketch.finish", json!({})).unwrap();
+    h.app.run("select.clear", json!({})).unwrap();
+    h.step(&json!({"call":"ui.view","params":{"view":"home"}})).unwrap();
+    h.step(&json!({"call":"ui.view","params":{"view":"fit"}})).unwrap();
+    h.settle();
+    h.step(&json!({"start":"solid.extrude"})).unwrap();
+    h.step(&json!({"click":{"world":[15,15,0]}})).unwrap();
+    h.frames(2);
+    assert!(crate::scenario::handle_at("taper").is_some(), "the taper handle is drawn");
+    let once = crate::canvas::taper_radii_worked_out();
+    h.frames(20);
+    assert_eq!(crate::canvas::taper_radii_worked_out(), once, "the same profile: not worked out again");
+    h.step(&json!({"text":"25"})).unwrap();
+    h.frames(4);
+    assert_eq!(crate::canvas::taper_radii_worked_out(), once, "only the height changed");
+    // The disc in the hole joins the extrude: other profiles, other limits.
+    h.step(&json!({"click":{"world":[-3,-3,0]}})).unwrap();
+    h.frames(2);
+    assert_eq!(h.app.dialog.as_ref().map(|d| d.inputs[0].items.len()), Some(2), "{:?}", h.app.dialog.as_ref().map(|d| &d.inputs[0].items));
+    assert!(crate::canvas::taper_radii_worked_out() > once, "new profiles are worked out");
+}
+
 fn point_overlays(app: &SolveApp) -> Vec<Shape> {
     let ctx = egui::Context::default();
     let proj = display_proj(app);
@@ -2637,5 +2669,31 @@ fn summary_preferences_cancel_restores_layout_independently_of_all_effect_polici
         });
         h.frames(3);
         assert_eq!(crate::scenario::rect_of("viewport_status:summary").is_some(), saved);
+    }
+}
+
+#[test]
+fn a_section_card_shows_every_row_and_reads_like_its_pill() {
+    // #10708: the card was cut off below Hatch (and Flip for a tilted plane), and showed
+    // "15.000000 mm" and a normal with 16 digits.
+    use crate::ui_kit::DetailValue as V;
+    for (plane, rows, normal) in [(json!("XZ"), 3, None), (json!({"origin":[20,15,10],"normal":[1,1,0]}), 3, Some("(0.707, 0.707, 0)"))] {
+        let mut h = Harness::new();
+        h.app.run("solid.box", json!({"length":40,"width":30,"height":20})).unwrap();
+        h.app.run("inspect.section", json!({"plane":plane,"offset":15})).unwrap();
+        h.frames(3);
+        let effect = h.app.session.status_items().remove(0);
+        let owner = crate::viewport_status::identity(&effect);
+        h.step(&json!({"click":{"handle":format!("viewport_status:{owner}:setting")}})).unwrap();
+        h.frames(4);
+        let card = crate::scenario::rect_of("viewport_status:card").expect("the card");
+        let fields: Vec<_> = ["offset", "flip", "hatch"].iter().filter_map(|f| crate::scenario::rect_of(&format!("details:field:{f}"))).collect();
+        assert_eq!(fields.len(), rows);
+        assert!(fields.iter().all(|f| card.contains_rect(*f)), "{plane}: card {card:?}, rows {fields:?}");
+        let description = crate::viewport_details::description(&h.app, &effect);
+        assert!(description.settings.iter().any(|s| matches!(&s.value, V::Length { decimals: 2, .. })));
+        if let Some(normal) = normal {
+            assert!(description.settings.iter().any(|s| matches!(&s.value, V::Axis { current, .. } if current == normal)), "{plane}");
+        }
     }
 }

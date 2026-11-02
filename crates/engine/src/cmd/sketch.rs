@@ -174,7 +174,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .at("SKETCH", "CONSTRAINTS")
         .icon("c_concentric")
         .enabled(in_sketch)
-        .params(concat!("a, b: circles/arcs", model_operand_doc!())),
+        .params(concat!("a, b: two circles/arcs, or a circle/arc and a sketch point (including origin), in either order; the point and the curve's centre become coincident", model_operand_doc!())),
     CommandSpec::new("sketch.constraint.collinear", "Collinear", c_collinear)
         .at("SKETCH", "CONSTRAINTS")
         .icon("c_collinear")
@@ -325,7 +325,7 @@ pub(super) fn edit_solved<T>(
     };
     sketch_store::checked(&sk)?;
     sketch_store::write(&mut doc, id, sk)?;
-    *s.doc_mut() = doc;
+    s.set_doc(doc);
     Ok((out, rep))
 }
 
@@ -472,6 +472,9 @@ const CONNECT_TOL: f64 = 1e-6;
 
 /// New points (index `first` on) that land on an existing point, the origin included, get a
 /// coincident constraint to it, as when a click snaps there; `connect: false` leaves them free.
+/// A point placed by parameter expressions is never tied: it follows its expressions, and a
+/// Coincident to where the expressions happened to come to at draw time conflicts with the
+/// next parameter change (#10703).
 fn connect_points(sk: &mut Sketch, first: usize, p: &Value) -> Result<Vec<String>> {
     if !bool_(p, "connect").unwrap_or(true) {
         return Ok(Vec::new());
@@ -481,6 +484,9 @@ fn connect_points(sk: &mut Sketch, first: usize, p: &Value) -> Result<Vec<String
     old.sort_by(|a, b| a.0.x.total_cmp(&b.0.x));
     let mut ties = Vec::new();
     for q in first..sk.points.len() {
+        if sk.points.get(q).is_some_and(|pt| pt.exprs.is_some()) {
+            continue;
+        }
         let Some(at) = sk.point(q) else { continue };
         let from = old.partition_point(|(o, _)| o.x < at.x - CONNECT_TOL);
         let hit =
@@ -2454,11 +2460,21 @@ fn c_perpendicular(s: &mut Session, p: &Value) -> Result<Value> {
     })
 }
 fn c_concentric(s: &mut Session, p: &Value) -> Result<Value> {
-    let p = &super::sketch_project::project_operands(s, p, "sketch.constraint.concentric", &["a", "b"])?;
-    constrain(s, p, "sketch.constraint.concentric", |sk| {
-        two_curves(sk, p, "sketch.constraint.concentric")
-            .and_then(|ab| two_different("sketch.constraint.concentric", ab))
-            .map(|(a, b)| ConstraintKind::Concentric { a, b })
+    let cmd = "sketch.constraint.concentric";
+    let p = &super::sketch_project::project_operands(s, p, cmd, &["a", "b"])?;
+    constrain(s, p, cmd, |sk| {
+        let centre = |key: &str| {
+            let curve = sk.curves.get(sk.curve_index(p.get(key)?.as_str()?)?)?;
+            match curve.kind {
+                CurveKind::Circle { c, .. } | CurveKind::Arc { c, .. } => Some(c),
+                _ => None,
+            }
+        };
+        let point = |key: &str| sk.resolve_point(p.get(key)?.as_str()?);
+        if let Some((p, q)) = centre("a").zip(point("b")).or_else(|| centre("b").zip(point("a"))) {
+            return Ok(ConstraintKind::Coincident { p, q });
+        }
+        two_curves(sk, p, cmd).and_then(|ab| two_different(cmd, ab)).map(|(a, b)| ConstraintKind::Concentric { a, b })
     })
 }
 fn c_collinear(s: &mut Session, p: &Value) -> Result<Value> {

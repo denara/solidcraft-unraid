@@ -99,9 +99,14 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
             "component.insert_design" | "component.relink" | "component.update_links" | "component.replace_with_link" | "component.links" => {
                 out.push(FileOperation::ReadSources)
             }
-            "pointcloud.insert" | "render.hdr.inspect" | "render.settings.capture_hdr" | "render.preflight" | "render.start" => {
-                out.push(FileOperation::ReadSources)
-            }
+            "pointcloud.insert"
+            | "inspect.compare_picture"
+            | "render.hdr.inspect"
+            | "render.settings.capture_hdr"
+            | "render.preflight"
+            | "render.start"
+            | "render.batch"
+            | "render.status" => out.push(FileOperation::ReadSources),
             "doc.open" => {
                 if let Some(path) = name(root, args)? {
                     *current = (!imports_as_new(&path)).then(|| path.clone());
@@ -116,14 +121,32 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
                     out.push(FileOperation::Save(path));
                 }
             }
-            "file.export" => {
+            "file.export" | "file.export_step" | "file.export_stl" | "file.export_3mf" | "file.export_obj" | "file.export_urdf" => {
                 // URDF has a data-dependent set of sibling mesh destinations. Until the
                 // worker can preflight that exact set, it cannot be protected by one ETag.
-                let format = args.get("format").and_then(Value::as_str).or_else(|| args.get("path").and_then(Value::as_str));
+                let format = match id {
+                    "file.export_step" => Some("step"),
+                    "file.export_stl" => Some("stl"),
+                    "file.export_3mf" => Some("3mf"),
+                    "file.export_obj" => Some("obj"),
+                    "file.export_urdf" => Some("urdf"),
+                    _ => args.get("format").and_then(Value::as_str).or_else(|| args.get("path").and_then(Value::as_str)),
+                };
                 if format.is_some_and(|format| format.rsplit('.').next().is_some_and(|ext| ext.eq_ignore_ascii_case("urdf"))) {
                     return Err("URDF multi-file export is not supported through the network gateway; export STEP or 3MF instead".into());
                 }
                 if let Some(path) = name(root, args)? {
+                    if format.is_some_and(|f| f.rsplit('.').next().is_some_and(|ext| ext.eq_ignore_ascii_case("obj"))) {
+                        // The material library is a fixed sibling, written before the OBJ.
+                        // Protect it even when this particular model has no material bytes.
+                        let sibling = Path::new(&path).with_extension("mtl");
+                        let sibling = sibling.to_str().ok_or("OBJ material file name is not valid UTF-8")?;
+                        if sibling == path {
+                            return Err("OBJ output must differ from its .mtl material file; use an .obj name".into());
+                        }
+                        let sibling = relative(root, sibling).ok_or("OBJ material file name is not permitted")?;
+                        out.push(FileOperation::Write(sibling));
+                    }
                     out.push(FileOperation::Write(path));
                 }
             }
@@ -172,6 +195,7 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
         Some("save") => command(root, "file.save", args, &mut current, &mut out)?,
         Some("new_design") => command(root, "file.new", args, &mut current, &mut out)?,
         Some("export") => command(root, "file.export", args, &mut current, &mut out)?,
+        Some("compare_picture") => out.push(FileOperation::ReadSources),
         Some("screenshot") => {
             if let Some(path) = name(root, args)? {
                 out.push(FileOperation::Write(path));
@@ -232,6 +256,39 @@ pub fn check_revisions(root: &Path, status: &ModelStatus, ops: &[FileOperation],
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_exports_and_obj_materials_keep_their_actual_output_revision_gates() {
+        let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(root.join("Public")).unwrap();
+        let call = |id, args| json!({"params":{"name":"execute","arguments":{"command":id,"params":args}}});
+        for id in ["file.export_step", "file.export_stl", "file.export_3mf"] {
+            assert_eq!(
+                operations(&root, &call(id, json!({"path":"Public/part.obj"})), None).unwrap(),
+                vec![FileOperation::Write("Public/part.obj".into())]
+            );
+        }
+        for id in ["file.export", "file.export_obj"] {
+            let message = call(id, json!({"path":"Public/part.obj"}));
+            let ops = operations(&root, &message, None).unwrap();
+            assert_eq!(ops, vec![FileOperation::Write("Public/part.mtl".into()), FileOperation::Write("Public/part.obj".into())]);
+            std::fs::write(root.join("Public/part.mtl"), b"public material").unwrap();
+            assert!(check_revisions(&root, &ModelStatus::default(), &ops, &Value::Null).is_err());
+            let revision = crate::workspace_files::revision(&root, "Public/part.mtl").unwrap().unwrap();
+            check_revisions(&root, &ModelStatus::default(), &ops, &json!({"Public/part.mtl":revision})).unwrap();
+            assert!(operations(&root, &call(id, json!({"path":"Public/part.mtl","format":"obj"})), None).is_err());
+        }
+        assert!(operations(&root, &call("file.export_urdf", json!({"path":"Public/part.step"})), None).unwrap_err().contains("URDF"));
+        let direct = json!({"params":{"name":"compare_picture","arguments":{"reference":"Public/ref.png"}}});
+        assert_eq!(operations(&root, &direct, None).unwrap(), vec![FileOperation::ReadSources]);
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(root.join("Public/part.mtl")).unwrap();
+            std::os::unix::fs::symlink("/etc/passwd", root.join("Public/part.mtl")).unwrap();
+            assert!(operations(&root, &call("file.export_obj", json!({"path":"Public/part.obj"})), None).is_err());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn desktop_slicer_routes_are_rejected_before_derived_writes_or_launches() {
@@ -396,6 +453,9 @@ mod tests {
             "render.settings.capture_hdr",
             "render.preflight",
             "render.start",
+            "render.batch",
+            "render.status",
+            "inspect.compare_picture",
         ] {
             let call = json!({"params":{"name":"execute","arguments":{"command":command,"params":{"path":root.join("source.solidcraft")}}}});
             assert_eq!(operations(&root, &call, None).unwrap(), vec![FileOperation::ReadSources]);

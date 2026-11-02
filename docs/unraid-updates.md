@@ -1,5 +1,81 @@
 # Validated container updates
 
+## 2026-11-02: fixed 0.30.0 snapshot, native format 48 and bounded build storage
+
+Selected `544de55baaa34f44956aa4d377596929490f1dbe` once, 160 commits after
+validated `7239c958`. The sole `codex/unraid-mcp-web` branch was synchronized
+at `bc4770a1`; fetched fork main remains an ancestor. Four later upstream commits
+observed during validation are deferred to the next fixed snapshot. For upstream
+CAD functions and changes see [the original project](https://github.com/tangency-labs/solidcraft).
+This is unofficial integration, not an upstream application release or Unraid installation.
+
+All published integration features are retained: independent browser CAD and server
+MCP, immutable projects, common path/revision/transfer gates, cookie-only remembered
+logins, live Workspace inventory and session metadata, previews, independent browser
+copies, read-only observation, confirmed deletion, bounded streaming ZIP64 with
+backup exclusions, manual projects, multi-file uploads and per-batch conflict choices,
+and the shared-volume capacity footer. The canonical Unraid Overview and icon are
+unchanged; build-machine tooling is not an additional runtime product feature.
+
+The gateway confines `compare_picture` and `inspect.compare_picture` image references
+for direct, execute and normalized batch calls without treating geometry references
+as paths. Queued render preparation/status keeps HDR sources under the shared read
+gate. Typed exporter command IDs determine formats independently of suffixes.
+Ordinary and typed OBJ exports preflight both OBJ and sibling MTL paths and their
+independent strong revisions before either write. A stale MTL leaves both outputs
+unchanged. Multi-file URDF remains blocked even with a misleading filename suffix.
+These paths have gateway regressions and actual official-SDK integration checks.
+
+Native format 48 includes the selected upstream pending fields. Public legacy13 and
+format47 examples reopen with parameters, 24000 mm3 volume and source bytes preserved;
+new files alone use format48. Captured cross-component face placements retain 1008 mm3,
+and parameter-expression circular-pattern origins survive a native48 roundtrip.
+STEP/STL/3MF, OBJ/MTL, BOM/DXF, linked-source digests, extraction/aliases, embedded HDR,
+reference scans, equations and print faces pass their relevant checks. Two queued CPU
+render shots remain independently accessible without dirtying saved source state.
+The Git-free production cache policy still rebuilds unknown-source evaluation caches.
+
+Relevant source checks pass: 145 gateway tests, 70 affected library selections,
+94 additional new upstream regression cases, five CLI integration suites and
+32 native web/helper tests. Two earlier UI corner cases passed separately and the
+complete affected sketch selection passed serially; no assertion was weakened or
+failing product check waived. Native all-target Clippy, 13-crate Wasm compatibility,
+scoped browser/client Wasm lint, formatting, licensing, 1003 attributed assets,
+363 original icon masters, layers, lists, UI containers and 17 skills pass.
+The final release artifacts build successfully. Actual software-GL capture/depth
+checks pass 27 tests, 22 additional UI cases pass, and the real browser API and all
+20 offline/update scenarios pass.
+
+The fresh labelled candidate passes modelling, PNG/STEP, authentication, session
+isolation, project/revision/path protections, restart persistence, logging, Workspace,
+observer, live inventory, deletion/ZIP, remembered-login and upload checks. Official
+MCP SDK checks confirm native migration, new output paths and original-byte preservation.
+Real browser screenshots and assertions cover multi-file upload conflicts, the unchecked
+"Für alle Dateien übernehmen" choice, joined status/search layout, compact project actions,
+capacity footer and independent format48 native/scan copies. Browser changes leave
+saved server files untouched. Evidence is retained privately under ignored
+`target/upstream-544de55b-20261102/`.
+
+Local Windows Cargo/Trunk/compatibility builds now use the marked cache-only native
+filesystem and `packaging/unraid/build-storage.ps1`, with private paths in ignored
+`target/build-storage.json`. The monitored ceilings are 120 GiB of cache data and
+160 GiB for its physical disk image, reserving 30 GiB on the system drive and 80 GiB
+on the cache drive. Incremental compilation is disabled. Unit checks cover thresholds,
+strict name/task/image/workspace/target/registry identity and junction exclusion.
+A real controlled disposable build stops at its own 1 GiB test limit while the
+existing runtime remains healthy; a successful guarded Cargo run also passes.
+The runner's optional browser network peer must be an owned isolated candidate with
+an owned test volume. Runtime projects, tokens and data volumes are outside cleanup.
+A storage-related interrupted build was resumed after verified private recovery;
+previously passed source checks were preserved rather than rerun wholesale.
+
+Publication is verified separately against the exact source workflow, immutable and
+latest anonymous pulls, image/source digest, archive checksum and local runtime
+preservation. Record those completed facts below after they pass. Before an Unraid
+update, retain a private backup and rollback image: older builds cannot open newly
+saved format48 files. Existing files are not automatically migrated.
+
+
 ## 2026-11-01: fixed upstream 0.29.0 snapshot and native format 47
 
 Selected `7239c95858553997457d28c244f4234628b69ac6` once, 186 commits after

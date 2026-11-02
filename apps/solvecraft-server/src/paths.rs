@@ -44,6 +44,16 @@ fn file_fields(root: &Path, value: &mut Value) -> Result<(), String> {
     Ok(())
 }
 
+/// Picture comparison reads one reference; other commands use `reference` for geometry.
+fn picture_reference(root: &Path, value: &mut Value) -> Result<(), String> {
+    if let Some(reference) = value.get_mut("reference")
+        && let Some(name) = reference.as_str()
+    {
+        *reference = Value::String(resolve(root, name)?.to_string_lossy().into_owned());
+    }
+    Ok(())
+}
+
 /// Renderer inputs may nest file sources in environments, textures and typed jobs.
 fn render_file_fields(root: &Path, value: &mut Value, depth: usize) -> Result<(), String> {
     if depth > 32 {
@@ -87,6 +97,7 @@ pub fn prepare_tool(root: &Path, tool: &str, value: &mut Value) -> Result<(), St
     match tool {
         "crash_reports" => Err("shared desktop crash reports are unavailable through the network gateway".into()),
         "open" | "save" | "export" | "screenshot" => file_fields(root, value),
+        "compare_picture" => picture_reference(root, value),
         "execute" => commands(root, value, 0),
         "batch" => {
             // The MCP worker accepts `id` as a batch-step alias for `command`.
@@ -119,6 +130,13 @@ fn normalize_batch_step(step: &mut Value) -> Result<(), String> {
                 return Err("an execute batch step needs an engine command, not a tool alias".into());
             }
             (inner, args.get("params").filter(|p| p.is_object()).cloned().unwrap_or_else(|| serde_json::json!({})))
+        }
+        "compare_picture" => {
+            let keys = ["reference", "view", "camera", "bodies", "crop_px", "crop_fraction", "fit", "rows"];
+            let mut params: serde_json::Map<String, Value> =
+                keys.iter().filter_map(|key| args.get(*key).cloned().map(|value| ((*key).to_owned(), value))).collect();
+            params.insert("overlay".into(), Value::Bool(false));
+            ("inspect.compare_picture", Value::Object(params))
         }
         "save" | "open" | "export" | "new_design" => {
             let (mapped, keys): (&str, &[&str]) = match command.as_str() {
@@ -170,6 +188,7 @@ fn commands(root: &Path, value: &mut Value, depth: usize) -> Result<(), String> 
                         && !matches!(c, "component.insert_design" | "component.relink" | "component.extract" | "component.replace_with_link"))
                     || c.starts_with("occurrence.")
             });
+            let picture = object.get("command").and_then(Value::as_str) == Some("inspect.compare_picture");
             let render = object.get("command").and_then(Value::as_str).is_some_and(|id| id.starts_with("render."));
             if !geometry
                 && object.get("command").is_some()
@@ -179,6 +198,9 @@ fn commands(root: &Path, value: &mut Value, depth: usize) -> Result<(), String> 
                     render_file_fields(root, params, 0)?;
                 } else {
                     file_fields(root, params)?;
+                    if picture {
+                        picture_reference(root, params)?;
+                    }
                 }
             }
             for item in object.values_mut() {
@@ -200,6 +222,39 @@ fn commands(root: &Path, value: &mut Value, depth: usize) -> Result<(), String> 
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn picture_references_are_confined_for_direct_execute_and_batch_calls() {
+        let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir(&root).unwrap();
+        for reference in ["refs/Schablone-ä.png", "../secret.png", "/etc/passwd", ".hidden.png", "image.png.bak", "C:\\secret.png"] {
+            let valid = reference.starts_with("refs/");
+            let mut direct = json!({"reference":reference});
+            assert_eq!(prepare_tool(&root, "compare_picture", &mut direct).is_ok(), valid);
+            let mut execute = json!({"command":"inspect.compare_picture","params":{"reference":reference}});
+            assert_eq!(prepare_tool(&root, "execute", &mut execute).is_ok(), valid);
+            for alias in ["compare_picture", "inspect.compare_picture"] {
+                let mut batch = json!({"commands":[{"id":alias,"params":{"reference":reference}}]});
+                assert_eq!(prepare_tool(&root, "batch", &mut batch).is_ok(), valid);
+                if valid {
+                    assert_eq!(batch["commands"][0]["params"]["reference"], json!(root.join(reference)));
+                    assert_eq!(batch["commands"][0]["command"], "inspect.compare_picture");
+                    if alias == "compare_picture" {
+                        assert_eq!(batch["commands"][0]["params"]["overlay"], false);
+                    }
+                }
+            }
+        }
+        let mut geometry = json!({"command":"construct.plane.tangent","params":{"reference":"XY"}});
+        prepare_tool(&root, "execute", &mut geometry).unwrap();
+        assert_eq!(geometry["params"]["reference"], "XY");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/etc/passwd", root.join("linked.png")).unwrap();
+            assert!(prepare_tool(&root, "compare_picture", &mut json!({"reference":"linked.png"})).is_err());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn rejects_traversal_and_rewrites_nested_file_calls() {

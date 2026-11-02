@@ -20,7 +20,7 @@ new uses of it anywhere else. Public docs/web/Flatpak deployments use project Pa
 
 ## Container prototype baseline
 The first Unraid prototype used upstream commit `af536a7`. The current validated
-container baseline is `7239c95858553997457d28c244f4234628b69ac6`.
+container baseline is `544de55baaa34f44956aa4d377596929490f1dbe`.
 Keep later upstream CAD/UI feature updates separate from this deployment addition;
 advance the baseline only as a separate, validated update. See [update records](../docs/unraid-updates.md).
 
@@ -43,6 +43,26 @@ the local runtime's data volume and MCP token, useful build images/caches and a 
 image. Check ownership and current activity before removal; do not prune unrelated Docker
 resources or delete data volumes. This authorizes refreshing the local test container,
 not installing on Unraid. See the update skill for verification and cleanup details.
+Local Windows build storage is bounded independently of application data. Read the ignored
+`target/build-storage.json` and use `packaging/unraid/build-storage.ps1` for local
+Cargo/Trunk/compatibility builds. The marked host cache contains only disposable
+compiler output and the Cargo registry, outside the Docker system disk; private
+absolute paths stay in ignored configuration. Keep the combined cache limit at
+120 GiB, at least 30 GiB free on the system disk and 80 GiB on the cache disk.
+A native cache-only WSL disk on that drive keeps Linux filesystem semantics and
+must be verified against its registration; it contains no projects or tokens.
+Keep its physical high-water ceiling at 160 GiB. Guarded builds disable incremental
+compilation to avoid accumulating large debug histories.
+The runner checks reserve space during a build and remeasures the cache every
+30 seconds. On a violation it stops only its verified name/task/image/workspace/
+cache-mount build container. Never lower reserves or raise limits to force a pass.
+Before removing obsolete artifacts, verify all consumers are idle and scope the
+operation to the marked build cache. Prefer Cargo's package/workspace clean over
+an unrestricted directory delete; retain registry/toolchain dependencies when
+useful. Designs, tokens, runtime volumes, private backups and rollback images are
+outside this cleanup scope. Do not use global Docker prune. Run the build-storage
+regressions after changes, and verify an actual bounded disposable build.
+
 Public container distribution is authorized through the tested container workflow to
 `ghcr.io/denara/solidcraft-unraid`, with Community Applications metadata in
 `denara/unraid-templates`. Publish only after the image's modelling, authentication,
@@ -78,6 +98,15 @@ workers explicitly with `--headless`; desktop discovery must never attach a netw
 to a running desktop app. New `component.extract` destinations and
 `component.replace_with_link` source paths retain file confinement and shared revision gates.
 Nested renderer file sources remain project-relative and share the HTTP/MCP read gate.
+Preserve that read gate for `render.batch` and `render.status`: status can prepare
+later queued shots and read their HDR sources. `compare_picture` and
+`inspect.compare_picture` references are confined project image paths in direct,
+execute and normalized batch calls; other geometry `reference` fields are not paths.
+Typed exporter IDs determine the actual format independently of filename extensions.
+Ordinary and typed OBJ exports preflight both the mesh and sibling `.mtl` before
+writing, with separate strong revisions and shared transfer/project gates; typed
+URDF stays blocked with ordinary multi-file URDF. Do not reduce a multi-output
+export to its primary path in future updates.
 Observer snapshots never inherit render-job hosts; ordinary scratch rendering retains them.
 Appearance clipboards also remain isolated from observer snapshots. Point-cloud source
 reads share the HTTP/MCP file gate; opening PLY/XYZ/PTS creates an unsaved design, never

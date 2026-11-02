@@ -238,7 +238,7 @@ pub struct MenuState {
     /// A delete waiting for its confirmation (it takes or breaks other features).
     pub confirm: Option<crate::delete::Pending>,
     /// A selected part has no free joint value for the explicit assembly Move command.
-    pub joint_move_warning: Option<String>,
+    pub(crate) joint_move_warning: Option<crate::joint_handles::Blocked>,
     /// Identical copies Extract to File found, waiting to be linked too.
     pub link_copies: Option<crate::linked_source::Copies>,
     /// The Properties window: title and measurements.
@@ -734,11 +734,11 @@ fn viewport_items(app: &SolveApp) -> Vec<Item> {
         v.push(act("ui.fit", "Fit", "fit"));
         v.push(act("ui.home", "Home View", "home"));
         v.push(Item::sep());
-        let anything_hidden = !app.session.visibility.hidden_bodies.is_empty()
-            || !app.session.visibility.hidden_sketches.is_empty()
-            || !app.session.visibility.hidden_folders.is_empty();
+        let can_unisolate = !app.session.visibility.hidden_bodies.is_empty() || !app.session.visibility.hidden_occurrences.is_empty();
+        let anything_hidden =
+            can_unisolate || !app.session.visibility.hidden_sketches.is_empty() || !app.session.visibility.hidden_folders.is_empty();
         v.push(act("ui.showAll", "Show All", "eye").on(anything_hidden));
-        v.push(act("ui.showAll", "Unisolate", "eye").on(!app.session.visibility.hidden_bodies.is_empty()));
+        v.push(act("ui.showAll", "Unisolate", "eye").on(can_unisolate));
         v.push(Item::sep());
         v.push(cmd(app, "solid.extrude", "Extrude"));
         v.push(cmd(app, "solid.fillet", "Fillet"));
@@ -1089,6 +1089,18 @@ fn component_items(app: &SolveApp, id: u64) -> Vec<Item> {
     v.push(act("ui.showAll", "Show All Bodies", "eye"));
     v.push(act("ui.isolate", "Isolate", "body").with(json!({ "bodies": names })).on(!bodies.is_empty() && id != 0));
     v.push(act("ui.newGroup", "New Group", "folder").with(json!({ "component": id })));
+    if id != 0 {
+        // Keep the component in the design but leave its features out of the History bar (#10393).
+        let hidden = doc.component_history_hidden(id);
+        v.push(
+            cmd(
+                app,
+                if hidden { "component.show_history" } else { "component.hide_history" },
+                if hidden { "Show its History" } else { "Hide its History" },
+            )
+            .with(json!({ "component": id })),
+        );
+    }
     v.push(Item::sep());
     v.push(cmd(app, "browser.expand_all", "Expand All").with(json!({ "component": id })));
     v.push(cmd(app, "browser.collapse_all", "Collapse All").with(json!({ "component": id })));
@@ -1269,6 +1281,19 @@ fn sketch_entity_items(app: &SolveApp) -> Vec<Item> {
     {
         v.push(cmd(app, "sketch.spline.reverse", "Reverse Spline Direction").with(json!({ "curve": curve })));
     }
+    // #10783: a point of one spline of the sketch's own, alone, comes out of that spline.
+    if let ([], [point]) = (curves.as_slice(), points.as_slice())
+        && let Some(at) = ss.sketch.resolve_point(point)
+        && let [spline] = ss
+            .sketch
+            .curves
+            .iter()
+            .filter(|c| c.link.is_none() && matches!(&c.kind, CurveKind::Spline { pts, .. } if pts.contains(&at)))
+            .collect::<Vec<_>>()
+            .as_slice()
+    {
+        v.push(cmd(app, "sketch.spline.remove_point", "Remove Spline Point").with(json!({ "curve": spline.id, "point": point })));
+    }
     v.push(act("ui.fix", "Fix/Unfix", "c_fix").with(json!({ "entities": ents })));
     // The clipboard beside Delete, as in every menu.
     v.push(act("ui.cut", "Cut", "cut").key("Ctrl+X"));
@@ -1322,6 +1347,9 @@ fn sketch_entity_items(app: &SolveApp) -> Vec<Item> {
         c.push(cmd(app, "sketch.constraint.concentric", "Concentric").with(ab.clone()));
         c.push(cmd(app, "sketch.constraint.equal", "Equal").with(ab.clone()));
         c.push(cmd(app, "sketch.constraint.tangent", "Tangent").with(ab));
+    }
+    if r == 1 && p == 1 && n == 2 {
+        c.push(cmd(app, "sketch.constraint.concentric", "Concentric").with(json!({ "a": picked[0], "b": picked[1] })));
     }
     if l == 1 && r == 1 && n == 2 {
         c.push(cmd(app, "sketch.constraint.tangent", "Tangent").with(json!({ "a": picked[0], "b": picked[1] })));
@@ -1683,6 +1711,7 @@ pub fn run_item(app: &mut SolveApp, item: &Item, at: Pos2) {
                 app.set_status(e, true);
             }
         }
+        "ui.historyShowHidden" => app.tree.history_show_hidden = p["show"].as_bool().unwrap_or(false),
         "ui.workspace" | "ui.workspace.design" | "ui.workspace.render" => {
             if let Some(workspace) = p.get("workspace").and_then(Value::as_str)
                 && let Err(e) = crate::render_workspace::enter(app, workspace == "render")
@@ -2925,6 +2954,47 @@ mod tests {
         let sk = &state.sketch(sid).unwrap().sketch;
         let added = sk.point(sk.curves[sk.curve_index(&fit).unwrap()].kind.point_ids()[2]).unwrap();
         assert!(added.dist(at) < 0.5, "the new fit point is where the menu was opened: {added:?}");
+    }
+
+    /// #10783: a right-click on one of a spline's points offers Remove Spline Point, and the item
+    /// takes that point out: the spline stays, through its other points. A line's end isn't
+    /// offered it.
+    #[test]
+    fn spline_context_menu_removes_the_clicked_point() {
+        let mut h = crate::scenario::Harness::new();
+        h.app.home.open = false;
+        h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+        let fit = h.app.run("sketch.spline.fit_point", json!({"points":[[0,0],[10,8],[20,0],[30,6]],"connect":false})).unwrap()["curves"][0]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        h.app.run("sketch.line", json!({"points":[[0,-12],[20,-12]],"connect":false})).unwrap();
+        let sid = h.app.session.active_sketch.unwrap();
+        let places = |h: &crate::scenario::Harness| {
+            let state = h.app.session.world_state();
+            let sk = &state.sketch(sid).unwrap().sketch;
+            sk.curves[sk.curve_index(&fit).unwrap()].kind.point_ids().iter().map(|i| sk.point(*i).unwrap()).collect::<Vec<_>>()
+        };
+        h.call("ui.view", json!({"view":"top"}));
+        h.app.cam.distance = 80.0;
+        h.settle();
+
+        h.step(&json!({"click":{"world":[20,-12,0]},"button":"right"})).unwrap();
+        assert!(matches!(h.app.session.selection.as_slice(), [Sel::SketchPoint { .. }]), "{:?}", h.app.session.selection);
+        assert!(items(&h.app, &Target::Viewport).iter().all(|item| item.id != "sketch.spline.remove_point"), "a line's end");
+        close(&mut h.app);
+
+        let mut left = places(&h);
+        left.remove(1);
+        h.step(&json!({"click":{"world":[10,8,0]},"button":"right"})).unwrap();
+        let [Sel::SketchPoint { id }] = h.app.session.selection.as_slice() else { panic!("{:?}", h.app.session.selection) };
+        let id = id.clone();
+        let menu = items(&h.app, &Target::Viewport);
+        let item = menu.iter().find(|item| item.id == "sketch.spline.remove_point").expect("a spline's point offers Remove Spline Point");
+        assert_eq!((item.label.as_str(), item.params.clone()), ("Remove Spline Point", Some(json!({"curve": fit, "point": id}))));
+        assert!(item.enabled);
+        h.step(&json!({"click":{"handle":"menu:sketch.spline.remove_point"}})).unwrap();
+        assert_eq!(places(&h), left, "the spline runs through its other points");
     }
 
     #[test]
