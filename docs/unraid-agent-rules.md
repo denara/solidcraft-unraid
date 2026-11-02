@@ -62,6 +62,14 @@ an unrestricted directory delete; retain registry/toolchain dependencies when
 useful. Designs, tokens, runtime volumes, private backups and rollback images are
 outside this cleanup scope. Do not use global Docker prune. Run the build-storage
 regressions after changes, and verify an actual bounded disposable build.
+Run [automatic build-storage maintenance](unraid-build-maintenance.md) on every
+daily task invocation, even without new upstream code, and before/after builds.
+Start preventive cache cleanup at 90 GiB and aim for 70 GiB; require maintenance
+at 140 GiB physical cache-disk size. These are earlier watermarks, not raised
+limits. Retain two validated transfer archives and compact proof records; remove
+only verified obsolete generated copies/resources. Preserve private backups,
+projects, tokens, all data volumes and rollback. Routine maintenance does not
+justify a new application image build or routine status notification.
 
 Public container distribution is authorized through the tested container workflow to
 `ghcr.io/denara/solidcraft-unraid`, with Community Applications metadata in

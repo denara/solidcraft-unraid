@@ -91,6 +91,16 @@ limits or bypass the runner. `build-storage-test.ps1` checks thresholds, disk
 reserves, build ownership and link exclusion. A real disposable limit-stop proof
 is also required when changing the runner.
 
+The daily task also performs [preventive storage maintenance](unraid-build-maintenance.md)
+when upstream is unchanged. At 90 GiB of compiler-cache data it targets 70 GiB;
+at 140 GiB of physical cache-disk size it requires maintenance before another
+build. The existing 120/160 GiB stop limits and 30/80 GiB drive reserves remain.
+It removes only verified obsolete project build resources and packaging copies,
+retains two validated image archives and compact proof records, and protects
+projects, tokens, data volumes, private backups and rollback. If safe cleanup
+cannot restore the reserve, the build is deferred and the required action is
+reported. The exceptional full Docker recovery backup is not a daily artifact.
+
 The actual private drive layout is not a product default. Moving this development
 cache does not move or migrate Unraid projects or change the runtime data mapping.
 
