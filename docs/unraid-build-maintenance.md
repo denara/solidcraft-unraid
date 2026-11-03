@@ -97,3 +97,10 @@ Record before/after sizes and exactly what was removed under ignored `target`.
 Notify only for a meaningful update, a failed/unsafe cleanup, storage that cannot
 be reclaimed automatically or a required user decision. The machine must never
 be filled intentionally to test the protection.
+
+Legacy transfer records may use `archive` instead of `file`, and older names may
+contain only the upstream prefix. Include them in the inventory rather than silently
+leaving them outside retention. When a sidecar lacks a whole-archive hash, use the
+exact historical SHA256/size from the committed update record and verify the tar's
+expected repository tag and saved export manifest. Preserve records/diagnoses;
+remove only the verified archive at its resolved workspace-target path.

@@ -61,9 +61,41 @@ actions, capacity footer and independent native/scan copies without server write
 The actual browser API and all 20 offline/update scenarios pass.
 Evidence stays private in ignored `target/upstream-4bdffef0-20261103-resume/`.
 
-Candidate validation is complete; source/container publication, verified transfer
-archive, local runtime replacement and final cleanup are recorded below after completion.
-The canonical Unraid template and original icon are unchanged; no catalog commit is needed.
+Published source `abeb4a6cc95fe023b5b4ab5d978fc5091af117c9` is a merge of the
+previous integration history and the fixed upstream snapshot. The exact
+[container workflow](https://github.com/denara/solidcraft-unraid/actions/runs/41647527407)
+passed all image checks and publication. Anonymous pulls of the immutable commit
+tag and `latest` match source labels, Linux amd64 and digest
+`sha256:e3354541c6a615bd1cec0d2eed52e913ba7f878d2fbaed59659cb387b3b79586`.
+
+Transfer archive: `target/solidcraft-unraid-upstream-4bdffef0-abeb4a6c.tar`
+(232,724,992 bytes), tag `solvecraft-unraid:upstream-4bdffef0-abeb4a6c`.
+SHA256: `8fe1c0b8d57cb58542278a3e8ab5700050a4b7a9f317e333380bddf9a9b4ddc5`.
+An independent pass verifies the tar, tag, source/architecture, absence of private
+credential/origin environment values and all eight content-blob hashes.
+
+After a verified private data/configuration backup, the local Compose runtime uses
+the immutable new image. Health, authenticated official-SDK MCP, read-only 24000 mm3
+public-design reopen, an unsaved 4000 mm3/PNG trial, cookie login, live metadata,
+browser assets and logout pass. Original public file bytes, data volume, MCP token,
+user, environment, ports and resource/security settings are preserved.
+
+Only then were 20 verified own build/check/candidate containers and two obsolete
+application images removed. One healthy development runtime remains. The previous
+validated image and useful toolchain/registry/cache resources, all data volumes and
+private backups remain. The latest two validated transfer archives are retained;
+ten older archives (including nine legacy names with independently checked hashes
+and manifests) were retired. One verified generated Workspace copy was removed;
+two differing older binary/web copies remain as diagnostic evidence. The native
+host cache is about 21.5 GiB and its disk image about 73 GiB, below the unchanged
+120/160 GiB ceilings. There was no global prune or data-volume deletion.
+
+The canonical template/icon still match `denara/unraid-templates` main
+`ffa25fd39fbca2c4d5da2c868d5d0eed7b371925`; no catalog commit is needed. Unraid,
+nginx and DNS were not modified. Back up server and browser designs before the
+manual Unraid Docker update; reconnect MCP and reload the browser afterward.
+Later upstream movement to `c553365a2197a689e749389a6fbf707a38df9b61` was observed
+after validation and is deferred to the next fixed snapshot.
 
 ## 2026-11-02: fixed 0.30.0 snapshot, native format 48 and bounded build storage
 
