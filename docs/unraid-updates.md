@@ -1,5 +1,70 @@
 # Validated container updates
 
+## 2026-11-03: fixed 0.40.0-rc.1 snapshot and matching Rust toolchain
+
+Selected `4bdffef06180fb3a2e8fbd4b15c7d3f60e55bd11` once, 678 commits after
+validated `544de55b`. Integration remains on `codex/unraid-mcp-web`; fork main
+is checked separately by ancestry. This is unofficial container integration, not an
+upstream app release or an Unraid installation. Original CAD changes belong to
+[the upstream project](https://github.com/tangency-labs/solidcraft).
+
+The earlier compile failure came from building the pinned dependency with Rust 1.95.
+The unchanged solidcore revision `8ddce901671f1cebd9214a31d21895d725e886c8`
+builds with upstream CI's Rust 1.99.1; local and published Docker builds now use it.
+The declared upstream minimum remains 1.95, but it is insufficient for that dependency
+here. No dependency pin was floated: the upstream Cargo manifests/lock are merged
+with the existing gateway dependencies. Solidcore is the only new external package
+against the previous published graph; its Apache-2.0 license and NVIDIA/Solidcore
+notices are included. Truck is removed by upstream. No native CAD/unsafe bridge is added.
+
+The new kernel's independent observation copies isolate kernel/mesh/volume/plan,
+placed/mirrored mesh, joint and iso-curve caches. Iso-curves and combs participate
+in bounded metadata and visual revisions. Fallible world placement/camera/scene
+calls return preview errors without invoking the renderer or changing the editor.
+The new diagnostics.profile trace writer has project confinement, transfer leases
+and per-file strong revision gates, including normalized batch aliases.
+
+Relevant checks: 146 gateway tests, 285 affected kernel/document/IO/MCP/CLI tests,
+four kernel isolation tests, three document display-cache tests and the engine
+snapshot check pass. All 187 selected analytic rig cases pass (solids, import,
+tessellation, booleans), without a known failure in those areas. Native all-target
+Clippy, Wasm compatibility and scoped Wasm lint, formatting, licensing, assets/icons,
+layers, lists, UI containers and skills pass. The native and both Wasm release
+builds complete under the unchanged storage guards.
+
+One selected unit test still fails exactly as in the original project:
+`native::tests::box_and_fillet_have_stable_wire_records` (5 versus 3). It is already
+listed unchanged in upstream's `tests/KNOWN_FAILING_TESTS`; the official Linux job
+counts 11573 passing and 31 known failures. Its assertion and fixture remain intact.
+The private selection runner rejects unexpected failures and unexpectedly passing
+listed tests; no fixture was blessed and no test skipped.
+
+Native format 49 is verified with public format-47/48 and legacy-13 designs,
+parameters, 24000 mm3 measurement, STEP/BOM/DXF, linked-source digests, extraction,
+OBJ/MTL, queued HDR rendering, scans, equations, print faces, mesh orientation and
+assembly/pattern origins. Originals remain byte-identical; only new copies use 49.
+The new kernel intentionally uses one closed cylinder wall where the previous
+kernel listed two pieces. The old exact mesh-centroid/topology comparison is retained
+as a diagnostic, not claimed as a cross-kernel guarantee. Analytic volume
+`17100 + 1216*pi` is preserved, as are the other face identities. The old cylindrical
+piece names are explicitly refused and require reselection; this is a compatibility
+limitation, not a silent remapping. Retain backups/rollback: older builds cannot read
+new format-49 saves. Existing files are not automatically migrated.
+
+The isolated fresh-volume candidate passes modelling, PNG/STEP, authentication,
+separate sessions, file/origin/project/revision protection, restart persistence,
+logging, Workspace, observer, live inventory, deletion/streamed ZIP, remembered
+logins and uploads. The official MCP SDK verifies the new I/O paths and migration.
+Real browser assertions/screenshots cover batch upload conflicts, the unchecked
+"Für alle Dateien übernehmen" choice, joined search/status layout, compact folder
+actions, capacity footer and independent native/scan copies without server writes.
+The actual browser API and all 20 offline/update scenarios pass.
+Evidence stays private in ignored `target/upstream-4bdffef0-20261103-resume/`.
+
+Candidate validation is complete; source/container publication, verified transfer
+archive, local runtime replacement and final cleanup are recorded below after completion.
+The canonical Unraid template and original icon are unchanged; no catalog commit is needed.
+
 ## 2026-11-02: fixed 0.30.0 snapshot, native format 48 and bounded build storage
 
 Selected `544de55baaa34f44956aa4d377596929490f1dbe` once, 160 commits after

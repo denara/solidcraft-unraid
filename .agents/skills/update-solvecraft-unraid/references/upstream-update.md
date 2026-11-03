@@ -43,6 +43,12 @@ Regenerate `THIRD-PARTY-LICENSES.txt` using `cargo xtask licences`; do not choos
 Keep existing compatibility identifiers unless the chosen upstream change requires a
 documented migration. Adapt Docker toolchain, Trunk version or runtime dependencies only
 when required by the selected changes.
+When a dependency fails to compile, compare the exact compiler with a successful upstream
+job before attributing it to upstream source. The declared minimum Rust version can lag
+what the current code actually needs. Reproduce the exact pinned dependency under that
+compiler; a compiler compatibility fix does not authorize floating or silently replacing
+its revision. Keep local and published Docker builds on the same verified toolchain.
+
 
 ## 3. Validate using the development environment
 
@@ -66,6 +72,13 @@ Open the candidate's independent browser app, wait for it to load and inspect a 
 Use only public-safe example designs. Keep screenshots and logs out of Git; attach suitable
 evidence when creating an issue or PR. Confirm that the browser has not become a client of
 the server's active CAD session.
+
+Read the raw upstream test results as well as the job conclusion. Its unchanged
+`tests/KNOWN_FAILING_TESTS` may explain a green job with failing cases; preserve those
+assertions and report them separately. New failures or changed expectations need investigation.
+Across an intentional kernel replacement, distinguish analytic geometry and stored-reference
+behaviour from display-mesh sampling or face decomposition. Validate and document a changed
+upstream contract explicitly; never hide reference loss behind a passing volume check.
 
 Review design-format migrations in the upstream diff. When relevant, open a public-safe
 design from the old version in the candidate and verify parameters, rebuild, measurements

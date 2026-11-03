@@ -67,6 +67,21 @@ try {
     $png = (ToolJson (Tool $a workspace_list_files @{path = "$taskProject/example-southeast.png"})).files[0]
     Reject $a screenshot @{path = 'example-southeast.png'; width = 320; height = 240; expected_revisions = @{'example-southeast.png' = $png.revision}}
     $null = Tool $a screenshot @{path = 'example-southeast.png'; width = 320; height = 240; expected_revisions = @{"$taskProject/example-southeast.png" = $png.revision}}
+    # The profiler's optional trace is a file write, despite its read-only model semantics.
+    $null = Tool $a execute @{command = 'diagnostics.profile'; params = @{trace = 'profile.json'}}
+    $tracePath = "$taskProject/profile.json"
+    $traceFile = Invoke-WebRequest "$BaseUrl/files/$tracePath" -Headers @{Authorization = "Bearer $Token"}
+    $null = [Text.Encoding]::UTF8.GetString($traceFile.RawContentStream.ToArray()) | ConvertFrom-Json -Depth 20
+    $trace = (ToolJson (Tool $a workspace_list_files @{path = $tracePath})).files[0]
+    Reject $a execute @{command = 'diagnostics.profile'; params = @{trace = 'profile.json'}}
+    Reject $a execute @{command = 'diagnostics.profile'; params = @{trace = '../outside-profile.json'}}
+    Reject $a batch @{commands = @(@{id = 'execute'; params = @{command = 'diagnostics.profile'; params = @{trace = '../outside-profile.json'}}})}
+    $null = Tool $a batch @{commands = @(@{id = 'execute'; params = @{command = 'diagnostics.profile'; params = @{trace = 'profile.json'}}}); expected_revisions = @{$tracePath = $trace.revision}}
+    $trace = (ToolJson (Tool $a workspace_list_files @{path = $tracePath})).files[0]
+    $null = Invoke-WebRequest "$BaseUrl/files/$tracePath" -Method Put -Headers @{Authorization = "Bearer $Token"; 'If-Match' = $trace.revision} -Body ([Text.Encoding]::UTF8.GetBytes('{"public_fixture":"changed"}'))
+    Reject $a execute @{command = 'diagnostics.profile'; params = @{trace = 'profile.json'}; expected_revisions = @{$tracePath = $trace.revision}}
+    $traceAfter = Invoke-WebRequest "$BaseUrl/files/$tracePath" -Headers @{Authorization = "Bearer $Token"}
+    if (([Text.Encoding]::UTF8.GetString($traceAfter.RawContentStream.ToArray()) | ConvertFrom-Json).public_fixture -cne 'changed') { throw 'Stale profile export changed a newer file' }
     $source = Invoke-WebRequest "$BaseUrl/files/$taskProject/example.solidcraft" -Headers @{Authorization = "Bearer $Token"}
     [byte[]]$bytes = $source.RawContentStream.ToArray()
     $null = Invoke-WebRequest "$BaseUrl/files/$taskLegacy" -Method Put -Headers @{Authorization = "Bearer $Token"} -Body $bytes
@@ -94,7 +109,7 @@ try {
     $listing = ToolJson (Tool $a workspace_list_files @{path = "$taskProject/example.solidcraft"})
     if (@($listing.files).Count -ne 1 -or -not $listing.files[0].revision) { throw 'Project file revision lookup failed' }
     $null = Tool $a project_list
-    @{project_selection = 'required'; binding = 'immutable'; files = 'project-relative'; revisions = 'workspace-relative'; legacy = 'read-source/save-copy'; traversal = 'rejected'; separate_projects = 'pass'} |
+    @{project_selection = 'required'; binding = 'immutable'; files = 'project-relative'; revisions = 'workspace-relative'; legacy = 'read-source/save-copy'; traversal = 'rejected'; separate_projects = 'pass'; profile_trace = 'confined/revision-checked/direct-and-alias-batch'} |
         ConvertTo-Json | Set-Content (Join-Path $OutputDirectory 'project-checks.json') -Encoding utf8
 } finally {
     foreach ($session in $taskSessions) { try { $null = Invoke-WebRequest "$BaseUrl/mcp" -Method Delete -Headers $session } catch {} }

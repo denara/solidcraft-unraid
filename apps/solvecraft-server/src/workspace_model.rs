@@ -160,6 +160,12 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
                     out.push(FileOperation::Write(path));
                 }
             }
+            "diagnostics.profile" => {
+                if let Some(trace) = args.get("trace").and_then(Value::as_str).filter(|path| !path.trim().is_empty()) {
+                    let path = relative(root, trace).ok_or("workspace trace file name is not permitted")?;
+                    out.push(FileOperation::Write(path));
+                }
+            }
             "motion.export_animation" => {
                 if let Some(path) = name(root, args)? {
                     if !path.to_ascii_lowercase().ends_with(".gif") {

@@ -20,7 +20,7 @@ new uses of it anywhere else. Public docs/web/Flatpak deployments use project Pa
 
 ## Container prototype baseline
 The first Unraid prototype used upstream commit `af536a7`. The current validated
-container baseline is `544de55baaa34f44956aa4d377596929490f1dbe`.
+container baseline is `4bdffef06180fb3a2e8fbd4b15c7d3f60e55bd11`.
 Keep later upstream CAD/UI feature updates separate from this deployment addition;
 advance the baseline only as a separate, validated update. See [update records](../docs/unraid-updates.md).
 
@@ -101,6 +101,10 @@ Preserve its cookie-only browser authentication, Bearer-only MCP/files authentic
 authoritative per-session metadata and shared HTTP/MCP file-revision checks. When an
 upstream update adds file-writing commands, review their entire output set against
 `workspace_model` and path confinement before enabling them through the gateway.
+The diagnostics.profile trace output is a project-relative file write: preflight its
+path, transfer lease and individual strong revision in direct and normalized batch calls.
+Observer copies isolate the new kernel, mirrored/placed mesh, plan, joint and iso-curve
+caches. Iso-curve/comb view state participates in bounded snapshot metadata and visual revisions.
 Normalize MCP batch tool aliases before project/path/revision preflight and launch gateway
 workers explicitly with `--headless`; desktop discovery must never attach a network session
 to a running desktop app. New `component.extract` destinations and
@@ -181,8 +185,8 @@ People trust SolidCraft with their designs; a crash loses their work. **This out
   returns an error ("not supported yet: â€¦"); it never panics.
 - **Input-derived numbers are hostile** (command parameters, design files, control-channel
   input): `get()` not `[i]`, finite checks, caps on sizes and loop counts.
-- **Third-party kernel calls are guarded:** everything that calls `truck` goes through
-  `solidcraft_kernel::guard`, which turns a panic into `KernelError::Internal`.
+- **Third-party kernel calls are guarded:** calls to `solidcore` use the safe
+  `crates/smlib` wrapper and `solidcraft_kernel::guard`; caught panics become kernel errors.
 - **Last-resort guard:** `Session::execute` runs every command under `catch_unwind`; an escaped
   panic restores the design and reports `EngineError::Internal`.
 - **Crash reports:** the desktop app writes every panic and every unclean exit to a local crash folder,
@@ -232,7 +236,7 @@ People trust SolidCraft with their designs; a crash loses their work. **This out
   clicks (`ui.start`) start interactive tools and dialogs, which then run commands.
 - **Layering** is enforced by `cargo xtask layers`: L0 `geom` â†’ L1 `sketch`, `kernel`, `render`
   â†’ L2 `doc` â†’ L3 `io` â†’ L4 `engine` â†’ L5 `ui-egui` â†’ apps. Nothing below L5 depends on
-  egui/eframe/winit/wgpu/rfd. **The UI crate is swappable.** Only `crates/kernel` may use `truck`.
+  egui/eframe/winit/wgpu/rfd. **The UI crate is swappable.** Only `crates/smlib` links `solidcore`; higher layers use the safe kernel facade.
 - **The UI is thin**: panels read engine state and act through `app.run(id, params)` /
   `app.start(id)`. Colours come from `theme::Tokens`.
 - **One outer UI container**: all panels, floating sheets, menus, overlays and platform UI
@@ -364,8 +368,9 @@ The upstream JavaScript service worker is browser infrastructure, independent of
 
 Design-format additions follow upstream's per-change files under crates/doc/src/format/pending/.
 The fork regenerates shipped licences after integration so its HTTP gateway remains covered.
-STEP worker placements use the existing bounded topology copier (`ops::placed_topology`),
-as explicit transforms do, to preserve repeated periodic seam edges without generic-builder panics.
+The solidcore update replaces the old Truck topology copier with schema-4 B-rep records
+and safe Rust kernel conversions. Preserve periodic STEP seam geometry and isolated observer
+mesh/plan/kernel/volume caches when adapting future kernel changes.
 
 ## Lists many changes add to
 Keep message catalogs sorted (cargo xtask lists --fix), module lines in their sorted group,

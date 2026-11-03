@@ -85,7 +85,17 @@ fn visual_revision_includes_camera_and_metadata_without_repeating_unchanged_fram
     assert_eq!(backend.observer_start(&json!({"revision":first}), Some(renderer())).unwrap()["status"], "unchanged");
     backend.call("ui.view", json!({"view":"top"})).unwrap();
     backend.observer_start(&json!({"revision":first}), Some(renderer())).unwrap();
-    assert!(completed(&mut backend).unwrap()["revision"].as_u64().unwrap() > first);
+    let second = completed(&mut backend).unwrap()["revision"].as_u64().unwrap();
+    assert!(second > first);
+    backend.session.isocurves.push(solidcraft_engine::IsoPick { body: "Missing public body".into(), at: Vec3::ZERO, count: 1 });
+    backend.observer_start(&json!({"revision": second}), Some(renderer())).unwrap();
+    let third = completed(&mut backend).unwrap()["revision"].as_u64().unwrap();
+    assert!(third > second, "view-only analysis changes must invalidate the observer frame");
+    backend.session.isocurves.clear();
+    backend.session.comb =
+        Some(solidcraft_engine::CombView { picks: Vec::new(), density: 2, length: 1.0, fixed_scale: None, scale: 1.0, teeth: Vec::new() });
+    backend.observer_start(&json!({"revision": third}), Some(renderer())).unwrap();
+    assert!(completed(&mut backend).unwrap()["revision"].as_u64().unwrap() > third);
 }
 
 #[test]
@@ -110,6 +120,21 @@ fn hostile_view_metadata_and_assembly_expansion_are_bounded_before_rendering() {
     assert!(backend.observer_start(&json!({}), Some(renderer())).is_err());
     assert!(backend.observer.job.is_none());
     backend.session.selection.clear();
+    backend.session.isocurves.push(solidcraft_engine::IsoPick { body: "Public body".into(), at: Vec3::ZERO, count: usize::MAX });
+    assert!(backend.observer_start(&json!({}), Some(renderer())).is_err());
+    assert!(backend.observer.job.is_none());
+    backend.session.isocurves.clear();
+    backend.session.comb = Some(solidcraft_engine::CombView {
+        picks: Vec::new(),
+        density: 2,
+        length: 1.0,
+        fixed_scale: None,
+        scale: 1.0,
+        teeth: vec![vec![[Vec3::ZERO; 2]; MAX_POINTS / 2 + 1]],
+    });
+    assert!(backend.observer_start(&json!({}), Some(renderer())).is_err());
+    assert!(backend.observer.job.is_none());
+    backend.session.comb = None;
     let doc = Arc::make_mut(&mut backend.session.doc);
     // One cycle is enough to prove expansion cannot allocate unbounded copies.
     doc.occurrences.push(solidcraft_engine::doc::Occurrence {
@@ -161,6 +186,35 @@ fn point_cloud_preview_is_explicitly_unavailable_before_rendering_and_hidden_sca
     assert_eq!(backend.workspace_status(), before);
     Arc::make_mut(&mut backend.session.doc).point_clouds[0].visible = false;
     backend.call("engine.execute", json!({"command":"solid.box","params":{"length":1,"width":2,"height":3}})).unwrap();
+    backend.observer_start(&json!({}), Some(renderer())).unwrap();
+    assert_eq!(completed(&mut backend).unwrap()["status"], "ready");
+}
+
+#[test]
+fn failed_world_placement_reports_an_error_without_rendering_or_changing_the_editor() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let mut backend = Headless::default();
+    backend.call("engine.execute", json!({"command":"component.create","params":{"name":"Public part"}})).unwrap();
+    backend.call("engine.execute", json!({"command":"solid.box","params":{"length":2,"width":3,"height":4}})).unwrap();
+    Arc::make_mut(&mut backend.session.doc).occurrences[0].transform = [[0.0; 4]; 4];
+    let expected = backend.session.world_state().expect_err("the synthetic placement is singular").to_string();
+    let before = backend.workspace_status();
+    let doc = Arc::clone(&backend.session.doc);
+    let called = Arc::new(AtomicBool::new(false));
+    let renderer_called = called.clone();
+    let capture: Arc<capture::Renderer> = Arc::new(move |_, _, width, height| {
+        renderer_called.store(true, Ordering::SeqCst);
+        Ok(capture::Picture { rgba: vec![0; (width * height * 4) as usize], renderer: "cpu" })
+    });
+    let result = match backend.observer_start(&json!({}), Some(capture)) {
+        Ok(_) => completed(&mut backend),
+        Err(error) => Err(error),
+    };
+    assert!(result.unwrap_err().contains(&expected));
+    assert!(!called.load(Ordering::SeqCst));
+    assert!(Arc::ptr_eq(&doc, &backend.session.doc));
+    assert_eq!(backend.workspace_status(), before);
+    Arc::make_mut(&mut backend.session.doc).occurrences[0].transform = solidcraft_engine::doc::IDENTITY;
     backend.observer_start(&json!({}), Some(renderer())).unwrap();
     assert_eq!(completed(&mut backend).unwrap()["status"], "ready");
 }

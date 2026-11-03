@@ -211,4 +211,34 @@ mod tests {
         }
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn profile_trace_output_is_project_confined_and_revision_checked_in_direct_and_alias_batches() {
+        let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir(&root).unwrap();
+        select(&root, "Demo").unwrap();
+        std::fs::write(root.join("Demo/trace.json"), b"old trace").unwrap();
+        for (index, mut call) in [
+            json!({"params":{"name":"execute","arguments":{"command":"diagnostics.profile","params":{"trace":"trace.json"}}}}),
+            json!({"params":{"name":"batch","arguments":{"commands":[{"id":"execute","params":{"command":"diagnostics.profile","params":{"trace":"trace.json"}}}]}}}),
+        ].into_iter().enumerate() {
+            prepare(&root, "Demo", &mut call).unwrap();
+            let ops = crate::workspace_model::operations(&root, &call, None).unwrap();
+            assert_eq!(ops, vec![FileOperation::Write("Demo/trace.json".into())]);
+            check_writes("Demo", &ops).unwrap();
+            assert!(check_writes("Other", &ops).is_err());
+            assert!(crate::workspace_model::check_revisions(&root, &Default::default(), &ops, &Value::Null).is_err());
+            let revision = crate::workspace_files::revision(&root, "Demo/trace.json").unwrap().unwrap();
+            crate::workspace_model::check_revisions(&root, &Default::default(), &ops, &json!({"Demo/trace.json":revision})).unwrap();
+            std::fs::write(root.join("Demo/trace.json"), format!("changed trace {index}")).unwrap();
+            assert!(crate::workspace_model::check_revisions(&root, &Default::default(), &ops, &json!({"Demo/trace.json":revision})).is_err());
+        }
+        for trace in ["../outside.json", "/etc/passwd", "x/.secret", "trace.json.bak"] {
+            let mut call = json!({"params":{"name":"execute","arguments":{"command":"diagnostics.profile","params":{"trace":trace}}}});
+            assert!(prepare(&root, "Demo", &mut call).is_err(), "{trace}");
+        }
+        let mut read = json!({"params":{"name":"execute","arguments":{"command":"diagnostics.profile","params":{}}}});
+        prepare(&root, "Demo", &mut read).unwrap();
+        assert!(crate::workspace_model::operations(&root, &read, None).unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

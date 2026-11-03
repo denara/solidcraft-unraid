@@ -190,6 +190,7 @@ fn commands(root: &Path, value: &mut Value, depth: usize) -> Result<(), String> 
             });
             let picture = object.get("command").and_then(Value::as_str) == Some("inspect.compare_picture");
             let render = object.get("command").and_then(Value::as_str).is_some_and(|id| id.starts_with("render."));
+            let profile = object.get("command").and_then(Value::as_str) == Some("diagnostics.profile");
             if !geometry
                 && object.get("command").is_some()
                 && let Some(params) = object.get_mut("params")
@@ -200,6 +201,12 @@ fn commands(root: &Path, value: &mut Value, depth: usize) -> Result<(), String> 
                     file_fields(root, params)?;
                     if picture {
                         picture_reference(root, params)?;
+                    }
+                    if profile
+                        && let Some(trace) = params.get_mut("trace")
+                        && let Some(name) = trace.as_str()
+                    {
+                        *trace = Value::String(resolve(root, name)?.to_string_lossy().into_owned());
                     }
                 }
             }

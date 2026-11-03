@@ -93,12 +93,12 @@ fn failure(code: StatusCode, message: &str) -> Response {
 fn success(value: Value) -> Response {
     crate::workspace::protect(Json(value).into_response())
 }
-async fn authorize(state: &AppState, headers: &HeaderMap) -> Result<String, Response> {
-    let owner = crate::workspace::browser_session(state, headers).await.ok_or_else(|| failure(StatusCode::UNAUTHORIZED, "Bitte erneut anmelden."))?;
+async fn authorize(state: &AppState, headers: &HeaderMap) -> Result<String, (StatusCode, &'static str)> {
+    let owner = crate::workspace::browser_session(state, headers).await.ok_or((StatusCode::UNAUTHORIZED, "Bitte erneut anmelden."))?;
     if crate::workspace::check_origin(state, headers).is_err()
         || headers.get("x-workspace-csrf").and_then(|v| v.to_str().ok()) != Some(owner.as_str())
     {
-        return Err(failure(StatusCode::FORBIDDEN, "Herkunft oder Formularbestätigung ist ungültig."));
+        return Err((StatusCode::FORBIDDEN, "Herkunft oder Formularbestätigung ist ungültig."));
     }
     Ok(owner)
 }
@@ -143,7 +143,7 @@ fn spelling(directory: &Path, name: &str) -> Result<(), &'static str> {
 pub(crate) async fn create_project(State(state): State<Arc<AppState>>, headers: HeaderMap, bytes: Bytes) -> Response {
     let owner = match authorize(&state, &headers).await {
         Ok(v) => v,
-        Err(r) => return r,
+        Err((code, message)) => return failure(code, message),
     };
     let data = match json_form(&bytes, &["name"]) {
         Ok(v) => v,
@@ -190,7 +190,7 @@ pub(crate) async fn create_project(State(state): State<Arc<AppState>>, headers: 
 pub(crate) async fn cancel(State(state): State<Arc<AppState>>, headers: HeaderMap, bytes: Bytes) -> Response {
     let owner = match authorize(&state, &headers).await {
         Ok(v) => v,
-        Err(r) => return r,
+        Err((code, message)) => return failure(code, message),
     };
     let data = match json_form(&bytes, &["batch"]) {
         Ok(v) => v,
@@ -208,7 +208,7 @@ pub(crate) async fn cancel(State(state): State<Arc<AppState>>, headers: HeaderMa
 pub(crate) async fn prepare(State(state): State<Arc<AppState>>, headers: HeaderMap, bytes: Bytes) -> Response {
     let owner = match authorize(&state, &headers).await {
         Ok(v) => v,
-        Err(r) => return r,
+        Err((code, message)) => return failure(code, message),
     };
     let Ok(_slot) = Arc::clone(&state.browser.uploads.preflights).try_acquire_owned() else {
         return failure(StatusCode::TOO_MANY_REQUESTS, "Eine Upload-Prüfung läuft bereits.");
@@ -370,7 +370,7 @@ pub(crate) async fn upload(State(state): State<Arc<AppState>>, request: Request)
     let headers = parts.headers;
     let owner = match authorize(&state, &headers).await {
         Ok(v) => v,
-        Err(r) => return r,
+        Err((code, message)) => return failure(code, message),
     };
     if headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()) != Some("application/octet-stream") {
         return failure(StatusCode::BAD_REQUEST, "Ungültiger Upload-Inhaltstyp.");

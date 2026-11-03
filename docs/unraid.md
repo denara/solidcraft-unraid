@@ -15,7 +15,7 @@ The fork is hosted at [denara/solidcraft-unraid](https://github.com/denara/solid
 The public Unraid template names a new container `SolidCraft`; the existing local Compose service,
 image tags, command names, data format and environment variables retain compatibility.
 The first prototype used upstream commit `af536a7`. The current validated snapshot is
-`544de55baaa34f44956aa4d377596929490f1dbe`. See [update records](unraid-updates.md) for checks,
+`4bdffef06180fb3a2e8fbd4b15c7d3f60e55bd11`. See [update records](unraid-updates.md) for checks,
 the transferable image archive and installation instructions for this update.
 
 For future requested updates, use the repository skill
@@ -579,7 +579,7 @@ Linked components may read and refresh designs only under /data/files, including
 stored in uploaded documents. The gateway supplies a per-subprocess link root; resolved
 paths and parent folders are checked again by the engine, with symlinks refused. Desktop
 linked components retain their normal behavior when no network link root is supplied.
-This upstream 0.26.0 snapshot writes native format 43, including linked-body property baselines and reference point clouds. Validated native format-41 files and legacy format-13 designs open without modifying their source files; parameters, measurements and named split faces are preserved. The `.sc` extension is the new upstream default; existing `.solidcraft`/`.solvecraft` files keep their names, and the workspace applies the same data-only validation, details and browser-copy safeguards to all three. Keep pre-update server and separate browser-design backups; older builds cannot read newly saved designs.
+The validated upstream 0.40.0-rc.1 snapshot writes native format 49 and replaces the previous kernel with the pure-Rust solidcore/SMLib port. Public native-format 47/48 and legacy-format 13 examples reopen with their parameters and source bytes preserved; new copies alone use format 49. Kernel topology is not identical: a cylinder wall previously listed as two pieces is now one analytic face. References to the former piece names may require explicit reselection; they are rejected rather than silently redirected. Analytic volume, other face identities and source preservation are tested separately from display-mesh centroids. The `.sc`, `.solidcraft` and `.solvecraft` filenames keep their existing safeguards. Back up server data and separate browser designs before updating; older builds cannot open newly saved format-49 files. Existing files are not automatically migrated.
 
 The HTTP gateway launches native MCP with --headless, an explicit /data/files scope and --quiet. Desktop discovery never attaches a network session to a desktop app. Batch tool aliases are normalized before path/project/revision checks. The component.extract file output and component.replace_with_link source path use the same confinement and shared file gate as other file commands. This keeps upstream file confinement active without logging private per-session paths. Browser build URLs are relative, matching upstream's offline/update support; Web and HTTP MCP remain independent.
 

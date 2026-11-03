@@ -85,6 +85,8 @@ impl Headless {
                 &s.active_occurrence_path,
                 s.analysis,
                 &s.continuity,
+                &s.isocurves,
+                &s.comb,
             ),
         )
         .map_err(|_| BUDGET)?;
@@ -126,6 +128,7 @@ fn snapshot_budget(s: &Session) -> Result<(), String> {
         || s.doc.components.len() > MAX_INSTANCES
         || s.active_occurrence_path.as_ref().is_some_and(|path| path.len() > 64)
         || s.continuity.len() > 1024
+        || s.isocurves.len() > 1024
         || v.hidden_bodies
             .len()
             .saturating_add(v.hidden_occurrences.len())
@@ -147,10 +150,33 @@ fn snapshot_budget(s: &Session) -> Result<(), String> {
     if continuity > MAX_POINTS || v.hidden_occurrences.iter().any(|path| path.len() > 64) {
         return Err(BUDGET.into());
     }
+    let iso_curves = s.isocurves.iter().try_fold(0usize, |total, pick| {
+        if !(1..=100).contains(&pick.count) || !pick.at.is_finite() {
+            return Err(BUDGET);
+        }
+        Ok(total.saturating_add(pick.count.saturating_mul(2)))
+    })?;
+    if iso_curves > MAX_CURVES {
+        return Err(BUDGET.into());
+    }
+    if let Some(comb) = &s.comb {
+        let points = comb.teeth.iter().fold(continuity, |n, teeth| n.saturating_add(teeth.len().saturating_mul(2)));
+        if comb.picks.len() > 1024
+            || comb.teeth.len() > MAX_CURVES
+            || points > MAX_POINTS
+            || !(2..=2000).contains(&comb.density)
+            || !comb.length.is_finite()
+            || !comb.scale.is_finite()
+            || comb.fixed_scale.is_some_and(|scale| !scale.is_finite())
+            || comb.teeth.iter().flatten().flatten().any(|point| !point.is_finite())
+        {
+            return Err(BUDGET.into());
+        }
+    }
     // The observer copies only evaluated/view state, never tool clipboards.
     // Bound variable-size metadata before copying it.
     let mut budget = Fingerprint::default();
-    serde_json::to_writer(&mut budget, &(v, &s.model.results, &s.model.param_errors, &s.continuity)).map_err(|_| BUDGET)?;
+    serde_json::to_writer(&mut budget, &(v, &s.model.results, &s.model.param_errors, &s.continuity, &s.isocurves, &s.comb)).map_err(|_| BUDGET)?;
     let names = model
         .bodies
         .iter()
@@ -209,16 +235,19 @@ fn render(s: &Session, view: StandardView, revision: u64, renderer: &capture::Re
     // Inspect definition meshes before occurrence transforms can copy them.
     // Meshing itself remains entirely inside this background job's panic guard.
     mesh_budget(&s.model.state().bodies, placements)?;
-    let world = s.world_state();
+    let world = s.world_state().map_err(|error| error.to_string())?;
     if world.bodies.len() > MAX_INSTANCES {
         return Err(BUDGET.into());
     }
     mesh_budget(&world.bodies, 1)?;
-    let camera = s.camera.unwrap_or_else(|| {
-        let mut camera = solidcraft_engine::view::home_camera(s);
-        camera.set_view(view);
-        camera
-    });
+    let camera = match s.camera {
+        Some(camera) => camera,
+        None => {
+            let mut camera = solidcraft_engine::view::home_camera(s).map_err(|error| error.to_string())?;
+            camera.set_view(view);
+            camera
+        }
+    };
     let mut sampled = 0usize;
     let mut exceeded = false;
     let scene = solidcraft_engine::view::scene_with_section_and_sketch_sampler(s, &camera, s.section, |sketch, index, plane| {
@@ -235,7 +264,8 @@ fn render(s: &Session, view: StandardView, revision: u64, renderer: &capture::Re
         } else {
             parts
         }
-    });
+    })
+    .map_err(|error| error.to_string())?;
     let points = scene.lines.iter().chain(&scene.grid).fold(0usize, |n, line| n.saturating_add(line.points.len()));
     if exceeded || points > MAX_POINTS {
         return Err(BUDGET.into());

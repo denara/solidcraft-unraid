@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Build locally; the runtime needs neither a display nor GPU access.
-FROM rust:1.95-bookworm AS toolchain
+FROM rust:1.99.1-bookworm AS toolchain
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libxkbcommon-dev libwayland-dev libasound2-dev \
     libegl1-mesa-dev libx11-dev libxi-dev libxcursor-dev libxrandr-dev \

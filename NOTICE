@@ -7,12 +7,11 @@ Third-party material
 
 Software dependencies are listed in Cargo.lock; their licences are in THIRD-PARTY-LICENSES.txt
 (`cargo xtask licences`), which the programs also carry (Help > About > Licences,
-`solidcraft-cli licences`). The geometry kernel builds on the truck crates
-(truck-modeling, truck-shapeops, truck-meshalgo, truck-stepio, truck-topology and their
-dependencies, https://github.com/ricosjp/truck), licensed under the Apache License 2.0 and used
-as libraries. truck-shapeops 0.4.0 is vendored in vendor/truck-shapeops with SolidCraft
-modifications (listed in vendor/README.md and marked in the source); its licence is in
-vendor/truck-shapeops/LICENSE. Copyright (c) RICOS Co. Ltd.
+`solidcraft-cli licences`). The B-rep geometry kernel uses solidcore
+(https://github.com/tangency-labs/solidcore), the pure-Rust port of NVIDIA's SMLib
+from USD BRep, under the Apache License 2.0. Its pinned revision is in Cargo.toml;
+its licence and NVIDIA attribution/NOTICE are included in THIRD-PARTY-LICENSES.txt.
+SolidCraft accesses it through the safe Rust wrapper in crates/smlib.
 
 Some code is adapted from sibling projects in the storytold family (CADCraft, GridCraft), which are
 licensed MIT OR Apache-2.0; ATTRIBUTION.md lists the files.

@@ -32,6 +32,11 @@ never silently clean a resource still required for recovery.
   Cargo's frozen workspace/package/profile clean, including obsolete CI/dev/release
   outputs as needed. Downloaded registry dependencies and reusable toolchain images
   should stay available. Disable incremental compilation for all guarded builds.
+  Always select an explicit package and/or profile for Cargo cleanup. `--target`
+  alone is not a safe profile boundary: Cargo can clear the entire target tree,
+  then fail trying to remove the bind-mount root. Do not unmount or force-remove
+  that root to make cleanup pass. Remeasure after any failure; preserve the
+  registry, proof directories and runtime, and rebuild disposable artifacts as needed.
 - `cargo clean` is deletion, not compilation: a bounded, explicitly labelled cleanup
   helper may run when the build runner's admission limit has already refused a new
   build. It mounts only the verified disposable caches and a read-only checkout;
