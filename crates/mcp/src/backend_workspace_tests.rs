@@ -168,3 +168,38 @@ fn point_cloud_only_design_is_an_unsaved_model_and_keeps_its_source_unchanged() 
     assert_eq!(result["current_file"], Value::Null);
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
 }
+
+#[test]
+fn panel_commands_keep_workspace_telemetry_and_observer_independent() {
+    let mut backend = Headless::default().with_panels(solidcraft_engine::panels::fixture_command_backend().unwrap());
+    let before = status(&mut backend);
+    execute(
+        &mut backend,
+        "panel.open",
+        json!({"kind":"fixture.log","instance":"log","destination":{
+            "type":"new_section","section":"logs","index":0,"location":{"type":"dock","zone":"left"},"size":{"width":280,"height":240}
+        }}),
+    )
+    .unwrap();
+    execute(&mut backend, "layout.save", json!({"name":"Workspace telemetry proof"})).unwrap();
+    assert_eq!(status(&mut backend), before);
+    assert_eq!(backend.call("workspace.snapshot", json!({"action":"poll"})).unwrap()["status"], "idle");
+    assert!(
+        backend
+            .call(
+                "engine.batch",
+                json!({"commands":[
+                    {"command":"layout.reset"}, {"command":"solid.box","params":box_params()}
+                ]})
+            )
+            .is_err()
+    );
+    assert_eq!(status(&mut backend), before);
+    execute(&mut backend, "solid.box", box_params()).unwrap();
+    let changed = status(&mut backend);
+    assert_eq!(changed["has_model"], true);
+    assert_eq!(changed["dirty"], true);
+    assert!(changed["revision"].as_u64().unwrap() > before["revision"].as_u64().unwrap());
+    assert_eq!(execute(&mut backend, "layout.get", json!({})).unwrap()["state"]["layout"]["instances"][0]["id"], "log");
+    assert_eq!(status(&mut backend), changed);
+}

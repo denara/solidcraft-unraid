@@ -3,7 +3,7 @@
 Clean-room, pure-Rust parametric CAD. Task skills below; humans: CONTRIBUTING.md.
 
 ## This Unraid fork
-Read [all mandatory fork rules](docs/unraid-agent-rules.md) first. Preserve `codex/unraid-mcp-web`, private configuration, HTTP MCP and independent web/Workspace; no unsafe platform bridges. Updates use [update-solvecraft-unraid](.agents/skills/update-solvecraft-unraid/SKILL.md). Validated baseline: `4bdffef06180fb3a2e8fbd4b15c7d3f60e55bd11`. Fork rules override upstream PR/release defaults; use relevant snapshot checks.
+Read [mandatory fork rules](docs/unraid-agent-rules.md) first. Preserve `codex/unraid-mcp-web`, private config, HTTP MCP and independent web/Workspace; no unsafe bridges. Updates: [update-solvecraft-unraid](.agents/skills/update-solvecraft-unraid/SKILL.md). Validated baseline: `4bdffef06180fb3a2e8fbd4b15c7d3f60e55bd11`. Fork rules override upstream defaults.
 
 ## Start here
 Work: ROADMAP.md, CONTRIBUTING.md and labelled issues; architecture: `docs/architecture.md`. Act when code, docs and rules settle a question; ask for user-visible decisions. Local `plan/` notes are optional.
@@ -14,6 +14,7 @@ Work: ROADMAP.md, CONTRIBUTING.md and labelled issues; architecture: `docs/archi
 - Every asset is original or openly licensed with a row in ATTRIBUTION.md; read `assets/AGENTS.md` before icon work: `cargo xtask assets`, `cargo xtask icons`.
 - Never crash: no unwrap/expect/panic/unsafe in non-test code, errors are `Result`, input is hostile: clippy `-D warnings`, `hostile_params_never_panic`.
 - Model decisions (operations, bodies, face/edge identity, depths, nearness) use exact geometry; meshes are for display, export, previews and mesh bodies (`xtask/mesh-decisions.txt` only shrinks): `cargo xtask mesh-decisions`.
+- New kernel cases go to solidcore: `cargo xtask lists`.
 - Everything is a command and programmatic calls never open dialogs: `skills/solidcraft-commands/SKILL.md`.
 - Layering (geom, sketch/kernel/render, doc, io, engine, ui-egui, apps): `cargo xtask layers`.
 - One outer UI container, one camera path (`navigation::handle`), colours from theme tokens: `cargo xtask ui-containers`.

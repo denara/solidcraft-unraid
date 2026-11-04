@@ -1,6 +1,6 @@
 use super::*;
 use crate::backend::Backend as _;
-use solidcraft_engine::geom::Vec3;
+use solidcore_record::Vec3;
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 

@@ -1,5 +1,58 @@
 # Validated container updates
 
+## 2026-11-04: fixed 0.40.0-rc.2 snapshot, record types and native format 51
+
+Selected `9e3e403b3f8624a8c312d6fd8552f10280b65514` once, 92 commits after the
+published `4bdffef0` baseline. The merge stays on `codex/unraid-mcp-web` and
+preserves published history and all Workspace/HTTP MCP additions. Fork main is
+checked separately by ancestry. This is unofficial container integration; original
+CAD features and changes belong to [SolidCraft upstream](https://github.com/tangency-labs/solidcraft).
+
+The kernel pin remains `8ddce901671f1cebd9214a31d21895d725e886c8`. Upstream now
+shares portable geometry/record types through Apache-2.0 `solidcore-record`, pinned
+at `f5e8e9a29e0c9b7cf6c4040a5bc8878382b3c62f`. The exact compiler remains Rust
+1.99.1, matching the successful original Linux CI. No dependency revision floats,
+FFI/platform bridge or unrelated dependency upgrade is introduced. Shipped license
+notices are regenerated for the complete graph including the gateway.
+
+The new headless panel backend is combined with existing authoritative Workspace
+metadata and asynchronous observation. A regression exercises layout edits, a refused
+mixed atomic batch, subsequent CAD edits and independent observation telemetry.
+Observer tests import the new record types directly. Two desktop-only UI imports
+are conditionally compiled, fixing the stricter Wasm lint without changing behavior.
+The short AGENTS router remains below its 5000-character limit and links the full
+fork rules. New CLI kernel-corpus export/setup code is not exposed as an HTTP MCP
+file writer; headless layout state is in memory and cannot open native windows.
+
+All expanded relevant CI gates pass: native all-target Clippy, Wasm compatibility
+and scoped Wasm lint, formatting, licenses, assets/icons, layers, sorted/pending
+lists, UI containers, mesh-decision ratchet and skill checks. No whole-suite rerun
+is requested. The affected test selections report 455 passing executions, including
+MCP, persistence, gateway, old automatic-thread sizing/editing, alignment frames,
+fillet response contracts and independent cold display caches. One unchanged
+known upstream native-wire test fails exactly as in the original CI; assertions,
+fixtures and failure inventories are unchanged. The exact original Linux job
+reports 11924 pass and 31 known failures, with no unexpected regression.
+
+The fresh-volume candidate passes authentication/session separation, modelling,
+PNG/STEP, restart persistence, logs, project/revision boundaries, Workspace, observer,
+live updates, deletion/streamed ZIP, remembered logins and upload tests. Official
+MCP SDK 1.32.1 exercises compact/paged command discovery, in-memory panels, old-format
+13/47/48/49 opening, unchanged original bytes and new format-51 copies. Swept fillets
+retain their mode and volume through actual native save/reopen. The previous cylinder
+piece-reference limitation remains explicit; no silent face remapping is claimed.
+Retain backups: older builds cannot open the new format-51 saves.
+
+The actual browser API and all 20 offline/update scenarios pass. Real captures verify
+the joined search/status overview, compact folder actions, PNG thumbnails, upload
+conflicts, storage footer and independent native/scan browser copies. Saved server
+bytes and the MCP model remain unchanged. The catalog template and original icon
+match the public repository's blobs; no catalog push is required.
+
+Evidence is private under ignored `target/upstream-9e3e403b-20261104/`.
+Public image publication, archive export and preserved local-runtime refresh are
+pending. No new image is advertised as available; the previous runtime is retained.
+
 ## 2026-11-03: fixed 0.40.0-rc.1 snapshot and matching Rust toolchain
 
 Selected `4bdffef06180fb3a2e8fbd4b15c7d3f60e55bd11` once, 678 commits after
