@@ -26,8 +26,8 @@ file writer; headless layout state is in memory and cannot open native windows.
 
 All expanded relevant CI gates pass: native all-target Clippy, Wasm compatibility
 and scoped Wasm lint, formatting, licenses, assets/icons, layers, sorted/pending
-lists, UI containers, mesh-decision ratchet and skill checks. No whole-suite rerun
-is requested. The affected test selections report 455 passing executions, including
+lists, UI containers, mesh-decision ratchet and skill checks. The whole suite
+was not rerun. The affected test selections report 455 passing executions, including
 MCP, persistence, gateway, old automatic-thread sizing/editing, alignment frames,
 fillet response contracts and independent cold display caches. One unchanged
 known upstream native-wire test fails exactly as in the original CI; assertions,
@@ -50,8 +50,42 @@ bytes and the MCP model remain unchanged. The catalog template and original icon
 match the public repository's blobs; no catalog push is required.
 
 Evidence is private under ignored `target/upstream-9e3e403b-20261104/`.
-Public image publication, archive export and preserved local-runtime refresh are
-pending. No new image is advertised as available; the previous runtime is retained.
+Published source `bafb0e2953d8afb3a17d69174cee37ad0a437453` is the tested merge of the previous
+integration and the fixed upstream snapshot. Exact [container workflow 41807735288](https://github.com/denara/solidcraft-unraid/actions/runs/41807735288)
+passes its fresh-image checks before publication. Anonymous pulls of the immutable
+commit tag and `latest` agree on Linux amd64, source and digest
+`sha256:ae2f5720f7be6e486514ab6ac21c9f2849b8a62411f58a5715f17c3ad3a08799`.
+
+Transfer archive: `target/solidcraft-unraid-upstream-9e3e403b-bafb0e29.tar` (236,416,512 bytes),
+tag `solvecraft-unraid:upstream-9e3e403b-bafb0e29`.
+SHA256: `931791d80f83e9199ad5b496be570024bb346ee5fe66c133d7896ad2ec5284eb`.
+Independent verification checks the tar/tag/source, every content blob, architecture
+and absence of private token/origin environment values.
+
+The surviving local `solvecraft-solvecraft-1` is healthy on the immutable published
+image. Its data volume, existing MCP token, port/origins, environment, ownership and
+resource/security limits are unchanged. A private scoped data/configuration backup
+and the previous validated image remain. Authenticated SDK checks reopen the known
+public design read-only at 24000 mm3 and render an unsaved test model; original bytes
+remain identical. Browser-cookie Workspace login/logout, live SSE, saved properties,
+client assets and independent web startup pass after replacement. No real file is
+replaced by a smoke test.
+
+Cleanup removes 11 verified own build/check/candidate containers,
+the obsolete candidate/application tags and 14
+verified old transfer archives. The newest two validated archives, compact records,
+useful toolchains/registry/compiler caches, all data volumes, private backups and
+one previous validated rollback image remain. An unverified legacy prototype archive
+is preserved. No global prune, data-volume deletion or new full Docker-disk backup
+is performed. Build storage remains under the unchanged 120/160 GiB monitored limits
+and system/cache-drive reserves. Detailed sizes and removal manifests stay private.
+
+The canonical Unraid XML and original icon still match their public catalog blobs;
+no metadata push or submission is needed. No Unraid installation, application release,
+release branch/tag, nginx or DNS change is performed. To install, save active work,
+keep pre-update server/browser backups, update the existing Unraid container and
+reload the browser. Older builds cannot read new format-51 saves.
+
 
 ## 2026-11-03: fixed 0.40.0-rc.1 snapshot and matching Rust toolchain
 

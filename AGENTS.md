@@ -3,7 +3,7 @@
 Clean-room, pure-Rust parametric CAD. Task skills below; humans: CONTRIBUTING.md.
 
 ## This Unraid fork
-Read [mandatory fork rules](docs/unraid-agent-rules.md) first. Preserve `codex/unraid-mcp-web`, private config, HTTP MCP and independent web/Workspace; no unsafe bridges. Updates: [update-solvecraft-unraid](.agents/skills/update-solvecraft-unraid/SKILL.md). Validated baseline: `4bdffef06180fb3a2e8fbd4b15c7d3f60e55bd11`. Fork rules override upstream defaults.
+Read [mandatory fork rules](docs/unraid-agent-rules.md) first. Preserve `codex/unraid-mcp-web`, private config, HTTP MCP and independent web/Workspace; no unsafe bridges. Updates: [update-solvecraft-unraid](.agents/skills/update-solvecraft-unraid/SKILL.md). Validated baseline: `9e3e403b3f8624a8c312d6fd8552f10280b65514`. Fork rules override upstream defaults.
 
 ## Start here
 Work: ROADMAP.md, CONTRIBUTING.md and labelled issues; architecture: `docs/architecture.md`. Act when code, docs and rules settle a question; ask for user-visible decisions. Local `plan/` notes are optional.

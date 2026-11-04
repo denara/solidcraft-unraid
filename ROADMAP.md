@@ -21,11 +21,11 @@ management now supports explicitly confirmed deletion of files and real folders 
 active-project/revision protection, plus bounded server-streamed ZIP64 folder downloads.
 Empty folders are included; virtual legacy groups never receive bulk deletion actions.
 Compact real-folder actions precede the file-table headings without repeating the project name.
-Fork deployment status updated 2026-10-23; upstream CAD milestones remain below.
+Fork deployment status updated 2026-11-04; upstream CAD milestones remain below.
 Requested upstream updates use the repository's
 [update skill](.agents/skills/update-solvecraft-unraid/SKILL.md), with a fixed target snapshot,
 isolated validation and local-only private deployment settings.
-The container's validated upstream baseline is `514b0c84` (SolidCraft 0.24.0 snapshot, format 40, previously `f006eefd`);
+The container's validated upstream baseline is `9e3e403b` (SolidCraft 0.40.0-rc.2, native format 51, previously `4bdffef0`);
 the Linux image passes the changed CAD/UI tests and real web/MCP, restart and old-design
 compatibility checks. See [update records](docs/unraid-updates.md).
 
