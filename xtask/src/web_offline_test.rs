@@ -180,6 +180,17 @@ const API_TEST: &str = r#"(async () => {
     check(settled.filter(r => r.status === 'rejected' && r.reason instanceof Error && r.reason.message.includes('pending')).length === 1,
         'queue limit rejects excess work');
     check((await app.inspect()).bodies.length === 1, 'API still works after rejected requests');
+    // A host page keeps the design itself (#8517): out, changed, and back in its place.
+    const kept = await app.request('document.export');
+    check(kept.format === 'json' && kept.dirty === true && kept.text.includes('Browser API box'), 'export gives the design as its file holds it');
+    check((await app.request('document.saved', {revision: kept.revision})).dirty === false, 'the host saved that revision');
+    await app.execute('solid.box', {length: 10, width: 10, height: 10, body_name: 'Second box'});
+    await rejects(() => app.request('document.saved', {revision: kept.revision}), 'changed since');
+    await rejects(() => app.request('document.import', {text: 'not a design'}), '');
+    check((await app.inspect()).bodies.length === 2, 'a refused import leaves the design as it was');
+    check((await app.request('document.import', {text: kept.text})).errors === 0, 'import evaluates the kept design');
+    check((await app.inspect()).bodies.length === 1, 'import puts the kept design back');
+    check((await app.request('document.export')).dirty === false, 'an imported design opens saved');
     const ui = await app.request('ui.inspect');
     check(ui.home === false && ui.viewport[2] > 600, 'model viewport is visible');
     // #3431: a native Instant compiles for wasm but panics when exporting in the browser.
@@ -544,6 +555,8 @@ const STATE_JS: &str = "(async () => {
   }
   const filling = (await navigator.locks.query()).held.map((l) => l.name).filter((n) => n.startsWith(prefix));
   return { search: location.search, ready: document.readyState, build: document.documentElement.dataset.build ?? null,
+    scriptStartedBuild: document.documentElement.dataset.started ?? null,
+    scriptSharedBuild: document.documentElement.dataset.shared ?? null,
     started: STARTED, controlled: !!navigator.serviceWorker.controller, caches: caches_, kept, retired, complete, filling,
     registered: (await navigator.serviceWorker.getRegistrations()).filter((r) => r.scope === scope).length };
 })()";

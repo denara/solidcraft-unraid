@@ -109,7 +109,13 @@ Normalize MCP batch tool aliases before project/path/revision preflight and laun
 workers explicitly with `--headless`; desktop discovery must never attach a network session
 to a running desktop app. New `component.extract` destinations and
 `component.replace_with_link` source paths retain file confinement and shared revision gates.
-Nested renderer file sources remain project-relative and share the HTTP/MCP read gate.
+Nested renderer file sources remain project-relative and share the HTTP/MCP read gate,
+including the typed maps read by render.surface.import. The HTTP gateway refuses
+pointcloud.reload because its stored source locator cannot be preflighted as an explicit
+project path. Use pointcloud.insert with the project-relative source. Desktop/browser
+access is unchanged. The HTTP gateway accepts only inline MCP batches, with every
+step normalized and checked. The stdio-only batch script path cannot bypass project,
+revision or file-operation checks.
 Preserve that read gate for `render.batch` and `render.status`: status can prepare
 later queued shots and read their HDR sources. `compare_picture` and
 `inspect.compare_picture` references are confined project image paths in direct,

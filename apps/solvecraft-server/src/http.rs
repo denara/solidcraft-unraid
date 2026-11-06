@@ -190,6 +190,18 @@ async fn mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, bytes: Byte
             {
                 tools.retain(|tool| tool.get("name").and_then(Value::as_str) != Some("crash_reports"));
                 for definition in tools.iter_mut() {
+                    if definition.get("name").and_then(Value::as_str) == Some("batch") {
+                        if let Some(properties) = definition.pointer_mut("/inputSchema/properties").and_then(Value::as_object_mut) {
+                            properties.remove("path");
+                        }
+                        definition["inputSchema"]["required"] = json!(["commands"]);
+                        if let Some(description) = definition.get("description").and_then(Value::as_str) {
+                            definition["description"] = Value::String(description.replace(
+                                "A long one (a polyline of hundreds of points) can be written to a JSON file and passed as `path` instead of `commands`. ",
+                                "Send commands inline so their paths and revisions can be checked. ",
+                            ));
+                        }
+                    }
                     if definition.get("name").and_then(Value::as_str) == Some("open") {
                         definition["inputSchema"]["properties"]["from_workspace"] = json!({"type":"boolean","description":"Explicitly read an existing source by workspace-relative path, including legacy root files. Save it under a project-relative path before saving implicitly; the source is never overwritten outside the selected project."});
                     }

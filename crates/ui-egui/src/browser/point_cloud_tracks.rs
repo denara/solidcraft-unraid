@@ -5,6 +5,8 @@
 //! for the values the coloured property takes over what is kept: the ramp's automatic range.
 
 use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Condvar;
 use std::sync::{Arc, Mutex};
 
 use egui::Color32;
@@ -51,11 +53,18 @@ pub(crate) struct Answer {
     pub extent: Option<[f64; 2]>,
 }
 
-/// The cloud's data as far as the tracks are concerned: its points, columns and placement.
+/// The cloud's data as far as the tracks are concerned: its points, cells, columns and placement.
 type DataKey = Vec<u64>;
 
 fn data_key(c: &PointCloud) -> DataKey {
-    let mut k = vec![Arc::as_ptr(c.points.values()).cast::<f32>() as u64, c.origin.x.to_bits(), c.origin.y.to_bits(), c.origin.z.to_bits()];
+    let mut k = vec![
+        Arc::as_ptr(c.points.values()).cast::<f32>() as u64,
+        Arc::as_ptr(&c.complex.segments.0).cast::<u32>() as u64,
+        Arc::as_ptr(&c.complex.triangles.0).cast::<u32>() as u64,
+        c.origin.x.to_bits(),
+        c.origin.y.to_bits(),
+        c.origin.z.to_bits(),
+    ];
     k.extend(c.complex.columns.iter().map(|col| Arc::as_ptr(&col.values.0).cast::<f32>() as u64));
     k.extend(c.transform.iter().flatten().map(|v| v.to_bits()));
     k
@@ -121,8 +130,9 @@ struct Inner {
 #[derive(Default)]
 struct Shared {
     inner: Mutex<Inner>,
+    /// Wakes the worker thread (the browser build answers on the window thread instead).
     #[cfg(not(target_arch = "wasm32"))]
-    asked: std::sync::Condvar,
+    asked: Condvar,
 }
 
 /// The answers of one card's tracks; clones share them.

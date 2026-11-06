@@ -76,7 +76,7 @@ pub struct DocJobs {
 
 /// How a command asked to run off the window thread goes.
 enum Start {
-    /// It computes off the window thread.
+    /// It computes off the window thread (never in the browser build, which has one thread).
     #[cfg(not(target_arch = "wasm32"))]
     Later(Deferred),
     /// It runs now, with what was evaluated for it ahead (if anything).

@@ -100,6 +100,11 @@ pub fn prepare_tool(root: &Path, tool: &str, value: &mut Value) -> Result<(), St
         "compare_picture" => picture_reference(root, value),
         "execute" => commands(root, value, 0),
         "batch" => {
+            // The stdio worker can read steps from disk, where the gateway cannot
+            // preflight the exact paths, revisions and leases of each operation.
+            if value.get("path").is_some() {
+                return Err("batch scripts on disk are unavailable through the network gateway; send the commands inline".into());
+            }
             // The MCP worker accepts `id` as a batch-step alias for `command`.
             // Normalize only actual steps, never arbitrary geometry/feature IDs.
             if let Some(steps) = value.get_mut("commands").and_then(Value::as_array_mut) {
@@ -165,6 +170,14 @@ fn commands(root: &Path, value: &mut Value, depth: usize) -> Result<(), String> 
             // use explicit open/save instead; desktop recovery remains unchanged.
             if object.get("command").and_then(Value::as_str).is_some_and(|c| c.starts_with("doc.recover") || c.starts_with("diagnostics.crash")) {
                 return Err("desktop recovery commands are unavailable through the network gateway; use open/save".into());
+            }
+            // Reload resolves a persisted locator from the design, not an explicit
+            // project-relative path that the gateway can preflight.
+            if object.get("command").and_then(Value::as_str) == Some("pointcloud.reload") {
+                return Err(
+                    "reloading a stored point-cloud path is unavailable through the network gateway; insert the project-relative source explicitly"
+                        .into(),
+                );
             }
             if object.get("command").and_then(Value::as_str) == Some("sketch.text")
                 && let Some(font) = object.get_mut("params").and_then(|p| p.get_mut("font"))
@@ -373,6 +386,29 @@ mod tests {
         assert_eq!(batch["commands"][1]["params"]["path"], json!(root.join("extract.solidcraft")));
     }
     #[test]
+    fn only_inline_mcp_batches_are_allowed_through_the_gateway() {
+        let root = std::env::temp_dir();
+        for mut args in [json!({"path":"script.json"}), json!({"path":null,"commands":[]})] {
+            assert!(prepare_tool(&root, "batch", &mut args).unwrap_err().contains("send the commands inline"));
+        }
+        let mut inline = json!({"commands":[{"id":"save","params":{"path":"safe.sc"}}]});
+        prepare_tool(&root, "batch", &mut inline).unwrap();
+        assert_eq!(inline["commands"][0]["params"]["path"], json!(root.join("safe.sc")));
+    }
+
+    #[test]
+    fn stored_point_cloud_sources_cannot_bypass_project_paths() {
+        let root = std::env::temp_dir();
+        let mut direct = json!({"command":"pointcloud.reload","params":{"cloud":"scan"}});
+        assert!(prepare_tool(&root, "execute", &mut direct).unwrap_err().contains("stored point-cloud path"));
+        let mut batch = json!({"commands":[{"id":"execute","params":{"command":"pointcloud.reload","params":{"cloud":"scan"}}}]});
+        assert!(prepare_tool(&root, "batch", &mut batch).unwrap_err().contains("stored point-cloud path"));
+        let mut explicit = json!({"command":"pointcloud.insert","params":{"path":"scan.ply"}});
+        prepare_tool(&root, "execute", &mut explicit).unwrap();
+        assert_eq!(explicit["params"]["path"], json!(root.join("scan.ply")));
+    }
+
+    #[test]
     fn nested_render_sources_follow_the_project_scope_in_direct_and_alias_batches() {
         let root = std::env::temp_dir();
         let mut direct = json!({"command":"render.start","params":{"environment":{"kind":"hdr","path":"sky.hdr"},
@@ -380,6 +416,11 @@ mod tests {
         prepare_tool(&root, "execute", &mut direct).unwrap();
         assert_eq!(direct["params"]["environment"]["path"], json!(root.join("sky.hdr")));
         assert_eq!(direct["params"]["raytrace"]["textures"][0]["path"], json!(root.join("colour.png")));
+        let mut capture = json!({"command":"render.surface.import","params":{"maps":{"base_color_srgb":{"path":"colour.png"}}}});
+        prepare_tool(&root, "execute", &mut capture).unwrap();
+        assert_eq!(capture["params"]["maps"]["base_color_srgb"]["path"], json!(root.join("colour.png")));
+        let mut outside = json!({"commands":[{"id":"execute","params":{"command":"render.surface.import","params":{"maps":{"normal_opengl":{"path":"../private.png"}}}}}]});
+        assert!(prepare_tool(&root, "batch", &mut outside).is_err());
         let mut builtin = json!({"command":"render.preflight","params":{"raytrace":{"textures":[{"path":"builtin://SURF-001/base_color"}]}}});
         prepare_tool(&root, "execute", &mut builtin).unwrap();
         assert_eq!(builtin["params"]["raytrace"]["textures"][0]["path"], "builtin://SURF-001/base_color");

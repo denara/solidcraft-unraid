@@ -6,7 +6,7 @@ Clean-room, pure-Rust parametric CAD. Task skills below; humans: CONTRIBUTING.md
 Read [mandatory fork rules](docs/unraid-agent-rules.md) first. Preserve `codex/unraid-mcp-web`, private config, HTTP MCP and independent web/Workspace; no unsafe bridges. Updates: [update-solvecraft-unraid](.agents/skills/update-solvecraft-unraid/SKILL.md). Validated baseline: `9e3e403b3f8624a8c312d6fd8552f10280b65514`. Fork rules override upstream defaults.
 
 ## Start here
-Work: ROADMAP.md, CONTRIBUTING.md and labelled issues; architecture: `docs/architecture.md`. Act when code, docs and rules settle a question; ask for user-visible decisions. Local `plan/` notes are optional.
+See ROADMAP.md, CONTRIBUTING.md, labelled issues and docs/architecture.md. Act when rules settle the choice; ask for user-visible decisions. Local plan/ notes are optional.
 
 ## Hard rules (what enforces each)
 - Independent: never copy another product's code, icons, text or templates; never drive or take data from commercial CAD. `skills/solidcraft-ground-rules/SKILL.md`.
@@ -24,12 +24,14 @@ Work: ROADMAP.md, CONTRIBUTING.md and labelled issues; architecture: `docs/archi
 - A design-format change is ONE new file in `crates/doc/src/format/pending/`: `scripts/test-format-pending.sh`.
 - A command has input and output schemas (will become required; `schema/unconverted.txt` only shrinks): `skills/solidcraft-commands/SKILL.md`.
 - New UI strings go in `assets/locales/pending/<slug>.json`, ATTRIBUTION rows in `attribution/pending/<slug>.md`: `cargo xtask lists`.
-- A changed default keeps the old behaviour behind a preference and fills the PR's `Changes a default:` line, and no second PR for an issue a lower-numbered one closes: `pr-checks.yml`.
+- A changed default keeps the old behaviour behind a preference and fills the PR's `Changes a default:` line: `pr-checks.yml`.
 - A regression test goes in the area's existing test file, never a per-bug file (#3226).
 - Check open PRs; claim a draft (lowest number wins), one topic, no force-push or catch-up-only pushes to `main`: `skills/solidcraft-contributing/SKILL.md`.
 - A PR's title and first sentence make sense to someone who never saw your chat or the issue: `skills/solidcraft-contributing/SKILL.md`.
+- Use English for code, comments, commit messages and docs.
+- Parallelize independent work; sequence dependent work.
 - Show observable changes with real screenshots or a recording, captured yourself.
-- Run `cargo xtask ci` before every commit, without switching branches while it runs. `cargo xtask skills` keeps this file and `skills/` honest.
+- Run `cargo xtask ci` before every commit. `cargo xtask skills` keeps this file and `skills/` honest.
 
 ## Working on X: read the skill first
 | Working on | Read |

@@ -103,6 +103,7 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
             | "inspect.compare_picture"
             | "render.hdr.inspect"
             | "render.settings.capture_hdr"
+            | "render.surface.import"
             | "render.preflight"
             | "render.start"
             | "render.batch"
@@ -457,6 +458,7 @@ mod tests {
             "pointcloud.insert",
             "render.hdr.inspect",
             "render.settings.capture_hdr",
+            "render.surface.import",
             "render.preflight",
             "render.start",
             "render.batch",

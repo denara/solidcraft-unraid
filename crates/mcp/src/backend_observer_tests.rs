@@ -164,6 +164,8 @@ fn point_cloud_preview_is_explicitly_unavailable_before_rendering_and_hidden_sca
         id: 1,
         name: "Public scan".into(),
         file: "scan.xyz".into(),
+        source: String::new(),
+        max_points: None,
         origin: Vec3::ZERO,
         points: Points::new(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0].into()),
         colors: Colors::default(),

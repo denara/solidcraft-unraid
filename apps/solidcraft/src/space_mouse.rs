@@ -1895,6 +1895,7 @@ mod tests {
 
     fn wheel() -> egui::Event {
         egui::Event::MouseWheel {
+            source: egui::MouseWheelSource::Unknown,
             unit: egui::MouseWheelUnit::Line,
             delta: egui::vec2(0.0, -1.0),
             modifiers: Default::default(),
