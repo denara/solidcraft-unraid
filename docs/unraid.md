@@ -9,13 +9,13 @@ Upstream renamed the displayed product from SolveCraft to SolidCraft. Technical 
 use upstream compatibility shims: `solvecraft-cli` remains a CLI alias and existing
 `.solvecraft` files still open. The gateway binary, container environment variables,
 persistent volume paths and image names retain their existing identifiers. New documents use the `.sc` extension; `.solidcraft` and `.solvecraft` remain explicit
-filename aliases. New saves use upstream's current container/format marker and cannot be opened by older builds. Hostnames and deployment paths below are examples: substitute your own
+filename aliases. New saves use upstream's current container/format marker and pending changes. Older builds may refuse these saves. Builds with newer-file support report unsupported content and preserve it when saving; retain a backup before rollback. Hostnames and deployment paths below are examples: substitute your own
 values locally, outside Git. `.env` and `target/` are ignored by Git and Docker builds.
 The fork is hosted at [denara/solidcraft-unraid](https://github.com/denara/solidcraft-unraid).
 The public Unraid template names a new container `SolidCraft`; the existing local Compose service,
 image tags, command names, data format and environment variables retain compatibility.
 The first prototype used upstream commit `af536a7`. The current validated snapshot is
-`9e3e403b3f8624a8c312d6fd8552f10280b65514`. See [update records](unraid-updates.md) for checks,
+`dad363980baf5c29aaab46c879be3df64ad72281`. See [update records](unraid-updates.md) for checks,
 the transferable image archive and installation instructions for this update.
 
 For future requested updates, use the repository skill

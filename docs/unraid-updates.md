@@ -1,5 +1,45 @@
 # Validated container updates
 
+## 2026-11-06: fixed 0.40.0-rc.2 snapshot and newer-design handling
+
+Selected dad363980baf5c29aaab46c879be3df64ad72281 once, 253 commits after 9e3e403b, on
+codex/unraid-mcp-web. Fork main is already an ancestor. The application version
+is unchanged; this is unofficial container integration, not a SolidCraft release.
+Original CAD changes belong to [SolidCraft upstream](https://github.com/tangency-labs/solidcraft).
+
+The snapshot updates egui/eframe to 0.37 and cadmpeg to 0.6.7 without floating
+either SolidCore revision. The development and publication toolchain stays
+Rust 1.99.1. Shipped licenses were regenerated for the complete fork graph.
+The original Linux CI for the preceding code commit reports 13375 passes and
+30 known failures; the selected successor folds generated locales and docs.
+The integration preserves the observer and browser handoff through the updated
+UI, adds the new typed texture reads to the shared file gate and retains separate
+project and revision checks for outputs. The gateway accepts inline MCP batches
+only; persisted scan paths cannot bypass project preflight. Native/desktop
+behavior for those upstream commands remains available.
+
+Native all-target Clippy, Wasm compatibility and scoped Wasm Clippy, formatting,
+licenses, assets/icons, layers, lists, UI containers, the mesh-decision ratchet
+and skill checks passed. Affected selections report 573 passing executions
+and 0 known upstream failures. The fresh-volume candidate passed modelling,
+MCP/authentication and session isolation, persistence, Workspace files, project
+boundaries, live observation and events, confirmed deletion, streamed ZIPs,
+remembered logins and uploads. The actual browser and independent copy were
+checked. An official MCP SDK reopened a format-51 fixture and preserved its bytes.
+The newer-design test reported unrecognized format-52 content and preserved it
+in an explicitly saved copy. Native saves stay on format 51 with additional
+pending markers; older builds can still reject them.
+
+Source 4d058b475d6917e6164e62e30263c4865c9cd0e1 passed the exact [container workflow](https://github.com/denara/solidcraft-unraid/actions/runs/42195580119).
+The commit tag and latest were pulled anonymously and agree on source and
+Linux amd64 digest sha256:e274add246ed3b272af11b541ea0ff52060aaf17986e13da007400caebc86546. Transfer archive:
+target/solidcraft-unraid-upstream-dad36398-4d058b47.tar (246297088 bytes, SHA256 7cf51202cc009e038cd790ec097ecde6634c5def16bd03b3c560e275d54e62f4).
+The local test instance was refreshed with the same volume, token and security
+settings, and the known public example was reopened without changing its bytes.
+Owned obsolete build resources were retired; a rollback image, two validated
+transfer archives and private backups remain. The catalog template and original
+icon are unchanged. No Unraid instance was installed or updated.
+
 ## 2026-11-04: fixed 0.40.0-rc.2 snapshot, record types and native format 51
 
 Selected `9e3e403b3f8624a8c312d6fd8552f10280b65514` once, 92 commits after the
