@@ -1,5 +1,44 @@
 # Validated container updates
 
+## 2026-11-07: fixed 0.40.0-rc.2 snapshot for glass and sketch division
+
+Selected 9325e3ac8cc1dcad67bc5d218274e89e8a9b26fc once, 24 commits after dad36398, on
+codex/unraid-mcp-web. Fork main was already an ancestor. Original CAD changes
+belong to [SolidCraft upstream](https://github.com/tangency-labs/solidcraft).
+
+The snapshot adds glass material settings, persistent points at fractions of a
+sketch curve, and workspace-specific panel layouts. Rust 1.99.1, the locked
+dependency graph, the kernel pins and the shipped license inventory are identical.
+The original Linux CI for the preceding code commit reports 13494 passes and
+30 known failures. The selected successor folds generated locale and feature
+documentation. The HTTP integration retains its independent browser, session
+observer and existing file gate. The changed render and panel commands introduce
+no additional gateway filesystem outputs.
+
+Native all-target Clippy, Wasm compatibility and scoped Wasm Clippy, formatting,
+licenses, assets/icons, layers, lists, UI containers, the mesh-decision ratchet
+and skill checks passed. Affected selections report 827 passing executions
+and 0 known upstream failures. The fresh-volume candidate passed modelling,
+MCP/authentication and session isolation, persistence, Workspace files, project
+boundaries, live observation and events, confirmed deletion, streamed ZIPs,
+remembered logins and uploads. The actual browser and independent copy were
+checked. An official MCP SDK reopened a format-51 fixture and preserved its bytes.
+The newer-design test reported unrecognized format-52 content and preserved it
+in an explicitly saved copy. A saved sketch reopened with its quarter, half and
+three-quarter constraints. A saved glass assignment reopened with its roughness,
+dispersion and film parameters, and the solid retained its volume. Native saves
+use format 51 with additional pending markers. Older builds may refuse them.
+
+Source 77767efad13545b5fed806256e6c2ed310aef083 passed the exact [container workflow](https://github.com/denara/solidcraft-unraid/actions/runs/42359638495).
+The commit tag and latest were pulled anonymously and agree on source and
+Linux amd64 digest sha256:3ba7a501aaecbf1f73b7c0a8319dde099026c063d9ebebac31d0928d354d931b. Transfer archive:
+target/solidcraft-unraid-upstream-9325e3ac-77767efa.tar (247202304 bytes, SHA256 5ebe636463cb51c4a1afadfe30a85e6d6d3659a3988d90d5468c2a57a80b3c09).
+The local test instance was refreshed with the same volume, token and security
+settings, and the known public example was reopened without changing its bytes.
+Owned obsolete build resources were retired; a rollback image, two validated
+transfer archives and private backups remain. The catalog template and original
+icon are unchanged. No Unraid instance was installed or updated.
+
 ## 2026-11-06: fixed 0.40.0-rc.2 snapshot and newer-design handling
 
 Selected dad363980baf5c29aaab46c879be3df64ad72281 once, 253 commits after 9e3e403b, on
