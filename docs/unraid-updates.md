@@ -1,5 +1,52 @@
 # Validated container updates
 
+## 2026-11-08 fixed 0.40.0-rc.3 snapshot and SolidCore update
+
+Selected ae1d85e5d4e32183258b3d301fb26b8687f4b969 once, 115 commits after 9325e3ac, on
+codex/unraid-mcp-web. Fork main was already an ancestor. Original CAD changes
+belong to [SolidCraft upstream](https://github.com/tangency-labs/solidcraft).
+
+SolidCore and its record library use the Apache-2.0 revision
+a445bdaac60a980b0e9d1dba3ee28eb7ada44f50. Rust stays on 1.99.1.
+Native format 51 incorporates its previous pending changes and adds
+persistent canvas locks. The browser stages kept-design recovery with
+progress and cancellation. The browser-tree merge retains the fork's
+render-aware rows and the new upstream feature rows under bodies. The
+independent Workspace copy uses the equivalent public opening API.
+The gateway confines the new sketch.replace file operand to the selected
+project, including in normalized batches, and takes the shared file gate
+without changing the loaded revision. DXF export remains a
+revision-protected single-file write.
+
+The first public container build hit a release-asset HTTP 504. The workflow now
+fetches the same pinned wasm-bindgen and Binaryen archives through the official
+GitHub API before Docker builds, and Docker verifies the SHA256 values. Only the
+two public tool archives enter the separate context. The local build produced
+byte-identical browser assets and the Docker context worked without network access.
+
+Native all-target Clippy, Wasm compatibility and scoped Wasm Clippy, formatting,
+licenses, assets/icons, layers, lists, UI containers, the mesh-decision ratchet
+and skill checks passed. Affected selections report 932 passing executions
+and 3 known upstream failures. The [upstream rc.3 packaging run](https://github.com/tangency-labs/solidcraft/actions/runs/42413691677)
+also passed, including Linux x86_64 and WebAssembly. The fresh-volume candidate
+passed modelling, authentication and session isolation, persistence, Workspace
+files, project boundaries, live observation and events, confirmed deletion,
+streamed ZIPs, remembered logins and uploads. The real browser and independent
+copy were checked. An official MCP SDK reopened existing format-51 files
+without changing their bytes, retained unrecognized format-52 data in a separate
+copy, and verified sketch replacement, DXF revision conflicts and canvas
+locking across save and reopen.
+
+Source 05b1d958fd1c282589cca4af5b491a7fa7db88c8 passed the exact [container workflow](https://github.com/denara/solidcraft-unraid/actions/runs/42477872443).
+The commit tag and latest were pulled anonymously and agree on source and
+Linux amd64 digest sha256:645fabc104eba80253d797a5d32201d8ee2af2e1a9483293594cf4bd9c32b768. Transfer archive
+target/solidcraft-unraid-upstream-ae1d85e5-05b1d958.tar (258800128 bytes, SHA256 dcda4728f820e7de618638e774a3605fa799f93c3474da499dd8b1cd400fb936).
+The local test instance was refreshed with the same volume, token and security
+settings, and the public example reopened without changing its bytes.
+Owned obsolete build resources were retired. A rollback image, two validated
+transfer archives and private backups remain. The catalog template and original
+icon match their public blobs.
+
 ## 2026-11-07: fixed 0.40.0-rc.2 snapshot for glass and sketch division
 
 Selected 9325e3ac8cc1dcad67bc5d218274e89e8a9b26fc once, 24 commits after dad36398, on
