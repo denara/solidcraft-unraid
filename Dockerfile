@@ -13,7 +13,15 @@ RUN curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VER
 WORKDIR /src
 ENV CARGO_TARGET_DIR=/src/target
 ENV CARGO_BUILD_JOBS=4
+# CI supplies only the two verified archives through this optional context.
+FROM scratch AS web-tools
+
 FROM toolchain AS build
+# Pin and verify Trunk's browser tools before compiling either web app.
+RUN --mount=type=bind,source=packaging/unraid/install-web-tools.sh,target=/tmp/install-web-tools.sh \
+    --mount=type=bind,source=Cargo.lock,target=/tmp/Cargo.lock \
+    --mount=type=bind,from=web-tools,target=/tmp/web-tools \
+    sh /tmp/install-web-tools.sh install /tmp/Cargo.lock /tmp/web-tools
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
