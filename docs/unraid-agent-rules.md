@@ -110,7 +110,9 @@ workers explicitly with `--headless`; desktop discovery must never attach a netw
 to a running desktop app. New `component.extract` destinations and
 `component.replace_with_link` source paths retain file confinement and shared revision gates.
 Nested renderer file sources remain project-relative and share the HTTP/MCP read gate,
-including the typed maps read by render.surface.import. The HTTP gateway refuses
+including the typed maps read by render.surface.import. The optional sketch.replace
+file operand stays project-relative and takes the shared read gate without opening
+it as the current design. The HTTP gateway refuses
 pointcloud.reload because its stored source locator cannot be preflighted as an explicit
 project path. Use pointcloud.insert with the project-relative source. Desktop/browser
 access is unchanged. The HTTP gateway accepts only inline MCP batches, with every

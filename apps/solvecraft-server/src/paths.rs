@@ -44,9 +44,9 @@ fn file_fields(root: &Path, value: &mut Value) -> Result<(), String> {
     Ok(())
 }
 
-/// Picture comparison reads one reference; other commands use `reference` for geometry.
-fn picture_reference(root: &Path, value: &mut Value) -> Result<(), String> {
-    if let Some(reference) = value.get_mut("reference")
+/// Resolve file operands that are specific to one command.
+fn file_operand(root: &Path, value: &mut Value, key: &str) -> Result<(), String> {
+    if let Some(reference) = value.get_mut(key)
         && let Some(name) = reference.as_str()
     {
         *reference = Value::String(resolve(root, name)?.to_string_lossy().into_owned());
@@ -97,7 +97,7 @@ pub fn prepare_tool(root: &Path, tool: &str, value: &mut Value) -> Result<(), St
     match tool {
         "crash_reports" => Err("shared desktop crash reports are unavailable through the network gateway".into()),
         "open" | "save" | "export" | "screenshot" => file_fields(root, value),
-        "compare_picture" => picture_reference(root, value),
+        "compare_picture" => file_operand(root, value, "reference"),
         "execute" => commands(root, value, 0),
         "batch" => {
             // The stdio worker can read steps from disk, where the gateway cannot
@@ -201,7 +201,11 @@ fn commands(root: &Path, value: &mut Value, depth: usize) -> Result<(), String> 
                         && !matches!(c, "component.insert_design" | "component.relink" | "component.extract" | "component.replace_with_link"))
                     || c.starts_with("occurrence.")
             });
-            let picture = object.get("command").and_then(Value::as_str) == Some("inspect.compare_picture");
+            let file_key = match object.get("command").and_then(Value::as_str) {
+                Some("inspect.compare_picture") => Some("reference"),
+                Some("sketch.replace") => Some("file"),
+                _ => None,
+            };
             let render = object.get("command").and_then(Value::as_str).is_some_and(|id| id.starts_with("render."));
             let profile = object.get("command").and_then(Value::as_str) == Some("diagnostics.profile");
             if !geometry
@@ -212,8 +216,8 @@ fn commands(root: &Path, value: &mut Value, depth: usize) -> Result<(), String> 
                     render_file_fields(root, params, 0)?;
                 } else {
                     file_fields(root, params)?;
-                    if picture {
-                        picture_reference(root, params)?;
+                    if let Some(key) = file_key {
+                        file_operand(root, params, key)?;
                     }
                     if profile
                         && let Some(trace) = params.get_mut("trace")
@@ -273,6 +277,36 @@ mod tests {
             std::os::unix::fs::symlink("/etc/passwd", root.join("linked.png")).unwrap();
             assert!(prepare_tool(&root, "compare_picture", &mut json!({"reference":"linked.png"})).is_err());
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replacement_sketch_sources_are_confined_in_direct_and_batch_calls() {
+        let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir(&root).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/etc/passwd", root.join("linked.sc")).unwrap();
+        for (file, valid) in [
+            ("Sketches/Source.sc", true),
+            ("../source.sc", false),
+            ("/etc/passwd", false),
+            (".hidden.sc", false),
+            #[cfg(unix)]
+            ("linked.sc", false),
+        ] {
+            let params = json!({"from":"Template","file":file});
+            let mut direct = json!({"command":"sketch.replace","params":params});
+            assert_eq!(prepare_tool(&root, "execute", &mut direct).is_ok(), valid);
+            let mut batch = json!({"commands":[{"id":"execute","params":{"command":"sketch.replace","params":params}}]});
+            assert_eq!(prepare_tool(&root, "batch", &mut batch).is_ok(), valid);
+            if valid {
+                assert_eq!(direct["params"]["file"], json!(root.join(file)));
+                assert_eq!(batch["commands"][0]["params"]["file"], direct["params"]["file"]);
+            }
+        }
+        let mut local = json!({"command":"sketch.replace","params":{"from":"Template"}});
+        prepare_tool(&root, "execute", &mut local).unwrap();
+        assert!(local["params"].get("file").is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
 

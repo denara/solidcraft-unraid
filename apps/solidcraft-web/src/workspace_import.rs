@@ -12,7 +12,7 @@ pub fn open_copy(app: &mut solidcraft_ui_egui::SolveApp, path: &str) -> bool {
         app.set_status("Die Modellkopie wurde nicht geöffnet: Zu viele Modelle sind bereits offen. Schließe ein Modell und öffne die Datei erneut im Arbeitsbereich.", true);
         return false;
     }
-    app.open_path(path);
+    app.open_path_with(path, &Default::default());
     app.session.path.as_deref() == Some(path)
 }
 

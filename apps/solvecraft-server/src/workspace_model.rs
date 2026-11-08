@@ -108,6 +108,7 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
             | "render.start"
             | "render.batch"
             | "render.status" => out.push(FileOperation::ReadSources),
+            "sketch.replace" if args.get("file").and_then(Value::as_str).is_some() => out.push(FileOperation::ReadSources),
             "doc.open" => {
                 if let Some(path) = name(root, args)? {
                     *current = (!imports_as_new(&path)).then(|| path.clone());
@@ -263,6 +264,21 @@ pub fn check_revisions(root: &Path, status: &ModelStatus, ops: &[FileOperation],
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replacing_a_sketch_from_file_uses_the_read_gate_without_opening_the_source() {
+        let root = std::env::temp_dir();
+        let params = json!({"from":"Template","file":"source.sc"});
+        let direct = json!({"params":{"name":"execute","arguments":{"command":"sketch.replace","params":params}}});
+        let batch = json!({"params":{"name":"batch","arguments":{"commands":[{"id":"sketch.replace","params":params}]}}});
+        for call in [&direct, &batch] {
+            let ops = operations(&root, call, Some("target.sc")).unwrap();
+            assert_eq!(ops, vec![FileOperation::ReadSources]);
+            assert!(!refreshes_current(&ops, &json!({"current_file":"target.sc"}), &root));
+        }
+        let local = json!({"params":{"name":"execute","arguments":{"command":"sketch.replace","params":{"from":"Template"}}}});
+        assert!(operations(&root, &local, None).unwrap().is_empty());
+    }
 
     #[test]
     fn typed_exports_and_obj_materials_keep_their_actual_output_revision_gates() {
