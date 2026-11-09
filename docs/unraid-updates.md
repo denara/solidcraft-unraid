@@ -1,5 +1,49 @@
 # Validated container updates
 
+## 2026-11-09 fixed 0.40.0-rc.3 snapshot and in-tree SolidCore
+
+Selected f9ed9a90b453517d83e787169887c180e17656fd once, 2923 commits after ae1d85e5, on
+codex/unraid-mcp-web. Fork main was already an ancestor. Original CAD changes
+belong to [SolidCraft upstream](https://github.com/tangency-labs/solidcraft).
+
+The kernel sync brings the Apache-2.0 SolidCore source into the upstream
+repository. Cargo uses the selected subtree for SolidCore and its record
+crate. Shipped licences include the real SolidCore licence and NVIDIA notice
+even when a Windows checkout represents their symbolic links as text. The
+shared MCP server handles internal Workspace status and snapshot RPCs through
+an application hook. These methods remain private to the worker. HTTP clients
+cannot call them. The public save tool retains the overwrite option, with the
+existing shared strong revision checks. The observer uses the shared PNG
+base64 encoder and the independent browser copy retains its separate model.
+
+The upstream Docker run failed at the Trunk release download. The Unraid
+workflow fetches the same pinned Trunk 0.21.14 from the official release API
+alongside the pinned wasm-bindgen and Binaryen archives. Docker validates all
+three SHA256 values before using the binaries. The named tool context passed
+an offline Docker check. The publication workflow also watches changes under
+the kernel subtree.
+
+Native all-target Clippy, Wasm compatibility and scoped Wasm Clippy, formatting,
+licences, assets/icons, layers, lists, UI containers, mesh-decision and skill
+checks passed. Targeted selections report 809 passing executions and
+0 known upstream failures. The isolated fresh-volume candidate passed
+MCP modelling, authentication, session isolation, restart persistence and the
+Workspace file, project, observer, live event, deletion, ZIP, login and upload
+checks. The real browser and independent copies were checked. A native format
+51 public design reopened without modifying the original bytes. The SDK also
+verified the private RPC boundary, per-file revisions and preserved newer data
+when writing a separate copy.
+
+Source 9e7c3f107039e0c0adc6567a761d2007334b86d7 passed the exact [container workflow](https://github.com/denara/solidcraft-unraid/actions/runs/42602121731).
+The commit tag and latest were pulled anonymously and agree on source and
+Linux amd64 digest sha256:a0b152997c3a09c9cc798d74b0465d9a2493b2678835bf05614c56c80dd56d9b. Transfer archive
+target/solidcraft-unraid-upstream-f9ed9a90-9e7c3f10.tar (262213632 bytes, SHA256 f849f267c5d7eab055631dca85c2f72038abe5fa0f6fb80af7e71beca746fe0b).
+The local test instance was refreshed with the same volume, token and security
+settings, and the public example reopened without changing its bytes.
+Owned obsolete build resources were retired. A rollback image, two validated
+transfer archives and private backups remain. The catalog template and original
+icon match their public blobs.
+
 ## 2026-11-08 fixed 0.40.0-rc.3 snapshot and SolidCore update
 
 Selected ae1d85e5d4e32183258b3d301fb26b8687f4b969 once, 115 commits after 9325e3ac, on
