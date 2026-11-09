@@ -83,7 +83,7 @@ fn generate(root: &Path) -> Result<String, String> {
             version: s("version"),
             license: s("license"),
             repository: s("repository"),
-            files: licence_files(&dir, p),
+            files: licence_files(root, &dir, p),
         });
     }
     crates.sort_by(|a, b| (&a.name, &a.version).cmp(&(&b.name, &b.version)));
@@ -91,7 +91,11 @@ fn generate(root: &Path) -> Result<String, String> {
 }
 
 /// The licence and notice files at the top of a crate's package (and its `license-file`).
-fn licence_files(dir: &Path, p: &Value) -> Vec<(String, String)> {
+fn licence_files(root: &Path, dir: &Path, p: &Value) -> Vec<(String, String)> {
+    // SolidCore's packaged licence and notice link to the subtree root. On a
+    // Windows checkout without symlinks, Git writes the link targets as text.
+    let solidcore_root = root.join("solidcore");
+    let dir = if dir == solidcore_root.join("crates/solidcore") { &solidcore_root } else { dir };
     let mut names: BTreeSet<String> = BTreeSet::new();
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {

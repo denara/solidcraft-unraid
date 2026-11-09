@@ -6,17 +6,17 @@ Clean-room, pure-Rust parametric CAD. Task skills below; humans: CONTRIBUTING.md
 Read [mandatory fork rules](docs/unraid-agent-rules.md) first. Preserve `codex/unraid-mcp-web`, private config, HTTP MCP and independent web/Workspace; no unsafe bridges. Updates: [update-solvecraft-unraid](.agents/skills/update-solvecraft-unraid/SKILL.md). Validated baseline: `ae1d85e5d4e32183258b3d301fb26b8687f4b969`. Fork rules override upstream defaults.
 
 ## Start here
-See ROADMAP.md, CONTRIBUTING.md, labelled issues and docs/architecture.md. Act when rules settle the choice; ask for user-visible decisions. Local plan/ notes are optional.
+See ROADMAP.md, CONTRIBUTING.md, labelled issues and docs/architecture.md. Ask for user-visible decisions.
 
 ## Hard rules (what enforces each)
 - Independent: never copy another product's code, icons, text or templates; never drive or take data from commercial CAD. `skills/solidcraft-ground-rules/SKILL.md`.
 - No GPL/LGPL/AGPL code, not even reading it (OpenCASCADE, FreeCAD, SolveSpace, CadQuery, LibreCAD, QCAD): `cargo xtask licences --check`.
 - Every asset is original or openly licensed with a row in ATTRIBUTION.md; read `assets/AGENTS.md` before icon work: `cargo xtask assets`, `cargo xtask icons`.
 - Never crash: no unwrap/expect/panic/unsafe in non-test code, errors are `Result`, input is hostile: clippy `-D warnings`, `hostile_params_never_panic`.
-- Model decisions (operations, bodies, face/edge identity, depths, nearness) use exact geometry; meshes are for display, export, previews and mesh bodies (`xtask/mesh-decisions.txt` only shrinks): `cargo xtask mesh-decisions`.
+- Model decisions (operations, bodies, face/edge identity, depths, nearness) use exact geometry; meshes serve display, export, previews and mesh bodies (`xtask/mesh-decisions.txt` only shrinks): `cargo xtask mesh-decisions`.
 - New kernel cases go to solidcore: `cargo xtask lists`.
 - Everything is a command and programmatic calls never open dialogs: `skills/solidcraft-commands/SKILL.md`.
-- Layering (geom, sketch/kernel/render, doc, io, engine, ui-egui, apps): `cargo xtask layers`.
+- Layering: Truck in `crates/kernel`; SolidCore via ops/tess/record. See `solidcore/docs/layers.md` and `cargo xtask layers`.
 - One outer UI container, one camera path (`navigation::handle`), colours from theme tokens: `cargo xtask ui-containers`.
 - Application code is Rust only and builds for wasm: `cargo xtask wasm`, `cargo xtask web-offline-test`.
 - The product name is SolidCraft; the old name lives only in `docs/compatibility.md`.
@@ -24,7 +24,7 @@ See ROADMAP.md, CONTRIBUTING.md, labelled issues and docs/architecture.md. Act w
 - A design-format change is ONE new file in `crates/doc/src/format/pending/`: `scripts/test-format-pending.sh`.
 - A command has input and output schemas (will become required; `schema/unconverted.txt` only shrinks): `skills/solidcraft-commands/SKILL.md`.
 - New UI strings go in `assets/locales/pending/<slug>.json`, ATTRIBUTION rows in `attribution/pending/<slug>.md`: `cargo xtask lists`.
-- A changed default keeps the old behaviour behind a preference and fills the PR's `Changes a default:` line: `pr-checks.yml`.
+- A changed default (existing UI, not kernel results) keeps the old behaviour behind a preference; fill the PR's `Changes a default:` line.
 - A regression test goes in the area's existing test file, never a per-bug file (#3226).
 - Check open PRs; claim a draft (lowest number wins), one topic, no force-push or catch-up-only pushes to `main`: `skills/solidcraft-contributing/SKILL.md`.
 - A PR's title and first sentence make sense to someone who never saw your chat or the issue: `skills/solidcraft-contributing/SKILL.md`.
@@ -36,10 +36,11 @@ See ROADMAP.md, CONTRIBUTING.md, labelled issues and docs/architecture.md. Act w
 ## Working on X: read the skill first
 | Working on | Read |
 |---|---|
-| A PR, a claim, review, CI or evidence | `skills/solidcraft-contributing/SKILL.md` |
+| PRs, claims, review, CI | `skills/solidcraft-contributing/SKILL.md` |
 | Licences, assets, clean-room, the name | `skills/solidcraft-ground-rules/SKILL.md` |
 | Non-test Rust, hostile input, a crash report | `skills/solidcraft-crash-safety/SKILL.md` |
-| A command, a crate boundary | `skills/solidcraft-commands/SKILL.md` |
+| Commands, crate boundaries | `skills/solidcraft-commands/SKILL.md` |
+| Kernel and geometry | `skills/solidcraft-layers/SKILL.md` |
 | A dialog, panel, camera, icon, colour | `skills/solidcraft-ui/SKILL.md` |
 | Labels, messages, translations | `skills/solidcraft-ui-text/SKILL.md` |
 | Saving something new in a design, import, export | `skills/solidcraft-file-formats/SKILL.md` |

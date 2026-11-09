@@ -107,7 +107,9 @@ Observer copies isolate the new kernel, mirrored/placed mesh, plan, joint and is
 caches. Iso-curve/comb view state participates in bounded snapshot metadata and visual revisions.
 Normalize MCP batch tool aliases before project/path/revision preflight and launch gateway
 workers explicitly with `--headless`; desktop discovery must never attach a network session
-to a running desktop app. New `component.extract` destinations and
+to a running desktop app. The shared MCP protocol server handles the private Workspace
+status and snapshot requests through its app hook. The HTTP gateway rejects both requests
+before forwarding them, and neither request appears as a public tool. New `component.extract` destinations and
 `component.replace_with_link` source paths retain file confinement and shared revision gates.
 Nested renderer file sources remain project-relative and share the HTTP/MCP read gate,
 including the typed maps read by render.surface.import. The optional sketch.replace

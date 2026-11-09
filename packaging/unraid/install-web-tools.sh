@@ -5,6 +5,7 @@ set -eu
 mode=$1
 lockfile=$2
 assets=$3
+trunk_version=0.21.14
 wasm_bindgen_version=0.2.129
 locked_version=$(awk '
     { sub(/\r$/, "") }
@@ -15,6 +16,7 @@ if [ "$locked_version" != "$wasm_bindgen_version" ]; then
     exit 1
 fi
 
+trunk_sha=f2b4680cd239693a646a2795e4633c625328d7b2a044fbe749fa3a2fe9e7036b
 bindgen_sha=82d12bb940e2d4e72e0d5605387fc1b8ca179044e012b620f0ce4e7440e8320e
 binaryen_sha=e959f2170af4c20c552e9de3a0253704d6a9d2766e8fdb88e4d6ac4bae9388fe
 
@@ -33,6 +35,7 @@ fetch_asset() {
 
 fetch_tools() {
     mkdir -p "$assets"
+    fetch_asset trunk-rs/trunk 252890635 "$assets/trunk.tar.gz"
     fetch_asset wasm-bindgen/wasm-bindgen 587769529 "$assets/wasm-bindgen.tar.gz"
     fetch_asset WebAssembly/binaryen 240710285 "$assets/binaryen.tar.gz"
 }
@@ -40,7 +43,7 @@ fetch_tools() {
 case "$mode" in
     download) fetch_tools ;;
     install)
-        if [ ! -e "$assets/wasm-bindgen.tar.gz" ] && [ ! -e "$assets/binaryen.tar.gz" ]; then
+        if [ ! -e "$assets/trunk.tar.gz" ] && [ ! -e "$assets/wasm-bindgen.tar.gz" ] && [ ! -e "$assets/binaryen.tar.gz" ]; then
             # Ordinary Docker builds can fetch public assets without any credentials.
             assets=$(mktemp -d)
             trap 'rm -rf -- "$assets"' EXIT
@@ -50,12 +53,15 @@ case "$mode" in
     *) printf >&2 'Expected download or install.\n'; exit 1 ;;
 esac
 
-printf '%s  %s\n' "$bindgen_sha" "$assets/wasm-bindgen.tar.gz" \
+printf '%s  %s\n' "$trunk_sha" "$assets/trunk.tar.gz" \
+    "$bindgen_sha" "$assets/wasm-bindgen.tar.gz" \
     "$binaryen_sha" "$assets/binaryen.tar.gz" | sha256sum --check -
 if [ "$mode" = download ]; then
     exit 0
 fi
 
+tar -xzf "$assets/trunk.tar.gz" -C /usr/local/bin trunk
+test "$(trunk --version)" = "trunk $trunk_version"
 tar -xzf "$assets/wasm-bindgen.tar.gz" -C /usr/local/bin --strip-components=1 \
     "wasm-bindgen-$wasm_bindgen_version-x86_64-unknown-linux-musl/wasm-bindgen"
 tar -xzf "$assets/binaryen.tar.gz" -C /usr/local/bin --strip-components=2 \

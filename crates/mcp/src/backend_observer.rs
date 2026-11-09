@@ -280,7 +280,7 @@ fn render(s: &Session, view: StandardView, revision: u64, renderer: &capture::Re
         return Err("observer PNG exceeds the preview budget".into());
     }
     Ok(json!({"status":"ready","revision":revision,"width":WIDTH,"height":HEIGHT,
-        "renderer":picture.renderer,"warning":capture::warning(picture.renderer),"png":crate::tools::base64(&bytes)}))
+        "renderer":picture.renderer,"warning":capture::warning(picture.renderer),"png":solidcraft_mcp_server::base64(&bytes)}))
 }
 
 fn mesh_budget(bodies: &[solidcraft_engine::doc::ModelBody], placements: usize) -> Result<(), String> {

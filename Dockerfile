@@ -6,14 +6,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libegl1-mesa-dev libx11-dev libxi-dev libxcursor-dev libxrandr-dev \
     && rm -rf /var/lib/apt/lists/*
 RUN rustup target add wasm32-unknown-unknown && rustup component add rustfmt clippy
-# Same Trunk version as upstream's browser build. Build tooling is not shipped.
-ARG TRUNK_VERSION=0.21.14
-RUN curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
-    | tar -xz -C /usr/local/bin
 WORKDIR /src
 ENV CARGO_TARGET_DIR=/src/target
 ENV CARGO_BUILD_JOBS=4
-# CI supplies only the two verified archives through this optional context.
+# CI supplies only the verified browser tools through this optional context.
 FROM scratch AS web-tools
 
 FROM toolchain AS build

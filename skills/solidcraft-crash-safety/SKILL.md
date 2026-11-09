@@ -12,7 +12,7 @@ People trust SolidCraft with their designs. This outranks feature work.
 - No `unsafe` (`unsafe_code = "forbid"`). This container fork omits the upstream native driver, macOS file-open and Windows/macOS crash/window/HID bridges. There is no platform exception here; preserve the compatibility stubs. See `docs/unraid-agent-rules.md`.
 - Errors are `Result<T, E>` through the crate's error type and `?`. An unfinished feature returns an error ("not supported yet: ..."); it never panics.
 - Input-derived numbers are hostile (command parameters, design files, control-channel input): `get()` not `[i]`, finite checks, caps on sizes and loop counts.
-- Calls to `solidcore` use the safe `crates/smlib` wrapper and `solidcraft_kernel::guard`; caught panics become kernel errors. Only `crates/smlib` links `solidcore`.
+- Calls through the safe kernel seam return errors. Follow `skills/solidcraft-layers/SKILL.md` and use the existing kernel guards.
 - Last resort: `Session::execute` runs every command under `catch_unwind`; an escaped panic restores the design and reports `EngineError::Internal`. Do not rely on it.
 - Files are written with `crates/io/src/safe_write.rs` (temporary file, flush, one rename), so a crash leaves the old file or the new one.
 
@@ -25,4 +25,4 @@ The desktop app writes every panic and every unclean exit to a local crash folde
 - `solidcraft-cli crashes`, `solidcraft-cli crashes show <id>`, `solidcraft-cli crashes replay <id>`
 - the `diagnostics.crash_reports` command, or the MCP `crash_reports` tool
 
-Crashes and data loss are taken as issues even while kernel work is paused (CONTRIBUTING.md, "Kernel work is paused").
+Crashes and data loss are taken first, including in kernel code, which lives in `solidcore/` (CONTRIBUTING.md, "Kernel work goes in solidcore/").
