@@ -1,5 +1,47 @@
 # Validated container updates
 
+## 2026-11-10 fixed 0.40.0-rc.3 snapshot and localized workspace
+
+Selected e8e73e11abec7149cf2945982553c0f9132a97ea once, 212 commits after f9ed9a90, on codex/unraid-mcp-web.
+Fork main was already an ancestor. CAD development remains with
+[SolidCraft upstream](https://github.com/tangency-labs/solidcraft).
+
+The workspace header follows browser language preferences with a US English
+fallback and keeps the manual language choice locally. German, US English and
+Easy British English cover the live workspace, sign-in, file and session
+views. The localized workspace footer uses its product name. The browser CAD
+button requests its own window without an opener or a navigation in the
+workspace. Browser CAD retains its separate preferences and model storage.
+
+The observer uses the shared viewport interfaces and preserves the read-only
+model boundary. The OpenGL/WebGL regression follows the viewport shader into
+its new crate. MCP STEP and IGES aliases retain project-relative single-file
+writes. The public format-51 model reopened with the same 24,000 mm³ volume and
+unchanged source bytes. A format-52 copy reopened with the same volume. Keep the
+pre-update backup when rolling back from designs saved with the new format.
+
+The exact upstream [CI run](https://github.com/tangency-labs/solidcraft/actions/runs/42777176484)
+passed its repository checks. Its native test and Wasm jobs were skipped for
+that head. Local native and Wasm Clippy, licensing and repository checks passed.
+One grouped Cargo compilation covered 11 selections and
+302 passing test executions. The initial grouped compilation took 1,142 seconds. The cached retry and test execution took
+24.2 and 19.4 seconds respectively.
+Separate optimized native and Wasm builds remain necessary. The isolated
+candidate passed MCP, workspace, project, observer, live events, deletion, ZIP,
+login, upload and restart proofs. Chromium verified all three footer labels,
+language selection by keyboard, reload persistence, incoming live content and
+a separate CAD window. The canonical template and icon were unchanged.
+
+Source dbfbfa59111f35fcb4e1b623832cfa51deff3a37 passed the [container workflow](https://github.com/denara/solidcraft-unraid/actions/runs/42796595408).
+The immutable tag and latest were pulled anonymously and agree on Linux amd64
+digest sha256:0b4c2fe16c3b365e0bfb997fdc70b2e5e90748c3bcb931c97bca2db0b9b7f39f. Transfer archive target/solidcraft-unraid-upstream-e8e73e11-dbfbfa59.tar
+(266472960 bytes, SHA256 fa2a3b1fb7fec91417a1ce985a32a7bfbd6112dcbb4409b9633ae12b4f280831).
+
+The local test instance was refreshed with the same volume, token and security
+settings. It reopened the public sample read-only. Verified obsolete containers,
+images and duplicate packaging outputs were retired. Two validated transfer
+archives, a rollback image and private backups remain.
+
 ## 2026-11-09 fixed 0.40.0-rc.3 snapshot and in-tree SolidCore
 
 Selected f9ed9a90b453517d83e787169887c180e17656fd once, 2923 commits after ae1d85e5, on
