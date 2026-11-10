@@ -109,7 +109,7 @@ async fn detail_route_reads_public_native_json_fixture_and_preserves_unknown_fil
     assert!(html.contains("pi-case"));
     assert!(html.contains("solidcraft/15"));
     assert!(html.contains("<dd>mm</dd>"));
-    assert!(html.contains("<dt>Skizzen</dt>"));
+    assert!(html.contains("<dt><span data-ws-text=\"sketches\">Skizzen</span></dt>"));
     // Broken designs still have useful filesystem properties and a download action.
     let response = fixture.app().oneshot(request("/workspace/details/public&example.solidcraft", Some(&cookie), false)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);

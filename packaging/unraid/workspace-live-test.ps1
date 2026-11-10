@@ -116,7 +116,7 @@ try {
     $export = @($snapshot.files | Where-Object name -EQ $taskExport)[0]
     if (-not $model.project.id -or $model.project.id -ne $export.project.id -or $model.project.basis -ne 'directory' -or $model.project.name -ne $taskProject) { throw 'Model/export project grouping incorrect' }
     $details = Invoke-WebRequest "$BaseUrl/workspace/details/$taskModel" -WebSession $browser
-    if ($details.Content -notmatch 'Live workspace proof updated' -or $details.Content -notmatch '<dt>Features</dt><dd>1</dd>') { throw 'Saved model properties missing or stale' }
+    if ($details.Content -notmatch 'Live workspace proof updated' -or $details.Content -notmatch '<dt><span data-ws-text="features">Features</span></dt><dd>1</dd>') { throw 'Saved model properties missing or stale' }
     if ($details.Content.Contains($Token) -or $details.Content.Contains('/data/files')) { throw 'Model details exposed private transport metadata' }
     if ((Invoke-WebRequest "$BaseUrl/workspace/details/$taskModel" -Headers @{Authorization = "Bearer $Token"} -SkipHttpErrorCheck).StatusCode -ne 401) { throw 'Details accepted Bearer authentication as a browser login' }
 

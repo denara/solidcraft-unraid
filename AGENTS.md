@@ -16,20 +16,20 @@ See ROADMAP.md, CONTRIBUTING.md, labelled issues and docs/architecture.md. Ask f
 - Model decisions (operations, bodies, face/edge identity, depths, nearness) use exact geometry; meshes serve display, export, previews and mesh bodies (`xtask/mesh-decisions.txt` only shrinks): `cargo xtask mesh-decisions`.
 - New kernel cases go to solidcore: `cargo xtask lists`.
 - Everything is a command and programmatic calls never open dialogs: `skills/solidcraft-commands/SKILL.md`.
-- Layering: Truck in `crates/kernel`; SolidCore via ops/tess/record. See `solidcore/docs/layers.md` and `cargo xtask layers`.
+- Truck stays in `crates/kernel`; SolidCore via ops/tess/record. `cargo xtask layers`.
 - One outer UI container, one camera path (`navigation::handle`), colours from theme tokens: `cargo xtask ui-containers`.
 - Application code is Rust only and builds for wasm: `cargo xtask wasm`, `cargo xtask web-offline-test`.
-- The product name is SolidCraft; the old name lives only in `docs/compatibility.md`.
+- The product name is SolidCraft; the old name lives in `docs/compatibility.md`.
 - Sorted lists (message catalogs, `mod` lines, languages) stay sorted: `cargo xtask lists`. Never edit generated files (`docs/features.md`, `THIRD-PARTY-LICENSES.txt`) in a PR.
 - A design-format change is ONE new file in `crates/doc/src/format/pending/`: `scripts/test-format-pending.sh`.
 - A command has input and output schemas (will become required; `schema/unconverted.txt` only shrinks): `skills/solidcraft-commands/SKILL.md`.
 - New UI strings go in `assets/locales/pending/<slug>.json`, ATTRIBUTION rows in `attribution/pending/<slug>.md`: `cargo xtask lists`.
 - A changed default (existing UI, not kernel results) keeps the old behaviour behind a preference; fill the PR's `Changes a default:` line.
-- A regression test goes in the area's existing test file, never a per-bug file (#3226).
+- Regression tests go in existing area test files (#3226).
 - Check open PRs; claim a draft (lowest number wins), one topic, no force-push or catch-up-only pushes to `main`: `skills/solidcraft-contributing/SKILL.md`.
 - A PR's title and first sentence make sense to someone who never saw your chat or the issue: `skills/solidcraft-contributing/SKILL.md`.
 - Use English for code, comments, commit messages and docs.
-- Parallelize independent work; sequence dependent work.
+- Parallelize independent work.
 - Show observable changes with real screenshots or a recording, captured yourself.
 - Run `cargo xtask ci` before every commit. `cargo xtask skills` keeps this file and `skills/` honest.
 
@@ -42,6 +42,7 @@ See ROADMAP.md, CONTRIBUTING.md, labelled issues and docs/architecture.md. Ask f
 | Commands, crate boundaries | `skills/solidcraft-commands/SKILL.md` |
 | Kernel and geometry | `skills/solidcraft-layers/SKILL.md` |
 | A dialog, panel, camera, icon, colour | `skills/solidcraft-ui/SKILL.md` |
+| Sheet metal | `skills/solidcraft-sheetmetal/SKILL.md` |
 | Labels, messages, translations | `skills/solidcraft-ui-text/SKILL.md` |
 | Saving something new in a design, import, export | `skills/solidcraft-file-formats/SKILL.md` |
 | Preferences, a changed default | `skills/solidcraft-preferences/SKILL.md` |

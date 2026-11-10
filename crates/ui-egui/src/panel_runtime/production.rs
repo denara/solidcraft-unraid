@@ -128,7 +128,7 @@ impl Product {
                     let availability = crate::timeline::transport_availability(app, *control);
                     RuntimeAction {
                         id: ControlId(control.id().into()),
-                        label: control.label(app.timeline_playback.is_some()).into(),
+                        label: control.label(app.timeline_playback.is_some(), crate::timeline::play_labels()).into(),
                         enabled: availability.is_ok(),
                         disabled_reason: availability.err(),
                         pressed: (*control == crate::ui_kit::HistoryTransport::Play).then_some(app.timeline_playback.is_some()),
@@ -757,17 +757,14 @@ fn focus_capture_id() -> egui::Id {
     egui::Id::unique("shared-panel-current-content-focus")
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn shared_content_measurement(ctx: &egui::Context) -> bool {
     ctx.data(|data| data.get_temp::<Option<FocusCapture>>(focus_capture_id()).flatten().is_some())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn shared_content_composer_height(ctx: &egui::Context) -> Option<f32> {
     ctx.data(|data| data.get_temp::<Option<FocusCapture>>(focus_capture_id()).flatten().and_then(|capture| capture.composer))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn report_content_composer_height(ctx: &egui::Context, height: f32) {
     if !height.is_finite() || height < 0.0 {
         return;

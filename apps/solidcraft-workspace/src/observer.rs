@@ -33,7 +33,8 @@ struct Frame {
     index: usize,
     revision: u64,
     url: String,
-    metadata: String,
+    captured_at: String,
+    renderer: String,
 }
 
 type Listener = (&'static str, Closure<dyn FnMut(Event)>);
@@ -80,7 +81,7 @@ fn label(state: &str, text: &str) {
         }
     }
     if let Some(element) = element("observer-status-text") {
-        element.set_text_content(Some(text));
+        crate::locale::message(&element, text);
     }
 }
 
@@ -96,7 +97,7 @@ fn clear_images() {
     }
     for id in ["observer-meta", "observer-warning"] {
         if let Some(meta) = element(id) {
-            meta.set_text_content(None);
+            crate::locale::clear(&meta);
         }
     }
 }
@@ -131,7 +132,7 @@ fn ended(client: &Rc<RefCell<Client>>) {
     close(client);
     label("ended", "Sitzung beendet · diese Live-Vorschau ist geschlossen.");
     if let Some(placeholder) = element("observer-placeholder") {
-        placeholder.set_text_content(Some("Die Sitzung ist nicht mehr verfügbar. Es wird kein veraltetes Modell als live angezeigt."));
+        crate::locale::message(&placeholder, "Die Sitzung ist nicht mehr verfügbar. Es wird kein veraltetes Modell als live angezeigt.");
     }
 }
 
@@ -172,7 +173,11 @@ fn update(client: &Rc<RefCell<Client>>, data: &str) {
         } else {
             value.get("warning").and_then(Value::as_str).filter(|text| text.len() <= 1024)
         };
-        warning.set_text_content(message);
+        if let Some(message) = message {
+            crate::locale::message(&warning, message);
+        } else {
+            crate::locale::clear(&warning);
+        }
     }
     let mut state = client.borrow_mut();
     state.desired_status = status.into();
@@ -195,13 +200,8 @@ fn update(client: &Rc<RefCell<Client>>, data: &str) {
     let renderer = value.get("renderer").and_then(Value::as_str).filter(|value| value.len() <= 80).unwrap_or("CPU");
     let captured = value.get("captured_at").and_then(Value::as_str).filter(|value| value.len() <= 80).unwrap_or("Zeit unbekannt");
     let index = 1 - state.front;
-    state.pending = Some(Frame {
-        generation: state.generation,
-        index,
-        revision,
-        url: url.clone(),
-        metadata: format!("Bildrevision {revision} · {captured} · Renderer: {renderer}"),
-    });
+    state.pending =
+        Some(Frame { generation: state.generation, index, revision, url: url.clone(), captured_at: captured.into(), renderer: renderer.into() });
     if status == "ready" {
         label("rendering", "Neuer abgeschlossener Stand · Bild wird geladen …");
     }
@@ -357,15 +357,17 @@ pub(crate) fn install(doc: &Document) -> Result<(), JsValue> {
                 .closest(".session")
                 .ok()
                 .flatten()
-                .and_then(|section| section.query_selector(".sessionname").ok().flatten())
+                .and_then(|section| section.query_selector(".sessionname .mono").ok().flatten())
                 .and_then(|name| name.text_content())
                 .filter(|name| name.len() <= 160);
-            title.set_text_content(Some(
-                &session.map_or_else(|| "Live-Vorschau der MCP-Sitzung".into(), |session| format!("Live-Vorschau · {session}")),
-            ));
+            if let Some(session) = session {
+                crate::locale::set(&title, "preview_session_title", &[("session", &session)]);
+            } else {
+                crate::locale::message(&title, "Live-Vorschau der MCP-Sitzung");
+            }
         }
         if let Some(placeholder) = element("observer-placeholder") {
-            placeholder.set_text_content(Some("Das erste Modellbild wird vorbereitet."));
+            crate::locale::message(&placeholder, "Das erste Modellbild wird vorbereitet.");
         }
         label("waiting", "Vorschau wird verbunden …");
         if connect(&client).is_err() {
@@ -423,7 +425,15 @@ pub(crate) fn install(doc: &Document) -> Result<(), JsValue> {
                 let _ = placeholder.set_attribute("hidden", "");
             }
             if let Some(meta) = element("observer-meta") {
-                meta.set_text_content(Some(&frame.metadata));
+                crate::locale::set(
+                    &meta,
+                    "preview_revision",
+                    &[
+                        ("revision", &frame.revision.to_string()),
+                        ("captured", crate::locale::translate(&frame.captured_at)),
+                        ("renderer", &frame.renderer),
+                    ],
+                );
             }
             state.front = index;
             state.loaded_revision = Some(frame.revision);

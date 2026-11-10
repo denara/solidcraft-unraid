@@ -26,7 +26,7 @@ impl Storage {
         value
     }
 }
-fn units(bytes: u64) -> String {
+pub(crate) fn units(bytes: u64) -> String {
     let (div, unit) = if bytes >= 1 << 40 {
         (1099511627776., "TiB")
     } else if bytes >= 1 << 30 {

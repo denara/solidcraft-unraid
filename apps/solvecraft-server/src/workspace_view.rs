@@ -66,7 +66,7 @@ const CSS: &str = r#"
 
 :root{color-scheme:dark;--bg:#10151b;--panel:#171e26;--raised:#1e2731;--line:#2b3541;--text:#ecf1f5;--dim:#9eafbf;--green:#6cddb4;--amber:#f1c36b;--blue:#9bc8fa}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);font-family:Segoe UI,system-ui,sans-serif;color:var(--text);font-size:14px;line-height:1.5}button,input,select{font:inherit}button,a,select{touch-action:manipulation}button{color:var(--text);cursor:pointer}a{color:inherit}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--green);outline-offset:3px}
-.top{min-height:76px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:20px;padding:16px 40px}.brand{display:flex;align-items:center;gap:12px;font-weight:700;font-size:20px;letter-spacing:-.4px;text-decoration:none}.mark{height:34px;width:34px;border:2px solid var(--green);border-radius:9px;display:grid;place-items:center;color:var(--green);font-size:22px}.brandnote{font-size:12px;color:var(--dim);font-weight:400;margin-left:12px;border-left:1px solid var(--line);padding-left:18px}.topright{display:flex;align-items:center;gap:20px;color:var(--dim);font-size:12px}.topright form{margin:0}.logout{border:0;background:transparent;color:var(--dim);font-size:12px;padding:6px 0}
+.top{min-height:76px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:20px;padding:16px 40px}.brand{display:flex;align-items:center;gap:12px;font-weight:700;font-size:20px;letter-spacing:-.4px;text-decoration:none}.mark{height:34px;width:34px;border:2px solid var(--green);border-radius:9px;display:grid;place-items:center;color:var(--green);font-size:22px}.brandnote{font-size:12px;color:var(--dim);font-weight:400;margin-left:12px;border-left:1px solid var(--line);padding-left:18px}.topright{display:flex;align-items:center;gap:20px;color:var(--dim);font-size:12px}.topright form{margin:0}.workspace-language select{max-width:150px;background:var(--panel);color:var(--dim);border:1px solid var(--line);border-radius:6px;padding:4px 6px}@media(max-width:400px){.workspace-language select{max-width:92px}.top{gap:8px}}.logout{border:0;background:transparent;color:var(--dim);font-size:12px;padding:6px 0}
 .shell{max-width:1480px;margin:auto;padding:30px 40px 28px}.heading{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin-bottom:25px}.eyebrow{text-transform:uppercase;font-size:10px;letter-spacing:1.8px;color:var(--green);font-weight:700}h1{font-size:29px;letter-spacing:-.7px;margin:4px 0 5px;line-height:1.25}p{margin:0;color:var(--dim)}.primary,.secondary{display:inline-block;text-decoration:none;padding:9px 14px;border-radius:7px;border:1px solid var(--line);background:var(--raised);white-space:nowrap;font-size:12px}.primary{color:var(--green);border-color:#3c645d;background:#1c332f}
 .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:25px}.stat{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px}.statlabel{font-size:12px;color:var(--dim);display:flex;gap:7px;align-items:center}.statnumber{font-size:26px;line-height:1.2;font-weight:650;margin:9px 0 5px;letter-spacing:-.6px}.statnote{font-size:11px;color:var(--dim)}.statdenom{font-size:15px;color:var(--dim)}.dot{height:7px;width:7px;border-radius:50%;background:var(--green);display:inline-block}.dot.amber{background:var(--amber)}.dot.blue{background:var(--blue)}
 .work{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:20px}.panel{background:var(--panel);border:1px solid var(--line);border-radius:11px;overflow:hidden}.panelhead{padding:20px 20px 16px;display:flex;justify-content:space-between;align-items:center;gap:10px}h2{margin:0;font-size:16px;font-weight:650}.sub{font-size:12px;color:var(--dim);margin-top:3px}.counter{color:var(--dim);font-weight:400;margin-left:6px}.toolbar{margin:0 20px 16px;display:flex;gap:10px;flex-wrap:wrap}.search{min-width:120px;padding:9px 12px;border-radius:7px;border:1px solid var(--line);background:#111820;color:var(--text);flex:1;font-size:12px}.search::placeholder{color:var(--dim)}.filter{color:var(--text);background:var(--raised);border:1px solid var(--line);border-radius:7px;padding:7px 12px;font-size:12px}.tablewrap{overflow:auto}table{border-collapse:collapse;width:100%;text-align:left}th{font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--dim);font-weight:600;background:#131b23;padding:11px 15px;border-top:1px solid var(--line);border-bottom:1px solid var(--line);white-space:nowrap}td{padding:16px 15px;border-bottom:1px solid var(--line);font-size:12px;vertical-align:top}th:first-child,td:first-child{padding-left:20px}.file{font-weight:600;font-size:12px;min-width:170px;max-width:300px;overflow-wrap:anywhere}.filetype{font-size:10px;color:var(--dim);margin-top:5px}.fileicon{display:inline-grid;place-items:center;width:31px;height:31px;border:1px solid #3b5063;border-radius:4px;margin-right:9px;float:left;color:var(--blue);font-size:8px}.pill{display:inline-block;padding:3px 8px;border-radius:5px;font-size:10px;font-weight:600;background:#203a32;color:var(--green);border:1px solid #345549}.pill.amber{color:var(--amber);background:#393123;border-color:#665334}.pill.blue{background:#25374a;color:var(--blue);border-color:#3b5067}.pill.gray{background:#232c35;color:#aebbc7;border-color:#35424e}.small{font-size:10px;color:var(--dim);margin-top:5px;overflow-wrap:anywhere}.action{color:var(--blue);font-size:11px;text-decoration:none;white-space:nowrap}.action:hover{text-decoration:underline}.nowrap{white-space:nowrap}
@@ -131,14 +131,50 @@ fn entries<'a>(value: &'a Value, key: &str) -> &'a [Value] {
     value.get(key).and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default()
 }
 
+// Only known Workspace messages are annotated. File names, model properties
+// and other supplied values stay escaped and are never translated.
+fn message_key(text: &str) -> Option<&'static str> {
+    type Messages = std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>;
+    static CATALOG: std::sync::OnceLock<Messages> = std::sync::OnceLock::new();
+    CATALOG
+        .get_or_init(|| serde_json::from_str(include_str!("../../../assets/locales/pending/workspace/messages.json")).unwrap_or_default())
+        .get("de")?
+        .iter()
+        .find_map(|(key, value)| (value == text).then_some(key.as_str()))
+}
+
+fn marked(text: &str) -> String {
+    message_key(text).map_or_else(|| escape(text), |key| message(key, text, &[]))
+}
+
+fn message(key: &str, text: &str, args: &[(&str, &str)]) -> String {
+    let attrs = message_attrs(key, args);
+    format!("<span {attrs}>{}</span>", escape(text))
+}
+
+fn message_attrs(key: &str, args: &[(&str, &str)]) -> String {
+    let mut attrs = format!("data-ws-text=\"{key}\"");
+    if !args.is_empty() {
+        let json = serde_json::to_string(&args.iter().copied().collect::<std::collections::BTreeMap<_, _>>()).unwrap_or_default();
+        let _ = write!(attrs, " data-ws-args=\"{}\"", escape(&json));
+    }
+    attrs
+}
+
+fn count_message(key: &str, count: impl std::fmt::Display, text: &str) -> String {
+    message(key, text, &[("count", &count.to_string())])
+}
+
 fn start(title: &str, csrf: Option<&str>) -> String {
+    let title_key = message_key(title).unwrap_or_default();
+    let title = escape(title);
     let mut html = format!(
-        "<!doctype html><html lang=\"de\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>SolidCraft · {title}</title><style>{CSS}</style></head><body><header class=\"top\"><a class=\"brand\" href=\"/workspace\"><span class=\"mark\" aria-hidden=\"true\">◇</span>SolidCraft<span class=\"brandnote\">Dateien &amp; Sitzungen</span></a><div class=\"topright\"><span>Arbeitsbereich</span>"
+        "<!doctype html><html lang=\"de\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title data-ws-page=\"{title_key}\">SolidCraft · {title}</title><style>{CSS}</style></head><body><header class=\"top\"><a class=\"brand\" href=\"/workspace\"><span class=\"mark\" aria-hidden=\"true\">◇</span>SolidCraft<span class=\"brandnote\"><span data-ws-text=\"files_and_sessions\">Dateien &amp; Sitzungen</span></span></a><div class=\"topright\"><span><span data-ws-text=\"workspace_title\">Arbeitsbereich</span></span><label class=\"workspace-language\" hidden><span class=\"visuallyhidden\" data-ws-text=\"language\">Sprache</span><select id=\"workspace-language\"><option value=\"de\" lang=\"de\">Deutsch</option><option value=\"en-US\" lang=\"en-US\">English (US)</option><option value=\"en-GB\" lang=\"en-GB\">Easy British English</option></select></label>"
     );
     if let Some(csrf) = csrf {
         let _ = write!(
             html,
-            "<form method=\"post\" action=\"/workspace/logout\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><button class=\"logout\" type=\"submit\">Abmelden</button></form>",
+            "<form method=\"post\" action=\"/workspace/logout\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><button class=\"logout\" type=\"submit\"><span data-ws-text=\"sign_out\">Abmelden</span></button></form>",
             escape(csrf)
         );
     }
@@ -149,13 +185,13 @@ fn start(title: &str, csrf: Option<&str>) -> String {
 /// Login never reflects a submitted token, including when authentication fails.
 pub fn login(error: bool, csrf: &str) -> String {
     let mut html = start("Arbeitsbereich anmelden", None);
-    html.push_str("<section class=\"panel loginpanel\"><div class=\"eyebrow\">Dein CAD-Arbeitsbereich</div><h1>Dateien &amp; Sitzungen</h1><p>Melde dich an, um gespeicherte Dateien und die aktuellen MCP-Sitzungen anzusehen.</p>");
+    html.push_str("<section class=\"panel loginpanel\"><div class=\"eyebrow\"><span data-ws-text=\"cad_workspace\">Dein CAD-Arbeitsbereich</span></div><h1><span data-ws-text=\"files_and_sessions\">Dateien &amp; Sitzungen</span></h1><p><span data-ws-text=\"sign_in_intro\">Melde dich an, um gespeicherte Dateien und die aktuellen MCP-Sitzungen anzusehen.</span></p>");
     if error {
-        html.push_str("<div class=\"error\" role=\"alert\">Anmeldung nicht möglich. Prüfe deinen Token und versuche es erneut. Nach mehreren Versuchen bitte kurz warten.</div>");
+        html.push_str("<div class=\"error\" role=\"alert\"><span data-ws-text=\"sign_in_bad_token\">Anmeldung nicht möglich. Prüfe deinen Token und versuche es erneut. Nach mehreren Versuchen bitte kurz warten.</span></div>");
     }
     let _ = write!(
         html,
-        "<form class=\"loginform\" method=\"post\" action=\"/workspace/login\" autocomplete=\"off\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><label for=\"token\">MCP-Token</label><input id=\"token\" name=\"token\" type=\"password\" required minlength=\"32\" maxlength=\"512\" autocomplete=\"off\" spellcheck=\"false\" autocapitalize=\"none\"><label for=\"remember\">Angemeldet bleiben</label><select class=\"remember\" id=\"remember\" name=\"remember\"><option value=\"session\">Für diese Sitzung (1 Stunde)</option><option value=\"7d\">7 Tage</option><option value=\"30d\">30 Tage</option><option value=\"forever\">Dauerhaft auf diesem Gerät</option></select><p class=\"remembernote\">Nur auf deinem eigenen Gerät verwenden. Gespeichert wird eine geschützte Browser-Anmeldung.</p><button class=\"primary\" type=\"submit\">Arbeitsbereich öffnen</button></form><p class=\"loginhint\">Den Speicherort des Tokens findest du im Container-Log unter „token.location“. Verwende denselben Token wie für deinen MCP-Client.</p><p class=\"loginhint\">Die Anmeldung gilt für diese Übersicht. Die <a href=\"/\">Browser-CAD-App</a> bleibt unabhängig.</p></section></main></body></html>",
+        "<form class=\"loginform\" method=\"post\" action=\"/workspace/login\" autocomplete=\"off\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><label for=\"token\"><span data-ws-text=\"mcp_token\">MCP-Token</span></label><input id=\"token\" name=\"token\" type=\"password\" required minlength=\"32\" maxlength=\"512\" autocomplete=\"off\" spellcheck=\"false\" autocapitalize=\"none\"><label for=\"remember\"><span data-ws-text=\"stay_signed_in\">Angemeldet bleiben</span></label><select class=\"remember\" id=\"remember\" name=\"remember\"><option value=\"session\" data-ws-text=\"login_session\">Für diese Sitzung (1 Stunde)</option><option value=\"7d\" data-ws-text=\"login_7_days\">7 Tage</option><option value=\"30d\" data-ws-text=\"login_30_days\">30 Tage</option><option value=\"forever\" data-ws-text=\"login_forever\">Dauerhaft auf diesem Gerät</option></select><p class=\"remembernote\"><span data-ws-text=\"login_trusted_device\">Nur auf deinem eigenen Gerät verwenden. Gespeichert wird eine geschützte Browser-Anmeldung.</span></p><button class=\"primary\" type=\"submit\"><span data-ws-text=\"open_workspace\">Arbeitsbereich öffnen</span></button></form><p class=\"loginhint\"><span data-ws-text=\"login_token_location\">Den Speicherort des Tokens findest du im Container-Log unter „token.location“. Verwende denselben Token wie für deinen MCP-Client.</span></p><p class=\"loginhint\"><span data-ws-text=\"login_scope_prefix\">Die Anmeldung gilt für diese Übersicht. Die</span> <a href=\"/\"><span data-ws-text=\"browser_app\">Browser-CAD-App</span></a> <span data-ws-text=\"login_scope_suffix\">bleibt unabhängig.</span></p></section></main><script type=\"module\" src=\"/workspace/boot.js\"></script></body></html>",
         escape(csrf)
     );
     html
@@ -186,10 +222,11 @@ pub fn login_rejected(reason: &str) -> String {
         }
         _ => "Das Anmeldeformular konnte nicht verarbeitet werden. Lade die Anmeldung neu und versuche es erneut.",
     };
+    let explanation = marked(explanation);
     let mut html = start("Anmeldung nicht möglich", None);
     let _ = write!(
         html,
-        "<section class=\"panel loginpanel\"><h1>Anmeldung nicht möglich</h1><div class=\"error\" role=\"alert\">{explanation}</div><a class=\"primary\" href=\"/workspace/login\">Anmeldung neu laden</a><p class=\"loginhint\">Der Token wurde bei diesem Versuch noch nicht geprüft. Der Container-Log enthält den Ablehnungsgrund.</p></section></main></body></html>"
+        "<section class=\"panel loginpanel\"><h1><span data-ws-text=\"sign_in_failed\">Anmeldung nicht möglich</span></h1><div class=\"error\" role=\"alert\">{explanation}</div><a class=\"primary\" href=\"/workspace/login\"><span data-ws-text=\"reload_login\">Anmeldung neu laden</span></a><p class=\"loginhint\"><span data-ws-text=\"login_not_checked\">Der Token wurde bei diesem Versuch noch nicht geprüft. Der Container-Log enthält den Ablehnungsgrund.</span></p></section></main><script type=\"module\" src=\"/workspace/boot.js\"></script></body></html>"
     );
     html
 }
@@ -200,7 +237,8 @@ fn event_date(seconds: u64) -> String {
         .and_then(chrono::TimeDelta::try_seconds)
         .and_then(|duration| chrono::Utc::now().checked_sub_signed(duration))
         .map(|date| date.format("%d.%m.%Y, %H:%M UTC").to_string())
-        .unwrap_or_else(|| "Zeitpunkt unbekannt".into())
+        .map(|date| escape(&date))
+        .unwrap_or_else(|| marked("Zeitpunkt unbekannt"))
 }
 
 fn size(bytes: u64) -> String {
@@ -221,6 +259,7 @@ fn file_row(html: &mut String, file: &Value) {
         "export" => (ICON_EXPORT, "Exportdatei"),
         _ => (ICON_FILE, "Datei"),
     };
+    let label = marked(label);
     let mut preview = icon(source);
     let preview_class = if is_png(name) {
         let _ = write!(
@@ -241,20 +280,25 @@ fn file_row(html: &mut String, file: &Value) {
         escape(text(file, "format"))
     );
     if opened.is_empty() {
-        let status = if kind == "export" { "Exportdatei" } else { "Nicht geöffnet" };
-        let _ = write!(html, "<span class=\"pill gray\">{status}</span><div class=\"small\">Keine aktive Sitzung zugeordnet</div>");
+        let status = marked(if kind == "export" { "Exportdatei" } else { "Nicht geöffnet" });
+        let _ = write!(
+            html,
+            "<span class=\"pill gray\">{status}</span><div class=\"small\"><span data-ws-text=\"no_active_session\">Keine aktive Sitzung zugeordnet</span></div>"
+        );
     } else {
         let (class, label) = match file.get("dirty").and_then(Value::as_bool) {
             Some(true) => ("amber", "Ungespeicherte Änderungen"),
             Some(false) => ("", "Geöffnet · unverändert"),
             None => ("gray", "Änderungsstatus unbekannt"),
         };
-        let _ = write!(
-            html,
-            "<span class=\"pill {class}\">{label}</span><div class=\"small\">In {} Sitzung{} geöffnet</div><div class=\"small mono\">",
-            opened.len(),
-            if opened.len() == 1 { "" } else { "en" }
-        );
+        let label = marked(label);
+        let count = opened.len();
+        let in_sessions = if count == 1 {
+            count_message("file_opened_in_one", count, &format!("In {count} Sitzung geöffnet"))
+        } else {
+            count_message("file_opened_in_many", count, &format!("In {count} Sitzungen geöffnet"))
+        };
+        let _ = write!(html, "<span class=\"pill {class}\">{label}</span><div class=\"small\">{in_sessions}</div><div class=\"small mono\">");
         for (index, display_id) in opened.iter().take(32).enumerate() {
             if index > 0 {
                 html.push_str(" · ");
@@ -265,17 +309,17 @@ fn file_row(html: &mut String, file: &Value) {
     }
     let modified = text(file, "modified_at");
     let date = chrono::DateTime::parse_from_rfc3339(modified)
-        .map(|date| date.with_timezone(&chrono::Utc).format("%d.%m.%Y, %H:%M UTC").to_string())
-        .unwrap_or_else(|_| "Unbekannt".into());
+        .map(|date| escape(&date.with_timezone(&chrono::Utc).format("%d.%m.%Y, %H:%M UTC").to_string()))
+        .unwrap_or_else(|_| marked("Unbekannt"));
     let _ = write!(
         html,
-        "</td><td class=\"nowrap\"><time datetime=\"{}\">{}</time></td><td class=\"nowrap\">{}</td><td><div class=\"actions\"><a class=\"action\" href=\"{details}\" data-file-details=\"{details}\">Details</a>",
+        "</td><td class=\"nowrap\"><time datetime=\"{}\">{}</time></td><td class=\"nowrap\">{}</td><td><div class=\"actions\"><a class=\"action\" href=\"{details}\" data-file-details=\"{details}\"><span data-ws-text=\"details\">Details</span></a>",
         escape(modified),
-        escape(&date),
+        date,
         size(number(file, "size_bytes"))
     );
     edit_link(html, file, "action", "Bearbeiten ↗");
-    let _ = write!(html, "<a class=\"action\" href=\"{}\" download>Download ↓</a>", download_url(name));
+    let _ = write!(html, "<a class=\"action\" href=\"{}\" download><span data-ws-text=\"download\">Download ↓</span></a>", download_url(name));
     delete_link(html, name);
     html.push_str("</div>");
 }
@@ -291,9 +335,10 @@ fn preview_url(name: &str) -> String {
 fn edit_link(html: &mut String, file: &Value, class: &str, label: &str) {
     if text(file, "kind") == "model" && crate::workspace_files::native_model(text(file, "name")) {
         let url = download_url(text(file, "name")).replacen("/workspace/files/", "/workspace/open/", 1);
+        let label = marked(label);
         let _ = write!(
             html,
-            "<a class=\"{class}\" href=\"{url}\" target=\"_blank\" rel=\"noopener\" title=\"Gespeicherte Kopie in einem neuen Browser-CAD-Tab öffnen\">{label}</a>"
+            "<a class=\"{class}\" href=\"{url}\" target=\"_blank\" rel=\"noopener\" title=\"Gespeicherte Kopie in einem neuen Browser-CAD-Tab öffnen\" data-ws-title=\"edit_copy_title\">{label}</a>"
         );
     }
 }
@@ -309,12 +354,13 @@ fn session_row(html: &mut String, session: &Value) {
     } else {
         ("gray", "Wartet")
     };
-    let file_label = current.unwrap_or(if has_model { "Ohne Dateinamen" } else { "Noch kein Modell" });
+    let status = marked(status);
+    let file_label = current.map_or_else(|| marked(if has_model { "Ohne Dateinamen" } else { "Noch kein Modell" }), escape);
     let _ = write!(
         html,
-        "<section class=\"session\"><div class=\"sessiontitle\"><span class=\"sessionname\">Sitzung <span class=\"mono\">{}</span></span><span class=\"pill {class}\">{status}</span></div><div class=\"sessionfile\">{}</div><div class=\"sessiondetail\">",
+        "<section class=\"session\"><div class=\"sessiontitle\"><span class=\"sessionname\"><span data-ws-text=\"session\">Sitzung</span> <span class=\"mono\">{}</span></span><span class=\"pill {class}\">{status}</span></div><div class=\"sessionfile\">{}</div><div class=\"sessiondetail\">",
         escape(text(session, "display_id")),
-        escape(file_label)
+        file_label
     );
     let change_label = match session.get("dirty").and_then(Value::as_bool) {
         None => "Änderungsstatus unbekannt",
@@ -324,29 +370,29 @@ fn session_row(html: &mut String, session: &Value) {
         Some(false) if current.is_some() => "Unveränderter geöffneter Stand",
         Some(false) => "Noch nie gespeichert",
     };
-    html.push_str(change_label);
+    html.push_str(&marked(change_label));
     if let Some(project) = session.get("project").and_then(Value::as_str).filter(|project| !project.is_empty()) {
-        let _ = write!(html, "<br>Projekt: {}", escape(project));
+        let _ = write!(html, "<br>{} {}", marked("Projekt:"), escape(project));
     } else {
-        html.push_str("<br>Projekt noch nicht gewählt");
+        html.push_str("<br><span data-ws-text=\"project_not_selected\">Projekt noch nicht gewählt</span>");
     }
     if let Some(seconds) = session.get("last_model_change_seconds").and_then(Value::as_u64) {
-        let _ = write!(html, "<br>Letzte Modelländerung: {}", event_date(seconds));
+        let _ = write!(html, "<br>{} {}", marked("Letzte Modelländerung:"), event_date(seconds));
     }
-    let _ = write!(html, "<br>Letzte Anfrage: {}", event_date(number(session, "last_request_seconds")));
+    let _ = write!(html, "<br>{} {}", marked("Letzte Anfrage:"), event_date(number(session, "last_request_seconds")));
     if busy {
-        html.push_str("<br>Eine Anfrage wird gerade ausgeführt");
+        html.push_str("<br><span data-ws-text=\"request_running\">Eine Anfrage wird gerade ausgeführt</span>");
     } else if current.is_some() {
-        html.push_str("<br>Eigenes Modell · keine Dateisperre");
+        html.push_str("<br><span data-ws-text=\"own_model\">Eigenes Modell · keine Dateisperre</span>");
     } else if has_model {
-        html.push_str("<br>Modell ist nur in dieser Sitzung vorhanden");
+        html.push_str("<br><span data-ws-text=\"only_in_session\">Modell ist nur in dieser Sitzung vorhanden</span>");
     }
     html.push_str("</div>");
     let handle = text(session, "observer_handle");
     if handle.len() == 36 && uuid::Uuid::parse_str(handle).is_ok() {
         let _ = write!(
             html,
-            "<button class=\"secondary observebutton\" type=\"button\" data-observe=\"{}\" aria-haspopup=\"dialog\" aria-controls=\"observer-dialog\">Live-Vorschau ansehen</button>",
+            "<button class=\"secondary observebutton\" type=\"button\" data-observe=\"{}\" aria-haspopup=\"dialog\" aria-controls=\"observer-dialog\"><span data-ws-text=\"watch_live\">Live-Vorschau ansehen</span></button>",
             escape(handle)
         );
     }
@@ -382,15 +428,20 @@ fn project_files(html: &mut String, files: &[Value], directories: &[Value]) {
             "ungrouped" => "Ohne eindeutige Projektzuordnung",
             _ => "Einzeldatei",
         };
+        let name_label = if text(project, "basis") == "ungrouped" { marked(name) } else { escape(name) };
+        let basis_label = marked(basis);
+        let count = files.len();
+        let files_label = if count == 1 {
+            count_message("one_file", count, &format!("{count} Datei"))
+        } else {
+            count_message("many_files", count, &format!("{count} Dateien"))
+        };
         let _ = write!(
             html,
-            "<details class=\"project\" data-project=\"{}\" data-upload-project=\"{}\"><summary>{}<div><div class=\"projectname\">{}</div><div class=\"projectmeta\">{basis}</div></div><span class=\"projectcount\">{} Datei{}</span></summary>",
+            "<details class=\"project\" data-project=\"{}\" data-upload-project=\"{}\"><summary>{}<div><div class=\"projectname\">{name_label}</div><div class=\"projectmeta\">{basis_label}</div></div><span class=\"projectcount\">{files_label}</span></summary>",
             escape(&id),
             if text(project, "basis") == "directory" { escape(name) } else { String::new() },
-            icon(ICON_FOLDER),
-            escape(name),
-            files.len(),
-            if files.len() == 1 { "" } else { "en" }
+            icon(ICON_FOLDER)
         );
         if text(project, "basis") == "directory" {
             // Folder actions use authoritative filesystem paths, never a virtual stem.
@@ -398,7 +449,13 @@ fn project_files(html: &mut String, files: &[Value], directories: &[Value]) {
             for directory in
                 std::iter::once(name).chain(directories.iter().filter_map(Value::as_str).filter(|directory| directory.starts_with(&prefix)))
             {
-                let _ = write!(html, "<div class=\"folderactions\" role=\"group\" aria-label=\"Ordneraktionen für {}\">", escape(directory));
+                let label = escape(directory);
+                let args = serde_json::json!({ "folder": directory }).to_string();
+                let args = escape(&args);
+                let _ = write!(
+                    html,
+                    "<div class=\"folderactions\" role=\"group\" aria-label=\"Ordneraktionen für {label}\" data-ws-aria-label=\"folder_actions\" data-ws-args=\"{args}\">"
+                );
                 if let Some(relative) = directory.strip_prefix(&prefix) {
                     let _ = write!(html, "<span>{}</span>", escape(relative));
                 }
@@ -406,7 +463,7 @@ fn project_files(html: &mut String, files: &[Value], directories: &[Value]) {
                 html.push_str("</div>");
             }
         }
-        html.push_str("<div class=\"tablewrap\"><table><thead><tr><th scope=\"col\">Name</th><th scope=\"col\">Bearbeitung</th><th scope=\"col\">Zuletzt gespeichert</th><th scope=\"col\">Größe</th><th scope=\"col\">Aktionen</th></tr></thead><tbody>");
+        html.push_str("<div class=\"tablewrap\"><table><thead><tr><th scope=\"col\"><span data-ws-text=\"name\">Name</span></th><th scope=\"col\"><span data-ws-text=\"edit_status\">Bearbeitung</span></th><th scope=\"col\"><span data-ws-text=\"last_saved\">Zuletzt gespeichert</span></th><th scope=\"col\"><span data-ws-text=\"size\">Größe</span></th><th scope=\"col\"><span data-ws-text=\"actions\">Aktionen</span></th></tr></thead><tbody>");
         for file in files {
             file_row(html, file);
         }
@@ -417,29 +474,30 @@ fn project_files(html: &mut String, files: &[Value], directories: &[Value]) {
 /// The query form and dialog stay outside the live region so incoming updates
 /// do not interrupt typing, close a properties popup or reset keyboard focus.
 pub fn page(snapshot: &Value, query: &str, kind: &str) -> String {
-    let mut html = start("Dateien &amp; Sitzungen", Some(text(snapshot, "csrf")));
-    html.push_str("<div class=\"heading\"><div><div class=\"eyebrow\">Dein CAD-Arbeitsbereich</div><h1>Was liegt vor. Was entsteht gerade.</h1><p>Gespeicherte Modelle, Exporte und die aktuellen MCP-Sitzungen an einem Ort.</p></div><a class=\"primary\" href=\"/\">Browser-CAD öffnen ↗</a></div><div id=\"workspace-status\" class=\"livebar\" data-state=\"connecting\" role=\"status\" aria-live=\"polite\"><span class=\"dot\" aria-hidden=\"true\"></span><span id=\"workspace-status-text\">Live-Verbindung wird hergestellt …</span><a href=\"\" aria-label=\"Arbeitsbereich mit denselben Filtern aktualisieren\">Jetzt aktualisieren ↻</a></div>");
+    let mut html = start("Dateien & Sitzungen", Some(text(snapshot, "csrf")));
+    html.push_str("<div class=\"heading\"><div><div class=\"eyebrow\"><span data-ws-text=\"cad_workspace\">Dein CAD-Arbeitsbereich</span></div><h1><span data-ws-text=\"headline\">Was liegt vor. Was entsteht gerade.</span></h1><p><span data-ws-text=\"dashboard_intro\">Gespeicherte Modelle, Exporte und die aktuellen MCP-Sitzungen an einem Ort.</span></p></div><a id=\"open-browser-cad\" class=\"primary\" href=\"/\" target=\"_blank\" rel=\"noopener\"><span data-ws-text=\"open_cad\">Browser-CAD öffnen ↗</span></a></div><div id=\"workspace-status\" class=\"livebar\" data-state=\"connecting\" role=\"status\" aria-live=\"polite\"><span class=\"dot\" aria-hidden=\"true\"></span><span id=\"workspace-status-text\"><span data-ws-text=\"live_connecting\">Live-Verbindung wird hergestellt …</span></span><a href=\"\" aria-label=\"Arbeitsbereich mit denselben Filtern aktualisieren\" data-ws-aria-label=\"refresh_description\"><span data-ws-text=\"refresh\">Jetzt aktualisieren ↻</span></a></div>");
     html.push_str(&upload_controls(snapshot));
-    html.push_str("<section class=\"filters\" aria-label=\"Dateien filtern\"><form class=\"toolbar\" method=\"get\" action=\"/workspace\">");
+    html.push_str("<section class=\"filters\" aria-label=\"Dateien filtern\" data-ws-aria-label=\"filter_files\"><form class=\"toolbar\" method=\"get\" action=\"/workspace\">");
     let _ = write!(
         html,
-        "<input class=\"search\" type=\"search\" name=\"q\" value=\"{}\" placeholder=\"Dateiname suchen …\" aria-label=\"Dateiname suchen\" maxlength=\"256\"><select class=\"filter\" name=\"kind\" aria-label=\"Dateityp\">",
+        "<input class=\"search\" type=\"search\" name=\"q\" value=\"{}\" placeholder=\"Dateiname suchen …\" data-ws-placeholder=\"search_placeholder\" aria-label=\"Dateiname suchen\" data-ws-aria-label=\"search_files\" maxlength=\"256\"><select class=\"filter\" name=\"kind\" aria-label=\"Dateityp\" data-ws-aria-label=\"file_type\">",
         escape(query)
     );
     for (value, label) in [("all", "Alle Dateitypen"), ("model", "SolidCraft-Modelle"), ("export", "Exporte"), ("other", "Weitere Dateien")] {
         let selected = kind == value || value == "all" && !matches!(kind, "model" | "export" | "other");
-        let _ = write!(html, "<option value=\"{value}\"{}>{label}</option>", if selected { " selected" } else { "" });
+        let key = message_key(label).unwrap_or_default();
+        let _ = write!(html, "<option value=\"{value}\" data-ws-text=\"{key}\"{}>{label}</option>", if selected { " selected" } else { "" });
     }
-    html.push_str("</select><button class=\"secondary\" type=\"submit\">Anzeigen</button></form><noscript><p class=\"note\">Aktualisiere diese Seite, um neue Dateien und Sitzungsänderungen zu sehen. Dateidetails lassen sich als eigene Seite öffnen.</p></noscript></section><div id=\"workspace-live\">");
+    html.push_str("</select><button class=\"secondary\" type=\"submit\"><span data-ws-text=\"apply_filters\">Anzeigen</span></button></form><noscript><p class=\"note\"><span data-ws-text=\"manual_updates\">Aktualisiere diese Seite, um neue Dateien und Sitzungsänderungen zu sehen. Dateidetails lassen sich als eigene Seite öffnen.</span></p></noscript></section><div id=\"workspace-live\">");
     html.push_str(&fragment(snapshot, query, kind));
-    html.push_str("</div><dialog id=\"file-dialog\" class=\"filedialog\" aria-labelledby=\"file-dialog-title\"><div class=\"dialoghead\"><h2 id=\"file-dialog-title\">Dateidetails</h2><button id=\"file-dialog-close\" class=\"dialogclose\" type=\"button\" aria-label=\"Dialog schließen\">×</button></div><div id=\"file-dialog-content\"></div></dialog>");
-    html.push_str("<dialog id=\"observer-dialog\" class=\"filedialog observerdialog\" aria-labelledby=\"observer-title\" aria-describedby=\"observer-note\"><div class=\"dialoghead\"><h2 id=\"observer-title\">Live-Vorschau der MCP-Sitzung</h2><button id=\"observer-close\" class=\"dialogclose\" type=\"button\" autofocus aria-label=\"Live-Vorschau schließen\">×</button></div><div class=\"observerbody\"><div id=\"observer-status\" class=\"observerstatus\" role=\"status\" aria-live=\"polite\"><span class=\"dot\" aria-hidden=\"true\"></span><span id=\"observer-status-text\">Vorschau wird verbunden …</span></div><figure class=\"observerstage\"><img id=\"observer-image\" alt=\"Aktueller Modellstand der beobachteten MCP-Sitzung\" decoding=\"async\" width=\"800\" height=\"500\" hidden><img id=\"observer-next\" alt=\"Aktueller Modellstand der beobachteten MCP-Sitzung\" decoding=\"async\" width=\"800\" height=\"500\" hidden><figcaption id=\"observer-placeholder\" class=\"observerplaceholder\">Das erste Modellbild wird vorbereitet.</figcaption></figure><div id=\"observer-meta\" class=\"observermeta\"></div><div id=\"observer-warning\" class=\"observernote\" role=\"note\"></div><p id=\"observer-note\" class=\"observernote\">Nur ansehen · Echte Bilder des Sitzungsmodells, auch vor dem Speichern. Neue Bilder erscheinen nach abgeschlossenen Befehlen oder Stapeln; während einer Berechnung bleibt der vorherige Stand sichtbar. Die Ansicht verändert weder Modell noch Kamera der KI.</p></div></dialog></main><script type=\"module\" src=\"/workspace/boot.js\"></script></body></html>");
+    html.push_str("</div><dialog id=\"file-dialog\" class=\"filedialog\" aria-labelledby=\"file-dialog-title\"><div class=\"dialoghead\"><h2 id=\"file-dialog-title\"><span data-ws-text=\"file_details\">Dateidetails</span></h2><button id=\"file-dialog-close\" class=\"dialogclose\" type=\"button\" aria-label=\"Dialog schließen\" data-ws-aria-label=\"close_dialog\">×</button></div><div id=\"file-dialog-content\"></div></dialog>");
+    html.push_str("<dialog id=\"observer-dialog\" class=\"filedialog observerdialog\" aria-labelledby=\"observer-title\" aria-describedby=\"observer-note\"><div class=\"dialoghead\"><h2 id=\"observer-title\"><span data-ws-text=\"live_preview_title\">Live-Vorschau der MCP-Sitzung</span></h2><button id=\"observer-close\" class=\"dialogclose\" type=\"button\" autofocus aria-label=\"Live-Vorschau schließen\" data-ws-aria-label=\"preview_close\">×</button></div><div class=\"observerbody\"><div id=\"observer-status\" class=\"observerstatus\" role=\"status\" aria-live=\"polite\"><span class=\"dot\" aria-hidden=\"true\"></span><span id=\"observer-status-text\"><span data-ws-text=\"preview_connecting\">Vorschau wird verbunden …</span></span></div><figure class=\"observerstage\"><img id=\"observer-image\" alt=\"Aktueller Modellstand der beobachteten MCP-Sitzung\" data-ws-alt=\"preview_alt\" decoding=\"async\" width=\"800\" height=\"500\" hidden><img id=\"observer-next\" alt=\"Aktueller Modellstand der beobachteten MCP-Sitzung\" data-ws-alt=\"preview_alt\" decoding=\"async\" width=\"800\" height=\"500\" hidden><figcaption id=\"observer-placeholder\" class=\"observerplaceholder\"><span data-ws-text=\"preview_first_image\">Das erste Modellbild wird vorbereitet.</span></figcaption></figure><div id=\"observer-meta\" class=\"observermeta\"></div><div id=\"observer-warning\" class=\"observernote\" role=\"note\"></div><p id=\"observer-note\" class=\"observernote\"><span data-ws-text=\"preview_read_only\">Nur ansehen · Echte Bilder des Sitzungsmodells, auch vor dem Speichern. Neue Bilder erscheinen nach abgeschlossenen Befehlen oder Stapeln; während einer Berechnung bleibt der vorherige Stand sichtbar. Die Ansicht verändert weder Modell noch Kamera der KI.</span></p></div></dialog></main><script type=\"module\" src=\"/workspace/boot.js\"></script></body></html>");
     html
 }
 
 fn detail_value(html: &mut String, label: &str, value: &str) {
     if !value.is_empty() {
-        let _ = write!(html, "<dt>{}</dt><dd>{}</dd>", escape(label), escape(value));
+        let _ = write!(html, "<dt>{}</dt><dd>{}</dd>", marked(label), escape(value));
     }
 }
 
@@ -454,14 +512,14 @@ fn date(value: &str) -> String {
 pub fn details(file: &Value) -> String {
     let mut html = start("Dateidetails", None);
     html.push_str(
-        "<div class=\"panel detailpanel\"><section id=\"file-details\" class=\"detailsbody\"><div class=\"eyebrow\">Gespeicherte Datei</div>",
+        "<div class=\"panel detailpanel\"><section id=\"file-details\" class=\"detailsbody\"><div class=\"eyebrow\"><span data-ws-text=\"saved_file\">Gespeicherte Datei</span></div>",
     );
     let name = text(file, "name");
     let _ = write!(html, "<h1>{}</h1><p class=\"detailspath\">{}</p>", escape(name.rsplit('/').next().unwrap_or(name)), escape(name));
     if is_png(name) {
         let _ = write!(
             html,
-            "<figure class=\"detailpreview\"><img src=\"{}\" loading=\"lazy\" decoding=\"async\" alt=\"Gespeicherte PNG-Datei\" data-file-preview><figcaption>Gespeicherte Bildvorschau</figcaption></figure>",
+            "<figure class=\"detailpreview\"><img src=\"{}\" loading=\"lazy\" decoding=\"async\" alt=\"Gespeicherte PNG-Datei\" data-ws-alt=\"saved_png\" data-file-preview><figcaption><span data-ws-text=\"saved_preview\">Gespeicherte Bildvorschau</span></figcaption></figure>",
             preview_url(name)
         );
     }
@@ -484,13 +542,13 @@ pub fn details(file: &Value) -> String {
     }
     html.push_str("</dl>");
     if file.get("project").is_some() {
-        html.push_str("<p class=\"detailnote\">Die Projektgruppe wird aus dem Speicherpfad oder Dateinamen ermittelt. Sie ist keine Modelleigenschaft und verändert die Datei nicht.</p>");
+        html.push_str("<p class=\"detailnote\"><span data-ws-text=\"project_group_note\">Die Projektgruppe wird aus dem Speicherpfad oder Dateinamen ermittelt. Sie ist keine Modelleigenschaft und verändert die Datei nicht.</span></p>");
     }
-    html.push_str("<h2 class=\"detailheading\">Modelleigenschaften</h2>");
+    html.push_str("<h2 class=\"detailheading\"><span data-ws-text=\"model_properties\">Modelleigenschaften</span></h2>");
     let metadata = file.get("metadata").unwrap_or(&Value::Null);
     match text(metadata, "status") {
         "available" => {
-            html.push_str("<p class=\"detailnote\">Eigenschaften aus dem gespeicherten Stand. Änderungen in aktiven Sitzungen erscheinen hier nach dem Speichern.</p><dl class=\"detailgrid\">");
+            html.push_str("<p class=\"detailnote\"><span data-ws-text=\"model_properties_note\">Eigenschaften aus dem gespeicherten Stand. Änderungen in aktiven Sitzungen erscheinen hier nach dem Speichern.</span></p><dl class=\"detailgrid\">");
             for (key, label) in [("title", "Titel"), ("project", "Projekt"), ("part_number", "Teilenummer"), ("revision", "Revision"), ("author", "Autor"), ("organization", "Organisation"), ("description", "Beschreibung"), ("license", "Lizenz"), ("format", "Designformat"), ("units", "Einheit")] {
                 detail_value(&mut html, label, text(metadata, key));
             }
@@ -501,14 +559,14 @@ pub fn details(file: &Value) -> String {
             }
             html.push_str("</dl>");
         }
-        "not_applicable" => html.push_str("<p class=\"detailnote\">Für dieses Dateiformat sind keine SolidCraft-Modelleigenschaften verfügbar.</p>"),
-        _ => html.push_str("<p class=\"detailnote\">Modelleigenschaften konnten für diesen gespeicherten Stand nicht gelesen werden. Die Datei bleibt zum Herunterladen verfügbar.</p>"),
+        "not_applicable" => html.push_str("<p class=\"detailnote\"><span data-ws-text=\"properties_not_applicable\">Für dieses Dateiformat sind keine SolidCraft-Modelleigenschaften verfügbar.</span></p>"),
+        _ => html.push_str("<p class=\"detailnote\"><span data-ws-text=\"properties_unavailable\">Modelleigenschaften konnten für diesen gespeicherten Stand nicht gelesen werden. Die Datei bleibt zum Herunterladen verfügbar.</span></p>"),
     }
     html.push_str("<div class=\"actions\">");
     edit_link(&mut html, file, "primary", "In Browser-CAD bearbeiten ↗");
     let _ = write!(
         html,
-        "<a class=\"secondary\" href=\"{}\" download>Datei herunterladen ↓</a><a class=\"secondary detailfallback\" href=\"/workspace\">Zurück zum Arbeitsbereich</a></div></section></div></main></body></html>",
+        "<a class=\"secondary\" href=\"{}\" download><span data-ws-text=\"download_file\">Datei herunterladen ↓</span></a><a class=\"secondary detailfallback\" href=\"/workspace\"><span data-ws-text=\"back_to_workspace\">Zurück zum Arbeitsbereich</span></a></div></section></div></main><script type=\"module\" src=\"/workspace/boot.js\"></script></body></html>",
         download_url(name)
     );
     html
@@ -530,19 +588,22 @@ pub fn fragment(snapshot: &Value, query: &str, kind: &str) -> String {
         .count();
     let shared = files.iter().filter(|file| entries(file, "opened_by").len() > 1).count();
     let filtered = !query.is_empty() || !kind.is_empty() && kind != "all";
+    let files_caption = marked(if filtered { "Angezeigte Dateien" } else { "Gespeicherte Dateien" });
+    let model_count = count_message("count_models", models, &format!("{models} Modelle"));
+    let export_count = count_message("count_exports", exports, &format!("{exports} Exporte"));
+    let other_files = if files.len() > models + exports { format!(" · {}", marked("Weitere Dateien")) } else { String::new() };
+    let busy_count = count_message("count_busy", busy, &format!("{busy} beschäftigt"));
+    let ready = sessions.len().saturating_sub(busy);
+    let ready_count = count_message("count_ready", ready, &format!("{ready} bereit"));
     let mut html = String::new();
     let _ = write!(
         html,
-        "<section class=\"cards\" aria-label=\"Übersicht\"><div class=\"stat\"><div class=\"statlabel\">{}</div><div class=\"statnumber\">{}</div><div class=\"statnote\">{models} Modelle · {exports} Exporte{}</div></div><div class=\"stat\"><div class=\"statlabel\"><span class=\"dot amber\" aria-hidden=\"true\"></span>Dateien in Bearbeitung</div><div class=\"statnumber\">{dirty_files}</div><div class=\"statnote\">{} mit bestätigten Änderungen</div></div><div class=\"stat\"><div class=\"statlabel\"><span class=\"dot\" aria-hidden=\"true\"></span>MCP-Sitzungen</div><div class=\"statnumber\">{used} <span class=\"statdenom\">/ {total}</span></div><div class=\"statnote\">{busy} beschäftigt · {} bereit</div></div><div class=\"stat\"><div class=\"statlabel\"><span class=\"dot blue\" aria-hidden=\"true\"></span>Neue Entwürfe</div><div class=\"statnumber\">{unsaved}</div><div class=\"statnote\">In Sitzungen · noch nie gespeichert</div></div></section>",
-        if filtered { "Angezeigte Dateien" } else { "Gespeicherte Dateien" },
-        files.len(),
-        if files.len() > models + exports { " · weitere Dateien" } else { "" },
-        if filtered { "Angezeigte Dateien" } else { "Gespeicherte Dateien" },
-        sessions.len().saturating_sub(busy)
+        "<section class=\"cards\" aria-label=\"Übersicht\" data-ws-aria-label=\"overview\"><div class=\"stat\"><div class=\"statlabel\">{files_caption}</div><div class=\"statnumber\">{}</div><div class=\"statnote\">{model_count} · {export_count}{other_files}</div></div><div class=\"stat\"><div class=\"statlabel\"><span class=\"dot amber\" aria-hidden=\"true\"></span><span data-ws-text=\"files_being_edited\">Dateien in Bearbeitung</span></div><div class=\"statnumber\">{dirty_files}</div><div class=\"statnote\">{files_caption} <span data-ws-text=\"confirmed_changes\">mit bestätigten Änderungen</span></div></div><div class=\"stat\"><div class=\"statlabel\"><span class=\"dot\" aria-hidden=\"true\"></span><span data-ws-text=\"mcp_sessions\">MCP-Sitzungen</span></div><div class=\"statnumber\">{used} <span class=\"statdenom\">/ {total}</span></div><div class=\"statnote\">{busy_count} · {ready_count}</div></div><div class=\"stat\"><div class=\"statlabel\"><span class=\"dot blue\" aria-hidden=\"true\"></span><span data-ws-text=\"new_drafts\">Neue Entwürfe</span></div><div class=\"statnumber\">{unsaved}</div><div class=\"statnote\"><span data-ws-text=\"drafts_note\">In Sitzungen · noch nie gespeichert</span></div></div></section>",
+        files.len()
     );
     let _ = write!(
         html,
-        "<div class=\"work\"><section class=\"panel file-explorer\" aria-labelledby=\"files-heading\"><div class=\"panelhead\"><div><h2 id=\"files-heading\">Projekte &amp; Dateien <span class=\"counter\">{}</span></h2><div class=\"sub\">Im gemeinsamen Serverspeicher</div></div></div><p class=\"filesintro\">Projektordner bündeln ihre Dateien und Unterordner. Dateien im Hauptordner werden nach passenden Modell-/Exportnamen virtuell gruppiert. ZIP-Downloads lassen Sicherungs-, temporäre und versteckte Dateien aus; Suchfilter schränken das Archiv nicht ein.</p>",
+        "<div class=\"work\"><section class=\"panel file-explorer\" aria-labelledby=\"files-heading\"><div class=\"panelhead\"><div><h2 id=\"files-heading\"><span data-ws-text=\"projects_and_files\">Projekte &amp; Dateien</span> <span class=\"counter\">{}</span></h2><div class=\"sub\"><span data-ws-text=\"shared_storage\">Im gemeinsamen Serverspeicher</span></div></div></div><p class=\"filesintro\"><span data-ws-text=\"file_grouping_and_zip\">Projektordner bündeln ihre Dateien und Unterordner. Dateien im Hauptordner werden nach passenden Modell-/Exportnamen virtuell gruppiert. ZIP-Downloads lassen Sicherungs-, temporäre und versteckte Dateien aus; Suchfilter schränken das Archiv nicht ein.</span></p>",
         files.len()
     );
     let directories = entries(snapshot, "directories")
@@ -559,25 +620,31 @@ pub fn fragment(snapshot: &Value, query: &str, kind: &str) -> String {
     project_files(&mut html, files, &directories);
     if files.is_empty() {
         html.push_str(if filtered {
-            "<div class=\"empty\"><strong>Keine passenden Dateien</strong>Ändere den Suchbegriff oder den Dateityp. <a href=\"/workspace\">Alle Dateien anzeigen</a></div>"
+            "<div class=\"empty\"><strong><span data-ws-text=\"no_matching_files\">Keine passenden Dateien</span></strong><span data-ws-text=\"change_search\">Ändere den Suchbegriff oder den Dateityp.</span> <a href=\"/workspace\"><span data-ws-text=\"show_all_files\">Alle Dateien anzeigen</span></a></div>"
         } else {
-            "<div class=\"empty\"><strong>Noch keine gespeicherten Dateien</strong>Speichert ein MCP-Client ein Modell oder einen Export im gemeinsamen Serverspeicher, erscheint die Datei hier automatisch.</div>"
+            "<div class=\"empty\"><strong><span data-ws-text=\"no_saved_files\">Noch keine gespeicherten Dateien</span></strong><span data-ws-text=\"saved_files_appear\">Speichert ein MCP-Client ein Modell oder einen Export im gemeinsamen Serverspeicher, erscheint die Datei hier automatisch.</span></div>"
         });
     }
     if flag(snapshot, "truncated") || files.len() > 2000 {
-        html.push_str("<div class=\"note\"><strong>Die Dateiliste ist begrenzt.</strong> Es werden nicht alle gespeicherten Dateien angezeigt. Die angezeigten Zähler beziehen sich auf diesen Ausschnitt.</div>");
+        html.push_str("<div class=\"note\"><strong><span data-ws-text=\"file_list_limited\">Die Dateiliste ist begrenzt.</span></strong> <span data-ws-text=\"file_list_limited_note\">Es werden nicht alle gespeicherten Dateien angezeigt. Die angezeigten Zähler beziehen sich auf diesen Ausschnitt.</span></div>");
     }
     if shared > 0 {
+        let shared_notice = if shared == 1 {
+            count_message("shared_one", shared, &format!("{shared} Datei ist in mehreren Sitzungen geöffnet."))
+        } else {
+            count_message("shared_many", shared, &format!("{shared} Dateien sind in mehreren Sitzungen geöffnet."))
+        };
         let _ = write!(
             html,
-            "<div class=\"note\"><strong>{shared} Datei{} in mehreren Sitzungen geöffnet.</strong> Jede Sitzung hat ihr eigenes Modell im Arbeitsspeicher. „Geöffnet“ bedeutet keine Dateisperre. Prüfe beim Speichern mögliche Konflikte mit anderen Sitzungen.</div>",
-            if shared == 1 { " ist" } else { "en sind" }
+            "<div class=\"note\"><strong>{shared_notice}</strong> <span data-ws-text=\"open_is_not_locked\">Jede Sitzung hat ihr eigenes Modell im Arbeitsspeicher. „Geöffnet“ bedeutet keine Dateisperre. Prüfe beim Speichern mögliche Konflikte mit anderen Sitzungen.</span></div>"
         );
     }
+    let free = total.saturating_sub(used);
+    let free_slots = count_message("free_slots", free, &format!("Freie Sitzungsplätze: {free}"));
+    let slot_args = escape(&serde_json::json!({"used":used.to_string(),"total":total.to_string()}).to_string());
     let _ = write!(
         html,
-        "</section><aside class=\"panel\"><div class=\"panelhead\"><div><h2>MCP-Sitzungen <span class=\"counter\">{used} / {total}</span></h2><div class=\"sub\">Freie Sitzungsplätze: {}</div></div></div><div class=\"capacity\" role=\"img\" aria-label=\"{used} von {total} Sitzungsplätzen belegt\">",
-        total.saturating_sub(used)
+        "</section><aside class=\"panel\"><div class=\"panelhead\"><div><h2><span data-ws-text=\"mcp_sessions\">MCP-Sitzungen</span> <span class=\"counter\">{used} / {total}</span></h2><div class=\"sub\">{free_slots}</div></div></div><div class=\"capacity\" role=\"img\" aria-label=\"{used} von {total} Sitzungsplätzen belegt\" data-ws-aria-label=\"occupied_slots\" data-ws-args=\"{slot_args}\">"
     );
     for index in 0..total.min(32) {
         let class = if index < (busy as u64).min(used) {
@@ -592,47 +659,70 @@ pub fn fragment(snapshot: &Value, query: &str, kind: &str) -> String {
     html.push_str("</div>");
     let closing = used.saturating_sub(sessions.len() as u64);
     if closing > 0 {
-        let _ = write!(
-            html,
-            "<div class=\"note\">{closing} beendete Sitzung(en) schließen noch eine laufende Anfrage ab. Ihr Platz wird anschließend frei.</div>"
+        let note = count_message(
+            "closing_sessions",
+            closing,
+            &format!("{closing} beendete Sitzung(en) schließen noch eine laufende Anfrage ab. Ihr Platz wird anschließend frei."),
         );
+        let _ = write!(html, "<div class=\"note\">{note}</div>");
     }
     html.push_str("<div class=\"sessionslist\">");
     for session in sessions.iter().take(32) {
         session_row(&mut html, session);
     }
     if sessions.is_empty() && used == 0 {
-        html.push_str("<div class=\"empty\"><strong>Alle Sitzungen frei</strong>Sobald sich ein MCP-Client verbindet, erscheint seine Sitzung hier automatisch.</div>");
+        html.push_str("<div class=\"empty\"><strong><span data-ws-text=\"all_sessions_free\">Alle Sitzungen frei</span></strong><span data-ws-text=\"sessions_appear\">Sobald sich ein MCP-Client verbindet, erscheint seine Sitzung hier automatisch.</span></div>");
     }
-    html.push_str("</div><div class=\"unsaved\">Ungespeicherte Änderungen gehen beim Sitzungsende oder Container-Neustart verloren.</div></aside></div><div class=\"bottom\"><section class=\"panel explain\"><h3>Was bedeutet „in Bearbeitung“?</h3><p>Eine Sitzung enthält bestätigte Änderungen, die noch nicht in einer Datei gespeichert sind. „Geöffnet“ bedeutet nur, dass eine Sitzung eine Datei geladen hat. „Führt aus“ beschreibt eine gerade laufende Anfrage. Ein unbekannter Änderungsstatus zählt nicht als bestätigte Bearbeitung.</p><div class=\"legend\"><span><span class=\"dot amber\" aria-hidden=\"true\"></span> Ungespeichert / führt aus</span><span><span class=\"dot blue\" aria-hidden=\"true\"></span> Neuer Entwurf</span><span><span class=\"dot\" aria-hidden=\"true\"></span> Sitzungsplatz belegt</span></div></section><section class=\"panel explain\"><h3>Browser-CAD bleibt unabhängig</h3><p>Diese Übersicht zeigt Dateien und Sitzungen des MCP-Dienstes. Deine Browsermodelle leben weiterhin im Browser. „Bearbeiten“ öffnet eine Kopie des gespeicherten Modells in einem neuen CAD-Tab. Alternativ kannst du Dateien herunterladen und selbst importieren.</p><div class=\"small\">Dateien nur mit Bestätigung löschen · Sitzungen werden hier nicht beendet</div></section></div><footer><span>SolidCraft · Inoffizielle Unraid-Integration</span><span>Gespeicherte Dateistände · Zeiten in UTC</span></footer>");
-    let storage = escape(text(snapshot.get("storage").unwrap_or(&Value::Null), "label"));
+    html.push_str("</div><div class=\"unsaved\"><span data-ws-text=\"unsaved_lost\">Ungespeicherte Änderungen gehen beim Sitzungsende oder Container-Neustart verloren.</span></div></aside></div><div class=\"bottom\"><section class=\"panel explain\"><h3><span data-ws-text=\"editing_explained_title\">Was bedeutet „in Bearbeitung“?</span></h3><p><span data-ws-text=\"editing_explained\">Eine Sitzung enthält bestätigte Änderungen, die noch nicht in einer Datei gespeichert sind. „Geöffnet“ bedeutet nur, dass eine Sitzung eine Datei geladen hat. „Führt aus“ beschreibt eine gerade laufende Anfrage. Ein unbekannter Änderungsstatus zählt nicht als bestätigte Bearbeitung.</span></p><div class=\"legend\"><span><span class=\"dot amber\" aria-hidden=\"true\"></span> <span data-ws-text=\"unsaved_or_running\">Ungespeichert / führt aus</span></span><span><span class=\"dot blue\" aria-hidden=\"true\"></span> <span data-ws-text=\"new_draft\">Neuer Entwurf</span></span><span><span class=\"dot\" aria-hidden=\"true\"></span> <span data-ws-text=\"slot_in_use\">Sitzungsplatz belegt</span></span></div></section><section class=\"panel explain\"><h3><span data-ws-text=\"browser_independent\">Browser-CAD bleibt unabhängig</span></h3><p><span data-ws-text=\"browser_independent_note\">Diese Übersicht zeigt Dateien und Sitzungen des MCP-Dienstes. Deine Browsermodelle leben weiterhin im Browser. „Bearbeiten“ öffnet eine Kopie des gespeicherten Modells in einem neuen CAD-Tab. Alternativ kannst du Dateien herunterladen und selbst importieren.</span></p><div class=\"small\"><span data-ws-text=\"confirmed_deletion_only\">Dateien nur mit Bestätigung löschen · Sitzungen werden hier nicht beendet</span></div></section></div><footer><span><span data-ws-text=\"footer_name\">Arbeitsbereich für SolidCraft</span></span><span><span data-ws-text=\"footer_utc\">Gespeicherte Dateistände · Zeiten in UTC</span></span></footer>");
+    let storage = snapshot.get("storage").unwrap_or(&Value::Null);
+    let storage = match (storage["available_bytes"].as_u64(), storage["total_bytes"].as_u64()) {
+        (Some(available), Some(total)) => {
+            let free = crate::workspace_storage::units(available);
+            let total = crate::workspace_storage::units(total);
+            message("storage_free", &format!("Speicher frei: {free} von {total}"), &[("free", &free), ("total", &total)])
+        }
+        _ => marked("Speicherplatz nicht verfügbar"),
+    };
     html = html.replace("</footer>", &format!("<span class=\"storage\">{storage}</span></footer>"));
     html
 }
 
 fn delete_link(html: &mut String, name: &str) {
     let url = download_url(name).replacen("/workspace/files/", "/workspace/delete/", 1);
-    let _ = write!(html, "<a class=\"action danger\" href=\"{url}\" data-file-details=\"{url}\">Löschen …</a>");
+    let _ = write!(html, "<a class=\"action danger\" href=\"{url}\" data-file-details=\"{url}\"><span data-ws-text=\"delete\">Löschen …</span></a>");
 }
 
 fn folder_actions(html: &mut String, name: &str) {
     if name.split('/').next().is_some_and(|p| crate::projects::validate(p).is_ok()) {
-        let _ = write!(html, "<button class=\"action\" type=\"button\" data-upload-target=\"{}\">Hochladen ↑</button>", escape(name));
+        let _ = write!(
+            html,
+            "<button class=\"action\" type=\"button\" data-upload-target=\"{}\"><span data-ws-text=\"upload\">Hochladen ↑</span></button>",
+            escape(name)
+        );
     }
     let url = download_url(name).replacen("/workspace/files/", "/workspace/archive/", 1);
     // The server attaches successful archives. Forcing `download` here also saves
     // HTML errors (expired login, origin rejection, manifest conflicts) as .htm.
     // Keep errors visible in a separate tab without losing the live workspace.
-    let _ = write!(html, "<a class=\"action\" href=\"{url}\" target=\"_blank\" rel=\"noopener\">Als ZIP herunterladen ↓</a>");
+    let _ = write!(
+        html,
+        "<a class=\"action\" href=\"{url}\" target=\"_blank\" rel=\"noopener\"><span data-ws-text=\"download_zip\">Als ZIP herunterladen ↓</span></a>"
+    );
     delete_link(html, name);
 }
 
 pub(crate) fn action_failure(message: &str) -> String {
+    let detail = message
+        .strip_prefix("Diese Herkunft ist nicht freigegeben (")
+        .and_then(|detail| {
+            detail.strip_suffix("). Bitte den Arbeitsbereich direkt über die freigegebene Adresse öffnen und den ZIP-Link dort anklicken.")
+        })
+        .map_or_else(|| marked(message), |reason| self::message("error_archive_origin", message, &[("reason", reason)]));
     let mut html = start("Dateiaktion nicht möglich", None);
     let _ = write!(
         html,
-        "<section id=\"file-details\" class=\"panel detailsbody detailpanel\"><h1>Dateiaktion nicht möglich</h1><p class=\"error\" role=\"alert\">{}</p><a class=\"secondary\" href=\"/workspace\">Zurück zum Arbeitsbereich</a></section></main></body></html>",
-        escape(message)
+        "<section id=\"file-details\" class=\"panel detailsbody detailpanel\"><h1><span data-ws-text=\"file_action_failed\">Dateiaktion nicht möglich</span></h1><p class=\"error\" role=\"alert\">{}</p><a class=\"secondary\" href=\"/workspace\"><span data-ws-text=\"back_to_workspace\">Zurück zum Arbeitsbereich</span></a></section></main><script type=\"module\" src=\"/workspace/boot.js\"></script></body></html>",
+        detail
     );
     html
 }
@@ -640,11 +730,15 @@ pub(crate) fn action_failure(message: &str) -> String {
 pub(crate) fn delete_confirmation(path: &str, csrf: &str, ticket: &str, manifest: &crate::workspace_actions::manifest::Manifest) -> String {
     let mut html = start("Löschen bestätigen", Some(csrf));
     let folder = manifest.entries.first().is_some_and(|entry| entry.directory);
-    let label = if folder { "Ordner" } else { "Datei" };
-    let object_label = if folder { "diesen Ordner" } else { "diese Datei" };
+    let question = marked(if folder { "Ordner wirklich löschen?" } else { "Datei wirklich löschen?" });
+    let confirmation = marked(if folder {
+        "Ich möchte diesen Ordner mit dem angezeigten Inhalt endgültig löschen."
+    } else {
+        "Ich möchte diese Datei mit dem angezeigten Inhalt endgültig löschen."
+    });
     let _ = write!(
         html,
-        "<div class=\"panel detailpanel\"><section id=\"file-details\" class=\"detailsbody\"><div class=\"eyebrow\">Löschen bestätigen</div><h1>{label} wirklich löschen?</h1><p class=\"detailspath\">{}</p><div class=\"deletewarning\">Dieser Vorgang entfernt den bestätigten Inhalt endgültig aus dem Serverspeicher. Es gibt keinen Papierkorb.</div><dl class=\"detailgrid\"><dt>Dateien</dt><dd>{}</dd><dt>Unterordner</dt><dd>{}</dd><dt>Gesamtgröße</dt><dd>{}</dd></dl><p class=\"detailnote\">Es wird der vollständige echte Pfad geprüft, unabhängig von Suchfiltern. Ändert sich der Inhalt oder nutzt eine MCP-Sitzung das Projekt, wird das Löschen abgelehnt. Die Bestätigung gilt fünf Minuten.</p><form class=\"deleteform\" method=\"post\" action=\"/workspace/delete\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><input type=\"hidden\" name=\"ticket\" value=\"{}\"><input type=\"hidden\" name=\"path\" value=\"{}\"><label><input type=\"checkbox\" name=\"confirm\" value=\"delete\" required> Ich möchte {object_label} mit dem angezeigten Inhalt endgültig löschen.</label><button class=\"primary\" type=\"submit\">Endgültig löschen</button><a class=\"secondary\" href=\"/workspace\">Abbrechen</a></form><a class=\"detailfallback\" href=\"/workspace\">Zurück zum Arbeitsbereich</a></section></div></main></body></html>",
+        "<div class=\"panel detailpanel\"><section id=\"file-details\" class=\"detailsbody\"><div class=\"eyebrow\"><span data-ws-text=\"confirm_delete\">Löschen bestätigen</span></div><h1>{question}</h1><p class=\"detailspath\">{}</p><div class=\"deletewarning\"><span data-ws-text=\"delete_warning\">Dieser Vorgang entfernt den bestätigten Inhalt endgültig aus dem Serverspeicher. Es gibt keinen Papierkorb.</span></div><dl class=\"detailgrid\"><dt><span data-ws-text=\"files\">Dateien</span></dt><dd>{}</dd><dt><span data-ws-text=\"subfolders\">Unterordner</span></dt><dd>{}</dd><dt><span data-ws-text=\"total_size\">Gesamtgröße</span></dt><dd>{}</dd></dl><p class=\"detailnote\"><span data-ws-text=\"delete_scope_note\">Es wird der vollständige echte Pfad geprüft, unabhängig von Suchfiltern. Ändert sich der Inhalt oder nutzt eine MCP-Sitzung das Projekt, wird das Löschen abgelehnt. Die Bestätigung gilt fünf Minuten.</span></p><form class=\"deleteform\" method=\"post\" action=\"/workspace/delete\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><input type=\"hidden\" name=\"ticket\" value=\"{}\"><input type=\"hidden\" name=\"path\" value=\"{}\"><label><input type=\"checkbox\" name=\"confirm\" value=\"delete\" required> {confirmation}</label><button class=\"primary\" type=\"submit\"><span data-ws-text=\"delete_permanently\">Endgültig löschen</span></button><a class=\"secondary\" href=\"/workspace\"><span data-ws-text=\"cancel\">Abbrechen</span></a></form><a class=\"detailfallback\" href=\"/workspace\"><span data-ws-text=\"back_to_workspace\">Zurück zum Arbeitsbereich</span></a></section></div></main><script type=\"module\" src=\"/workspace/boot.js\"></script></body></html>",
         escape(path),
         manifest.files,
         manifest.folders.saturating_sub(usize::from(folder)),
@@ -658,14 +752,14 @@ pub(crate) fn delete_confirmation(path: &str, csrf: &str, ticket: &str, manifest
 
 fn upload_controls(snapshot: &Value) -> String {
     let mut html = String::from(
-        "<details class=\"uploadtools\" id=\"upload-panel\"><summary>Projekt anlegen · Dateien hochladen</summary><div class=\"uploadbody\"><form id=\"project-create\" class=\"uploadrow\"><label for=\"project-name\">Neues Projekt</label><input id=\"project-name\" class=\"search\" maxlength=\"96\" required placeholder=\"Projektname\"><button class=\"secondary\" type=\"submit\" id=\"project-create-button\">Projekt anlegen</button></form><div class=\"uploadrow\"><label for=\"upload-project\">Upload-Ziel</label><select id=\"upload-project\" class=\"filter\"><option value=\"\">Projekt auswählen …</option>",
+        "<details class=\"uploadtools\" id=\"upload-panel\"><summary><span data-ws-text=\"create_and_upload\">Projekt anlegen · Dateien hochladen</span></summary><div class=\"uploadbody\"><form id=\"project-create\" class=\"uploadrow\"><label for=\"project-name\"><span data-ws-text=\"new_project\">Neues Projekt</span></label><input id=\"project-name\" class=\"search\" maxlength=\"96\" required placeholder=\"Projektname\" data-ws-placeholder=\"project_name\"><button class=\"secondary\" type=\"submit\" id=\"project-create-button\"><span data-ws-text=\"create_project\">Projekt anlegen</span></button></form><div class=\"uploadrow\"><label for=\"upload-project\"><span data-ws-text=\"upload_target\">Upload-Ziel</span></label><select id=\"upload-project\" class=\"filter\"><option value=\"\" data-ws-text=\"select_project\">Projekt auswählen …</option>",
     );
     for path in entries(snapshot, "directories").iter().filter_map(Value::as_str).take(256) {
         if path.split('/').next().is_some_and(|p| crate::projects::validate(p).is_ok()) {
             let _ = write!(html, "<option value=\"{}\">{}</option>", escape(path), escape(path));
         }
     }
-    html.push_str("</select></div><div id=\"upload-dropzone\" class=\"dropzone\"><div id=\"upload-target\">Bitte zuerst einen echten Projektordner auswählen.</div><div>Dateien hierher ziehen – auch mehrere gleichzeitig</div><label>Dateien auswählen<input id=\"upload-files\" type=\"file\" multiple accept=\".sc,.solidcraft,.solvecraft,.json,.step,.stp,.igs,.iges,.stl,.3mf,.obj,.glb,.gltf,.dxf,.svg,.png,.jpg,.jpeg\"></label></div><p class=\"uploadnote\">SolidCraft-Modelle/Design-JSON, STEP, IGES, STL, 3MF, selbstenthaltendes OBJ/glTF/GLB, DXF/SVG und PNG/JPEG-Schablonen. Maximal 16 MiB je Datei, 100 Dateien / 128 MiB je Upload. Bilder: 8 MiB / 4096 × 4096 Pixel; SVG: 1 MiB. Dateien werden gespeichert, nicht automatisch als CAD geöffnet oder ausgeführt.</p><div id=\"upload-status\" class=\"uploadstatus\" role=\"status\" aria-live=\"polite\"></div><progress id=\"upload-progress\" class=\"uploadprogress\" hidden></progress><button id=\"upload-cancel\" type=\"button\" class=\"secondary\" hidden>Upload abbrechen</button><ul id=\"upload-results\" class=\"uploadresults\"></ul><noscript><p class=\"uploadnote\">Projektanlage und Upload benötigen den Browser-Client. Die Dateiliste und Downloads bleiben verfügbar.</p></noscript></div></details><dialog id=\"upload-overwrite\" class=\"filedialog\" aria-labelledby=\"overwrite-title\"><div class=\"dialoghead\"><h2 id=\"overwrite-title\">Datei überschreiben?</h2></div><div class=\"overwritebody\"><p id=\"overwrite-name\"></p><p>Am Ziel ist diese Datei bereits vorhanden. Überschreiben ersetzt den vorhandenen Inhalt.</p><label class=\"overwriteall\"><input id=\"overwrite-all\" type=\"checkbox\"> Für alle Dateien übernehmen</label><div class=\"overwritechoices\"><button id=\"overwrite-yes\" type=\"button\" class=\"primary\">Überschreiben</button><button id=\"overwrite-skip\" type=\"button\" class=\"secondary\">Überspringen</button><button id=\"overwrite-cancel\" type=\"button\" class=\"secondary\">Abbrechen</button></div></div></dialog>");
+    html.push_str("</select></div><div id=\"upload-dropzone\" class=\"dropzone\"><div id=\"upload-target\"><span data-ws-text=\"select_real_project\">Bitte zuerst einen echten Projektordner auswählen.</span></div><div><span data-ws-text=\"drop_files\">Dateien hierher ziehen – auch mehrere gleichzeitig</span></div><label><span data-ws-text=\"choose_files\">Dateien auswählen</span><input id=\"upload-files\" type=\"file\" multiple accept=\".sc,.solidcraft,.solvecraft,.json,.step,.stp,.igs,.iges,.stl,.3mf,.obj,.glb,.gltf,.dxf,.svg,.png,.jpg,.jpeg\"></label></div><p class=\"uploadnote\"><span data-ws-text=\"upload_limits\">SolidCraft-Modelle/Design-JSON, STEP, IGES, STL, 3MF, selbstenthaltendes OBJ/glTF/GLB, DXF/SVG und PNG/JPEG-Schablonen. Maximal 16 MiB je Datei, 100 Dateien / 128 MiB je Upload. Bilder: 8 MiB / 4096 × 4096 Pixel; SVG: 1 MiB. Dateien werden gespeichert, nicht automatisch als CAD geöffnet oder ausgeführt.</span></p><div id=\"upload-status\" class=\"uploadstatus\" role=\"status\" aria-live=\"polite\"></div><progress id=\"upload-progress\" class=\"uploadprogress\" hidden></progress><button id=\"upload-cancel\" type=\"button\" class=\"secondary\" hidden><span data-ws-text=\"cancel_upload\">Upload abbrechen</span></button><ul id=\"upload-results\" class=\"uploadresults\"></ul><noscript><p class=\"uploadnote\"><span data-ws-text=\"upload_needs_client\">Projektanlage und Upload benötigen den Browser-Client. Die Dateiliste und Downloads bleiben verfügbar.</span></p></noscript></div></details><dialog id=\"upload-overwrite\" class=\"filedialog\" aria-labelledby=\"overwrite-title\"><div class=\"dialoghead\"><h2 id=\"overwrite-title\"><span data-ws-text=\"overwrite_question\">Datei überschreiben?</span></h2></div><div class=\"overwritebody\"><p id=\"overwrite-name\"></p><p><span data-ws-text=\"overwrite_note\">Am Ziel ist diese Datei bereits vorhanden. Überschreiben ersetzt den vorhandenen Inhalt.</span></p><label class=\"overwriteall\"><input id=\"overwrite-all\" type=\"checkbox\"> <span data-ws-text=\"apply_all\">Für alle Dateien übernehmen</span></label><div class=\"overwritechoices\"><button id=\"overwrite-yes\" type=\"button\" class=\"primary\"><span data-ws-text=\"overwrite\">Überschreiben</span></button><button id=\"overwrite-skip\" type=\"button\" class=\"secondary\"><span data-ws-text=\"skip\">Überspringen</span></button><button id=\"overwrite-cancel\" type=\"button\" class=\"secondary\"><span data-ws-text=\"cancel\">Abbrechen</span></button></div></div></dialog>");
     html
 }
 
@@ -726,6 +820,20 @@ mod tests {
     }
 
     #[test]
+    fn workspace_language_hooks_never_mark_file_names_and_keep_cad_in_a_separate_context() {
+        let file = json!({"name":"Arbeitsbereich für SolidCraft", "kind":"model"});
+        let html = page(&json!({"files":[file]}), "", "");
+        assert!(html.contains("id=\"open-browser-cad\" class=\"primary\" href=\"/\" target=\"_blank\" rel=\"noopener\""));
+        assert!(html.contains("id=\"workspace-language\""));
+        for locale in ["de", "en-US", "en-GB"] {
+            assert!(html.contains(&format!("value=\"{locale}\" lang=\"{locale}\"")));
+        }
+        assert_eq!(html.matches("data-ws-text=\"footer_name\"").count(), 1);
+        assert!(html.contains(">Arbeitsbereich für SolidCraft</a>"));
+        assert!(html.contains(">Arbeitsbereich für SolidCraft</span>"));
+    }
+
+    #[test]
     fn urls_encode_each_utf8_segment_and_query_characters() {
         assert_eq!(download_url("öffentlich/teil #1?.solidcraft"), "/workspace/files/%C3%B6ffentlich/teil%20%231%3F.solidcraft");
         assert_eq!(download_url("x%2Fy&z.solidcraft"), "/workspace/files/x%252Fy%26z.solidcraft");
@@ -743,8 +851,8 @@ mod tests {
             ], "slots_total":4,"slots_used":4
         });
         let html = page(&snapshot, "", "all");
-        assert!(html.contains("Dateien in Bearbeitung</div><div class=\"statnumber\">1</div>"));
-        assert!(html.contains("Neue Entwürfe</div><div class=\"statnumber\">1</div>"));
+        assert!(html.contains("Dateien in Bearbeitung</span></div><div class=\"statnumber\">1</div>"));
+        assert!(html.contains("Neue Entwürfe</span></div><div class=\"statnumber\">1</div>"));
         assert!(html.contains("1 Datei ist in mehreren Sitzungen geöffnet"));
         assert!(html.contains("In 2 Sitzungen geöffnet"));
         assert!(html.contains("Noch kein Modell"));
@@ -762,7 +870,7 @@ mod tests {
         let html = page(&json!({"truncated":true}), "part", "export");
         assert!(html.contains("Keine passenden Dateien"));
         assert!(html.contains("Angezeigte Dateien"));
-        assert!(html.contains("value=\"export\" selected"));
+        assert!(html.contains("value=\"export\" data-ws-text=\"exports\" selected"));
         assert!(html.contains("Die Dateiliste ist begrenzt"));
     }
 
@@ -773,7 +881,7 @@ mod tests {
         assert!(html.contains("autocomplete=\"off\""));
         assert!(html.contains("role=\"alert\""));
         assert!(html.contains("&lt;script&gt;"));
-        assert!(!html.contains("<script"));
+        assert_eq!(html.matches("<script type=\"module\" src=\"/workspace/boot.js\"></script>").count(), 1);
         assert!(!html.contains("localStorage"));
         assert!(!html.contains("name=\"token\" value="));
         assert!(!login(false, "csrf").contains("role=\"alert\""));
@@ -812,9 +920,9 @@ mod tests {
             "project":{"id":"directory:fixture","name":"fixture","basis":"directory"},
             "metadata":{"status":"available","project":"Saved model property"}
         }));
-        assert!(html.contains("<dt>Projektgruppe</dt><dd>fixture</dd>"));
-        assert!(html.contains("<dt>Zuordnung</dt><dd>Projektordner im Serverspeicher</dd>"));
-        assert!(html.contains("<dt>Projekt</dt><dd>Saved model property</dd>"));
+        assert!(html.contains("<dt><span data-ws-text=\"project_group\">Projektgruppe</span></dt><dd>fixture</dd>"));
+        assert!(html.contains("<dt><span data-ws-text=\"association\">Zuordnung</span></dt><dd>Projektordner im Serverspeicher</dd>"));
+        assert!(html.contains("<dt><span data-ws-text=\"project\">Projekt</span></dt><dd>Saved model property</dd>"));
         assert!(html.contains("Sie ist keine Modelleigenschaft"));
     }
 
@@ -822,7 +930,7 @@ mod tests {
     fn sessions_show_the_server_selected_project_without_using_model_metadata() {
         let mut html = String::new();
         session_row(&mut html, &json!({"project":"Fixture & Tools","metadata":{"project":"Unrelated saved property"}}));
-        assert!(html.contains("Projekt: Fixture &amp; Tools"));
+        assert!(html.contains("Projekt:</span> Fixture &amp; Tools"));
         assert!(!html.contains("Unrelated saved property"));
         assert!(!html.contains("Projekt noch nicht gewählt"));
         let mut unselected = String::new();
@@ -873,11 +981,11 @@ mod tests {
         assert!(html.contains("&lt;script&gt;unsafe&lt;/script&gt;"));
         assert!(html.contains("A &amp; B"));
         assert!(html.contains("Line one\nLine two"));
-        assert!(html.contains("<dt>Features</dt><dd>3</dd>"));
+        assert!(html.contains("<dt><span data-ws-text=\"features\">Features</span></dt><dd>3</dd>"));
         assert!(html.contains("id=\"file-details\""));
         assert!(html.contains("/workspace/files/parts/teil%20%231.solidcraft"));
         assert!(!html.contains("private-value"));
-        assert!(!html.contains("<script"));
+        assert_eq!(html.matches("<script type=\"module\" src=\"/workspace/boot.js\"></script>").count(), 1);
         assert!(details(&json!({"metadata":{"status":"unavailable"}})).contains("nicht gelesen"));
         assert!(details(&json!({"metadata":{"status":"not_applicable"}})).contains("keine SolidCraft-Modelleigenschaften"));
     }
@@ -911,7 +1019,7 @@ mod tests {
         let mut row = String::new();
         file_row(&mut row, &native);
         assert!(row.contains("href=\"/workspace/open/projects/teil%20%231.solidcraft\" target=\"_blank\" rel=\"noopener\""));
-        assert!(row.contains(">Bearbeiten ↗</a>"));
+        assert!(row.contains(">Bearbeiten ↗</span></a>"));
         assert!(details(&native).contains("In Browser-CAD bearbeiten ↗"));
         for file in [json!({"name":"part.step","kind":"export"}), json!({"name":"not-native.solidcraft","kind":"other"})] {
             let mut row = String::new();

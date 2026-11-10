@@ -4,6 +4,8 @@
 #![forbid(unsafe_code)]
 
 #[cfg(target_arch = "wasm32")]
+mod locale;
+#[cfg(target_arch = "wasm32")]
 mod observer;
 #[cfg(target_arch = "wasm32")]
 mod uploads;
@@ -30,10 +32,8 @@ mod browser {
         if let Some(bar) = document.get_element_by_id("workspace-status") {
             let _ = bar.set_attribute("data-state", state);
         }
-        if let Some(text) = document.get_element_by_id("workspace-status-text")
-            && text.text_content().as_deref() != Some(label)
-        {
-            text.set_text_content(Some(label));
+        if let Some(text) = document.get_element_by_id("workspace-status-text") {
+            crate::locale::message(&text, label);
         }
     }
 
@@ -72,6 +72,7 @@ mod browser {
         let focused_project =
             focused.and_then(|element| element.closest("[data-project]").ok().flatten()).and_then(|element| element.get_attribute("data-project"));
         live.set_inner_html(html);
+        crate::locale::apply(&live);
         if let Ok(nodes) = live.query_selector_all("[data-project]") {
             for index in 0..nodes.length().min(2000) {
                 if let Some(node) = nodes.item(index)
@@ -152,7 +153,7 @@ mod browser {
             };
             let Some(dialog) = dialog() else { return };
             if let Some(title) = document().and_then(|doc| doc.get_element_by_id("file-dialog-title")) {
-                title.set_text_content(Some(if url.starts_with("/workspace/delete/") { "Löschen bestätigen" } else { "Dateidetails" }));
+                crate::locale::message(&title, if url.starts_with("/workspace/delete/") { "Löschen bestätigen" } else { "Dateidetails" });
             }
             // Preserve a normal accessible navigation when the browser cannot
             // display the native dialog, rather than swallowing the link.
@@ -164,7 +165,7 @@ mod browser {
             active_request.set(generation);
             let current = active_request.clone();
             if let Some(content) = document().and_then(|doc| doc.get_element_by_id("file-dialog-content")) {
-                content.set_text_content(Some("Dateidetails werden geladen …"));
+                crate::locale::message(&content, "Dateidetails werden geladen …");
             }
             spawn_local(async move {
                 let result = load_details(&url).await;
@@ -173,10 +174,14 @@ mod browser {
                 }
                 let Some(content) = document().and_then(|doc| doc.get_element_by_id("file-dialog-content")) else { return };
                 match result {
-                    Ok(Some(html)) => content.set_inner_html(&html),
-                    Ok(None) => content.set_text_content(Some("Dateidetails nicht verfügbar. Lade den Arbeitsbereich neu.")),
+                    Ok(Some(html)) => {
+                        crate::locale::clear(&content);
+                        content.set_inner_html(&html);
+                        crate::locale::apply(&content);
+                    }
+                    Ok(None) => crate::locale::message(&content, "Dateidetails nicht verfügbar. Lade den Arbeitsbereich neu."),
                     Err(_) => {
-                        content.set_text_content(Some("Dateidetails konnten nicht geladen werden. Prüfe die Verbindung und versuche es erneut."))
+                        crate::locale::message(&content, "Dateidetails konnten nicht geladen werden. Prüfe die Verbindung und versuche es erneut.")
                     }
                 }
             });
@@ -231,6 +236,7 @@ mod browser {
 
     pub fn start() -> Result<(), JsValue> {
         let document = document().ok_or_else(|| JsValue::from_str("document unavailable"))?;
+        crate::locale::install(&document)?;
         if document.get_element_by_id("workspace-live").is_none() {
             return Ok(());
         }
@@ -334,7 +340,7 @@ fn main() {
         if let Some(document) = web_sys::window().and_then(|window| window.document())
             && let Some(status) = document.get_element_by_id("workspace-status-text")
         {
-            status.set_text_content(Some("Live-Verbindung nicht verfügbar · bitte manuell aktualisieren"));
+            locale::message(&status, "Live-Verbindung nicht verfügbar · bitte manuell aktualisieren");
         }
     }
 }

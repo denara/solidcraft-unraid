@@ -357,8 +357,15 @@ the last request and whether a request is running. The display ID is not a usabl
 session credential. An open file is not locked: multiple sessions can load it into
 separate models. Unknown change state is explicitly shown as unknown. New unsaved
 models are counted separately from saved files and disappear when their session ends.
-The browser CAD app at `/` remains independent; download a saved model and import it
-there to inspect it. The dashboard cannot edit files or forcibly end MCP sessions.
+The **Open browser CAD** button requests a separate browser window and leaves the
+workspace open. Browser settings can put that window in a new tab. The dashboard
+cannot edit models or forcibly end MCP sessions.
+
+The workspace header offers Deutsch, English (US), and Easy British English.
+The browser's supported language preference applies until a language is selected,
+with US English as the fallback. The selection stays in local browser storage.
+The workspace catalog under `assets/locales/pending/workspace/` is loaded only
+by the workspace. The independent CAD app uses its own language settings.
 
 The inventory is bounded to 512 files, 4,096 visited directory entries and eight
 directory levels; files larger than 256 MiB are excluded. A `truncated` indicator warns

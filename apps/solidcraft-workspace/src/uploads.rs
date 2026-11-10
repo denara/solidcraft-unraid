@@ -30,7 +30,7 @@ fn element(id: &str) -> Option<Element> {
 }
 fn label(id: &str, text: &str) {
     if let Some(el) = element(id) {
-        el.set_text_content(Some(text));
+        crate::locale::message(&el, text);
     }
 }
 fn hidden(id: &str, yes: bool) {
@@ -66,12 +66,15 @@ fn csrf() -> Result<String, String> {
 fn project() -> String {
     element("upload-project").and_then(|e| e.dyn_into::<HtmlSelectElement>().ok()).map(|s| s.value()).unwrap_or_default()
 }
-fn target_label() {
-    let target = project();
-    label(
-        "upload-target",
-        &if target.is_empty() { "Bitte zuerst einen echten Projektordner auswählen.".into() } else { format!("Upload-Ziel: {target}") },
-    );
+pub(crate) fn target_label() {
+    if let Some(element) = element("upload-target") {
+        let target = project();
+        if target.is_empty() {
+            crate::locale::set(&element, "select_real_project", &[]);
+        } else {
+            crate::locale::set(&element, "upload_destination", &[("target", &target)]);
+        }
+    }
 }
 fn open_panel() {
     if let Some(e) = element("upload-panel").and_then(|e| e.dyn_into::<HtmlDetailsElement>().ok()) {
@@ -102,7 +105,11 @@ pub(crate) fn refresh(directories: &Value) {
     for value in std::iter::once("").chain(directories.as_array().into_iter().flatten().filter_map(Value::as_str).take(256)) {
         if let Ok(option) = d.create_element("option") {
             let _ = option.set_attribute("value", value);
-            option.set_text_content(Some(if value.is_empty() { "Projekt auswählen …" } else { value }));
+            if value.is_empty() {
+                crate::locale::set(&option, "select_project", &[]);
+            } else {
+                option.set_text_content(Some(value));
+            }
             let _ = select.append_child(&option);
         }
     }
@@ -123,7 +130,7 @@ async fn response(response: JsValue) -> Result<Value, String> {
         .as_string()
         .filter(|s| s.len() < 128 * 1024)
         .ok_or("Ungültige Antwort.")?;
-    let value = serde_json::from_str::<Value>(&text).map_err(|_| format!("Anfrage fehlgeschlagen (HTTP {code})."))?;
+    let value = serde_json::from_str::<Value>(&text).map_err(|_| crate::locale::format("request_failed", &[("code", &code.to_string())]))?;
     if ok { Ok(value) } else { Err(value["error"].as_str().unwrap_or("Upload konnte nicht abgeschlossen werden.").chars().take(500).collect()) }
 }
 async fn api(path: &str, body: &Value) -> Result<Value, String> {
@@ -173,8 +180,11 @@ fn result(name: &str, message: &str, class: &str) {
     if let Some(d) = doc()
         && let Some(list) = d.get_element_by_id("upload-results")
         && let Ok(li) = d.create_element("li")
+        && let Ok(status) = d.create_element("span")
     {
-        li.set_text_content(Some(&format!("{name}: {message}")));
+        li.set_text_content(Some(&format!("{name}: ")));
+        crate::locale::message(&status, message);
+        let _ = li.append_child(&status);
         let _ = li.set_attribute("class", class);
         let _ = list.append_child(&li);
     }
@@ -275,13 +285,10 @@ async fn run_files(ui: Rc<Ui>, files: Vec<File>, target: String) -> Result<(), S
     }
     .await;
     let _ = api("/workspace/uploads/cancel", &json!({"batch":batch})).await;
-    label(
-        "upload-status",
-        &format!(
-            "{} · {complete} hochgeladen, {skipped} übersprungen, {failed} fehlgeschlagen. Bereits gespeicherte Dateien bleiben erhalten.",
-            if ui.cancelled.get() { "Upload abgebrochen" } else { "Upload abgeschlossen" }
-        ),
-    );
+    if let Some(status) = element("upload-status") {
+        let key = if ui.cancelled.get() { "upload_summary_cancelled" } else { "upload_summary" };
+        crate::locale::set(&status, key, &[("complete", &complete.to_string()), ("skipped", &skipped.to_string()), ("failed", &failed.to_string())]);
+    }
     outcome
 }
 fn start_files(ui: Rc<Ui>, list: FileList) {
@@ -456,7 +463,9 @@ pub(crate) fn install(document: &Document) -> Result<(), JsValue> {
                 match answer {
                     Ok(_) => {
                         select_project(&name);
-                        label("upload-status", &format!("Projekt „{name}“ angelegt. Jetzt Dateien auswählen oder hierher ziehen."));
+                        if let Some(status) = element("upload-status") {
+                            crate::locale::set(&status, "project_created", &[("name", &name)]);
+                        }
                         if let Some(input) = element("project-name").and_then(|e| e.dyn_into::<HtmlInputElement>().ok()) {
                             input.set_value("");
                         }

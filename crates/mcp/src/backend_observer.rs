@@ -3,7 +3,8 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use serde_json::{Value, json};
-use solidcraft_engine::{Session, capture, render::StandardView};
+use solidcraft_engine::{Session, capture};
+use solidcraft_viewport::StandardView;
 
 use super::Headless;
 
@@ -275,7 +276,7 @@ fn render(s: &Session, view: StandardView, revision: u64, renderer: &capture::Re
     if picture.rgba.len() != (WIDTH * HEIGHT * 4) as usize {
         return Err("observer renderer returned invalid pixels".into());
     }
-    let bytes = solidcraft_engine::render::png(WIDTH as usize, HEIGHT as usize, picture.rgba).ok_or("observer PNG encoding failed")?;
+    let bytes = solidcraft_viewport::png(WIDTH as usize, HEIGHT as usize, picture.rgba).ok_or("observer PNG encoding failed")?;
     if bytes.len() > MAX_PNG {
         return Err("observer PNG exceeds the preview budget".into());
     }

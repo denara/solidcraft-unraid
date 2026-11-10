@@ -9,7 +9,10 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+solidcraft-viewport-gpu = { workspace = true }
+solidcraft-viewport = { workspace = true }
 solidcore-record = { workspace = true }
+solidcore-tess = { workspace = true }
 robust = "1.2"
 solidcraft-color = { workspace = true }
 solidcraft-geom = { workspace = true }
@@ -34,4 +37,4 @@ solidcraft-engine = { workspace = true, features = ["bundled-render-library"] }
 solidcraft-io = { workspace = true }
 serde_json = { workspace = true }
 # Shader translation checks: D3D12 HLSL for FXC, and portable WebGL/OpenGL GLSL.
-naga = { workspace = true, features = ["wgsl-in", "hlsl-out", "glsl-out"] }
+naga = { workspace = true, features = ["wgsl-in", "hlsl-out"] }
