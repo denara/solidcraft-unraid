@@ -1,5 +1,46 @@
 # Validated container updates
 
+## 2026-11-12 fixed 0.40.1 snapshot
+
+Selected 9fd103a0f3d3232052c42a7e580e97c0c4686011 once, 394 commits after e8e73e11, on codex/unraid-mcp-web.
+Fork main was already an ancestor. See [SolidCraft upstream](https://github.com/tangency-labs/solidcraft)
+for application features and changes.
+
+The dependency lock follows upstream and the two Unraid workspace package
+versions. The Unraid toolchain keeps Rust 1.99.1, while upstream CI pins 1.98.0.
+The observer copies the new cut cache independently. Linked design checks
+retain project confinement before accessing paths. GLB export uses one
+project-relative destination and the existing strong revision gate. The
+public format-52 box reopened at 24,000 mm³ and kept its original bytes. A
+separate format-55 copy reopened at the same volume. Retain the pre-update
+backup for rollback when designs are saved with the new format.
+
+The exact [upstream CI run](https://github.com/tangency-labs/solidcraft/actions/runs/43178743670)
+passed repository and SolidCore checks. App native tests and Wasm compilation
+were skipped in that run. Local license, layering and list checks passed.
+One grouped Cargo test compilation covered 15 selections
+with 371 passing test executions. Compilation took
+662.4 seconds and tests took 24.5
+seconds. The optimized native, CAD Wasm and Workspace Wasm builds took 844,
+1,357 and 7 seconds respectively. Earlier attempts diagnosed a Rust type
+change and upstream's moved icon paths. The container workflow's time budget
+is 90 minutes after the previous passing job took 59 minutes and 35 seconds.
+The isolated candidate
+passed the MCP, Workspace, project, observer, live event, deletion, ZIP,
+login, upload and restart proofs. Chromium verified the independent CAD
+browser, offline updates, all Workspace locales, language persistence and
+the separate CAD window. The canonical template and icon were unchanged.
+
+Source 3c24a2a86c3863c80ae7c4f168322cdea16e0ff6 passed the [container workflow](https://github.com/denara/solidcraft-unraid/actions/runs/43190289907).
+The immutable tag and latest were pulled anonymously and agree on Linux amd64
+digest sha256:ca8fd0fd7bc81899a2f55cbef36db6cd108fa96b4dc4d8694dc2c06a6c218b8c. Transfer archive target/solidcraft-unraid-upstream-9fd103a0-3c24a2a8.tar
+(280836096 bytes, SHA256 19e8125328fc726790e4f0b0a3e53600433c1fdeae6ab5b82583cb72454acb48).
+
+The local test instance retained the same volume, token and security settings
+and reopened the public sample read-only. Verified obsolete containers,
+images and duplicate packaging outputs were retired. Two validated transfer
+archives, a rollback image and private backups remain.
+
 ## 2026-11-10 fixed 0.40.0-rc.3 snapshot and localized workspace
 
 Selected e8e73e11abec7149cf2945982553c0f9132a97ea once, 212 commits after f9ed9a90, on codex/unraid-mcp-web.
