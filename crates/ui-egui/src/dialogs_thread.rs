@@ -7,8 +7,8 @@
 use serde_json::{Value, json};
 use solidcraft_engine::doc::thread_forms::{SteepFlank, ThreadForm, ThreadHand, ThreadTip};
 use solidcraft_engine::doc::{
-    Document, Expr, FeatureKind, TappedThread, TappedThreadFamily, ThreadLimit, ThreadRunout, metric_thread_sizes, parse_metric_thread,
-    parse_tapped_thread, tapped_thread_sizes,
+    Document, Expr, FeatureKind, TappedThread, TappedThreadFamily, ThreadLimit, ThreadRunout, parse_metric_thread, parse_tapped_thread,
+    tapped_thread_sizes,
 };
 use solidcraft_engine::{Sel, Session};
 
@@ -21,10 +21,11 @@ use solidcraft_ui_text::tr;
 /// diameter/pitch pairs; the current pitch is included separately, custom pairs remain editable.
 const METRIC_PITCHES: &[f64] = &[0.2, 0.25, 0.35, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0];
 
-/// Generated metric designations omit only the shared catalogue's coarse pitch.
-/// Authored designation text is never rewritten just by displaying a dialog.
+/// Generated metric designations omit only the coarse pitch of a standard size (the second
+/// choice ones too: M33, not M33x3.5). Authored designation text is never rewritten just by
+/// displaying a dialog.
 pub(crate) fn designation(diameter: f64, pitch: f64) -> String {
-    let coarse = metric_thread_sizes().iter().any(|(d, p)| (d - diameter).abs() < 1e-9 && (p - pitch).abs() < 1e-9);
+    let coarse = ThreadForm::Metric.sizes().iter().any(|(d, p)| (d - diameter).abs() < 1e-9 && (p - pitch).abs() < 1e-9);
     if coarse { format!("M{diameter}") } else { format!("M{diameter}x{pitch}") }
 }
 
@@ -658,6 +659,7 @@ pub(crate) fn reopen(d: &mut Dialog, s: &Session, kind: &FeatureKind) {
         designation,
         length,
         modeled,
+        continuous_flanks,
         from,
         up_to,
         form,
@@ -674,6 +676,7 @@ pub(crate) fn reopen(d: &mut Dialog, s: &Session, kind: &FeatureKind) {
     else {
         return;
     };
+    d.extra.insert("continuous_flanks".into(), json!(continuous_flanks));
     if *modeled {
         d.extra.insert("modeled".into(), json!(true));
     }
@@ -741,6 +744,7 @@ mod contribution_tests {
     };
     use serde_json::json;
     use solidcore_record::Vec3;
+    use solidcraft_engine::doc::metric_thread_sizes;
     use solidcraft_engine::geom::MeshGeom;
     use solidcraft_engine::{Sel, Session};
     fn hole() -> (SolveApp, Dialog) {

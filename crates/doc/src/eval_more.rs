@@ -79,7 +79,7 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
             apply_op(doc, st, f, tools, Operation::Join, &[])
         }
         FeatureKind::ReplaceFace { faces, target, body } => {
-            let tp = doc.resolve_plane_in(vals, target, 0, Some(st))?;
+            let tp = doc.resolve_plane_in(vals, target, 0, f.component, Some(st))?;
             let tn = tp.normal();
             let i = body_at(st, body, &crate::plain(faces))?;
             let Some(mb) = st.bodies.get(i).cloned() else { return Err(DocError::Invalid("body".into())) };
@@ -98,7 +98,7 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
                 }
             }
             if let Some(slot) = st.bodies.get_mut(i) {
-                *slot = ModelBody::traced_new(mb.name, b, mb.feature);
+                *slot = mb.remade(b);
             }
             Ok(())
         }
@@ -106,7 +106,7 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
             // A plane on either side is worked out now, so the bodies follow it when it moves.
             let (mut from, mut from_normal) = (from.0, from_normal.and_then(|n| n.normalized()));
             if let Some(p) = from_plane {
-                let pl = doc.resolve_plane_in(vals, p, 0, Some(&*st))?;
+                let pl = doc.resolve_plane_in(vals, p, 0, f.component, Some(&*st))?;
                 (from, from_normal) = (pl.origin, Some(pl.normal()));
             }
             // So is a frame (#6257): its origin and z, found again from the geometry.
@@ -116,7 +116,7 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
             }
             let target = match to_frame {
                 Some(_) => None,
-                None => to_plane.as_ref().map(|p| doc.resolve_plane_in(vals, p, 0, Some(&*st))).transpose()?,
+                None => to_plane.as_ref().map(|p| doc.resolve_plane_in(vals, p, 0, f.component, Some(&*st))).transpose()?,
             };
             let (to, to_normal) = match (to_frame, &target) {
                 (Some(fr), _) => fr.resolve(doc, st).map(|(o, z)| (o, Some(z)))?,
@@ -293,6 +293,33 @@ fn chain_points(ss: &SolvedSketch, ids: &[String]) -> Result<Vec<Vec2>> {
         }
     }
     Ok(pts)
+}
+
+/// The curves of a chain as connected segments in sketch coordinates, in order, with lines
+/// and arcs kept exact (see [`chain_points`] for the polyline form).
+fn chain_segs(ss: &SolvedSketch, ids: &[String]) -> Result<Vec<Seg2>> {
+    let mut segs: Vec<Seg2> = Vec::new();
+    for id in ids {
+        let ci = ss.sketch.curve_index(id).ok_or_else(|| DocError::Unknown(format!("curve `{id}`")))?;
+        segs.extend(ss.sketch.segs(ci));
+    }
+    let Some(first) = segs.first().copied() else { return Err(DocError::Invalid("no curves".into())) };
+    // Orient the first segment toward the second, then chain.
+    let mut chain = vec![first];
+    if let Some(n) = segs.get(1)
+        && (first.start().dist(n.start()) < 1e-6 || first.start().dist(n.end()) < 1e-6)
+    {
+        chain[0] = first.reversed();
+    }
+    for s in segs.iter().skip(1) {
+        let prev = chain.last().map(Seg2::end).unwrap_or_default();
+        let s = if s.end().dist(prev) < s.start().dist(prev) { s.reversed() } else { *s };
+        if s.start().dist(prev) > 1e-5 {
+            return Err(DocError::Invalid("the contour curves are not connected end to end".into()));
+        }
+        chain.push(s);
+    }
+    Ok(chain)
 }
 
 /// A rib wall: the band swept from the curves across the plane by `depth` (or to the body),
@@ -587,13 +614,7 @@ pub(super) fn sheet_eval(
         }
         FeatureKind::SheetContour { sketch, curves, distance, rule, flip, reverse } => {
             let ss = st.sketch(sketch.0).ok_or_else(|| DocError::Unknown(format!("sketch {sketch}")))?.clone();
-            for id in curves {
-                let ci = ss.sketch.curve_index(id).ok_or_else(|| DocError::Unknown(format!("curve `{id}`")))?;
-                if !ss.sketch.segs(ci).iter().all(|s| matches!(s, Seg2::Line { .. })) {
-                    return Err(DocError::Invalid("not supported yet: arcs in a contour flange (use lines; the bends are made for you)".into()));
-                }
-            }
-            let pts = chain_points(&ss, curves)?;
+            let segs = chain_segs(&ss, curves)?;
             let w = val(vals, distance, Kind::Length)?;
             if !(w > 0.0) {
                 return Err(DocError::Invalid("the contour flange distance must be positive".into()));
@@ -601,10 +622,21 @@ pub(super) fn sheet_eval(
             let r = doc.sheet_rule(rule.as_deref());
             let rv = doc.rule_values(vals, &r)?;
             let plane = if *reverse { Plane { origin: ss.plane.origin, x: ss.plane.x, y: ss.plane.y * -1.0 } } else { ss.plane };
-            let pts: Vec<Vec2> = if *reverse { pts.iter().map(|p| Vec2::new(p.x, -p.y)).collect() } else { pts };
+            let segs: Vec<Seg2> = if *reverse {
+                segs.iter()
+                    .map(|s| match *s {
+                        Seg2::Arc { center, radius, start, sweep } => {
+                            Seg2::Arc { center: Vec2::new(center.x, -center.y), radius, start: -start, sweep: -sweep }
+                        }
+                        other => other.map_controls(|p| Vec2::new(p.x, -p.y)),
+                    })
+                    .collect()
+            } else {
+                segs
+            };
             // Mirroring the sketch swaps the material side too.
             let name = new_name(st, f, 0);
-            let sh = sheet::contour_flange(&name, &r.name, &rv, &plane, &pts, w, *flip != *reverse)?;
+            let sh = sheet::contour_flange_path(&name, &r.name, &rv, &plane, &segs, w, *flip != *reverse)?;
             let solid = sh.solid()?;
             st.bodies.push(ModelBody::new(name, solid, f.id));
             st.sheets.push(sh);
@@ -2419,7 +2451,7 @@ pub(super) fn plastic_eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &F
                 let edges = resolve_edges(&mb.body, &[position.0 + x * r0], &[], &mut warn)?;
                 let nb = mb.traced().then(kernel::fillet(&mb.body, &edges, rf)?);
                 if let Some(slot) = st.bodies.get_mut(i) {
-                    *slot = ModelBody::traced_new(mb.name, nb, mb.feature);
+                    *slot = mb.remade(nb);
                 }
             }
             if let Some(hd) = hole_diameter {

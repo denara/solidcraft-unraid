@@ -128,7 +128,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .at("SKETCH", "MODIFY")
         .icon("sketch_scale")
         .enabled(in_sketch)
-        .params("entities: [curve/point ids], base: [x,y] or point ref, factor: number"),
+        .params("entities: [curve/point ids], base: [x,y] or point ref, factor: number; the driving length and radius dimensions wholly inside the selection scale too (a formula becomes `(formula) * factor`)"),
     CommandSpec::new("sketch.transform", "Transform", transform)
         .at("SKETCH", "MODIFY")
         .icon("sketch_move")
@@ -141,7 +141,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .at("SKETCH", "MODIFY")
         .icon("sketch_move")
         .enabled(in_sketch)
-        .params(concat!("entities: [ids], translate?: [dx,dy], angle?: deg, center?: [x,y], copy?: bool, rotate_constraints?: bool (default true; false keeps constraints unchanged); a rotation turns the constraints tied to the sketch axes when all their geometry moves (horizontal and vertical relations and dimensions swap at odd quarter turns and stay at half turns, line angles turn with the line) and removes the horizontal and vertical ones that cannot hold at other angles; picking a text outline or linked point transforms its whole text source once, and copies remain editable text; copy also accepts drawn 3D curves, preserving exact arcs and height above the sketch plane", created_doc!())),
+        .params(concat!("entities: [ids], translate?: [dx,dy], angle?: deg, center?: [x,y], copy?: bool, rotate_constraints?: bool (default true; false keeps constraints unchanged); a rotation turns the constraints tied to the sketch axes when all their geometry moves (horizontal and vertical relations and dimensions swap at odd quarter turns and stay at half turns, line angles turn with the line) and removes the horizontal and vertical ones that cannot hold at other angles; picking a text outline or linked point transforms its whole text source once, and copies remain editable text; copy also accepts drawn 3D curves, preserving exact arcs and height above the sketch plane; returns `released`: the constraints tying the moved geometry to what stays that the move let go, as {id, kind}", created_doc!())),
     CommandSpec::new("sketch.mirror", "Mirror", crate::checked!("sketch.mirror", mirror))
         .contract(&MIRROR_CONTRACT)
         .output(output_schema_for::<MirrorResult>)
@@ -184,6 +184,9 @@ fn curve_arg(sk: &Sketch, p: &Value, cmd: &str) -> Result<usize> {
 
 fn curve_by_id(sk: &Sketch, id: &str, cmd: &str) -> Result<usize> {
     let c = sk.curve_index(id).ok_or_else(|| bad(cmd, format!("unknown curve `{id}`")))?;
+    if sk.curves.get(c).is_some_and(|curve| curve.spline_handle_of.is_some()) {
+        return Err(bad(cmd, "spline tangent construction lines cannot be trimmed, split, or extended"));
+    }
     if sk.is_linked_curve(c) {
         let action = match cmd {
             "sketch.trim" => "Trim",
@@ -305,7 +308,17 @@ fn split_at(sk: &mut Sketch, ci: usize, ts: &[f64], cmd: &str) -> Result<(Vec<us
     let mut pieces = vec![ci];
     let mut push = |sk: &mut Sketch, kind: CurveKind, prefix: &str| -> Result<()> {
         let id = sk.fresh(prefix)?;
-        sk.curves.push(Curve { id, kind, construction, reversed: false, link: None, centerline: false, fixed: false, infinite: false });
+        sk.curves.push(Curve {
+            id,
+            kind,
+            construction,
+            reversed: false,
+            link: None,
+            centerline: false,
+            fixed: false,
+            infinite: false,
+            spline_handle_of: None,
+        });
         pieces.push(sk.curves.len() - 1);
         Ok(())
     };
@@ -1140,7 +1153,7 @@ fn line_end(sk: &Sketch, ci: usize, toward: Vec2) -> Result<Option<LineEnd>> {
 
     // A neighbour running on the same way as the extension has it nowhere to go.
     for (oi, c) in sk.curves.iter().enumerate() {
-        if oi == ci || !uses(c, end) {
+        if oi == ci || c.spline_handle_of.is_some() || !uses(c, end) {
             continue;
         }
         // Arcs do not block a line: the line runs past the point they share.
@@ -1167,7 +1180,7 @@ fn line_aim(sk: &Sketch, ci: usize, at: Vec2) -> Result<Option<LineAim>> {
     let mut budget = 1_000_000usize;
     let mut segment_count = 0usize;
     for (oi, other) in sk.curves.iter().enumerate() {
-        if oi == ci {
+        if oi == ci || other.spline_handle_of.is_some() {
             continue;
         }
         let mut pieces = sk.exact_segs(oi).unwrap_or_else(|| sk.segs(oi));
@@ -1301,7 +1314,7 @@ fn arc_aim(sk: &Sketch, ci: usize, at: Vec2, cmd: &str) -> Result<Option<ArcAim>
     let mut budget = 1_000_000usize;
     let mut segment_count = 0usize;
     for (oi, curve) in sk.curves.iter().enumerate() {
-        if oi == ci {
+        if oi == ci || curve.spline_handle_of.is_some() {
             continue;
         }
         // A circle passes over arcs lying on it, so no intersection reports them: an arc on the
@@ -1411,7 +1424,7 @@ fn stop_point(sk: &Sketch, ci: usize, q: Vec2) -> Option<usize> {
     sk.curves
         .iter()
         .enumerate()
-        .filter(|(i, _)| *i != ci)
+        .filter(|(i, c)| *i != ci && c.spline_handle_of.is_none())
         .find_map(|(_, c)| {
             let (a, b) = c.kind.ends()?;
             [a, b].into_iter().find(|p| sk.point(*p).is_some_and(|pt| pt.dist(q) <= TOL * 10.0))
@@ -1553,7 +1566,7 @@ fn extend(s: &mut Session, p: &Value) -> Result<Value> {
 fn grow_line(sk: &mut Sketch, ci: usize, aim: LineAim) -> Result<String> {
     let end = aim.end;
     let (q, cutter, stop) = (aim.hit, aim.cutter, aim.stop);
-    let neighbors: Vec<_> = sk.curves.iter().enumerate().filter(|(i, c)| *i != ci && uses(c, end)).collect();
+    let neighbors: Vec<_> = sk.curves.iter().enumerate().filter(|(i, c)| *i != ci && c.spline_handle_of.is_none() && uses(c, end)).collect();
 
     // The end joined to other geometry stays where it is: add a line from it.
     if !neighbors.is_empty() {
@@ -2822,7 +2835,11 @@ fn offset_side(sk: &mut Sketch, cmd: &str, order: &[(usize, bool)], sources: &[(
                 idx.push(pb);
                 idx.dedup();
                 if idx.len() >= 2 {
-                    made.push(sk.add_curve(CurveKind::Spline { pts: idx, control: false, degree: 3, periodic: false, nurbs: None }, None)?);
+                    let spline = sk.add_curve(
+                        CurveKind::Spline { pts: idx, control: false, degree: 3, periodic: false, nurbs: None, handles: Vec::new() },
+                        None,
+                    )?;
+                    made.push(spline);
                 }
             }
             Piece::Line(..) => {
@@ -3513,10 +3530,25 @@ fn copy_through(
     keep: &dyn Fn(Vec2) -> bool,
     scale_r: f64,
 ) -> Result<(Vec<usize>, Vec<(usize, usize)>)> {
-    if sk.curves.len().saturating_add(cs.len()) > solidcraft_sketch::MAX_CURVES {
+    let mut sources = cs.to_vec();
+    let spline_ids: std::collections::BTreeSet<String> = cs
+        .iter()
+        .filter_map(|index| sk.curves.get(*index))
+        .filter(|curve| matches!(curve.kind, CurveKind::Spline { .. }))
+        .map(|curve| curve.id.clone())
+        .collect();
+    sources.extend(
+        sk.curves
+            .iter()
+            .enumerate()
+            .filter_map(|(index, curve)| curve.spline_handle_of.as_ref().is_some_and(|parent| spline_ids.contains(parent)).then_some(index)),
+    );
+    let mut seen = std::collections::BTreeSet::new();
+    sources.retain(|source| seen.insert(*source));
+    if sk.curves.len().saturating_add(sources.len()) > solidcraft_sketch::limits::max_curves() {
         return Err(solidcraft_sketch::SketchError::TooLarge.into());
     }
-    let pts = involved_points(sk, cs, ps);
+    let pts = involved_points(sk, &sources, ps);
     let mut map: Vec<(usize, usize)> = Vec::new();
     for q in &pts {
         let pos = sk.point(*q).unwrap_or_default();
@@ -3525,10 +3557,13 @@ fn copy_through(
     }
     let m = |q: usize| map.iter().find(|x| x.0 == q).map(|x| x.1).unwrap_or(q);
     let mut made = Vec::new();
-    for c in cs {
+    let mut clones = Vec::with_capacity(sources.len());
+    let mut curve_map = std::collections::BTreeMap::new();
+    for c in &sources {
         let Some(cu) = sk.curves.get(*c).cloned() else { continue };
         let mut kind = cu.kind.clone();
         kind.map_points(&m);
+        let helper_line = cu.spline_handle_of.is_some();
         let (kind, prefix) = match cu.kind {
             CurveKind::Ellipse { r, .. } => {
                 if let CurveKind::Ellipse { r: slot, .. } = &mut kind {
@@ -3538,7 +3573,7 @@ fn copy_through(
             }
             CurveKind::Spline { .. } => (kind, "s"),
             CurveKind::Conic { .. } => (kind, "n"),
-            CurveKind::Line { a, b } => (CurveKind::Line { a: m(a), b: m(b) }, "l"),
+            CurveKind::Line { a, b } => (CurveKind::Line { a: m(a), b: m(b) }, if helper_line { "h" } else { "l" }),
             CurveKind::Circle { c, r } => (CurveKind::Circle { c: m(c), r: r * scale_r }, "c"),
             CurveKind::Arc { c, a, b } => {
                 if flip {
@@ -3551,7 +3586,7 @@ fn copy_through(
         let id = sk.fresh(prefix)?;
         // A mirrored or patterned infinite line is an infinite line too (#1359).
         let infinite = cu.infinite && matches!(kind, CurveKind::Line { .. });
-        sk.curves.push(Curve {
+        let clone = Curve {
             id,
             kind,
             construction: cu.construction,
@@ -3560,7 +3595,14 @@ fn copy_through(
             centerline: false,
             fixed: false,
             infinite,
-        });
+            spline_handle_of: cu.spline_handle_of.clone(),
+        };
+        curve_map.insert(cu.id, clone.id.clone());
+        clones.push(clone);
+    }
+    for clone in &mut clones {
+        clone.spline_handle_of = clone.spline_handle_of.as_ref().and_then(|parent| curve_map.get(parent).cloned());
+        sk.curves.push(clone.clone());
         made.push(sk.curves.len() - 1);
     }
     Ok((made, map))
@@ -3618,7 +3660,10 @@ fn mirror(s: &mut Session, p: &Value) -> Result<Value> {
                 cons.push(add_c(sk, ConstraintKind::Equal { a: *o, b: *n })?);
             }
         }
-        Ok((ids_of(sk, &made), cons))
+        let mut selected = std::collections::BTreeSet::new();
+        let selected_count = cs.iter().filter(|source| selected.insert(**source)).count();
+        let reported = made.get(..selected_count).ok_or_else(|| bad(cmd, "copied curves changed while mirroring"))?;
+        Ok((ids_of(sk, reported), cons))
     })?;
     reply(cmd, MirrorResult { curves: out.0, constraints: out.1, sketch: info, param_warnings: Vec::new() })
 }
@@ -3790,6 +3835,7 @@ fn move_copy(s: &mut Session, p: &Value) -> Result<Value> {
     let rotate_constraints = bool_(p, "rotate_constraints").unwrap_or(true);
     let selection = string_list(cmd, p, "entities")?;
     let (planar, drawn) = if copy { drawn_copy_selection(s, p, selection)? } else { (selection, Vec::new()) };
+    let mut released = Vec::new();
     let (out, info) = edit(s, p, cmd, false, |sk, doc| {
         let (mut cs, mut ps) =
             if planar.is_empty() && !drawn.is_empty() { (Vec::new(), Vec::new()) } else { entities(sk, &json!({"entities": planar}), cmd)? };
@@ -3821,16 +3867,18 @@ fn move_copy(s: &mut Session, p: &Value) -> Result<Value> {
             return Ok(ids);
         }
         with_ellipse_axes(sk, &mut cs);
+        let held = holding(sk, &involved_points(sk, &cs, &ps));
         transform_in_place(sk, &cs, &ps, &f, 1.0, cmd)?;
         if rotate_constraints {
             let moved = involved_points(sk, &cs, &ps);
             rotate_axis_constraints(sk, doc, &moved, ang)?;
         }
+        released = release_broken(sk, &held);
         cs.extend(text_curves);
         Ok(ids_of(sk, &cs))
     })?;
     s.doc_mut().prune_model_params();
-    reply(cmd, MoveResult { curves: out, sketch: info, param_warnings: Vec::new() })
+    reply(cmd, MoveResult { curves: out, released, sketch: info, param_warnings: Vec::new() })
 }
 
 /// Scale, turn and move the entities in one step: scaled about `center`, then turned about it,
@@ -3917,17 +3965,70 @@ fn scale_dimensions(sk: &mut Sketch, doc: &mut solidcraft_doc::Document, curves:
     Ok(())
 }
 
+/// The constraints that tie the points about to move to points that stay (a corner on the
+/// origin, a distance to a line left behind) and hold now: their ids and type names. Constraints
+/// among the moved points alone (a rectangle's sides, a line's typed angle) move with them and
+/// are kept.
+fn holding(sk: &Sketch, moved: &[usize]) -> Vec<(String, &'static str)> {
+    sk.constraints
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| {
+            let touched = sk.constraint_points(&c.kind);
+            touched.iter().any(|q| moved.contains(q)) && touched.iter().any(|q| !moved.contains(q))
+        })
+        .filter(|(ci, c)| solidcraft_sketch::constraint_residual(sk, *ci).is_some_and(|r| r <= broken_at(sk, &c.kind)))
+        .map(|(_, c)| (c.id.clone(), c.kind.name()))
+        .collect()
+}
+
+/// After a move: the constraints of `held` that no longer hold are let go. Kept, the solve
+/// would pull the moved geometry back to what stays and bend it (#2980). Returns every
+/// constraint of `held` the move let go, these and the origin holds the move itself dropped
+/// (#5034), as `{id, kind}` for the status line to name them.
+fn release_broken(sk: &mut Sketch, held: &[(String, &'static str)]) -> Vec<Value> {
+    let broken: Vec<String> = sk
+        .constraints
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| held.iter().any(|(id, _)| *id == c.id))
+        .filter(|(ci, c)| solidcraft_sketch::constraint_residual(sk, *ci).is_some_and(|r| r > broken_at(sk, &c.kind)))
+        .map(|(_, c)| c.id.clone())
+        .collect();
+    sk.constraints.retain(|c| !broken.contains(&c.id));
+    held.iter().filter(|(id, _)| !sk.constraints.iter().any(|c| c.id == *id)).map(|(id, kind)| json!({"id": id, "kind": kind})).collect()
+}
+
+/// A residual above this is a constraint that doesn't hold. A distance is judged against the size
+/// of the geometry the constraint itself touches, so a far-away point elsewhere in the sketch can't
+/// hide a broken one; the sine or cosine between two lines has no length to scale by.
+fn broken_at(sk: &Sketch, kind: &ConstraintKind) -> f64 {
+    let direction_only = match *kind {
+        ConstraintKind::Parallel { .. } | ConstraintKind::Perpendicular { .. } => true,
+        ConstraintKind::Horizontal { l } | ConstraintKind::Vertical { l } => sk.curves.get(l).is_some_and(|c| c.infinite),
+        _ => false,
+    };
+    if direction_only {
+        return 1e-7;
+    }
+    1e-7 * sk.constraint_points(kind).iter().filter_map(|&q| sk.points.get(q)).map(|p| p.pos.len()).fold(1.0, f64::max)
+}
+
 fn scale(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "sketch.scale";
     let k = num(p, "factor").filter(|k| *k > 1e-9 && *k < 1e6).ok_or_else(|| bad(cmd, "`factor` must be a positive number"))?;
-    let (out, info) = edit(s, p, cmd, false, |sk, _| {
+    let (out, info) = edit(s, p, cmd, false, |sk, doc| {
         let (mut cs, ps) = entities(sk, p, cmd)?;
         with_ellipse_axes(sk, &mut cs);
         let b = if p.get("base").is_some() { point_or_ref(sk, p, "base", cmd)? } else { Vec2::ZERO };
         let f = move |q: Vec2| b + (q - b) * k;
         transform_in_place(sk, &cs, &ps, &f, k, cmd)?;
+        // The dimensions go with the geometry, else the solve pulls it back to the old sizes (#14411).
+        let moved = involved_points(sk, &cs, &ps);
+        scale_dimensions(sk, doc, &cs, &moved, k)?;
         Ok(ids_of(sk, &cs))
     })?;
+    s.doc_mut().prune_model_params();
     reply(cmd, ScaleResult { curves: out, sketch: info, param_warnings: Vec::new() })
 }
 

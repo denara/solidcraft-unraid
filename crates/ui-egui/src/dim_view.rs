@@ -483,6 +483,13 @@ thread_local! {
     /// Value texts of finished sketches' shown dimensions (Show Dimensions), as the model view
     /// drew them last frame: sketch, constraint id, parameter (None: driven), text box.
     static MODEL: RefCell<Vec<ModelDim>> = const { RefCell::new(Vec::new()) };
+    /// The value box of the dimension being placed or typed, as drawn this frame.
+    static DRAFT_TEXT: std::cell::Cell<Option<Rect>> = const { std::cell::Cell::new(None) };
+}
+
+/// Where the value of the dimension being placed or typed was drawn this frame.
+pub(crate) fn draft_text() -> Option<Rect> {
+    DRAFT_TEXT.with(std::cell::Cell::get)
 }
 
 /// A shown dimension of a finished sketch, as drawn in the model view (screen space).
@@ -770,6 +777,7 @@ fn label_marked(k: &ConstraintKind, radius_mark: bool, expr: Option<&str>, drive
 
 /// Draw the active sketch's dimensions and remember where they are for picking.
 pub fn show(app: &mut SolveApp, ui: &egui::Ui, painter: &egui::Painter, proj: &Proj) {
+    DRAFT_TEXT.with(|d| d.set(None));
     let mut drawn = Vec::new();
     let editor_draft = EDIT.with(|edit| {
         let mut edit = edit.borrow_mut();
@@ -875,12 +883,7 @@ pub fn show(app: &mut SolveApp, ui: &egui::Ui, painter: &egui::Painter, proj: &P
             DimFrame::Radial { center, .. } | DimFrame::ArcLength { center, .. } | DimFrame::HalfAxis { center, .. } => center,
             DimFrame::Angular { vertex, .. } => vertex,
         };
-        // Millimetres per pixel at the dimension.
-        let (Some(a), Some(b)) = (to(anchor), to(anchor + Vec2::X)) else { continue };
-        let px = 1.0 / f64::from(a.distance(b)).max(1e-9);
-        if !px.is_finite() {
-            continue;
-        }
+        let Some(px) = mm_per_pixel(to, anchor) else { continue };
         let display_doc =
             if is_draft { draft.as_ref().map(|(_, d)| d.preview_doc.as_ref()).unwrap_or(app.session.doc.as_ref()) } else { app.session.doc.as_ref() };
         let expr = c.param.as_ref().and_then(|p| display_doc.param(p)).map(|p| p.expr.as_str());
@@ -938,6 +941,9 @@ pub fn show(app: &mut SolveApp, ui: &egui::Ui, painter: &egui::Painter, proj: &P
         }
         let Some(tc) = to(lay.text) else { continue };
         let r = Rect::from_center_size(tc, size);
+        if is_draft {
+            DRAFT_TEXT.with(|d| d.set(Some(r)));
+        }
         placed.push(r);
         painter.rect_filled(r, tk.radius_sm / 2, tk.viewport_top.gamma_multiply(0.85));
         painter.galley(r.min + vec2(3.0, 1.0), galley, col);
@@ -962,6 +968,18 @@ pub fn show(app: &mut SolveApp, ui: &egui::Ui, painter: &egui::Painter, proj: &P
     DRAWN.with(|d| *d.borrow_mut() = drawn);
     window::paint(app, painter, proj);
     edit_box(app, ui.ctx());
+}
+
+/// Millimetres per pixel at the sketch point `at`, along whichever of the sketch's x and y
+/// directions looks longer on screen (`to`: sketch to screen). Seen nearly edge-on, one of them
+/// points at the eye and looks a pixel long or less: sized from it alone, a dimension's text and
+/// gaps grew so large that its lines ran across the window (#14826). Face-on both are the same.
+/// A direction that does not project leaves the other to size it; with neither, there is no size.
+pub(crate) fn mm_per_pixel(to: impl Fn(Vec2) -> Option<Pos2>, at: Vec2) -> Option<f64> {
+    let a = to(at)?;
+    let longest = [Vec2::X, Vec2::Y].into_iter().filter_map(|d| to(at + d)).map(|p| a.distance(p)).reduce(f32::max)?;
+    let px = 1.0 / f64::from(longest).max(1e-9);
+    px.is_finite().then_some(px)
 }
 
 /// A point a dimension measures (for the shape it belongs to).

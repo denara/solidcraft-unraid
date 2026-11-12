@@ -4,11 +4,11 @@ use std::fmt::Write as _;
 
 use serde_json::Value;
 
-const ICON_FOLDER: &str = include_str!("../../../assets/icons/ui/design/svg/model/folder.svg");
-const ICON_MODEL: &str = include_str!("../../../assets/icons/ui/design/svg/model/box.svg");
-const ICON_EXPORT: &str = include_str!("../../../assets/icons/ui/design/svg/model/export.svg");
-const ICON_FILE: &str = include_str!("../../../assets/icons/ui/design/svg/model/library.svg");
-const ICON_PALETTE: &str = include_str!("../../../assets/icons/ui/design/palette.toml");
+const ICON_FOLDER: &str = include_str!("../../../crates/look/icons/design/svg/model/folder.svg");
+const ICON_MODEL: &str = include_str!("../../../crates/look/icons/design/svg/model/box.svg");
+const ICON_EXPORT: &str = include_str!("../../../crates/look/icons/design/svg/model/export.svg");
+const ICON_FILE: &str = include_str!("../../../crates/look/icons/design/svg/model/library.svg");
+const ICON_PALETTE: &str = include_str!("../../../crates/look/icons/design/palette.toml");
 
 // Reuse the native application's original masters and its single palette authority.
 // Convert the export master's GAP paint into real transparency, matching the

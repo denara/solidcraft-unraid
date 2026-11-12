@@ -1621,6 +1621,33 @@ fn transform_scales_dimension_formulas_once_and_keeps_unselected_dimensions() {
     assert!(close(s.doc.eval(height["param"].as_str().unwrap(), length).unwrap(), 60.0), "dependent dimensions scale only once");
 }
 
+/// #14411: Scale takes the driving dimensions of what it scales with it, as Transform does: a
+/// 40 × 20 rectangle filleted r5, scaled 2× about the origin, is 80 × 40 with r10 corners, not a
+/// skewed shape the solver bent to keep the old radius.
+#[test]
+fn scale_scales_the_dimensions_it_takes_with_it() {
+    let mut s = new_sketch();
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [40, 0], [40, 20], [0, 20]], "closed": true}));
+    run(&mut s, "sketch.fillet", json!({"points": ["l1.end", "l2.end", "l3.end", "l4.end"], "radius": 5}));
+    let curves = ["l1", "l2", "l3", "l4", "a1", "a2", "a3", "a4"];
+    let radius = sketch(&s).constraints.iter().find_map(|c| c.param.clone()).unwrap();
+    let out = run(&mut s, "sketch.scale", json!({"entities": curves, "base": [0, 0], "factor": 2}));
+    assert_eq!(out["sketch"]["solved"], true, "{out}");
+    assert!(close(s.doc.eval(&radius, solidcraft_doc::expr::Kind::Length).unwrap(), 10.0), "{:?}", s.doc.param(&radius));
+    let sk = sketch(&s);
+    for (id, a, b) in [("l1", [10.0, 0.0], [70.0, 0.0]), ("l2", [80.0, 10.0], [80.0, 30.0])] {
+        let (p, q) = (
+            sk.point(sk.resolve_point(&format!("{id}.start")).unwrap()).unwrap(),
+            sk.point(sk.resolve_point(&format!("{id}.end")).unwrap()).unwrap(),
+        );
+        assert!(p.dist(Vec2::new(a[0], a[1])) < 1e-6 && q.dist(Vec2::new(b[0], b[1])) < 1e-6, "{id}: {p:?} {q:?}");
+    }
+    let area = 80.0 * 40.0 - (4.0 - std::f64::consts::PI) * 100.0;
+    assert!((profiles(&s)[0] - area).abs() < 1e-6, "{:?}", profiles(&s));
+    run(&mut s, "edit.undo", json!({}));
+    assert!(close(s.doc.eval(&radius, solidcraft_doc::expr::Kind::Length).unwrap(), 5.0), "one undo restores the radius");
+}
+
 /// #1485: after a circle is trimmed between two construction lines, clicking the trimmed end
 /// picks the construction line's end lying there, not the arc's own; the tangent arc still starts
 /// from the trimmed arc, tangent to it.
@@ -1992,7 +2019,8 @@ fn a_point_added_to_a_spline_keeps_its_constraints_and_undoes() {
     run(&mut s, "sketch.line", json!({"points": [format!("{sid}.end"), [40, 6]], "connect": false}));
     let sk = sketch(&s);
     let si = sk.curve_index(&sid).unwrap();
-    let old = sk.curves[si].kind.point_ids();
+    let fit_ids = |k: &CurveKind| if let CurveKind::Spline { pts, .. } = k { pts.clone() } else { Vec::new() };
+    let old = fit_ids(&sk.curves[si].kind);
     let names: Vec<String> = old.iter().map(|i| sk.points[*i].id.clone()).collect();
     run(&mut s, "sketch.dimension", json!({"entities": [names[0], names[1]], "value": 12.8}));
     let before = sketch(&s);
@@ -2004,7 +2032,7 @@ fn a_point_added_to_a_spline_keeps_its_constraints_and_undoes() {
     let out = run(&mut s, "sketch.spline.insert_point", json!({"curve": sid, "at": [15, 6]}));
     let after = sketch(&s);
     let new = after.point_index(out["point"].as_str().unwrap()).unwrap();
-    let now = after.curves[si].kind.point_ids();
+    let now = fit_ids(&after.curves[si].kind);
     assert_eq!(now.len(), old.len() + 1);
     assert_eq!(now[2], new, "between the second and third fit points: {now:?}");
     let q = after.point(new).unwrap();
@@ -2050,7 +2078,9 @@ fn a_point_removed_from_a_spline_goes_with_its_dimension_and_undoes() {
     run(&mut s, "sketch.line", json!({"points": [format!("{sid}.end"), [40, 6]], "connect": false}));
     let sk = sketch(&s);
     let si = sk.curve_index(&sid).unwrap();
-    let names: Vec<String> = sk.curves[si].kind.point_ids().iter().map(|i| sk.points[*i].id.clone()).collect();
+    // Its fit points, not their tangent handles (#6502).
+    let CurveKind::Spline { pts, .. } = &sk.curves[si].kind else { panic!("a spline") };
+    let names: Vec<String> = pts.iter().map(|i| sk.points[*i].id.clone()).collect();
     run(&mut s, "sketch.dimension", json!({"entities": [names[1], names[2]], "value": 12.8}));
     let before = sketch(&s);
     let at = |sk: &solidcraft_sketch::Sketch, id: &str| sk.point(sk.point_index(id).unwrap()).unwrap();
@@ -2059,7 +2089,8 @@ fn a_point_removed_from_a_spline_goes_with_its_dimension_and_undoes() {
     assert_eq!((r["curve"].as_str(), r["point"].as_str(), r["deleted"].as_bool()), (Some(sid.as_str()), Some(names[1].as_str()), Some(true)), "{r}");
     let after = sketch(&s);
     assert!(after.point_index(&names[1]).is_none(), "the point went");
-    let left: Vec<String> = after.curves[si].kind.point_ids().iter().map(|i| after.points[*i].id.clone()).collect();
+    let CurveKind::Spline { pts: left, .. } = &after.curves[si].kind else { panic!("a spline") };
+    let left: Vec<String> = left.iter().map(|i| after.points[*i].id.clone()).collect();
     assert_eq!(left, [names[0].clone(), names[2].clone(), names[3].clone()]);
     let segs = after.exact_segs(si).unwrap();
     for id in &left {
@@ -2125,10 +2156,18 @@ fn a_reversed_spline_runs_the_other_way_along_the_same_path() {
         let r = run(&mut s, "sketch.spline.reverse", json!({"curve": id}));
         assert_eq!(r["curve"], json!(id), "{r}");
         let after = sketch(&s);
-        let mut reversed = before.curves[ci].kind.point_ids();
+        let fit_points = |k: &CurveKind| match k {
+            CurveKind::Spline { pts, handles, .. } => (pts.clone(), handles.clone()),
+            _ => (Vec::new(), Vec::new()),
+        };
+        let (mut reversed, handles) = fit_points(&before.curves[ci].kind);
         reversed.reverse();
-        assert_eq!(after.curves[ci].kind.point_ids(), reversed, "{id}");
-        assert_eq!((&after.points, &after.constraints), (&before.points, &before.constraints), "{id}: points and constraints stay");
+        assert_eq!(fit_points(&after.curves[ci].kind).0, reversed, "{id}");
+        // Tangent handles (#6502) turn about their fit points; every other point stays.
+        let others = |sk: &solidcraft_sketch::Sketch| {
+            sk.points.iter().enumerate().filter(|(i, _)| !handles.contains(i)).map(|(_, p)| p.clone()).collect::<Vec<_>>()
+        };
+        assert_eq!((others(&after), &after.constraints), (others(&before), &before.constraints), "{id}: points and constraints stay");
         let segs = after.exact_segs(ci).unwrap();
         for (a, b) in [(&path, &segs), (&segs, &path)] {
             for seg in a {
@@ -2800,7 +2839,8 @@ fn irregular_closed_spline_offset_certificate_edits_undoes_and_reopens() {
     let result = run(&mut s, "sketch.offset", json!({"curves":["s1"],"distance":2.0,"chain":true}));
     let output = result["curves"][0].as_str().unwrap().to_string();
     let parameter = result["param"].as_str().unwrap().to_string();
-    let point_ids = sketch(&s).curves[1].kind.point_ids();
+    let output_index = sketch(&s).curve_index(&output).unwrap();
+    let point_ids = sketch(&s).curves[output_index].kind.point_ids();
     let verify = |s: &Session, distance: f64| {
         let state = s.world_state().unwrap();
         let sk = &state.sketch(1).unwrap().sketch;
@@ -4407,7 +4447,10 @@ fn inside_offset_wall(s: &Session, output: &str) -> Vec2 {
     let sk = sketch(s);
     let index = sk.curve_index(output).unwrap();
     let q = sk.exact_pieces(index)[0].point_at(0.5);
-    let source: Vec<_> = (0..sk.curves.len()).filter(|i| *i < index && !sk.freeform_offsets.iter().any(|o| o.output == sk.curves[*i].id)).collect();
+    // The source curves, not a spline's tangent handle lines (#6502) or an offset's output.
+    let source: Vec<_> = (0..sk.curves.len())
+        .filter(|i| *i < index && sk.curves[*i].spline_handle_of.is_none() && !sk.freeform_offsets.iter().any(|o| o.output == sk.curves[*i].id))
+        .collect();
     let p = source
         .iter()
         .flat_map(|i| sk.exact_pieces(*i))
@@ -4441,12 +4484,13 @@ fn freeform_offsets_trim_folds_and_round_chain_corners_into_an_extrudable_wall()
     ]);
     let mut s = new_sketch();
     run(&mut s, "sketch.spline.fit_point", json!({"points": cookie, "periodic": true}));
+    let source_dof = run(&mut s, "sketch.inspect", json!({}))["dof"].as_u64().unwrap();
     let (before, params) = (s.doc.to_json(), s.doc.params.len());
     let out = run(&mut s, "sketch.offset", json!({"curves": ["s1"], "distance": 1.26}));
     let curves = ids(&out["curves"]);
     assert!(!curves.is_empty(), "{out}");
     assert_eq!(out["param"], Value::Null, "a trimmed offset has no distance to drive: {out}");
-    assert_eq!(out["sketch"]["dof"], 30, "the offset adds no freedom (only the source's fit points move): {out}");
+    assert_eq!(out["sketch"]["dof"], source_dof, "the offset adds no freedom: {out}");
     assert_eq!(s.doc.params.len(), params, "no orphan distance parameter");
     let sk = sketch(&s);
     assert!(sk.freeform_offsets.is_empty() && !sk.constraints.iter().any(|c| matches!(c.kind, ConstraintKind::OffsetDistance { .. })));
@@ -5738,6 +5782,47 @@ fn split_failures_name_the_public_command() {
     assert!(text.contains("invalid parameters for `sketch.break`"), "{text}");
     assert!(!text.contains("invalid parameters for `split`"), "{text}");
     assert!(!text.contains("sketch.modify"), "{text}");
+}
+
+/// #2980: a rectangle drawn from the origin and a circle, all moved: they move as drawn. The
+/// corner's coincidence with the origin is let go instead of pulling that corner back and
+/// bending the rectangle; its own horizontals and verticals stay.
+#[test]
+fn moving_shapes_held_to_the_origin_moves_them_whole() {
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY"}));
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [20, -30]}));
+    run(&mut s, "sketch.circle.center", json!({"center": [-5, 20], "radius": 12}));
+    let sk = sketch(&s);
+    let at_origin = sk.constraints.iter().find(|c| matches!(c.kind, ConstraintKind::Coincident { .. })).map(|c| c.id.clone());
+    assert!(at_origin.is_some(), "the rectangle's corner is held on the origin");
+    let before: Vec<(String, Vec2)> = sk.points.iter().filter(|p| p.id != "origin").map(|p| (p.id.clone(), p.pos)).collect();
+    let ids: Vec<String> = sk.curves.iter().map(|c| c.id.clone()).collect();
+    let r = run(&mut s, "sketch.move", json!({"entities": ids, "translate": [15.5, 0]}));
+    assert_eq!(r["released"], json!([{"id": at_origin.clone().unwrap(), "kind": "Coincident"}]), "{r}");
+    let after = sketch(&s);
+    for (id, p) in &before {
+        let q = after.points.iter().find(|q| &q.id == id).map(|q| q.pos).unwrap();
+        assert!(q.dist(*p + Vec2::new(15.5, 0.0)) < 1e-9, "{id} went from {p:?} to {q:?}");
+    }
+    assert_eq!(after.constraints.len(), sk.constraints.len() - 1, "only the origin's coincidence is let go");
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!(sketch(&s).constraints.len(), sk.constraints.len(), "undo brings it back");
+}
+
+/// A point far from the move says nothing about how exactly the moved line has to stay level with
+/// the line that stays: a short move still breaks that relation, so it is still let go.
+#[test]
+fn a_far_away_point_does_not_keep_a_constraint_the_move_broke() {
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY"}));
+    let stays = ids(&run(&mut s, "sketch.line", json!({"points": [[5, 5], [15, 5]], "connect": false}))["curves"])[0].clone();
+    let moved = ids(&run(&mut s, "sketch.line", json!({"points": [[30, 5], [30, 20]], "connect": false}))["curves"])[0].clone();
+    run(&mut s, "sketch.constraint.horizontal_vertical", json!({"points": [format!("{moved}.start"), format!("{stays}.end")], "mode": "horizontal"}));
+    let level = sketch(&s).constraints.iter().find(|c| matches!(c.kind, ConstraintKind::HorizontalPoints { .. })).map(|c| c.id.clone()).unwrap();
+    run(&mut s, "sketch.point", json!({"point": [1e8, 0], "id": "far"}));
+    let r = run(&mut s, "sketch.move", json!({"entities": [moved], "translate": [0, 1]}));
+    assert_eq!(r["released"], json!([{"id": level, "kind": "Horizontal"}]), "{r}");
 }
 
 /// #12294: a spline offset together with a line is trimmed and unlinked, so a distance that names a

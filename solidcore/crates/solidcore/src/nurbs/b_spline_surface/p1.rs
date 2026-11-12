@@ -924,6 +924,30 @@ impl BSplineSurface {
         self.nurb.as_ref()
     }
 
+    /// Certified boxes covering the whole surface, one per knot span
+    /// ([`crate::nurbs::nurbs_srf::srf_span_boxes`]); `None`, meaning no certified
+    /// cover, without a NURB, when the weights or knots cannot be read as a cover, or
+    /// while evaluation beyond the natural domain is enabled (the extension leaves the
+    /// convex hull). Not upstream.
+    #[must_use]
+    pub fn span_boxes(&self) -> Option<Vec<Extent3d>> {
+        if self.is_out_of_bounds_enabled() {
+            return None;
+        }
+        crate::nurbs::nurbs_srf::srf_span_boxes(self.gw_nurb()?)
+    }
+
+    /// The refinable certified cover ([`crate::nurbs::nurbs_srf::SurfaceCover`]), refined
+    /// `depth` times; `None` under the conditions of [`BSplineSurface::span_boxes`].
+    /// Not upstream.
+    #[must_use]
+    pub fn cover(&self, depth: usize) -> Option<crate::nurbs::nurbs_srf::SurfaceCover> {
+        if self.is_out_of_bounds_enabled() {
+            return None;
+        }
+        crate::nurbs::nurbs_srf::SurfaceCover::new(self.gw_nurb()?, depth)
+    }
+
     /// The NURB, made first if missing (`GetOrCreateGwNurbPointer`).
     ///
     /// # Errors
@@ -1501,9 +1525,9 @@ impl BSplineSurface {
             norm[9] = evaluate_normal(k, self, uv_domain.evaluate(0.5, 0.5))?;
 
             if planar {
-                pol.add_vector_with_kernel(k, norm[9], None);
+                pol.add_vector(norm[9], None);
                 if polar_guess.is_some() {
-                    trial_polar_box.add_vector_with_kernel(k, norm[9], None);
+                    trial_polar_box.add_vector(norm[9], None);
                 }
             } else {
                 // get corner normals
@@ -1530,14 +1554,14 @@ impl BSplineSurface {
                     // build the polar box by adding all the vectors
                     pol.reset();
                     for v in norm {
-                        pol.add_vector_with_kernel(k, v, None);
+                        pol.add_vector(v, None);
                     }
 
                     if let Some(g) = polar_guess {
                         guess_basis = Some(polar_guess_basis(g));
                         trial_polar_box.reset();
                         for v in norm {
-                            trial_polar_box.add_vector_with_kernel(k, v, guess_basis);
+                            trial_polar_box.add_vector(v, guess_basis);
                         }
                     }
                 }
@@ -1548,18 +1572,18 @@ impl BSplineSurface {
         // derivatives of the midpoints to establish the base line vector.
         if let (Some(pol), false) = (polar_box.as_mut(), analytic) {
             let n0 = evaluate_normal(k, self, uv_domain.evaluate(0.5, 0.5))?;
-            pol.add_vector_with_kernel(k, n0, None);
+            pol.add_vector(n0, None);
             let n1 = evaluate_normal(k, self, uv_domain.evaluate(1.0, 0.5))?;
-            pol.add_vector_with_kernel(k, n1, None);
+            pol.add_vector(n1, None);
             let n2 = evaluate_normal(k, self, uv_domain.evaluate(0.5, 1.0))?;
-            pol.add_vector_with_kernel(k, n2, None);
+            pol.add_vector(n2, None);
 
             if let Some(g) = polar_guess {
                 guess_basis = Some(polar_guess_basis(g));
                 trial_polar_box.reset();
-                trial_polar_box.add_vector_with_kernel(k, n0, guess_basis);
-                trial_polar_box.add_vector_with_kernel(k, n1, guess_basis);
-                trial_polar_box.add_vector_with_kernel(k, n2, guess_basis);
+                trial_polar_box.add_vector(n0, guess_basis);
+                trial_polar_box.add_vector(n1, guess_basis);
+                trial_polar_box.add_vector(n2, guess_basis);
             }
         }
 
@@ -1588,9 +1612,9 @@ impl BSplineSurface {
                     if let (Some(pol), true) = (polar_box.as_mut(), net_polar) {
                         // get control net tangent vectors
                         let mut add = |cross: Vec3, pol: &mut PolarBox| {
-                            pol.add_vector_with_kernel(k, cross, None);
+                            pol.add_vector(cross, None);
                             if polar_guess.is_some() {
-                                trial_polar_box.add_vector_with_kernel(k, cross, guess_basis);
+                                trial_polar_box.add_vector(cross, guess_basis);
                             }
                         };
                         let dv0 = if j > 1 {

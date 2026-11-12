@@ -39,7 +39,8 @@ concurrency:
 jobs:
   proof:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # Leave time for smoke tests and publication after a cold build.
+    timeout-minutes: 90
     permissions:
       contents: read
       packages: write

@@ -7,6 +7,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 RUN rustup target add wasm32-unknown-unknown && rustup component add rustfmt clippy
 WORKDIR /src
+# The Unraid image uses its validated compiler even when upstream pins a different one.
+ENV RUSTUP_TOOLCHAIN=1.99.1
 ENV CARGO_TARGET_DIR=/src/target
 ENV CARGO_BUILD_JOBS=4
 # CI supplies only the verified browser tools through this optional context.
