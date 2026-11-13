@@ -1,5 +1,5 @@
 //! STEP topology (ISO 10303-42 topology and geometric model entities) into the kernel-neutral
-//! B-rep, schema 4 ([`solidcraft_geom::brep`], docs/native-brep.md). Written from the public
+//! B-rep, schema 4 ([`solidcore_record::brep`]). Written from the public
 //! ISO 10303-42 specification.
 //!
 //! Each MANIFOLD_SOLID_BREP, BREP_WITH_VOIDS and SHELL_BASED_SURFACE_MODEL becomes one
@@ -80,7 +80,7 @@ const MAX_SPLINE_DEGREE: usize = 16;
 /// Samples along a curve when projecting a vertex onto it.
 const MAX_SAMPLES: usize = 4096;
 /// The largest tolerance (mm) an edge or vertex is given: SMLib takes none larger (smlib.h's
-/// EDGE_TOLERANCE and VERTEX_TOLERANCE, `solidcraft_smlib::flat::MAX_TOLERANCE`). Geometry that
+/// EDGE_TOLERANCE and VERTEX_TOLERANCE). Geometry that
 /// would need more is refused, with how far off it lies.
 const MAX_TOLERANCE: f64 = 1.0;
 /// A vertex's tolerance over its largest gap from its curves and surfaces.
@@ -1662,7 +1662,12 @@ impl<'b, 'a> Builder<'b, 'a> {
         // tolerance (a corner patch with one side shrunk to a few µm) is run along between them,
         // its boundary iso line. As the record check (`brep::geometry`) takes it.
         let poles = SurfaceEval::new(&surface).ok();
-        let at_pole = |uv: [f64; 2], reach: f64| poles.as_ref().is_some_and(|e| e.pole_within(uv, reach).iter().any(|p| *p));
+        let at_pole = |uv: [f64; 2], reach: f64| -> R<bool> {
+            Ok(match &poles {
+                Some(e) => e.pole_within(uv, reach)?.iter().any(|p| *p),
+                None => false,
+            })
+        };
         for (l, pc) in edge_loops.iter().zip(&pcs) {
             let mut ends = Vec::with_capacity(l.len());
             for (&(_, forward), c) in l.iter().zip(pc) {
@@ -1677,7 +1682,7 @@ impl<'b, 'a> Builder<'b, 'a> {
                 let v = self.edges.get(e as usize).ok_or("edge reference")?.vertices;
                 let v = if forward { v[0] } else { v[1] };
                 let reach = self.vertices.get(v as usize).ok_or("vertex reference")?.tolerance.max(tol);
-                if at_pole(*start, reach) || at_pole(*end, reach) {
+                if at_pole(*start, reach)? || at_pole(*end, reach)? {
                     continue;
                 }
                 for d in 0..2 {

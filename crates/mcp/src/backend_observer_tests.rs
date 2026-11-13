@@ -144,6 +144,7 @@ fn hostile_view_metadata_and_assembly_expansion_are_bounded_before_rendering() {
         name: "root".into(),
         transform: solidcraft_engine::doc::IDENTITY,
         grounded: false,
+        expressed_moves: Vec::new(),
     });
     doc.occurrences.push(solidcraft_engine::doc::Occurrence {
         id: 2,
@@ -152,6 +153,7 @@ fn hostile_view_metadata_and_assembly_expansion_are_bounded_before_rendering() {
         name: "cycle".into(),
         transform: solidcraft_engine::doc::IDENTITY,
         grounded: false,
+        expressed_moves: Vec::new(),
     });
     assert!(placement_budget(&backend.session).is_err());
 }

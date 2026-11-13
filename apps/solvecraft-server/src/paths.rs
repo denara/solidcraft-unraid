@@ -171,6 +171,14 @@ fn commands(root: &Path, value: &mut Value, depth: usize) -> Result<(), String> 
             if object.get("command").and_then(Value::as_str).is_some_and(|c| c.starts_with("doc.recover") || c.starts_with("diagnostics.crash")) {
                 return Err("desktop recovery commands are unavailable through the network gateway; use open/save".into());
             }
+            // Plugins can inspect private packages, install files or dispatch commands outside this gate.
+            // The import cache is also internal to the worker, not a user project.
+            if object.get("command").and_then(Value::as_str).is_some_and(|command| {
+                command.get(..7).is_some_and(|prefix| prefix.eq_ignore_ascii_case("plugin."))
+                    || command.eq_ignore_ascii_case("file.import_cache_clear")
+            }) {
+                return Err("plugins and import-cache administration are unavailable through the network gateway".into());
+            }
             // Reload resolves a persisted locator from the design, not an explicit
             // project-relative path that the gateway can preflight.
             if object.get("command").and_then(Value::as_str) == Some("pointcloud.reload") {
@@ -398,6 +406,20 @@ mod tests {
         let mut escape = json!({"command":"component.relink","params":{"component":"Part","path":"../secret.solidcraft"}});
         assert!(commands(&root, &mut escape, 0).is_err());
     }
+    #[test]
+    fn desktop_plugins_and_import_cache_commands_are_rejected_before_dispatch() {
+        let root = std::env::temp_dir();
+        for id in ["plugin.inspect", "plugin.install", "plugin.list", "PLUGIN.RUN", "file.import_cache_clear"] {
+            let params = json!({"path":"example.zip"});
+            let mut direct = json!({"command":id,"params":params});
+            let mut batch = json!({"commands":[{"id":id,"params":params}]});
+            let mut wrapped = json!({"commands":[{"command":"execute","params":{"command":id,"params":params}}]});
+            for (tool, call) in [("execute", &mut direct), ("batch", &mut batch), ("batch", &mut wrapped)] {
+                assert!(prepare_tool(&root, tool, call).unwrap_err().contains("unavailable through the network gateway"));
+            }
+        }
+    }
+
     #[test]
     fn worker_tool_aliases_receive_confinement_and_recovery_checks_before_execution() {
         let root = std::env::temp_dir();

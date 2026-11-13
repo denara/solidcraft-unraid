@@ -1225,6 +1225,41 @@ fn fillet_keeps_expression_corner_when_parameter_changes() {
     }
 }
 
+/// #15240: a tilted profile with two corners rounded in one fillet call keeps its area when a
+/// parameter moves it. The rebuild used to add a full disc of the fillet radius (pi * 1.5^2
+/// here) to the profile, so an extruded body came out that disc times its depth larger.
+#[test]
+fn a_tilted_profile_with_two_fillets_keeps_its_area_when_a_parameter_moves_it() {
+    let mut s = new_sketch();
+    run(&mut s, "parameters.add", json!({"name": "lean", "expression": "15 deg"}));
+    run(&mut s, "parameters.add", json!({"name": "c0", "expression": "26 mm"}));
+    // The step-shaped profile from the issue: no line horizontal or vertical, every point an
+    // expression of `lean` and `c0`.
+    let pts = [
+        ["c0 + (-19.5 mm) * cos(lean) + (3.5 mm) * sin(lean)", "16 mm - (-19.5 mm) * sin(lean) + (3.5 mm) * cos(lean)"],
+        ["c0 + (-16 mm) * cos(lean) + (3.5 mm) * sin(lean)", "16 mm - (-16 mm) * sin(lean) + (3.5 mm) * cos(lean)"],
+        ["c0 + (-16 mm) * cos(lean) + (0 mm) * sin(lean)", "16 mm - (-16 mm) * sin(lean) + (0 mm) * cos(lean)"],
+        ["c0 + (0 mm) * cos(lean) + (0 mm) * sin(lean)", "16 mm - (0 mm) * sin(lean) + (0 mm) * cos(lean)"],
+        ["c0 + (0 mm) * cos(lean) + (28 mm) * sin(lean)", "16 mm - (0 mm) * sin(lean) + (28 mm) * cos(lean)"],
+        ["c0 + (3 mm) * cos(lean) + (28 mm) * sin(lean)", "16 mm - (3 mm) * sin(lean) + (28 mm) * cos(lean)"],
+        ["c0 + (3 mm) * cos(lean) + (58 mm) * sin(lean)", "16 mm - (3 mm) * sin(lean) + (58 mm) * cos(lean)"],
+        ["c0 + (-19.5 mm) * cos(lean) + (58 mm) * sin(lean)", "16 mm - (-19.5 mm) * sin(lean) + (58 mm) * cos(lean)"],
+    ];
+    let outline = run(&mut s, "sketch.line", json!({"closed": true, "points": pts}));
+    assert_eq!(outline["sketch"]["dof"], 0, "{outline}");
+    let fillet = run(&mut s, "sketch.fillet", json!({"points": ["l2.start", "l5.start"], "radius": "1.5 mm"}));
+    assert_eq!(fillet["sketch"]["dof"], 0, "{fillet}");
+    let area = profiles(&s);
+    assert_eq!(area.len(), 1, "{area:?}");
+    // Moving the whole profile does not change it: the same area, not that plus a disc.
+    run(&mut s, "parameters.change", json!({"name": "c0", "expression": "30 mm"}));
+    let info = run(&mut s, "sketch.inspect", json!({}));
+    assert_eq!(info["dof"], 0, "{info}");
+    let moved = profiles(&s);
+    assert_eq!(moved.len(), 1, "{moved:?}");
+    assert!(close(moved[0], area[0]), "{moved:?} before {area:?}");
+}
+
 #[test]
 fn fillet_and_chamfers() {
     let mut s = new_sketch();
@@ -5782,6 +5817,100 @@ fn split_failures_name_the_public_command() {
     assert!(text.contains("invalid parameters for `sketch.break`"), "{text}");
     assert!(!text.contains("invalid parameters for `split`"), "{text}");
     assert!(!text.contains("sketch.modify"), "{text}");
+}
+
+/// #11523: two lines whose ends already sit at one place, as points of their own, make a corner
+/// to round without any end having to move, however much holds those ends (a fixed position, a
+/// length). The fillet was refused as if each end had to move to the meeting point.
+#[test]
+fn fillet_of_lines_that_already_meet_needs_no_end_to_move() {
+    for hold in ["fixed", "length", "both"] {
+        let mut s = new_sketch();
+        let a = ids(&run(&mut s, "sketch.line", json!({"points": [[0, 0], [40, 0]], "connect": false, "infer": false}))["curves"])[0].clone();
+        let b = ids(&run(&mut s, "sketch.line", json!({"points": [[40, 0], [40, 50]], "connect": false, "infer": false}))["curves"])[0].clone();
+        if hold != "length" {
+            run(&mut s, "sketch.constraint.fix", json!({"entities": [format!("{a}.end")]}));
+        }
+        if hold != "fixed" {
+            run(&mut s, "sketch.dimension", json!({"entities": [a.clone()], "type": "length", "value": "40"}));
+            run(&mut s, "sketch.dimension", json!({"entities": [b.clone()], "type": "length", "value": "50"}));
+        }
+        let r = s.execute("sketch.fillet", &json!({"a": a, "b": b, "radius": 5})).unwrap_or_else(|e| panic!("{hold}: {e}"));
+        let sk = sketch(&s);
+        // What held the lines is still there (a length now measures to the kept corner), none merged.
+        let held = |sk: &solidcraft_sketch::Sketch, f: fn(&ConstraintKind) -> bool| sk.constraints.iter().filter(|k| f(&k.kind)).count();
+        assert_eq!(
+            held(&sk, |k| matches!(k, ConstraintKind::Length { .. } | ConstraintKind::Distance { .. })),
+            if hold == "fixed" { 0 } else { 2 },
+            "{hold}"
+        );
+        assert_eq!(held(&sk, |k| matches!(k, ConstraintKind::Fix { .. })), if hold == "length" { 0 } else { 1 }, "{hold}");
+        let arcs: Vec<_> = sk.curves.iter().filter(|c| matches!(c.kind, CurveKind::Arc { .. })).collect();
+        assert_eq!(arcs.len(), 1, "{hold}: {r}");
+        // The arc's tangent points: 5 mm from the corner (40, 0) along each line.
+        let CurveKind::Arc { a, b, .. } = arcs[0].kind else { panic!("an arc") };
+        let ends: Vec<Vec2> = vec![sk.point(a).unwrap(), sk.point(b).unwrap()];
+        for want in [Vec2::new(35.0, 0.0), Vec2::new(40.0, 5.0)] {
+            assert!(ends.iter().any(|e| e.dist(want) < 1e-6), "{hold}: {ends:?}");
+        }
+    }
+}
+
+/// #11523: a line ending at the sketch origin keeps the origin as the corner when another line
+/// is brought to meet it there, so a third line still ending at the origin still shares it.
+#[test]
+fn fillet_meeting_at_the_origin_keeps_the_origin_shared() {
+    let mut s = new_sketch();
+    let a = ids(&run(&mut s, "sketch.line", json!({"points": [[20, 0], [5, 0]], "connect": false, "infer": false}))["curves"])[0].clone();
+    let b = ids(&run(&mut s, "sketch.line", json!({"points": ["origin", [0, 30]], "connect": false, "infer": false}))["curves"])[0].clone();
+    let c = ids(&run(&mut s, "sketch.line", json!({"points": ["origin", [-20, -20]], "connect": false, "infer": false}))["curves"])[0].clone();
+    let r = run(&mut s, "sketch.fillet", json!({"a": a, "b": b, "radius": 2}));
+    let sk = sketch(&s);
+    let ci = sk.curve_index(&c).expect("the third line");
+    assert!(matches!(sk.curves[ci].kind, CurveKind::Line { a: 0, .. }), "the third line still starts at the origin: {r}");
+    assert!(!sk.curves.iter().enumerate().any(|(i, l)| i != ci && matches!(l.kind, CurveKind::Line { a, b } if (a == 0) != (b == 0) && sk.point(if a == 0 { b } else { a }).is_some_and(|q| q.len() < 1e-9))), "no other point sits on the origin");
+}
+
+/// #11523: two ends already at one place but each placed by its own expressions can't become one
+/// corner point that follows both: the fillet is refused instead of dropping one end's expressions.
+#[test]
+fn fillet_refuses_meeting_ends_placed_by_different_expressions() {
+    let mut s = new_sketch();
+    run(&mut s, "parameters.add", json!({"name": "W", "expression": "40 mm"}));
+    run(&mut s, "parameters.add", json!({"name": "X", "expression": "40 mm"}));
+    let a =
+        ids(&run(&mut s, "sketch.line", json!({"points": [["0 mm", "0 mm"], ["W", "0 mm"]], "connect": false, "infer": false}))["curves"])[0].clone();
+    let b =
+        ids(&run(&mut s, "sketch.line", json!({"points": [["X", "0 mm"], ["X", "30 mm"]], "connect": false, "infer": false}))["curves"])[0].clone();
+    let err = s.execute("sketch.fillet", &json!({"a": a, "b": b, "radius": 5})).expect_err("two placements can't both hold one corner").to_string();
+    assert!(err.contains("one corner point can't follow both"), "{err}");
+    // The same expressions on both ends are one placement: that corner rounds.
+    let mut s = new_sketch();
+    run(&mut s, "parameters.add", json!({"name": "W", "expression": "40 mm"}));
+    let a =
+        ids(&run(&mut s, "sketch.line", json!({"points": [["0 mm", "0 mm"], ["W", "0 mm"]], "connect": false, "infer": false}))["curves"])[0].clone();
+    let b =
+        ids(&run(&mut s, "sketch.line", json!({"points": [["W", "0 mm"], ["W", "30 mm"]], "connect": false, "infer": false}))["curves"])[0].clone();
+    s.execute("sketch.fillet", &json!({"a": a, "b": b, "radius": 5})).expect("one placement on both ends");
+}
+
+/// #11523: an end placed by expressions and one linked to a model vertex, at one place, can't
+/// become one corner point: the expressions would overwrite where the vertex moves it. Refused.
+#[test]
+fn fillet_refuses_meeting_ends_placed_by_an_expression_and_a_link() {
+    let mut s = new_sketch();
+    run(&mut s, "parameters.add", json!({"name": "W", "expression": "40 mm"}));
+    let a =
+        ids(&run(&mut s, "sketch.line", json!({"points": [["0 mm", "0 mm"], ["W", "0 mm"]], "connect": false, "infer": false}))["curves"])[0].clone();
+    let b = ids(&run(&mut s, "sketch.line", json!({"points": [[40, 0], [40, 30]], "connect": false, "infer": false}))["curves"])[0].clone();
+    let id = s.active_sketch.unwrap();
+    let start = sketch(&s).resolve_point(&format!("{b}.start")).expect("b's start");
+    s.doc_mut().sketch_mut(id).unwrap().points[start].link = Some("model-vertex".into());
+    let err = s
+        .execute("sketch.fillet", &json!({"a": a, "b": b, "radius": 5}))
+        .expect_err("an expression and a link can't both hold one corner")
+        .to_string();
+    assert!(err.contains("one corner point can't follow both"), "{err}");
 }
 
 /// #2980: a rectangle drawn from the origin and a circle, all moved: they move as drawn. The
