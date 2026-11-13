@@ -1,5 +1,43 @@
 # Validated container updates
 
+## 2026-11-13 fixed 0.41.0 snapshot
+
+Selected 7b90a309a2d61951cad8f4fd70f51fdedf3f5f52 once, 191 commits after 9fd103a0, on codex/unraid-mcp-web.
+Fork main was already an ancestor. See [SolidCraft upstream](https://github.com/tangency-labs/solidcraft)
+for application features and changes.
+
+HTTP MCP keeps its headless worker and private Workspace hooks after the upstream
+backend split. The gateway rejects plugin inspection, installation, listing and
+execution, and import-cache administration, including in inline batches. HTTP workers
+disable the desktop import cache. The desktop and browser command boundaries stay
+independent. Rust 1.99.1 is now also the upstream pin. The updated dependency notices
+include the Apache-2.0 LLVM-exception dependencies.
+
+The public format-55 box reopened at 24,000 mm³ with unchanged original bytes.
+A separate format-56 copy reopened at the same volume. Retain the pre-update
+backup when rolling back designs saved in the new format.
+
+The exact upstream [merge-queue CI](https://github.com/tangency-labs/solidcraft/actions/runs/43386084854)
+passed Linux tests and Clippy, reference and doc tests, repository checks and Wasm
+compilation. The local fork ran one grouped Cargo compilation in
+716.9 seconds and 135 passing test executions
+in 5.2 seconds. Native release, browser CAD and Workspace
+Wasm builds took 1037,
+1370 and 8
+seconds respectively. MCP, Workspace, project, upload, observer, ZIP and restart
+checks passed on a fresh test volume. Chromium confirmed browser CAD, offline
+updates, all Workspace locales and the separate CAD window. The catalog template
+and icon stayed unchanged.
+
+Source eeecfc0a6bc692cc99bfc515131608f91391d242 passed the [container workflow](https://github.com/denara/solidcraft-unraid/actions/runs/43401620670).
+The immutable tag and latest were pulled anonymously and agree on Linux amd64
+digest sha256:3dd740090a58e369e56df810150755ca746ea6b065e79b95bc7fb4141ec36d38. Transfer archive target/solidcraft-unraid-upstream-7b90a309-eeecfc0a.tar
+(301126656 bytes, SHA256 84ffc9097ebd507d0def36912750f6c9cb919d74a4e91dbbda4ff9dbd9d86981).
+
+The development instance retained its volume, token and security settings and
+reopened the public sample read-only. Obsolete owned build resources were retired.
+Two validated archives, the rollback image and private backups remain.
+
 ## 2026-11-12 fixed 0.40.1 snapshot
 
 Selected 9fd103a0f3d3232052c42a7e580e97c0c4686011 once, 394 commits after e8e73e11, on codex/unraid-mcp-web.
