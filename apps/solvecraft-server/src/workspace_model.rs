@@ -99,7 +99,8 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
             "component.insert_design" | "component.relink" | "component.update_links" | "component.replace_with_link" | "component.links" => {
                 out.push(FileOperation::ReadSources)
             }
-            "pointcloud.insert"
+            "file.verify"
+            | "pointcloud.insert"
             | "inspect.compare_picture"
             | "render.hdr.inspect"
             | "render.settings.capture_hdr"

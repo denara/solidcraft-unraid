@@ -93,12 +93,43 @@ fn render_file_fields(root: &Path, value: &mut Value, depth: usize) -> Result<()
     Ok(())
 }
 
+fn check_open(args: &Value) -> Result<(), String> {
+    if let Some(ext) = args.get("path").and_then(Value::as_str).and_then(|name| Path::new(name).extension()).and_then(|ext| ext.to_str())
+        && ["kicad_pcb", "kicad_pro"].iter().any(|kind| ext.eq_ignore_ascii_case(kind))
+    {
+        return Err("KiCad opens can load external component files; import a STEP export through the network gateway".into());
+    }
+    Ok(())
+}
+
+fn check_save(args: &Value) -> Result<(), String> {
+    if args.get("sign").and_then(Value::as_bool) == Some(true) || args.get("signing_key").is_some_and(|key| !key.is_null()) {
+        return Err("signing with local keys is unavailable through the network gateway".into());
+    }
+    Ok(())
+}
+
 pub fn prepare_tool(root: &Path, tool: &str, value: &mut Value) -> Result<(), String> {
     match tool {
         "crash_reports" => Err("shared desktop crash reports are unavailable through the network gateway".into()),
-        "open" | "save" | "export" | "screenshot" => file_fields(root, value),
+        "open" => {
+            check_open(value)?;
+            file_fields(root, value)
+        }
+        "save" => {
+            check_save(value)?;
+            file_fields(root, value)
+        }
+        "export" | "screenshot" => file_fields(root, value),
         "compare_picture" => file_operand(root, value, "reference"),
-        "execute" => commands(root, value, 0),
+        "execute" => {
+            if let Some(command) = value.get_mut("command")
+                && let Some(id) = command.as_str().filter(|id| id.contains('.'))
+            {
+                *command = Value::String(id.to_ascii_lowercase());
+            }
+            commands(root, value, 0)
+        }
         "batch" => {
             // The stdio worker can read steps from disk, where the gateway cannot
             // preflight the exact paths, revisions and leases of each operation.
@@ -145,7 +176,10 @@ fn normalize_batch_step(step: &mut Value) -> Result<(), String> {
         }
         "save" | "open" | "export" | "new_design" => {
             let (mapped, keys): (&str, &[&str]) = match command.as_str() {
-                "save" => ("file.save", &["path", "format", "overwrite"]),
+                "save" => {
+                    check_save(&args)?;
+                    ("file.save", &["path", "format", "overwrite"])
+                }
                 "open" => ("doc.open", &["path", "up", "names"]),
                 "export" => ("file.export", &["path", "format", "bodies", "mesh_prefix", "effort", "velocity"]),
                 _ => ("file.new", &["name"]),
@@ -155,7 +189,7 @@ fn normalize_batch_step(step: &mut Value) -> Result<(), String> {
         }
         _ => (command.as_str(), args),
     };
-    object.insert("command".into(), Value::String(mapped.to_owned()));
+    object.insert("command".into(), Value::String(if mapped.contains('.') { mapped.to_ascii_lowercase() } else { mapped.to_owned() }));
     object.insert("params".into(), params);
     Ok(())
 }
@@ -178,6 +212,14 @@ fn commands(root: &Path, value: &mut Value, depth: usize) -> Result<(), String> 
                     || command.eq_ignore_ascii_case("file.import_cache_clear")
             }) {
                 return Err("plugins and import-cache administration are unavailable through the network gateway".into());
+            }
+            match object.get("command").and_then(Value::as_str) {
+                Some(id) if id == "file.gpg_keys" || id.starts_with("settings.profile.") => {
+                    return Err("desktop signing keys and settings profiles are unavailable through the network gateway".into());
+                }
+                Some("doc.open") => check_open(object.get("params").unwrap_or(&Value::Null))?,
+                Some("file.save" | "file.save_as") => check_save(object.get("params").unwrap_or(&Value::Null))?,
+                _ => {}
             }
             // Reload resolves a persisted locator from the design, not an explicit
             // project-relative path that the gateway can preflight.
@@ -462,6 +504,29 @@ mod tests {
         let mut explicit = json!({"command":"pointcloud.insert","params":{"path":"scan.ply"}});
         prepare_tool(&root, "execute", &mut explicit).unwrap();
         assert_eq!(explicit["params"]["path"], json!(root.join("scan.ply")));
+    }
+
+    #[test]
+    fn desktop_file_actions_are_refused_before_worker_dispatch() {
+        let root = std::env::temp_dir();
+        assert!(prepare_tool(&root, "open", &mut json!({"path":"board.KICAD_PCB"})).is_err());
+        assert!(prepare_tool(&root, "save", &mut json!({"path":"part.sc","sign":true})).is_err());
+        assert!(prepare_tool(&root, "save", &mut json!({"path":"part.sc","sign":false,"overwrite":true})).is_ok());
+
+        let mut direct = json!({"command":"FILE.VERIFY","params":{"path":"part.sc"}});
+        prepare_tool(&root, "execute", &mut direct).unwrap();
+        assert_eq!(direct["command"], "file.verify");
+        assert_eq!(direct["params"]["path"], root.join("part.sc").to_str().unwrap());
+        for command in [
+            json!({"command":"DOC.OPEN","params":{"path":"board.kicad_pro"}}),
+            json!({"command":"FILE.GPG_KEYS"}),
+            json!({"command":"SETTINGS.PROFILE.EXPORT","params":{"path":"profile.json"}}),
+            json!({"command":"FILE.SAVE_AS","params":{"path":"part.sc","signing_key":"test"}}),
+        ] {
+            assert!(prepare_tool(&root, "execute", &mut command.clone()).is_err());
+            assert!(prepare_tool(&root, "batch", &mut json!({"commands":[command]})).is_err());
+        }
+        assert!(prepare_tool(&root, "batch", &mut json!({"commands":[{"id":"save","params":{"path":"part.sc","sign":true}}]})).is_err());
     }
 
     #[test]

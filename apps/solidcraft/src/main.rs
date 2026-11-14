@@ -1382,7 +1382,7 @@ fn main() -> eframe::Result {
                     // the files given at launch included.
                     solidcraft_ui_egui::open_elsewhere::start(app);
                     for f in &files {
-                        app.open_path_async(f);
+                        app.open_chosen_file(f);
                     }
                     // No file and no sample: the empty design takes Units of new designs (#1205).
                     // An opened file and the sample part keep the units they were saved or built with.
