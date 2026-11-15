@@ -1195,7 +1195,8 @@ mod web {
             DESIGN_SHOWN.with(|d| d.set(solidcraft_ui_egui::toolbar::design_shown(&self.app)));
         }
         fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
-            // First, so everything after sees the buttons the browser holds.
+            // The browser tracker also handles real window blur. Eframe's focus events
+            // include focus moving between the canvas and its hidden text input.
             crate::mouse_buttons::reconcile(&self.mouse_buttons, ctx, raw);
             let now = raw.time.unwrap_or_else(|| ctx.input(|i| i.time));
             if let Some(delay) = self.wheel_gestures.update(raw, now) {

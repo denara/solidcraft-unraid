@@ -17,7 +17,7 @@
 //! solidcraft-cli recipe <recipe.json>                         translate an oracle recipe to a script
 //! solidcraft-cli oracle <case-dir>...                         replay recipes and compare with expected.json
 //! solidcraft-cli kernel-cases [--json] [--dumps=DIR] [--validation=MODE] <case-dir>... the kernel regression rig (tests/kernel-cases)
-//! solidcraft-cli mcp [--headless] [--in design|script] [--connect HOST:PORT [--token T]] [--allow-path DIR]... [--allow-any-path] [--quiet]
+//! solidcraft-cli mcp [--headless] [--in design|script] [--connect HOST:PORT [--token T]] [--allow-path DIR]... [--allow-any-path] [--require-allow-path] [--quiet]
 //!                    [--param-check off|warn|strict] [--compact]
 //!                                                             MCP server on stdio (docs/mcp.md)
 //! solidcraft-cli mcp setup [--dry-run] [--client NAME] [--live] (alias: mcp install) add it to OpenCode, Claude Desktop, Claude Code, Cursor
@@ -92,7 +92,7 @@ const USAGE_KERNEL_CASES: &str = "  solidcraft-cli kernel-cases <case-dir>... [-
 const USAGE_FUZZ: &str =
     "  solidcraft-cli fuzz [--from N] [--count N] [--jobs J] [--timeout S] [--steps N] [--minimise] [--out DIR] [--report FILE]\n";
 /// `mcp`'s lines in the usage.
-const USAGE_MCP: &str = "  solidcraft-cli mcp [--headless] [--in design.sc|script.json] [--connect 127.0.0.1:PORT [--token T]] [--allow-path DIR]... [--allow-any-path]\n                     [--param-check off|warn|strict] [--render-gpu] [--quiet] [--compact]\n      (--compact, SOLIDCRAFT_MCP_COMPACT=1 or the app's Preferences › AI (with --connect): compact tool output for\n       agents: inspect_design summarises sketches and takes `sketches` by name and a `bodies` filter, and tool JSON\n       is not pretty-printed; off by default)\n  solidcraft-cli mcp setup [--dry-run] [--client opencode|claude-desktop|claude-code|cursor] [--live]\n      (adds a `solidcraft` server, with this program's path, to each installed AI client; --live adds `solidcraft-live` for the running app; alias: mcp install)\n";
+const USAGE_MCP: &str = "  solidcraft-cli mcp [--headless] [--in design.sc|script.json] [--connect 127.0.0.1:PORT [--token T]] [--allow-path DIR]... [--allow-any-path] [--require-allow-path]\n                     [--param-check off|warn|strict] [--render-gpu] [--quiet] [--compact]\n      (--compact, SOLIDCRAFT_MCP_COMPACT=1 or the app's Preferences › AI (with --connect): compact tool output for\n       agents: inspect_design summarises sketches and takes `sketches` by name and a `bodies` filter, and tool JSON\n       is not pretty-printed; off by default)\n  solidcraft-cli mcp setup [--dry-run] [--client opencode|claude-desktop|claude-code|cursor] [--live]\n      (adds a `solidcraft` server, with this program's path, to each installed AI client; --live adds `solidcraft-live` for the running app; alias: mcp install)\n";
 /// `crashes`'s lines in the usage.
 const USAGE_CRASHES: &str = "  solidcraft-cli crashes [list [--json] | show <id> | replay <id> | dir | clear [<id>]]\n";
 /// `licences`'s lines in the usage.
@@ -955,11 +955,29 @@ fn cmd_mcp(args: &[String]) -> Result<(), String> {
     if options.compact {
         eprintln!("solidcraft mcp: compact output (inspect_design summarises sketches; tool JSON is not pretty-printed)");
     }
-    let scope = (!args.iter().any(|a| a == "--allow-any-path"))
-        .then(|| solidcraft_mcp::agent_scope(flags(args, "--allow-path").into_iter().map(std::path::PathBuf::from)));
-    if !args.iter().any(|a| a == "--quiet")
-        && let Some(s) = &scope
-    {
+    let allowed: Vec<std::path::PathBuf> = flags(args, "--allow-path").into_iter().map(std::path::PathBuf::from).collect();
+    let scope = (!args.iter().any(|a| a == "--allow-any-path")).then(|| solidcraft_mcp::agent_scope(allowed.iter().cloned()));
+    let quiet = args.iter().any(|a| a == "--quiet");
+    if let Some(s) = &scope {
+        // A folder that was given but can't be used is said so (#16662); with --require-allow-path, one that leaves the
+        // agent with nothing it asked for stops the start rather than serving a scope it didn't mean.
+        let ignored: Vec<&solidcraft_engine::io::vfs::RejectedRoot> = s.rejected().iter().filter(|r| allowed.contains(&r.path)).collect();
+        if !quiet {
+            for r in &ignored {
+                eprintln!("solidcraft mcp: allow-path {} ignored: {}", r.path.display(), r.reason);
+            }
+        }
+        if !allowed.is_empty()
+            && args.iter().any(|a| a == "--require-allow-path")
+            && ignored.len() == allowed.iter().collect::<std::collections::BTreeSet<_>>().len()
+        {
+            return Err(
+                "mcp: every --allow-path folder is missing or unusable (see above); create the folder or fix the path (without --require-allow-path the server starts with the other folders)"
+                    .into(),
+            );
+        }
+    }
+    if !quiet && let Some(s) = &scope {
         let roots: Vec<String> = s.roots().iter().map(|r| r.display().to_string()).collect();
         solidcraft_engine::note!(
             "solidcraft mcp: files limited to {} and the folders of designs opened or saved here (--allow-path DIR adds one, --allow-any-path lifts the limit)",

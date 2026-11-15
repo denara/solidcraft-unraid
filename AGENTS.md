@@ -1,14 +1,15 @@
 # SolidCraft: instructions for agents
 
-Clean-room, pure-Rust parametric CAD. Task skills below; humans: CONTRIBUTING.md.
+Clean-room, pure-Rust CAD. See CONTRIBUTING.md.
 
 ## This Unraid fork
-Read [mandatory fork rules](docs/unraid-agent-rules.md) first. Preserve `codex/unraid-mcp-web`, private config, HTTP MCP and independent web/Workspace; no unsafe bridges. Updates: [update-solvecraft-unraid](.agents/skills/update-solvecraft-unraid/SKILL.md). Validated baseline: `5a986bf6bbd45829ab3710ce379249e46bcc7611`. Fork rules override upstream defaults.
+Read [fork rules](docs/unraid-agent-rules.md) first. Preserve `codex/unraid-mcp-web`, private config, HTTP MCP and independent web/Workspace; no unsafe bridges. Updates: [update-solvecraft-unraid](.agents/skills/update-solvecraft-unraid/SKILL.md). Validated baseline: `5a986bf6bbd45829ab3710ce379249e46bcc7611`. Fork rules override upstream.
 
 ## Start here
 See ROADMAP.md, CONTRIBUTING.md, labelled issues and docs/architecture.md. Ask for user-visible decisions.
 
 ## Hard rules (what enforces each)
+- Integrations with other platforms need the maintainer's yes first: `skills/solidcraft-packaging/SKILL.md`.
 - Independent: never copy another product's code, icons, text or templates; never drive or take data from commercial CAD. `skills/solidcraft-ground-rules/SKILL.md`.
 - No GPL/LGPL/AGPL code, not even reading it (OpenCASCADE, FreeCAD, SolveSpace, CadQuery, LibreCAD, QCAD): `cargo xtask licences --check`.
 - Every asset is original or openly licensed with a row in ATTRIBUTION.md; read `assets/AGENTS.md` before icon work: `cargo xtask assets`, `cargo xtask icons`.
@@ -20,7 +21,7 @@ See ROADMAP.md, CONTRIBUTING.md, labelled issues and docs/architecture.md. Ask f
 - One outer UI container, one camera path (`navigation::handle`), colours from theme tokens: `cargo xtask ui-containers`.
 - Application code is Rust only and builds for wasm: `cargo xtask wasm`, `cargo xtask web-offline-test`.
 - The product name is SolidCraft; the old name lives in `docs/compatibility.md`.
-- Sorted lists (message catalogs, `mod` lines, languages) stay sorted: `cargo xtask lists`. Never edit generated files (`docs/features.md`, `THIRD-PARTY-LICENSES.txt`) in a PR.
+- Lists (message catalogs, `mod` lines, languages) stay sorted: `cargo xtask lists`. Never edit generated files (`docs/features.md`, `THIRD-PARTY-LICENSES.txt`) in a PR.
 - A design-format change is ONE new file in `crates/doc/src/format/pending/`: `scripts/test-format-pending.sh`.
 - A command has I/O schemas (soon required; `crates/engine/src/schema/unconverted.txt` only shrinks): `skills/solidcraft-commands/SKILL.md`.
 - New UI strings go in `assets/locales/pending/<slug>.json`, ATTRIBUTION rows in `attribution/pending/<slug>.md`: `cargo xtask lists`.

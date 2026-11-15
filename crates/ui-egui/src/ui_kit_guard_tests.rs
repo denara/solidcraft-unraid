@@ -9,6 +9,9 @@ fn test_only(attrs: &[syn::Attribute]) -> bool {
 /// No caller may bypass the kit for a matching control.
 const ALLOWED: &[(&str, usize, &str)] = &[];
 
+// These apps render with egui. The Workspace uses browser DOM controls.
+const EGUI_APPS: &[&str] = &["solidcraft", "solidcraft-web"];
+
 #[derive(Default)]
 struct Guard {
     found: Vec<String>,
@@ -143,7 +146,10 @@ fn all_ui_and_apps_use_ui_kit_controls() {
             check(&path, &name, &mut failures);
         }
     }
-    scan(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps"), "apps/", &mut failures);
+    let apps = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps");
+    for app in EGUI_APPS {
+        scan(&apps.join(app).join("src"), &format!("apps/{app}/src/"), &mut failures);
+    }
     failures.sort();
     assert!(failures.is_empty(), "Use crate::ui_kit controls:\n{}", failures.join("\n"));
 }
@@ -569,7 +575,10 @@ fn all_ui_and_apps_use_kit_checkboxes_and_the_single_check_glyph() {
     let mut failures = Vec::new();
     scan(&root.join("src"), &kit, &mut failures);
     scan(&kit, &kit, &mut failures);
-    scan(&root.join("../../apps"), &kit, &mut failures);
+    let apps = root.join("../../apps");
+    for app in EGUI_APPS {
+        scan(&apps.join(app).join("src"), &kit, &mut failures);
+    }
     failures.sort();
     assert!(failures.is_empty(), "Checkboxes only via ui_kit::checkbox; no caller allowances:\n{}", failures.join("\n"));
 }
