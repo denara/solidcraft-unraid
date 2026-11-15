@@ -3,7 +3,7 @@
 Clean-room, pure-Rust CAD. See CONTRIBUTING.md.
 
 ## This Unraid fork
-Read [fork rules](docs/unraid-agent-rules.md) first. Preserve `codex/unraid-mcp-web`, private config, HTTP MCP and independent web/Workspace; no unsafe bridges. Updates: [update-solvecraft-unraid](.agents/skills/update-solvecraft-unraid/SKILL.md). Validated baseline: `5a986bf6bbd45829ab3710ce379249e46bcc7611`. Fork rules override upstream.
+Read [fork rules](docs/unraid-agent-rules.md) first. Preserve `codex/unraid-mcp-web`, private config, HTTP MCP and independent web/Workspace; no unsafe bridges. Updates: [update-solvecraft-unraid](.agents/skills/update-solvecraft-unraid/SKILL.md). Validated baseline: `c71236a40de9f36713194df624663a252d0f71a3`. Fork rules override upstream.
 
 ## Start here
 See ROADMAP.md, CONTRIBUTING.md, labelled issues and docs/architecture.md. Ask for user-visible decisions.

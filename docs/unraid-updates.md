@@ -1,5 +1,61 @@
 # Validated container updates
 
+## 2026-11-15 fixed 0.42.0 snapshot
+
+Selected c71236a40de9f36713194df624663a252d0f71a3 once, 179 commits after 5a986bf6, on codex/unraid-mcp-web.
+Fork main was already an ancestor. See [SolidCraft upstream](https://github.com/bherbruck/solidcraft)
+for application features and changes.
+
+The headless CLI retains quiet gateway operation and accepts the new
+`--require-allow-path` option. The gateway retains its existing project-scoped
+reads and revision-checked writes, and refuses desktop plugin administration,
+including removal. The upstream CLI changes were checked with a usable and an
+unavailable disposable folder, without emitting the latter path in quiet mode.
+
+Browser CAD keeps mouse-button state when focus moves between the canvas and
+its hidden text input. The first Chromium check caught a regression from using
+the native window recovery in the browser. The browser's existing tracker
+now owns this recovery and still clears the buttons on real window blur.
+The public format-55 and format-56 designs opened at 24,000 mm³. A separate
+format-57 copy reopened at the same volume, and prior files remained byte-identical.
+The migration proof checked all five pending format changes and linked cosmetic
+threads. Keep the pre-update backup when rolling back after saving format 57.
+
+The fixed generated commit skipped upstream CI. Its immediate source parent
+passed [merge-queue CI](https://github.com/bherbruck/solidcraft/actions/runs/43689304129).
+The [generator workflow](https://github.com/bherbruck/solidcraft/actions/runs/43694302676)
+produced the selected commit. An earlier [nightly run](https://github.com/bherbruck/solidcraft/actions/runs/43685535184)
+failed in 15 matrix shards. Its 106 failed action keys all occurred in the
+previously recorded nightly, with changed messages for eight of them.
+Repository formatting, attribution, licences, layering, Clippy, Wasm and doc
+tests passed. The unbounded native runner reached the test container's process
+limit, so the affected cases and six blocked test binaries were repeated with
+bounded concurrency. The retry ran 368 tests, with 355
+passing and 13 matching the upstream known-failure
+list. The Windows-checkout plugin fixture now normalizes line endings before
+editing the test input, and the egui control guards apply to the egui apps.
+Those three cases passed after correction. The isolated fork checks covered the
+merged code.
+The fork ran one grouped Cargo test compilation
+in 971.4 seconds and 163 passing test
+executions in 6.2 seconds. Native release, browser CAD and
+Workspace builds took 912,
+1355 and 5
+seconds. Only the browser and Workspace artifacts were rebuilt after the focus fix.
+MCP, Workspace, project, upload, observer, ZIP and restart checks passed
+on a fresh test volume. Chromium verified browser CAD, offline support, all three
+Workspace locales and the separate CAD browsing context. The catalog template
+and icon stayed unchanged.
+
+Source 6b57e015ca29c497e8f4838b40e148b0958f9279 passed the [container workflow](https://github.com/denara/solidcraft-unraid/actions/runs/43736986508).
+The immutable tag and latest were pulled anonymously and agree on Linux amd64
+digest sha256:6c3fb1f28dd76026070d16714d718c94e1f3112ada0886683d5e952952214022. Transfer archive solidcraft-unraid-upstream-c71236a4-6b57e015.tar
+(313650688 bytes, SHA256 ba01158c7067e8f6eb7068408ee31c8e9a380cccbb20c00f1853d0548de2ca8e).
+
+The development instance retained its volume, token and security settings and
+reopened the public sample read-only. Obsolete owned build resources were retired.
+Two validated archives, the rollback image and private backups remain.
+
 ## 2026-11-14 fixed 0.42.0 snapshot
 
 Selected 5a986bf6bbd45829ab3710ce379249e46bcc7611 once, 218 commits after 7b90a309, on codex/unraid-mcp-web.
