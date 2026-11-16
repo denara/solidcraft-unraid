@@ -1,5 +1,42 @@
 # Validated container updates
 
+## 2026-11-16 fixed 0.43.0 snapshot
+
+Selected df92feda8992762c18312f52ed0ddd6f251be919 once, 226 commits after c71236a4, on codex/unraid-mcp-web.
+Fork main was already an ancestor. See [SolidCraft upstream](https://github.com/tangency-labs/solidcraft)
+for application features and changes.
+
+The merge keeps LF rules for the container tool installer and adopts the upstream
+LF rule for WAT fixtures. The Windows move preference uses the vendored winit
+adapter without restoring the native frame APIs removed by this fork. The
+gateway rejects desktop issue reporting before a direct or batch worker call.
+
+Public designs from formats 55, 56 and 57 opened at 24,000 mm³. Format-58
+round-trip and format-fold checks passed, and older source bytes were preserved.
+The gateway checked revision-protected DXF and GLB output and opened the DXF as
+a new unsaved drawing. Take the pre-update backup into account when rolling back
+after saving format 58.
+
+The [exact upstream CI](https://github.com/tangency-labs/solidcraft/actions/runs/43828080683) passed the selected checks. Local
+bounded CI ran 116 native test binaries in
+4885.5 seconds, with 13 failures on
+the upstream known-failure list and no new failures. Wasm and doc checks passed.
+Native release, browser CAD and Workspace builds took
+920, 1433 and
+8 seconds. Isolated MCP, Workspace,
+file actions, observer, upload and restart proofs passed. Chromium verified
+offline CAD, Workspace languages and a separate CAD browsing context.
+The catalog template and original icon stayed unchanged.
+
+Source 9a38f34610624bebf41c769d0e589c1d12841b87 passed the [container workflow](https://github.com/denara/solidcraft-unraid/actions/runs/43855015366).
+The immutable tag and latest were pulled anonymously and agree on Linux amd64
+digest sha256:d540fd669508eeac5fd51cfa1f96f22f79a2fb88f558f0f5614ed191f1484807. Transfer archive solidcraft-unraid-upstream-df92feda-9a38f346.tar
+(318141440 bytes, SHA256 2227b7f6652b58abe5a93e165701db52f088e0eaad080985fb219c284581b3d4).
+
+The development instance retained its volume, token and settings and reopened
+the public sample read-only. Obsolete owned build resources were removed.
+Two validated archives, the rollback image and private backups remain.
+
 ## 2026-11-15 fixed 0.42.0 snapshot
 
 Selected c71236a40de9f36713194df624663a252d0f71a3 once, 179 commits after 5a986bf6, on codex/unraid-mcp-web.
