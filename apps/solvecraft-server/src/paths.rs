@@ -217,6 +217,9 @@ fn commands(root: &Path, value: &mut Value, depth: usize) -> Result<(), String> 
                 Some(id) if id == "file.gpg_keys" || id.starts_with("settings.profile.") => {
                     return Err("desktop signing keys and settings profiles are unavailable through the network gateway".into());
                 }
+                Some(id) if id.eq_ignore_ascii_case("diagnostics.report_issue") || id.eq_ignore_ascii_case("diagnostics.report_issue_status") => {
+                    return Err("desktop issue reporting is unavailable through the network gateway".into());
+                }
                 Some("doc.open") => check_open(object.get("params").unwrap_or(&Value::Null))?,
                 Some("file.save" | "file.save_as") => check_save(object.get("params").unwrap_or(&Value::Null))?,
                 _ => {}
@@ -449,10 +452,18 @@ mod tests {
         assert!(commands(&root, &mut escape, 0).is_err());
     }
     #[test]
-    fn desktop_plugins_and_import_cache_commands_are_rejected_before_dispatch() {
+    fn desktop_only_commands_are_rejected_before_dispatch() {
         let root = std::env::temp_dir();
-        for id in ["plugin.inspect", "plugin.install", "plugin.list", "PLUGIN.RUN", "file.import_cache_clear"] {
-            let params = json!({"path":"example.zip"});
+        for id in [
+            "plugin.inspect",
+            "plugin.install",
+            "plugin.list",
+            "PLUGIN.RUN",
+            "file.import_cache_clear",
+            "diagnostics.report_issue",
+            "DIAGNOSTICS.REPORT_ISSUE_STATUS",
+        ] {
+            let params = json!({"path":"example.zip","title":"Test report","report":"test-report"});
             let mut direct = json!({"command":id,"params":params});
             let mut batch = json!({"commands":[{"id":id,"params":params}]});
             let mut wrapped = json!({"commands":[{"command":"execute","params":{"command":id,"params":params}}]});
