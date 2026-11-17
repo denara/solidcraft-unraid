@@ -1,5 +1,48 @@
 # Validated container updates
 
+## 2026-11-17 fixed 0.44.0 snapshot
+
+Selected 49efdea291cee2a3c898edf6edd1df6248a310c4 once, 258 commits after df92feda, on codex/unraid-mcp-web.
+Fork main was already an ancestor. See [SolidCraft upstream](https://github.com/tangency-labs/solidcraft)
+for application features and changes.
+
+The first isolated candidate refused the oldest filename extension. The fork
+restores the design alias, browser recovery and preference fallbacks, and retains
+the legacy CLI binary and MCP resource URIs. The new version tool reports the headless
+build through HTTP MCP. The gateway refuses desktop file copying, moving,
+trashing, plugin imports and Gerber set scans before direct and batch dispatch.
+Workspace confirmation, file gates and independent browser CAD stay available.
+The merge retained the fork's native macOS source boundary, incorporated the
+upstream mirror and ribbon behavior, and regenerated the shipped licence notices.
+
+Public designs from formats 55 through 58 opened at 24,000 mm³. The format-59
+round trip preserved the model and the bytes of the older test files. DXF
+revision protection and opening a DXF as an unsaved design passed. Preserve the
+backup before rolling back from a format-59 save.
+
+The [exact upstream merge-queue CI](https://github.com/tangency-labs/solidcraft/actions/runs/44035066901) passed Linux Clippy, doc,
+reference and Wasm checks. Its native job recorded 17,484 passing cases and 13
+known failures. The local fork compiled selected Rust test targets once in
+1280.0 seconds and ran 184 passing cases in
+11.1 seconds. The disposable worker once hit a transient
+file-busy error at process launch. Its exact case and all nine session tests
+passed when run serially. Browser CAD, Workspace, MCP authentication,
+isolation, revisions, upload, observer and restart checks passed against the
+disposable container. Chromium also verified offline CAD, all Workspace
+languages and the separate CAD context. Native, CAD web and Workspace builds took
+660, 1229 and
+4 seconds. The catalog XML and icon
+matched the public versions.
+
+Source 45708719726dee0916388a5807e6124ad7c4875e passed the [container workflow](https://github.com/denara/solidcraft-unraid/actions/runs/44063005082).
+The immutable tag and latest were pulled anonymously and agree on Linux amd64
+digest sha256:ba2d3e2b88b158b47040364c2effcfb3acc1c5835fa3eed3fa73b7f23c7d29a7. Transfer archive solidcraft-unraid-upstream-49efdea2-45708719.tar
+(327653888 bytes, SHA256 38a88a5338b905bcc25b0c201e726e790177caf5d751343d902bacd25f812df5).
+
+The development instance retained its volume, token and settings and reopened
+the public sample read-only. Obsolete owned build resources were removed.
+Two validated archives, the rollback image and private backups remain.
+
 ## 2026-11-16 fixed 0.43.0 snapshot
 
 Selected df92feda8992762c18312f52ed0ddd6f251be919 once, 226 commits after c71236a4, on codex/unraid-mcp-web.
