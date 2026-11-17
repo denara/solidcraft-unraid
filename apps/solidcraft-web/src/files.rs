@@ -229,7 +229,9 @@ async fn write_file(name: &str, bytes: &[u8]) -> Result<(), String> {
 async fn remove_file(name: &str) -> Result<(), String> {
     if local_only() {
         let st = local()?;
-        st.remove_item(&format!("{LEGACY_LOCAL_PREFIX}{name}")).map_err(err)?;
+        if crate::channel::current().is_empty() {
+            st.remove_item(&format!("{LEGACY_LOCAL_PREFIX}{name}")).map_err(err)?;
+        }
         return st.remove_item(&crate::channel::key(&format!("{LOCAL_PREFIX}{name}"))).map_err(err);
     }
     let dir = root().await?;

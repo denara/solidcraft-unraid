@@ -13,8 +13,7 @@ workspace = true
 name = "solidcraft-cli"
 path = "src/main.rs"
 
-# Compatibility alias for the CLI's former name: forwards to solidcraft-cli with a deprecation
-# note on stderr. Shipped in every package for at least one release.
+# Retain the previous CLI name for existing Unraid installations and automation.
 [[bin]]
 name = "solvecraft-cli"
 path = "src/alias.rs"

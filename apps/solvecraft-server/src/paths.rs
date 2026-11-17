@@ -220,6 +220,10 @@ fn commands(root: &Path, value: &mut Value, depth: usize) -> Result<(), String> 
                 Some(id) if id.eq_ignore_ascii_case("diagnostics.report_issue") || id.eq_ignore_ascii_case("diagnostics.report_issue_status") => {
                     return Err("desktop issue reporting is unavailable through the network gateway".into());
                 }
+                Some("file.copy" | "file.move" | "file.trash" | "file.import" | "file.insert_gerber" | "file.gerber_files") => {
+                    // Library changes carry their own file effects; Gerber scans sibling files and plugin imports dispatch outside this gate.
+                    return Err("desktop file-library and import commands are unavailable through the network gateway".into());
+                }
                 Some("doc.open") => check_open(object.get("params").unwrap_or(&Value::Null))?,
                 Some("file.save" | "file.save_as") => check_save(object.get("params").unwrap_or(&Value::Null))?,
                 _ => {}
@@ -462,6 +466,12 @@ mod tests {
             "file.import_cache_clear",
             "diagnostics.report_issue",
             "DIAGNOSTICS.REPORT_ISSUE_STATUS",
+            "FILE.COPY",
+            "file.move",
+            "file.trash",
+            "file.import",
+            "file.insert_gerber",
+            "file.gerber_files",
         ] {
             let params = json!({"path":"example.zip","title":"Test report","report":"test-report"});
             let mut direct = json!({"command":id,"params":params});
