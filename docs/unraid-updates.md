@@ -1,5 +1,45 @@
 # Validated container updates
 
+## 2026-11-18 fixed SolidCraft snapshot
+
+Selected 6bb23d20ac742aaca819354d4bb95930186df48e once after 49efdea2 on codex/unraid-mcp-web. Fork main was
+already an ancestor. See [SolidCraft upstream](https://github.com/tangency-labs/solidcraft)
+for application features and changes.
+
+The gateway protects SVG and PNG sheet exports and JSON template output with
+the shared file revisions, including batches. Explicit drawing inputs are
+confined to the selected project. The gateway excludes dynamic plugin tools.
+The live observer carries the upstream section planes into its detached display
+copy. Browser CAD keeps pointer state when focus moves between elements.
+
+Public designs from formats 55 through 59 opened at 24,000 mm³. The format-60
+round trip preserved the volume and the original file bytes. DXF opens as an
+unsaved design. Keep the private backup for rollback after writing format 60.
+
+The [exact upstream merge-queue CI](https://github.com/tangency-labs/solidcraft/actions/runs/44258107154) passed Linux Clippy, doc,
+reference and Wasm checks. Its native job recorded 19,433
+passes, 21 known failures and no new failures.
+The local fork recorded 188 passing cases in 10.5
+seconds from one grouped test selection. The first compilation exposed two
+observer fixture initializers that needed the upstream BOM field. The completed
+retry reused the first run's artifacts and compiled in 28.4
+seconds. The fixture-only change left the already tested production code intact.
+The disposable container passed Workspace,
+MCP authentication and isolation, revisions, upload, observer and restart
+checks. Chromium verified offline CAD, language selection and a separate CAD
+context. Native, CAD web and Workspace builds took 1073,
+1777 and 8
+seconds. The catalog XML and icon matched the public copies.
+
+Source 1230e49099f147c11e85303a0092c99b5a9d515a passed the [container workflow](https://github.com/denara/solidcraft-unraid/actions/runs/44282106927).
+The immutable tag and latest were pulled anonymously and agree on Linux amd64
+digest sha256:623bb2f20ce5e344f655bbf559eef3bc1d7ba3e1e9d2e1f05336fcfe3ec33c6f. Transfer archive solidcraft-unraid-upstream-6bb23d20-1230e490.tar
+(366696960 bytes, SHA256 0aeb7cb0b59da00a3cefc743d5a1aa6fbdc0961d95b04c40be327729b36824aa).
+
+The development instance retained its volume, token and settings and reopened
+the public sample read-only. Two validated archives, the rollback image and
+private backups remain.
+
 ## 2026-11-17 fixed 0.44.0 snapshot
 
 Selected 49efdea291cee2a3c898edf6edd1df6248a310c4 once, 258 commits after df92feda, on codex/unraid-mcp-web.
