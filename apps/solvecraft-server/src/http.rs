@@ -188,7 +188,7 @@ async fn mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, bytes: Byte
             if method == "tools/list"
                 && let Some(tools) = reply.pointer_mut("/result/tools").and_then(Value::as_array_mut)
             {
-                tools.retain(|tool| tool.get("name").and_then(Value::as_str) != Some("crash_reports"));
+                tools.retain(|tool| tool.get("plugin").is_none() && tool.get("name").and_then(Value::as_str) != Some("crash_reports"));
                 for definition in tools.iter_mut() {
                     if definition.get("name").and_then(Value::as_str) == Some("batch") {
                         if let Some(properties) = definition.pointer_mut("/inputSchema/properties").and_then(Value::as_object_mut) {

@@ -27,7 +27,7 @@ fn completed(backend: &mut Headless) -> Result<Value, String> {
 fn unsaved_preview_preserves_document_camera_history_and_dirty_state() {
     let mut backend = Headless::default();
     backend.call("engine.execute", json!({"command":"solid.box","params":{"length":10,"width":20,"height":30}})).unwrap();
-    backend.session.section = Some((Vec3::ZERO, Vec3::Z));
+    backend.session.section = vec![solidcraft_engine::SectionPlane { id: 1, origin: Vec3::ZERO, normal: Vec3::Z }];
     backend.session.analysis = Some(solidcraft_engine::SurfaceAnalysis::Zebra { stripes: 8.0 });
     backend.session.path = Some("not-written-by-observation.solidcraft".into());
     let before = backend.workspace_status();
@@ -37,7 +37,7 @@ fn unsaved_preview_preserves_document_camera_history_and_dirty_state() {
     let redo = backend.session.redo.len();
     let (send, receive) = std::sync::mpsc::channel();
     let capture: Arc<capture::Renderer> = Arc::new(move |scene, _, width, height| {
-        send.send((scene.meshes.len(), scene.clip.is_some(), scene.analysis.is_some())).unwrap();
+        send.send((scene.meshes.len(), !scene.clip.is_empty(), scene.analysis.is_some())).unwrap();
         Ok(capture::Picture { rgba: vec![200; (width * height * 4) as usize], renderer: "cpu" })
     });
     assert_eq!(backend.observer_start(&json!({}), Some(capture)).unwrap()["status"], "rendering");
@@ -144,6 +144,7 @@ fn hostile_view_metadata_and_assembly_expansion_are_bounded_before_rendering() {
         name: "root".into(),
         transform: solidcraft_engine::doc::IDENTITY,
         grounded: false,
+        bom_type: None,
         expressed_moves: Vec::new(),
     });
     doc.occurrences.push(solidcraft_engine::doc::Occurrence {
@@ -153,6 +154,7 @@ fn hostile_view_metadata_and_assembly_expansion_are_bounded_before_rendering() {
         name: "cycle".into(),
         transform: solidcraft_engine::doc::IDENTITY,
         grounded: false,
+        bom_type: None,
         expressed_moves: Vec::new(),
     });
     assert!(placement_budget(&backend.session).is_err());

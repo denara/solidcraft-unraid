@@ -163,6 +163,12 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
                     out.push(FileOperation::Write(path));
                 }
             }
+            "drawing.export" | "drawing.template.save" => {
+                out.push(FileOperation::ReadSources);
+                if let Some(path) = name(root, args)? {
+                    out.push(FileOperation::Write(path));
+                }
+            }
             "diagnostics.profile" => {
                 if let Some(trace) = args.get("trace").and_then(Value::as_str).filter(|path| !path.trim().is_empty()) {
                     let path = relative(root, trace).ok_or("workspace trace file name is not permitted")?;
@@ -192,6 +198,7 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
                     out.push(FileOperation::Write(path));
                 }
             }
+            id if id.starts_with("drawing.") => out.push(FileOperation::ReadSources),
             _ => {}
         }
         Ok(())
@@ -427,6 +434,14 @@ mod tests {
         ] {
             let message = json!({"params":{"name":"execute","arguments":{"command":command,"params":params}}});
             assert!(operations(&root, &message, None).is_err(), "{command}");
+        }
+        for (command, path) in [("drawing.export", "sheet.svg"), ("drawing.export", "sheet.png"), ("drawing.template.save", "template.json")] {
+            let args = json!({"command":command,"params":{"path":path}});
+            let direct = json!({"params":{"name":"execute","arguments":args}});
+            let batched = batch(json!([args]));
+            let expected = vec![FileOperation::ReadSources, FileOperation::Write(path.into())];
+            assert_eq!(operations(&root, &direct, None).unwrap(), expected, "{command}");
+            assert_eq!(operations(&root, &batched, None).unwrap(), expected, "{command}");
         }
         let gif = json!({"params":{"name":"execute","arguments":{"command":"motion.export_animation","params":{"path":"motion.gif"}}}});
         assert_eq!(operations(&root, &gif, None).unwrap(), vec![FileOperation::Write("motion.gif".into())]);

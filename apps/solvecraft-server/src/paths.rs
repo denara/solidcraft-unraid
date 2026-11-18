@@ -112,6 +112,7 @@ fn check_save(args: &Value) -> Result<(), String> {
 pub fn prepare_tool(root: &Path, tool: &str, value: &mut Value) -> Result<(), String> {
     match tool {
         "crash_reports" => Err("shared desktop crash reports are unavailable through the network gateway".into()),
+        name if name.contains('.') => Err("dynamic plugin tools are unavailable through the network gateway; use execute for engine commands".into()),
         "open" => {
             check_open(value)?;
             file_fields(root, value)
@@ -209,6 +210,7 @@ fn commands(root: &Path, value: &mut Value, depth: usize) -> Result<(), String> 
             // The import cache is also internal to the worker, not a user project.
             if object.get("command").and_then(Value::as_str).is_some_and(|command| {
                 command.get(..7).is_some_and(|prefix| prefix.eq_ignore_ascii_case("plugin."))
+                    || command.starts_with("storage.")
                     || command.eq_ignore_ascii_case("file.import_cache_clear")
             }) {
                 return Err("plugins and import-cache administration are unavailable through the network gateway".into());
@@ -260,9 +262,11 @@ fn commands(root: &Path, value: &mut Value, depth: usize) -> Result<(), String> 
             });
             let file_key = match object.get("command").and_then(Value::as_str) {
                 Some("inspect.compare_picture") => Some("reference"),
-                Some("sketch.replace") => Some("file"),
+                Some("sketch.replace" | "drawing.image.add" | "drawing.title_block.logo") => Some("file"),
+                Some("drawing.create") => Some("source"),
                 _ => None,
             };
+            let template = matches!(object.get("command").and_then(Value::as_str), Some("drawing.create" | "drawing.template.apply"));
             let render = object.get("command").and_then(Value::as_str).is_some_and(|id| id.starts_with("render."));
             let profile = object.get("command").and_then(Value::as_str) == Some("diagnostics.profile");
             if !geometry
@@ -275,6 +279,14 @@ fn commands(root: &Path, value: &mut Value, depth: usize) -> Result<(), String> 
                     file_fields(root, params)?;
                     if let Some(key) = file_key {
                         file_operand(root, params, key)?;
+                    }
+                    if template
+                        && params
+                            .get("template")
+                            .and_then(Value::as_str)
+                            .is_some_and(|value| Path::new(value).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("json")))
+                    {
+                        file_operand(root, params, "template")?;
                     }
                     if profile
                         && let Some(trace) = params.get_mut("trace")
@@ -384,6 +396,31 @@ mod tests {
         assert_eq!(geometry["params"]["path"], "l1");
         assert!(prepare_tool(&root, "screenshot", &mut json!({"path":"../escape","command":"solid.sweep"})).is_err());
         assert!(prepare_tool(&root, "execute", &mut json!({"command":"file.save","params":{"path":"../escape","command":"solid.sweep"}})).is_err());
+    }
+
+    #[test]
+    fn drawing_file_operands_stay_in_the_project_in_direct_and_batched_calls() {
+        let root = std::env::temp_dir();
+        for (command, key, file) in [
+            ("drawing.create", "source", "part.sc"),
+            ("drawing.create", "template", "layout.JSON"),
+            ("drawing.template.apply", "template", "layout.json"),
+            ("drawing.image.add", "file", "picture.png"),
+            ("drawing.title_block.logo", "file", "logo.jpg"),
+            ("drawing.template.save", "path", "layout.json"),
+            ("drawing.export", "path", "sheet.svg"),
+        ] {
+            let mut confined = json!({"command":command,"params":{(key):file}});
+            prepare_tool(&root, "execute", &mut confined).unwrap();
+            assert_eq!(confined["params"][key], root.join(file).to_string_lossy().as_ref());
+            let escaped = json!({"command":command,"params":{(key):format!("../{file}")}});
+            assert!(prepare_tool(&root, "execute", &mut escaped.clone()).is_err(), "{command}");
+            assert!(prepare_tool(&root, "batch", &mut json!({"commands":[{"command":"execute","params":escaped}]})).is_err(), "{command}");
+        }
+        let mut builtin = json!({"command":"drawing.create","params":{"template":"iso-a3-part"}});
+        prepare_tool(&root, "execute", &mut builtin).unwrap();
+        assert_eq!(builtin["params"]["template"], "iso-a3-part");
+        assert!(prepare_tool(&root, "local-plugin.example", &mut json!({})).is_err());
     }
 
     #[test]

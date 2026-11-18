@@ -78,7 +78,7 @@ impl Headless {
                 status.get("revision"),
                 s.camera,
                 self.view,
-                s.section,
+                (&s.section, &s.section_folder, s.section_hatch),
                 s.active_sketch,
                 &s.selection,
                 &s.pending_moves,
@@ -251,7 +251,7 @@ fn render(s: &Session, view: StandardView, revision: u64, renderer: &capture::Re
     };
     let mut sampled = 0usize;
     let mut exceeded = false;
-    let scene = solidcraft_engine::view::scene_with_section_and_sketch_sampler(s, &camera, s.section, |sketch, index, plane| {
+    let scene = solidcraft_engine::view::scene_with_section_and_sketch_sampler(s, &camera, &s.section, |sketch, index, plane| {
         if exceeded {
             return Vec::new();
         }

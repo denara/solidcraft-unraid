@@ -131,3 +131,35 @@ fn viewport_ambient_occlusion_compiles_for_glsl() {
         assert!(!output.is_empty());
     }
 }
+
+#[test]
+fn plan_validation_matches_the_packing_refusals() {
+    let plan = TessPlan {
+        surfaces: vec![EvalSurface::Plane {
+            origin: solidcore_tess::vec3(Vec3::ZERO),
+            du: solidcore_tess::vec3(Vec3::X),
+            dv: solidcore_tess::vec3(Vec3::Y),
+        }],
+        faces: vec![solidcore_tess::FacePlan { face: 7, surface: Some(0), ..Default::default() }],
+        ..Default::default()
+    };
+    assert!(validate_plan(&plan).is_ok());
+    assert!(PackedPlans::of(&[&plan]).is_ok());
+    for reason in ["pole", "fixed", "missing surface"] {
+        let mut refused = plan.clone();
+        let face = &mut refused.faces[0];
+        match reason {
+            "pole" => face.poles.push(solidcore_tess::PoleNode { node: 0, rule: solidcore_tess::PoleRule::Averaged }),
+            "fixed" => face.surface = None,
+            _ => face.surface = Some(1),
+        }
+        let check = validate_plan(&refused).unwrap_err();
+        let packed = PackedPlans::of(&[&refused]).unwrap_err();
+        assert_eq!(check.to_string(), packed.to_string(), "{reason}");
+        match reason {
+            "pole" => assert!(matches!(check, GpuError::PoleNodes { face: 7 })),
+            "fixed" => assert!(matches!(check, GpuError::Unsupported(_))),
+            _ => assert!(matches!(check, GpuError::Failed(_))),
+        }
+    }
+}

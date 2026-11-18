@@ -285,6 +285,7 @@ impl Worker {
             .arg("--headless")
             .arg("--allow-path")
             .arg(&config.files)
+            .arg("--require-allow-path")
             .arg("--quiet")
             .current_dir(&config.files)
             .env_remove("SOLVECRAFT_MCP_TOKEN")
