@@ -83,9 +83,12 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
     }
     fn imports_as_new(path: &str) -> bool {
         Path::new(path).extension().and_then(|ext| ext.to_str()).is_some_and(|ext| {
-            ["step", "stp", "igs", "iges", "fcstd", "3dm", "3mf", "stl", "obj", "glb", "gltf", "dxf", "svg", "ply", "xyz", "pts"]
-                .iter()
-                .any(|import| ext.eq_ignore_ascii_case(import))
+            [
+                "step", "stp", "igs", "iges", "fcstd", "3dm", "3mf", "stl", "obj", "glb", "gltf", "usd", "usda", "usdc", "usdz", "dxf", "svg", "ply",
+                "xyz", "pts",
+            ]
+            .iter()
+            .any(|import| ext.eq_ignore_ascii_case(import))
         })
     }
     fn command(root: &Path, id: &str, args: &Value, current: &mut Option<String>, out: &mut Vec<FileOperation>) -> Result<(), String> {
@@ -101,6 +104,8 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
             }
             "file.verify"
             | "pointcloud.insert"
+            | "canvas.insert"
+            | "canvas.decal"
             | "inspect.compare_picture"
             | "render.hdr.inspect"
             | "render.settings.capture_hdr"
@@ -341,7 +346,17 @@ mod tests {
     #[test]
     fn upstream_drawing_open_does_not_plan_an_implicit_native_save_over_the_source() {
         let root = std::env::temp_dir();
-        for path in ["Project/template.svg", "Project/template.dxf", "Project/scan.ply", "Project/scan.xyz", "Project/scan.pts"] {
+        for path in [
+            "Project/template.svg",
+            "Project/template.dxf",
+            "Project/scan.ply",
+            "Project/scan.xyz",
+            "Project/scan.pts",
+            "Project/scene.usd",
+            "Project/scene.USDA",
+            "Project/scene.usdc",
+            "Project/scene.usdz",
+        ] {
             let message = batch(json!([{"command":"doc.open","params":{"path":path}},{"command":"file.save","params":{}}]));
             assert_eq!(operations(&root, &message, None).unwrap(), vec![FileOperation::Open(path.into())]);
         }
