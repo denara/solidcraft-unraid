@@ -3,7 +3,7 @@
 Clean-room, pure-Rust parametric CAD. See CONTRIBUTING.md.
 
 ## This Unraid fork
-Read [fork rules](docs/unraid-agent-rules.md) first. Keep `codex/unraid-mcp-web`, private config, HTTP MCP and independent web/Workspace. No unsafe bridges. Validated baseline: `6bb23d20ac742aaca819354d4bb95930186df48e`. Fork rules override upstream.
+Read [fork rules](docs/unraid-agent-rules.md) first. Keep `codex/unraid-mcp-web`, private config, HTTP MCP and independent web/Workspace. No unsafe bridges. Validated baseline: `3c5936c72beb44c4dae97c725407f8ddaf2bf268`. Fork rules override upstream.
 
 ## Start here
 See ROADMAP.md, CONTRIBUTING.md, issues and docs/architecture.md. Ask for user-visible decisions.

@@ -1,5 +1,47 @@
 # Validated container updates
 
+## 2026-11-19 fixed SolidCraft snapshot
+
+Selected 3c5936c72beb44c4dae97c725407f8ddaf2bf268 once, 203 commits after 6bb23d20, on codex/unraid-mcp-web.
+Fork main was already an ancestor. See [SolidCraft upstream](https://github.com/tangency-labs/solidcraft)
+for application features and changes.
+
+The merge preserves the fork's rules while following the upstream move of
+development skills. Headless CLI quiet mode and stored-link confinement remain.
+USD export takes the shared output revision gate for each encoding, including
+batches. USD opens as a new unsaved design. SVG canvas file inputs use the shared
+read gate. Desktop plugin, signing, import-library and recovery restrictions
+remain in effect through HTTP.
+
+Public models from formats 55 through 60 reopened at 24,000 mm³. The format-63
+round trip preserved the model and original source bytes. USD exports in text,
+binary and packaged encodings passed file protection and unsaved-open checks.
+The public SVG canvas imported without external resource access. Preserve the
+private backup for rollback after writing format 63.
+
+The [exact upstream merge-queue CI](https://github.com/tangency-labs/solidcraft/actions/runs/44480476358) passed Linux Clippy, native, doc
+and reference checks. Its native job reported 19,841 passes,
+21 known failures and no new failures. Local
+native/Wasm release builds, format folding, licenses and repository checks
+passed. One grouped Rust test compilation took 1708.6 seconds
+and 193 selected cases passed in 11.5 seconds.
+Isolated container tests covered MCP authentication, session/project isolation,
+Workspace revisions, upload, file actions, read-only observation and restart
+persistence. Chromium verified browser CAD, offline support, the three Workspace
+languages and the separate CAD context. Native, CAD web and Workspace release
+builds took 1252, 3202
+and 8 seconds.
+
+Source 198fa714f072ace22e92c217a5805a19f9836e0e passed the [container workflow](https://github.com/denara/solidcraft-unraid/actions/runs/44501084631).
+Commit-tag and latest anonymous pulls agree on Linux amd64 digest sha256:f97f9e26096da63fedd32102b77dd69895b18049ceb0f71ffa3986b1f3ba414c.
+Transfer archive solidcraft-unraid-upstream-3c5936c7-198fa714.tar has 382805504 bytes and
+SHA256 e0180e377d70648b3da84e2dec0f11937f098620b3f9fd2c49df272652730287. The catalog template and icon stayed byte-identical.
+
+The local development instance retained its volume, token, origins, port and
+resource/security settings. Authentication, web, health and read-only public-model
+reopen passed after replacement. Verified obsolete own resources were removed.
+Two validated transfer archives, rollback, toolchains and private backups remain.
+
 ## 2026-11-18 fixed SolidCraft snapshot
 
 Selected 6bb23d20ac742aaca819354d4bb95930186df48e once after 49efdea2 on codex/unraid-mcp-web. Fork main was
