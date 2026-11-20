@@ -12,8 +12,7 @@ pub fn open_copy(app: &mut solidcraft_ui_egui::SolveApp, path: &str) -> bool {
         app.set_status("Die Modellkopie wurde nicht geöffnet: Zu viele Modelle sind bereits offen. Schließe ein Modell und öffne die Datei erneut im Arbeitsbereich.", true);
         return false;
     }
-    app.open_path_with(path, &Default::default());
-    app.session.path.as_deref() == Some(path)
+    app.open_path_with(path, &Default::default()).is_ok() && app.session.path.as_deref() == Some(path)
 }
 
 pub fn key(fragment: &str) -> Result<Option<&str>, &'static str> {
@@ -244,7 +243,7 @@ mod tests {
         use solidcraft_ui_egui::{Services, SolveApp, documents};
 
         let document = Document::new("Workspace copy");
-        let variants = [io::write_design(&document), io::write_design_container(&document).unwrap_or_default()];
+        let variants = [io::write_design(&document).unwrap(), io::write_design_container(&document).unwrap()];
         for (index, bytes) in variants.iter().enumerate() {
             let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
             let directory = std::env::temp_dir().join(format!("solidcraft-browser-import-{}-{unique}-{index}", std::process::id()));

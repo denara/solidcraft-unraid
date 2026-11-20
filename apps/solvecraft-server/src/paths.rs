@@ -181,8 +181,10 @@ fn normalize_batch_step(step: &mut Value) -> Result<(), String> {
                     check_save(&args)?;
                     ("file.save", &["path", "format", "overwrite"])
                 }
-                "open" => ("doc.open", &["path", "up", "names"]),
-                "export" => ("file.export", &["path", "format", "bodies", "mesh_prefix", "effort", "velocity"]),
+                "open" => ("doc.open", &["path", "up", "names", "geometry"]),
+                "export" => {
+                    ("file.export", &["path", "format", "bodies", "mesh_prefix", "effort", "velocity", "images", "name", "static", "model_uris"])
+                }
                 _ => ("file.new", &["name"]),
             };
             let params = keys.iter().filter_map(|key| args.get(*key).cloned().map(|value| ((*key).to_owned(), value))).collect();
@@ -540,6 +542,9 @@ mod tests {
         assert_eq!(batch["commands"][0]["params"]["path"], json!(root.join("part.solidcraft")));
         assert_eq!(batch["commands"][1]["command"], "component.extract");
         assert_eq!(batch["commands"][1]["params"]["path"], json!(root.join("extract.solidcraft")));
+        let mut usd = json!({"commands":[{"id":"open","params":{"path":"part.usda","geometry":"exact"}}]});
+        prepare_tool(&root, "batch", &mut usd).unwrap();
+        assert_eq!(usd["commands"][0]["params"]["geometry"], "exact");
     }
     #[test]
     fn only_inline_mcp_batches_are_allowed_through_the_gateway() {

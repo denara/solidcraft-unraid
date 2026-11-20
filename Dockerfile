@@ -44,7 +44,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 COPY --from=build /out/solidcraft-cli /out/solvecraft-cli /out/solvecraft-server /usr/local/bin/
 COPY --from=build /src/dist/web/ /opt/solvecraft/web/
 COPY --from=build /src/dist/workspace/ /opt/solvecraft/workspace/
-COPY LICENSE-MIT LICENSE-APACHE NOTICE THIRD-PARTY-LICENSES.txt /opt/solvecraft/
+COPY LICENSE-MIT LICENSE-APACHE LICENSE-BRAND NOTICE THIRD-PARTY-LICENSES.txt /opt/solvecraft/
 ENV SOLVECRAFT_LISTEN=0.0.0.0:8080 SOLVECRAFT_DATA_DIR=/data SOLVECRAFT_WEB_DIR=/opt/solvecraft/web
 USER 99:100
 VOLUME /data

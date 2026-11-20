@@ -85,7 +85,7 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
         Path::new(path).extension().and_then(|ext| ext.to_str()).is_some_and(|ext| {
             [
                 "step", "stp", "igs", "iges", "fcstd", "3dm", "3mf", "stl", "obj", "glb", "gltf", "usd", "usda", "usdc", "usdz", "dxf", "svg", "ply",
-                "xyz", "pts",
+                "xyz", "pts", "pcd", "asc", "e57",
             ]
             .iter()
             .any(|import| ext.eq_ignore_ascii_case(import))
@@ -129,7 +129,8 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
                     out.push(FileOperation::Save(path));
                 }
             }
-            "file.export" | "file.export_step" | "file.export_stl" | "file.export_3mf" | "file.export_obj" | "file.export_urdf" => {
+            "file.export" | "file.export_step" | "file.export_stl" | "file.export_3mf" | "file.export_obj" | "file.export_urdf"
+            | "file.export_sdf" => {
                 // URDF has a data-dependent set of sibling mesh destinations. Until the
                 // worker can preflight that exact set, it cannot be protected by one ETag.
                 let format = match id {
@@ -138,10 +139,14 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
                     "file.export_3mf" => Some("3mf"),
                     "file.export_obj" => Some("obj"),
                     "file.export_urdf" => Some("urdf"),
+                    "file.export_sdf" => Some("sdf"),
                     _ => args.get("format").and_then(Value::as_str).or_else(|| args.get("path").and_then(Value::as_str)),
                 };
                 if format.is_some_and(|format| format.rsplit('.').next().is_some_and(|ext| ext.eq_ignore_ascii_case("urdf"))) {
                     return Err("URDF multi-file export is not supported through the network gateway; export STEP or 3MF instead".into());
+                }
+                if format.is_some_and(|format| format.rsplit('.').next().is_some_and(|ext| ext.eq_ignore_ascii_case("sdf"))) {
+                    return Err("SDF model-folder export is not supported through the network gateway; export STEP or 3MF instead".into());
                 }
                 if let Some(path) = name(root, args)? {
                     if format.is_some_and(|f| f.rsplit('.').next().is_some_and(|ext| ext.eq_ignore_ascii_case("obj"))) {
@@ -168,7 +173,7 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
                     out.push(FileOperation::Write(path));
                 }
             }
-            "drawing.export" | "drawing.template.save" => {
+            "drawing.export" | "drawing.print" | "drawing.template.save" => {
                 out.push(FileOperation::ReadSources);
                 if let Some(path) = name(root, args)? {
                     out.push(FileOperation::Write(path));
@@ -315,6 +320,7 @@ mod tests {
             assert!(operations(&root, &call(id, json!({"path":"Public/part.mtl","format":"obj"})), None).is_err());
         }
         assert!(operations(&root, &call("file.export_urdf", json!({"path":"Public/part.step"})), None).unwrap_err().contains("URDF"));
+        assert!(operations(&root, &call("file.export_sdf", json!({"path":"Public/part.step"})), None).unwrap_err().contains("SDF"));
         let direct = json!({"params":{"name":"compare_picture","arguments":{"reference":"Public/ref.png"}}});
         assert_eq!(operations(&root, &direct, None).unwrap(), vec![FileOperation::ReadSources]);
         #[cfg(unix)]
@@ -352,6 +358,9 @@ mod tests {
             "Project/scan.ply",
             "Project/scan.xyz",
             "Project/scan.pts",
+            "Project/scan.PCD",
+            "Project/scan.asc",
+            "Project/scan.e57",
             "Project/scene.usd",
             "Project/scene.USDA",
             "Project/scene.usdc",
@@ -444,13 +453,24 @@ mod tests {
         for (command, params) in [
             ("file.export", json!({"path":"robot.URDF"})),
             ("file.export", json!({"path":"robot.data","format":"urdf"})),
+            ("file.export", json!({"path":"robot.SDF"})),
+            ("file.export", json!({"path":"robot.data","format":"sdf"})),
+            ("file.export_sdf", json!({"path":"robot"})),
             ("sheet.export_dxf", json!({"path":"flat.dxf","per_body":true})),
             ("motion.export_animation", json!({"path":"frames"})),
         ] {
             let message = json!({"params":{"name":"execute","arguments":{"command":command,"params":params}}});
             assert!(operations(&root, &message, None).is_err(), "{command}");
+            assert!(operations(&root, &batch(json!([{"command":command,"params":params}])), None).is_err(), "{command}");
         }
-        for (command, path) in [("drawing.export", "sheet.svg"), ("drawing.export", "sheet.png"), ("drawing.template.save", "template.json")] {
+        for (command, path) in [
+            ("drawing.export", "sheet.svg"),
+            ("drawing.export", "sheet.png"),
+            ("drawing.export", "sheet.pdf"),
+            ("drawing.export", "sheet.dxf"),
+            ("drawing.print", "print.pdf"),
+            ("drawing.template.save", "template.json"),
+        ] {
             let args = json!({"command":command,"params":{"path":path}});
             let direct = json!({"params":{"name":"execute","arguments":args}});
             let batched = batch(json!([args]));
