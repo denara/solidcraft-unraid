@@ -25,7 +25,7 @@ Fork deployment status updated 2026-11-04; upstream CAD milestones remain below.
 Requested upstream updates use the repository's
 [update skill](.agents/skills/update-solvecraft-unraid/SKILL.md), with a fixed target snapshot,
 isolated validation and local-only private deployment settings.
-The container's validated upstream baseline is `3c5936c7` (SolidCraft 0.45.0-rc.4, native format 63, previously `6bb23d20`);
+The container's validated upstream baseline is `2132b0f2` (SolidCraft 0.45.0, native format 64, previously `3c5936c7`);
 the Linux image passes the changed CAD/UI tests and real web/MCP, restart and old-design
 compatibility checks. See [update records](docs/unraid-updates.md).
 

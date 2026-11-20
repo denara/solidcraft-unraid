@@ -15,7 +15,7 @@ The fork is hosted at [denara/solidcraft-unraid](https://github.com/denara/solid
 The public Unraid template names a new container `SolidCraft`; the existing local Compose service,
 image tags, command names, data format and environment variables retain compatibility.
 The first prototype used upstream commit `af536a7`. The current validated snapshot is
-`3c5936c72beb44c4dae97c725407f8ddaf2bf268`. See [update records](unraid-updates.md) for checks,
+`2132b0f2e5bca0e31daff8ed67cfa63cf15f8b55`. See [update records](unraid-updates.md) for checks,
 the transferable image archive and installation instructions for this update.
 
 For future requested updates, use the repository skill
@@ -399,9 +399,13 @@ Typed `file.export_step`, `file.export_stl`, `file.export_3mf` and
 exports. The command selects its real output format, even with a misleading filename
 extension. Both ordinary and typed OBJ exports check the `.obj` file and its sibling
 `.mtl` material library before either write. Replacing either existing output requires
-its own current strong revision. Typed URDF is refused for the same multi-file reason
-as ordinary URDF. A failed multi-file export can leave already-written outputs; it
+its own current strong revision. Typed URDF and SDF model-folder exports are refused for the same multi-file
+reason as their ordinary export forms. A failed multi-file export can leave already-written outputs; it
 reports that failure rather than claiming an atomic group write.
+
+Drawing SVG, PNG, PDF and DXF exports and `drawing.print` PDF output use the same
+project-relative destination, individual strong revision and shared source-read gates.
+Each requested document is written to one atomic destination.
 
 `compare_picture` and `inspect.compare_picture` reference images are data-only reads
 inside the selected project, with the same path/symlink and shared source-read gate
@@ -418,7 +422,7 @@ with the gateway. Avoid such concurrent external writes. A failed batch may roll
 its in-memory document but does not undo files already written by earlier steps.
 
 Until every output target can be checked, the network gateway declines multi-file URDF
-exports, per-body DXF exports to files and PNG animation frame directories. Use an
+exports, SDF model-folder exports, per-body DXF exports to files and PNG animation frame directories. Use an
 ordinary export or GIF animation instead; per-body DXF returned as text without a file
 path remains available. These restrictions concern the gateway, not desktop CAD.
 Desktop/cloud slicer delivery (`file.send_to_slicer`, `file.open_in_easyprint` and
@@ -640,7 +644,7 @@ browser CAD remain read-only with respect to server models.
 
 ## Reference scans in the current snapshot
 
-The enabled native importer can open PLY/XYZ/PTS reference scans through MCP. Their
+The enabled native importer can open PLY/XYZ/PTS/PCD/ASC/E57 reference scans through MCP. Their
 paths remain project-relative and use the common source-read gate; opening a scan
 creates an unsaved design rather than making the source its implicit save target.
 A scan-only document is reported as a draft. Save explicitly to a new `.sc` file.

@@ -1,5 +1,53 @@
 # Validated container updates
 
+## 2026-11-20 fixed SolidCraft snapshot
+
+Selected 2132b0f2e5bca0e31daff8ed67cfa63cf15f8b55 once, 208 commits after 3c5936c7, on codex/unraid-mcp-web.
+Fork main was already an ancestor. See [SolidCraft upstream](https://github.com/tangency-labs/solidcraft)
+for application features and changes.
+
+The gateway rejects data-dependent SDF model-folder output in ordinary and typed
+exports, including normalized batches, while retaining the single-file output
+revision gates. Drawing PDF, DXF and Print output share the existing path,
+source-read, transfer and strong-revision gates. PCD, ASC and E57 imports are
+tracked as new unsaved designs. Direct and batched OpenUSD opens retain the new
+geometry option. Workspace handoff honors the original opener's error result.
+The runtime also ships the existing brand license alongside the other notices.
+
+Public native formats 55 through 60 and 63 reopened at 24,000 mm³ with their source
+bytes preserved. Format 64 round trips retained parameter expressions and values.
+A public drawing made with the previous validated image migrated its embedded PNG
+from the older record into referenced binary parts with identical original bytes.
+Plain JSON refused binary-image loss. PCD/ASC scan round trips, exact OpenUSD
+imports, single-file exports and direct/batched output conflicts passed.
+
+The [exact upstream merge-queue CI](https://github.com/tangency-labs/solidcraft/actions/runs/44696162641) passed native Linux Clippy,
+native, reference, doc, kernel and SolidCore checks. The native job reported
+20,178 passes and 21 known failures with no regression. Local scoped
+fork Clippy, format folding, notices and repository checks passed.
+The combined local test compilation found a handoff fixture using the previous
+serializer return type. The corrected cached retry passed 202 selected tests in
+11.6 seconds. Both compilation attempts and the separate native/Wasm
+build timings are recorded in the private build evidence.
+
+The disposable candidate passed authentication, session/project isolation,
+Workspace revisions, upload, file actions, live observation and restart checks.
+Chromium verified independent browser CAD, offline behavior, all three Workspace
+languages, local remembered language choice, keyboard control and a separate CAD
+context with no opener.
+
+Source efe8cc7b3af245134fad8f3d20d2d2775d222054 passed the [container workflow](https://github.com/denara/solidcraft-unraid/actions/runs/44716363986).
+Commit-tag and latest anonymous pulls agree on Linux amd64 digest sha256:a538200ccf06402b9f86918ba5d5ec99cf6032dac7500cbb36382ee2c493d00a.
+Transfer archive solidcraft-unraid-upstream-2132b0f2-efe8cc7b.tar has 386700800 bytes and
+SHA256 f6fbc1333ee88bf49653b3d1989c85e785ceb87e3508d6926336298a922962df. The canonical catalog template and icon match their public copies.
+
+The local development instance retained its volume, token, origins, port and
+security/resource settings. Health, authenticated MCP, web, cookie login and a
+read-only public-design reopen passed after replacement. Verified obsolete own
+resources were retired. Two validated archives, a rollback image, toolchains,
+data volumes and private backups remain available. Preserve the private backup
+when rolling back designs saved in format 64.
+
 ## 2026-11-19 fixed SolidCraft snapshot
 
 Selected 3c5936c72beb44c4dae97c725407f8ddaf2bf268 once, 203 commits after 6bb23d20, on codex/unraid-mcp-web.
