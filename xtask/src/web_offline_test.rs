@@ -124,7 +124,7 @@ pub fn run_api(site: &str) -> Result<(), String> {
     println!("web-api-test: {linked}");
     let keys = cdp.eval(KEYS_TEST)?;
     println!("web-api-test: {keys}");
-    println!("web-api-test: {}", drawing_test(&browser, server.port)?);
+    println!("web-api-test: {}", drawing_test(&browser, server.port, &downloads)?);
     Ok(())
 }
 
@@ -132,17 +132,41 @@ pub fn run_api(site: &str) -> Result<(), String> {
 /// alone in a tab of its own, so the steps before leave nothing in it. Kept as a host keeps a
 /// design (`document.export`), the app started again in that tab and the design put back
 /// (`document.import`), its drawing reads and exports the same, byte for byte.
-fn drawing_test(browser: &Chrome, port: u16) -> Result<String, String> {
+fn drawing_test(browser: &Chrome, port: u16, downloads: &Path) -> Result<String, String> {
     let mut tab = browser.new_tab()?;
     tab.call("Page.bringToFront", json!({}))?;
     tab.call("Emulation.setFocusEmulationEnabled", json!({"enabled": true}))?;
     let made = start_and_run(&mut tab, port, "made", &Value::Null)?;
     let kept = json!({"text": made["text"], "drawing": made["drawing"], "dimensions": made["dimensions"]});
+    let png = drawing_png(downloads, "made", &made)?;
     let opened = start_and_run(&mut tab, port, "opened", &kept)?;
-    if let Some(key) = ["read", "svg", "png"].into_iter().find(|&key| opened[key] != made[key]) {
+    if drawing_png(downloads, "opened", &opened)? != png {
+        return Err("web-api-test: the downloaded PNG changed once the app started again".into());
+    }
+    if let Some(key) = ["read", "svg"].into_iter().find(|&key| opened[key] != made[key]) {
         return Err(format!("web-api-test: the plate's drawing changed once the app started again: its {key}"));
     }
     Ok("the M2 plate's drawing made by commands, and the same SVG, PNG and dimensions after the app started again".into())
+}
+
+/// Wait for Chrome to finish handing over the sheet the command wrote.
+fn drawing_png(downloads: &Path, step: &str, reply: &Value) -> Result<Vec<u8>, String> {
+    let path = downloads.join(format!("drawing-plate-{step}.png"));
+    let started = Instant::now();
+    loop {
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") || reply["png_bytes"].as_u64() != Some(bytes.len() as u64) {
+                    return Err(format!("web-api-test: invalid sheet PNG download ({step})"));
+                }
+                return Ok(bytes);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && started.elapsed() < LAUNCH_TIMEOUT => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => return Err(format!("web-api-test: receiving the sheet PNG ({step}): {e}")),
+        }
+    }
 }
 
 /// The app started afresh at `?drawing={step}`, then [`DRAWING_TEST`] run in it with `kept`.
@@ -213,7 +237,10 @@ const DRAWING_TEST: &str = r#"(async (plate, kept) => {
     const shown = groups.map(g => g.items.filter(item => item.kind === 'text').map(item => item.text).join(''));
     check(same([...shown].sort(), [...read].sort()), 'the sheet shows ' + JSON.stringify(shown));
     const svg = await run('drawing.export', {sheet: 'Sheet 1'});
-    const png = await run('drawing.export', {sheet: 'Sheet 1', format: 'png', dpi: 150});
+    const phase = kept === null ? 'made' : 'opened';
+    const pngPath = '/downloads/drawing-plate-' + phase + '.png';
+    const png = await run('drawing.export', {sheet: 'Sheet 1', format: 'png', dpi: 150, path: pngPath});
+    check(png.path === pngPath, 'the command writes the requested PNG file');
     check(svg.svg.includes('width="420mm" height="297mm"'), 'the SVG is A3');
     check(same(png.report.pixels, [2481, 1754]), 'the PNG is ' + JSON.stringify(png.report.pixels) + ' pixels');
     // An export leaves out_of_date out of its reply when nothing is out of date.
@@ -221,7 +248,7 @@ const DRAWING_TEST: &str = r#"(async (plate, kept) => {
         'every view is drawn and nothing is out of date');
     const exported = await app.request('document.export');
     await app.request('document.saved', {revision: exported.revision});
-    return {drawing, dimensions, text: exported.text, read, svg: svg.svg, png: png.data};
+    return {drawing, dimensions, text: exported.text, read, svg: svg.svg, png_bytes: png.bytes};
 })"#;
 
 /// The app's mouse buttons follow the browser's: a chord leaves none held (a second button

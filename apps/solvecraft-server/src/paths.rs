@@ -268,6 +268,7 @@ fn commands(root: &Path, value: &mut Value, depth: usize) -> Result<(), String> 
                 Some("drawing.create") => Some("source"),
                 _ => None,
             };
+            let picture = object.get("command").and_then(Value::as_str) == Some("inspect.compare_picture");
             let template = matches!(object.get("command").and_then(Value::as_str), Some("drawing.create" | "drawing.template.apply"));
             let render = object.get("command").and_then(Value::as_str).is_some_and(|id| id.starts_with("render."));
             let profile = object.get("command").and_then(Value::as_str) == Some("diagnostics.profile");
@@ -282,11 +283,13 @@ fn commands(root: &Path, value: &mut Value, depth: usize) -> Result<(), String> 
                     if let Some(key) = file_key {
                         file_operand(root, params, key)?;
                     }
+                    if picture {
+                        file_operand(root, params, "overlay")?;
+                    }
                     if template
-                        && params
-                            .get("template")
-                            .and_then(Value::as_str)
-                            .is_some_and(|value| Path::new(value).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("json")))
+                        && params.get("template").and_then(Value::as_str).is_some_and(|value| {
+                            Path::new(value).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("json") || ext.eq_ignore_ascii_case("scdwg"))
+                        })
                     {
                         file_operand(root, params, "template")?;
                     }
@@ -338,6 +341,18 @@ mod tests {
                         assert_eq!(batch["commands"][0]["params"]["overlay"], false);
                     }
                 }
+            }
+        }
+        for path in ["refs/overlay.png", "../overlay.png", ".hidden.png"] {
+            let args = json!({"command":"inspect.compare_picture","params":{"reference":"refs/input.png","overlay":path}});
+            let mut direct = args.clone();
+            let mut batch = json!({"commands":[{"id":"execute","params":args}]});
+            let valid = path.starts_with("refs/");
+            assert_eq!(prepare_tool(&root, "execute", &mut direct).is_ok(), valid);
+            assert_eq!(prepare_tool(&root, "batch", &mut batch).is_ok(), valid);
+            if valid {
+                assert_eq!(direct["params"]["overlay"], json!(root.join(path)));
+                assert_eq!(batch["commands"][0]["params"]["overlay"], json!(root.join(path)));
             }
         }
         let mut geometry = json!({"command":"construct.plane.tangent","params":{"reference":"XY"}});
@@ -418,6 +433,13 @@ mod tests {
             let escaped = json!({"command":command,"params":{(key):format!("../{file}")}});
             assert!(prepare_tool(&root, "execute", &mut escaped.clone()).is_err(), "{command}");
             assert!(prepare_tool(&root, "batch", &mut json!({"commands":[{"command":"execute","params":escaped}]})).is_err(), "{command}");
+        }
+        for command in ["drawing.create", "drawing.template.apply"] {
+            let mut direct = json!({"command":command,"params":{"template":"project/Logo.SCDWG"}});
+            prepare_tool(&root, "execute", &mut direct).unwrap();
+            assert_eq!(direct["params"]["template"], json!(root.join("project/Logo.SCDWG")));
+            let mut batch = json!({"commands":[{"command":command,"params":{"template":"../outside.scdwg"}}]});
+            assert!(prepare_tool(&root, "batch", &mut batch).is_err());
         }
         let mut builtin = json!({"command":"drawing.create","params":{"template":"iso-a3-part"}});
         prepare_tool(&root, "execute", &mut builtin).unwrap();

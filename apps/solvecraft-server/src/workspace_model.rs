@@ -106,7 +106,6 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
             | "pointcloud.insert"
             | "canvas.insert"
             | "canvas.decal"
-            | "inspect.compare_picture"
             | "render.hdr.inspect"
             | "render.settings.capture_hdr"
             | "render.surface.import"
@@ -114,6 +113,13 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
             | "render.start"
             | "render.batch"
             | "render.status" => out.push(FileOperation::ReadSources),
+            "inspect.compare_picture" => {
+                out.push(FileOperation::ReadSources);
+                if let Some(overlay) = args.get("overlay").and_then(Value::as_str) {
+                    let overlay = relative(root, overlay).ok_or("workspace overlay file name is not permitted")?;
+                    out.push(FileOperation::Write(overlay));
+                }
+            }
             "sketch.replace" if args.get("file").and_then(Value::as_str).is_some() => out.push(FileOperation::ReadSources),
             "doc.open" => {
                 if let Some(path) = name(root, args)? {
@@ -173,7 +179,22 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
                     out.push(FileOperation::Write(path));
                 }
             }
-            "drawing.export" | "drawing.print" | "drawing.template.save" => {
+            "drawing.template.save" => {
+                out.push(FileOperation::ReadSources);
+                if let Some(path) = name(root, args)? {
+                    // The worker converts legacy .json destinations to a sibling .scdwg.
+                    let path = Path::new(&path);
+                    let output = if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("json")) {
+                        path.with_extension("scdwg")
+                    } else {
+                        path.to_path_buf()
+                    };
+                    let output = output.to_str().ok_or("drawing template output is not valid UTF-8")?;
+                    let target = relative(root, output).ok_or("drawing template output is not permitted")?;
+                    out.push(FileOperation::Write(target));
+                }
+            }
+            "drawing.export" | "drawing.print" => {
                 out.push(FileOperation::ReadSources);
                 if let Some(path) = name(root, args)? {
                     out.push(FileOperation::Write(path));
@@ -463,21 +484,27 @@ mod tests {
             assert!(operations(&root, &message, None).is_err(), "{command}");
             assert!(operations(&root, &batch(json!([{"command":command,"params":params}])), None).is_err(), "{command}");
         }
-        for (command, path) in [
-            ("drawing.export", "sheet.svg"),
-            ("drawing.export", "sheet.png"),
-            ("drawing.export", "sheet.pdf"),
-            ("drawing.export", "sheet.dxf"),
-            ("drawing.print", "print.pdf"),
-            ("drawing.template.save", "template.json"),
+        for (command, path, output) in [
+            ("drawing.export", "sheet.svg", "sheet.svg"),
+            ("drawing.export", "sheet.png", "sheet.png"),
+            ("drawing.export", "sheet.pdf", "sheet.pdf"),
+            ("drawing.export", "sheet.dxf", "sheet.dxf"),
+            ("drawing.print", "print.pdf", "print.pdf"),
+            ("drawing.template.save", "template.JSON", "template.scdwg"),
+            ("drawing.template.save", "logo.scdwg", "logo.scdwg"),
         ] {
             let args = json!({"command":command,"params":{"path":path}});
             let direct = json!({"params":{"name":"execute","arguments":args}});
             let batched = batch(json!([args]));
-            let expected = vec![FileOperation::ReadSources, FileOperation::Write(path.into())];
+            let expected = vec![FileOperation::ReadSources, FileOperation::Write(output.into())];
             assert_eq!(operations(&root, &direct, None).unwrap(), expected, "{command}");
             assert_eq!(operations(&root, &batched, None).unwrap(), expected, "{command}");
         }
+        let compare = json!({"command":"inspect.compare_picture","params":{"reference":"ref.png","overlay":"result.png"}});
+        let direct = json!({"params":{"name":"execute","arguments":compare}});
+        let expected = vec![FileOperation::ReadSources, FileOperation::Write("result.png".into())];
+        assert_eq!(operations(&root, &direct, None).unwrap(), expected);
+        assert_eq!(operations(&root, &batch(json!([compare])), None).unwrap(), expected);
         let gif = json!({"params":{"name":"execute","arguments":{"command":"motion.export_animation","params":{"path":"motion.gif"}}}});
         assert_eq!(operations(&root, &gif, None).unwrap(), vec![FileOperation::Write("motion.gif".into())]);
         let text = json!({"params":{"name":"execute","arguments":{"command":"sheet.export_dxf","params":{"per_body":true}}}});

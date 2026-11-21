@@ -27,6 +27,10 @@ mod linked;
 mod mouse_buttons;
 #[cfg(any(target_arch = "wasm32", test))]
 mod space_mouse;
+#[cfg(all(target_arch = "wasm32", feature = "usage-stats"))]
+mod usage;
+#[cfg(target_arch = "wasm32")]
+mod wheel_samples;
 #[cfg(any(target_arch = "wasm32", test))]
 mod workspace_import;
 
@@ -403,6 +407,8 @@ mod web {
         space_mouse: SpaceMouse,
         workspace_import: crate::workspace_import::Slot,
         wheel_gestures: solidcraft_ui_egui::WebWheelGestures,
+        /// What the browser said about each wheel event since the last frame (`wheel_samples`).
+        wheel_samples: Rc<std::cell::RefCell<Vec<solidcraft_ui_egui::wheel_hint::WheelSample>>>,
         /// The mouse buttons the browser holds, which egui's are kept to (`mouse_buttons`).
         mouse_buttons: Rc<std::cell::RefCell<crate::mouse_buttons::Tracker>>,
         /// The settings this tab wrote or loaded last, and those another tab wrote since (#8644).
@@ -1256,9 +1262,11 @@ mod web {
             // include focus moving between the canvas and its hidden text input.
             let taps = crate::mouse_buttons::reconcile(&self.mouse_buttons, ctx, raw);
             let now = raw.time.unwrap_or_else(|| ctx.input(|i| i.time));
-            if let Some(delay) = self.wheel_gestures.update(raw, now) {
+            if let Some(delay) = self.wheel_gestures.update(raw, now, self.app.preferences.browser_scroll_wheel) {
                 ctx.request_repaint_after(delay);
             }
+            let samples = std::mem::take(&mut *self.wheel_samples.borrow_mut());
+            solidcraft_ui_egui::wheel_hint::feed(&mut self.app, ctx, &samples);
             if self.launch.persists() {
                 let theme = solidcraft_ui_egui::prefs::theme_drop_target(&self.app, ctx);
                 files::take_drops(&self.files, raw, theme);
@@ -1269,7 +1277,7 @@ mod web {
             self.space_mouse.raw_input_hook(ctx, self.app.preferences.space_mouse_enabled, raw);
             self.app.raw_input_hook_with_taps(ctx, raw, taps);
         }
-        fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
             self.linked.tick(&mut self.app, ui.ctx());
             self.restored();
             UNSAVED.with(|u| u.set(self.asks_before_unload()));
@@ -1283,6 +1291,7 @@ mod web {
                 });
             }
             self.app.ui(ui);
+            self.app.retain_view_pictures(frame.wgpu_render_state());
             let ctx = ui.ctx().clone();
             if self.launch.persists() {
                 self.file_panel(&ctx);
@@ -1306,6 +1315,8 @@ mod web {
             }
             let Some(prefs) = self.persisted_prefs(|| Ok(storage.get_string(&crate::prefs_key()))) else { return };
             storage.set_string(&crate::prefs_key(), prefs);
+            #[cfg(feature = "usage-stats")]
+            storage.set_string(&crate::channel::key(solidcraft_ui_egui::usage_stats::STORAGE_KEY), self.app.usage_stats_for_storage());
         }
     }
 
@@ -1455,6 +1466,8 @@ mod web {
                             easyprint_upload: Some(std::sync::Arc::new(crate::easyprint::upload)),
                             browser_files: Some(Box::new(move || shown.panel.set(true))),
                             install_app: Some(crate::install::service(&cc.egui_ctx)),
+                            #[cfg(feature = "usage-stats")]
+                            usage_http: Some(std::sync::Arc::new(crate::usage::post)),
                             ..Default::default()
                         }};
                         // Thumbnails of saves and start-page cards.
@@ -1471,6 +1484,11 @@ mod web {
                         }
                         if launch.persists() && let Some(p) = cc.storage.and_then(|s| solidcraft_ui_egui::prefs::stored(|k| s.get_string(&crate::channel::key(k)))) {
                             app.load_prefs(&p);
+                        }
+                        #[cfg(feature = "usage-stats")]
+                        if launch.persists() {
+                            let key = crate::channel::key(solidcraft_ui_egui::usage_stats::STORAGE_KEY);
+                            app.load_usage_stats(cc.storage.and_then(|s| s.get_string(&key)).as_deref());
                         }
                         if let Some(rs) = &cc.wgpu_render_state {
                             install_viewport(&mut app, rs);
@@ -1492,6 +1510,7 @@ mod web {
                             }
                         }
                         let mouse_buttons = crate::mouse_buttons::install(&window, &mouse_canvas, &cc.egui_ctx);
+                        let wheel_samples = crate::wheel_samples::install(&window);
                         let api = Api::install(sender, cc.egui_ctx.clone()).map_err(|e| format!("SolidCraft browser API: {e:?}"))?;
                         let (workspace_import, importing) = crate::workspace_import::start(&cc.egui_ctx);
                         if importing {
@@ -1525,6 +1544,7 @@ mod web {
                             space_mouse: SpaceMouse::default(),
                             workspace_import,
                             wheel_gestures: solidcraft_ui_egui::WebWheelGestures::default(),
+                            wheel_samples,
                             mouse_buttons,
                             prefs_writer: crate::PrefsWriter::default(),
                             prefs_warning: None,
