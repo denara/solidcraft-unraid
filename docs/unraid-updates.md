@@ -1,5 +1,47 @@
 # Validated container updates
 
+## 2026-11-21 fixed SolidCraft snapshot
+
+Selected 447d683e0e060772091d3638250da9f905d39396 once, 177 commits after 2132b0f2, on codex/unraid-mcp-web.
+Fork main was already an ancestor. See [SolidCraft upstream](https://github.com/tangency-labs/solidcraft)
+for application features and changes.
+
+The Unraid browser build omits usage statistics. Workspace handoff and cold model
+caches for the read-only observer remain in place. Legacy drawing template names
+are revision-checked against the actual .scdwg destination. Both supported template
+inputs remain project-confined. Explicit comparison PNGs take the shared source-read
+and individually checked output locks. The dedicated Compare Picture tool returns
+its image from private scratch storage.
+
+Public format-64 models reopened with volume and parameters preserved. Saving a
+copy of the previous image-bearing drawing preserved the original PNG bytes and
+indexed its binary parts in document metadata. Template save/apply, image comparison,
+drawing PDF print and direct/batched output conflicts passed through the real MCP client.
+
+The [exact upstream merge-queue CI](https://github.com/tangency-labs/solidcraft/actions/runs/44880432765)
+passed. Its Native Linux job recorded 21,062 passes, 17 known failures and no new
+regression. Four old failures were removed from the upstream expected-failure list.
+The first compilation exposed the observer cache type change. The next hit the
+build container memory limit while compiling the engine test executable. The
+final focused run passed 197 selected tests at the original limit.
+The engine suite was covered by exact upstream CI and the combined image's observer tests. The pre-commit fast checks, licence notices and format folding passed.
+The isolated container passed MCP, session
+and project isolation, authentication, Workspace file actions and restart persistence.
+Chromium verified the independent CAD context and offline startup, all three Workspace
+languages, remembered selection, keyboard control and the footer. The drawing
+acceptance test used the documented PNG download path and verified identical
+SVG, PNG and dimensions after reload.
+
+Source c4b5c5e6a79de6d9147fb62fd0307b9064becd74 passed the [container workflow](https://github.com/denara/solidcraft-unraid/actions/runs/44901513528).
+The commit tag and latest matched on anonymous pulls at digest sha256:c0f4bd2c91eb93eddedc9242d9a4309c2850f11afa467a1ad04cbb7916a91590.
+Transfer archive solidcraft-unraid-upstream-447d683e-c4b5c5e6.tar has 393524736 bytes and
+SHA256 303da9d23fd3d953a99589279b209c3c68ffaad6c24e95e038dc4a0faac04843. The public template and icon match the canonical files.
+
+The local development instance retained its volume, token, origins, port and
+security/resource settings. Health, authenticated MCP, browser assets and read-only
+reopen passed after replacement. Verified obsolete resources were retired. Two archives,
+the previous rollback image, toolchain caches, volumes and private backups remain.
+
 ## 2026-11-20 fixed SolidCraft snapshot
 
 Selected 2132b0f2e5bca0e31daff8ed67cfa63cf15f8b55 once, 208 commits after 3c5936c7, on codex/unraid-mcp-web.

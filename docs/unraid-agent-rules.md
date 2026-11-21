@@ -20,7 +20,7 @@ new uses of it anywhere else. Public docs/web/Flatpak deployments use project Pa
 
 ## Container prototype baseline
 The first Unraid prototype used upstream commit `af536a7`. The current validated
-container baseline is `2132b0f2e5bca0e31daff8ed67cfa63cf15f8b55`.
+container baseline is `447d683e0e060772091d3638250da9f905d39396`.
 Keep later upstream CAD/UI feature updates separate from this deployment addition;
 advance the baseline only as a separate, validated update. See [update records](../docs/unraid-updates.md).
 
@@ -129,7 +129,11 @@ Ordinary and typed OBJ exports preflight both the mesh and sibling `.mtl` before
 writing, with separate strong revisions and shared transfer/project gates. Typed
 URDF and SDF model-folder exports stay blocked with their ordinary multi-file forms.
 Drawing PDF/DXF exports and drawing.print retain their single-file output revisions,
-transfer leases and shared source-read gate. PCD/ASC/E57 opens remain unsaved designs. Do not reduce a multi-output
+transfer leases and shared source-read gate. A legacy drawing.template.save JSON
+destination resolves to the actual .scdwg sibling before revision and lease checks.
+Confine both template input formats and explicit inspect.compare_picture overlay
+outputs; the latter take their own strong revisions. The Unraid CAD browser build
+keeps upstream usage statistics disabled. PCD/ASC/E57 opens remain unsaved designs. Do not reduce a multi-output
 export to its primary path in future updates.
 Observer snapshots never inherit render-job hosts; ordinary scratch rendering retains them.
 Appearance clipboards also remain isolated from observer snapshots. Point-cloud source

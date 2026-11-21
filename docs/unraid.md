@@ -15,7 +15,7 @@ The fork is hosted at [denara/solidcraft-unraid](https://github.com/denara/solid
 The public Unraid template names a new container `SolidCraft`; the existing local Compose service,
 image tags, command names, data format and environment variables retain compatibility.
 The first prototype used upstream commit `af536a7`. The current validated snapshot is
-`2132b0f2e5bca0e31daff8ed67cfa63cf15f8b55`. See [update records](unraid-updates.md) for checks,
+`447d683e0e060772091d3638250da9f905d39396`. See [update records](unraid-updates.md) for checks,
 the transferable image archive and installation instructions for this update.
 
 For future requested updates, use the repository skill
@@ -365,7 +365,8 @@ The workspace header offers Deutsch, English (US), and Easy British English.
 The browser's supported language preference applies until a language is selected,
 with US English as the fallback. The selection stays in local browser storage.
 The workspace catalog under `assets/locales/pending/workspace/` is loaded only
-by the workspace. The independent CAD app uses its own language settings.
+by the workspace. The independent CAD app uses its own language settings. The Unraid browser build
+leaves the upstream usage statistics feature disabled.
 
 The inventory is bounded to 512 files, 4,096 visited directory entries and eight
 directory levels; files larger than 256 MiB are excluded. A `truncated` indicator warns
@@ -405,12 +406,18 @@ reports that failure rather than claiming an atomic group write.
 
 Drawing SVG, PNG, PDF and DXF exports and `drawing.print` PDF output use the same
 project-relative destination, individual strong revision and shared source-read gates.
-Each requested document is written to one atomic destination.
+Each requested document is written to one atomic destination. A legacy `drawing.template.save`
+request for a `.json` name writes the sibling `.scdwg` file. Supply the revision of
+that actual output when replacing it. JSON and `.scdwg` template inputs remain
+confined to the calling project's files.
 
 `compare_picture` and `inspect.compare_picture` reference images are data-only reads
 inside the selected project, with the same path/symlink and shared source-read gate
 as other imports. Direct tools, `execute` and normalized `batch` aliases use these
 checks. Geometry fields named `reference` still represent geometry, not filenames.
+An explicit `inspect.compare_picture` overlay PNG also requires the project's write
+lease and its own current revision when replacing an existing file. The dedicated
+`compare_picture` tool returns an image from private scratch storage.
 Saved-shot queues (`render.batch`) and their `render.status` advancement also hold
 the shared source-read gate while preparing each shot, including nested HDR sources.
 Their transient results remain session-local; explicit image export retains the
