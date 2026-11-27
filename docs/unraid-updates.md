@@ -1,5 +1,36 @@
 # Validated container updates
 
+## 2026-11-27 fixed SolidCraft snapshot
+
+Selected a5ef51f39270f206eb73cacece05663dc6cb1b1b once, 5,923 commits after 447d683e, on codex/unraid-mcp-web.
+Fork main was already an ancestor. See [SolidCraft upstream](https://github.com/bherbruck/solidcraft)
+for application features and changes.
+
+The HTTP gateway confines sheet profile inputs and STL-to-STEP conversion paths.
+Sketch SVG and cope DXF output use the shared file revision check. Multi-file exports
+and desktop plugins stay outside the HTTP gateway. The observer keeps separate mutable
+display caches. Browser CAD omits usage statistics and the DWARF data discarded during
+packaging. Public format-64 designs reopened at 24,000 mm³. The format-71 round trip
+preserved parameters and the drawing's original PNG bytes.
+
+[Exact upstream CI](https://github.com/bherbruck/solidcraft/actions/runs/45964712637)
+recorded 25,628 native passes, 19 known failures and no new regression. Local checks
+covered 42 gateway tests, 12 focused observer and GLSL tests, Clippy, licenses and
+format folding. The disposable container passed Workspace authentication, file
+revision and transfer checks, session isolation, upload, ZIP and restart persistence.
+Chromium confirmed independent browser CAD, offline startup, three Workspace
+languages, keyboard access, remembered selection and the footer.
+
+Source 2823fd136df7b3c3efca7a83b8f55dec779a7637 passed the [container workflow](https://github.com/denara/solidcraft-unraid/actions/runs/46030170687).
+Anonymous pulls of the source tag and latest matched at sha256:055c921defe5f7ba4f565b5232de7b51477b051ba8039fe449134397790698e0.
+Transfer archive solidcraft-unraid-upstream-a5ef51f3-2823fd13.tar has 450094080 bytes and SHA256 80859bb8ea1e979be1cced975e7613f134ec3680325c6ce461d6f79cca292364.
+The public template and icon match their canonical copies.
+
+The local development instance retained its data volume, token, origin settings, port
+and security and resource limits. Health, authenticated MCP, the browser and read-only
+reopen passed after replacement. Two archives, the rollback image, toolchains, volumes
+and private backups remain.
+
 ## 2026-11-21 fixed SolidCraft snapshot
 
 Selected 447d683e0e060772091d3638250da9f905d39396 once, 177 commits after 2132b0f2, on codex/unraid-mcp-web.

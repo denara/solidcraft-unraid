@@ -3,7 +3,7 @@
 Clean-room Rust CAD. See CONTRIBUTING.md.
 
 ## This Unraid fork
-[Fork rules](docs/unraid-agent-rules.md) first. Keep `codex/unraid-mcp-web`, private config, HTTP MCP and separate web/Workspace. No unsafe bridges. Validated baseline: `447d683e0e060772091d3638250da9f905d39396`. Fork rules override upstream.
+[Fork rules](docs/unraid-agent-rules.md) first. Keep `codex/unraid-mcp-web`, private config, HTTP MCP and separate web/Workspace. No unsafe bridges. Validated baseline: `a5ef51f39270f206eb73cacece05663dc6cb1b1b`. Fork rules override upstream.
 
 ## Start here
 See ROADMAP.md, CONTRIBUTING.md, issues and docs/architecture.md. Ask for user-visible decisions.
