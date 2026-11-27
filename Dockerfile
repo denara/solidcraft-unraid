@@ -27,10 +27,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --locked -p solidcraft-cli -p solvecraft-server \
     && mkdir -p /out \
     && cp target/release/solidcraft-cli target/release/solvecraft-cli target/release/solvecraft-server /out/
+# wasm-bindgen discards DWARF in the distributed browser module. Omit it at link time
+# so packaging the same release can stay within the build container's memory budget.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
-    cd apps/solidcraft-web && trunk build --release --locked --public-url ./
+    cd apps/solidcraft-web && CARGO_PROFILE_RELEASE_DEBUG=0 trunk build --release --locked --public-url ./
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \

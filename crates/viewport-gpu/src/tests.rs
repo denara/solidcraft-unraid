@@ -42,6 +42,45 @@ fn out_of_memory_is_reported_before_secondary_validation_errors() {
     assert_eq!(buffer.map(|b| b.size()).map_err(|e| e.to_string()), Ok(wgpu::COPY_BUFFER_ALIGNMENT));
 }
 
+/// [`buffer_write`]'s buffer holds what it was given, padded with zeros to whole words as
+/// [`buffer_init`]'s is, in the command buffers submitted after it.
+#[test]
+fn a_buffer_written_through_the_queue_holds_its_contents_padded() {
+    let Ok((_, device, queue)) = open_headless(test_env::policy()) else { return };
+    for contents in [&[][..], &[7][..], &[1, 2, 3, 4][..], &[1, 2, 3, 4, 5, 6][..]] {
+        let buffer = ok(buffer_write(&device, &queue, "test", contents, wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_SRC));
+        let mut want = contents.to_vec();
+        want.resize(contents.len().div_ceil(4).max(1) * 4, 0);
+        assert_eq!(buffer.size(), want.len() as u64);
+        let read = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: buffer.size(),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(&buffer, 0, &read, 0, buffer.size());
+        queue.submit([encoder.finish()]);
+        read.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        assert_eq!(ok(read.slice(..).get_mapped_range()).to_vec(), want, "{contents:?}");
+    }
+}
+
+/// A buffer the device does not make is an error, as [`buffer_init`]'s is, whatever it was to hold:
+/// the scene upload then keeps the previous picture.
+#[test]
+fn a_buffer_the_device_refuses_is_an_error_when_written() {
+    let Ok((_, device, queue)) = open_headless(test_env::policy()) else { return };
+    let limit = device.limits().max_buffer_size;
+    // Only where asking for too much takes little memory here.
+    let Some(size) = usize::try_from(limit).ok().filter(|l| *l <= 512 << 20).and_then(|l| l.checked_add(4)) else { return };
+    let contents = vec![0; size];
+    assert!(buffer_write(&device, &queue, "test", &contents, wgpu::BufferUsages::VERTEX).is_err());
+    // The device goes on making buffers.
+    assert!(buffer_write(&device, &queue, "test", &[1, 2, 3, 4], wgpu::BufferUsages::VERTEX).is_ok());
+}
+
 #[test]
 fn the_hlsl_for_fxc_has_no_arrays_fxc_must_unroll_loops_for() {
     use naga::back::hlsl;
@@ -124,7 +163,10 @@ fn viewport_ambient_occlusion_compiles_for_glsl() {
     let info = ok(naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::default()).validate(&module));
     let options = glsl::Options { version: glsl::Version::new_gles(300), ..Default::default() };
     for entry_point in ["fs_solid", "fs_solid_cut", "fs_ao_depth"] {
-        let pipeline = glsl::PipelineOptions { shader_stage: naga::ShaderStage::Fragment, entry_point: entry_point.into(), multiview: None };
+        let stage = naga::ShaderStage::Fragment;
+        // Resolve the pipeline constants before running the GLSL writer, as wgpu's GLES backend does.
+        let (module, info) = ok(naga::back::pipeline_constants::process_overrides(&module, &info, Some((stage, entry_point)), &Default::default()));
+        let pipeline = glsl::PipelineOptions { shader_stage: stage, entry_point: entry_point.into(), multiview: None };
         let mut output = String::new();
         let mut writer = ok(glsl::Writer::new(&mut output, &module, &info, &options, &pipeline, Default::default()));
         ok(writer.write());

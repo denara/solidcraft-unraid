@@ -107,6 +107,6 @@ fn token_file(path: &PathBuf) -> Result<String, String> {
     }
     let mut file = options.open(path).map_err(|e| format!("create token file: {e}"))?;
     writeln!(file, "{token}").map_err(|e| e.to_string())?;
-    eprintln!("MCP token created in {}; use its contents in your client's Authorization header", path.display());
+    let _ = writeln!(std::io::stderr().lock(), "MCP token created in {}; use its contents in your client's Authorization header", path.display());
     Ok(token)
 }

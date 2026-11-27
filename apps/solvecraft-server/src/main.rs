@@ -19,6 +19,7 @@ mod workspace_storage;
 mod workspace_upload;
 mod workspace_view;
 
+use std::io::Write;
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -27,7 +28,7 @@ async fn main() -> ExitCode {
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("[error] ❌ solvecraft-server: {e}");
+            let _ = writeln!(std::io::stderr().lock(), "[error] ❌ solvecraft-server: {e}");
             ExitCode::FAILURE
         }
     }
@@ -46,7 +47,7 @@ async fn run() -> Result<(), String> {
         }
     });
     let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| format!("listen {addr}: {e}"))?;
-    eprintln!("SolidCraft web: http://{addr}/ ; workspace: /workspace ; MCP: /mcp (Bearer authentication required)");
+    let _ = writeln!(std::io::stderr().lock(), "SolidCraft web: http://{addr}/ ; workspace: /workspace ; MCP: /mcp (Bearer authentication required)");
     state.audit.startup(&state.config);
     let stopping = Arc::clone(&state);
     axum::serve(listener, http::router(state)).with_graceful_shutdown(shutdown(stopping)).await.map_err(|e| e.to_string())

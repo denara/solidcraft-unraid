@@ -74,12 +74,15 @@ pub fn refreshes_current(ops: &[FileOperation], status: &Value, root: &Path) -> 
 /// preflight: a failed step stops the worker batch, so later planned writes never run.
 /// Paths have already passed the gateway's confinement before this function runs.
 pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result<Vec<FileOperation>, String> {
-    fn name(root: &Path, args: &Value) -> Result<Option<String>, String> {
-        args.get("path")
+    fn named_operand(root: &Path, args: &Value, key: &str) -> Result<Option<String>, String> {
+        args.get(key)
             .and_then(Value::as_str)
             .filter(|path| !path.trim().is_empty())
             .map(|path| relative(root, path).ok_or_else(|| "workspace file name is not permitted".to_string()))
             .transpose()
+    }
+    fn name(root: &Path, args: &Value) -> Result<Option<String>, String> {
+        named_operand(root, args, "path")
     }
     fn imports_as_new(path: &str) -> bool {
         Path::new(path).extension().and_then(|ext| ext.to_str()).is_some_and(|ext| {
@@ -103,6 +106,8 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
                 out.push(FileOperation::ReadSources)
             }
             "file.verify"
+            | "file.insert_step"
+            | "file.insert_mesh"
             | "pointcloud.insert"
             | "canvas.insert"
             | "canvas.decal"
@@ -127,6 +132,17 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
                     out.push(FileOperation::Open(path));
                 }
             }
+            "file.revert_saved" => {
+                if let Some(path) = current.clone() {
+                    out.push(FileOperation::Open(path));
+                }
+            }
+            "file.stl_to_step" => {
+                out.push(FileOperation::ReadSources);
+                if let Some(path) = named_operand(root, args, "output")? {
+                    out.push(FileOperation::Write(path));
+                }
+            }
             "file.save" | "file.save_as" => {
                 let explicit = name(root, args)?;
                 let target = if id == "file.save" { explicit.or_else(|| current.clone()) } else { explicit };
@@ -135,7 +151,14 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
                     out.push(FileOperation::Save(path));
                 }
             }
-            "file.export" | "file.export_step" | "file.export_stl" | "file.export_3mf" | "file.export_obj" | "file.export_urdf"
+            "file.export"
+            | "file.export_step"
+            | "file.export_stl"
+            | "file.export_3mf"
+            | "file.export_obj"
+            | "file.export_urdf"
+            | "file.export_urdf_options"
+            | "file.export_mjcf"
             | "file.export_sdf" => {
                 // URDF has a data-dependent set of sibling mesh destinations. Until the
                 // worker can preflight that exact set, it cannot be protected by one ETag.
@@ -144,7 +167,8 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
                     "file.export_stl" => Some("stl"),
                     "file.export_3mf" => Some("3mf"),
                     "file.export_obj" => Some("obj"),
-                    "file.export_urdf" => Some("urdf"),
+                    "file.export_urdf" | "file.export_urdf_options" => Some("urdf"),
+                    "file.export_mjcf" => Some("mjcf"),
                     "file.export_sdf" => Some("sdf"),
                     _ => args.get("format").and_then(Value::as_str).or_else(|| args.get("path").and_then(Value::as_str)),
                 };
@@ -153,6 +177,9 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
                 }
                 if format.is_some_and(|format| format.rsplit('.').next().is_some_and(|ext| ext.eq_ignore_ascii_case("sdf"))) {
                     return Err("SDF model-folder export is not supported through the network gateway; export STEP or 3MF instead".into());
+                }
+                if format.is_some_and(|format| format.rsplit('.').next().is_some_and(|ext| ext.eq_ignore_ascii_case("mjcf"))) {
+                    return Err("MJCF multi-file export is not supported through the network gateway; export STEP or 3MF instead".into());
                 }
                 if let Some(path) = name(root, args)? {
                     if format.is_some_and(|f| f.rsplit('.').next().is_some_and(|ext| ext.eq_ignore_ascii_case("obj"))) {
@@ -170,6 +197,9 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
                 }
             }
             "sheet.export_dxf" => {
+                if args.get("profile").and_then(Value::as_str).is_some() {
+                    out.push(FileOperation::ReadSources);
+                }
                 if args.get("per_body").and_then(Value::as_bool) == Some(true) && name(root, args)?.is_some() {
                     return Err(
                         "per-body DXF file export is not supported through the network gateway; omit per_body or omit path to return DXF text".into(),
@@ -221,6 +251,8 @@ pub fn operations(root: &Path, message: &Value, current: Option<&str>) -> Result
             | "parameters.export"
             | "timeline.export_script"
             | "sketch.export_dxf"
+            | "sketch.export_svg"
+            | "frame.export_cope_dxf"
             | "sheet.export_bend_table"
             | "file.export_view_dxf"
             | "library.export"
@@ -477,6 +509,9 @@ mod tests {
             ("file.export", json!({"path":"robot.SDF"})),
             ("file.export", json!({"path":"robot.data","format":"sdf"})),
             ("file.export_sdf", json!({"path":"robot"})),
+            ("file.export_urdf_options", json!({"path":"robot.urdf"})),
+            ("file.export_mjcf", json!({"path":"robot.xml"})),
+            ("file.export", json!({"path":"robot.xml","format":"mjcf"})),
             ("sheet.export_dxf", json!({"path":"flat.dxf","per_body":true})),
             ("motion.export_animation", json!({"path":"frames"})),
         ] {
@@ -509,6 +544,24 @@ mod tests {
         assert_eq!(operations(&root, &gif, None).unwrap(), vec![FileOperation::Write("motion.gif".into())]);
         let text = json!({"params":{"name":"execute","arguments":{"command":"sheet.export_dxf","params":{"per_body":true}}}});
         assert!(operations(&root, &text, None).unwrap().is_empty());
+        let dxf = json!({"command":"sheet.export_dxf","params":{"profile":"cutter.json","path":"flat.dxf"}});
+        let convert = json!({"command":"file.stl_to_step","params":{"input":"part.stl","output":"converted.step"}});
+        for (args, path) in [(dxf, "flat.dxf"), (convert, "converted.step")] {
+            let direct = json!({"params":{"name":"execute","arguments":args}});
+            let expected = vec![FileOperation::ReadSources, FileOperation::Write(path.into())];
+            assert_eq!(operations(&root, &direct, None).unwrap(), expected);
+            assert_eq!(operations(&root, &batch(json!([args])), None).unwrap(), expected);
+        }
+        for (command, path) in [("file.insert_step", "part.step"), ("file.insert_mesh", "part.stl")] {
+            let args = json!({"command":command,"params":{"path":path}});
+            let direct = json!({"params":{"name":"execute","arguments":args}});
+            assert_eq!(operations(&root, &direct, None).unwrap(), vec![FileOperation::ReadSources]);
+            assert_eq!(operations(&root, &batch(json!([args])), None).unwrap(), vec![FileOperation::ReadSources]);
+        }
+        for (id, path) in [("sketch.export_svg", "profile.svg"), ("frame.export_cope_dxf", "cope.dxf")] {
+            let args = json!({"command":id,"params":{"path":path}});
+            assert_eq!(operations(&root, &batch(json!([args])), None).unwrap(), vec![FileOperation::Write(path.into())]);
+        }
         // Feature data is not another executable step.
         let feature = batch(json!([{"command":"timeline.add","params":{"feature":{"command":"file.save","params":{"path":"fake.solidcraft"}}}}]));
         assert!(operations(&root, &feature, None).unwrap().is_empty());

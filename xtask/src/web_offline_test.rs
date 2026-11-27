@@ -82,7 +82,7 @@ const SIGN_IN: &str = "/sign-in";
 const CONNECTIONS_PER_SERVER: usize = 6;
 
 /// Exercise the real browser build's command bridge, using the same Chrome harness as the offline test.
-pub fn run_api(site: &str) -> Result<(), String> {
+pub fn run_api(site: &str, smoke: bool) -> Result<(), String> {
     let site = std::fs::canonicalize(site).map_err(|e| format!("{site}: {e}; build apps/solidcraft-web with trunk first"))?;
     if !site.join("index.html").is_file() {
         return Err(format!("{}: index.html missing; build apps/solidcraft-web with trunk first", site.display()));
@@ -95,7 +95,10 @@ pub fn run_api(site: &str) -> Result<(), String> {
     let mut cdp = browser.connect()?;
     let downloads = work.0.join("downloads");
     std::fs::create_dir_all(&downloads).map_err(|e| e.to_string())?;
-    cdp.call("Browser.setDownloadBehavior", json!({"behavior": "allow", "downloadPath": downloads}))?;
+    cdp.call("Browser.setDownloadBehavior", json!({"behavior": "allow", "downloadPath": &downloads}))?;
+    if smoke {
+        return smoke_test(&mut cdp, server.port, &downloads);
+    }
     cdp.call("Emulation.setDeviceMetricsOverride", json!({"width": 1280, "height": 900, "deviceScaleFactor": 1, "mobile": false}))?;
     // The page has the keyboard, as a tab the user is looking at does (for KEYS_TEST).
     cdp.call("Emulation.setFocusEmulationEnabled", json!({"enabled": true}))?;
@@ -114,19 +117,126 @@ pub fn run_api(site: &str) -> Result<(), String> {
             break;
         }
         if started.elapsed() > LAUNCH_TIMEOUT {
-            let found: Vec<_> = std::fs::read_dir(&downloads).map_err(|e| e.to_string())?.filter_map(Result::ok).map(|e| e.file_name()).collect();
-            return Err(format!("web-api-test: Export Current View did not download its DXF; files={found:?}"));
+            return Err("web-api-test: Export Current View did not download its DXF".into());
         }
         std::thread::sleep(Duration::from_millis(100));
     }
     println!("web-api-test: {result}");
-    let linked = cdp.eval(LINKED_TEST)?;
-    println!("web-api-test: {linked}");
     let keys = cdp.eval(KEYS_TEST)?;
     println!("web-api-test: {keys}");
     println!("web-api-test: {}", drawing_test(&browser, server.port, &downloads)?);
     Ok(())
 }
+
+/// One launch, a synthetic saved design opened through the real UI thread, and three
+/// token-correlated frames after camera changes. The full API and offline tests remain separate.
+fn smoke_test(cdp: &mut Cdp, port: u16, downloads: &Path) -> Result<(), String> {
+    let started = Instant::now();
+    cdp.call("Page.enable", json!({}))?;
+    cdp.call("Page.addScriptToEvaluateOnNewDocument", json!({"source": SMOKE_ERRORS}))?;
+    cdp.call("Emulation.setDeviceMetricsOverride", json!({"width": 1280, "height": 720, "deviceScaleFactor": 1, "mobile": false}))?;
+    cdp.call("Page.navigate", json!({"url": format!("http://127.0.0.1:{port}{PREFIX}")}))?;
+    loop {
+        let state = match cdp.eval("({error: window.smokeError, ready: !!window.solidcraft && !document.getElementById('solidcraft_loading')})") {
+            Ok(state) => state,
+            // Navigation can replace about:blank's execution context during the first poll.
+            Err(e) if e.contains("Execution context was destroyed") || e.contains("Cannot find context") => Value::Null,
+            Err(e) => return Err(e),
+        };
+        if let Some(error) = state["error"].as_str() {
+            return Err(format!("web-api-test smoke: startup: {error}"));
+        }
+        if state["ready"] == true {
+            break;
+        }
+        if started.elapsed() > LAUNCH_TIMEOUT {
+            return Err(format!("web-api-test smoke: startup timed out after {LAUNCH_TIMEOUT:?}"));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    println!("web-api-test smoke: {}", cdp.eval(&format!("window.smokeRun(() => {SMOKE_TEST})"))?);
+    let mut previous_image = Vec::new();
+    for (index, yaw) in [0.3, 0.8, 1.3].into_iter().enumerate() {
+        let name = format!("smoke-{index}.png");
+        // ui.screenshot's token is queued after this camera command. The app answers only
+        // with that request's frame, after at least three paints and its GPU readback.
+        let shot = cdp.eval(&format!(
+            "window.smokeRun(async () => {{
+                await window.solidcraft.request('ui.camera', {{yaw: {yaw}, fit: true}});
+                const shot = await window.solidcraft.request('ui.screenshot', {{path: '/downloads/{name}'}});
+                const ui = await window.solidcraft.request('ui.inspect');
+                if (!Number.isFinite(ui.camera.yaw) || Math.abs(ui.camera.yaw - {yaw}) > 1e-6) throw new Error('camera did not reach yaw {yaw}');
+                return shot;
+            }})"
+        ))?;
+        if shot["width"] != 1280 || shot["height"] != 720 {
+            return Err(format!("web-api-test smoke: unexpected captured frame: {shot}"));
+        }
+        let frame_started = Instant::now();
+        let image = loop {
+            if let Some(error) = cdp.eval("window.smokeError")?.as_str() {
+                return Err(format!("web-api-test smoke: frame: {error}"));
+            }
+            if let Ok(bytes) = std::fs::read(downloads.join(&name))
+                && bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+                && bytes.ends_with(b"\0\0\0\0IEND\xaeB`\x82")
+            {
+                break bytes;
+            }
+            if frame_started.elapsed() > Duration::from_secs(30) {
+                return Err(format!("web-api-test smoke: captured frame {name} was not downloaded"));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        if image == previous_image {
+            return Err(format!("web-api-test smoke: the captured image did not change at yaw {yaw}"));
+        }
+        previous_image = image;
+    }
+    println!("web-api-test smoke: three token-correlated model frames; passed in {:.1}s", started.elapsed().as_secs_f64());
+    Ok(())
+}
+
+// Installed before navigation, so a panic in the first app frame cannot escape the test.
+const SMOKE_ERRORS: &str = r#"
+window.smokeError = null;
+const reportError = console.error;
+console.error = (...args) => {
+    window.smokeError ||= args.map(String).join(' ');
+    reportError.apply(console, args);
+};
+addEventListener('error', e => { window.smokeError ||= String(e.error?.stack || e.message); });
+addEventListener('unhandledrejection', e => { window.smokeError ||= String(e.reason?.stack || e.reason); });
+window.smokeRun = async run => {
+    let timer;
+    const failed = new Promise((_, reject) => {
+        const deadline = performance.now() + 60_000;
+        timer = setInterval(() => {
+            if (window.smokeError) reject(new Error(window.smokeError));
+            else if (performance.now() > deadline) reject(new Error('browser smoke commands timed out'));
+        }, 100);
+    });
+    try { return await Promise.race([run(), failed]); }
+    finally { clearInterval(timer); }
+};
+"#;
+
+const SMOKE_TEST: &str = r#"(async () => {
+    const app = window.solidcraft;
+    const check = (ok, message) => { if (!ok) throw new Error(message); };
+    await app.request('ui.home', {open: false});
+    await app.execute('solid.box', {length: 30, width: 20, height: 10, body_name: 'Browser smoke box'});
+    const kept = await app.request('document.export');
+    await app.execute('file.new');
+    check((await app.inspect()).bodies.length === 0, 'new design is empty');
+    check((await app.request('document.import', {text: kept.text})).errors === 0, 'saved design opens without feature errors');
+    const opened = await app.inspect({measure: true});
+    check(opened.bodies.length === 1, 'opened design has one body');
+    check(Math.abs(opened.bodies[0].volume_mm3 - 6000) < 0.001, 'opened box volume is 6000 mm³');
+    const ui = await app.request('ui.inspect');
+    check(ui.home === false && ui.viewport[2] > 600 && ui.viewport[3] > 200, 'model viewport is visible');
+    return 'opened a saved 30 × 20 × 10 mm box; volume 6000 mm³';
+})()"#;
 
 /// The drawing milestone's plate (#4894 W23, acceptance case 84) made and checked by commands
 /// alone in a tab of its own, so the steps before leave nothing in it. Kept as a host keeps a
@@ -240,8 +350,8 @@ const DRAWING_TEST: &str = r#"(async (plate, kept) => {
     const phase = kept === null ? 'made' : 'opened';
     const pngPath = '/downloads/drawing-plate-' + phase + '.png';
     const png = await run('drawing.export', {sheet: 'Sheet 1', format: 'png', dpi: 150, path: pngPath});
-    check(png.path === pngPath, 'the command writes the requested PNG file');
     check(svg.svg.includes('width="420mm" height="297mm"'), 'the SVG is A3');
+    check(png.path === pngPath && png.bytes > 0, 'the PNG is written to ' + pngPath + ', not ' + JSON.stringify(png.path));
     check(same(png.report.pixels, [2481, 1754]), 'the PNG is ' + JSON.stringify(png.report.pixels) + ' pixels');
     // An export leaves out_of_date out of its reply when nothing is out of date.
     check([svg, png].every(e => (e.out_of_date || []).length === 0 && e.views.length === 3 && e.views.every(v => v.status === 'drawn')),
@@ -354,6 +464,12 @@ const KEYS_TEST: &str = r#"(async () => {
 const API_TEST: &str = r#"(async () => {
     const app = window.solidcraft;
     const check = (condition, message) => { if (!condition) throw new Error(message); };
+    const waitForUi = async (ready, message) => {
+        const deadline = performance.now() + 120_000;
+        while (!ready(await app.request('ui.inspect'))) {
+            check(performance.now() < deadline, message);
+        }
+    };
     const rejects = async (call, message) => {
         try { await call(); } catch (error) {
             check(error instanceof Error, 'rejections must be Error objects');
@@ -422,20 +538,98 @@ const API_TEST: &str = r#"(async () => {
     await app.request('ui.inspect');
     const [x, y] = await app.request('ui.at', {handle: 'dialog:Export DXF…'});
     await app.request('ui.click', {x, y});
-    return {commands: 'discovered', bodies: [0, 1, 0, 1], errors: 'rejected', queue: '256 completed, 1 rejected',
-        dxf: 'omit and dashed exported; dialog download checked'};
-})()"#;
-
-// Finish the UI export before replacing its document through the command bridge.
-// Picker completion is asynchronous; unrelated file.new/save work must not race it.
-const LINKED_TEST: &str = r#"(async () => {
-    const app = window.solidcraft;
-    const check = (condition, message) => { if (!condition) throw new Error(message); };
+    // The click is queued for a later frame. Keep this design until the export has finished.
+    await waitForUi(ui => !ui.dialog && !ui.file_picker_busy && !ui.file_busy, 'view export finishes');
+    // An export to the same explicit path can publish newer virtual bytes while Save is waiting.
+    {
+        const handle = FileSystemFileHandle.prototype;
+        const createWritable = handle.createWritable;
+        const sharedPath = '/opfs/concurrent-write.sc';
+        let opened, finish;
+        const opening = new Promise(resolve => { opened = resolve; });
+        const allowWrite = new Promise(resolve => { finish = resolve; });
+        handle.createWritable = function (...args) {
+            if (this.name !== 'concurrent-write.sc') return createWritable.apply(this, args);
+            opened();
+            return allowWrite.then(() => createWritable.apply(this, args));
+        };
+        await app.execute('parameters.add', {name: 'newer_value', expression: '5 mm'});
+        const saving = app.execute('file.save_as', {path: sharedPath});
+        try {
+            await Promise.race([opening, saving.then(() => { throw new Error('save completed before storage opened'); })]);
+            await app.execute('parameters.export', {path: sharedPath, format: 'json'});
+            finish();
+            await saving;
+        } finally {
+            finish();
+            handle.createWritable = createWritable;
+        }
+        await app.execute('parameters.delete', {name: 'newer_value'});
+        const imported = await app.execute('parameters.import', {path: sharedPath});
+        check(imported.imported.includes('newer_value'), 'save completion preserves the newer virtual file');
+    }
     // Browser files exist only in the VFS: native filesystem metadata cannot find them.
     await app.execute('file.save', {path: '/upload/linked-part.sc'});
     await app.execute('file.new');
     const linked = await app.execute('component.insert_design', {path: '/upload/linked-part.sc'});
+    // The browser's persistence promise controls when Save can acknowledge this revision.
+    const handle = FileSystemFileHandle.prototype;
+    const createWritable = handle.createWritable;
+    let reached, release;
+    const writing = new Promise(resolve => { reached = resolve; });
+    const fail = new Promise(resolve => { release = resolve; });
+    handle.createWritable = function (...args) {
+        if (this.name !== 'linked-assembly.sc') return createWritable.apply(this, args);
+        reached();
+        return fail.then(() => { throw new Error('test OPFS write failed'); });
+    };
+    try {
+        const saving = rejects(() => app.execute('file.save', {path: '/opfs/linked-assembly.sc'}), 'test OPFS write failed');
+        await writing;
+        check((await app.request('document.export')).dirty, 'pending OPFS save leaves the design unsaved');
+        release();
+        await saving;
+        check((await app.request('document.export')).dirty, 'failed OPFS save leaves the design unsaved');
+    } finally {
+        release();
+        handle.createWritable = createWritable;
+    }
+    // Fail after opening a real writable stream. The failed save must abort it and
+    // keep the original error, rather than leave the browser's temporary copy open.
+    for (const phase of ['write throw', 'write rejection', 'close rejection', 'abort rejection']) {
+        let aborted = 0;
+        handle.createWritable = async function (...args) {
+            const stream = await createWritable.apply(this, args);
+            if (this.name !== 'linked-assembly.sc') return stream;
+            const abort = stream.abort.bind(stream);
+            stream.abort = async (...args) => {
+                aborted++;
+                await abort(...args);
+                if (phase === 'abort rejection') throw new Error('test abort failed');
+            };
+            if (phase === 'write throw') {
+                stream.write = () => { throw new Error('test write failed'); };
+            } else if (phase === 'write rejection' || phase === 'abort rejection') {
+                stream.write = () => Promise.reject(new Error('test write failed'));
+            } else {
+                stream.close = () => Promise.reject(new Error('test close failed'));
+            }
+            return stream;
+        };
+        try {
+            await rejects(() => app.execute('file.save', {path: '/opfs/linked-assembly.sc'}),
+                phase === 'close rejection' ? 'test close failed' : 'test write failed');
+            check(aborted === 1, phase + ' aborts the opened stream once');
+            check((await app.request('document.export')).dirty, phase + ' leaves the design unsaved');
+        } finally {
+            handle.createWritable = createWritable;
+        }
+    }
     await app.execute('file.save', {path: '/opfs/linked-assembly.sc'});
+    const dir = await navigator.storage.getDirectory();
+    const savedHandle = await dir.getFileHandle('linked-assembly.sc');
+    check((await savedHandle.getFile()).size > 0, 'successful save is already readable in OPFS');
+    check(!(await app.request('document.export')).dirty, 'successful OPFS save acknowledges its design');
     const links = await app.execute('component.links');
     check(links.links[0].found === true, 'linked part is found in browser storage');
     check(links.links[0].path === '../upload/linked-part.sc', 'assembly stores a relative link');
@@ -448,17 +642,16 @@ const LINKED_TEST: &str = r#"(async () => {
     }
     check(menu.items?.some(item => item.id === 'ui.openLinkedDesign'), 'occurrence menu offers the source design');
     await app.request('ui.menuPick', {item: 'ui.openLinkedDesign'});
-    // Opening is incremental: the menu starts it, and subsequent frames finish it.
-    let tabs;
-    for (let frame = 0; frame < 120; frame++) {
-        tabs = await app.request('ui.documents');
-        if (tabs.documents.length === 2 && tabs.active === 1) break;
-    }
+    // The menu starts a staged file load; its reply does not mean the source tab is ready.
+    await waitForUi(ui => !ui.file_busy, 'linked source finishes loading');
+    const tabs = await app.request('ui.documents');
     check(tabs.documents.length === 2 && tabs.active === 1, 'linked source opens in another tab');
     check((await app.inspect()).bodies[0].name === 'Browser API box', 'source design is active');
     await app.request('ui.documents', {action: 'switch', index: 0});
     check((await app.execute('component.links')).links[0].component === linked.component, 'assembly remains in its tab');
-    return {linked: 'source opened from browser storage'};
+    return {commands: 'discovered', bodies: [0, 1, 0, 1], errors: 'rejected', queue: '256 completed, 1 rejected',
+        dxf: 'omit and dashed exported; dialog download checked', linked: 'source opened from browser storage',
+        host: 'exported, saved and imported back'};
 })()"#;
 
 /// Run the test; `required: false` (from `cargo xtask ci`) skips it when Chrome is missing.
@@ -490,11 +683,6 @@ pub fn run(root: &Path, site: Option<&str>, required: bool) -> Result<(), String
                 let index = to.join("index.html");
                 let html = std::fs::read_to_string(&index).map_err(|e| format!("{}: {e}", index.display()))?;
                 std::fs::write(&index, mark(&html, build)?).map_err(|e| format!("{}: {e}", index.display()))?;
-                // Clones share the real bundle's content-named assets. Give each fixture one
-                // unique cached file, as successive Trunk builds have, so SlowFiles can hold
-                // v5's download without blocking v6 or letting v5 finish before it overlaps.
-                let unique = to.join(format!("offline-fixture-{build}.txt"));
-                std::fs::write(&unique, build).map_err(|e| format!("{}: {e}", unique.display()))?;
             }
             // The wasm ran: the loading message is gone (started) or says why it couldn't start.
             "(() => { const el = document.getElementById('solidcraft_loading'); return !el || !el.innerText.startsWith('Loading'); })()"
@@ -1339,7 +1527,13 @@ impl Cdp {
         let mut message = Vec::new();
         loop {
             let mut h = [0u8; 2];
-            self.stream.read_exact(&mut h).map_err(|e| format!("DevTools: {e}"))?;
+            self.stream.read_exact(&mut h).map_err(|e| match e.kind() {
+                // The read timeout ran out: Linux reports it as EAGAIN, which reads as a socket fault.
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => {
+                    format!("DevTools: the page sent no reply within {LAUNCH_TIMEOUT:?}; the app may have stopped (a wasm panic shows in the browser console)")
+                }
+                _ => format!("DevTools: {e}"),
+            })?;
             let (fin, opcode) = (h[0] & 0x80 != 0, h[0] & 0x0f);
             let len = match h[1] & 0x7f {
                 126 => {

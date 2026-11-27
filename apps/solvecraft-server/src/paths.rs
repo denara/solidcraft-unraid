@@ -181,11 +181,11 @@ fn normalize_batch_step(step: &mut Value) -> Result<(), String> {
                     check_save(&args)?;
                     ("file.save", &["path", "format", "overwrite"])
                 }
-                "open" => ("doc.open", &["path", "up", "names", "geometry"]),
+                "open" => ("doc.open", &["path", "new_tab", "up", "names", "geometry"]),
                 "export" => {
                     ("file.export", &["path", "format", "bodies", "mesh_prefix", "effort", "velocity", "images", "name", "static", "model_uris"])
                 }
-                _ => ("file.new", &["name"]),
+                _ => ("file.new", &["name", "new_tab"]),
             };
             let params = keys.iter().filter_map(|key| args.get(*key).cloned().map(|value| ((*key).to_owned(), value))).collect();
             (mapped, Value::Object(params))
@@ -266,9 +266,12 @@ fn commands(root: &Path, value: &mut Value, depth: usize) -> Result<(), String> 
                 Some("inspect.compare_picture") => Some("reference"),
                 Some("sketch.replace" | "drawing.image.add" | "drawing.title_block.logo") => Some("file"),
                 Some("drawing.create") => Some("source"),
+                Some("sheet.export_dxf") => Some("profile"),
                 _ => None,
             };
-            let picture = object.get("command").and_then(Value::as_str) == Some("inspect.compare_picture");
+            let command = object.get("command").and_then(Value::as_str);
+            let picture = command == Some("inspect.compare_picture");
+            let convert_stl = command == Some("file.stl_to_step");
             let template = matches!(object.get("command").and_then(Value::as_str), Some("drawing.create" | "drawing.template.apply"));
             let render = object.get("command").and_then(Value::as_str).is_some_and(|id| id.starts_with("render."));
             let profile = object.get("command").and_then(Value::as_str) == Some("diagnostics.profile");
@@ -285,6 +288,10 @@ fn commands(root: &Path, value: &mut Value, depth: usize) -> Result<(), String> 
                     }
                     if picture {
                         file_operand(root, params, "overlay")?;
+                    }
+                    if convert_stl {
+                        file_operand(root, params, "input")?;
+                        file_operand(root, params, "output")?;
                     }
                     if template
                         && params.get("template").and_then(Value::as_str).is_some_and(|value| {
@@ -516,6 +523,21 @@ mod tests {
         let mut escape = json!({"command":"component.relink","params":{"component":"Part","path":"../secret.solidcraft"}});
         assert!(commands(&root, &mut escape, 0).is_err());
     }
+    #[test]
+    fn sheet_profile_and_stl_conversion_resolve_project_file_operands() {
+        let root = std::env::temp_dir();
+        let mut dxf = json!({"command":"sheet.export_dxf","params":{"profile":"profiles/cutter.json"}});
+        prepare_tool(&root, "execute", &mut dxf).unwrap();
+        assert_eq!(dxf["params"]["profile"], json!(root.join("profiles/cutter.json")));
+        let mut inline = json!({"command":"sheet.export_dxf","params":{"profile":{"format":"solidcraft-dxf-profile"}}});
+        prepare_tool(&root, "execute", &mut inline).unwrap();
+        assert_eq!(inline["params"]["profile"]["format"], "solidcraft-dxf-profile");
+        let mut batch = json!({"commands":[{"id":"file.stl_to_step","params":{"input":"part.stl","output":"converted.step"}}]});
+        prepare_tool(&root, "batch", &mut batch).unwrap();
+        assert_eq!(batch["commands"][0]["params"]["input"], json!(root.join("part.stl")));
+        assert_eq!(batch["commands"][0]["params"]["output"], json!(root.join("converted.step")));
+    }
+
     #[test]
     fn desktop_only_commands_are_rejected_before_dispatch() {
         let root = std::env::temp_dir();

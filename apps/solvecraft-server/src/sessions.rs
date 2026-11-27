@@ -291,6 +291,7 @@ impl Worker {
             .env_remove("SOLVECRAFT_MCP_TOKEN")
             .env("SOLIDCRAFT_LINK_ROOT", &config.files)
             .env("SOLIDCRAFT_NO_IMPORT_CACHE", "1")
+            .env("SOLIDCRAFT_NO_PLUGINS", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -548,6 +549,11 @@ impl State {
                     .map_err(|_| "revision check unavailable")?
             {
                 return Ok(Some(tool_error(&message, &error)));
+            }
+            // This HTTP transport returns one JSON response. Keep stdio progress
+            // notifications from preceding the worker response on that pipe.
+            if let Some(meta) = message.pointer_mut("/params/_meta").and_then(Value::as_object_mut) {
+                meta.remove("progressToken");
             }
             let transaction = async {
                 let reply = worker.exchange(&message).await?;

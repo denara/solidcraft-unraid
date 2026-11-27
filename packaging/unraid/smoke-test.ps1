@@ -50,7 +50,7 @@ if ($Reopen) {
         @{command = 'solid.extrude'; params = @{distance = 20}}
     )}
     $null = Invoke-Tool 'save' @{path = 'unraid-proof.solvecraft'}
-    $null = Invoke-Tool 'export' @{path = 'unraid-proof.step'}
+    $null = Invoke-Mcp 'tools/call' @{name = 'export'; arguments = @{path = 'unraid-proof.step'}; _meta = @{progressToken = 'unraid-proof-export'}}
     Invoke-WebRequest "$BaseUrl/files/$taskProject/unraid-proof.step" -Headers @{Authorization = "Bearer $Token"} -OutFile (Join-Path $OutputDirectory 'unraid-proof.step')
     $taskStep = Get-Content (Join-Path $OutputDirectory 'unraid-proof.step') -TotalCount 1
     if ($taskStep -notmatch 'ISO-10303-21') { throw 'STEP download is invalid' }

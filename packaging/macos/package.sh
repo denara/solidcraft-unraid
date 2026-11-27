@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build and package SolidCraft for macOS:
 #
-#   $DIST/solidcraft-<version>-macos-<arch>.dmg        SolidCraft.app (with solidcraft-cli inside) on a
+#   $DIST/solidcraft-<version>-macos-<arch>.dmg        SolidCraft.app (with solidcraft-cli and the
+#                                                      Quick Look extensions inside) on a
 #                                                      drag-to-Applications DMG with a drawn window
 #                                                      (assets/platforms/macos/dmg)
 #   $DIST/solidcraft-cli-<version>-macos-<arch>.zip    the headless CLI with the licence files
@@ -27,10 +28,12 @@ set -euo pipefail
 # The same reverse-DNS id as the Linux APP_ID.
 MACOS_BUNDLE_ID=io.tangencylabs.solidcraft
 
-# sign_code <path> [identifier] [entitlements]: Developer ID with the hardened runtime and a secure
-# timestamp, or the ad-hoc signature (Apple silicon refuses unsigned code) without an identity.
+# sign_code <path> [identifier] [entitlements] [always]: Developer ID with the hardened runtime and
+# a secure timestamp, or the ad-hoc signature (Apple silicon refuses unsigned code) without an
+# identity. The entitlements go on Developer ID signatures only, or on every signature with
+# `always` (the Quick Look extensions' sandbox, which macOS requires before it loads them).
 sign_code() {
-  local path="$1" identifier="${2:-}" entitlements="${3:-}"
+  local path="$1" identifier="${2:-}" entitlements="${3:-}" always="${4:-}"
   local args=(--force)
   if [ -n "$SIGN_IDENTITY" ]; then
     args+=(--sign "$SIGN_IDENTITY" --options runtime --timestamp)
@@ -38,7 +41,9 @@ sign_code() {
     args+=(--sign - --timestamp=none)
   fi
   if [ -n "$identifier" ]; then args+=(--identifier "$identifier"); fi
-  if [ -n "$entitlements" ] && [ -n "$SIGN_IDENTITY" ]; then args+=(--entitlements "$entitlements"); fi
+  if [ -n "$entitlements" ] && { [ -n "$SIGN_IDENTITY" ] || [ "$always" = always ]; }; then
+    args+=(--entitlements "$entitlements")
+  fi
   codesign "${args[@]}" "$path"
 }
 
@@ -182,7 +187,7 @@ plutil -lint "$APP/Contents/Info.plist"
 printf 'APPL????' >"$APP/Contents/PkgInfo"
 # Signature over the whole bundle. Nested code is signed first: the bundle signature refuses an
 # unsigned helper in Contents/MacOS. The entitlements go on the bundle (they apply to the main
-# executable): the 3D mouse driver is loaded by the app, not by the CLI.
+# executable). The app loads the 3D mouse driver.
 sign_code "$APP/Contents/MacOS/solidcraft-cli" "$MACOS_BUNDLE_ID.cli" "$SCRIPT_DIR/cli-entitlements.plist"
 sign_code "$APP" "" "$SCRIPT_DIR/entitlements.plist"
 codesign --verify --strict --deep --verbose=2 "$APP"
